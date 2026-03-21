@@ -205,6 +205,55 @@ func TestAccountsSwitch(t *testing.T) {
 	}
 }
 
+func TestAccountsSwitchAdoptsActiveAccount(t *testing.T) {
+	fs := newFakeFS()
+
+	// Active account from codex login (only in auth.json, NOT in accounts/)
+	jwt1 := fakeCodexJWT("original@test.com", "acct-1", "user-1", "plus")
+	// Second account added via cq codex login (in accounts/)
+	jwt2 := fakeCodexJWT("second@test.com", "acct-2", "user-2", "pro")
+
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt1)
+	fs.files["/fake/home/.codex/accounts/user-2::acct-2.auth.json"] = codexAuthJSON("tok-2", "acct-2", jwt2)
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {
+			{name: "user-2::acct-2.auth.json"},
+		},
+	}
+
+	mgr := &Accounts{FS: fs}
+	acct, err := mgr.Switch(context.Background(), "second@test.com")
+	if err != nil {
+		t.Fatalf("Switch: %v", err)
+	}
+	if acct.Email != "second@test.com" {
+		t.Errorf("Email = %q, want second@test.com", acct.Email)
+	}
+
+	// The original account should have been adopted into accounts/
+	adopted, ok := fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"]
+	if !ok {
+		t.Fatal("expected original account to be adopted into accounts/")
+	}
+	var af codexAuthFile
+	if err := json.Unmarshal(adopted, &af); err != nil {
+		t.Fatalf("parse adopted file: %v", err)
+	}
+	if af.Tokens.AccessToken != "tok-1" {
+		t.Errorf("adopted token = %q, want tok-1", af.Tokens.AccessToken)
+	}
+
+	// auth.json should now be the switched-to account
+	active := fs.files["/fake/home/.codex/auth.json"]
+	var activeAF codexAuthFile
+	if err := json.Unmarshal(active, &activeAF); err != nil {
+		t.Fatalf("parse active auth.json: %v", err)
+	}
+	if activeAF.Tokens.AccessToken != "tok-2" {
+		t.Errorf("active token = %q, want tok-2", activeAF.Tokens.AccessToken)
+	}
+}
+
 func TestAccountsSwitchNotFound(t *testing.T) {
 	fs := newFakeFS()
 	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")

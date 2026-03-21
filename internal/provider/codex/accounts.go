@@ -153,19 +153,25 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 
 // Switch sets the active Codex account by copying the matching account's
 // auth file to ~/.codex/auth.json and updating codex-auth's registry.
+// Before overwriting, it adopts the current auth.json into ~/.codex/accounts/
+// if it's not already stored there (preserves accounts created by codex login).
 func (a *Accounts) Switch(_ context.Context, identifier string) (provider.Account, error) {
 	accts := DiscoverAccounts(a.FS)
+
+	home, err := a.FS.UserHomeDir()
+	if err != nil {
+		return provider.Account{}, fmt.Errorf("home dir: %w", err)
+	}
+
+	// Adopt the current active account into accounts/ before overwriting.
+	adoptActiveAccount(a.FS, home, accts)
+
 	for _, acct := range accts {
 		if acct.Email != identifier {
 			continue
 		}
 		if acct.FilePath == "" {
 			return provider.Account{}, fmt.Errorf("no stored auth file for %q", identifier)
-		}
-
-		home, err := a.FS.UserHomeDir()
-		if err != nil {
-			return provider.Account{}, fmt.Errorf("home dir: %w", err)
 		}
 
 		// Read the account file to copy it
@@ -197,6 +203,48 @@ func (a *Accounts) Switch(_ context.Context, identifier string) (provider.Accoun
 		}, nil
 	}
 	return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
+}
+
+// adoptActiveAccount saves the current ~/.codex/auth.json into
+// ~/.codex/accounts/{record_key}.auth.json if it isn't already stored there.
+// This preserves accounts originally created by `codex login` (Codex CLI)
+// so they aren't lost when Switch overwrites auth.json.
+func adoptActiveAccount(fs fsutil.FileSystem, home string, accts []CodexAccount) {
+	authPath := filepath.Join(home, ".codex", "auth.json")
+	accountsDir := filepath.Join(home, ".codex", "accounts")
+
+	for _, acct := range accts {
+		if !acct.IsActive {
+			continue
+		}
+		if acct.RecordKey == "" {
+			break // can't adopt without a record key
+		}
+		// If FilePath already points into accounts/, it's already stored.
+		if acct.FilePath != authPath {
+			break
+		}
+		// Active account only lives in auth.json — adopt it.
+		data, err := fs.ReadFile(authPath)
+		if err != nil {
+			break
+		}
+		if err := fs.MkdirAll(accountsDir, 0o700); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: adopt account: mkdir: %v\n", err)
+			break
+		}
+		dest := filepath.Join(accountsDir, acct.RecordKey+".auth.json")
+		tmp := dest + ".tmp"
+		if err := fs.WriteFile(tmp, data, 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: adopt account: write: %v\n", err)
+			break
+		}
+		if err := fs.Rename(tmp, dest); err != nil {
+			fs.Remove(tmp)
+			fmt.Fprintf(os.Stderr, "cq: adopt account: rename: %v\n", err)
+		}
+		break
+	}
 }
 
 // updateRegistryActiveKey updates active_account_key in codex-auth's registry.json.
