@@ -23,13 +23,17 @@ cq --json                # JSON output
 cq --refresh             # Bypass cache
 ```
 
-### Account Management (Claude)
+### Account Management (Claude & Codex)
 
 ```bash
 cq claude login          # Add account via OAuth
 cq claude accounts       # List accounts
 cq claude switch EMAIL   # Switch active account
+cq codex accounts        # List accounts
+cq codex switch EMAIL    # Switch active account
 ```
+
+> **Note:** After switching accounts, MCP servers that use the provider's credentials (e.g. Codex MCP) may need to be reconnected to pick up the new active account.
 
 ## What It Shows
 
