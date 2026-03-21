@@ -14,6 +14,7 @@ type Window struct {
 type Result struct {
 	AccountID     string                `json:"account_id,omitempty"`
 	Email         string                `json:"email,omitempty"`
+	Active        bool                  `json:"active"`
 	Status        Status                `json:"status"`
 	Error         *ErrorInfo            `json:"error,omitempty"`
 	Plan          string                `json:"plan,omitempty"`

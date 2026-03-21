@@ -44,6 +44,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 				}
 			}()
 			results[i] = p.fetchAccount(ctx, acct)
+			results[i].Active = acct.IsActive
 		}(i, acct)
 	}
 	wg.Wait()

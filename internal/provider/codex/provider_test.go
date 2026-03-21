@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,14 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+// fakeJWT builds a JWT with the given payload (no signature verification needed).
+func fakeJWT(payload any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
+	body, _ := json.Marshal(payload)
+	encoded := base64.RawURLEncoding.EncodeToString(body)
+	return header + "." + encoded + ".fakesig"
+}
 
 // fakeFS is a test FileSystem implementation backed by an in-memory map.
 type fakeFS struct {
@@ -222,6 +231,69 @@ func TestFetchHappyPath(t *testing.T) {
 	}
 	if results[0].Plan != "plus" {
 		t.Errorf("plan = %q, want plus", results[0].Plan)
+	}
+	if !results[0].Active {
+		t.Error("expected Active=true for auth.json account")
+	}
+}
+
+func TestFetchMultiAccountActive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(happyUsageBody))
+	}))
+	defer srv.Close()
+
+	idToken1 := fakeJWT(map[string]any{
+		"email": "active@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_user_id":    "user-1",
+			"chatgpt_account_id": "acct-1",
+		},
+	})
+	idToken2 := fakeJWT(map[string]any{
+		"email": "other@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_user_id":    "user-2",
+			"chatgpt_account_id": "acct-2",
+		},
+	})
+
+	fs := newFakeFS()
+	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON("tok-active", "ref-active", idToken1, "acct-1")
+	fs.files["/fake/home/.codex/accounts/other.auth.json"] = validAuthJSON("tok-other", "ref-other", idToken2, "acct-2")
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "other.auth.json"}},
+	}
+
+	p := &Provider{
+		client: &urlRewriter{client: srv.Client(), baseURL: srv.URL},
+		fs:     fs,
+	}
+
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2", len(results))
+	}
+
+	activeCount := 0
+	for _, r := range results {
+		if r.Active {
+			activeCount++
+		}
+	}
+	if activeCount != 1 {
+		t.Errorf("active count = %d, want 1", activeCount)
+	}
+	// The first result corresponds to auth.json (the active account).
+	if !results[0].Active {
+		t.Error("expected first result (auth.json) to be active")
+	}
+	if results[1].Active {
+		t.Error("expected second result (accounts/ file) to not be active")
 	}
 }
 

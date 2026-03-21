@@ -113,5 +113,7 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 		return []quota.Result{quota.ErrorResult("api_error", "api error", quotaCode)}, nil
 	}
 
-	return []quota.Result{parseQuota(quotaBody, tier, email)}, nil
+	result := parseQuota(quotaBody, tier, email)
+	result.Active = true
+	return []quota.Result{result}, nil
 }

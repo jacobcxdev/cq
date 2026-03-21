@@ -2,8 +2,10 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -47,7 +49,35 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 	}
 	wg.Wait()
 
-	return dedup(results), nil
+	deduped := dedup(results)
+
+	// Mark the active account (the one from the credentials file).
+	activeEmail := activeCredentialEmail()
+	for i := range deduped {
+		if activeEmail != "" && deduped[i].Email == activeEmail {
+			deduped[i].Active = true
+		}
+	}
+
+	return deduped, nil
+}
+
+// activeCredentialEmail reads the active Claude account's email from the
+// credentials file. Returns empty string on any error.
+func activeCredentialEmail() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
+	if err != nil {
+		return ""
+	}
+	var creds keyring.ClaudeCredentials
+	if json.Unmarshal(data, &creds) != nil || creds.ClaudeAiOauth == nil {
+		return ""
+	}
+	return creds.ClaudeAiOauth.Email
 }
 
 // fetchAccount fetches quota for a single Claude account. It handles token
