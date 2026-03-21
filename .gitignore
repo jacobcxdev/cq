@@ -18,6 +18,9 @@ coverage.out
 *.swp
 *.swo
 
+# Claude Code
+.claude/equip-session.json
+
 # OS
 .DS_Store
 Thumbs.db
