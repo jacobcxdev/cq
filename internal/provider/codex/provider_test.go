@@ -15,11 +15,23 @@ import (
 
 // fakeFS is a test FileSystem implementation backed by an in-memory map.
 type fakeFS struct {
-	files    map[string][]byte
+	files      map[string][]byte
+	dirEntries map[string][]fakeDirEntry
 	homeDirErr error
 	writeErr   error
 	renameErr  error
 }
+
+// fakeDirEntry implements os.DirEntry for tests.
+type fakeDirEntry struct {
+	name  string
+	isDir bool
+}
+
+func (e fakeDirEntry) Name() string               { return e.name }
+func (e fakeDirEntry) IsDir() bool                 { return e.isDir }
+func (e fakeDirEntry) Type() os.FileMode           { return 0 }
+func (e fakeDirEntry) Info() (os.FileInfo, error)   { return nil, nil }
 
 func newFakeFS() *fakeFS {
 	return &fakeFS{files: make(map[string][]byte)}
@@ -90,7 +102,20 @@ func (f *fakeFS) Remove(name string) error {
 
 func (f *fakeFS) MkdirAll(_ string, _ os.FileMode) error { return nil }
 
-func (f *fakeFS) ReadDir(_ string) ([]os.DirEntry, error) { return nil, nil }
+func (f *fakeFS) ReadDir(name string) ([]os.DirEntry, error) {
+	if f.dirEntries == nil {
+		return nil, nil
+	}
+	entries, ok := f.dirEntries[name]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	out := make([]os.DirEntry, len(entries))
+	for i, e := range entries {
+		out[i] = e
+	}
+	return out, nil
+}
 
 // urlRewriter rewrites request URLs to a local httptest.Server.
 type urlRewriter struct {
@@ -146,6 +171,8 @@ func TestFetchMissingAuthFile(t *testing.T) {
 }
 
 func TestFetchParseError(t *testing.T) {
+	// DiscoverAccounts silently skips unparseable files, so invalid JSON
+	// in auth.json results in not_configured (no accounts found).
 	fs := newFakeFS()
 	fs.files["/fake/home/.codex/auth.json"] = []byte(`not valid json`)
 	p := &Provider{client: http.DefaultClient, fs: fs}
@@ -163,8 +190,8 @@ func TestFetchParseError(t *testing.T) {
 	if results[0].Error == nil {
 		t.Fatal("expected non-nil Error info")
 	}
-	if results[0].Error.Code != "parse_error" {
-		t.Errorf("error code = %q, want parse_error", results[0].Error.Code)
+	if results[0].Error.Code != "not_configured" {
+		t.Errorf("error code = %q, want not_configured", results[0].Error.Code)
 	}
 }
 

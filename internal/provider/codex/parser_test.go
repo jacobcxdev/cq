@@ -15,7 +15,7 @@ var codexUsageJSON = []byte(`{
 }`)
 
 func TestParseUsageNormal(t *testing.T) {
-	result := parseUsage(codexUsageJSON, "user@example.com")
+	result := parseUsage(codexUsageJSON, "user@example.com", "")
 
 	if result.Status != quota.StatusOK {
 		t.Errorf("status = %q, want %q", result.Status, quota.StatusOK)
@@ -59,7 +59,7 @@ func TestParseUsageExhausted(t *testing.T) {
 		}
 	}`)
 
-	result := parseUsage(exhaustedJSON, "user@example.com")
+	result := parseUsage(exhaustedJSON, "user@example.com", "")
 
 	if result.Status != quota.StatusExhausted {
 		t.Errorf("status = %q, want %q", result.Status, quota.StatusExhausted)
@@ -72,7 +72,7 @@ func TestParseUsageExhausted(t *testing.T) {
 }
 
 func TestParseUsageInvalidJSON(t *testing.T) {
-	result := parseUsage([]byte(`not json`), "user@example.com")
+	result := parseUsage([]byte(`not json`), "user@example.com", "")
 
 	if result.Status != quota.StatusError {
 		t.Errorf("status = %q, want %q", result.Status, quota.StatusError)
@@ -91,7 +91,7 @@ func TestParseUsageMissingWindows(t *testing.T) {
 		"rate_limit": {}
 	}`)
 
-	result := parseUsage(noWindowsJSON, "user@example.com")
+	result := parseUsage(noWindowsJSON, "user@example.com", "")
 
 	if result.Status != quota.StatusOK {
 		t.Errorf("status = %q, want %q", result.Status, quota.StatusOK)
@@ -109,7 +109,7 @@ func TestParseUsageOnlyPrimaryWindow(t *testing.T) {
 		}
 	}`)
 
-	result := parseUsage(onlyPrimaryJSON, "user@example.com")
+	result := parseUsage(onlyPrimaryJSON, "user@example.com", "")
 
 	if result.Status != quota.StatusOK {
 		t.Errorf("status = %q, want %q", result.Status, quota.StatusOK)
@@ -136,7 +136,7 @@ func TestParseUsageUnknownPlanType(t *testing.T) {
 		}
 	}`)
 
-	result := parseUsage(noPlanJSON, "user@example.com")
+	result := parseUsage(noPlanJSON, "user@example.com", "")
 
 	if result.Plan != "unknown" {
 		t.Errorf("plan = %q, want unknown", result.Plan)
