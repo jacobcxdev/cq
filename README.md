@@ -33,38 +33,9 @@ cq claude switch EMAIL   # Switch active account
 
 ## What It Shows
 
-For each provider, cq displays remaining quota as a percentage bar, pace indicator, and burndown estimate for each rate-limit window. Requires a [Nerd Font](https://www.nerdfonts.com/) for icons to render correctly.
+For each provider, cq displays remaining quota as a percentage bar, pace indicator, and burndown estimate for each rate-limit window. Requires a [Nerd Font](https://www.nerdfonts.com/) for icons to render correctly. Recommended: [`jacobcxdev/tap/liga-sf-mono-nerd-font`](https://github.com/jacobcxdev/homebrew-tap).
 
-```
-————————————————————————————————————————————————————————————————————————
-
-  ✻   Claude max 20x · alice@example.com
-          5h  ╌╌╌|╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌  󰪟   3%  󰦖 44m      󰓅  -12  󰅒 7m
-          7d  ━━━━━╌╌╌╌╌╌|╌╌╌╌╌╌╌╌  󰪟  27%  󰦖 3d 21h   󰓅  -29  󰅒 1d 3h
-
-  ✻   Claude max 20x · bob@example.com
-          5h  ━━━━━━━━━━━━━━━━━━━━  󰪟 100%  󰦖 —        󰓅    —  󰅒 —
-          7d  |╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌  󰪟   0%  󰦖 6h 44m   󰓅   -4  󰅒 now
-
-  ----------------------------------------------------------------------
-
-  ✻   Claude 2 × max 20x = 40x
-          5h  ╌╌╌|╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌  󰪟   3%  󰊚 │──────  󰓅  -12  󰅒 7m
-          7d  ━━╌╌╌╌|╌╌╌╌╌╌╌╌╌╌╌╌╌  󰪟  14%  󰊚 ───│───  󰓅  -16  󰅒 1d 3h
-
-————————————————————————————————————————————————————————————————————————
-
-      Codex plus · alice@example.com
-          5h  ━━━━━━━━━━━|━━━━╌╌╌╌  󰪟  82%  󰦖 2h 54m   󰓅  +24  󰅒 9h 30m
-          7d  ━━━━╌╌╌╌╌╌╌╌|╌╌╌╌╌╌╌  󰪟  21%  󰦖 4d 10h   󰓅  -43  󰅒 16h 16m
-
-————————————————————————————————————————————————————————————————————————
-
-     Gemini paid · alice@example.com
-       quota  ━━━━━━━━━━━━━━━━━━━|  󰪟 100%  󰦖 1d       󰓅   +0  󰅒 —
-
-————————————————————————————————————————————————————————————————————————
-```
+![cq output](docs/screenshot.png)
 
 ## Configuration
 
