@@ -1,0 +1,495 @@
+package output
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/jacobcxdev/cq/internal/aggregate"
+	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/provider"
+	"github.com/jacobcxdev/cq/internal/quota"
+)
+
+func TestBuildTTYModel_SingleProvider(t *testing.T) {
+	now := time.Unix(1000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Claude,
+				Name: "claude",
+				Results: []quota.Result{
+					{
+						Status: quota.StatusOK,
+						Email:  "test@example.com",
+						Plan:   "max",
+						Windows: map[quota.WindowName]quota.Window{
+							quota.Window5Hour: {RemainingPct: 75, ResetAtUnix: 10000},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	model := BuildTTYModel(report, now)
+
+	if len(model.Sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(model.Sections))
+	}
+
+	sec := model.Sections[0]
+	if sec.Separator == "" {
+		t.Error("first section should have a separator")
+	}
+	if sec.Header == "" {
+		t.Error("expected non-empty header")
+	}
+	if len(sec.WindowRows) != 1 {
+		t.Fatalf("expected 1 window row, got %d", len(sec.WindowRows))
+	}
+	row := sec.WindowRows[0]
+	if row.Bar == "" {
+		t.Error("expected non-empty bar")
+	}
+	if row.Pct == "" {
+		t.Error("expected non-empty pct")
+	}
+	if row.Reset == "" {
+		t.Error("expected non-empty reset")
+	}
+	if row.PaceDiff == "" {
+		t.Error("expected non-empty pace diff")
+	}
+	if row.Burndown == "" {
+		t.Error("expected non-empty burndown")
+	}
+}
+
+func TestBuildTTYModel_ErrorResult(t *testing.T) {
+	now := time.Unix(1000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Codex,
+				Name: "codex",
+				Results: []quota.Result{
+					{
+						Status: quota.StatusError,
+						Error:  &quota.ErrorInfo{Message: "token expired"},
+					},
+				},
+			},
+		},
+	}
+
+	model := BuildTTYModel(report, now)
+
+	if len(model.Sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(model.Sections))
+	}
+
+	sec := model.Sections[0]
+	if len(sec.WindowRows) != 0 {
+		t.Errorf("expected 0 window rows for error result, got %d", len(sec.WindowRows))
+	}
+}
+
+func TestBuildTTYModel_WithAggregate(t *testing.T) {
+	now := time.Unix(1000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Claude,
+				Name: "claude",
+				Results: []quota.Result{
+					{
+						Status: quota.StatusOK,
+						Plan:   "max",
+						Windows: map[quota.WindowName]quota.Window{
+							quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: 10000},
+						},
+					},
+				},
+				Aggregate: &app.AggregateReport{
+					Kind: "weighted_pace",
+					Summary: aggregate.AccountSummary{
+						Count: 2, TotalMulti: 2, Label: "2 x max",
+					},
+					Windows: map[quota.WindowName]quota.AggregateResult{
+						quota.Window5Hour: {
+							RemainingPct: 75,
+							ExpectedPct:  50,
+							PaceDiff:     25,
+							Burndown:     3600,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	model := BuildTTYModel(report, now)
+
+	if len(model.Sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(model.Sections))
+	}
+
+	sec := model.Sections[0]
+	if sec.ThinSep == "" {
+		t.Error("expected non-empty thin separator before aggregate")
+	}
+	if sec.AggHeader == "" {
+		t.Error("expected non-empty aggregate header")
+	}
+	if len(sec.AggRows) != 1 {
+		t.Fatalf("expected 1 aggregate row, got %d", len(sec.AggRows))
+	}
+}
+
+func TestBuildTTYModel_MultipleSections(t *testing.T) {
+	now := time.Unix(1000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Claude,
+				Name: "claude",
+				Results: []quota.Result{
+					{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+						quota.Window5Hour: {RemainingPct: 50, ResetAtUnix: 5000},
+					}},
+				},
+			},
+			{
+				ID:   provider.Codex,
+				Name: "codex",
+				Results: []quota.Result{
+					{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+						quota.WindowQuota: {RemainingPct: 90, ResetAtUnix: 80000},
+					}},
+				},
+			},
+		},
+	}
+
+	model := BuildTTYModel(report, now)
+
+	if len(model.Sections) != 2 {
+		t.Fatalf("expected 2 sections, got %d", len(model.Sections))
+	}
+	if model.Sections[0].Separator == "" {
+		t.Error("first section should have separator")
+	}
+	if model.Sections[1].Separator == "" {
+		t.Error("second section should have separator")
+	}
+}
+
+func TestBuildTTYModel_MultiResultProviderClosingSeparator(t *testing.T) {
+	now := time.Unix(1000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Claude,
+				Name: "claude",
+				Results: []quota.Result{
+					{Status: quota.StatusOK, Email: "a@b.com", Windows: map[quota.WindowName]quota.Window{
+						quota.Window5Hour: {RemainingPct: 50, ResetAtUnix: 5000},
+					}},
+					{Status: quota.StatusOK, Email: "c@d.com", Windows: map[quota.WindowName]quota.Window{
+						quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: 5000},
+					}},
+				},
+			},
+		},
+	}
+
+	model := BuildTTYModel(report, now)
+
+	// Two results in one provider → 2 sections (first with separator, second without)
+	if len(model.Sections) != 2 {
+		t.Fatalf("expected 2 sections, got %d", len(model.Sections))
+	}
+	if model.Sections[0].Separator == "" {
+		t.Error("first section should have separator")
+	}
+	if model.Sections[1].Separator != "" {
+		t.Error("continuation section should have no separator")
+	}
+	// ClosingSeparator must always be set regardless of which section is last
+	if model.ClosingSeparator == "" {
+		t.Error("ClosingSeparator should be set even when last section has no separator")
+	}
+}
+
+func TestBuildTTYModel_EmptyProviders(t *testing.T) {
+	model := BuildTTYModel(app.Report{}, time.Unix(1000, 0))
+	if len(model.Sections) != 0 {
+		t.Errorf("expected 0 sections, got %d", len(model.Sections))
+	}
+	if model.ClosingSeparator != "" {
+		t.Errorf("expected empty ClosingSeparator for empty report, got %q", model.ClosingSeparator)
+	}
+}
+
+func TestRenderBar_Width(t *testing.T) {
+	bar := renderBar(50, greenStyle, -1)
+	// Strip ANSI codes to count visible characters
+	stripped := stripANSI(bar)
+	if len([]rune(stripped)) != barWidth {
+		t.Errorf("bar visible width = %d, want %d (stripped: %q)", len([]rune(stripped)), barWidth, stripped)
+	}
+}
+
+func TestRenderBar_PaceMarker(t *testing.T) {
+	bar := renderBar(50, greenStyle, 50)
+	if !strings.Contains(bar, "|") {
+		t.Error("expected pace marker '|' in bar")
+	}
+}
+
+func TestRenderSustainGauge_Width(t *testing.T) {
+	gauge := renderSustainGauge(1.0, false)
+	stripped := stripANSI(gauge)
+	if len([]rune(stripped)) != gaugeWidth {
+		t.Errorf("gauge visible width = %d, want %d", len([]rune(stripped)), gaugeWidth)
+	}
+}
+
+func TestSustainGaugePos(t *testing.T) {
+	tests := []struct {
+		s    float64
+		want int
+	}{
+		{0, 0},
+		{-1, 0},
+		{0.25, 1},
+		{0.5, 2},
+		{1.0, 3},
+		{2.0, 4},
+		{4.0, 5},
+		{8.0, 6},
+		{100.0, 6},
+	}
+	for _, tt := range tests {
+		got := sustainGaugePos(tt.s)
+		if got != tt.want {
+			t.Errorf("sustainGaugePos(%g) = %d, want %d", tt.s, got, tt.want)
+		}
+	}
+}
+
+func TestCalcSepWidth(t *testing.T) {
+	t.Run("empty report returns windowLineWidth", func(t *testing.T) {
+		report := app.Report{}
+		got := calcSepWidth(report)
+		want := windowLineWidth()
+		if got != want {
+			t.Errorf("calcSepWidth(empty) = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("report with long header is wider than windowLineWidth", func(t *testing.T) {
+		longEmail := "very.long.email.address.that.makes.header.wide@example-domain.com"
+		report := app.Report{
+			Providers: []app.ProviderReport{
+				{
+					ID: provider.Claude,
+					Results: []quota.Result{
+						{
+							Status:        quota.StatusOK,
+							Plan:          "max",
+							RateLimitTier: "default_claude_max_20x",
+							Email:         longEmail,
+						},
+					},
+				},
+			},
+		}
+		got := calcSepWidth(report)
+		base := windowLineWidth()
+		if got <= base {
+			t.Errorf("calcSepWidth(long header) = %d, want > %d", got, base)
+		}
+	})
+}
+
+func TestHeaderVisibleWidth(t *testing.T) {
+	tests := []struct {
+		name string
+		r    quota.Result
+		id   provider.ID
+		want int
+	}{
+		{
+			name: "no plan no email",
+			r:    quota.Result{},
+			id:   provider.Claude,
+			want: 12,
+		},
+		{
+			name: "with plan only",
+			r:    quota.Result{Plan: "max"},
+			id:   provider.Claude,
+			want: 12 + 1 + len("max"), // " max"
+		},
+		{
+			name: "plan with multiplier",
+			r:    quota.Result{Plan: "max", RateLimitTier: "default_claude_max_20x"},
+			id:   provider.Claude,
+			want: 12 + 1 + len("max") + len(" 20x"),
+		},
+		{
+			name: "plan with email",
+			r:    quota.Result{Plan: "max", Email: "a@b.com"},
+			id:   provider.Claude,
+			want: 12 + 1 + len("max") + 3 + len("a@b.com"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := headerVisibleWidth(tt.r, tt.id)
+			if got != tt.want {
+				t.Errorf("headerVisibleWidth() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderIcon(t *testing.T) {
+	tests := []struct {
+		id   provider.ID
+		want string
+	}{
+		{provider.Claude, "\u273B"},
+		{provider.Codex, "\uF120"},
+		{provider.Gemini, "\uF51B"},
+		{provider.ID("unknown"), "\u25CF"},
+		{provider.ID(""), "\u25CF"},
+	}
+	for _, tt := range tests {
+		got := providerIcon(tt.id)
+		if got != tt.want {
+			t.Errorf("providerIcon(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestProviderDisplayName(t *testing.T) {
+	tests := []struct {
+		id   provider.ID
+		want string
+	}{
+		{provider.Claude, "Claude"},
+		{provider.Codex, "Codex"},
+		{provider.Gemini, "Gemini"},
+		{provider.ID(""), ""},
+	}
+	for _, tt := range tests {
+		got := providerDisplayName(tt.id)
+		if got != tt.want {
+			t.Errorf("providerDisplayName(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestRenderBar_ClampAbove100(t *testing.T) {
+	// renderBar(150, ...) must not panic and must produce a bar of barWidth visible chars.
+	bar := renderBar(150, greenStyle, -1)
+	stripped := stripANSI(bar)
+	if len([]rune(stripped)) != barWidth {
+		t.Errorf("renderBar(150) visible width = %d, want %d", len([]rune(stripped)), barWidth)
+	}
+	// All characters should be filled (█ / ━ style), not empty (╌ style).
+	// The bar at 100% has no dim characters — verify no ╌ present.
+	if strings.Contains(stripped, "\u254C") {
+		t.Error("renderBar(150) should be fully filled but contains dim char ╌")
+	}
+}
+
+func TestRenderBar_ClampBelowZero(t *testing.T) {
+	// renderBar(-10, ...) must not panic and must produce a bar of barWidth visible chars.
+	bar := renderBar(-10, greenStyle, -1)
+	stripped := stripANSI(bar)
+	if len([]rune(stripped)) != barWidth {
+		t.Errorf("renderBar(-10) visible width = %d, want %d", len([]rune(stripped)), barWidth)
+	}
+	// The bar at 0% should be all empty characters — no filled chars (━).
+	if strings.Contains(stripped, "\u2501") {
+		t.Error("renderBar(-10) should be empty but contains filled char ━")
+	}
+}
+
+func TestRenderSustainGauge_NegativeSustainability(t *testing.T) {
+	// renderSustainGauge(-1, false) must not panic and must not contain a
+	// marker character (│ / ╎ etc.) — negative sustainability means "unknown",
+	// the gauge condition is s >= 0, so no marker is placed.
+	gauge := renderSustainGauge(-1, false)
+	stripped := stripANSI(gauge)
+	// No marker character ╎ (U+254E) or │ (U+2502) should appear.
+	if strings.Contains(stripped, "\u2502") {
+		t.Errorf("renderSustainGauge(-1) should have no marker, got %q", stripped)
+	}
+	// Width must still be correct.
+	if len([]rune(stripped)) != gaugeWidth {
+		t.Errorf("renderSustainGauge(-1) visible width = %d, want %d", len([]rune(stripped)), gaugeWidth)
+	}
+}
+
+func TestRenderBarMarkerOverlapsFilled(t *testing.T) {
+	// When pct equals expectedPct, the marker should replace a filled cell.
+	bar := renderBar(50, lipgloss.Style{}, 50)
+	stripped := stripANSI(bar)
+	if len([]rune(stripped)) != barWidth {
+		t.Errorf("renderBar(50, 50) visible width = %d, want %d", len([]rune(stripped)), barWidth)
+	}
+	// The marker "|" must appear exactly once.
+	count := strings.Count(stripped, "|")
+	if count != 1 {
+		t.Errorf("renderBar(50, 50) marker count = %d, want 1; bar = %q", count, stripped)
+	}
+}
+
+func TestRenderBarMarkerAt100Pct(t *testing.T) {
+	// When expectedPct is 100, the marker is clamped to the last position.
+	bar := renderBar(100, lipgloss.Style{}, 100)
+	stripped := stripANSI(bar)
+	if len([]rune(stripped)) != barWidth {
+		t.Errorf("renderBar(100, 100) visible width = %d, want %d", len([]rune(stripped)), barWidth)
+	}
+	runes := []rune(stripped)
+	if runes[barWidth-1] != '|' {
+		t.Errorf("renderBar(100, 100) last char = %q, want '|'", runes[barWidth-1])
+	}
+}
+
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\033' {
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				j++
+				for j < len(s) && !((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z')) {
+					j++
+				}
+				if j < len(s) {
+					j++ // skip the final letter
+				}
+				i = j
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}

@@ -1,0 +1,13 @@
+{
+  "equipped_at": "2026-03-20T18:05:00Z",
+  "detect_hash": "8d61122ade11483c",
+  "base_packs": ["go"],
+  "task_pack": "refactor",
+  "situation_packs": [],
+  "reference_files_loaded": ["code-search.md", "agent-routing.md"],
+  "pinned_overrides": {},
+  "declined_optional": [],
+  "recent_choices": [
+    { "timestamp": "2026-03-20T18:05:00Z", "task": "refactor", "confidence": 0.95 }
+  ]
+}
