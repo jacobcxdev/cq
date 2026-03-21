@@ -2,11 +2,12 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
-	"path/filepath"
+	"fmt"
+	"os"
+	"runtime/debug"
+	"sync"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -23,51 +24,82 @@ func New(client httputil.Doer) *Provider {
 	return &Provider{client: client, fs: fsutil.OSFileSystem{}}
 }
 
-// Fetch reads ~/.codex/auth.json, fetches quota, and returns the parsed result.
+// Fetch discovers all Codex accounts and fetches quota for each in parallel.
 func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, error) {
-	home, err := p.fs.UserHomeDir()
-	if err != nil {
-		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
-	}
-	authFile := filepath.Join(home, ".codex", "auth.json")
-	data, err := p.fs.ReadFile(authFile)
-	if err != nil {
+	accounts := DiscoverAccounts(p.fs)
+	if len(accounts) == 0 {
 		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
 
-	var authData struct {
-		Tokens struct {
-			AccessToken  string `json:"access_token"`
-			AccountID    string `json:"account_id"`
-			RefreshToken string `json:"refresh_token"`
-			IDToken      string `json:"id_token"`
-		} `json:"tokens"`
+	results := make([]quota.Result, len(accounts))
+	var wg sync.WaitGroup
+	for i, acct := range accounts {
+		wg.Add(1)
+		go func(i int, acct CodexAccount) {
+			defer wg.Done()
+			defer func() {
+				if rv := recover(); rv != nil {
+					fmt.Fprintf(os.Stderr, "cq: panic in codex provider: %v\n%s\n", rv, debug.Stack())
+					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
+				}
+			}()
+			results[i] = p.fetchAccount(ctx, acct)
+		}(i, acct)
 	}
-	if json.Unmarshal(data, &authData) != nil {
-		return []quota.Result{quota.ErrorResult("parse_error", "", 0)}, nil
+	wg.Wait()
+
+	return dedup(results), nil
+}
+
+// fetchAccount fetches quota for a single Codex account.
+func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Result {
+	if acct.AccessToken == "" {
+		return quota.ErrorResult("no_token", "no token", 0)
 	}
 
-	token := authData.Tokens.AccessToken
-	if token == "" {
-		return []quota.Result{quota.ErrorResult("no_token", "no token", 0)}, nil
-	}
-
-	email := auth.DecodeEmail(authData.Tokens.IDToken)
-
-	body, code, err := fetchUsage(ctx, p.client, token, authData.Tokens.AccountID)
+	body, code, err := fetchUsage(ctx, p.client, acct.AccessToken, acct.AccountID)
 	if err != nil {
-		return []quota.Result{quota.ErrorResult("transport_error", err.Error(), 0)}, nil
+		return quota.ErrorResult("transport_error", err.Error(), 0)
 	}
 
-	// Do not refresh — cq shares ~/.codex/auth.json with codex CLI, and Auth0
-	// refresh token rotation would invalidate codex's copy.
+	// Do not refresh — cq shares credentials with codex CLI and codex-auth,
+	// and Auth0 refresh token rotation would invalidate their copies.
 	if code == 401 || code == 403 {
-		return []quota.Result{quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex", code)}, nil
+		return quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code)
 	}
 
 	if code != 200 {
-		return []quota.Result{quota.ErrorResult("api_error", "api error", code)}, nil
+		return quota.ErrorResult("api_error", "api error", code)
 	}
 
-	return []quota.Result{parseUsage(body, email)}, nil
+	return parseUsage(body, acct.Email, acct.AccountID)
+}
+
+// dedup removes duplicate results by AccountID, preferring usable results
+// over errors when both exist for the same account.
+func dedup(results []quota.Result) []quota.Result {
+	if len(results) <= 1 {
+		return results
+	}
+	seen := make(map[string]int) // key -> index in out
+	var out []quota.Result
+	for _, r := range results {
+		key := r.AccountID
+		if key == "" {
+			key = r.Email
+		}
+		if key == "" {
+			out = append(out, r)
+			continue
+		}
+		if idx, exists := seen[key]; exists {
+			if r.IsUsable() && !out[idx].IsUsable() {
+				out[idx] = r
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, r)
+	}
+	return out
 }

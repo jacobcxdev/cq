@@ -9,7 +9,7 @@ import (
 )
 
 // parseUsage decodes a Codex usage API JSON body and returns a quota.Result.
-func parseUsage(body []byte, email string) quota.Result {
+func parseUsage(body []byte, email, accountID string) quota.Result {
 	var usage struct {
 		PlanType  string `json:"plan_type"`
 		RateLimit struct {
@@ -53,10 +53,11 @@ func parseUsage(body []byte, email string) quota.Result {
 	}
 
 	return quota.Result{
-		Status:  quota.StatusFromWindows(windows),
-		Plan:    plan,
-		Email:   email,
-		Windows: windows,
+		Status:    quota.StatusFromWindows(windows),
+		Plan:      plan,
+		Email:     email,
+		AccountID: accountID,
+		Windows:   windows,
 	}
 }
 

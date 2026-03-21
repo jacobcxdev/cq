@@ -95,9 +95,9 @@ func TestAccountManager(t *testing.T) {
 		}
 	})
 
-	t.Run("Codex returns nil", func(t *testing.T) {
-		if got := app.AccountManager(provider.Codex); got != nil {
-			t.Errorf("AccountManager(Codex) = %v, want nil", got)
+	t.Run("Codex returns non-nil", func(t *testing.T) {
+		if got := app.AccountManager(provider.Codex); got == nil {
+			t.Error("AccountManager(Codex) = nil, want non-nil")
 		}
 	})
 

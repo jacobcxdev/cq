@@ -45,7 +45,9 @@ type ClaudeCmd struct {
 
 // CodexCmd groups Codex-specific subcommands.
 type CodexCmd struct {
-	Accounts AccountsCmd `cmd:"" help:"Show Codex account"`
+	Login    LoginCmd    `cmd:"" help:"Add Codex account"`
+	Accounts AccountsCmd `cmd:"" help:"List Codex accounts"`
+	Switch   SwitchCmd   `cmd:"" help:"Switch active Codex account"`
 }
 
 // GeminiCmd groups Gemini-specific subcommands.
@@ -93,8 +95,12 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		return app.RunAccounts(provider.Claude)
 	case "claude switch <email>":
 		return app.RunSwitch(provider.Claude, cli.Claude.Switch.Email)
+	case "codex login":
+		return app.RunCodexLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Codex.Login.Activate)
 	case "codex accounts":
 		return app.RunAccounts(provider.Codex)
+	case "codex switch <email>":
+		return app.RunSwitch(provider.Codex, cli.Codex.Switch.Email)
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini)
 	default:
