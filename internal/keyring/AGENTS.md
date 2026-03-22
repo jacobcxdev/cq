@@ -15,7 +15,7 @@ Claude credential discovery and persistence across multiple storage backends.
 
 ### Working In This Directory
 
-- Discovery order: credentials file → platform keychain → cq keyring. `mergeAnonymousFresh` only merges when exactly 1 identified account exists
+- Discovery order: credentials file → platform keychain → cq keyring. `mergeAnonymousFresh` uses token affinity (`sameStoredAccount`) to match anonymous keychain entries to identified accounts — never merges blindly
 - All file writes use atomic tmp+rename with `0o600` permissions (files) and `0o700` (directories)
 - `BackfillCredentialsFile` and `PersistRefreshedToken` log errors to stderr and return void — they are best-effort
 - `accountKey` falls back to hashed access token when no stable identifier exists — this is fragile after refresh

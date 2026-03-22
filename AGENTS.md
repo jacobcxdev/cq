@@ -74,7 +74,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 
 - Claude has **multi-account** support; Codex/Gemini are single-account
 - `keyring.DiscoverClaudeAccounts()` calls real keychain — tests must mock at provider level
-- `mergeAnonymousFresh` only merges when exactly 1 identified account exists (prevents cross-wiring)
+- `mergeAnonymousFresh` uses token affinity (`sameStoredAccount`) to match anonymous entries — never merges blindly
 - `dedup` in Claude parser prefers usable results over errors on key collision
 - OAuth `sync.Once` gates only the **valid** callback path — invalid requests don't consume it
 - `MinRemainingPct()` returns `-1` for empty windows (not `0`) to distinguish "no data" from "depleted"

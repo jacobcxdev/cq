@@ -74,22 +74,15 @@ func DiscoverClaudeAccounts() []ClaudeOAuth {
 
 // mergeAnonymousFresh finds anonymous entries (no email/UUID, typically from keychain
 // after Claude Code refreshed tokens) and merges their fresh tokens into identified
-// entries (from credentials file). The anonymous entry is removed after merging.
+// entries (from credentials file or cq keyring). The anonymous entry is removed after
+// merging.
+//
+// With a single identified account the anonymous entry is merged unconditionally
+// (there is only one candidate). With 2+ identified accounts, token affinity
+// (sameStoredAccount) is used to find the right target — this prevents cross-wiring
+// while still allowing the merge when a clear match exists.
 func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 	if len(accounts) <= 1 {
-		return accounts
-	}
-
-	// Count identified entries. With 2+ identified accounts we cannot
-	// determine which one an anonymous token belongs to, so skip merging
-	// entirely to avoid cross-wiring credentials between accounts.
-	identifiedCount := 0
-	for _, a := range accounts {
-		if a.Email != "" || a.AccountUUID != "" {
-			identifiedCount++
-		}
-	}
-	if identifiedCount != 1 {
 		return accounts
 	}
 
@@ -98,23 +91,41 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 		if a.Email != "" || a.AccountUUID != "" {
 			continue // not anonymous
 		}
-		// Find the single identified entry to merge into.
+
+		// Find identified entries that could be the same account.
+		var matchIdx []int
 		for j := range accounts {
 			if j == i || (accounts[j].Email == "" && accounts[j].AccountUUID == "") {
 				continue
 			}
-			if a.ExpiresAt > accounts[j].ExpiresAt {
-				updated := accounts[j]
-				updated.AccessToken = a.AccessToken
-				updated.RefreshToken = a.RefreshToken
-				updated.ExpiresAt = a.ExpiresAt
-				if len(a.Scopes) > 0 {
-					updated.Scopes = a.Scopes
+			matchIdx = append(matchIdx, j)
+		}
+
+		// Use token affinity to find the right merge target. Even with a
+		// single identified entry we require a token match — blind merging
+		// cross-wires credentials when an identified entry is missing from
+		// a source (e.g. a deleted cq keyring item).
+		target := -1
+		for _, j := range matchIdx {
+			if sameStoredAccount(&a, &accounts[j]) {
+				if target != -1 {
+					target = -1 // ambiguous — matches multiple
+					break
 				}
-				accounts[j] = updated
-				merged[i] = true
-				break
+				target = j
 			}
+		}
+
+		if target >= 0 && a.ExpiresAt > accounts[target].ExpiresAt {
+			updated := accounts[target]
+			updated.AccessToken = a.AccessToken
+			updated.RefreshToken = a.RefreshToken
+			updated.ExpiresAt = a.ExpiresAt
+			if len(a.Scopes) > 0 {
+				updated.Scopes = a.Scopes
+			}
+			accounts[target] = updated
+			merged[i] = true
 		}
 	}
 
