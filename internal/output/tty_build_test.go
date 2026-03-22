@@ -276,37 +276,42 @@ func TestRenderSustainGauge_Positions(t *testing.T) {
 	}
 }
 
-func TestCalcSepWidth(t *testing.T) {
-	t.Run("empty report returns windowLineWidth", func(t *testing.T) {
-		report := app.Report{}
-		got := calcSepWidth(report)
-		want := windowLineWidth()
-		if got != want {
-			t.Errorf("calcSepWidth(empty) = %d, want %d", got, want)
+func TestMeasuredSepWidth(t *testing.T) {
+	t.Run("empty model returns 0", func(t *testing.T) {
+		model := TTYModel{}
+		got := measuredSepWidth(model)
+		if got != 0 {
+			t.Errorf("measuredSepWidth(empty) = %d, want 0", got)
 		}
 	})
 
-	t.Run("report with long header is wider than windowLineWidth", func(t *testing.T) {
-		longEmail := "very.long.email.address.that.makes.header.wide@example-domain.com"
-		report := app.Report{
-			Providers: []app.ProviderReport{
-				{
-					ID: provider.Claude,
-					Results: []quota.Result{
-						{
-							Status:        quota.StatusOK,
-							Plan:          "max",
-							RateLimitTier: "default_claude_max_20x",
-							Email:         longEmail,
-						},
-					},
-				},
+	t.Run("measures widest row", func(t *testing.T) {
+		short := TTYWindowRow{Label: "  5h  ", Bar: "bar", Pct: "50%", Reset: "1h", PaceDiff: "+1", Burndown: "2h"}
+		long := TTYWindowRow{Label: "  7d  ", Bar: "longbar1234567890", Pct: "100%", Reset: "6d 23h", PaceDiff: "dry 1d 3h", Burndown: "in 1d 9h"}
+		model := TTYModel{
+			Sections: []TTYSection{
+				{WindowRows: []TTYWindowRow{short}, AggRows: []TTYWindowRow{long}},
 			},
 		}
-		got := calcSepWidth(report)
-		base := windowLineWidth()
-		if got <= base {
-			t.Errorf("calcSepWidth(long header) = %d, want > %d", got, base)
+		got := measuredSepWidth(model)
+		want := rowVisibleWidth(long)
+		if got != want {
+			t.Errorf("measuredSepWidth = %d, want %d (widest row)", got, want)
+		}
+	})
+
+	t.Run("wide header wins over narrow rows", func(t *testing.T) {
+		header := "  ✻   Claude max 20x · very.long.email.address.that.makes.header.wide@example-domain.com"
+		narrow := TTYWindowRow{Label: "  5h  ", Bar: "bar", Pct: "50%"}
+		model := TTYModel{
+			Sections: []TTYSection{
+				{Header: header, WindowRows: []TTYWindowRow{narrow}},
+			},
+		}
+		got := measuredSepWidth(model)
+		headerW := visibleWidth(header)
+		if got != headerW {
+			t.Errorf("measuredSepWidth = %d, want %d (header width)", got, headerW)
 		}
 	})
 }

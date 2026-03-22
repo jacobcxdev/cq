@@ -21,31 +21,30 @@ var icons = map[provider.ID]string{
 
 // BuildTTYModel converts a Report into a structured TTYModel ready for rendering.
 // It is a pure function — no I/O. The returned model contains pre-styled strings.
+// Sections are built first, then separators are sized to the widest rendered line.
 func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 	nowEpoch := now.Unix()
-	sepWidth := calcSepWidth(report)
 
 	model := TTYModel{
 		Sections: make([]TTYSection, 0, len(report.Providers)),
 	}
 
-	closingSep := buildSeparator(sepWidth)
-
+	// Track which sections are provider-first (get separator) vs continuation (no separator).
+	var providerFirstIdx []int
 	for _, pr := range report.Providers {
 		section := TTYSection{}
+		isFirst := true
 
-		// Separator before every provider (including first)
-		section.Separator = buildSeparator(sepWidth)
-
-		// Build per-result rows
 		for _, result := range pr.Results {
 			header, rows := buildResultBlock(result, pr.ID, nowEpoch)
 			if section.Header == "" {
-				// First result provides the section header
 				section.Header = header
 				section.WindowRows = rows
 			} else {
-				// Additional results within the same provider get no separator
+				if isFirst {
+					providerFirstIdx = append(providerFirstIdx, len(model.Sections))
+					isFirst = false
+				}
 				model.Sections = append(model.Sections, section)
 				section = TTYSection{
 					Header:     header,
@@ -54,18 +53,35 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 			}
 		}
 
-		// Aggregate rows
 		if pr.Aggregate != nil {
-			section.ThinSep = buildThinSeparator(sepWidth)
 			section.AggHeader = buildAggHeader(pr.Aggregate)
 			section.AggRows = buildAggRows(pr.Aggregate.Windows)
 		}
 
+		if isFirst {
+			providerFirstIdx = append(providerFirstIdx, len(model.Sections))
+		}
 		model.Sections = append(model.Sections, section)
 	}
 
+	// Measure actual max width across all rendered content.
+	sepWidth := measuredSepWidth(model)
+
+	// Insert separators only on provider-first sections.
+	firstSet := make(map[int]bool, len(providerFirstIdx))
+	for _, idx := range providerFirstIdx {
+		firstSet[idx] = true
+	}
+	for i := range model.Sections {
+		if firstSet[i] {
+			model.Sections[i].Separator = buildSeparator(sepWidth)
+		}
+		if model.Sections[i].AggHeader != "" {
+			model.Sections[i].ThinSep = buildThinSeparator(sepWidth)
+		}
+	}
 	if len(model.Sections) > 0 {
-		model.ClosingSeparator = closingSep
+		model.ClosingSeparator = buildSeparator(sepWidth)
 	}
 
 	return model
@@ -163,9 +179,9 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 			if isExhausted && w.RemainingPct > 0 {
 				rc = dimStyle
 			}
-			row.Reset = rc.Render(fmt.Sprintf("\U000F0996 %-7s", rel))
+			row.Reset = rc.Render(fmt.Sprintf("\U000F0996 %7s", rel))
 		} else {
-			row.Reset = dimStyle.Render(fmt.Sprintf("\U000F0996 %-7s", "\u2014"))
+			row.Reset = dimStyle.Render(fmt.Sprintf("\U000F0996 %7s", "\u2014"))
 		}
 
 		// Pace diff + burndown
@@ -175,7 +191,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 			if isExhausted {
 				dc = dimStyle
 			}
-			row.PaceDiff = dc.Render(fmt.Sprintf("\U000F04C5 %+4d", diff))
+			row.PaceDiff = dc.Render(fmt.Sprintf("\U000F04C5 %+7d", diff))
 
 			burn := ""
 			if periodS > 0 && w.ResetAtUnix > 0 {
@@ -184,13 +200,13 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 				}
 			}
 			if burn != "" {
-				row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %-7s", burn))
+				row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %7s", burn))
 			} else {
-				row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %-7s", "\u2014"))
+				row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
 			}
 		} else {
-			row.PaceDiff = dimStyle.Render(fmt.Sprintf("\U000F04C5 %4s", "\u2014"))
-			row.Burndown = dimStyle.Render(fmt.Sprintf("\U000F0152 %-7s", "\u2014"))
+			row.PaceDiff = dimStyle.Render(fmt.Sprintf("\U000F04C5 %7s", "\u2014"))
+			row.Burndown = dimStyle.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
 		}
 
 		rows = append(rows, row)
@@ -255,20 +271,25 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		}
 		row.Reset = sc.Render("\U000F029A") + " " + renderSustainGauge(a.GaugePos, isDim)
 
-		// Pace diff
-		dc := diffStyle(a.PaceDiff)
+		// Gauge-contextual columns: impact + timing (icon + value format).
+		gc := gaugeStyle(a.GaugePos)
 		if a.RemainingPct <= 0 {
-			dc = dimStyle
+			gc = dimStyle
 		}
-		row.PaceDiff = dc.Render(fmt.Sprintf("\U000F04C5 %+4d", a.PaceDiff))
-
-		// Burndown: positive means time until exhaustion; 0 is ambiguous (could be
-		// "already exhausted" or "no data"), so both render as em-dash. Per-result
-		// burndown uses calcBurndown's separate bool to distinguish these cases.
-		if a.Burndown > 0 {
-			row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %-7s", fmtDuration(a.Burndown)))
-		} else {
-			row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %-7s", "\u2014"))
+		switch {
+		case a.GaugePos >= 0 && a.GaugePos < 3: // overburn
+			row.PaceDiff = gc.Render(fmt.Sprintf("\uEE8E %7s", fmtDuration(a.GapDurationS)))
+			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", fmtDuration(a.GapStartS)))
+		case a.GaugePos >= 4: // underburn
+			row.PaceDiff = gc.Render(fmt.Sprintf("\uEFC7 %7s", fmt.Sprintf("%d%%", a.WastedPct)))
+			if a.WasteDeadlineS > 0 {
+				row.Burndown = gc.Render(fmt.Sprintf("\U000F1557 %7s", fmtDuration(a.WasteDeadlineS)))
+			} else {
+				row.Burndown = gc.Render(fmt.Sprintf("\U000F1557 %7s", "\u2014"))
+			}
+		default: // on pace or unknown
+			row.PaceDiff = gc.Render(fmt.Sprintf("\U000F012C %7s", "\u2014"))
+			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
 		}
 
 		rows = append(rows, row)
@@ -286,12 +307,23 @@ func buildThinSeparator(width int) string {
 	return "  " + dimStyle.Render(strings.Repeat("-", max(0, width-2)))
 }
 
-// calcSepWidth calculates the separator width from the widest line in the report.
-func calcSepWidth(report app.Report) int {
-	maxW := windowLineWidth()
-	for _, pr := range report.Providers {
-		for _, r := range pr.Results {
-			if w := headerVisibleWidth(r, pr.ID); w > maxW {
+// measuredSepWidth returns the widest visible line across all sections.
+func measuredSepWidth(model TTYModel) int {
+	maxW := 0
+	for _, sec := range model.Sections {
+		if w := visibleWidth(sec.Header); w > maxW {
+			maxW = w
+		}
+		for _, row := range sec.WindowRows {
+			if w := rowVisibleWidth(row); w > maxW {
+				maxW = w
+			}
+		}
+		if w := visibleWidth(sec.AggHeader); w > maxW {
+			maxW = w
+		}
+		for _, row := range sec.AggRows {
+			if w := rowVisibleWidth(row); w > maxW {
 				maxW = w
 			}
 		}
@@ -299,12 +331,36 @@ func calcSepWidth(report app.Report) int {
 	return maxW
 }
 
-// windowLineWidth returns the character count of a fully populated window line.
-func windowLineWidth() int {
-	// indent(7) + winName(5) + gap(2) + bar(20) +
-	// 4x metric: gap(2) + icon(1) + space(1) + field
-	// fields: pct(4) + duration(7) + diff(4) + duration(7)
-	return 7 + 5 + 2 + barWidth + 4*(2+1+1) + 4 + 7 + 4 + 7
+// rowVisibleWidth returns the visible character width of a rendered window row.
+// Mirrors the concatenation in writeWindowRow.
+func rowVisibleWidth(row TTYWindowRow) int {
+	// row.Label + row.Bar + "  " + row.Pct + "  " + row.Reset + "  " + row.PaceDiff + "  " + row.Burndown
+	return visibleWidth(row.Label) + visibleWidth(row.Bar) +
+		2 + visibleWidth(row.Pct) +
+		2 + visibleWidth(row.Reset) +
+		2 + visibleWidth(row.PaceDiff) +
+		2 + visibleWidth(row.Burndown)
+}
+
+// visibleWidth returns the number of visible characters in a styled string
+// by stripping ANSI escape sequences.
+func visibleWidth(s string) int {
+	n := 0
+	inEsc := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEsc = false
+			}
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // headerVisibleWidth calculates the visible character width of a header line.

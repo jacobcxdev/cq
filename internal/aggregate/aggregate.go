@@ -137,7 +137,18 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		result.Sustainability = 0
 	}
 
-	result.GaugePos = computeGaugePos(accounts, winName, periodS, nowEpoch)
+	gi := computeGaugeInfo(accounts, winName, periodS, nowEpoch)
+	result.GaugePos = gi.Pos
+	if gi.GapStart >= 0 {
+		result.GapStartS = int64(math.Round(gi.GapStart))
+		result.GapDurationS = int64(math.Round(gi.GapDuration))
+	}
+	if gi.WastedPct > 0 {
+		result.WastedPct = int(math.Round(gi.WastedPct * 100))
+	}
+	if gi.WasteDeadline >= 0 {
+		result.WasteDeadlineS = int64(math.Round(gi.WasteDeadline))
+	}
 
 	return result, true
 }
