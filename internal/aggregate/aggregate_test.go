@@ -151,12 +151,13 @@ func TestComputeSustainabilityReturnsZeroWhenAllDepleted(t *testing.T) {
 	}
 }
 
-func TestComputeSustainabilityReturnsUnknownWhenAllElapsedZero(t *testing.T) {
+func TestComputeSustainabilityFallbackRateWhenAllElapsedZero(t *testing.T) {
 	now := int64(1_000)
 	accounts := []acctInfo{
 		{
 			result: quota.Result{
 				Windows: map[quota.WindowName]quota.Window{
+					// elapsed=0 (reset is full period away), 20% used
 					quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: now + 18_000},
 				},
 			},
@@ -164,14 +165,18 @@ func TestComputeSustainabilityReturnsUnknownWhenAllElapsedZero(t *testing.T) {
 		{
 			result: quota.Result{
 				Windows: map[quota.WindowName]quota.Window{
+					// elapsed=0, 60% used
 					quota.Window5Hour: {RemainingPct: 40, ResetAtUnix: now + 18_000},
 				},
 			},
 		},
 	}
 
-	if got := computeSustainability(accounts, quota.Window5Hour, 18_000, now); got != -1 {
-		t.Fatalf("sustainability = %v, want -1", got)
+	// With the fallback rate (used/period), these accounts have finite rates
+	// and should produce a positive sustainability, not -1 (unknown).
+	got := computeSustainability(accounts, quota.Window5Hour, 18_000, now)
+	if got <= 0 {
+		t.Fatalf("sustainability = %v, want > 0 (fallback rate should produce finite result)", got)
 	}
 }
 
@@ -397,6 +402,12 @@ func TestComputeSustainabilityInAggregateResult(t *testing.T) {
 	// Both accounts at 100% with zero consumption → sustainability is capped at 100.
 	if w5h.Sustainability != 100 {
 		t.Errorf("Sustainability = %v, want 100 (zero-rate capped)", w5h.Sustainability)
+	}
+	// Zero-rate accounts with full remaining → severe underburn (position 6)
+	// since all quota will be wasted at current (zero) rate. However, near-zero
+	// rate accounts are skipped in projectedWaste, so waste=0 → on pace (3).
+	if w5h.GaugePos != 3 {
+		t.Errorf("GaugePos = %d, want 3 (unused accounts → on pace)", w5h.GaugePos)
 	}
 }
 

@@ -137,6 +137,8 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		result.Sustainability = 0
 	}
 
+	result.GaugePos = computeGaugePos(accounts, winName, periodS, nowEpoch)
+
 	return result, true
 }
 

@@ -249,11 +249,11 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 
 		// Sustainability gauge (replaces reset time slot)
 		isDim := a.RemainingPct <= 0
-		sc := sustainStyle(a.Sustainability)
+		sc := gaugeStyle(a.GaugePos)
 		if isDim {
 			sc = dimStyle
 		}
-		row.Reset = sc.Render("\U000F029A") + " " + renderSustainGauge(a.Sustainability, isDim)
+		row.Reset = sc.Render("\U000F029A") + " " + renderSustainGauge(a.GaugePos, isDim)
 
 		// Pace diff
 		dc := diffStyle(a.PaceDiff)

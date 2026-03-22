@@ -37,12 +37,11 @@ func diffStyle(diff int) lipgloss.Style {
 	return redStyle
 }
 
-// sustainStyle returns the style for a sustainability value.
-func sustainStyle(s float64) lipgloss.Style {
-	if s < 0 {
+// gaugeStyle returns the style for a gauge position (0-6, or -1 for unknown).
+func gaugeStyle(pos int) lipgloss.Style {
+	if pos < 0 {
 		return dimStyle
 	}
-	pos := sustainGaugePos(s)
 	if pos < 3 {
 		return redStyle // overconsumption
 	}

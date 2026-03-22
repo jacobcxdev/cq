@@ -255,32 +255,23 @@ func TestRenderBar_PaceMarker(t *testing.T) {
 }
 
 func TestRenderSustainGauge_Width(t *testing.T) {
-	gauge := renderSustainGauge(1.0, false)
+	gauge := renderSustainGauge(3, false) // on-pace position
 	stripped := stripANSI(gauge)
 	if len([]rune(stripped)) != gaugeWidth {
 		t.Errorf("gauge visible width = %d, want %d", len([]rune(stripped)), gaugeWidth)
 	}
 }
 
-func TestSustainGaugePos(t *testing.T) {
-	tests := []struct {
-		s    float64
-		want int
-	}{
-		{0, 0},
-		{-1, 0},
-		{0.25, 1},
-		{0.5, 2},
-		{1.0, 3},
-		{2.0, 4},
-		{4.0, 5},
-		{8.0, 6},
-		{100.0, 6},
-	}
-	for _, tt := range tests {
-		got := sustainGaugePos(tt.s)
-		if got != tt.want {
-			t.Errorf("sustainGaugePos(%g) = %d, want %d", tt.s, got, tt.want)
+func TestRenderSustainGauge_Positions(t *testing.T) {
+	for pos := 0; pos < gaugeWidth; pos++ {
+		gauge := renderSustainGauge(pos, false)
+		stripped := stripANSI(gauge)
+		if len([]rune(stripped)) != gaugeWidth {
+			t.Errorf("pos=%d: visible width = %d, want %d", pos, len([]rune(stripped)), gaugeWidth)
+		}
+		runes := []rune(stripped)
+		if runes[pos] != '\u2502' {
+			t.Errorf("pos=%d: expected marker at position %d, got %c", pos, pos, runes[pos])
 		}
 	}
 }
@@ -426,17 +417,14 @@ func TestRenderBar_ClampBelowZero(t *testing.T) {
 	}
 }
 
-func TestRenderSustainGauge_NegativeSustainability(t *testing.T) {
+func TestRenderSustainGauge_Unknown(t *testing.T) {
 	// renderSustainGauge(-1, false) must not panic and must not contain a
-	// marker character (│ / ╎ etc.) — negative sustainability means "unknown",
-	// the gauge condition is s >= 0, so no marker is placed.
+	// marker character — pos -1 means "unknown", so no marker is placed.
 	gauge := renderSustainGauge(-1, false)
 	stripped := stripANSI(gauge)
-	// No marker character ╎ (U+254E) or │ (U+2502) should appear.
 	if strings.Contains(stripped, "\u2502") {
 		t.Errorf("renderSustainGauge(-1) should have no marker, got %q", stripped)
 	}
-	// Width must still be correct.
 	if len([]rune(stripped)) != gaugeWidth {
 		t.Errorf("renderSustainGauge(-1) visible width = %d, want %d", len([]rune(stripped)), gaugeWidth)
 	}
