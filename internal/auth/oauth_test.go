@@ -162,8 +162,11 @@ func TestBuildAuthorizeURL(t *testing.T) {
 		})
 	}
 
-	// redirect_uri must include the port
+	// redirect_uri must use localhost and include the port
 	redirectURI := q.Get("redirect_uri")
+	if !strings.HasPrefix(redirectURI, "http://localhost:") {
+		t.Errorf("redirect_uri %q does not start with http://localhost:", redirectURI)
+	}
 	if !strings.Contains(redirectURI, "54321") {
 		t.Errorf("redirect_uri %q does not contain port 54321", redirectURI)
 	}
