@@ -60,24 +60,25 @@ func TestDiffStyle(t *testing.T) {
 	}
 }
 
-func TestSustainStyle(t *testing.T) {
+func TestGaugeStyle(t *testing.T) {
 	tests := []struct {
-		s    float64
+		pos  int
 		want lipgloss.Style
 	}{
-		{-1, dimStyle},   // negative → dim
-		{0, redStyle},    // s=0 → pos=0 < 3 → red (overconsumption)
-		{1, greenStyle},  // s=1 → pos=3 → green (on pace)
-		{2, yellowStyle}, // s=2 → pos=4 > 3 → yellow (underconsumption)
-		{3, yellowStyle},
-		{4, yellowStyle},
-		{10, yellowStyle},
+		{-1, dimStyle},    // unknown → dim
+		{0, redStyle},     // severe overburn → red
+		{1, redStyle},     // moderate overburn → red
+		{2, redStyle},     // mild overburn → red
+		{3, greenStyle},   // on pace → green
+		{4, yellowStyle},  // mild underburn → yellow
+		{5, yellowStyle},  // moderate underburn → yellow
+		{6, yellowStyle},  // severe underburn → yellow
 	}
 	for _, tt := range tests {
-		got := sustainStyle(tt.s)
+		got := gaugeStyle(tt.pos)
 		if styleID(got) != styleID(tt.want) {
-			t.Errorf("sustainStyle(%v): got style rendering %q, want %q",
-				tt.s, styleID(got), styleID(tt.want))
+			t.Errorf("gaugeStyle(%d): got style rendering %q, want %q",
+				tt.pos, styleID(got), styleID(tt.want))
 		}
 	}
 }

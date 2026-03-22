@@ -7,4 +7,5 @@ type AggregateResult struct {
 	PaceDiff       int     `json:"pace_diff"`
 	Burndown       int64   `json:"burndown_s,omitempty"`
 	Sustainability float64 `json:"sustainability,omitempty"`
+	GaugePos       int     `json:"gauge_pos"`
 }
