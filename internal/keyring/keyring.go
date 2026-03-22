@@ -347,8 +347,7 @@ func BackfillCredentialsFile(acct *ClaudeOAuth) {
 	path := filepath.Join(home, ".claude", ".credentials.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: backfill creds: read: %v\n", err)
-		return
+		return // file missing is normal (e.g. no credentials file on disk)
 	}
 	var creds ClaudeCredentials
 	if err := json.Unmarshal(data, &creds); err != nil || creds.ClaudeAiOauth == nil {
