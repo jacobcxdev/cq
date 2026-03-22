@@ -234,17 +234,14 @@ func TestDedupByEmail(t *testing.T) {
 		}
 	})
 
-	t.Run("no-email entries without UUID dropped when email entries exist", func(t *testing.T) {
+	t.Run("anonymous entries preserved alongside email entries for provider identification", func(t *testing.T) {
 		input := []ClaudeOAuth{
 			{Email: "a@example.com", AccessToken: "tok1"},
-			{AccessToken: "tok2"}, // no email, no UUID — stale
+			{AccessToken: "tok2"}, // anonymous — kept for provider fetch to identify
 		}
 		got := dedupByEmail(input)
-		if len(got) != 1 {
-			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
-		}
-		if got[0].Email != "a@example.com" {
-			t.Errorf("Email = %q, want %q", got[0].Email, "a@example.com")
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (anonymous kept for provider identification); got %+v", len(got), got)
 		}
 	})
 
@@ -264,13 +261,13 @@ func TestDedupByEmail(t *testing.T) {
 			{Email: "a@example.com", AccessToken: "tokA1", ExpiresAt: 100},
 			{Email: "b@example.com", AccessToken: "tokB"},
 			{Email: "a@example.com", AccessToken: "tokA2", ExpiresAt: 200},
-			{AccessToken: "anon"}, // anonymous, dropped because email entries exist
+			{AccessToken: "anon"}, // anonymous — kept for provider identification
 		}
 		got := dedupByEmail(input)
-		if len(got) != 2 {
-			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (2 deduped email entries + 1 anonymous); got %+v", len(got), got)
 		}
-		// find a@example.com entry
+		// find a@example.com entry — should have fresher token
 		var aEntry ClaudeOAuth
 		for _, g := range got {
 			if g.Email == "a@example.com" {

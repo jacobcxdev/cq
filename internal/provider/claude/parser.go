@@ -131,7 +131,8 @@ func dedup(results []quota.Result) []quota.Result {
 			}
 		}
 	}
-	if len(usableKeys) > 0 {
+	hasUsable := len(usableKeys) > 0
+	if hasUsable {
 		var filtered []quota.Result
 		for _, r := range out {
 			if r.IsUsable() {
@@ -142,8 +143,14 @@ func dedup(results []quota.Result) []quota.Result {
 			if key == "" {
 				key = r.Email
 			}
-			// Keep error results for accounts that have no usable result
-			if key == "" || !usableKeys[key] {
+			// Drop unidentifiable error results (stale keychain cruft)
+			// when usable results exist — they can't be associated with
+			// any account and just add noise.
+			if key == "" {
+				continue
+			}
+			// Keep error results for identified accounts that have no usable result
+			if !usableKeys[key] {
 				filtered = append(filtered, r)
 			}
 		}

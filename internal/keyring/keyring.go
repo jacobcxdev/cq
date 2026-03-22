@@ -164,26 +164,7 @@ func dedupByEmail(accounts []ClaudeOAuth) []ClaudeOAuth {
 		}
 		result = append(result, a)
 	}
-	// If any entries have email, drop entries without email that lack a UUID
-	// (they're stale duplicates from before backfill)
-	hasEmailEntry := false
-	for _, a := range result {
-		if a.Email != "" {
-			hasEmailEntry = true
-			break
-		}
-	}
-	if !hasEmailEntry {
-		return result
-	}
-	var final []ClaudeOAuth
-	for _, a := range result {
-		if a.Email == "" && a.AccountUUID == "" {
-			continue // stale entry, skip
-		}
-		final = append(final, a)
-	}
-	return final
+	return result
 }
 
 func sameStoredAccount(stored, acct *ClaudeOAuth) bool {
