@@ -21,7 +21,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 - **Two phases:** Fetch (provider APIs → quota results) and Render (results → TTY or JSON)
 - **Three providers:** Claude (multi-account), Codex (single-account), Gemini (single-account)
 - **Concurrent fetch:** Each provider runs in its own goroutine with panic recovery
-- **Aggregate layer:** Weighted pace, sustainability, and burndown across 2+ accounts
+- **Aggregate layer:** Weighted pace, correction-deadline gauge, and burndown across 2+ accounts
 
 ## Package Structure
 
@@ -34,7 +34,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 | `internal/provider/gemini` | Single account, no refresh (shared credentials) | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
 | `internal/app` | Runner (concurrent fetch), Report types, account management | [AGENTS.md](internal/app/AGENTS.md) |
 | `internal/output` | TTY renderer (lipgloss), JSON renderer | [AGENTS.md](internal/output/AGENTS.md) |
-| `internal/aggregate` | Weighted pace, sustainability, burndown computation | [AGENTS.md](internal/aggregate/AGENTS.md) |
+| `internal/aggregate` | Weighted pace, gauge (correction-deadline), burndown computation | [AGENTS.md](internal/aggregate/AGENTS.md) |
 | `internal/quota` | Domain types (Result, Window, Status), time helpers | [AGENTS.md](internal/quota/AGENTS.md) |
 | `internal/auth` | OAuth PKCE flow, browser detection, JWT email decode | [AGENTS.md](internal/auth/AGENTS.md) |
 | `internal/keyring` | Credential discovery (keychain + credentials file + cq keyring) | [AGENTS.md](internal/keyring/AGENTS.md) |
@@ -79,6 +79,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 - OAuth `sync.Once` gates only the **valid** callback path — invalid requests don't consume it
 - `MinRemainingPct()` returns `-1` for empty windows (not `0`) to distinguish "no data" from "depleted"
 - Aggregate `Burndown == 0` is ambiguous (exhausted or no data) — callers show em-dash for both
+- Aggregate gauge is asymmetric: left (overburn) = dry spot deadline, right (underburn) = projected waste magnitude; `Sustainability` float retained for JSON backward compat
 
 ## Testing
 

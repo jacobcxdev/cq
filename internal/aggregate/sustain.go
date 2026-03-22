@@ -20,9 +20,18 @@ type interval struct {
 	end   float64
 }
 
+// GaugeInfo holds the computed gauge position and supporting data for display.
+type GaugeInfo struct {
+	Pos           int     // -1=unknown, 0-6
+	GapStart      float64 // seconds until dry spot, -1 if no gap
+	GapDuration   float64 // duration of dry spot in seconds
+	WastedPct     float64 // projected waste as fraction (0-1)
+	WasteDeadline float64 // seconds until earliest wasting account resets, -1 if N/A
+}
+
 // computeSustainability computes the raw sustainability factor s: the maximum
 // rate multiplier before dry spots appear. Retained for JSON output; the TTY
-// gauge uses computeGaugePos instead.
+// gauge uses computeGaugeInfo instead.
 func computeSustainability(accounts []acctInfo, winName quota.WindowName, periodS int64, nowEpoch int64) float64 {
 	const (
 		maxF       = 100.0
@@ -50,8 +59,6 @@ func computeSustainability(accounts []acctInfo, winName quota.WindowName, period
 
 		used := float64(100 - w.RemainingPct)
 		if used <= 0 {
-			// Unused account — provides indefinite coverage at current rate.
-			// Use near-zero rate so binary search treats it as infinite.
 			allElapsedZero = false
 			sustainers = append(sustainers, sustainAccount{
 				remaining: 100,
@@ -63,7 +70,6 @@ func computeSustainability(accounts []acctInfo, winName quota.WindowName, period
 
 		elapsed := windowElapsed(w, periodS, nowEpoch)
 		if elapsed <= 0 {
-			// Rate unidentifiable — use period-average as bounded fallback.
 			elapsed = float64(periodS)
 		}
 		allElapsedZero = false
@@ -90,7 +96,7 @@ func computeSustainability(accounts []acctInfo, winName quota.WindowName, period
 			return false
 		}
 		ivs := buildIntervals(sustainers, f, float64(periodS))
-		return firstGap(ivs, float64(periodS)) < 0
+		return coversPeriod(ivs, float64(periodS))
 	}
 
 	lo, hi := 0.0, 1.0
@@ -124,7 +130,7 @@ func computeSustainability(accounts []acctInfo, winName quota.WindowName, period
 	return lo
 }
 
-// computeGaugePos returns a gauge position (0-6) or -1 for unknown.
+// computeGaugeInfo returns gauge position and supporting data for display.
 // 0-2 = overburn (severe/moderate/mild), 3 = on pace, 4-6 = underburn (mild/moderate/severe).
 //
 // Left side: time until first dry spot at current rate, mapped to severity via
@@ -132,15 +138,15 @@ func computeSustainability(accounts []acctInfo, winName quota.WindowName, period
 //
 // Right side: projected wasted quota weighted by elapsed fraction, mapped to
 // equivalent thresholds.
-func computeGaugePos(accounts []acctInfo, winName quota.WindowName, periodS int64, nowEpoch int64) int {
+func computeGaugeInfo(accounts []acctInfo, winName quota.WindowName, periodS int64, nowEpoch int64) GaugeInfo {
+	unknown := GaugeInfo{Pos: -1, GapStart: -1, WasteDeadline: -1}
 	period := float64(periodS)
 	if period <= 0 {
-		return -1
+		return unknown
 	}
 
 	var sustainers []sustainAccount
 	hasData := false
-	allDepleted := true
 
 	for _, a := range accounts {
 		w, ok := a.result.Windows[winName]
@@ -148,13 +154,8 @@ func computeGaugePos(accounts []acctInfo, winName quota.WindowName, periodS int6
 			continue
 		}
 		hasData = true
-		// Normalize reset time.
 		if w.ResetAtUnix <= 0 && periodS > 0 {
 			w.ResetAtUnix = quota.DefaultResetEpoch(periodS, nowEpoch)
-		}
-
-		if w.RemainingPct > 0 {
-			allDepleted = false
 		}
 
 		// Handle weekly-gated 5h accounts (Issue 1).
@@ -170,7 +171,6 @@ func computeGaugePos(accounts []acctInfo, winName quota.WindowName, periodS int6
 			if offset < 0 {
 				offset = 0
 			}
-			// After the weekly gate lifts, assume full 5h quota.
 			sustainers = append(sustainers, sustainAccount{
 				remaining:  100,
 				rate:       math.SmallestNonzeroFloat64,
@@ -207,42 +207,50 @@ func computeGaugePos(accounts []acctInfo, winName quota.WindowName, periodS int6
 	}
 
 	if !hasData {
-		return -1
+		return unknown
 	}
 	if len(sustainers) == 0 {
-		return 0 // all accounts present but none can provide coverage
-	}
-	if allDepleted {
-		return 0
+		return GaugeInfo{Pos: 0, GapStart: 0, GapDuration: period, WasteDeadline: -1}
 	}
 
-	// Overburn: at current rate (f=1), find first coverage gap.
+	// Check effective coverage at t=0 instead of raw remaining.
 	ivs := buildIntervals(sustainers, 1.0, period)
-	gap := firstGap(ivs, period)
+	gapStart, gapEnd, hasGap := firstGapSpan(ivs, period)
 
-	if gap >= 0 {
-		frac := gap / period
+	if hasGap {
+		dur := gapEnd - gapStart
+		frac := gapStart / period
+		pos := 2 // mild
 		if frac <= 0.10 {
-			return 0 // severe: dry spot within 10% of window
+			pos = 0 // severe: dry spot within 10% of window
+		} else if frac <= 0.25 {
+			pos = 1 // moderate: within 25%
 		}
-		if frac <= 0.25 {
-			return 1 // moderate: within 25%
+		return GaugeInfo{
+			Pos:           pos,
+			GapStart:      gapStart,
+			GapDuration:   dur,
+			WasteDeadline: -1,
 		}
-		return 2 // mild: beyond 25%
 	}
 
-	// Underburn: projected wasted quota weighted by elapsed.
-	waste := projectedWaste(sustainers, period)
+	// No overburn. Check underburn: projected wasted quota.
+	waste, deadline := projectedWasteInfo(sustainers, period)
 	if waste <= 0.02 {
-		return 3 // on pace
+		return GaugeInfo{Pos: 3, GapStart: -1, WasteDeadline: -1}
 	}
-	if waste <= 0.10 {
-		return 4 // mild underburn
+	pos := 4 // mild
+	if waste > 0.25 {
+		pos = 6 // severe
+	} else if waste > 0.10 {
+		pos = 5 // moderate
 	}
-	if waste <= 0.25 {
-		return 5 // moderate underburn
+	return GaugeInfo{
+		Pos:           pos,
+		GapStart:      -1,
+		WastedPct:     waste,
+		WasteDeadline: deadline,
 	}
-	return 6 // severe underburn
 }
 
 // buildIntervals constructs coverage intervals for the given rate multiplier f.
@@ -254,7 +262,6 @@ func buildIntervals(sustainers []sustainAccount, f float64, period float64) []in
 		gate := a.gateOffset
 
 		if a.rate <= math.SmallestNonzeroFloat64*2 {
-			// Near-zero rate: covers from gate to period.
 			if gate < period {
 				ivs = append(ivs, interval{start: gate, end: period})
 			}
@@ -283,30 +290,42 @@ func buildIntervals(sustainers []sustainAccount, f float64, period float64) []in
 	return ivs
 }
 
-// firstGap returns the time of the first coverage gap, or -1 if fully covered.
-func firstGap(intervals []interval, period float64) float64 {
-	if period <= 0 {
-		return -1
-	}
-	if len(intervals) == 0 {
-		return 0
-	}
-
-	slices.SortFunc(intervals, func(a, b interval) int {
-		if a.start != b.start {
-			if a.start < b.start {
-				return -1
-			}
-			return 1
-		}
-		if a.end < b.end {
+func intervalCmp(a, b interval) int {
+	if a.start != b.start {
+		if a.start < b.start {
 			return -1
 		}
-		if a.end > b.end {
-			return 1
-		}
-		return 0
-	})
+		return 1
+	}
+	if a.end < b.end {
+		return -1
+	}
+	if a.end > b.end {
+		return 1
+	}
+	return 0
+}
+
+// firstGap returns the time of the first coverage gap, or -1 if fully covered.
+func firstGap(intervals []interval, period float64) float64 {
+	start, _, found := firstGapSpan(intervals, period)
+	if found {
+		return start
+	}
+	return -1
+}
+
+// firstGapSpan returns the start and end of the first coverage gap.
+// Returns found=false if the intervals fully cover [0, period].
+func firstGapSpan(intervals []interval, period float64) (gapStart, gapEnd float64, found bool) {
+	if period <= 0 {
+		return 0, 0, false
+	}
+	if len(intervals) == 0 {
+		return 0, period, true
+	}
+
+	slices.SortFunc(intervals, intervalCmp)
 
 	covered := 0.0
 	for _, iv := range intervals {
@@ -314,27 +333,26 @@ func firstGap(intervals []interval, period float64) float64 {
 			continue
 		}
 		if iv.start > covered {
-			return covered
+			return covered, iv.start, true
 		}
 		covered = iv.end
 		if covered >= period {
-			return -1
+			return 0, 0, false
 		}
 	}
 	if covered < period {
-		return covered
+		return covered, period, true
 	}
-	return -1
+	return 0, 0, false
 }
 
-// projectedWaste computes the fraction of total capacity (0-1) that will go
+// projectedWasteInfo computes the fraction of total capacity (0-1) that will go
 // unused when windows reset, weighted by how far each account is into its
-// window. Early-window accounts contribute less urgency since their rate
-// projection is less reliable.
-func projectedWaste(sustainers []sustainAccount, period float64) float64 {
+// window. Also returns the earliest reset time among wasting accounts.
+func projectedWasteInfo(sustainers []sustainAccount, period float64) (waste float64, deadline float64) {
+	deadline = -1
 	var totalUrgency, totalWeight float64
 	for _, a := range sustainers {
-		// Skip accounts with unmeasurable rate.
 		if a.rate <= math.SmallestNonzeroFloat64*2 {
 			continue
 		}
@@ -344,7 +362,7 @@ func projectedWaste(sustainers []sustainAccount, period float64) float64 {
 		}
 		projected := a.remaining - a.rate*timeToReset
 		if projected <= 0 {
-			continue // will use all remaining before reset
+			continue
 		}
 		wasteFrac := projected / 100.0
 		timingWeight := a.elapsed / period
@@ -353,11 +371,14 @@ func projectedWaste(sustainers []sustainAccount, period float64) float64 {
 		}
 		totalUrgency += wasteFrac * timingWeight
 		totalWeight += 1.0
+		if deadline < 0 || a.reset < deadline {
+			deadline = a.reset
+		}
 	}
 	if totalWeight == 0 {
-		return 0
+		return 0, -1
 	}
-	return totalUrgency / totalWeight
+	return totalUrgency / totalWeight, deadline
 }
 
 // coversPeriod checks whether the union of intervals covers [0, period].
