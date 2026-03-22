@@ -9,84 +9,179 @@ import (
 // ── mergeAnonymousFresh ───────────────────────────────────────────────────────
 
 func TestMergeAnonymousFresh(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []ClaudeOAuth
-		wantLen  int
-		wantAt0  ClaudeOAuth // only checked when wantLen > 0
-		checkAt0 bool
-	}{
-		{
-			name:    "empty slice",
-			input:   []ClaudeOAuth{},
-			wantLen: 0,
-		},
-		{
-			name: "single entry no merge possible",
-			input: []ClaudeOAuth{
-				{Email: "a@example.com", AccessToken: "tok", ExpiresAt: 100},
-			},
-			wantLen:  1,
-			checkAt0: true,
-			wantAt0:  ClaudeOAuth{Email: "a@example.com", AccessToken: "tok", ExpiresAt: 100},
-		},
-		{
-			name: "anonymous fresher than identified — merges token",
-			input: []ClaudeOAuth{
-				{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "old-at", RefreshToken: "old-rt", ExpiresAt: 100},
-				{AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: 200}, // anonymous, fresher
-			},
-			wantLen:  1,
-			checkAt0: true,
-			wantAt0: ClaudeOAuth{
-				Email: "a@example.com", AccountUUID: "uuid1",
-				AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: 200,
-			},
-		},
-		{
-			name: "anonymous staler than identified — no merge",
-			input: []ClaudeOAuth{
-				{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "new-at", RefreshToken: "new-rt", ExpiresAt: 300},
-				{AccessToken: "old-at", RefreshToken: "old-rt", ExpiresAt: 100}, // anonymous, staler
-			},
-			wantLen: 2, // anonymous entry kept, no merge
-		},
-		{
-			name: "multiple anonymous entries — only fresher one merges",
-			input: []ClaudeOAuth{
-				{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "base-at", RefreshToken: "base-rt", ExpiresAt: 100},
-				{AccessToken: "anon1-at", RefreshToken: "anon1-rt", ExpiresAt: 50},  // staler, no merge
-				{AccessToken: "anon2-at", RefreshToken: "anon2-rt", ExpiresAt: 200}, // fresher, merges
-			},
-			// anon2 merges into identified; anon1 is kept (staler, no merge target)
-			wantLen: 2,
-		},
+	// findByEmail is a helper to locate an account by email in a result slice.
+	findByEmail := func(t *testing.T, accts []ClaudeOAuth, email string) ClaudeOAuth {
+		t.Helper()
+		for _, a := range accts {
+			if a.Email == email {
+				return a
+			}
+		}
+		t.Fatalf("no account with email %q in %+v", email, accts)
+		return ClaudeOAuth{}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := mergeAnonymousFresh(tt.input)
-			if len(got) != tt.wantLen {
-				t.Fatalf("len = %d, want %d; got %+v", len(got), tt.wantLen, got)
-			}
-			if tt.checkAt0 && tt.wantLen == 1 {
-				a := got[0]
-				w := tt.wantAt0
-				if a.Email != w.Email || a.AccountUUID != w.AccountUUID ||
-					a.AccessToken != w.AccessToken || a.RefreshToken != w.RefreshToken ||
-					a.ExpiresAt != w.ExpiresAt {
-					t.Errorf("got[0] = %+v, want %+v", a, w)
-				}
-			}
-		})
-	}
+	t.Run("empty slice", func(t *testing.T) {
+		got := mergeAnonymousFresh(nil)
+		if got != nil {
+			t.Errorf("got %v, want nil", got)
+		}
+	})
+
+	t.Run("single entry no merge possible", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccessToken: "tok", ExpiresAt: 100},
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 1 || got[0].AccessToken != "tok" {
+			t.Errorf("got %+v, want passthrough", got)
+		}
+	})
+
+	t.Run("single identified + anonymous fresher with shared refresh token — merges", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "old-at", RefreshToken: "rt-shared", ExpiresAt: 100},
+			{AccessToken: "new-at", RefreshToken: "rt-shared", ExpiresAt: 200},
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
+		}
+		a := got[0]
+		if a.Email != "a@example.com" || a.AccountUUID != "uuid1" {
+			t.Error("identity fields lost after merge")
+		}
+		if a.AccessToken != "new-at" || a.ExpiresAt != 200 {
+			t.Errorf("tokens not updated: %+v", a)
+		}
+	})
+
+	t.Run("single identified + anonymous fresher but no token match — no merge", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "tok-a", RefreshToken: "rt-a", ExpiresAt: 100},
+			{AccessToken: "tok-unrelated", RefreshToken: "rt-unrelated", ExpiresAt: 200},
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (no merge without token affinity); got %+v", len(got), got)
+		}
+	})
+
+	t.Run("single identified + anonymous staler — no merge", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "new-at", RefreshToken: "rt-shared", ExpiresAt: 300},
+			{AccessToken: "old-at", RefreshToken: "rt-shared", ExpiresAt: 100},
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (no merge when staler)", len(got))
+		}
+	})
+
+	t.Run("two identified + anonymous matching one by refresh token — merges into correct account", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid-a", AccessToken: "old-a", RefreshToken: "rt-shared", ExpiresAt: 100},
+			{Email: "b@example.com", AccountUUID: "uuid-b", AccessToken: "tok-b", RefreshToken: "rt-b", ExpiresAt: 100},
+			{AccessToken: "fresh-at", RefreshToken: "rt-shared", ExpiresAt: 300}, // anonymous, matches a@ by refresh token
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		}
+		a := findByEmail(t, got, "a@example.com")
+		if a.AccessToken != "fresh-at" || a.ExpiresAt != 300 {
+			t.Errorf("a@ should have fresh token: %+v", a)
+		}
+		b := findByEmail(t, got, "b@example.com")
+		if b.AccessToken != "tok-b" {
+			t.Errorf("b@ should be untouched: %+v", b)
+		}
+	})
+
+	t.Run("two identified + anonymous matching one by access token — merges into correct account", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid-a", AccessToken: "at-shared", RefreshToken: "rt-a", ExpiresAt: 100},
+			{Email: "b@example.com", AccountUUID: "uuid-b", AccessToken: "tok-b", RefreshToken: "rt-b", ExpiresAt: 100},
+			{AccessToken: "at-shared", RefreshToken: "rt-new", ExpiresAt: 300}, // anonymous, matches a@ by access token
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		}
+		a := findByEmail(t, got, "a@example.com")
+		if a.RefreshToken != "rt-new" || a.ExpiresAt != 300 {
+			t.Errorf("a@ should have fresh tokens: %+v", a)
+		}
+	})
+
+	t.Run("two identified + anonymous matching none — no merge", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid-a", AccessToken: "tok-a", RefreshToken: "rt-a", ExpiresAt: 100},
+			{Email: "b@example.com", AccountUUID: "uuid-b", AccessToken: "tok-b", RefreshToken: "rt-b", ExpiresAt: 100},
+			{AccessToken: "tok-unrelated", RefreshToken: "rt-unrelated", ExpiresAt: 300}, // matches neither
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (no merge when no match); got %+v", len(got), got)
+		}
+	})
+
+	t.Run("two identified + anonymous matching both — no merge (ambiguous)", func(t *testing.T) {
+		// Contrived: anonymous shares access token with a@ and refresh token with b@
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid-a", AccessToken: "at-shared", RefreshToken: "rt-a", ExpiresAt: 100},
+			{Email: "b@example.com", AccountUUID: "uuid-b", AccessToken: "tok-b", RefreshToken: "rt-shared", ExpiresAt: 100},
+			{AccessToken: "at-shared", RefreshToken: "rt-shared", ExpiresAt: 300}, // matches both
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (no merge when ambiguous); got %+v", len(got), got)
+		}
+		// Verify neither identified account was modified
+		a := findByEmail(t, got, "a@example.com")
+		if a.ExpiresAt != 100 {
+			t.Errorf("a@ should be untouched: %+v", a)
+		}
+		b := findByEmail(t, got, "b@example.com")
+		if b.ExpiresAt != 100 {
+			t.Errorf("b@ should be untouched: %+v", b)
+		}
+	})
+
+	t.Run("no identified entries — no merge", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{AccessToken: "anon1", ExpiresAt: 100},
+			{AccessToken: "anon2", ExpiresAt: 200},
+		}
+		got := mergeAnonymousFresh(input)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		}
+	})
+
+	t.Run("multiple anonymous entries — only fresher matching one merges", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "base-at", RefreshToken: "rt-shared", ExpiresAt: 100},
+			{AccessToken: "anon1-at", RefreshToken: "anon1-rt", ExpiresAt: 50},           // staler and no match
+			{AccessToken: "anon2-at", RefreshToken: "rt-shared", ExpiresAt: 200},          // fresher with matching RT
+		}
+		got := mergeAnonymousFresh(input)
+		// anon2 merges into identified (shared RT); anon1 is kept (no match)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		}
+		a := findByEmail(t, got, "a@example.com")
+		if a.AccessToken != "anon2-at" {
+			t.Errorf("identified should have anon2's token: %+v", a)
+		}
+	})
 }
 
 func TestMergeAnonymousFreshScopesCarried(t *testing.T) {
 	// Scopes from anonymous entry should propagate when non-empty.
 	input := []ClaudeOAuth{
-		{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "old", ExpiresAt: 10},
-		{AccessToken: "new", ExpiresAt: 20, Scopes: []string{"scope1", "scope2"}},
+		{Email: "a@example.com", AccountUUID: "uuid1", AccessToken: "old", RefreshToken: "rt-shared", ExpiresAt: 10},
+		{AccessToken: "new", RefreshToken: "rt-shared", ExpiresAt: 20, Scopes: []string{"scope1", "scope2"}},
 	}
 	got := mergeAnonymousFresh(input)
 	if len(got) != 1 {
@@ -139,17 +234,14 @@ func TestDedupByEmail(t *testing.T) {
 		}
 	})
 
-	t.Run("no-email entries without UUID dropped when email entries exist", func(t *testing.T) {
+	t.Run("anonymous entries preserved alongside email entries for provider identification", func(t *testing.T) {
 		input := []ClaudeOAuth{
 			{Email: "a@example.com", AccessToken: "tok1"},
-			{AccessToken: "tok2"}, // no email, no UUID — stale
+			{AccessToken: "tok2"}, // anonymous — kept for provider fetch to identify
 		}
 		got := dedupByEmail(input)
-		if len(got) != 1 {
-			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
-		}
-		if got[0].Email != "a@example.com" {
-			t.Errorf("Email = %q, want %q", got[0].Email, "a@example.com")
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (anonymous kept for provider identification); got %+v", len(got), got)
 		}
 	})
 
@@ -169,13 +261,13 @@ func TestDedupByEmail(t *testing.T) {
 			{Email: "a@example.com", AccessToken: "tokA1", ExpiresAt: 100},
 			{Email: "b@example.com", AccessToken: "tokB"},
 			{Email: "a@example.com", AccessToken: "tokA2", ExpiresAt: 200},
-			{AccessToken: "anon"}, // anonymous, dropped because email entries exist
+			{AccessToken: "anon"}, // anonymous — kept for provider identification
 		}
 		got := dedupByEmail(input)
-		if len(got) != 2 {
-			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 (2 deduped email entries + 1 anonymous); got %+v", len(got), got)
 		}
-		// find a@example.com entry
+		// find a@example.com entry — should have fresher token
 		var aEntry ClaudeOAuth
 		for _, g := range got {
 			if g.Email == "a@example.com" {

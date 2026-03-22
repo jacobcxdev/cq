@@ -207,6 +207,39 @@ func TestParseUsageEmptyEmail(t *testing.T) {
 	}
 }
 
+// TestDedupUnidentifiableErrorDropped verifies that error results with no email
+// and no account_id are dropped when usable results exist — they are stale
+// keychain cruft that can't be associated with any account.
+func TestDedupUnidentifiableErrorDropped(t *testing.T) {
+	results := []quota.Result{
+		{AccountID: "uuid-1", Email: "a@example.com", Status: quota.StatusOK},
+		{Status: quota.StatusError, Error: &quota.ErrorInfo{Code: "auth_expired"}}, // no identity
+	}
+
+	out := dedup(results)
+
+	if len(out) != 1 {
+		t.Fatalf("len = %d, want 1 (unidentifiable error should be dropped); got %+v", len(out), out)
+	}
+	if out[0].Email != "a@example.com" {
+		t.Errorf("expected a@example.com, got %+v", out[0])
+	}
+}
+
+// TestDedupUnidentifiableErrorKeptWhenNoUsable verifies that unidentifiable
+// error results are kept when there are no usable results at all.
+func TestDedupUnidentifiableErrorKeptWhenNoUsable(t *testing.T) {
+	results := []quota.Result{
+		{Status: quota.StatusError, Error: &quota.ErrorInfo{Code: "not_configured"}},
+	}
+
+	out := dedup(results)
+
+	if len(out) != 1 {
+		t.Fatalf("len = %d, want 1 (sole error kept when no usable results)", len(out))
+	}
+}
+
 // TestDedupExhaustedKept verifies that an exhausted result and an error result
 // for different accounts are both retained — the error is only dropped when it
 // shares an identity key with a usable result.
