@@ -33,6 +33,8 @@ type mockCache struct {
 	data    map[string][]quota.Result
 	putErr  error
 	getErr  error
+	ageVal  time.Duration
+	ageOK   bool
 }
 
 func (c *mockCache) Get(_ context.Context, id string) ([]quota.Result, bool, error) {
@@ -43,6 +45,10 @@ func (c *mockCache) Get(_ context.Context, id string) ([]quota.Result, bool, err
 		return r, true, nil
 	}
 	return nil, false, nil
+}
+
+func (c *mockCache) Age(_ context.Context, _ string) (time.Duration, bool) {
+	return c.ageVal, c.ageOK
 }
 
 func (c *mockCache) Put(_ context.Context, id string, results []quota.Result) error {
@@ -295,6 +301,134 @@ func TestRunnerEmptyResultsBecomesErrorResult(t *testing.T) {
 	}
 	if results[0].Error == nil || results[0].Error.Code != "empty_result" {
 		t.Errorf("expected error code %q, got %+v", "empty_result", results[0].Error)
+	}
+}
+
+func TestRunnerBackfillFromCacheOnError(t *testing.T) {
+	// Provider returns one OK result and one error. Cache has a previous good
+	// result for the errored account. The error should be replaced with cached data.
+	okResult := quota.Result{
+		Status:    quota.StatusOK,
+		AccountID: "acct-1",
+		Email:     "a@b.com",
+		Plan:      "max",
+		Windows:   map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 80}},
+	}
+	errResult := quota.Result{
+		Status:    quota.StatusError,
+		AccountID: "acct-2",
+		Email:     "c@d.com",
+		Error:     &quota.ErrorInfo{Code: "api_error", HTTPStatus: 429},
+	}
+	cachedGood := quota.Result{
+		Status:    quota.StatusOK,
+		AccountID: "acct-2",
+		Email:     "c@d.com",
+		Plan:      "pro",
+		Windows:   map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 60}},
+	}
+
+	p := &mockProvider{id: provider.Claude, results: []quota.Result{okResult, errResult}}
+	cr := &captureRenderer{}
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		Cache: &mockCache{
+			data:   map[string][]quota.Result{string(provider.Claude): {okResult, cachedGood}},
+			ageVal: 5 * time.Minute,
+			ageOK:  true,
+		},
+		Services: map[provider.ID]provider.Services{
+			provider.Claude: {Usage: p},
+		},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{
+		Providers: []provider.ID{provider.Claude},
+		Refresh:   true,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	results := cr.report.Providers[0].Results
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(results))
+	}
+
+	// Second result should be backfilled from cache.
+	r := results[1]
+	if r.Status != quota.StatusOK {
+		t.Errorf("backfilled result status = %q, want %q", r.Status, quota.StatusOK)
+	}
+	if r.Plan != "pro" {
+		t.Errorf("backfilled result plan = %q, want %q", r.Plan, "pro")
+	}
+	if r.CacheAge != 300 {
+		t.Errorf("CacheAge = %d, want 300 (5 minutes)", r.CacheAge)
+	}
+	// Original error preserved on backfilled result for display.
+	if r.Error == nil || r.Error.Code != "api_error" || r.Error.HTTPStatus != 429 {
+		t.Errorf("expected original error preserved, got %+v", r.Error)
+	}
+}
+
+func TestRunnerBackfillNoCache(t *testing.T) {
+	// Provider returns an error but no cached data exists. Error passes through.
+	errResult := quota.Result{
+		Status:    quota.StatusError,
+		AccountID: "acct-1",
+		Email:     "a@b.com",
+		Error:     &quota.ErrorInfo{Code: "api_error", HTTPStatus: 429},
+	}
+	p := &mockProvider{id: provider.Claude, results: []quota.Result{errResult}}
+	cr := &captureRenderer{}
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		Cache: &mockCache{data: map[string][]quota.Result{}},
+		Services: map[provider.ID]provider.Services{
+			provider.Claude: {Usage: p},
+		},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{
+		Providers: []provider.ID{provider.Claude},
+		Refresh:   true,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	results := cr.report.Providers[0].Results
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(results))
+	}
+	if results[0].Status != quota.StatusError {
+		t.Errorf("result status = %q, want error (no cache to backfill)", results[0].Status)
+	}
+}
+
+func TestRunnerDoesNotCacheAllErrors(t *testing.T) {
+	// If all results are errors, they should NOT be cached (would overwrite good data).
+	errResult := quota.Result{
+		Status: quota.StatusError,
+		Error:  &quota.ErrorInfo{Code: "api_error", HTTPStatus: 429},
+	}
+	p := &mockProvider{id: provider.Claude, results: []quota.Result{errResult}}
+	cr := &captureRenderer{}
+	cache := &mockCache{data: map[string][]quota.Result{}}
+	runner := &Runner{
+		Clock:    fixedClock(time.Unix(1000, 0)),
+		Cache:    cache,
+		Services: map[provider.ID]provider.Services{provider.Claude: {Usage: p}},
+		Renderer: cr,
+	}
+
+	_ = runner.Run(context.Background(), RunRequest{
+		Providers: []provider.ID{provider.Claude},
+		Refresh:   true,
+	})
+	if _, ok := cache.data[string(provider.Claude)]; ok {
+		t.Error("all-error results should not be cached")
 	}
 }
 

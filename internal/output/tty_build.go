@@ -93,13 +93,34 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 	icon := providerIcon(id)
 
 	if !r.IsUsable() {
-		errMsg := "unknown"
-		if r.Error != nil && r.Error.Message != "" {
-			errMsg = r.Error.Message
-		} else if r.Error != nil && r.Error.Code != "" {
-			errMsg = r.Error.Code
+		errMsg := "error"
+		if r.Error != nil && r.Error.Code != "" {
+			errMsg = strings.ReplaceAll(r.Error.Code, "_", " ")
 		}
-		header := fmt.Sprintf("  %s  %7s %s", icon, displayName, dimStyle.Render(errMsg))
+		if r.Error != nil && r.Error.HTTPStatus > 0 {
+			errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+		}
+
+		header := fmt.Sprintf("  %s  %s",
+			boldRedStyle.Render(icon),
+			boldStyle.Render(fmt.Sprintf("%7s", displayName)),
+		)
+		label := r.Plan
+		if label == "" {
+			label = r.Tier
+		}
+		if label != "" && label != "null" {
+			if r.RateLimitTier != "" {
+				if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
+					label += fmt.Sprintf(" %dx", m)
+				}
+			}
+			header += " " + boldDimItalicStyle.Render(label)
+		}
+		if r.Email != "" {
+			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
+		}
+		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(errMsg)
 		return header, nil
 	}
 
@@ -130,6 +151,19 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 
 	if r.Email != "" {
 		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
+	}
+
+	if r.CacheAge > 0 && r.Error != nil {
+		errMsg := "error"
+		if r.Error.Code != "" {
+			errMsg = strings.ReplaceAll(r.Error.Code, "_", " ")
+		}
+		if r.Error.HTTPStatus > 0 {
+			errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+		}
+		header += " " + brightBlackStyle.Render("\u00b7") + " " +
+			boldRedStyle.Render(errMsg) + " " +
+			dimStyle.Render(fmt.Sprintf("\u2014 using cache from %s ago", fmtDuration(r.CacheAge)))
 	}
 
 	// Window rows

@@ -83,9 +83,20 @@ func activeCredentialEmail() string {
 // fetchAccount fetches quota for a single Claude account. It handles token
 // refresh, parallel profile+usage fetch, profile backfill, and result parsing.
 func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, now time.Time) quota.Result {
+	// errorWithIdentity wraps an error result with the account's known identity
+	// so dedup can associate it with the correct account.
+	errorWithIdentity := func(code, msg string, httpCode int) quota.Result {
+		r := quota.ErrorResult(code, msg, httpCode)
+		r.Email = acct.Email
+		r.AccountID = acct.AccountUUID
+		r.Plan = acct.SubscriptionType
+		r.RateLimitTier = acct.RateLimitTier
+		return r
+	}
+
 	token := acct.AccessToken
 	if token == "" {
-		return quota.ErrorResult("no_token", "no token", 0)
+		return errorWithIdentity("no_token", "no token", 0)
 	}
 
 	// Check expiry and refresh if needed.
@@ -93,7 +104,7 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	if acct.ExpiresAt > 0 && acct.ExpiresAt < nowMs && acct.RefreshToken != "" {
 		rr, err := RefreshToken(ctx, p.client.http, acct.RefreshToken, acct.Scopes)
 		if err != nil {
-			return quota.ErrorResult("auth_expired", "auth expired", 0)
+			return errorWithIdentity("auth_expired", "auth expired", 0)
 		}
 		token = rr.AccessToken
 		acct.AccessToken = rr.AccessToken
@@ -141,10 +152,10 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	wg.Wait()
 
 	if usageErr != nil {
-		return quota.ErrorResult("fetch_error", fmt.Sprintf("usage: %v", usageErr), 0)
+		return errorWithIdentity("fetch_error", fmt.Sprintf("usage: %v", usageErr), 0)
 	}
 	if usageCode != 200 {
-		return quota.ErrorResult("api_error", "api error", usageCode)
+		return errorWithIdentity("api_error", "api error", usageCode)
 	}
 
 	// Prefer profile API data over stored keychain fields.

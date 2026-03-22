@@ -58,13 +58,13 @@ func DiscoverClaudeAccounts() []ClaudeOAuth {
 	// and the keychain entry often lacks email/UUID metadata.
 	accounts = append(accounts, discoverPlatformKeychain(seen)...)
 
-	// Merge anonymous keychain entries (no email/UUID) with identified entries
-	// from the credentials file. Claude Code's active account lives in both
-	// places but with different tokens after a refresh.
-	accounts = mergeAnonymousFresh(accounts)
-
 	// cq-managed accounts via go-keyring (cross-platform)
 	accounts = append(accounts, discoverCQKeyring(seen)...)
+
+	// Merge anonymous keychain entries (no email/UUID) with identified entries
+	// from the credentials file or cq keyring. Must run after all sources are
+	// discovered so token affinity can match against cq keyring entries.
+	accounts = mergeAnonymousFresh(accounts)
 
 	// Post-discovery dedup: entries from different sources may represent
 	// the same account with different tokens (e.g. before/after refresh).
@@ -116,7 +116,7 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 			}
 		}
 
-		if target >= 0 && a.ExpiresAt > accounts[target].ExpiresAt {
+		if target >= 0 && a.ExpiresAt >= accounts[target].ExpiresAt {
 			updated := accounts[target]
 			updated.AccessToken = a.AccessToken
 			updated.RefreshToken = a.RefreshToken
