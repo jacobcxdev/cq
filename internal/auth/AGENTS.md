@@ -17,7 +17,7 @@ OAuth PKCE login flow, browser detection, and JWT utilities.
 ### Working In This Directory
 
 - OAuth callback uses `sync.Once` that gates **only valid callbacks** — invalid requests (bad state, missing code) are rejected before the Once
-- Listener binds `127.0.0.1` and redirect URI uses `127.0.0.1` (not `localhost`) to avoid IPv4/IPv6 mismatch
+- Listener binds `127.0.0.1` but redirect URI uses `localhost` (Claude's OAuth server requires `localhost`; the browser resolves it to `127.0.0.1` on the loopback)
 - All `exec.Command(...).Start()` calls must use `startAndReap` to prevent zombie processes
 - `openBrowser` validates URL scheme (http/https only) before any exec
 - `validBrowserName` regex is a security boundary for AppleScript interpolation

@@ -80,7 +80,7 @@ func Login(ctx context.Context, client httputil.Doer) (*TokenResponse, *Profile,
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
@@ -197,7 +197,7 @@ func buildAuthorizeURL(challenge, state string, port int) string {
 	q.Set("code", "true")
 	q.Set("client_id", ClaudeClientID)
 	q.Set("response_type", "code")
-	q.Set("redirect_uri", fmt.Sprintf("http://127.0.0.1:%d/callback", port))
+	q.Set("redirect_uri", fmt.Sprintf("http://localhost:%d/callback", port))
 	q.Set("scope", strings.Join(DefaultScopes(), " "))
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
