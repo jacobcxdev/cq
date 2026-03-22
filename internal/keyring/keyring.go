@@ -309,7 +309,12 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 		return err
 	}
 	if err := gokeyring.Set(service, acct.AccountUUID, string(data)); err != nil {
-		return err
+		// SecItemAdd fails with errSecDuplicateItem (exit status 45) when the
+		// item already exists. Delete and retry once.
+		_ = gokeyring.Delete(service, acct.AccountUUID)
+		if err := gokeyring.Set(service, acct.AccountUUID, string(data)); err != nil {
+			return err
+		}
 	}
 
 	// Update manifest
