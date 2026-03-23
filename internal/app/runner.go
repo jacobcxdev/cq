@@ -81,11 +81,78 @@ func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id p
 		return []quota.Result{quota.ErrorResult("empty_result", "provider returned no results", 0)}
 	}
 
+	// Backfill transient errors from cache: if an individual account failed
+	// but we have a recent cached result for the same account, use it.
 	if r.Cache != nil {
-		if err := r.Cache.Put(ctx, string(id), results); err != nil {
-			// Cache write failure is non-fatal; log and continue.
-			fmt.Fprintf(os.Stderr, "cq: cache put %s: %v\n", id, err)
+		results = r.backfillFromCache(ctx, id, results)
+	}
+
+	// Only cache results that have at least one usable entry.
+	if r.Cache != nil {
+		hasUsable := false
+		for _, res := range results {
+			if res.IsUsable() {
+				hasUsable = true
+				break
+			}
+		}
+		if hasUsable {
+			if err := r.Cache.Put(ctx, string(id), results); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: cache put %s: %v\n", id, err)
+			}
 		}
 	}
 	return results
+}
+
+// backfillFromCache replaces error results with cached usable results for the
+// same account (matched by AccountID or Email). This handles transient failures
+// like 429 rate limits — the user sees stale-but-usable data instead of an error.
+func (r *Runner) backfillFromCache(ctx context.Context, id provider.ID, results []quota.Result) []quota.Result {
+	cached, ok, err := r.Cache.Get(ctx, string(id))
+	if err != nil || !ok {
+		return results
+	}
+	age, hasAge := r.Cache.Age(ctx, string(id))
+	ageS := int64(0)
+	if hasAge {
+		ageS = int64(age.Seconds())
+	}
+
+	// Index cached results by account identity.
+	byID := make(map[string]quota.Result)
+	byEmail := make(map[string]quota.Result)
+	for _, c := range cached {
+		if !c.IsUsable() {
+			continue
+		}
+		if c.AccountID != "" {
+			byID[c.AccountID] = c
+		}
+		if c.Email != "" {
+			byEmail[c.Email] = c
+		}
+	}
+
+	out := make([]quota.Result, len(results))
+	copy(out, results)
+	for i, res := range out {
+		if res.IsUsable() {
+			continue
+		}
+		var found quota.Result
+		var ok bool
+		if res.AccountID != "" {
+			found, ok = byID[res.AccountID]
+		}
+		if !ok && res.Email != "" {
+			found, ok = byEmail[res.Email]
+		}
+		if ok {
+			found.CacheAge = ageS
+			found.Error = res.Error // preserve original error for display
+			out[i] = found
+		}
+	}
+	return out
 }

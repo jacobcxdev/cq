@@ -21,6 +21,7 @@ type Result struct {
 	Tier          string                `json:"tier,omitempty"`
 	RateLimitTier string                `json:"rate_limit_tier,omitempty"`
 	Windows       map[WindowName]Window `json:"windows,omitempty"`
+	CacheAge      int64                 `json:"cache_age_s,omitempty"` // seconds; >0 means result is from cache
 }
 
 func (r Result) IsUsable() bool {

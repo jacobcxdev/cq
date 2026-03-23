@@ -54,6 +54,23 @@ func (c *Cache) Get(_ context.Context, id string) ([]quota.Result, bool, error) 
 	return results, true, nil
 }
 
+// Age returns how old the cached entry is, or false if not present.
+func (c *Cache) Age(_ context.Context, id string) (time.Duration, bool) {
+	if id == "" {
+		return 0, false
+	}
+	base := filepath.Base(id)
+	if base == "." || base == ".." || base == "/" {
+		return 0, false
+	}
+	path := filepath.Join(c.dir, base+".json")
+	info, err := c.fs.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	return c.nowFunc().Sub(info.ModTime()), true
+}
+
 // Put writes results to cache atomically.
 func (c *Cache) Put(_ context.Context, id string, results []quota.Result) error {
 	if id == "" {

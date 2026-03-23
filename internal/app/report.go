@@ -26,6 +26,7 @@ type Clock interface {
 type Cache interface {
 	Get(ctx context.Context, id string) ([]quota.Result, bool, error)
 	Put(ctx context.Context, id string, results []quota.Result) error
+	Age(ctx context.Context, id string) (time.Duration, bool)
 }
 
 type Renderer interface {
