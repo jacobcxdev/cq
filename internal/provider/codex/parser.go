@@ -52,12 +52,20 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 		plan = "unknown"
 	}
 
+	// Codex Pro has ~6.7x the rate limits of Plus (rounded to 7x).
+	// Encode as a synthetic rateLimitTier so ExtractMultiplier can parse it.
+	var rlt string
+	if plan == "pro" {
+		rlt = "codex_pro_7x"
+	}
+
 	return quota.Result{
-		Status:    quota.StatusFromWindows(windows),
-		Plan:      plan,
-		Email:     email,
-		AccountID: accountID,
-		Windows:   windows,
+		Status:        quota.StatusFromWindows(windows),
+		Plan:          plan,
+		RateLimitTier: rlt,
+		Email:         email,
+		AccountID:     accountID,
+		Windows:       windows,
 	}
 }
 

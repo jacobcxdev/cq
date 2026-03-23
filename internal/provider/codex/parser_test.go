@@ -23,6 +23,9 @@ func TestParseUsageNormal(t *testing.T) {
 	if result.Plan != "plus" {
 		t.Errorf("plan = %q, want %q", result.Plan, "plus")
 	}
+	if result.RateLimitTier != "" {
+		t.Errorf("RateLimitTier = %q, want empty for plus", result.RateLimitTier)
+	}
 	if result.Email != "user@example.com" {
 		t.Errorf("email = %q, want %q", result.Email, "user@example.com")
 	}
@@ -140,6 +143,27 @@ func TestParseUsageUnknownPlanType(t *testing.T) {
 
 	if result.Plan != "unknown" {
 		t.Errorf("plan = %q, want unknown", result.Plan)
+	}
+}
+
+func TestParseUsageProMultiplier(t *testing.T) {
+	proJSON := []byte(`{
+		"plan_type": "pro",
+		"rate_limit": {
+			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+		}
+	}`)
+
+	result := parseUsage(proJSON, "user@example.com", "")
+
+	if result.Plan != "pro" {
+		t.Errorf("plan = %q, want pro", result.Plan)
+	}
+	if result.RateLimitTier != "codex_pro_7x" {
+		t.Errorf("RateLimitTier = %q, want codex_pro_7x", result.RateLimitTier)
+	}
+	if m := quota.ExtractMultiplier(result.RateLimitTier); m != 7 {
+		t.Errorf("ExtractMultiplier = %d, want 7", m)
 	}
 }
 
