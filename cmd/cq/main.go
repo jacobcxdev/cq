@@ -21,8 +21,8 @@ import (
 
 // CLI defines the kong command structure.
 type CLI struct {
-	JSON    bool   `help:"Output JSON" short:"j"`
-	Refresh bool   `help:"Bypass cache" short:"r"`
+	JSON    bool             `help:"Output JSON" short:"j"`
+	Refresh bool             `help:"Bypass cache" short:"r"`
 	Version kong.VersionFlag `help:"Print version" short:"v"`
 
 	Check  CheckCmd  `cmd:"" default:"withargs" help:"Check quota usage"`
@@ -72,6 +72,26 @@ type SwitchCmd struct {
 var version = "dev"
 
 func main() {
+	// Handle commands that conflict with kong's default:"withargs" on CheckCmd.
+	// Kong validates the enum constraint on providers before trying command
+	// matching, so "refresh" and "agent" must be intercepted first.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "refresh":
+			if err := runRefresh(); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "agent":
+			if err := runAgent(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	var cli CLI
 	ctx := kong.Parse(&cli,
 		kong.Name("cq"),
@@ -82,6 +102,22 @@ func main() {
 	if err := dispatch(ctx, &cli); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: %v\n", err)
 		os.Exit(1)
+	}
+	ensureAgent()
+}
+
+func runAgent(args []string) error {
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: cq agent <install|uninstall>\n")
+		return fmt.Errorf("missing subcommand")
+	}
+	switch args[0] {
+	case "install":
+		return installAgent(1800)
+	case "uninstall":
+		return uninstallAgent()
+	default:
+		return fmt.Errorf("unknown agent command: %s", args[0])
 	}
 }
 
