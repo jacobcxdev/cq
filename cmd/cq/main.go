@@ -130,13 +130,13 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 	case "claude accounts":
 		return app.RunAccounts(provider.Claude)
 	case "claude switch <email>":
-		return app.RunSwitch(provider.Claude, cli.Claude.Switch.Email)
+		return app.RunSwitch(provider.Claude, cli.Claude.Switch.Email, httputil.NewClient(10*time.Second, version))
 	case "codex login":
 		return app.RunCodexLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Codex.Login.Activate)
 	case "codex accounts":
 		return app.RunAccounts(provider.Codex)
 	case "codex switch <email>":
-		return app.RunSwitch(provider.Codex, cli.Codex.Switch.Email)
+		return app.RunSwitch(provider.Codex, cli.Codex.Switch.Email, httputil.NewClient(10*time.Second, version))
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini)
 	default:

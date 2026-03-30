@@ -115,14 +115,14 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		persistRefreshedToken(&acct)
 	}
 
-	// Fetch profile and usage in parallel.
+	// Fetch profile (always) and usage (skip for free plan) in parallel.
 	var prof profile
 	var usageBody []byte
 	var usageCode int
+	var usageErr error
 	var wg sync.WaitGroup
 
-	var usageErr error
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer func() {
@@ -136,27 +136,26 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 			fmt.Fprintf(os.Stderr, "cq: claude profile: %v\n", err)
 		}
 	}()
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if rv := recover(); rv != nil {
-				fmt.Fprintf(os.Stderr, "cq: panic in claude usage fetch: %v\n%s\n", rv, debug.Stack())
-				usageErr = fmt.Errorf("panic: %v", rv)
+
+	// Only fetch usage for paid plans. Free accounts have no usage endpoint.
+	skipUsage := acct.SubscriptionType == "free"
+	if !skipUsage {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if rv := recover(); rv != nil {
+					fmt.Fprintf(os.Stderr, "cq: panic in claude usage fetch: %v\n%s\n", rv, debug.Stack())
+					usageErr = fmt.Errorf("panic: %v", rv)
+				}
+			}()
+			usageBody, usageCode, usageErr = p.client.FetchUsage(ctx, token)
+			if usageErr != nil {
+				fmt.Fprintf(os.Stderr, "cq: claude usage: %v\n", usageErr)
 			}
 		}()
-		usageBody, usageCode, usageErr = p.client.FetchUsage(ctx, token)
-		if usageErr != nil {
-			fmt.Fprintf(os.Stderr, "cq: claude usage: %v\n", usageErr)
-		}
-	}()
+	}
 	wg.Wait()
-
-	if usageErr != nil {
-		return errorWithIdentity("fetch_error", fmt.Sprintf("usage: %v", usageErr), 0)
-	}
-	if usageCode != 200 {
-		return errorWithIdentity("api_error", "api error", usageCode)
-	}
 
 	// Prefer profile API data over stored keychain fields.
 	plan := prof.Plan
@@ -169,7 +168,8 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	}
 
 	// Backfill all credential stores with profile data for future
-	// discovery and deduplication.
+	// discovery and deduplication — even if usage failed, so that
+	// stale plan/tier metadata is corrected.
 	if prof.Email != "" || prof.AccountUUID != "" {
 		updated := acct
 		if prof.Email != "" {
@@ -187,6 +187,34 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		if err := backfillCredentialsFile(&updated); err != nil {
 			fmt.Fprintf(os.Stderr, "cq: backfill credentials: %v\n", err)
 		}
+	}
+
+	// Build error results with refreshed metadata (not the stale closure values).
+	errorWithProfile := func(code, msg string, httpCode int) quota.Result {
+		r := quota.ErrorResult(code, msg, httpCode)
+		r.Email = prof.Email
+		if r.Email == "" {
+			r.Email = acct.Email
+		}
+		r.AccountID = prof.AccountUUID
+		if r.AccountID == "" {
+			r.AccountID = acct.AccountUUID
+		}
+		r.Plan = plan
+		r.RateLimitTier = rlt
+		return r
+	}
+
+	// Free plan: no usage data available.
+	if plan == "free" {
+		return errorWithProfile("free_plan", "usage not available on free plan", 0)
+	}
+
+	if usageErr != nil {
+		return errorWithProfile("fetch_error", fmt.Sprintf("usage: %v", usageErr), 0)
+	}
+	if usageCode != 200 {
+		return errorWithProfile("api_error", "api error", usageCode)
 	}
 
 	return parseUsage(usageBody, plan, rlt, prof.Email, prof.AccountUUID)
