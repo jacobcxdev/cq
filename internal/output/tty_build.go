@@ -94,11 +94,16 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 
 	if !r.IsUsable() {
 		errMsg := "error"
-		if r.Error != nil && r.Error.Code != "" {
+		if r.Error != nil && r.Error.Message != "" {
+			errMsg = r.Error.Message
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
+		} else if r.Error != nil && r.Error.Code != "" {
 			errMsg = strings.ReplaceAll(r.Error.Code, "_", " ")
-		}
-		if r.Error != nil && r.Error.HTTPStatus > 0 {
-			errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
 		}
 
 		header := fmt.Sprintf("  %s  %s",
@@ -155,11 +160,16 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 
 	if r.CacheAge > 0 && r.Error != nil {
 		errMsg := "error"
-		if r.Error.Code != "" {
+		if r.Error.Message != "" {
+			errMsg = r.Error.Message
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
+		} else if r.Error.Code != "" {
 			errMsg = strings.ReplaceAll(r.Error.Code, "_", " ")
-		}
-		if r.Error.HTTPStatus > 0 {
-			errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
 		}
 		header += " " + brightBlackStyle.Render("\u00b7") + " " +
 			boldRedStyle.Render(errMsg) + " " +

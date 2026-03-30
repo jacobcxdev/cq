@@ -90,19 +90,19 @@ func TestCacheTTL(t *testing.T) {
 
 func TestAccountManager(t *testing.T) {
 	t.Run("Claude returns non-nil", func(t *testing.T) {
-		if got := app.AccountManager(provider.Claude); got == nil {
+		if got := app.AccountManager(provider.Claude, nil); got == nil {
 			t.Error("AccountManager(Claude) = nil, want non-nil")
 		}
 	})
 
 	t.Run("Codex returns non-nil", func(t *testing.T) {
-		if got := app.AccountManager(provider.Codex); got == nil {
+		if got := app.AccountManager(provider.Codex, nil); got == nil {
 			t.Error("AccountManager(Codex) = nil, want non-nil")
 		}
 	})
 
 	t.Run("Gemini returns nil", func(t *testing.T) {
-		if got := app.AccountManager(provider.Gemini); got != nil {
+		if got := app.AccountManager(provider.Gemini, nil); got != nil {
 			t.Errorf("AccountManager(Gemini) = %v, want nil", got)
 		}
 	})

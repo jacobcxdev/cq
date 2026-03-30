@@ -59,8 +59,6 @@ func parseKeychainEntry(raw string) *ClaudeOAuth {
 
 // UpdateKeychainEntry updates a macOS keychain entry with plaintext JSON,
 // matching Claude Code's `security add-generic-password -w` writes.
-// Credentials are passed via stdin (not as a -w argument value) to prevent
-// exposure in process listings (ps output).
 func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 	data, err := json.Marshal(creds)
 	if err != nil {
@@ -70,8 +68,6 @@ func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 	if user == "" {
 		user = "unknown"
 	}
-	cmd := exec.Command("security", "add-generic-password",
-		"-U", "-s", service, "-a", user, "-w")
-	cmd.Stdin = strings.NewReader(string(data))
-	return cmd.Run()
+	return exec.Command("security", "add-generic-password",
+		"-U", "-s", service, "-a", user, "-w", string(data)).Run()
 }

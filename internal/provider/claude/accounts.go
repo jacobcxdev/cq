@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 )
 
 // Accounts implements provider.AccountManager for Claude.
-type Accounts struct{}
+type Accounts struct {
+	HTTP httputil.Doer
+}
 
 func (a *Accounts) ProviderID() provider.ID { return provider.Claude }
 
@@ -31,29 +34,53 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 	return out, nil
 }
 
-// Switch sets the active Claude account by email. It writes the matching
-// account's credentials to the credentials file and updates Claude Code's
-// keychain entry.
-func (a *Accounts) Switch(_ context.Context, identifier string) (provider.Account, error) {
+// Switch sets the active Claude account by email. It refreshes account
+// metadata from the profile API (best-effort), writes the credentials to
+// the credentials file, and updates Claude Code's keychain entry.
+func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Account, error) {
 	accts := keyring.DiscoverClaudeAccounts()
 	for _, acct := range accts {
-		if acct.Email == identifier {
-			acctCopy := acct
-			creds := &keyring.ClaudeCredentials{ClaudeAiOauth: &acctCopy}
-			if err := keyring.WriteCredentialsFile(creds); err != nil {
-				return provider.Account{}, fmt.Errorf("write credentials: %w", err)
-			}
-			if err := keyring.UpdateKeychainEntry("Claude Code-credentials", creds); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: keychain update failed: %v\n", err)
-			}
-			return provider.Account{
-				AccountID: acct.AccountUUID,
-				Email:     acct.Email,
-				Label:     acct.SubscriptionType,
-				Active:    true,
-				SwitchID:  acct.Email,
-			}, nil
+		if acct.Email != identifier {
+			continue
 		}
+		acctCopy := acct
+
+		// Best-effort profile refresh to pick up plan/tier changes.
+		if a.HTTP != nil {
+			client := &Client{http: a.HTTP}
+			if p, err := client.FetchProfile(ctx, acctCopy.AccessToken); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: profile refresh failed: %v\n", err)
+			} else {
+				if p.Plan != "" {
+					acctCopy.SubscriptionType = p.Plan
+				}
+				if p.RateLimitTier != "" {
+					acctCopy.RateLimitTier = p.RateLimitTier
+				}
+			}
+		}
+
+		creds := &keyring.ClaudeCredentials{ClaudeAiOauth: &acctCopy}
+		if err := keyring.WriteCredentialsFile(creds); err != nil {
+			return provider.Account{}, fmt.Errorf("write credentials: %w", err)
+		}
+		if err := keyring.UpdateKeychainEntry("Claude Code-credentials", creds); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: keychain update failed: %v\n", err)
+		}
+		// Persist refreshed metadata to the cq keyring.
+		if acctCopy.AccountUUID != "" {
+			if err := keyring.StoreCQAccount(&acctCopy); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: keyring store failed: %v\n", err)
+			}
+		}
+		return provider.Account{
+			AccountID:     acctCopy.AccountUUID,
+			Email:         acctCopy.Email,
+			Label:         acctCopy.SubscriptionType,
+			RateLimitTier: acctCopy.RateLimitTier,
+			Active:        true,
+			SwitchID:      acctCopy.Email,
+		}, nil
 	}
 	return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
 }

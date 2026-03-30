@@ -229,7 +229,7 @@ func updateCodexRegistry(home, recordKey string, claims *auth.CodexClaims) {
 
 // RunAccounts lists discovered accounts for the given provider.
 func RunAccounts(id provider.ID) error {
-	mgr := AccountManager(id)
+	mgr := AccountManager(id, nil)
 	if mgr == nil {
 		return fmt.Errorf("account management not supported for %s", id)
 	}
@@ -249,8 +249,8 @@ func RunAccounts(id provider.ID) error {
 }
 
 // RunSwitch switches the active account for the given provider.
-func RunSwitch(id provider.ID, email string) error {
-	mgr := AccountManager(id)
+func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
+	mgr := AccountManager(id, client)
 	if mgr == nil {
 		return fmt.Errorf("account switching not supported for %s", id)
 	}
@@ -264,10 +264,11 @@ func RunSwitch(id provider.ID, email string) error {
 }
 
 // AccountManager returns the AccountManager for a provider, or nil if unsupported.
-func AccountManager(id provider.ID) provider.AccountManager {
+// The client is used for providers that refresh metadata on switch (e.g. Claude).
+func AccountManager(id provider.ID, client httputil.Doer) provider.AccountManager {
 	switch id {
 	case provider.Claude:
-		return &claudeprov.Accounts{}
+		return &claudeprov.Accounts{HTTP: client}
 	case provider.Codex:
 		return &codexprov.Accounts{FS: fsutil.OSFileSystem{}}
 	default:
