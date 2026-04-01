@@ -58,13 +58,21 @@ func runProxyStart() error {
 	fmt.Fprintln(os.Stderr)
 
 	discover := proxy.ClaudeDiscoverer(keyring.DiscoverClaudeAccounts)
-	selector := proxy.NewAccountSelector(discover)
+	activeEmail := proxy.ActiveEmailFunc(keyring.ActiveClaudeEmail)
+	selector := proxy.NewAccountSelector(discover, activeEmail)
 	refreshClient := httputil.NewClient(30*time.Second, version)
+
+	accountsMgr := &claudeprov.Accounts{HTTP: refreshClient}
+	switcher := proxy.AccountSwitcher(func(ctx context.Context, email string) error {
+		_, err := accountsMgr.Switch(ctx, email)
+		return err
+	})
 
 	transport := &proxy.TokenTransport{
 		Selector:    selector,
 		Refresher:   claudeprov.RefreshToken,
 		Persister:   proxy.DefaultPersister,
+		Switcher:    switcher,
 		RefreshHTTP: refreshClient,
 		Inner:       http.DefaultTransport,
 	}

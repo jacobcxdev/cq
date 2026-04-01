@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,21 +25,35 @@ func DefaultPersister(acct *keyring.ClaudeOAuth) {
 	keyring.PersistRefreshedToken(acct)
 }
 
-// CooldownDuration is how long an account is skipped after a 429.
-const CooldownDuration = 5 * time.Minute
+// AccountSwitcher persists an account switch (credentials file + keychain + cq keyring).
+type AccountSwitcher func(ctx context.Context, email string) error
+
+const (
+	// exhaustionThreshold is how many consecutive 429s declare an account exhausted.
+	exhaustionThreshold = 3
+	// exhaustionWindow is the time window within which consecutive 429s must occur.
+	exhaustionWindow = 60 * time.Second
+)
+
+// failure429 tracks consecutive 429 responses for one account.
+type failure429 struct {
+	count int
+	first time.Time
+}
 
 // TokenTransport is an http.RoundTripper that injects OAuth tokens
-// and handles 401 (refresh) and 429 (account failover with cooldown).
+// and handles 401 (refresh) and 429 (exhaustion-based failover).
 type TokenTransport struct {
 	Selector    ClaudeSelector
 	Refresher   RefreshFunc
 	Persister   PersistFunc
+	Switcher    AccountSwitcher
 	RefreshHTTP httputil.Doer
 	Inner       http.RoundTripper
 
 	mu          sync.Mutex
-	knownTokens map[string]string    // acctIdentifier → current access token
-	cooldowns   map[string]time.Time // acctIdentifier → cooldown expiry
+	knownTokens map[string]string          // acctIdentifier → current access token
+	failures    map[string]*failure429      // acctIdentifier → 429 tracker
 }
 
 func (t *TokenTransport) inner() http.RoundTripper {
@@ -48,38 +63,43 @@ func (t *TokenTransport) inner() http.RoundTripper {
 	return http.DefaultTransport
 }
 
-// cooledDownKeys returns exclude keys for accounts currently in cooldown.
-func (t *TokenTransport) cooledDownKeys() []string {
+// record429 records a 429 for the account and returns true if the account is exhausted.
+func (t *TokenTransport) record429(acct *keyring.ClaudeOAuth) bool {
+	key := acctIdentifier(acct)
+	now := time.Now()
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.cooldowns) == 0 {
-		return nil
+
+	if t.failures == nil {
+		t.failures = make(map[string]*failure429)
 	}
-	now := time.Now()
-	var keys []string
-	for k, until := range t.cooldowns {
-		if now.Before(until) {
-			keys = append(keys, k)
-		} else {
-			delete(t.cooldowns, k) // expired cooldown
-		}
+	f := t.failures[key]
+	if f == nil {
+		t.failures[key] = &failure429{count: 1, first: now}
+		return false
 	}
-	return keys
+	// Reset if window expired.
+	if now.Sub(f.first) > exhaustionWindow {
+		f.count = 1
+		f.first = now
+		return false
+	}
+	f.count++
+	return f.count >= exhaustionThreshold
 }
 
-func (t *TokenTransport) setCooldown(acct *keyring.ClaudeOAuth) {
+// reset429 clears the 429 tracker for the account (called on non-429 responses).
+func (t *TokenTransport) reset429(acct *keyring.ClaudeOAuth) {
 	key := acctIdentifier(acct)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.cooldowns == nil {
-		t.cooldowns = make(map[string]time.Time)
-	}
-	t.cooldowns[key] = time.Now().Add(CooldownDuration)
+	delete(t.failures, key)
 }
 
 // RoundTrip implements http.RoundTripper.
 func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	acct, err := t.Selector.Select(req.Context(), t.cooledDownKeys()...)
+	acct, err := t.Selector.Select(req.Context())
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +126,7 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	case http.StatusTooManyRequests:
 		return t.handle429(req, resp, acct)
 	default:
+		t.reset429(acct)
 		return resp, nil
 	}
 }
@@ -130,11 +151,30 @@ func (t *TokenTransport) handleUnauthorized(req *http.Request, acct *keyring.Cla
 }
 
 func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, failedAcct *keyring.ClaudeOAuth) (*http.Response, error) {
-	t.setCooldown(failedAcct)
+	exhausted := t.record429(failedAcct)
+	if !exhausted {
+		// Transient 429 — forward to client (Claude Code handles backoff).
+		return resp, nil
+	}
 
+	// Account exhausted — attempt failover to alternate.
 	alt, err := t.Selector.Select(req.Context(), acctExcludeKeys(failedAcct)...)
 	if err != nil {
 		return resp, nil // no alternate — forward upstream 429
+	}
+
+	fmt.Fprintf(os.Stderr, "cq: proxy account %s exhausted (%d consecutive 429s), switching to %s\n",
+		failedAcct.Email, exhaustionThreshold, alt.Email)
+
+	// Persist the switch (best-effort, async).
+	if t.Switcher != nil && alt.Email != "" {
+		go func() {
+			if err := t.Switcher(context.Background(), alt.Email); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: proxy switch persist failed: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "cq: proxy active account is now %s\n", alt.Email)
+			}
+		}()
 	}
 
 	token := alt.AccessToken
