@@ -101,7 +101,7 @@ func TestAccountSelector_Select(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
 				return tt.accounts
-			})
+			}, nil)
 
 			acct, err := sel.Select(context.Background(), tt.exclude...)
 			if tt.wantErr {
@@ -128,7 +128,7 @@ func TestAccountSelector_Select_ReturnsCopy(t *testing.T) {
 	}
 	sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
 		return []keyring.ClaudeOAuth{original}
-	})
+	}, nil)
 
 	acct, err := sel.Select(context.Background())
 	if err != nil {
@@ -143,4 +143,77 @@ func TestAccountSelector_Select_ReturnsCopy(t *testing.T) {
 	if acct2.AccessToken != "original" {
 		t.Error("Select returned reference to internal state instead of copy")
 	}
+}
+
+func TestAccountSelector_Select_PrefersActiveAccount(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+
+	t.Run("active account preferred over fresher token", func(t *testing.T) {
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "fresh@test.com", AccessToken: "t1", ExpiresAt: future + 5000},
+				{Email: "active@test.com", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, func() string { return "active@test.com" })
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "active@test.com" {
+			t.Errorf("got %q, want active@test.com", acct.Email)
+		}
+	})
+
+	t.Run("falls back to freshest when active is excluded", func(t *testing.T) {
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "fresh@test.com", AccessToken: "t1", ExpiresAt: future + 5000},
+				{Email: "active@test.com", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, func() string { return "active@test.com" })
+
+		acct, err := sel.Select(context.Background(), "active@test.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "fresh@test.com" {
+			t.Errorf("got %q, want fresh@test.com", acct.Email)
+		}
+	})
+
+	t.Run("nil activeEmail behaves like before", func(t *testing.T) {
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "old@test.com", AccessToken: "t1", ExpiresAt: future},
+				{Email: "new@test.com", AccessToken: "t2", ExpiresAt: future + 5000},
+			}
+		}, nil)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "new@test.com" {
+			t.Errorf("got %q, want new@test.com (freshest)", acct.Email)
+		}
+	})
+
+	t.Run("active account preferred even when expired but refreshable", func(t *testing.T) {
+		past := time.Now().UnixMilli() - 3600_000
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth{
+			return []keyring.ClaudeOAuth{
+				{Email: "newer@test.com", AccessToken: "t1", ExpiresAt: past, RefreshToken: "r1"},
+				{Email: "active@test.com", AccessToken: "t2", ExpiresAt: past - 1000, RefreshToken: "r2"},
+			}
+		}, func() string { return "active@test.com" })
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "active@test.com" {
+			t.Errorf("got %q, want active@test.com", acct.Email)
+		}
+	})
 }

@@ -459,6 +459,24 @@ func PersistRefreshedToken(acct *ClaudeOAuth) {
 	}
 }
 
+// ActiveClaudeEmail returns the email of the currently active Claude account
+// from ~/.claude/.credentials.json. Returns "" if unavailable.
+func ActiveClaudeEmail() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
+	if err != nil {
+		return ""
+	}
+	var creds ClaudeCredentials
+	if json.Unmarshal(data, &creds) != nil || creds.ClaudeAiOauth == nil {
+		return ""
+	}
+	return creds.ClaudeAiOauth.Email
+}
+
 // WriteCredentialsFile atomically writes credentials to ~/.claude/.credentials.json.
 func WriteCredentialsFile(creds *ClaudeCredentials) error {
 	home, err := os.UserHomeDir()

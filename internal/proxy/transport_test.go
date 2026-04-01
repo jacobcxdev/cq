@@ -242,34 +242,86 @@ func TestTokenTransport_ConcurrentRefresh(t *testing.T) {
 	}
 }
 
-func TestTokenTransport_429FallbackToAlternate(t *testing.T) {
+func TestTokenTransport_429TransientForwarded(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
 		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
 		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
 	}}
 
-	var lastAuth string
+	var upstreamCalls int
 	transport := &TokenTransport{
 		Selector: sel,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			upstreamCalls++
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+
+	// A single 429 should be forwarded to the client, not trigger failover.
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 429 {
+		t.Errorf("status = %d, want 429 (forwarded)", resp.StatusCode)
+	}
+	if upstreamCalls != 1 {
+		t.Errorf("upstream calls = %d, want 1 (no failover)", upstreamCalls)
+	}
+}
+
+func TestTokenTransport_429ExhaustionTriggersFailover(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
+		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
+	}}
+
+	var switchedTo string
+	var switchDone sync.WaitGroup
+	switchDone.Add(1)
+
+	transport := &TokenTransport{
+		Selector: sel,
+		Switcher: func(_ context.Context, email string) error {
+			switchedTo = email
+			switchDone.Done()
+			return nil
+		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			lastAuth = req.Header.Get("Authorization")
-			if lastAuth == "Bearer tok-1" {
+			auth := req.Header.Get("Authorization")
+			if auth == "Bearer tok-1" {
 				return makeResponse(429, "rate limited"), nil
 			}
 			return makeResponse(200, "ok"), nil
 		}),
 	}
 
+	// First two 429s: transient, forwarded to client.
+	for i := 0; i < 2; i++ {
+		resp, err := transport.RoundTrip(makeRequest(""))
+		if err != nil {
+			t.Fatalf("req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
+	}
+
+	// Third 429: exhaustion triggers failover to secondary.
 	resp, err := transport.RoundTrip(makeRequest(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+		t.Errorf("req 3: status = %d, want 200 (failover)", resp.StatusCode)
 	}
-	if lastAuth != "Bearer tok-2" {
-		t.Errorf("last auth = %q, want Bearer tok-2", lastAuth)
+
+	// Wait for async switch to complete.
+	switchDone.Wait()
+	if switchedTo != "secondary@test.com" {
+		t.Errorf("switched to %q, want secondary@test.com", switchedTo)
 	}
 }
 
@@ -285,59 +337,60 @@ func TestTokenTransport_429NoAlternate(t *testing.T) {
 		}),
 	}
 
-	resp, err := transport.RoundTrip(makeRequest(""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 429 {
-		t.Errorf("status = %d, want 429 (forwarded upstream)", resp.StatusCode)
+	// Exhaust the single account (3 consecutive 429s).
+	for i := 0; i < 3; i++ {
+		resp, err := transport.RoundTrip(makeRequest(""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 429 {
+			t.Errorf("req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
 	}
 }
 
-func TestTokenTransport_429CooldownSkipsExhaustedAccount(t *testing.T) {
+func TestTokenTransport_429ResetOnSuccess(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
 		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
-		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
 	}}
 
-	var auths []string
+	var callCount int
 	transport := &TokenTransport{
 		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			auth := req.Header.Get("Authorization")
-			auths = append(auths, auth)
-			if auth == "Bearer tok-1" {
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			callCount++
+			// First two calls: 429, then a 200, then two more 429s.
+			// The 200 should reset the counter so the final 429s don't trigger exhaustion.
+			switch callCount {
+			case 1, 2, 4, 5:
 				return makeResponse(429, "rate limited"), nil
+			default:
+				return makeResponse(200, "ok"), nil
 			}
-			return makeResponse(200, "ok"), nil
 		}),
 	}
 
-	// Request 1: tries tok-1 → 429 → falls back to tok-2 → 200
-	resp, err := transport.RoundTrip(makeRequest(""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("req1 status = %d, want 200", resp.StatusCode)
+	// Two 429s (count=2).
+	for i := 0; i < 2; i++ {
+		resp, _ := transport.RoundTrip(makeRequest(""))
+		if resp.StatusCode != 429 {
+			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
 	}
 
-	// Request 2: cooldown should skip tok-1 entirely, go straight to tok-2
-	auths = nil
-	resp, err = transport.RoundTrip(makeRequest(""))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Success resets counter.
+	resp, _ := transport.RoundTrip(makeRequest(""))
 	if resp.StatusCode != 200 {
-		t.Fatalf("req2 status = %d, want 200", resp.StatusCode)
+		t.Fatalf("req 3: status = %d, want 200", resp.StatusCode)
 	}
-	// Should only have one upstream call (tok-2), not two
-	if len(auths) != 1 {
-		t.Errorf("req2: expected 1 upstream call, got %d: %v", len(auths), auths)
-	}
-	if len(auths) > 0 && auths[0] != "Bearer tok-2" {
-		t.Errorf("req2: auth = %q, want Bearer tok-2", auths[0])
+
+	// Two more 429s — counter is back at 2, not 4 (no exhaustion).
+	for i := 0; i < 2; i++ {
+		resp, _ := transport.RoundTrip(makeRequest(""))
+		if resp.StatusCode != 429 {
+			t.Fatalf("req %d: status = %d, want 429", i+4, resp.StatusCode)
+		}
 	}
 }
 

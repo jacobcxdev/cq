@@ -11,18 +11,23 @@ import (
 // ClaudeDiscoverer abstracts keyring discovery for testability.
 type ClaudeDiscoverer func() []keyring.ClaudeOAuth
 
+// ActiveEmailFunc returns the email of the currently active Claude account.
+type ActiveEmailFunc func() string
+
 // ClaudeSelector picks the best account for a request.
 type ClaudeSelector interface {
 	Select(ctx context.Context, exclude ...string) (*keyring.ClaudeOAuth, error)
 }
 
 type accountSelector struct {
-	discover ClaudeDiscoverer
+	discover    ClaudeDiscoverer
+	activeEmail ActiveEmailFunc
 }
 
 // NewAccountSelector creates a ClaudeSelector backed by the given discovery function.
-func NewAccountSelector(discover ClaudeDiscoverer) ClaudeSelector {
-	return &accountSelector{discover: discover}
+// If activeEmail is non-nil, Select() prefers the active account over others.
+func NewAccountSelector(discover ClaudeDiscoverer, activeEmail ActiveEmailFunc) ClaudeSelector {
+	return &accountSelector{discover: discover, activeEmail: activeEmail}
 }
 
 func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring.ClaudeOAuth, error) {
@@ -36,6 +41,11 @@ func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring
 		excludeSet[e] = true
 	}
 
+	var activeEmail string
+	if s.activeEmail != nil {
+		activeEmail = s.activeEmail()
+	}
+
 	now := time.Now().UnixMilli()
 	var best *keyring.ClaudeOAuth
 	var bestExpired *keyring.ClaudeOAuth
@@ -47,13 +57,22 @@ func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring
 		}
 
 		if a.ExpiresAt == 0 || a.ExpiresAt > now {
-			// Non-expired (or unknown expiry): pick latest expiry.
-			if best == nil || a.ExpiresAt > best.ExpiresAt {
+			// Non-expired (or unknown expiry).
+			// Prefer the active account; otherwise pick latest expiry.
+			if best == nil {
+				best = a
+			} else if activeEmail != "" && a.Email == activeEmail && best.Email != activeEmail {
+				best = a
+			} else if best.Email != activeEmail && a.ExpiresAt > best.ExpiresAt {
 				best = a
 			}
 		} else if a.RefreshToken != "" {
-			// Expired but refreshable: pick newest.
-			if bestExpired == nil || a.ExpiresAt > bestExpired.ExpiresAt {
+			// Expired but refreshable.
+			if bestExpired == nil {
+				bestExpired = a
+			} else if activeEmail != "" && a.Email == activeEmail && bestExpired.Email != activeEmail {
+				bestExpired = a
+			} else if bestExpired.Email != activeEmail && a.ExpiresAt > bestExpired.ExpiresAt {
 				bestExpired = a
 			}
 		}
