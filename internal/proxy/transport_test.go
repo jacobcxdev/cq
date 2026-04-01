@@ -394,6 +394,112 @@ func TestTokenTransport_429ResetOnSuccess(t *testing.T) {
 	}
 }
 
+func TestTokenTransport_429NonMessagesEndpointForwarded(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
+		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
+	}}
+
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+
+	// Hit a non-messages endpoint 5 times — all should forward 429,
+	// never trigger exhaustion or failover.
+	for i := 0; i < 5; i++ {
+		buf := []byte(`{}`)
+		req, _ := http.NewRequest("GET", "https://api.anthropic.com/v1/usage", bytes.NewReader(buf))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(buf)), nil
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Errorf("req %d: status = %d, want 429 (forwarded, no exhaustion tracking)", i+1, resp.StatusCode)
+		}
+	}
+}
+
+func TestTokenTransport_429PingPongPrevention(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccessToken: "tok-b", ExpiresAt: future},
+	}}
+
+	var switchCount atomic.Int32
+	transport := &TokenTransport{
+		Selector: sel,
+		Switcher: func(_ context.Context, _ string) error {
+			switchCount.Add(1)
+			return nil
+		},
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			// Both accounts always return 429.
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+
+	// Exhaust account A (3 requests) → failover to B → B returns 429.
+	// Then exhaust B (needs 3 fresh requests — the failover doRequest
+	// response bypasses handle429 so B starts at 0).
+	// Then failover back to A.
+	// Key assertion: each account gets a fresh 3-request window after
+	// being rotated away from (no infinite ping-pong).
+
+	// 3 requests exhaust A → switch to B (B's 429 is the failover response).
+	for i := 0; i < 3; i++ {
+		resp, err := transport.RoundTrip(makeRequest(""))
+		if err != nil {
+			t.Fatalf("phase1 req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Fatalf("phase1 req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
+	}
+	// Switcher is async — give it a moment.
+	time.Sleep(10 * time.Millisecond)
+	if n := switchCount.Load(); n != 1 {
+		t.Fatalf("after phase1: switchCount = %d, want 1", n)
+	}
+
+	// B now needs 3 full requests to be exhausted.
+	for i := 0; i < 3; i++ {
+		resp, err := transport.RoundTrip(makeRequest(""))
+		if err != nil {
+			t.Fatalf("phase2 req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Fatalf("phase2 req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
+	}
+	time.Sleep(10 * time.Millisecond)
+	if n := switchCount.Load(); n != 2 {
+		t.Fatalf("after phase2: switchCount = %d, want 2", n)
+	}
+
+	// Now back on A with a fresh counter. Two more transient 429s — no switch.
+	for i := 0; i < 2; i++ {
+		resp, err := transport.RoundTrip(makeRequest(""))
+		if err != nil {
+			t.Fatalf("phase3 req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Fatalf("phase3 req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
+	}
+	time.Sleep(10 * time.Millisecond)
+	if n := switchCount.Load(); n != 2 {
+		t.Errorf("after phase3: switchCount = %d, want 2 (no extra switches)", n)
+	}
+}
+
 func TestTokenTransport_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

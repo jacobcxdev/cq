@@ -151,6 +151,13 @@ func (t *TokenTransport) handleUnauthorized(req *http.Request, acct *keyring.Cla
 }
 
 func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, failedAcct *keyring.ClaudeOAuth) (*http.Response, error) {
+	// Only track exhaustion for the messages endpoint — other endpoints
+	// (usage API, profiles, etc.) should forward 429s without affecting
+	// account rotation.
+	if req.URL == nil || req.URL.Path != "/v1/messages" {
+		return resp, nil
+	}
+
 	exhausted := t.record429(failedAcct)
 	if !exhausted {
 		// Transient 429 — forward to client (Claude Code handles backoff).
@@ -162,6 +169,10 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 	if err != nil {
 		return resp, nil // no alternate — forward upstream 429
 	}
+
+	// Reset the exhausted account's counter so it gets a fresh window
+	// if we rotate back to it later (prevents infinite ping-pong).
+	t.reset429(failedAcct)
 
 	fmt.Fprintf(os.Stderr, "cq: proxy account %s exhausted (%d consecutive 429s), switching to %s\n",
 		failedAcct.Email, exhaustionThreshold, alt.Email)
