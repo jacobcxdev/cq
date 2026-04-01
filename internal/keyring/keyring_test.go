@@ -278,6 +278,61 @@ func TestDedupByEmail(t *testing.T) {
 			t.Errorf("a@example.com AccessToken = %q, want %q", aEntry.AccessToken, "tokA2")
 		}
 	})
+
+	t.Run("fresher token carries forward scopes from older entry", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccessToken: "old", ExpiresAt: 100, Scopes: []string{"user:inference", "user:profile"}},
+			{Email: "a@example.com", AccessToken: "new", ExpiresAt: 200},
+		}
+		got := dedupByEmail(input)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if got[0].AccessToken != "new" {
+			t.Errorf("AccessToken = %q, want %q", got[0].AccessToken, "new")
+		}
+		if len(got[0].Scopes) != 2 || got[0].Scopes[0] != "user:inference" {
+			t.Errorf("Scopes = %v, want [user:inference user:profile]", got[0].Scopes)
+		}
+	})
+
+	t.Run("fresher token keeps its own scopes", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccessToken: "old", ExpiresAt: 100, Scopes: []string{"old:scope"}},
+			{Email: "a@example.com", AccessToken: "new", ExpiresAt: 200, Scopes: []string{"new:scope"}},
+		}
+		got := dedupByEmail(input)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if len(got[0].Scopes) != 1 || got[0].Scopes[0] != "new:scope" {
+			t.Errorf("Scopes = %v, want [new:scope]", got[0].Scopes)
+		}
+	})
+
+	t.Run("UUID-preferred entry carries forward metadata", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccessToken: "old", ExpiresAt: 200,
+				Scopes: []string{"user:inference"}, SubscriptionType: "max", RateLimitTier: "tier1"},
+			{Email: "a@example.com", AccessToken: "new", ExpiresAt: 100, AccountUUID: "uuid-1"},
+		}
+		got := dedupByEmail(input)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if got[0].AccountUUID != "uuid-1" {
+			t.Errorf("AccountUUID = %q, want %q", got[0].AccountUUID, "uuid-1")
+		}
+		if len(got[0].Scopes) != 1 || got[0].Scopes[0] != "user:inference" {
+			t.Errorf("Scopes = %v, want [user:inference]", got[0].Scopes)
+		}
+		if got[0].SubscriptionType != "max" {
+			t.Errorf("SubscriptionType = %q, want %q", got[0].SubscriptionType, "max")
+		}
+		if got[0].RateLimitTier != "tier1" {
+			t.Errorf("RateLimitTier = %q, want %q", got[0].RateLimitTier, "tier1")
+		}
+	})
 }
 
 // ── sameStoredAccount ─────────────────────────────────────────────────────────

@@ -269,3 +269,92 @@ func TestServer_BodyReplay(t *testing.T) {
 		t.Errorf("body not replayed correctly: %v", bodies)
 	}
 }
+
+// ── isValidToken (dual-mode auth) ────────────────────────────────────────────
+
+func TestServer_IsValidToken_LocalToken(t *testing.T) {
+	srv := &Server{Config: &Config{LocalToken: "local-tok"}}
+	if !srv.isValidToken("local-tok") {
+		t.Error("local token should be valid")
+	}
+	if srv.isValidToken("wrong") {
+		t.Error("wrong token should be invalid")
+	}
+}
+
+func TestServer_IsValidToken_KnownOAuthToken(t *testing.T) {
+	srv := &Server{
+		Config: &Config{LocalToken: "local-tok"},
+		Discover: func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "a@test.com", AccessToken: "oauth-tok-a"},
+				{Email: "b@test.com", AccessToken: "oauth-tok-b"},
+			}
+		},
+	}
+	if !srv.isValidToken("oauth-tok-a") {
+		t.Error("known OAuth token A should be valid")
+	}
+	if !srv.isValidToken("oauth-tok-b") {
+		t.Error("known OAuth token B should be valid")
+	}
+	if srv.isValidToken("unknown-tok") {
+		t.Error("unknown token should be invalid")
+	}
+}
+
+func TestServer_IsValidToken_NilDiscover(t *testing.T) {
+	srv := &Server{Config: &Config{LocalToken: "local-tok"}}
+	// Without Discover, only LocalToken works.
+	if srv.isValidToken("some-oauth-tok") {
+		t.Error("should reject OAuth token when Discover is nil")
+	}
+}
+
+func TestServer_OAuthTokenForwardsRequest(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"result":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner:    http.DefaultTransport,
+	}
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: upstream.URL,
+			LocalToken:     "local-tok",
+		},
+		Discover: func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "user@test.com", AccessToken: "user-oauth-token"},
+			}
+		},
+		Transport: transport,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(upstream.URL))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"claude"}`))
+	// Authenticate with the user's own OAuth token — NOT the local proxy token.
+	req.Header.Set("Authorization", "Bearer user-oauth-token")
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	// TokenTransport should have replaced the OAuth token with the selected account's token.
+	if gotAuth != "Bearer real-token" {
+		t.Errorf("upstream Authorization = %q, want %q", gotAuth, "Bearer real-token")
+	}
+}
