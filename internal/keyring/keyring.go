@@ -141,8 +141,35 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 	return result
 }
 
+// mergeAccountFields copies missing metadata from loser into winner.
+// Token fields (AccessToken, RefreshToken, ExpiresAt) come from winner;
+// everything else is filled in from loser when winner lacks it.
+func mergeAccountFields(winner, loser ClaudeOAuth) ClaudeOAuth {
+	if len(winner.Scopes) == 0 && len(loser.Scopes) > 0 {
+		winner.Scopes = loser.Scopes
+	}
+	if winner.SubscriptionType == "" && loser.SubscriptionType != "" {
+		winner.SubscriptionType = loser.SubscriptionType
+	}
+	if winner.RateLimitTier == "" && loser.RateLimitTier != "" {
+		winner.RateLimitTier = loser.RateLimitTier
+	}
+	if winner.AccountUUID == "" && loser.AccountUUID != "" {
+		winner.AccountUUID = loser.AccountUUID
+	}
+	if winner.Profile == nil && loser.Profile != nil {
+		winner.Profile = loser.Profile
+	}
+	if winner.TokenAccount == nil && loser.TokenAccount != nil {
+		winner.TokenAccount = loser.TokenAccount
+	}
+	return winner
+}
+
 // dedupByEmail removes duplicate accounts that share an email address,
 // preferring fresher tokens before falling back to richer metadata.
+// Metadata (scopes, plan, tier, UUID, profile) is carried forward from the
+// replaced entry when the winner lacks it — prevents silent scope stripping.
 func dedupByEmail(accounts []ClaudeOAuth) []ClaudeOAuth {
 	if len(accounts) <= 1 {
 		return accounts
@@ -154,9 +181,9 @@ func dedupByEmail(accounts []ClaudeOAuth) []ClaudeOAuth {
 			if idx, ok := seen[a.Email]; ok {
 				existing := result[idx]
 				if a.ExpiresAt > existing.ExpiresAt {
-					result[idx] = a
+					result[idx] = mergeAccountFields(a, existing)
 				} else if a.AccountUUID != "" && existing.AccountUUID == "" {
-					result[idx] = a
+					result[idx] = mergeAccountFields(a, existing)
 				}
 				continue
 			}

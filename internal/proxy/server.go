@@ -86,6 +86,25 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// isValidToken returns true if token matches the local proxy token or the
+// access token of any known Claude account. This allows Claude Code to
+// authenticate with its own OAuth token (preserving subscriber detection)
+// instead of requiring ANTHROPIC_API_KEY which disables OAuth features.
+func (s *Server) isValidToken(token string) bool {
+	if token == s.Config.LocalToken {
+		return true
+	}
+	if s.Discover == nil {
+		return false
+	}
+	for _, acct := range s.Discover() {
+		if acct.AccessToken != "" && acct.AccessToken == token {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -109,9 +128,9 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Auth check: validate local token.
+		// Auth check: accept local proxy token or a known Claude account token.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if token != s.Config.LocalToken {
+		if !s.isValidToken(token) {
 			writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
 			return
 		}
