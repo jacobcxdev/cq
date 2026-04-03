@@ -27,6 +27,7 @@ type Config struct {
 	ClaudeUpstream string `json:"claude_upstream"`
 	CodexUpstream  string `json:"codex_upstream"`
 	LocalToken     string `json:"local_token"`
+	Headroom       bool   `json:"headroom,omitempty"`
 }
 
 func (c *Config) setDefaults() {

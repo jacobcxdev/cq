@@ -44,7 +44,11 @@ brews:
     homepage: "https://github.com/jacobcxdev/cq"
     description: "CLI tool to check AI provider quota usage"
     license: "MIT"
+    dependencies:
+      - name: python@3
     install: |
       bin.install "cq"
+    post_install: |
+      system Formula["python@3"].opt_bin/"python3", "-m", "pip", "install", "--quiet", "headroom-ai[all]"
     test: |
       system "#{bin}/cq", "--help"
