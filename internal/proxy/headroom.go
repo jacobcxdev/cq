@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -51,13 +52,36 @@ type headroomResponse struct {
 	CompressionRatio float64         `json:"compression_ratio"`
 }
 
+// findPython3 returns the path to a python3 binary, checking well-known
+// Homebrew paths in addition to PATH. LaunchAgents run with a minimal PATH
+// that often excludes /opt/homebrew/bin, so we probe explicitly.
+func findPython3() (string, error) {
+	// Prefer PATH first (works in normal shell environments).
+	if p, err := exec.LookPath("python3"); err == nil {
+		return p, nil
+	}
+
+	// Probe well-known Homebrew locations for LaunchAgent environments.
+	var candidates []string
+	if runtime.GOARCH == "arm64" {
+		candidates = append(candidates, "/opt/homebrew/bin/python3")
+	}
+	candidates = append(candidates, "/usr/local/bin/python3", "/usr/bin/python3")
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("python3 not found in PATH or well-known locations")
+}
+
 // StartHeadroomBridge spawns the Python subprocess and verifies headroom-ai
 // is importable by sending a ping. Returns an error with an install hint if
 // the library is missing.
 func StartHeadroomBridge() (*HeadroomBridge, error) {
-	pythonPath, err := exec.LookPath("python3")
+	pythonPath, err := findPython3()
 	if err != nil {
-		return nil, fmt.Errorf("python3 not found: %w", err)
+		return nil, err
 	}
 
 	cmd := exec.Command(pythonPath, "-u", "-c", headroomScript)
