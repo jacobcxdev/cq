@@ -17,6 +17,14 @@ import (
 const headroomScript = `
 import json, sys
 from headroom import compress
+from headroom.models import get_model_info
+
+def model_limit(model):
+    info = get_model_info(model)
+    if info and info.context_window:
+        return info.context_window
+    return 200000
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -26,7 +34,8 @@ for line in sys.stdin:
     if not msgs:
         print(json.dumps({"messages": [], "tokens_saved": 0, "compression_ratio": 0}), flush=True)
         continue
-    r = compress(msgs, model=req.get("model", ""))
+    model = req.get("model", "")
+    r = compress(msgs, model=model, model_limit=model_limit(model))
     print(json.dumps({"messages": r.messages, "tokens_saved": r.tokens_saved, "compression_ratio": r.compression_ratio}), flush=True)
 `
 
@@ -52,12 +61,10 @@ type headroomResponse struct {
 	CompressionRatio float64         `json:"compression_ratio"`
 }
 
-// findPython3 returns the path to a python3 binary that can import headroom.
-// Homebrew paths are checked before the system Python because LaunchAgents
-// run with a minimal PATH, and headroom-ai is installed into Homebrew's
-// site-packages.
+// findPython3 returns the path to a python3 binary, preferring Homebrew
+// installations over the system Python. LaunchAgents run with a minimal
+// PATH that excludes /opt/homebrew/bin, so we probe well-known paths first.
 func findPython3() (string, error) {
-	// Build candidate list: Homebrew paths first, then PATH, then system.
 	var candidates []string
 	if runtime.GOARCH == "arm64" {
 		candidates = append(candidates, "/opt/homebrew/bin/python3")
@@ -66,26 +73,18 @@ func findPython3() (string, error) {
 	if p, err := exec.LookPath("python3"); err == nil {
 		candidates = append(candidates, p)
 	}
-	candidates = append(candidates, "/usr/bin/python3")
 
-	// Deduplicate while preserving order.
 	seen := make(map[string]bool)
 	for _, c := range candidates {
 		if seen[c] {
 			continue
 		}
 		seen[c] = true
-		if _, err := os.Stat(c); err != nil {
-			continue
-		}
-		// Check that this Python can import headroom.
-		out, err := exec.Command(c, "-c", "import headroom").CombinedOutput()
-		if err == nil {
+		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
-		fmt.Fprintf(os.Stderr, "cq: headroom: %s cannot import headroom: %s\n", c, out)
 	}
-	return "", fmt.Errorf("no python3 with headroom-ai found (tried %d candidates)", len(seen))
+	return "", fmt.Errorf("python3 not found in PATH or well-known locations")
 }
 
 // StartHeadroomBridge spawns the Python subprocess and verifies headroom-ai
@@ -116,10 +115,13 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 		return nil, fmt.Errorf("start python3: %w", err)
 	}
 
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
+
 	b := &HeadroomBridge{
 		cmd:    cmd,
 		stdin:  stdin,
-		stdout: bufio.NewScanner(stdoutPipe),
+		stdout: scanner,
 	}
 
 	// Ping to verify headroom-ai is installed.
@@ -145,7 +147,7 @@ func (b *HeadroomBridge) ping() error {
 	select {
 	case r := <-ch:
 		return r.err
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		return fmt.Errorf("timeout waiting for bridge response")
 	}
 }
