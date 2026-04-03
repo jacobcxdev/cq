@@ -2,8 +2,18 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 )
+
+const countTokensPath = "/v1/messages/count_tokens"
+
+func RouteRequest(method, path, model string) Provider {
+	if method == http.MethodPost && path == countTokensPath {
+		return ProviderClaude
+	}
+	return RouteModel(model)
+}
 
 // Provider identifies the upstream API provider for routing.
 type Provider int

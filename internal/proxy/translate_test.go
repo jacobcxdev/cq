@@ -269,6 +269,49 @@ func TestTranslateResponse_TextOnly(t *testing.T) {
 	if resp.Usage.InputTokens != 10 || resp.Usage.OutputTokens != 5 {
 		t.Errorf("usage = %+v", resp.Usage)
 	}
+	if resp.Usage.TotalTokens == nil || *resp.Usage.TotalTokens != 15 {
+		t.Fatalf("total_tokens = %v, want 15", resp.Usage.TotalTokens)
+	}
+}
+
+func TestTranslateResponse_RichUsageFields(t *testing.T) {
+	oResp := `{
+		"id": "resp_rich",
+		"status": "completed",
+		"model": "gpt-5.4",
+		"output": [{
+			"type": "message",
+			"role": "assistant",
+			"content": [{"type": "output_text", "text": "Hello!"}]
+		}],
+		"usage": {
+			"input_tokens": 10,
+			"output_tokens": 5,
+			"total_tokens": 15,
+			"input_tokens_details": {"cached_tokens": 4},
+			"output_tokens_details": {"reasoning_tokens": 2}
+		}
+	}`
+
+	out, err := translateResponse([]byte(oResp), "gpt-5.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var resp anthropicResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.Usage.CacheReadInputTokens == nil || *resp.Usage.CacheReadInputTokens != 4 {
+		t.Fatalf("cache_read_input_tokens = %v, want 4", resp.Usage.CacheReadInputTokens)
+	}
+	if resp.Usage.ReasoningOutputTokens == nil || *resp.Usage.ReasoningOutputTokens != 2 {
+		t.Fatalf("reasoning_output_tokens = %v, want 2", resp.Usage.ReasoningOutputTokens)
+	}
+	if resp.Usage.TotalTokens == nil || *resp.Usage.TotalTokens != 15 {
+		t.Fatalf("total_tokens = %v, want 15", resp.Usage.TotalTokens)
+	}
 }
 
 func TestTranslateResponse_FunctionCall(t *testing.T) {

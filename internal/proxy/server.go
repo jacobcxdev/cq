@@ -173,9 +173,9 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			}
 		}
 
-		// Route based on model.
+		// Route based on endpoint and model.
 		model := extractModel(buf)
-		if RouteModel(model) == ProviderCodex {
+		if RouteRequest(r.Method, r.URL.Path, model) == ProviderCodex {
 			s.handleCodex(w, r, buf)
 			return
 		}

@@ -100,7 +100,7 @@ func TestStreamTranslator_FunctionCall(t *testing.T) {
 func TestStreamTranslator_UsageInMessageDelta(t *testing.T) {
 	events := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_3"}}`,
-		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":42,"output_tokens":17,"total_tokens":59}}}`,
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":42,"output_tokens":17,"total_tokens":59,"input_tokens_details":{"cached_tokens":11},"output_tokens_details":{"reasoning_tokens":7}}}}`,
 		`data: [DONE]`,
 	}, "\n")
 
@@ -129,6 +129,15 @@ func TestStreamTranslator_UsageInMessageDelta(t *testing.T) {
 		}
 		if usage["output_tokens"].(float64) != 17 {
 			t.Errorf("output_tokens = %v, want 17", usage["output_tokens"])
+		}
+		if usage["total_tokens"].(float64) != 59 {
+			t.Errorf("total_tokens = %v, want 59", usage["total_tokens"])
+		}
+		if usage["cache_read_input_tokens"].(float64) != 11 {
+			t.Errorf("cache_read_input_tokens = %v, want 11", usage["cache_read_input_tokens"])
+		}
+		if usage["reasoning_output_tokens"].(float64) != 7 {
+			t.Errorf("reasoning_output_tokens = %v, want 7", usage["reasoning_output_tokens"])
 		}
 		return
 	}

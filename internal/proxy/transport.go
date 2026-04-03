@@ -151,10 +151,7 @@ func (t *TokenTransport) handleUnauthorized(req *http.Request, acct *keyring.Cla
 }
 
 func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, failedAcct *keyring.ClaudeOAuth) (*http.Response, error) {
-	// Only track exhaustion for the messages endpoint — other endpoints
-	// (usage API, profiles, etc.) should forward 429s without affecting
-	// account rotation.
-	if req.URL == nil || req.URL.Path != "/v1/messages" {
+	if !tracksExhaustion(req) {
 		return resp, nil
 	}
 
@@ -280,6 +277,10 @@ func acctIdentifier(a *keyring.ClaudeOAuth) string {
 		return a.Email
 	}
 	return a.AccessToken
+}
+
+func tracksExhaustion(req *http.Request) bool {
+	return req != nil && req.URL != nil && req.URL.Path == "/v1/messages"
 }
 
 func acctExcludeKeys(a *keyring.ClaudeOAuth) []string {

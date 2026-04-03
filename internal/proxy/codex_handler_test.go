@@ -63,7 +63,7 @@ func TestHandleCodex_NonStreaming(t *testing.T) {
 			`data: {"type":"response.output_text.delta","delta":"Hi there!"}`,
 			`data: {"type":"response.content_part.done","part":{"type":"output_text"}}`,
 			`data: {"type":"response.output_item.done","item":{"type":"message"}}`,
-			`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`,
+			`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":1}}}}`,
 			`data: [DONE]`,
 		}
 		for _, ev := range events {
@@ -113,6 +113,15 @@ func TestHandleCodex_NonStreaming(t *testing.T) {
 	}
 	if resp.StopReason != "end_turn" {
 		t.Errorf("stop_reason = %q, want end_turn", resp.StopReason)
+	}
+	if resp.Usage.CacheReadInputTokens == nil || *resp.Usage.CacheReadInputTokens != 2 {
+		t.Fatalf("cache_read_input_tokens = %v, want 2", resp.Usage.CacheReadInputTokens)
+	}
+	if resp.Usage.ReasoningOutputTokens == nil || *resp.Usage.ReasoningOutputTokens != 1 {
+		t.Fatalf("reasoning_output_tokens = %v, want 1", resp.Usage.ReasoningOutputTokens)
+	}
+	if resp.Usage.TotalTokens == nil || *resp.Usage.TotalTokens != 8 {
+		t.Fatalf("total_tokens = %v, want 8", resp.Usage.TotalTokens)
 	}
 }
 
@@ -314,6 +323,56 @@ func TestServer_CodexRouting(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if len(resp.Content) == 0 || resp.Content[0].Text != "routed!" {
 		t.Errorf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestServer_CountTokensAlwaysRoutesToClaude(t *testing.T) {
+	claudeHits := 0
+	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claudeHits++
+		if r.URL.Path != countTokensPath {
+			t.Fatalf("upstream path = %q, want %q", r.URL.Path, countTokensPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"input_tokens":123}`))
+	}))
+	defer claudeUpstream.Close()
+
+	codexUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("codex upstream should not be called for count_tokens")
+	}))
+	defer codexUpstream.Close()
+
+	future := int64(9999999999999)
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{Email: "a@test.com", AccessToken: "claude-tok", ExpiresAt: future}}}
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: claudeUpstream.URL,
+			CodexUpstream:  codexUpstream.URL,
+			LocalToken:     "tok",
+		},
+		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
+		CodexSelector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+	}
+
+	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", countTokensPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if claudeHits != 1 {
+		t.Fatalf("claude hits = %d, want 1", claudeHits)
+	}
+	if strings.TrimSpace(w.Body.String()) != `{"input_tokens":123}` {
+		t.Fatalf("response = %s, want count_tokens payload", w.Body.String())
 	}
 }
 

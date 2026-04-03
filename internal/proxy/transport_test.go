@@ -394,6 +394,83 @@ func TestTokenTransport_429ResetOnSuccess(t *testing.T) {
 	}
 }
 
+func TestTokenTransport_401RefreshRetry_CountTokens(t *testing.T) {
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{
+		Email: "a@test.com", AccessToken: "old-tok", ExpiresAt: time.Now().UnixMilli() + 3600_000, RefreshToken: "rt",
+	}}}
+
+	var attempts int
+	var paths []string
+	transport := &TokenTransport{
+		Selector: sel,
+		Refresher: func(_ context.Context, _ httputil.Doer, _ string, _ []string) (*claude.RefreshResult, error) {
+			return &claude.RefreshResult{AccessToken: "new-tok", ExpiresIn: 3600}, nil
+		},
+		Persister:   func(_ *keyring.ClaudeOAuth) {},
+		RefreshHTTP: http.DefaultClient,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			paths = append(paths, req.URL.Path)
+			if attempts == 1 {
+				return makeResponse(401, "unauthorized"), nil
+			}
+			if req.Header.Get("Authorization") != "Bearer new-tok" {
+				t.Errorf("retry auth = %q, want Bearer new-tok", req.Header.Get("Authorization"))
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	buf := []byte(`{"model":"claude-opus-4-6"}`)
+	req, _ := http.NewRequest("POST", "https://api.anthropic.com"+countTokensPath, bytes.NewReader(buf))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
+	req.ContentLength = int64(len(buf))
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if len(paths) != 2 || paths[0] != countTokensPath || paths[1] != countTokensPath {
+		t.Fatalf("paths = %v, want both %q", paths, countTokensPath)
+	}
+}
+
+func TestTokenTransport_429CountTokensForwarded(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future}, {Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future}}}
+
+	var upstreamCalls int
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			upstreamCalls++
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+
+	for i := 0; i < 5; i++ {
+		buf := []byte(`{}`)
+		req, _ := http.NewRequest("POST", "https://api.anthropic.com"+countTokensPath, bytes.NewReader(buf))
+		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
+	}
+	if upstreamCalls != 5 {
+		t.Fatalf("upstream calls = %d, want 5", upstreamCalls)
+	}
+}
+
 func TestTokenTransport_429NonMessagesEndpointForwarded(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
