@@ -57,8 +57,12 @@ type anthropicResponse struct {
 }
 
 type anthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens           int  `json:"input_tokens"`
+	OutputTokens          int  `json:"output_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens  *int `json:"cache_read_input_tokens,omitempty"`
+	ReasoningOutputTokens *int `json:"reasoning_output_tokens,omitempty"`
+	TotalTokens           *int `json:"total_tokens,omitempty"`
 }
 
 // --- OpenAI Responses API types (subset for translation) ---
@@ -134,9 +138,15 @@ type openaiOutputContent struct {
 }
 
 type openaiUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	InputTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"output_tokens_details,omitempty"`
 }
 
 // --- Translation functions ---
@@ -524,11 +534,30 @@ func translateResponse(body []byte, model string) ([]byte, error) {
 
 	// Usage.
 	if oResp.Usage != nil {
-		resp.Usage = anthropicUsage{
-			InputTokens:  oResp.Usage.InputTokens,
-			OutputTokens: oResp.Usage.OutputTokens,
-		}
+		resp.Usage = translateUsage(oResp.Usage)
 	}
 
 	return json.Marshal(resp)
 }
+
+func translateUsage(usage *openaiUsage) anthropicUsage {
+	if usage == nil {
+		return anthropicUsage{}
+	}
+	translated := anthropicUsage{
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+	}
+	if usage.TotalTokens > 0 {
+		translated.TotalTokens = intPtr(usage.TotalTokens)
+	}
+	if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
+		translated.CacheReadInputTokens = intPtr(usage.InputTokensDetails.CachedTokens)
+	}
+	if usage.OutputTokensDetails != nil && usage.OutputTokensDetails.ReasoningTokens > 0 {
+		translated.ReasoningOutputTokens = intPtr(usage.OutputTokensDetails.ReasoningTokens)
+	}
+	return translated
+}
+
+func intPtr(v int) *int { return &v }

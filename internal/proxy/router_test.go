@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestRouteModel(t *testing.T) {
 	tests := []struct {
@@ -114,6 +117,30 @@ func TestExtractModel(t *testing.T) {
 			got := extractModel([]byte(tt.body))
 			if got != tt.want {
 				t.Errorf("extractModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRouteRequest(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		model  string
+		want   Provider
+	}{
+		{"count tokens always claude", http.MethodPost, countTokensPath, "gpt-5.4", ProviderClaude},
+		{"messages codex model", http.MethodPost, "/v1/messages", "gpt-5.4", ProviderCodex},
+		{"messages claude model", http.MethodPost, "/v1/messages", "claude-opus-4-6", ProviderClaude},
+		{"non-post count tokens by model", http.MethodGet, countTokensPath, "gpt-5.4", ProviderCodex},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RouteRequest(tt.method, tt.path, tt.model)
+			if got != tt.want {
+				t.Errorf("RouteRequest(%q, %q, %q) = %d, want %d", tt.method, tt.path, tt.model, got, tt.want)
 			}
 		})
 	}

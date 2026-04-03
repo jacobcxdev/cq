@@ -307,21 +307,30 @@ func (st *StreamTranslator) handleResponseCompleted(data []byte) []sseEvent {
 	}
 	st.stopReason = stopReason
 
-	var inputTokens, outputTokens int
-	if ev.Response.Usage != nil {
-		inputTokens = ev.Response.Usage.InputTokens
-		outputTokens = ev.Response.Usage.OutputTokens
+	st.usage = translateUsage(ev.Response.Usage)
+
+	usage := map[string]any{
+		"output_tokens": st.usage.OutputTokens,
 	}
-	st.usage = anthropicUsage{InputTokens: inputTokens, OutputTokens: outputTokens}
+	if st.usage.CacheCreationInputTokens != nil {
+		usage["cache_creation_input_tokens"] = *st.usage.CacheCreationInputTokens
+	}
+	if st.usage.CacheReadInputTokens != nil {
+		usage["cache_read_input_tokens"] = *st.usage.CacheReadInputTokens
+	}
+	if st.usage.ReasoningOutputTokens != nil {
+		usage["reasoning_output_tokens"] = *st.usage.ReasoningOutputTokens
+	}
+	if st.usage.TotalTokens != nil {
+		usage["total_tokens"] = *st.usage.TotalTokens
+	}
 
 	msgDelta := map[string]any{
 		"type": "message_delta",
 		"delta": map[string]string{
 			"stop_reason": stopReason,
 		},
-		"usage": map[string]int{
-			"output_tokens": outputTokens,
-		},
+		"usage": usage,
 	}
 	b, _ := json.Marshal(msgDelta)
 	return []sseEvent{{event: "message_delta", data: b}}
