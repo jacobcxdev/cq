@@ -49,6 +49,6 @@ brews:
     install: |
       bin.install "cq"
     post_install: |
-      system Formula["python@3"].opt_bin/"python3", "-m", "pip", "install", "--quiet", "headroom-ai[all]"
+      system Formula["python@3"].opt_bin/"python3", "-m", "pip", "install", "--break-system-packages", "--quiet", "headroom-ai[all]"
     test: |
       system "#{bin}/cq", "--help"
