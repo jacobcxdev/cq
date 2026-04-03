@@ -28,6 +28,7 @@ type Server struct {
 	CodexSelector  CodexSelector
 	CodexDiscover  CodexDiscoverer
 	CodexTransport http.RoundTripper
+	Headroom       *HeadroomBridge
 }
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
@@ -78,7 +79,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status": "ok",
+		"status":   "ok",
+		"headroom": s.Headroom != nil,
 		"accounts": map[string]int{
 			"claude": claudeCount,
 			"codex":  codexCount,
@@ -153,6 +155,21 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			r.ContentLength = int64(len(buf))
 			r.GetBody = func() (io.ReadCloser, error) {
 				return io.NopCloser(bytes.NewReader(buf)), nil
+			}
+		}
+
+		// Compress messages via headroom bridge if available.
+		if s.Headroom != nil && len(buf) > 0 {
+			if compressed, saved, err := s.Headroom.Compress(buf); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: headroom: %v\n", err)
+			} else if saved > 0 {
+				fmt.Fprintf(os.Stderr, "cq: headroom saved %d tokens\n", saved)
+				buf = compressed
+				r.Body = io.NopCloser(bytes.NewReader(buf))
+				r.ContentLength = int64(len(buf))
+				r.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(bytes.NewReader(buf)), nil
+				}
 			}
 		}
 

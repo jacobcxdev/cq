@@ -96,6 +96,18 @@ func runProxyStart() error {
 	}
 	fmt.Fprintln(os.Stderr)
 
+	// Start headroom compression bridge if configured.
+	var headroom *proxy.HeadroomBridge
+	if cfg.Headroom {
+		var err error
+		headroom, err = proxy.StartHeadroomBridge()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: headroom: %v (continuing without compression)\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "cq: headroom compression enabled\n")
+		}
+	}
+
 	srv := &proxy.Server{
 		Config:        cfg,
 		Selector:      selector,
@@ -103,9 +115,14 @@ func runProxyStart() error {
 		Transport:     transport,
 		CodexSelector: codexSelector,
 		CodexDiscover: codexDiscover,
+		Headroom:      headroom,
 	}
 
-	return srv.ListenAndServe(context.Background())
+	err = srv.ListenAndServe(context.Background())
+	if headroom != nil {
+		headroom.Stop()
+	}
+	return err
 }
 
 func runProxyStatus() error {
