@@ -52,27 +52,40 @@ type headroomResponse struct {
 	CompressionRatio float64         `json:"compression_ratio"`
 }
 
-// findPython3 returns the path to a python3 binary, checking well-known
-// Homebrew paths in addition to PATH. LaunchAgents run with a minimal PATH
-// that often excludes /opt/homebrew/bin, so we probe explicitly.
+// findPython3 returns the path to a python3 binary that can import headroom.
+// Homebrew paths are checked before the system Python because LaunchAgents
+// run with a minimal PATH, and headroom-ai is installed into Homebrew's
+// site-packages.
 func findPython3() (string, error) {
-	// Prefer PATH first (works in normal shell environments).
-	if p, err := exec.LookPath("python3"); err == nil {
-		return p, nil
-	}
-
-	// Probe well-known Homebrew locations for LaunchAgent environments.
+	// Build candidate list: Homebrew paths first, then PATH, then system.
 	var candidates []string
 	if runtime.GOARCH == "arm64" {
 		candidates = append(candidates, "/opt/homebrew/bin/python3")
 	}
-	candidates = append(candidates, "/usr/local/bin/python3", "/usr/bin/python3")
+	candidates = append(candidates, "/usr/local/bin/python3")
+	if p, err := exec.LookPath("python3"); err == nil {
+		candidates = append(candidates, p)
+	}
+	candidates = append(candidates, "/usr/bin/python3")
+
+	// Deduplicate while preserving order.
+	seen := make(map[string]bool)
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		if _, err := os.Stat(c); err != nil {
+			continue
+		}
+		// Check that this Python can import headroom.
+		out, err := exec.Command(c, "-c", "import headroom").CombinedOutput()
+		if err == nil {
 			return c, nil
 		}
+		fmt.Fprintf(os.Stderr, "cq: headroom: %s cannot import headroom: %s\n", c, out)
 	}
-	return "", fmt.Errorf("python3 not found in PATH or well-known locations")
+	return "", fmt.Errorf("no python3 with headroom-ai found (tried %d candidates)", len(seen))
 }
 
 // StartHeadroomBridge spawns the Python subprocess and verifies headroom-ai
