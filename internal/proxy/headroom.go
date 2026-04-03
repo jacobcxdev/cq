@@ -17,6 +17,14 @@ import (
 const headroomScript = `
 import json, sys
 from headroom import compress
+from headroom.models import get_model_info
+
+def model_limit(model):
+    info = get_model_info(model)
+    if info and info.context_window:
+        return info.context_window
+    return 200000
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -26,7 +34,8 @@ for line in sys.stdin:
     if not msgs:
         print(json.dumps({"messages": [], "tokens_saved": 0, "compression_ratio": 0}), flush=True)
         continue
-    r = compress(msgs, model=req.get("model", ""))
+    model = req.get("model", "")
+    r = compress(msgs, model=model, model_limit=model_limit(model))
     print(json.dumps({"messages": r.messages, "tokens_saved": r.tokens_saved, "compression_ratio": r.compression_ratio}), flush=True)
 `
 
@@ -52,22 +61,25 @@ type headroomResponse struct {
 	CompressionRatio float64         `json:"compression_ratio"`
 }
 
-// findPython3 returns the path to a python3 binary, checking well-known
-// Homebrew paths in addition to PATH. LaunchAgents run with a minimal PATH
-// that often excludes /opt/homebrew/bin, so we probe explicitly.
+// findPython3 returns the path to a python3 binary, preferring Homebrew
+// installations over the system Python. LaunchAgents run with a minimal
+// PATH that excludes /opt/homebrew/bin, so we probe well-known paths first.
 func findPython3() (string, error) {
-	// Prefer PATH first (works in normal shell environments).
-	if p, err := exec.LookPath("python3"); err == nil {
-		return p, nil
-	}
-
-	// Probe well-known Homebrew locations for LaunchAgent environments.
 	var candidates []string
 	if runtime.GOARCH == "arm64" {
 		candidates = append(candidates, "/opt/homebrew/bin/python3")
 	}
-	candidates = append(candidates, "/usr/local/bin/python3", "/usr/bin/python3")
+	candidates = append(candidates, "/usr/local/bin/python3")
+	if p, err := exec.LookPath("python3"); err == nil {
+		candidates = append(candidates, p)
+	}
+
+	seen := make(map[string]bool)
 	for _, c := range candidates {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
 		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
@@ -103,10 +115,13 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 		return nil, fmt.Errorf("start python3: %w", err)
 	}
 
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
+
 	b := &HeadroomBridge{
 		cmd:    cmd,
 		stdin:  stdin,
-		stdout: bufio.NewScanner(stdoutPipe),
+		stdout: scanner,
 	}
 
 	// Ping to verify headroom-ai is installed.
@@ -132,7 +147,7 @@ func (b *HeadroomBridge) ping() error {
 	select {
 	case r := <-ch:
 		return r.err
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		return fmt.Errorf("timeout waiting for bridge response")
 	}
 }
