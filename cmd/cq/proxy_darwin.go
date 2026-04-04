@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"text/template"
 )
 
@@ -59,49 +58,8 @@ func proxyAgentLogPath() (string, error) {
 	return filepath.Join(home, "Library", "Logs", "cq", "proxy.log"), nil
 }
 
-func proxyAgentVersionPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "Logs", "cq", "proxy.version"), nil
-}
-
 var runProxyLaunchctl = func(args ...string) error {
 	return exec.Command("launchctl", args...).Run()
-}
-
-func proxyAgentVersionMarkerMatches(currentVersion string) (bool, error) {
-	if currentVersion == "" {
-		return true, nil
-	}
-	versionPath, err := proxyAgentVersionPath()
-	if err != nil {
-		return false, err
-	}
-	data, err := os.ReadFile(versionPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read proxy version marker: %w", err)
-	}
-	stored := strings.TrimSpace(string(data))
-	return stored == currentVersion, nil
-}
-
-func writeProxyAgentVersionMarker(currentVersion string) error {
-	versionPath, err := proxyAgentVersionPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
-		return fmt.Errorf("create proxy version dir: %w", err)
-	}
-	if err := os.WriteFile(versionPath, []byte(currentVersion+"\n"), 0o644); err != nil {
-		return fmt.Errorf("write proxy version marker: %w", err)
-	}
-	return nil
 }
 
 func installProxyAgent() error {
@@ -148,9 +106,6 @@ func installProxyAgent() error {
 	if err := runProxyLaunchctl("load", plistPath); err != nil {
 		return fmt.Errorf("launchctl load: %w", err)
 	}
-	if err := writeProxyAgentVersionMarker(version); err != nil {
-		return err
-	}
 
 	fmt.Fprintf(os.Stderr, "cq: installed proxy LaunchAgent (KeepAlive)\n")
 	fmt.Fprintf(os.Stderr, "cq: plist: %s\n", plistPath)
@@ -163,36 +118,7 @@ func restartProxyAgent() error {
 	if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel)); err != nil {
 		return fmt.Errorf("launchctl kickstart: %w", err)
 	}
-	if err := writeProxyAgentVersionMarker(version); err != nil {
-		return err
-	}
 	return nil
-}
-
-func ensureProxyAgentCurrent(currentVersion string) {
-	if currentVersion == "" {
-		return
-	}
-	plistPath, err := proxyAgentPlistPath()
-	if err != nil {
-		return
-	}
-	if _, err := os.Stat(plistPath); err != nil {
-		return
-	}
-	matches, err := proxyAgentVersionMarkerMatches(currentVersion)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: proxy auto-restart check failed: %v\n", err)
-		return
-	}
-	if matches {
-		return
-	}
-	if err := restartProxyAgent(); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: proxy auto-restart failed: %v\n", err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "cq: restarted proxy LaunchAgent for %s\n", currentVersion)
 }
 
 func uninstallProxyAgent() error {

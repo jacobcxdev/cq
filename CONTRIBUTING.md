@@ -72,6 +72,19 @@ To release a new version:
    - Opens a PR against [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap) to update the formula
 5. Merge the Homebrew formula PR.
 
+## Homebrew Proxy Service
+
+Homebrew-managed installs should run the proxy via `brew services`, not `cq proxy install`.
+
+- Start on first install: `brew services start cq`
+- Restart after upgrades or config changes: `brew services restart cq`
+- Stop the service: `brew services stop cq`
+- Check proxy health with `cq proxy status`
+
+The generated formula service runs `cq proxy start` and writes logs to `~/Library/Logs/cq/proxy.log`.
+
+Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain available for manual macOS workflows, but they are no longer the supported Homebrew path.
+
 ### Required Secret
 
 The release workflow needs a `HOMEBREW_TAP_TOKEN` repository secret — a GitHub PAT with `repo` scope on `jacobcxdev/homebrew-tap`.

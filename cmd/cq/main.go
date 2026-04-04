@@ -110,7 +110,6 @@ func main() {
 		os.Exit(1)
 	}
 	ensureAgent()
-	ensureProxyAgentCurrent(version)
 }
 
 func runAgent(args []string) error {

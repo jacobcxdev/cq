@@ -50,8 +50,11 @@ brews:
       bin.install "cq"
     post_install: |
       system Formula["python@3"].opt_bin/"python3", "-m", "pip", "install", "--break-system-packages", "--quiet", "headroom-ai[all]"
-      if OS.mac?
-        system bin/"cq", "proxy", "install"
-      end
+    service: |
+      run [opt_bin/"cq", "proxy", "start"]
+      keep_alive true
+      log_path File.expand_path("~/Library/Logs/cq/proxy.log")
+      error_log_path File.expand_path("~/Library/Logs/cq/proxy.log")
+      working_dir Dir.home
     test: |
       system "#{bin}/cq", "--help"
