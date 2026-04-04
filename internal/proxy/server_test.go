@@ -15,6 +15,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	claude "github.com/jacobcxdev/cq/internal/provider/claude"
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func mustParseURL(s string) *url.URL {
@@ -212,6 +213,54 @@ func TestServer_NetworkError(t *testing.T) {
 	}
 	if resp["type"] != "error" {
 		t.Errorf("response type = %v, want error", resp["type"])
+	}
+}
+
+func TestServer_HeadroomPreservesOriginalModelRouting(t *testing.T) {
+	claudeUpstreamCalled := false
+	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		claudeUpstreamCalled = true
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer claudeUpstream.Close()
+
+	codexUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer codexUpstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: claudeUpstream.URL,
+			CodexUpstream:  codexUpstream.URL,
+			LocalToken:     "tok",
+		},
+		Headroom: fakeBridge(t, func(req headroomRequest) headroomResponse {
+			if req.Model != "gpt-5.4" {
+				t.Fatalf("bridge model = %q, want gpt-5.4", req.Model)
+			}
+			return headroomResponse{
+				Messages:    json.RawMessage(`[{"role":"user","content":"compressed"}]`),
+				TokensSaved: 123,
+			}
+		}),
+		CodexSelector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+	}
+
+	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if claudeUpstreamCalled {
+		t.Fatal("claude upstream should not be called for compressed codex model")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
 }
 

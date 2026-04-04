@@ -19,7 +19,7 @@ import (
 
 func runProxy(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: cq proxy <start|install|uninstall|status>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cq proxy <start|install|uninstall|restart|status>\n")
 		return fmt.Errorf("missing subcommand")
 	}
 	switch args[0] {
@@ -29,6 +29,8 @@ func runProxy(args []string) error {
 		return installProxyAgent()
 	case "uninstall":
 		return uninstallProxyAgent()
+	case "restart":
+		return restartProxyAgent()
 	case "status":
 		return runProxyStatus()
 	default:

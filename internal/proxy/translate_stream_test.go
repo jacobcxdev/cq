@@ -108,9 +108,40 @@ func TestStreamTranslator_UsageInMessageDelta(t *testing.T) {
 	st := NewStreamTranslator("gpt-5.4")
 	st.Translate(w, strings.NewReader(events))
 
-	body := w.Body.String()
+	assertMessageDeltaUsage(t, w.Body.String(), map[string]float64{
+		"input_tokens":            42,
+		"output_tokens":           17,
+		"total_tokens":            59,
+		"cache_read_input_tokens": 11,
+		"reasoning_output_tokens": 7,
+	})
+}
 
-	// Find the message_delta event and check usage.
+func TestStreamTranslator_UsageFromThreadTokenUsageUpdated(t *testing.T) {
+	events := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_usage"}}`,
+		`data: {"type":"thread.token_usage.updated","usage":{"input_tokens":4200,"output_tokens":1700,"total_tokens":5900,"input_tokens_details":{"cached_tokens":1100},"output_tokens_details":{"reasoning_tokens":700}}}`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	w := httptest.NewRecorder()
+	st := NewStreamTranslator("gpt-5.4")
+	if err := st.Translate(w, strings.NewReader(events)); err != nil {
+		t.Fatal(err)
+	}
+
+	assertMessageDeltaUsage(t, w.Body.String(), map[string]float64{
+		"input_tokens":            4200,
+		"output_tokens":           1700,
+		"total_tokens":            5900,
+		"cache_read_input_tokens": 1100,
+		"reasoning_output_tokens": 700,
+	})
+}
+
+func assertMessageDeltaUsage(t *testing.T, body string, want map[string]float64) {
+	t.Helper()
 	for _, line := range strings.Split(body, "\n") {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -127,21 +158,18 @@ func TestStreamTranslator_UsageInMessageDelta(t *testing.T) {
 		if !ok {
 			t.Fatal("missing usage in message_delta")
 		}
-		if usage["output_tokens"].(float64) != 17 {
-			t.Errorf("output_tokens = %v, want 17", usage["output_tokens"])
-		}
-		if usage["total_tokens"].(float64) != 59 {
-			t.Errorf("total_tokens = %v, want 59", usage["total_tokens"])
-		}
-		if usage["cache_read_input_tokens"].(float64) != 11 {
-			t.Errorf("cache_read_input_tokens = %v, want 11", usage["cache_read_input_tokens"])
-		}
-		if usage["reasoning_output_tokens"].(float64) != 7 {
-			t.Errorf("reasoning_output_tokens = %v, want 7", usage["reasoning_output_tokens"])
+		for key, wantValue := range want {
+			got, ok := usage[key].(float64)
+			if !ok {
+				t.Fatalf("usage[%q] missing", key)
+			}
+			if got != wantValue {
+				t.Fatalf("usage[%q] = %v, want %v", key, got, wantValue)
+			}
 		}
 		return
 	}
-	t.Error("no message_delta event found")
+	t.Fatal("no message_delta event found")
 }
 
 func TestStreamTranslator_MaxTokens(t *testing.T) {

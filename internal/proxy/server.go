@@ -108,6 +108,10 @@ func (s *Server) isValidToken(token string) bool {
 }
 
 func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
+	var routeModel string
+	var routeProvider Provider
+	var buf []byte
+
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
@@ -138,7 +142,6 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 		}
 
 		// Buffer body for replay via GetBody on 401/429 retries.
-		var buf []byte
 		if r.Body != nil {
 			var err error
 			buf, err = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
@@ -158,6 +161,9 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			}
 		}
 
+		// Route based on the original endpoint and model before any body rewriting.
+		routeModel = extractModel(buf)
+
 		// Compress messages via headroom bridge if available.
 		if s.Headroom != nil && len(buf) > 0 {
 			if compressed, saved, err := s.Headroom.Compress(buf); err != nil {
@@ -173,15 +179,75 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			}
 		}
 
-		// Route based on endpoint and model.
-		model := extractModel(buf)
-		if RouteRequest(r.Method, r.URL.Path, model) == ProviderCodex {
+		routeProvider = RouteRequest(r.Method, r.URL.Path, routeModel)
+		fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
+			r.Method, r.URL.Path, routeModel, providerName(routeProvider))
+		if routeProvider == ProviderCodex {
 			s.handleCodex(w, r, buf)
 			return
 		}
 
 		rp.ServeHTTP(w, r)
 	}
+}
+
+func providerName(provider Provider) string {
+	switch provider {
+	case ProviderCodex:
+		return "codex"
+	default:
+		return "claude"
+	}
+}
+
+func debugMessagePreview(body []byte) string {
+	var partial struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &partial) != nil || len(partial.Messages) == 0 {
+		return ""
+	}
+	for _, msg := range partial.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		if text := debugContentPreview(msg.Content); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func debugContentPreview(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return truncateDebugText(text)
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return ""
+	}
+	for _, block := range blocks {
+		if block.Type == "text" && block.Text != "" {
+			return truncateDebugText(block.Text)
+		}
+	}
+	return ""
+}
+
+func truncateDebugText(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	const maxLen = 120
+	if len(text) <= maxLen {
+		return text
+	}
+	return text[:maxLen] + "…"
 }
 
 func writeError(w http.ResponseWriter, status int, errType, message string) {
