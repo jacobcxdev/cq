@@ -327,6 +327,57 @@ func TestHandleCodex_ModelValidationProbe(t *testing.T) {
 	}
 }
 
+func TestHandleCodex_RejectsClaudeModel(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		var req openaiResponsesRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("unmarshal upstream body: %v", err)
+		}
+		if req.Model != "claude-haiku-4-5-20251001" {
+			t.Fatalf("upstream model = %q, want claude-haiku-4-5-20251001", req.Model)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"detail":"The 'claude-haiku-4-5-20251001' model is not supported when using Codex with a ChatGPT account."}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "test-tok",
+		},
+		CodexSelector: &fakeCodexSelector{
+			account: &codex.CodexAccount{
+				AccessToken: "tok",
+				AccountID:   "acct",
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"claude-haiku-4-5-20251001","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+
+	srv.handleCodex(w, req, []byte(body))
+
+	if upstreamCalled {
+		t.Fatal("codex upstream should not be called for Claude models")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "is not a Codex model") {
+		t.Fatalf("response = %s, want local model guard error", w.Body.String())
+	}
+}
+
 func TestHandleCodex_UpstreamError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(429)

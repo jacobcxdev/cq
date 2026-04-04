@@ -25,6 +25,10 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	}
 
 	rawModel := extractModel(body)
+	if RouteModel(rawModel) != ProviderCodex {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model %q is not a Codex model", rawModel))
+		return
+	}
 	baseModel, effortOverride := ParseModelEffort(rawModel)
 
 	// Translate Anthropic → OpenAI Responses.
