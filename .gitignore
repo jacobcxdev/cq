@@ -19,7 +19,7 @@ coverage.out
 *.swo
 
 # Claude Code
-.claude/equip-session.json
+.claude/
 
 # OS
 .DS_Store
