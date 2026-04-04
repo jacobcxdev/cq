@@ -108,10 +108,6 @@ func (s *Server) isValidToken(token string) bool {
 }
 
 func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
-	var routeModel string
-	var routeProvider Provider
-	var buf []byte
-
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
@@ -134,6 +130,10 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		var routeModel string
+		var routeProvider Provider
+		var buf []byte
+
 		// Auth check: accept local proxy token or a known Claude account token.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !s.isValidToken(token) {
