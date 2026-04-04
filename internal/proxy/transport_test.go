@@ -546,7 +546,8 @@ func TestTokenTransport_429PingPongPrevention(t *testing.T) {
 		t.Fatalf("after phase1: switchCount = %d, want 1", n)
 	}
 
-	// B now needs 3 full requests to be exhausted.
+	// B now returns 429s too, but because the initial failover also failed,
+	// we should suppress further switching until some account replenishes.
 	for i := 0; i < 3; i++ {
 		resp, err := transport.RoundTrip(makeRequest(""))
 		if err != nil {
@@ -557,23 +558,76 @@ func TestTokenTransport_429PingPongPrevention(t *testing.T) {
 		}
 	}
 	time.Sleep(10 * time.Millisecond)
-	if n := switchCount.Load(); n != 2 {
-		t.Fatalf("after phase2: switchCount = %d, want 2", n)
+	if n := switchCount.Load(); n != 1 {
+		t.Fatalf("after phase2: switchCount = %d, want 1", n)
 	}
 
-	// Now back on A with a fresh counter. Two more transient 429s — no switch.
-	for i := 0; i < 2; i++ {
+	// Once a request succeeds again, switching may resume later.
+	var recovered atomic.Bool
+	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		if !recovered.Swap(true) {
+			return makeResponse(200, "ok"), nil
+		}
+		return makeResponse(429, "rate limited"), nil
+	})
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatalf("phase3 recovery: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("phase3 recovery: status = %d, want 200", resp.StatusCode)
+	}
+
+	for i := 0; i < 3; i++ {
 		resp, err := transport.RoundTrip(makeRequest(""))
 		if err != nil {
-			t.Fatalf("phase3 req %d: %v", i+1, err)
+			t.Fatalf("phase4 req %d: %v", i+1, err)
 		}
 		if resp.StatusCode != 429 {
-			t.Fatalf("phase3 req %d: status = %d, want 429", i+1, resp.StatusCode)
+			t.Fatalf("phase4 req %d: status = %d, want 429", i+1, resp.StatusCode)
 		}
 	}
 	time.Sleep(10 * time.Millisecond)
 	if n := switchCount.Load(); n != 2 {
-		t.Errorf("after phase3: switchCount = %d, want 2 (no extra switches)", n)
+		t.Fatalf("after phase4: switchCount = %d, want 2", n)
+	}
+}
+
+func TestTokenTransport_429StopsSwitchingWhenAllAccountsExhausted(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccessToken: "tok-b", ExpiresAt: future},
+	}}
+
+	var switchCount atomic.Int32
+	transport := &TokenTransport{
+		Selector: sel,
+		Switcher: func(_ context.Context, _ string) error {
+			switchCount.Add(1)
+			return nil
+		},
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+
+	for i := 0; i < 9; i++ {
+		resp, err := transport.RoundTrip(makeRequest(""))
+		if err != nil {
+			t.Fatalf("req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
+		}
+	}
+	time.Sleep(10 * time.Millisecond)
+	if n := switchCount.Load(); n != 1 {
+		t.Fatalf("switchCount = %d, want 1 after all accounts exhausted", n)
+	}
+	if transport.suppressFailoverForKey == "" {
+		t.Fatal("expected failover suppression to be set")
 	}
 }
 

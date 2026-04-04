@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -318,6 +321,61 @@ func TestStartHeadroomBridge_Integration(t *testing.T) {
 	_ = saved // may be 0 for short messages — that's fine
 }
 
+func TestDrainStderr_SuppressesKnownNoise(t *testing.T) {
+	bridge := &HeadroomBridge{}
+	input := strings.NewReader(strings.Join([]string{
+		"Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.",
+		"Tag placeholder lost during compression, appending: <system-reminder>",
+		"## Exited Plan Mode",
+		"",
+		"You have exited plan mode. You can now make edits again.",
+		"Traceback (most recent call last):",
+		"  File \"<string>\", line 12, in <module>",
+		"    for line in sys.stdin:",
+		"                ^^^^^^^^^",
+		"KeyboardInterrupt",
+	}, "\n") + "\n")
+
+	stderr := captureStderr(t, func() {
+		bridge.drainStderr(input)
+	})
+
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestDrainStderr_PreservesUnexpectedDiagnostics(t *testing.T) {
+	bridge := &HeadroomBridge{}
+	stderr := captureStderr(t, func() {
+		bridge.drainStderr(strings.NewReader("unexpected warning\n"))
+	})
+
+	if !strings.Contains(stderr, "cq: headroom stderr: unexpected warning") {
+		t.Fatalf("stderr = %q, want unexpected diagnostic", stderr)
+	}
+}
+
+func TestDrainStderr_SuppressesShutdownKeyboardInterrupt(t *testing.T) {
+	bridge := &HeadroomBridge{}
+	bridge.shuttingDown.Store(true)
+	input := strings.NewReader(strings.Join([]string{
+		"Traceback (most recent call last):",
+		"  File \"<string>\", line 12, in <module>",
+		"    for line in sys.stdin:",
+		"                ^^^^^^^^^",
+		"KeyboardInterrupt",
+	}, "\n") + "\n")
+
+	stderr := captureStderr(t, func() {
+		bridge.drainStderr(input)
+	})
+
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
 func TestHealthEndpoint_HeadroomField(t *testing.T) {
 	for _, hasHeadroom := range []bool{true, false} {
 		name := "without"
@@ -351,4 +409,29 @@ func TestHealthEndpoint_HeadroomField(t *testing.T) {
 			}
 		})
 	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return buf.String()
 }

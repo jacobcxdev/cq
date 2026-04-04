@@ -100,6 +100,8 @@ func (st *StreamTranslator) translateEvent(eventType string, data []byte) []sseE
 		return st.handleOutputItemDone(data)
 	case "response.completed":
 		return st.handleResponseCompleted(data)
+	case "thread.token_usage.updated":
+		return st.handleThreadTokenUsageUpdated(data)
 	default:
 		return nil
 	}
@@ -307,22 +309,8 @@ func (st *StreamTranslator) handleResponseCompleted(data []byte) []sseEvent {
 	}
 	st.stopReason = stopReason
 
-	st.usage = translateUsage(ev.Response.Usage)
-
-	usage := map[string]any{
-		"output_tokens": st.usage.OutputTokens,
-	}
-	if st.usage.CacheCreationInputTokens != nil {
-		usage["cache_creation_input_tokens"] = *st.usage.CacheCreationInputTokens
-	}
-	if st.usage.CacheReadInputTokens != nil {
-		usage["cache_read_input_tokens"] = *st.usage.CacheReadInputTokens
-	}
-	if st.usage.ReasoningOutputTokens != nil {
-		usage["reasoning_output_tokens"] = *st.usage.ReasoningOutputTokens
-	}
-	if st.usage.TotalTokens != nil {
-		usage["total_tokens"] = *st.usage.TotalTokens
+	if ev.Response.Usage != nil {
+		st.usage = translateUsage(ev.Response.Usage)
 	}
 
 	msgDelta := map[string]any{
@@ -330,14 +318,47 @@ func (st *StreamTranslator) handleResponseCompleted(data []byte) []sseEvent {
 		"delta": map[string]string{
 			"stop_reason": stopReason,
 		},
-		"usage": usage,
+		"usage": anthropicUsageMap(st.usage),
 	}
 	b, _ := json.Marshal(msgDelta)
 	return []sseEvent{{event: "message_delta", data: b}}
 }
 
+func (st *StreamTranslator) handleThreadTokenUsageUpdated(data []byte) []sseEvent {
+	var ev struct {
+		Usage *openaiUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return nil
+	}
+	if ev.Usage != nil {
+		st.usage = translateUsage(ev.Usage)
+	}
+	return nil
+}
+
 func (st *StreamTranslator) writeSSE(w http.ResponseWriter, event string, data json.RawMessage) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(data))
+}
+
+func anthropicUsageMap(usage anthropicUsage) map[string]any {
+	result := map[string]any{
+		"input_tokens":  usage.InputTokens,
+		"output_tokens": usage.OutputTokens,
+	}
+	if usage.CacheCreationInputTokens != nil {
+		result["cache_creation_input_tokens"] = *usage.CacheCreationInputTokens
+	}
+	if usage.CacheReadInputTokens != nil {
+		result["cache_read_input_tokens"] = *usage.CacheReadInputTokens
+	}
+	if usage.ReasoningOutputTokens != nil {
+		result["reasoning_output_tokens"] = *usage.ReasoningOutputTokens
+	}
+	if usage.TotalTokens != nil {
+		result["total_tokens"] = *usage.TotalTokens
+	}
+	return result
 }
 
 // Collect reads all SSE events from r, accumulating state without writing SSE output.

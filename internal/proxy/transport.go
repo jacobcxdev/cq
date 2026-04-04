@@ -51,9 +51,10 @@ type TokenTransport struct {
 	RefreshHTTP httputil.Doer
 	Inner       http.RoundTripper
 
-	mu          sync.Mutex
-	knownTokens map[string]string          // acctIdentifier → current access token
-	failures    map[string]*failure429      // acctIdentifier → 429 tracker
+	mu                    sync.Mutex
+	knownTokens           map[string]string      // acctIdentifier → current access token
+	failures              map[string]*failure429 // acctIdentifier → 429 tracker
+	suppressFailoverForKey string
 }
 
 func (t *TokenTransport) inner() http.RoundTripper {
@@ -127,6 +128,7 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return t.handle429(req, resp, acct)
 	default:
 		t.reset429(acct)
+		t.clearFailoverSuppression(acct)
 		return resp, nil
 	}
 }
@@ -158,6 +160,9 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 	exhausted := t.record429(failedAcct)
 	if !exhausted {
 		// Transient 429 — forward to client (Claude Code handles backoff).
+		return resp, nil
+	}
+	if t.isFailoverSuppressed(failedAcct) {
 		return resp, nil
 	}
 
@@ -195,7 +200,45 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 	}
 
 	resp.Body.Close()
-	return t.doRequest(req, token)
+	failoverResp, err := t.doRequest(req, token)
+	if err != nil {
+		return nil, err
+	}
+	if failoverResp.StatusCode == http.StatusTooManyRequests {
+		t.setFailoverSuppression(failedAcct)
+	} else {
+		t.clearFailoverSuppression(failedAcct)
+	}
+	return failoverResp, nil
+}
+
+func (t *TokenTransport) isFailoverSuppressed(acct *keyring.ClaudeOAuth) bool {
+	key := acctIdentifier(acct)
+	if key == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.suppressFailoverForKey == key
+}
+
+func (t *TokenTransport) setFailoverSuppression(acct *keyring.ClaudeOAuth) {
+	key := acctIdentifier(acct)
+	if key == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.suppressFailoverForKey = key
+}
+
+func (t *TokenTransport) clearFailoverSuppression(acct *keyring.ClaudeOAuth) {
+	key := acctIdentifier(acct)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if key == "" || t.suppressFailoverForKey == key {
+		t.suppressFailoverForKey = ""
+	}
 }
 
 // refreshAccount obtains a fresh token, with double-check to avoid redundant refreshes.

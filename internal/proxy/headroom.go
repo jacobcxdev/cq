@@ -2,13 +2,16 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,10 +45,12 @@ for line in sys.stdin:
 // HeadroomBridge manages a persistent Python subprocess that compresses
 // LLM messages via the headroom-ai library.
 type HeadroomBridge struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Scanner
-	mu     sync.Mutex
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	stdout        *bufio.Scanner
+	mu            sync.Mutex
+	shuttingDown  atomic.Bool
+	stderrDrainWG sync.WaitGroup
 }
 
 // headroomRequest is the JSON line sent to the Python bridge.
@@ -97,7 +102,6 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 	}
 
 	cmd := exec.Command(pythonPath, "-u", "-c", headroomScript)
-	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -108,6 +112,12 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 	if err != nil {
 		stdin.Close()
 		return nil, fmt.Errorf("create stdout pipe: %w", err)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		stdin.Close()
+		return nil, fmt.Errorf("create stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -123,6 +133,11 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 		stdin:  stdin,
 		stdout: scanner,
 	}
+	b.stderrDrainWG.Add(1)
+	go func() {
+		defer b.stderrDrainWG.Done()
+		b.drainStderr(stderrPipe)
+	}()
 
 	// Ping to verify headroom-ai is installed.
 	if err := b.ping(); err != nil {
@@ -230,8 +245,85 @@ func spliceMessages(body []byte, messages json.RawMessage) ([]byte, error) {
 	return json.Marshal(raw)
 }
 
+func (b *HeadroomBridge) drainStderr(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
+	var traceback bytes.Buffer
+	capturingTraceback := false
+
+	flushTraceback := func() {
+		if traceback.Len() == 0 {
+			return
+		}
+		text := traceback.String()
+		if shouldSuppressHeadroomTraceback(text, b.shuttingDown.Load()) {
+			traceback.Reset()
+			capturingTraceback = false
+			return
+		}
+		fmt.Fprintf(os.Stderr, "cq: headroom stderr: %s\n", text)
+		traceback.Reset()
+		capturingTraceback = false
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "Traceback (most recent call last):" {
+			flushTraceback()
+			traceback.WriteString(line)
+			capturingTraceback = true
+			continue
+		}
+		if capturingTraceback {
+			traceback.WriteByte('\n')
+			traceback.WriteString(line)
+			if strings.Contains(line, "KeyboardInterrupt") {
+				flushTraceback()
+			}
+			continue
+		}
+		if shouldSuppressHeadroomStderrLine(line) {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "cq: headroom stderr: %s\n", line)
+	}
+
+	flushTraceback()
+	if err := scanner.Err(); err != nil && !b.shuttingDown.Load() {
+		fmt.Fprintf(os.Stderr, "cq: headroom stderr: %v\n", err)
+	}
+}
+
+func shouldSuppressHeadroomStderrLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return true
+	}
+	if line == "## Exited Plan Mode" {
+		return true
+	}
+	if strings.HasPrefix(line, "You have exited plan mode.") {
+		return true
+	}
+	if strings.Contains(line, "Warning: You are sending unauthenticated requests to the HF Hub.") {
+		return true
+	}
+	if strings.Contains(line, "Tag placeholder lost during compression, appending:") {
+		return true
+	}
+	return false
+}
+
+func shouldSuppressHeadroomTraceback(text string, shuttingDown bool) bool {
+	if strings.Contains(text, "for line in sys.stdin:") && strings.Contains(text, "KeyboardInterrupt") {
+		return true
+	}
+	return shuttingDown && strings.Contains(text, "KeyboardInterrupt")
+}
+
 // Stop shuts down the Python subprocess gracefully, falling back to SIGKILL.
 func (b *HeadroomBridge) Stop() {
+	b.shuttingDown.Store(true)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -249,4 +341,5 @@ func (b *HeadroomBridge) Stop() {
 		b.cmd.Process.Kill()
 		<-done
 	}
+	b.stderrDrainWG.Wait()
 }
