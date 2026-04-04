@@ -16,4 +16,3 @@ func restartProxyAgent() error {
 	return fmt.Errorf("proxy LaunchAgent is only supported on macOS")
 }
 
-func ensureProxyAgentCurrent(string) {}
