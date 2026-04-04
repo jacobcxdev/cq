@@ -50,5 +50,8 @@ brews:
       bin.install "cq"
     post_install: |
       system Formula["python@3"].opt_bin/"python3", "-m", "pip", "install", "--break-system-packages", "--quiet", "headroom-ai[all]"
+      if OS.mac?
+        system bin/"cq", "proxy", "install"
+      end
     test: |
       system "#{bin}/cq", "--help"
