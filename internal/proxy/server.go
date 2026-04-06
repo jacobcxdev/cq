@@ -216,7 +216,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(codexUpstream)
-			pr.Out.URL.Path = "/responses"
+			pr.Out.URL.Path = codexUpstream.Path + "/responses"
 			pr.Out.Host = codexUpstream.Host
 		},
 		Transport: s.CodexTransport,
