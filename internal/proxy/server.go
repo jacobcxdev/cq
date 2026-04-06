@@ -39,7 +39,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /responses", s.handleNativeCodex)
+	mux.HandleFunc("/responses", s.handleNativeCodex)
 	mux.HandleFunc("/", s.proxyHandler(upstream))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.Config.Port)
@@ -120,6 +120,12 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WebSocket upgrade — reverse proxy to Codex upstream.
+	if r.Header.Get("Upgrade") != "" {
+		s.proxyCodexUpgrade(w, r)
+		return
+	}
+
 	// Buffer request body.
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
 	r.Body.Close()
@@ -192,6 +198,30 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	} else {
 		io.Copy(w, resp.Body)
 	}
+}
+
+// proxyCodexUpgrade handles WebSocket upgrade requests to /responses by
+// reverse-proxying to the Codex upstream. The CodexTokenTransport injects
+// auth on the initial HTTP upgrade request; after the upgrade the raw TCP
+// connection is relayed without further intervention.
+func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
+	codexUpstream, err := url.Parse(s.Config.CodexUpstream)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade) provider=codex (native)\n", r.Method)
+
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(codexUpstream)
+			pr.Out.URL.Path = "/responses"
+			pr.Out.Host = codexUpstream.Host
+		},
+		Transport: s.CodexTransport,
+	}
+	rp.ServeHTTP(w, r)
 }
 
 func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
