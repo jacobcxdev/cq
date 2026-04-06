@@ -98,6 +98,19 @@ func runProxyStart() error {
 	}
 	fmt.Fprintln(os.Stderr)
 
+	// Codex account switcher (best-effort, persists switch to disk).
+	codexAccountsMgr := &codexprov.Accounts{FS: fsutil.OSFileSystem{}}
+	codexSwitcher := proxy.CodexAccountSwitcher(func(ctx context.Context, email string) error {
+		_, err := codexAccountsMgr.Switch(ctx, email)
+		return err
+	})
+
+	codexTransport := &proxy.CodexTokenTransport{
+		Selector: codexSelector,
+		Switcher: codexSwitcher,
+		Inner:    http.DefaultTransport,
+	}
+
 	// Start headroom compression bridge if configured.
 	var headroom *proxy.HeadroomBridge
 	if cfg.Headroom {
@@ -111,13 +124,13 @@ func runProxyStart() error {
 	}
 
 	srv := &proxy.Server{
-		Config:        cfg,
-		Selector:      selector,
-		Discover:      discover,
-		Transport:     transport,
-		CodexSelector: codexSelector,
-		CodexDiscover: codexDiscover,
-		Headroom:      headroom,
+		Config:         cfg,
+		Selector:       selector,
+		Discover:       discover,
+		Transport:      transport,
+		CodexDiscover:  codexDiscover,
+		CodexTransport: codexTransport,
+		Headroom:       headroom,
 	}
 
 	err = srv.ListenAndServe(context.Background())
