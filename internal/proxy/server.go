@@ -147,10 +147,11 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
 
-	// Copy relevant headers from original request.
-	for _, h := range []string{"Content-Type", "Accept", "OpenAI-Beta"} {
-		if v := r.Header.Get(h); v != "" {
-			upReq.Header.Set(h, v)
+	// Forward all original headers — the transport will override auth headers.
+	// This preserves Codex CLI-specific headers the ChatGPT backend may require.
+	for key, vals := range r.Header {
+		for _, v := range vals {
+			upReq.Header.Add(key, v)
 		}
 	}
 	if upReq.Header.Get("Content-Type") == "" {
