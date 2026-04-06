@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/keyring"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 func TestAccountSelector_Select(t *testing.T) {
@@ -101,7 +102,7 @@ func TestAccountSelector_Select(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
 				return tt.accounts
-			}, nil)
+			}, nil, nil)
 
 			acct, err := sel.Select(context.Background(), tt.exclude...)
 			if tt.wantErr {
@@ -128,7 +129,7 @@ func TestAccountSelector_Select_ReturnsCopy(t *testing.T) {
 	}
 	sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
 		return []keyring.ClaudeOAuth{original}
-	}, nil)
+	}, nil, nil)
 
 	acct, err := sel.Select(context.Background())
 	if err != nil {
@@ -154,7 +155,7 @@ func TestAccountSelector_Select_PrefersActiveAccount(t *testing.T) {
 				{Email: "fresh@test.com", AccessToken: "t1", ExpiresAt: future + 5000},
 				{Email: "active@test.com", AccessToken: "t2", ExpiresAt: future},
 			}
-		}, func() string { return "active@test.com" })
+		}, func() string { return "active@test.com" }, nil)
 
 		acct, err := sel.Select(context.Background())
 		if err != nil {
@@ -171,7 +172,7 @@ func TestAccountSelector_Select_PrefersActiveAccount(t *testing.T) {
 				{Email: "fresh@test.com", AccessToken: "t1", ExpiresAt: future + 5000},
 				{Email: "active@test.com", AccessToken: "t2", ExpiresAt: future},
 			}
-		}, func() string { return "active@test.com" })
+		}, func() string { return "active@test.com" }, nil)
 
 		acct, err := sel.Select(context.Background(), "active@test.com")
 		if err != nil {
@@ -188,7 +189,7 @@ func TestAccountSelector_Select_PrefersActiveAccount(t *testing.T) {
 				{Email: "old@test.com", AccessToken: "t1", ExpiresAt: future},
 				{Email: "new@test.com", AccessToken: "t2", ExpiresAt: future + 5000},
 			}
-		}, nil)
+		}, nil, nil)
 
 		acct, err := sel.Select(context.Background())
 		if err != nil {
@@ -206,7 +207,7 @@ func TestAccountSelector_Select_PrefersActiveAccount(t *testing.T) {
 				{Email: "newer@test.com", AccessToken: "t1", ExpiresAt: past, RefreshToken: "r1"},
 				{Email: "active@test.com", AccessToken: "t2", ExpiresAt: past - 1000, RefreshToken: "r2"},
 			}
-		}, func() string { return "active@test.com" })
+		}, func() string { return "active@test.com" }, nil)
 
 		acct, err := sel.Select(context.Background())
 		if err != nil {
@@ -216,4 +217,167 @@ func TestAccountSelector_Select_PrefersActiveAccount(t *testing.T) {
 			t.Errorf("got %q, want active@test.com", acct.Email)
 		}
 	})
+}
+
+func TestAccountSelector_Select_QuotaAware(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+
+	// Helper to build a pre-populated monitor without starting the goroutine.
+	buildMonitor := func(snaps map[string]QuotaSnapshot) *QuotaMonitor {
+		return &QuotaMonitor{snapshots: snaps}
+	}
+
+	t.Run("prefers account with higher remaining quota", func(t *testing.T) {
+		monitor := buildMonitor(map[string]QuotaSnapshot{
+			"uuid-low":  {Result: quotaResult("uuid-low", "low@test.com", 10)},
+			"uuid-high": {Result: quotaResult("uuid-high", "high@test.com", 80)},
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "low@test.com", AccountUUID: "uuid-low", AccessToken: "t1", ExpiresAt: future + 5000},
+				{Email: "high@test.com", AccountUUID: "uuid-high", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, nil, monitor)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "high@test.com" {
+			t.Errorf("got %q, want high@test.com (higher quota)", acct.Email)
+		}
+	})
+
+	t.Run("quota tiebreak uses active preference", func(t *testing.T) {
+		monitor := buildMonitor(map[string]QuotaSnapshot{
+			"uuid-a": {Result: quotaResult("uuid-a", "a@test.com", 50)},
+			"uuid-b": {Result: quotaResult("uuid-b", "b@test.com", 50)},
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "t1", ExpiresAt: future + 5000},
+				{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, func() string { return "b@test.com" }, monitor)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "b@test.com" {
+			t.Errorf("got %q, want b@test.com (active, tied quota)", acct.Email)
+		}
+	})
+
+	t.Run("quota tiebreak uses latest expiry when no active", func(t *testing.T) {
+		monitor := buildMonitor(map[string]QuotaSnapshot{
+			"uuid-a": {Result: quotaResult("uuid-a", "a@test.com", 50)},
+			"uuid-b": {Result: quotaResult("uuid-b", "b@test.com", 50)},
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "t1", ExpiresAt: future},
+				{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "t2", ExpiresAt: future + 5000},
+			}
+		}, nil, monitor)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "b@test.com" {
+			t.Errorf("got %q, want b@test.com (later expiry, tied quota)", acct.Email)
+		}
+	})
+
+	t.Run("known quota beats unknown", func(t *testing.T) {
+		monitor := buildMonitor(map[string]QuotaSnapshot{
+			"uuid-known": {Result: quotaResult("uuid-known", "known@test.com", 30)},
+			// uuid-unknown has no snapshot
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "unknown@test.com", AccountUUID: "uuid-unknown", AccessToken: "t1", ExpiresAt: future + 5000},
+				{Email: "known@test.com", AccountUUID: "uuid-known", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, nil, monitor)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "known@test.com" {
+			t.Errorf("got %q, want known@test.com (known state)", acct.Email)
+		}
+	})
+
+	t.Run("nil monitor falls back to existing logic", func(t *testing.T) {
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "old@test.com", AccessToken: "t1", ExpiresAt: future},
+				{Email: "new@test.com", AccessToken: "t2", ExpiresAt: future + 5000},
+			}
+		}, nil, nil)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "new@test.com" {
+			t.Errorf("got %q, want new@test.com (latest expiry fallback)", acct.Email)
+		}
+	})
+
+	t.Run("exhausted account deprioritised", func(t *testing.T) {
+		monitor := buildMonitor(map[string]QuotaSnapshot{
+			"uuid-dead": {Result: quotaResult("uuid-dead", "dead@test.com", 0)},
+			"uuid-live": {Result: quotaResult("uuid-live", "live@test.com", 45)},
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "dead@test.com", AccountUUID: "uuid-dead", AccessToken: "t1", ExpiresAt: future + 5000},
+				{Email: "live@test.com", AccountUUID: "uuid-live", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, func() string { return "dead@test.com" }, monitor)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "live@test.com" {
+			t.Errorf("got %q, want live@test.com (dead account at 0%%)", acct.Email)
+		}
+	})
+
+	t.Run("quota overrides active preference", func(t *testing.T) {
+		monitor := buildMonitor(map[string]QuotaSnapshot{
+			"uuid-active": {Result: quotaResult("uuid-active", "active@test.com", 5)},
+			"uuid-other":  {Result: quotaResult("uuid-other", "other@test.com", 80)},
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "active@test.com", AccountUUID: "uuid-active", AccessToken: "t1", ExpiresAt: future},
+				{Email: "other@test.com", AccountUUID: "uuid-other", AccessToken: "t2", ExpiresAt: future},
+			}
+		}, func() string { return "active@test.com" }, monitor)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "other@test.com" {
+			t.Errorf("got %q, want other@test.com (80%% vs 5%%)", acct.Email)
+		}
+	})
+}
+
+func quotaResult(id, email string, remainingPct int) quota.Result {
+	return quota.Result{
+		AccountID: id,
+		Email:     email,
+		Status:    quota.StatusOK,
+		Windows: map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: remainingPct},
+		},
+	}
 }

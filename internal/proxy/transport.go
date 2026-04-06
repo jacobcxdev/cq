@@ -33,6 +33,13 @@ const (
 	exhaustionThreshold = 3
 	// exhaustionWindow is the time window within which consecutive 429s must occur.
 	exhaustionWindow = 60 * time.Second
+
+	// transientQuotaThreshold: if quota shows more than this percentage remaining,
+	// treat consecutive 429s as transient rather than true exhaustion.
+	transientQuotaThreshold = 10
+	// transientQuotaMaxAge is the maximum age of a quota snapshot to trust
+	// for transient-429 detection.
+	transientQuotaMaxAge = 5 * time.Minute
 )
 
 // failure429 tracks consecutive 429 responses for one account.
@@ -49,6 +56,7 @@ type TokenTransport struct {
 	Persister   PersistFunc
 	Switcher    AccountSwitcher
 	RefreshHTTP httputil.Doer
+	Monitor     *QuotaMonitor
 	Inner       http.RoundTripper
 
 	mu                    sync.Mutex
@@ -162,6 +170,15 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 		// Transient 429 — forward to client (Claude Code handles backoff).
 		return resp, nil
 	}
+
+	// Validate against quota data before declaring exhaustion.
+	if t.isTransient429(failedAcct) {
+		t.reset429(failedAcct)
+		fmt.Fprintf(os.Stderr, "cq: proxy %s got %d consecutive 429s but quota shows remaining capacity — treating as transient\n",
+			failedAcct.Email, exhaustionThreshold)
+		return resp, nil
+	}
+
 	if t.isFailoverSuppressed(failedAcct) {
 		return resp, nil
 	}
@@ -239,6 +256,26 @@ func (t *TokenTransport) clearFailoverSuppression(acct *keyring.ClaudeOAuth) {
 	if key == "" || t.suppressFailoverForKey == key {
 		t.suppressFailoverForKey = ""
 	}
+}
+
+// isTransient429 checks whether a 429-exhausted account likely still has quota.
+// Returns true if the quota monitor shows the account has more than
+// transientQuotaThreshold percent remaining and the data is fresh.
+func (t *TokenTransport) isTransient429(acct *keyring.ClaudeOAuth) bool {
+	if t.Monitor == nil {
+		return false
+	}
+	snap, ok := t.Monitor.Snapshot(acctIdentifier(acct))
+	if !ok {
+		return false
+	}
+	if time.Since(snap.FetchedAt) > transientQuotaMaxAge {
+		return false
+	}
+	if !snap.Result.IsUsable() {
+		return false
+	}
+	return snap.Result.MinRemainingPct() > transientQuotaThreshold
 }
 
 // refreshAccount obtains a fresh token, with double-check to avoid redundant refreshes.

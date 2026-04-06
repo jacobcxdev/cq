@@ -22,12 +22,14 @@ type ClaudeSelector interface {
 type accountSelector struct {
 	discover    ClaudeDiscoverer
 	activeEmail ActiveEmailFunc
+	monitor     *QuotaMonitor
 }
 
 // NewAccountSelector creates a ClaudeSelector backed by the given discovery function.
 // If activeEmail is non-nil, Select() prefers the active account over others.
-func NewAccountSelector(discover ClaudeDiscoverer, activeEmail ActiveEmailFunc) ClaudeSelector {
-	return &accountSelector{discover: discover, activeEmail: activeEmail}
+// If monitor is non-nil, Select() prefers accounts with more remaining quota.
+func NewAccountSelector(discover ClaudeDiscoverer, activeEmail ActiveEmailFunc, monitor *QuotaMonitor) ClaudeSelector {
+	return &accountSelector{discover: discover, activeEmail: activeEmail, monitor: monitor}
 }
 
 func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring.ClaudeOAuth, error) {
@@ -48,7 +50,9 @@ func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring
 
 	now := time.Now().UnixMilli()
 	var best *keyring.ClaudeOAuth
+	bestRemaining := -1
 	var bestExpired *keyring.ClaudeOAuth
+	bestExpiredRemaining := -1
 
 	for i := range accounts {
 		a := &accounts[i]
@@ -56,24 +60,17 @@ func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring
 			continue
 		}
 
+		remaining := s.accountRemaining(a)
+
 		if a.ExpiresAt == 0 || a.ExpiresAt > now {
-			// Non-expired (or unknown expiry).
-			// Prefer the active account; otherwise pick latest expiry.
-			if best == nil {
+			if s.betterCandidate(a, remaining, best, bestRemaining, activeEmail) {
 				best = a
-			} else if activeEmail != "" && a.Email == activeEmail && best.Email != activeEmail {
-				best = a
-			} else if best.Email != activeEmail && a.ExpiresAt > best.ExpiresAt {
-				best = a
+				bestRemaining = remaining
 			}
 		} else if a.RefreshToken != "" {
-			// Expired but refreshable.
-			if bestExpired == nil {
+			if s.betterCandidate(a, remaining, bestExpired, bestExpiredRemaining, activeEmail) {
 				bestExpired = a
-			} else if activeEmail != "" && a.Email == activeEmail && bestExpired.Email != activeEmail {
-				bestExpired = a
-			} else if bestExpired.Email != activeEmail && a.ExpiresAt > bestExpired.ExpiresAt {
-				bestExpired = a
+				bestExpiredRemaining = remaining
 			}
 		}
 	}
@@ -88,6 +85,52 @@ func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring
 	}
 
 	return nil, fmt.Errorf("no claude accounts available")
+}
+
+// accountRemaining returns the MinRemainingPct for an account from the quota
+// monitor, or -1 if no data is available.
+func (s *accountSelector) accountRemaining(a *keyring.ClaudeOAuth) int {
+	if s.monitor == nil {
+		return -1
+	}
+	key := acctIdentifier(a)
+	snap, ok := s.monitor.Snapshot(key)
+	if !ok {
+		return -1
+	}
+	return snap.Result.MinRemainingPct()
+}
+
+// betterCandidate returns true if candidate (with candidateRemaining) should
+// replace current (with currentRemaining). Selection priority:
+//  1. Higher remaining quota (when both have data)
+//  2. Known quota state beats unknown
+//  3. Active account preference
+//  4. Later token expiry
+func (s *accountSelector) betterCandidate(candidate *keyring.ClaudeOAuth, candidateRemaining int, current *keyring.ClaudeOAuth, currentRemaining int, activeEmail string) bool {
+	if current == nil {
+		return true
+	}
+
+	// Quota-based comparison (when at least one has data).
+	if candidateRemaining >= 0 || currentRemaining >= 0 {
+		if candidateRemaining != currentRemaining {
+			return candidateRemaining > currentRemaining
+		}
+		// Equal remaining — fall through to tiebreakers.
+	}
+
+	// Active account preference.
+	if activeEmail != "" {
+		candidateActive := candidate.Email == activeEmail
+		currentActive := current.Email == activeEmail
+		if candidateActive != currentActive {
+			return candidateActive
+		}
+	}
+
+	// Latest expiry.
+	return candidate.ExpiresAt > current.ExpiresAt
 }
 
 func isExcluded(a *keyring.ClaudeOAuth, excludeSet map[string]bool) bool {

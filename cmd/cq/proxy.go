@@ -61,8 +61,16 @@ func runProxyStart() error {
 
 	discover := proxy.ClaudeDiscoverer(keyring.DiscoverClaudeAccounts)
 	activeEmail := proxy.ActiveEmailFunc(keyring.ActiveClaudeEmail)
-	selector := proxy.NewAccountSelector(discover, activeEmail)
 	refreshClient := httputil.NewClient(30*time.Second, version)
+
+	// Quota monitor: periodically fetches usage data for proactive account selection.
+	claudeProvider := claudeprov.New(refreshClient)
+	monitor := proxy.NewQuotaMonitor(claudeProvider.Fetch, 2*time.Minute)
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	defer monitorCancel()
+	go monitor.Start(monitorCtx)
+
+	selector := proxy.NewAccountSelector(discover, activeEmail, monitor)
 
 	accountsMgr := &claudeprov.Accounts{HTTP: refreshClient}
 	switcher := proxy.AccountSwitcher(func(ctx context.Context, email string) error {
@@ -76,6 +84,7 @@ func runProxyStart() error {
 		Persister:   proxy.DefaultPersister,
 		Switcher:    switcher,
 		RefreshHTTP: refreshClient,
+		Monitor:     monitor,
 		Inner:       http.DefaultTransport,
 	}
 

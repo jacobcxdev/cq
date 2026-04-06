@@ -15,6 +15,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	claude "github.com/jacobcxdev/cq/internal/provider/claude"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // --- test helpers (shared with server_test.go) ---
@@ -651,5 +652,222 @@ func TestTokenTransport_ContextCancellation(t *testing.T) {
 	_, err := transport.RoundTrip(req)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
+	}
+}
+
+// --- quota-aware 429 tests ---
+
+func monitorWithSnapshot(id string, remainingPct int, age time.Duration) *QuotaMonitor {
+	return &QuotaMonitor{
+		snapshots: map[string]QuotaSnapshot{
+			id: {
+				Result: quota.Result{
+					AccountID: id,
+					Status:    quota.StatusOK,
+					Windows: map[quota.WindowName]quota.Window{
+						quota.Window5Hour: {RemainingPct: remainingPct},
+					},
+				},
+				FetchedAt: time.Now().Add(-age),
+			},
+		},
+	}
+}
+
+func TestTransport_Transient429_HighQuota_NoSwitch(t *testing.T) {
+	// Account has 80% remaining — 3 consecutive 429s should be treated as transient.
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+
+	switchCh := make(chan string, 1)
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Monitor:  monitorWithSnapshot("uuid-a", 80, 0),
+		Switcher: func(_ context.Context, email string) error {
+			switchCh <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	// Send 3+ requests to trigger exhaustion threshold.
+	for i := 0; i < exhaustionThreshold+1; i++ {
+		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 429 {
+			t.Fatalf("request %d: expected 429, got %d", i, resp.StatusCode)
+		}
+	}
+
+	select {
+	case email := <-switchCh:
+		t.Errorf("expected no account switch — quota shows 80%% remaining, but switched to %s", email)
+	default:
+	}
+}
+
+func TestTransport_Transient429_LowQuota_Switches(t *testing.T) {
+	// Account has 5% remaining — 429s should trigger a switch.
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+
+	switchCh := make(chan string, 1)
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Monitor:  monitorWithSnapshot("uuid-a", 5, 0),
+		Switcher: func(_ context.Context, email string) error {
+			switchCh <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	for i := 0; i < exhaustionThreshold; i++ {
+		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+
+	select {
+	case <-switchCh:
+	case <-time.After(time.Second):
+		t.Error("expected account switch — quota shows only 5% remaining")
+	}
+}
+
+func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
+	// Account has 80% remaining but data is 10 minutes old — too stale to trust.
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+
+	switchCh := make(chan string, 1)
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Monitor:  monitorWithSnapshot("uuid-a", 80, 10*time.Minute),
+		Switcher: func(_ context.Context, email string) error {
+			switchCh <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	for i := 0; i < exhaustionThreshold; i++ {
+		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+
+	select {
+	case <-switchCh:
+	case <-time.After(time.Second):
+		t.Error("expected account switch — quota data is stale (10 min old)")
+	}
+}
+
+func TestTransport_Transient429_NilMonitor_Unchanged(t *testing.T) {
+	// No monitor at all — existing behavior (switches after threshold).
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+
+	switchCh := make(chan string, 1)
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Monitor:  nil,
+		Switcher: func(_ context.Context, email string) error {
+			switchCh <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	for i := 0; i < exhaustionThreshold; i++ {
+		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+
+	select {
+	case <-switchCh:
+	case <-time.After(time.Second):
+		t.Error("expected account switch — nil monitor should not prevent it")
+	}
+}
+
+func TestTransport_Transient429_CounterReset(t *testing.T) {
+	// After transient detection, the 429 counter should be reset so it takes
+	// another full threshold of 429s to trigger again.
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
+	}
+
+	var switchCalled bool
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA}},
+		Monitor:  monitorWithSnapshot("uuid-a", 80, 0),
+		Switcher: func(_ context.Context, email string) error {
+			switchCalled = true
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	// First batch: triggers threshold, but transient check resets counter.
+	for i := 0; i < exhaustionThreshold; i++ {
+		resp, _ := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+		resp.Body.Close()
+	}
+	if switchCalled {
+		t.Fatal("unexpected switch after first batch")
+	}
+
+	// One more 429 should NOT trigger switch (counter was reset).
+	resp, _ := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+	resp.Body.Close()
+	if switchCalled {
+		t.Error("expected no switch — counter should have been reset after transient detection")
 	}
 }
