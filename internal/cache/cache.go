@@ -3,12 +3,19 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+// isNotExist reports whether an error indicates a file does not exist.
+func isNotExist(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
+}
 
 // Cache provides file-based caching for provider results.
 type Cache struct {
@@ -69,6 +76,22 @@ func (c *Cache) Age(_ context.Context, id string) (time.Duration, bool) {
 		return 0, false
 	}
 	return c.nowFunc().Sub(info.ModTime()), true
+}
+
+// Delete removes a cached entry. Returns nil if the entry does not exist.
+func (c *Cache) Delete(_ context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("empty cache ID")
+	}
+	base := filepath.Base(id)
+	if base == "." || base == ".." || base == "/" {
+		return fmt.Errorf("invalid cache ID: %q", id)
+	}
+	path := filepath.Join(c.dir, base+".json")
+	if err := c.fs.Remove(path); err != nil && !isNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Put writes results to cache atomically.

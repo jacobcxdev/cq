@@ -135,3 +135,41 @@ func TestCachePutWriteError(t *testing.T) {
 		t.Fatal("expected error from Put when WriteFile fails")
 	}
 }
+
+func TestCacheDeleteExisting(t *testing.T) {
+	c, _ := New(fsutil.NewMemFS(), "/cache", 30*time.Second)
+	ctx := context.Background()
+
+	// Put, then delete, then verify miss.
+	results := []quota.Result{{Status: quota.StatusOK, Plan: "pro"}}
+	if err := c.Put(ctx, string(provider.Claude), results); err != nil {
+		t.Fatalf("Put error: %v", err)
+	}
+	if err := c.Delete(ctx, string(provider.Claude)); err != nil {
+		t.Fatalf("Delete error: %v", err)
+	}
+	_, ok, err := c.Get(ctx, string(provider.Claude))
+	if ok {
+		t.Fatal("expected miss after Delete")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error after Delete: %v", err)
+	}
+}
+
+func TestCacheDeleteNonExistent(t *testing.T) {
+	c, _ := New(fsutil.NewMemFS(), "/cache", 30*time.Second)
+	// Deleting a non-existent entry should not error.
+	if err := c.Delete(context.Background(), "nonexistent"); err != nil {
+		t.Fatalf("Delete of non-existent entry should not error, got: %v", err)
+	}
+}
+
+func TestCacheDeleteEmptyID(t *testing.T) {
+	c, _ := New(fsutil.NewMemFS(), "/cache", 30*time.Second)
+	for _, bad := range []string{"", ".", "/", ".."} {
+		if err := c.Delete(context.Background(), bad); err == nil {
+			t.Errorf("expected error from Delete with ID %q", bad)
+		}
+	}
+}

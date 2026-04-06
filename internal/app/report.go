@@ -26,6 +26,7 @@ type Clock interface {
 type Cache interface {
 	Get(ctx context.Context, id string) ([]quota.Result, bool, error)
 	Put(ctx context.Context, id string, results []quota.Result) error
+	Delete(ctx context.Context, id string) error
 	Age(ctx context.Context, id string) (time.Duration, bool)
 }
 

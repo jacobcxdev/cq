@@ -59,6 +59,11 @@ func (c *mockCache) Put(_ context.Context, id string, results []quota.Result) er
 	return nil
 }
 
+func (c *mockCache) Delete(_ context.Context, id string) error {
+	delete(c.data, id)
+	return nil
+}
+
 // captureRenderer implements Renderer, storing the last rendered report.
 type captureRenderer struct{ report Report }
 
