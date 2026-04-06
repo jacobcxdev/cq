@@ -85,12 +85,12 @@ func TestFetchExpiredTokenReturnsAuthExpired(t *testing.T) {
 	tmpHome := t.TempDir()
 	withHome(t, tmpHome)
 
-	// Write creds with an expired token (expiry_date in the past).
+	// Write creds with an expired token and no refresh_token.
 	pastMs := float64(time.Now().Add(-1 * time.Hour).UnixMilli())
 	writeCredsFile(t, tmpHome, map[string]any{
 		"access_token":  "old-token",
 		"expiry_date":   pastMs,
-		"refresh_token": "refresh-tok",
+		"refresh_token": "",
 		"id_token":      "",
 	})
 
@@ -243,6 +243,140 @@ func TestFetchNoToken(t *testing.T) {
 	}
 	if results[0].Error == nil || results[0].Error.Code != "no_token" {
 		t.Errorf("error code = %v, want no_token", results[0].Error)
+	}
+}
+
+// --- Fetch: expired token with refresh_token triggers refresh ---
+
+func TestFetchExpiredTokenRefreshes(t *testing.T) {
+	tmpHome := t.TempDir()
+	withHome(t, tmpHome)
+
+	pastMs := float64(time.Now().Add(-1 * time.Hour).UnixMilli())
+	writeCredsFile(t, tmpHome, map[string]any{
+		"access_token":  "old-token",
+		"expiry_date":   pastMs,
+		"refresh_token": "my-refresh-token",
+		"id_token":      "",
+		"custom_field":  "preserved",
+	})
+
+	tierResp := `{"currentTier": {"id": "standard-tier"}}`
+	qBody := quotaResponse([]map[string]any{
+		{"modelId": "gemini-2.0-pro", "remainingFraction": 0.50, "resetTime": "2026-04-07T00:00:00Z"},
+	})
+	tokenResp, _ := json.Marshal(map[string]any{
+		"access_token": "new-fresh-token",
+		"expires_in":   3600,
+		"id_token":     "new-id-token",
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			// Validate refresh request.
+			if r.Method != http.MethodPost {
+				t.Errorf("token request method = %q, want POST", r.Method)
+			}
+			if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
+				t.Errorf("token content-type = %q, want application/x-www-form-urlencoded", ct)
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write(tokenResp)
+		case "/v1internal:loadCodeAssist":
+			if auth := r.Header.Get("Authorization"); auth != "Bearer new-fresh-token" {
+				t.Errorf("tier Authorization = %q, want Bearer new-fresh-token", auth)
+			}
+			w.Write([]byte(tierResp))
+		case "/v1internal:retrieveUserQuota":
+			if auth := r.Header.Get("Authorization"); auth != "Bearer new-fresh-token" {
+				t.Errorf("quota Authorization = %q, want Bearer new-fresh-token", auth)
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write(qBody)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// urlRewriter rewrites all URLs (including googleTokenURL) to the test server.
+	p := New(&urlRewriter{client: srv.Client(), baseURL: srv.URL})
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.Status != quota.StatusOK {
+		t.Errorf("status = %q, want ok; error = %+v", r.Status, r.Error)
+	}
+	if r.Tier != "paid" {
+		t.Errorf("tier = %q, want paid", r.Tier)
+	}
+
+	// Verify credentials file was updated with refreshed token.
+	updatedData, err := os.ReadFile(filepath.Join(tmpHome, ".gemini", "oauth_creds.json"))
+	if err != nil {
+		t.Fatalf("read updated creds: %v", err)
+	}
+	var updatedCreds map[string]any
+	if err := json.Unmarshal(updatedData, &updatedCreds); err != nil {
+		t.Fatalf("parse updated creds: %v", err)
+	}
+	if got := updatedCreds["access_token"]; got != "new-fresh-token" {
+		t.Errorf("updated access_token = %v, want new-fresh-token", got)
+	}
+	if got := updatedCreds["id_token"]; got != "new-id-token" {
+		t.Errorf("updated id_token = %v, want new-id-token", got)
+	}
+	// Verify unknown fields are preserved.
+	if got := updatedCreds["custom_field"]; got != "preserved" {
+		t.Errorf("custom_field = %v, want preserved", got)
+	}
+}
+
+// --- Fetch: expired token with refresh failure returns auth_expired ---
+
+func TestFetchExpiredTokenRefreshFails(t *testing.T) {
+	tmpHome := t.TempDir()
+	withHome(t, tmpHome)
+
+	pastMs := float64(time.Now().Add(-1 * time.Hour).UnixMilli())
+	writeCredsFile(t, tmpHome, map[string]any{
+		"access_token":  "old-token",
+		"expiry_date":   pastMs,
+		"refresh_token": "bad-refresh-token",
+		"id_token":      "",
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid_grant"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := New(&urlRewriter{client: srv.Client(), baseURL: srv.URL})
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(results))
+	}
+	r := results[0]
+	if r.Status != quota.StatusError {
+		t.Errorf("status = %q, want error", r.Status)
+	}
+	if r.Error == nil || r.Error.Code != "auth_expired" {
+		t.Errorf("error code = %v, want auth_expired", r.Error)
 	}
 }
 
