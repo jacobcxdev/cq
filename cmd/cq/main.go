@@ -132,21 +132,47 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 	case "check", "check <providers>":
 		return runCheck(cli)
 	case "claude login":
-		return app.RunLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Claude.Login.Activate)
+		err := app.RunLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Claude.Login.Activate)
+		if err == nil {
+			invalidateProviderCache(provider.Claude)
+		}
+		return err
 	case "claude accounts":
 		return app.RunAccounts(provider.Claude)
 	case "claude switch <email>":
-		return app.RunSwitch(provider.Claude, cli.Claude.Switch.Email, httputil.NewClient(10*time.Second, version))
+		err := app.RunSwitch(provider.Claude, cli.Claude.Switch.Email, httputil.NewClient(10*time.Second, version))
+		if err == nil {
+			invalidateProviderCache(provider.Claude)
+		}
+		return err
 	case "codex login":
-		return app.RunCodexLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Codex.Login.Activate)
+		err := app.RunCodexLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Codex.Login.Activate)
+		if err == nil {
+			invalidateProviderCache(provider.Codex)
+		}
+		return err
 	case "codex accounts":
 		return app.RunAccounts(provider.Codex)
 	case "codex switch <email>":
-		return app.RunSwitch(provider.Codex, cli.Codex.Switch.Email, httputil.NewClient(10*time.Second, version))
+		err := app.RunSwitch(provider.Codex, cli.Codex.Switch.Email, httputil.NewClient(10*time.Second, version))
+		if err == nil {
+			invalidateProviderCache(provider.Codex)
+		}
+		return err
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini)
 	default:
 		return fmt.Errorf("unknown command: %s", ctx.Command())
+	}
+}
+
+// invalidateProviderCache removes the cached result file for a provider.
+// Best-effort: errors are logged to stderr.
+func invalidateProviderCache(id provider.ID) {
+	dir := cacheDir()
+	path := filepath.Join(dir, string(id)+".json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "cq: cache invalidate %s: %v\n", id, err)
 	}
 }
 

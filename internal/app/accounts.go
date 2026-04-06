@@ -69,6 +69,15 @@ func RunLogin(ctx context.Context, client httputil.Doer, activate bool) error {
 		}
 	}
 
+	// Always update credentials if the logged-in account is already active,
+	// so that stale tokens in the credentials file are replaced by fresh ones.
+	if !activate && acct.Email != "" {
+		_, activeEmail := GetActiveCredentials()
+		if activeEmail == acct.Email {
+			activate = true
+		}
+	}
+
 	if activate {
 		creds := &keyring.ClaudeCredentials{ClaudeAiOauth: acct}
 		if err := keyring.WriteCredentialsFile(creds); err != nil {

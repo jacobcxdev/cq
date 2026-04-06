@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -44,6 +45,21 @@ func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Acco
 			continue
 		}
 		acctCopy := acct
+
+		// Refresh expired token before attempting profile fetch.
+		if a.HTTP != nil && acctCopy.RefreshToken != "" && acctCopy.ExpiresAt > 0 && acctCopy.ExpiresAt < time.Now().UnixMilli() {
+			rr, err := RefreshToken(ctx, a.HTTP, acctCopy.RefreshToken, acctCopy.Scopes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: token refresh failed: %v\n", err)
+			} else {
+				acctCopy.AccessToken = rr.AccessToken
+				acctCopy.ExpiresAt = time.Now().UnixMilli() + rr.ExpiresIn*1000
+				if rr.RefreshToken != "" {
+					acctCopy.RefreshToken = rr.RefreshToken
+				}
+				persistRefreshedToken(&acctCopy)
+			}
+		}
 
 		// Best-effort profile refresh to pick up plan/tier changes.
 		if a.HTTP != nil {
