@@ -19,12 +19,19 @@ type fakeCodexSelector struct {
 	err     error
 }
 
-func (f *fakeCodexSelector) Select(_ context.Context) (*codex.CodexAccount, error) {
+func (f *fakeCodexSelector) Select(_ context.Context, _ ...string) (*codex.CodexAccount, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	result := *f.account
 	return &result, nil
+}
+
+func newCodexTransport(sel CodexSelector) *CodexTokenTransport {
+	return &CodexTokenTransport{
+		Selector: sel,
+		Inner:    http.DefaultTransport,
+	}
 }
 
 func TestHandleCodex_NonStreaming(t *testing.T) {
@@ -79,13 +86,13 @@ func TestHandleCodex_NonStreaming(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: &fakeCodexSelector{
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-123",
 				Email:       "user@test.com",
 			},
-		},
+		}),
 	}
 
 	w := httptest.NewRecorder()
@@ -160,12 +167,12 @@ func TestHandleCodex_Streaming(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: &fakeCodexSelector{
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-123",
 			},
-		},
+		}),
 	}
 
 	w := httptest.NewRecorder()
@@ -190,14 +197,14 @@ func TestHandleCodex_Streaming(t *testing.T) {
 	}
 }
 
-func TestHandleCodex_NoSelector(t *testing.T) {
+func TestHandleCodex_NoTransport(t *testing.T) {
 	srv := &Server{
 		Config: &Config{
 			ClaudeUpstream: "https://api.anthropic.com",
 			CodexUpstream:  "https://api.openai.com",
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: nil,
+		CodexTransport: nil,
 	}
 
 	w := httptest.NewRecorder()
@@ -218,7 +225,7 @@ func TestHandleCodex_SelectorError(t *testing.T) {
 			CodexUpstream:  "https://api.openai.com",
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: &fakeCodexSelector{err: fmt.Errorf("no accounts")},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{err: fmt.Errorf("no accounts")}),
 	}
 
 	w := httptest.NewRecorder()
@@ -227,8 +234,8 @@ func TestHandleCodex_SelectorError(t *testing.T) {
 
 	srv.handleCodex(w, req, []byte(body))
 
-	if w.Code != 503 {
-		t.Errorf("status = %d, want 503", w.Code)
+	if w.Code != 502 {
+		t.Errorf("status = %d, want 502 (transport error surfaces as bad gateway)", w.Code)
 	}
 }
 
@@ -288,12 +295,12 @@ func TestHandleCodex_ModelValidationProbe(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: &fakeCodexSelector{
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct",
 			},
-		},
+		}),
 	}
 
 	w := httptest.NewRecorder()
@@ -353,12 +360,12 @@ func TestHandleCodex_RejectsClaudeModel(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: &fakeCodexSelector{
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "tok",
 				AccountID:   "acct",
 			},
-		},
+		}),
 	}
 
 	w := httptest.NewRecorder()
@@ -391,12 +398,12 @@ func TestHandleCodex_UpstreamError(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexSelector: &fakeCodexSelector{
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "tok",
 				AccountID:   "acct",
 			},
-		},
+		}),
 	}
 
 	w := httptest.NewRecorder()
@@ -444,12 +451,12 @@ func TestServer_CodexRouting(t *testing.T) {
 			CodexUpstream:  codexUpstream.URL,
 			LocalToken:     "tok",
 		},
-		CodexSelector: &fakeCodexSelector{
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct",
 			},
-		},
+		}),
 	}
 
 	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
@@ -499,7 +506,9 @@ func TestServer_CountTokensAlwaysRoutesToClaude(t *testing.T) {
 			LocalToken:     "tok",
 		},
 		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
-		CodexSelector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
+			account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"},
+		}),
 	}
 
 	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))

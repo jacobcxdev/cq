@@ -13,14 +13,8 @@ import (
 // It translates the Anthropic-format request body, forwards it with Codex credentials,
 // and translates the response back to Anthropic format.
 func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte) {
-	if s.CodexSelector == nil {
+	if s.CodexTransport == nil {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
-		return
-	}
-
-	acct, err := s.CodexSelector.Select(r.Context())
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "api_error", fmt.Sprintf("codex account selection failed: %v", err))
 		return
 	}
 
@@ -52,18 +46,16 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	}
 
 	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Authorization", "Bearer "+acct.AccessToken)
-	if acct.AccountID != "" {
-		upReq.Header.Set("ChatGPT-Account-ID", acct.AccountID)
-	}
 
-	// Set body.
+	// Set body (with GetBody for transport retry on 401/429).
 	upReq.Body = io.NopCloser(bytes.NewReader(translated))
 	upReq.ContentLength = int64(len(translated))
+	upReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(translated)), nil
+	}
 
-	// Send to upstream.
-	transport := s.codexTransport()
-	resp, err := transport.RoundTrip(upReq)
+	// Send to upstream — transport handles auth injection and account rotation.
+	resp, err := s.CodexTransport.RoundTrip(upReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
@@ -110,13 +102,6 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 		w.WriteHeader(http.StatusOK)
 		w.Write(assembled)
 	}
-}
-
-func (s *Server) codexTransport() http.RoundTripper {
-	if s.CodexTransport != nil {
-		return s.CodexTransport
-	}
-	return http.DefaultTransport
 }
 
 // extractStream does a quick JSON parse to check the "stream" field.

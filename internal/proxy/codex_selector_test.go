@@ -87,3 +87,67 @@ func TestCodexSelector_ReturnsCopy(t *testing.T) {
 		t.Error("selector returned reference instead of copy")
 	}
 }
+
+func TestCodexSelector_ExcludeByEmail(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "a@test.com", AccessToken: "tok-a", IsActive: true},
+			{Email: "b@test.com", AccessToken: "tok-b", IsActive: false},
+		}
+	})
+
+	acct, err := sel.Select(context.Background(), "a@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.Email != "b@test.com" {
+		t.Errorf("email = %q, want b@test.com", acct.Email)
+	}
+}
+
+func TestCodexSelector_ExcludeByAccountID(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1", IsActive: true},
+			{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2", IsActive: false},
+		}
+	})
+
+	acct, err := sel.Select(context.Background(), "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.Email != "b@test.com" {
+		t.Errorf("email = %q, want b@test.com", acct.Email)
+	}
+}
+
+func TestCodexSelector_ExcludeByRecordKey(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "a@test.com", AccessToken: "tok-a", RecordKey: "uid1::acct1", IsActive: true},
+			{Email: "b@test.com", AccessToken: "tok-b", RecordKey: "uid2::acct2", IsActive: false},
+		}
+	})
+
+	acct, err := sel.Select(context.Background(), "uid1::acct1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.Email != "b@test.com" {
+		t.Errorf("email = %q, want b@test.com", acct.Email)
+	}
+}
+
+func TestCodexSelector_ExcludeAll(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "a@test.com", AccessToken: "tok-a", IsActive: true},
+		}
+	})
+
+	_, err := sel.Select(context.Background(), "a@test.com")
+	if err == nil {
+		t.Fatal("expected error when all accounts are excluded")
+	}
+}

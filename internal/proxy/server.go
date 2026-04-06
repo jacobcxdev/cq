@@ -25,7 +25,6 @@ type Server struct {
 	Selector       ClaudeSelector
 	Discover       ClaudeDiscoverer
 	Transport      http.RoundTripper
-	CodexSelector  CodexSelector
 	CodexDiscover  CodexDiscoverer
 	CodexTransport http.RoundTripper
 	Headroom       *HeadroomBridge
@@ -40,6 +39,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("POST /responses", s.handleNativeCodex)
 	mux.HandleFunc("/", s.proxyHandler(upstream))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.Config.Port)
@@ -105,6 +105,92 @@ func (s *Server) isValidToken(token string) bool {
 		}
 	}
 	return false
+}
+
+// handleNativeCodex handles requests from Codex CLI in native OpenAI Responses
+// API format. No Anthropic↔OpenAI translation is performed — the request is
+// forwarded as-is with auth injected by CodexTransport.
+//
+// Security: no proxy token auth is required. The proxy binds to 127.0.0.1 only,
+// so only local processes can reach this endpoint. Codex CLI in ChatGPT auth
+// mode doesn't support custom API keys, so we can't require the proxy token.
+func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
+	if s.CodexTransport == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
+		return
+	}
+
+	// Buffer request body.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+	r.Body.Close()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
+		return
+	}
+	if len(body) > maxRequestBody {
+		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds 10 MiB")
+		return
+	}
+
+	model := extractModel(body)
+	fmt.Fprintf(os.Stderr, "cq: route POST /responses model=%q provider=codex (native)\n", model)
+
+	// Build upstream request — forward as-is, no translation.
+	upstreamURL := s.Config.CodexUpstream + "/responses"
+	upReq, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
+		return
+	}
+	upReq.ContentLength = int64(len(body))
+	upReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+
+	// Copy relevant headers from original request.
+	for _, h := range []string{"Content-Type", "Accept", "OpenAI-Beta"} {
+		if v := r.Header.Get(h); v != "" {
+			upReq.Header.Set(h, v)
+		}
+	}
+	if upReq.Header.Get("Content-Type") == "" {
+		upReq.Header.Set("Content-Type", "application/json")
+	}
+
+	// Transport handles auth injection and account rotation.
+	resp, err := s.CodexTransport.RoundTrip(upReq)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	fmt.Fprintf(os.Stderr, "cq: proxy POST %s → %d (codex native)\n", upstreamURL, resp.StatusCode)
+
+	// Forward response as-is — headers, status code, body.
+	for key, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(key, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream the body through (supports SSE).
+	if f, ok := w.(http.Flusher); ok {
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				f.Flush()
+			}
+			if readErr != nil {
+				break
+			}
+		}
+	} else {
+		io.Copy(w, resp.Body)
+	}
 }
 
 func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {

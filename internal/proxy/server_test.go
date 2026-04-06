@@ -245,7 +245,10 @@ func TestServer_HeadroomPreservesOriginalModelRouting(t *testing.T) {
 				TokensSaved: 123,
 			}
 		}),
-		CodexSelector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+			Inner:    http.DefaultTransport,
+		},
 	}
 
 	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
@@ -405,5 +408,160 @@ func TestServer_OAuthTokenForwardsRequest(t *testing.T) {
 	// TokenTransport should have replaced the OAuth token with the selected account's token.
 	if gotAuth != "Bearer real-token" {
 		t.Errorf("upstream Authorization = %q, want %q", gotAuth, "Bearer real-token")
+	}
+}
+
+// ── handleNativeCodex tests ─────────────────────────────────────────────────
+
+func TestServer_NativeCodex_ForwardsWithAuth(t *testing.T) {
+	var gotAuth, gotAcctID, gotBody, gotContentType string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAcctID = r.Header.Get("ChatGPT-Account-ID")
+		gotContentType = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"resp_123","output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
+				AccessToken: "codex-tok",
+				AccountID:   "acct-1",
+			}},
+			Inner: http.DefaultTransport,
+		},
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","input":"hello","stream":false}`
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if gotAuth != "Bearer codex-tok" {
+		t.Errorf("upstream auth = %q, want Bearer codex-tok", gotAuth)
+	}
+	if gotAcctID != "acct-1" {
+		t.Errorf("upstream account-id = %q, want acct-1", gotAcctID)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("upstream content-type = %q, want application/json", gotContentType)
+	}
+	if gotBody != body {
+		t.Errorf("upstream body = %q, want %q (no translation)", gotBody, body)
+	}
+	if !strings.Contains(w.Body.String(), "resp_123") {
+		t.Errorf("response body should contain resp_123: %s", w.Body.String())
+	}
+}
+
+func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		events := []string{
+			"data: {\"type\":\"response.created\"}\n\n",
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+			"data: {\"type\":\"response.completed\"}\n\n",
+		}
+		for _, ev := range events {
+			w.Write([]byte(ev))
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
+				AccessToken: "codex-tok",
+				AccountID:   "acct-1",
+			}},
+			Inner: http.DefaultTransport,
+		},
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","input":"hello","stream":true}`
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	result := w.Body.String()
+	if !strings.Contains(result, "response.created") {
+		t.Error("missing response.created event")
+	}
+	if !strings.Contains(result, "response.completed") {
+		t.Error("missing response.completed event")
+	}
+}
+
+func TestServer_NativeCodex_NoTransport(t *testing.T) {
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: "https://chatgpt.com/backend-api/codex",
+			LocalToken:    "tok",
+		},
+		CodexTransport: nil,
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(`{"model":"gpt-5.4"}`))
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 503 {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestServer_NativeCodex_NoProxyTokenRequired(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_ok"}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "secret-proxy-token",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
+				AccessToken: "codex-tok",
+			}},
+			Inner: http.DefaultTransport,
+		},
+	}
+
+	w := httptest.NewRecorder()
+	// Deliberately do NOT send Authorization header or proxy token.
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(`{"model":"gpt-5.4"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (no proxy token required for /responses)", w.Code)
 	}
 }
