@@ -22,14 +22,14 @@ type ClaudeSelector interface {
 type accountSelector struct {
 	discover    ClaudeDiscoverer
 	activeEmail ActiveEmailFunc
-	monitor     *QuotaMonitor
+	quota       QuotaReader
 }
 
 // NewAccountSelector creates a ClaudeSelector backed by the given discovery function.
 // If activeEmail is non-nil, Select() prefers the active account over others.
-// If monitor is non-nil, Select() prefers accounts with more remaining quota.
-func NewAccountSelector(discover ClaudeDiscoverer, activeEmail ActiveEmailFunc, monitor *QuotaMonitor) ClaudeSelector {
-	return &accountSelector{discover: discover, activeEmail: activeEmail, monitor: monitor}
+// If quota is non-nil, Select() prefers accounts with more remaining quota.
+func NewAccountSelector(discover ClaudeDiscoverer, activeEmail ActiveEmailFunc, quota QuotaReader) ClaudeSelector {
+	return &accountSelector{discover: discover, activeEmail: activeEmail, quota: quota}
 }
 
 func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring.ClaudeOAuth, error) {
@@ -88,13 +88,13 @@ func (s *accountSelector) Select(_ context.Context, exclude ...string) (*keyring
 }
 
 // accountRemaining returns the MinRemainingPct for an account from the quota
-// monitor, or -1 if no data is available.
+// cache, or -1 if no data is available.
 func (s *accountSelector) accountRemaining(a *keyring.ClaudeOAuth) int {
-	if s.monitor == nil {
+	if s.quota == nil {
 		return -1
 	}
 	key := acctIdentifier(a)
-	snap, ok := s.monitor.Snapshot(key)
+	snap, ok := s.quota.Snapshot(key)
 	if !ok {
 		return -1
 	}

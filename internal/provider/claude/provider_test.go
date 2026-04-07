@@ -2,13 +2,19 @@ package claude
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
 
 // TestNewProvider verifies that New creates a Provider with a non-nil client
 // using the supplied HTTP doer.
@@ -45,5 +51,75 @@ func TestFetchAccountPanicInInnerGoroutines(t *testing.T) {
 	}
 	if result.Error == nil || result.Error.Code != "fetch_error" {
 		t.Fatalf("expected fetch_error code, got %+v", result.Error)
+	}
+}
+
+func TestFetchAccountUsage(t *testing.T) {
+	p := &Provider{client: &Client{http: doerFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/oauth/usage" {
+			t.Fatalf("path = %q, want /api/oauth/usage", req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body: io.NopCloser(strings.NewReader(
+				`{"five_hour":{"utilization":25.0,"resets_at":"2026-03-20T12:00:00Z"}}`,
+			)),
+		}, nil
+	})}}
+
+	acct := keyring.ClaudeOAuth{
+		AccessToken:      "test-token",
+		SubscriptionType: "max",
+		RateLimitTier:    "tier-1",
+		Email:            "user@example.com",
+		AccountUUID:      "uuid-123",
+	}
+
+	result, retryAfter, err := p.FetchAccountUsage(context.Background(), acct, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if retryAfter != 0 {
+		t.Fatalf("retryAfter = %v, want 0", retryAfter)
+	}
+	if result.Status != quota.StatusOK {
+		t.Fatalf("status = %v, want %v", result.Status, quota.StatusOK)
+	}
+	if result.Plan != "max" {
+		t.Fatalf("plan = %q, want max", result.Plan)
+	}
+	if result.RateLimitTier != "tier-1" {
+		t.Fatalf("rate limit tier = %q, want tier-1", result.RateLimitTier)
+	}
+	if result.Email != "user@example.com" || result.AccountID != "uuid-123" {
+		t.Fatalf("identity = (%q, %q), want (user@example.com, uuid-123)", result.Email, result.AccountID)
+	}
+	if result.MinRemainingPct() != 75 {
+		t.Fatalf("remaining = %d, want 75", result.MinRemainingPct())
+	}
+}
+
+func TestFetchAccountUsageRetryAfter(t *testing.T) {
+	p := &Provider{client: &Client{http: doerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"120"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":"rate_limited"}`)),
+		}, nil
+	})}}
+
+	result, retryAfter, err := p.FetchAccountUsage(context.Background(), keyring.ClaudeOAuth{
+		AccessToken:      "test-token",
+		SubscriptionType: "max",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if retryAfter != 120*time.Second {
+		t.Fatalf("retryAfter = %v, want %v", retryAfter, 120*time.Second)
+	}
+	if result.Error == nil || result.Error.Code != "api_error" || result.Error.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("unexpected error result: %+v", result.Error)
 	}
 }

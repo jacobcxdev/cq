@@ -169,7 +169,7 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 // invalidateProviderCache removes the cached result file for a provider.
 // Best-effort: errors are logged to stderr.
 func invalidateProviderCache(id provider.ID) {
-	dir := cacheDir()
+	dir := cache.DefaultDir()
 	path := filepath.Join(dir, string(id)+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "cq: cache invalidate %s: %v\n", id, err)
@@ -208,7 +208,7 @@ func runCheck(cli *CLI) error {
 		renderer = ttyRenderer
 	}
 
-	c, err := cache.New(cache.OSFileSystem{}, cacheDir(), cacheTTL())
+	c, err := cache.New(cache.OSFileSystem{}, cache.DefaultDir(), cacheTTL())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cq: cache unavailable, running uncached: %v\n", err)
 		c = nil
@@ -246,20 +246,6 @@ func isTerminal() bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
-}
-
-func cacheDir() string {
-	if d := os.Getenv("XDG_CACHE_HOME"); d != "" && filepath.IsAbs(d) {
-		return filepath.Join(d, "cq")
-	}
-	if d, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(d, "cq")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "cq-cache")
-	}
-	return filepath.Join(home, ".cache", "cq")
 }
 
 func cacheTTL() time.Duration {

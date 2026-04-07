@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -149,7 +150,7 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 					usageErr = fmt.Errorf("panic: %v", rv)
 				}
 			}()
-			usageBody, usageCode, usageErr = p.client.FetchUsage(ctx, token)
+			usageBody, usageCode, _, usageErr = p.client.FetchUsage(ctx, token)
 			if usageErr != nil {
 				fmt.Fprintf(os.Stderr, "cq: claude usage: %v\n", usageErr)
 			}
@@ -218,4 +219,52 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	}
 
 	return parseUsage(usageBody, plan, rlt, prof.Email, prof.AccountUUID)
+}
+
+// FetchAccountUsage fetches only usage data for a single account (no profile fetch).
+// It uses metadata already stored in the keyring entry for plan/tier.
+// Returns the Retry-After duration from a 429 response alongside the result.
+func (p *Provider) FetchAccountUsage(ctx context.Context, acct keyring.ClaudeOAuth, now time.Time) (quota.Result, time.Duration, error) {
+	errorWithIdentity := func(code, msg string, httpCode int) quota.Result {
+		r := quota.ErrorResult(code, msg, httpCode)
+		r.Email = acct.Email
+		r.AccountID = acct.AccountUUID
+		r.Plan = acct.SubscriptionType
+		r.RateLimitTier = acct.RateLimitTier
+		return r
+	}
+
+	token := acct.AccessToken
+	if token == "" {
+		return errorWithIdentity("no_token", "no token", 0), 0, nil
+	}
+
+	if acct.SubscriptionType == "free" {
+		return errorWithIdentity("free_plan", "usage not available on free plan", 0), 0, nil
+	}
+
+	nowMs := now.UnixMilli()
+	if acct.ExpiresAt > 0 && acct.ExpiresAt < nowMs && acct.RefreshToken != "" {
+		rr, err := RefreshToken(ctx, p.client.http, acct.RefreshToken, acct.Scopes)
+		if err != nil {
+			return errorWithIdentity("auth_expired", "auth expired", 0), 0, nil
+		}
+		token = rr.AccessToken
+		acct.AccessToken = rr.AccessToken
+		acct.ExpiresAt = nowMs + rr.ExpiresIn*1000
+		if rr.RefreshToken != "" {
+			acct.RefreshToken = rr.RefreshToken
+		}
+		persistRefreshedToken(&acct)
+	}
+
+	body, statusCode, retryAfter, err := p.client.FetchUsage(ctx, token)
+	if err != nil {
+		return errorWithIdentity("fetch_error", fmt.Sprintf("usage: %v", err), 0), 0, nil
+	}
+	if statusCode != http.StatusOK {
+		return errorWithIdentity("api_error", "api error", statusCode), retryAfter, nil
+	}
+
+	return parseUsage(body, acct.SubscriptionType, acct.RateLimitTier, acct.Email, acct.AccountUUID), 0, nil
 }

@@ -657,8 +657,10 @@ func TestTokenTransport_ContextCancellation(t *testing.T) {
 
 // --- quota-aware 429 tests ---
 
-func monitorWithSnapshot(id string, remainingPct int, age time.Duration) *QuotaMonitor {
-	return &QuotaMonitor{
+func quotaCacheWithSnapshot(id string, remainingPct int, age time.Duration) *QuotaCache {
+	now := time.Now()
+	return &QuotaCache{
+		nowFunc: func() time.Time { return now },
 		snapshots: map[string]QuotaSnapshot{
 			id: {
 				Result: quota.Result{
@@ -668,9 +670,10 @@ func monitorWithSnapshot(id string, remainingPct int, age time.Duration) *QuotaM
 						quota.Window5Hour: {RemainingPct: remainingPct},
 					},
 				},
-				FetchedAt: time.Now().Add(-age),
+				FetchedAt: now.Add(-age),
 			},
 		},
+		cooldowns: make(map[string]time.Time),
 	}
 }
 
@@ -688,7 +691,7 @@ func TestTransport_Transient429_HighQuota_NoSwitch(t *testing.T) {
 	switchCh := make(chan string, 1)
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
-		Monitor:  monitorWithSnapshot("uuid-a", 80, 0),
+		Quota:    quotaCacheWithSnapshot("uuid-a", 80, 0),
 		Switcher: func(_ context.Context, email string) error {
 			switchCh <- email
 			return nil
@@ -731,7 +734,7 @@ func TestTransport_Transient429_LowQuota_Switches(t *testing.T) {
 	switchCh := make(chan string, 1)
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
-		Monitor:  monitorWithSnapshot("uuid-a", 5, 0),
+		Quota:    quotaCacheWithSnapshot("uuid-a", 5, 0),
 		Switcher: func(_ context.Context, email string) error {
 			switchCh <- email
 			return nil
@@ -757,7 +760,8 @@ func TestTransport_Transient429_LowQuota_Switches(t *testing.T) {
 }
 
 func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
-	// Account has 80% remaining but data is 10 minutes old — too stale to trust.
+	// Account has 80% remaining in memory, but it is 10 minutes old. Refresh()
+	// attempts an on-demand fetch, which fails, so the transport switches.
 	acctA := keyring.ClaudeOAuth{
 		Email: "a@test.com", AccountUUID: "uuid-a",
 		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
@@ -767,10 +771,17 @@ func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
 		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
 	}
 
+	var refreshCalls atomic.Int32
+	quotaCache := quotaCacheWithSnapshot("uuid-a", 80, 10*time.Minute)
+	quotaCache.UsageFetchFunc = func(context.Context, keyring.ClaudeOAuth, time.Time) (quota.Result, time.Duration, error) {
+		refreshCalls.Add(1)
+		return quota.ErrorResult("api_error", "api error", http.StatusTooManyRequests), 0, nil
+	}
+
 	switchCh := make(chan string, 1)
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
-		Monitor:  monitorWithSnapshot("uuid-a", 80, 10*time.Minute),
+		Quota:    quotaCache,
 		Switcher: func(_ context.Context, email string) error {
 			switchCh <- email
 			return nil
@@ -793,10 +804,13 @@ func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Error("expected account switch — quota data is stale (10 min old)")
 	}
+	if refreshCalls.Load() != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls.Load())
+	}
 }
 
-func TestTransport_Transient429_NilMonitor_Unchanged(t *testing.T) {
-	// No monitor at all — existing behavior (switches after threshold).
+func TestTransport_Transient429_NilQuota_Unchanged(t *testing.T) {
+	// No quota cache at all — existing behavior (switches after threshold).
 	acctA := keyring.ClaudeOAuth{
 		Email: "a@test.com", AccountUUID: "uuid-a",
 		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
@@ -809,7 +823,7 @@ func TestTransport_Transient429_NilMonitor_Unchanged(t *testing.T) {
 	switchCh := make(chan string, 1)
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
-		Monitor:  nil,
+		Quota:    nil,
 		Switcher: func(_ context.Context, email string) error {
 			switchCh <- email
 			return nil
@@ -845,7 +859,7 @@ func TestTransport_Transient429_CounterReset(t *testing.T) {
 	var switchCalled bool
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA}},
-		Monitor:  monitorWithSnapshot("uuid-a", 80, 0),
+		Quota:    quotaCacheWithSnapshot("uuid-a", 80, 0),
 		Switcher: func(_ context.Context, email string) error {
 			switchCalled = true
 			return nil

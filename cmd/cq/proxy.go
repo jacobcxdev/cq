@@ -9,12 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
-	"github.com/jacobcxdev/cq/internal/proxy"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 func runProxy(args []string) error {
@@ -63,14 +64,9 @@ func runProxyStart() error {
 	activeEmail := proxy.ActiveEmailFunc(keyring.ActiveClaudeEmail)
 	refreshClient := httputil.NewClient(30*time.Second, version)
 
-	// Quota monitor: periodically fetches usage data for proactive account selection.
 	claudeProvider := claudeprov.New(refreshClient)
-	monitor := proxy.NewQuotaMonitor(claudeProvider.Fetch, 2*time.Minute)
-	monitorCtx, monitorCancel := context.WithCancel(context.Background())
-	defer monitorCancel()
-	go monitor.Start(monitorCtx)
-
-	selector := proxy.NewAccountSelector(discover, activeEmail, monitor)
+	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())
+	selector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
 
 	accountsMgr := &claudeprov.Accounts{HTTP: refreshClient}
 	switcher := proxy.AccountSwitcher(func(ctx context.Context, email string) error {
@@ -84,7 +80,7 @@ func runProxyStart() error {
 		Persister:   proxy.DefaultPersister,
 		Switcher:    switcher,
 		RefreshHTTP: refreshClient,
-		Monitor:     monitor,
+		Quota:       quotaCache,
 		Inner:       http.DefaultTransport,
 	}
 

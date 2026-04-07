@@ -56,12 +56,12 @@ type TokenTransport struct {
 	Persister   PersistFunc
 	Switcher    AccountSwitcher
 	RefreshHTTP httputil.Doer
-	Monitor     *QuotaMonitor
+	Quota       *QuotaCache
 	Inner       http.RoundTripper
 
-	mu                    sync.Mutex
-	knownTokens           map[string]string      // acctIdentifier → current access token
-	failures              map[string]*failure429 // acctIdentifier → 429 tracker
+	mu                     sync.Mutex
+	knownTokens            map[string]string      // acctIdentifier → current access token
+	failures               map[string]*failure429 // acctIdentifier → 429 tracker
 	suppressFailoverForKey string
 }
 
@@ -172,7 +172,7 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 	}
 
 	// Validate against quota data before declaring exhaustion.
-	if t.isTransient429(failedAcct) {
+	if t.isTransient429(req.Context(), failedAcct) {
 		t.reset429(failedAcct)
 		fmt.Fprintf(os.Stderr, "cq: proxy %s got %d consecutive 429s but quota shows remaining capacity — treating as transient\n",
 			failedAcct.Email, exhaustionThreshold)
@@ -259,13 +259,13 @@ func (t *TokenTransport) clearFailoverSuppression(acct *keyring.ClaudeOAuth) {
 }
 
 // isTransient429 checks whether a 429-exhausted account likely still has quota.
-// Returns true if the quota monitor shows the account has more than
+// Returns true if the quota cache shows the account has more than
 // transientQuotaThreshold percent remaining and the data is fresh.
-func (t *TokenTransport) isTransient429(acct *keyring.ClaudeOAuth) bool {
-	if t.Monitor == nil {
+func (t *TokenTransport) isTransient429(ctx context.Context, acct *keyring.ClaudeOAuth) bool {
+	if t.Quota == nil {
 		return false
 	}
-	snap, ok := t.Monitor.Snapshot(acctIdentifier(acct))
+	snap, ok := t.Quota.Refresh(ctx, acct)
 	if !ok {
 		return false
 	}
