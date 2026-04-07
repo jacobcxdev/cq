@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestClientFetchUsage(t *testing.T) {
@@ -28,12 +29,15 @@ func TestClientFetchUsage(t *testing.T) {
 	// We need a custom Doer that rewrites the URL to our test server.
 	c.http = &urlRewriter{client: srv.Client(), baseURL: srv.URL}
 
-	body, code, err := c.FetchUsage(context.Background(), "test-tok")
+	body, code, retryAfter, err := c.FetchUsage(context.Background(), "test-tok")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if code != 200 {
 		t.Fatalf("status = %d, want 200", code)
+	}
+	if retryAfter != 0 {
+		t.Fatalf("retryAfter = %v, want 0", retryAfter)
 	}
 	if string(body) != want {
 		t.Errorf("body = %q, want %q", string(body), want)
@@ -49,9 +53,34 @@ func TestClientFetchUsageError(t *testing.T) {
 
 	c := &Client{http: &urlRewriter{client: srv.Client(), baseURL: srv.URL}}
 
-	_, code, _ := c.FetchUsage(context.Background(), "bad-tok")
+	_, code, retryAfter, _ := c.FetchUsage(context.Background(), "bad-tok")
 	if code != 401 {
 		t.Errorf("status = %d, want 401", code)
+	}
+	if retryAfter != 0 {
+		t.Errorf("retryAfter = %v, want 0", retryAfter)
+	}
+}
+
+func TestClientFetchUsageRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate_limited"}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{http: &urlRewriter{client: srv.Client(), baseURL: srv.URL}}
+
+	_, code, retryAfter, err := c.FetchUsage(context.Background(), "rate-limited-tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", code, http.StatusTooManyRequests)
+	}
+	if retryAfter != 120*time.Second {
+		t.Fatalf("retryAfter = %v, want %v", retryAfter, 120*time.Second)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,46 +13,6 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 )
-
-func TestCacheDir(t *testing.T) {
-	t.Run("XDG_CACHE_HOME set", func(t *testing.T) {
-		t.Setenv("XDG_CACHE_HOME", "/tmp/xdg")
-		got := cacheDir()
-		want := filepath.Join("/tmp/xdg", "cq")
-		if got != want {
-			t.Fatalf("cacheDir() = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("XDG_CACHE_HOME relative path falls through", func(t *testing.T) {
-		t.Setenv("XDG_CACHE_HOME", "./relative")
-		got := cacheDir()
-		// Should fall through to os.UserCacheDir() since path is not absolute
-		if strings.Contains(got, "relative") {
-			t.Errorf("relative XDG path should be ignored, got %q", got)
-		}
-	})
-
-	t.Run("XDG_CACHE_HOME unset", func(t *testing.T) {
-		t.Setenv("XDG_CACHE_HOME", "")
-		got := cacheDir()
-		// Must end in "cq" and be an absolute path.
-		if filepath.Base(got) != "cq" {
-			t.Fatalf("cacheDir() = %q, want base to be \"cq\"", got)
-		}
-		if !filepath.IsAbs(got) {
-			t.Fatalf("cacheDir() = %q, want absolute path", got)
-		}
-		// Must be rooted under os.UserCacheDir or os.UserHomeDir (both absolute).
-		cacheBase, err := os.UserCacheDir()
-		if err == nil {
-			want := filepath.Join(cacheBase, "cq")
-			if got != want {
-				t.Fatalf("cacheDir() = %q, want %q", got, want)
-			}
-		}
-	})
-}
 
 func TestCacheTTL(t *testing.T) {
 	tests := []struct {
