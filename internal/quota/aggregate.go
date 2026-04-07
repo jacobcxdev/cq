@@ -12,4 +12,8 @@ type AggregateResult struct {
 	GapDurationS   int64   `json:"gap_duration_s,omitempty"`
 	WastedPct      int     `json:"wasted_pct,omitempty"`
 	WasteDeadlineS int64   `json:"waste_deadline_s,omitempty"`
+	// GaugeOverride is set when the gauge snapped to a non-natural position
+	// because of an imminent-block override. Empty string means no override
+	// was applied. Current values: "", "imminent_block".
+	GaugeOverride string `json:"gauge_override,omitempty"`
 }

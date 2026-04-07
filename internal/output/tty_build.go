@@ -307,13 +307,21 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		}
 		row.Pct = pc.Render(fmt.Sprintf("\U000F0A9F %3d%%", a.RemainingPct))
 
-		// Sustainability gauge (replaces reset time slot)
+		// Sustainability gauge (replaces reset time slot). When the gauge
+		// was snapped to severe by the imminent-block override, swap the
+		// reset glyph for an mdi-alert warning triangle so the user sees
+		// the escalation even before reading the gauge.
 		isDim := a.RemainingPct <= 0
 		sc := gaugeStyle(a.GaugePos)
 		if isDim {
 			sc = dimStyle
 		}
-		row.Reset = sc.Render("\U000F029A") + " " + renderSustainGauge(a.GaugePos, isDim)
+		gaugeIcon := "\U000F029A" // mdi-refresh
+		if a.GaugeOverride == "imminent_block" && !isDim {
+			gaugeIcon = "\U0000F071" // fa-warning
+			sc = boldRedStyle
+		}
+		row.Reset = sc.Render(gaugeIcon) + " " + renderSustainGauge(a.GaugePos, isDim)
 
 		// Gauge-contextual columns: impact + timing (icon + value format).
 		gc := gaugeStyle(a.GaugePos)

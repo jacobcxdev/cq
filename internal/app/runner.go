@@ -8,13 +8,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 type Runner struct {
 	Clock    Clock
-	Cache    Cache                              // nil = no caching
+	Cache    Cache    // nil = no caching
+	History  History  // nil = cold-start, no burn-rate smoothing
 	Services map[provider.ID]provider.Services
 	Renderer Renderer
 }
@@ -62,7 +64,16 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	}
 	wg.Wait()
 
-	return buildReport(now, req.Providers, fetched), nil
+	var burnRates history.BurnRates
+	if r.History != nil {
+		var err error
+		burnRates, err = r.History.UpdateAndGetBurnRates(ctx, flattenFetched(fetched), now.Unix())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: history update failed: %v\n", err)
+		}
+	}
+
+	return buildReport(now, req.Providers, fetched, burnRates), nil
 }
 
 func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id provider.ID) []quota.Result {

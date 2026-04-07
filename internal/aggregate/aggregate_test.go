@@ -28,7 +28,7 @@ func TestComputeFiltersWeeklyExhaustedFrom5h(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now)
+	agg, summary := Compute(results, now, nil)
 	if agg == nil || summary == nil {
 		t.Fatal("expected aggregate and summary")
 	}
@@ -61,7 +61,7 @@ func TestComputeIncludesAccountsMissing7dIn5h(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now)
+	agg, _ := Compute(results, now, nil)
 	if got := agg[quota.Window5Hour].RemainingPct; got != 40 {
 		t.Fatalf("5h remaining = %d, want 40", got)
 	}
@@ -88,7 +88,7 @@ func TestComputeZeroes5hWhenAllWeeklyExhausted(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now)
+	agg, _ := Compute(results, now, nil)
 	if got := agg[quota.Window5Hour].RemainingPct; got != 0 {
 		t.Fatalf("5h remaining = %d, want 0", got)
 	}
@@ -121,7 +121,7 @@ func TestComputeFiltersWeeklyExhaustedFrom5hBurndown(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now)
+	agg, _ := Compute(results, now, nil)
 	if got := agg[quota.Window5Hour].Burndown; got != 1000 {
 		t.Fatalf("5h burndown = %d, want 1000", got)
 	}
@@ -315,7 +315,7 @@ func TestComputeDisjointWindows(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now)
+	agg, summary := Compute(results, now, nil)
 	if agg == nil {
 		t.Fatal("expected non-nil aggregate for disjoint windows with 2 usable results")
 	}
@@ -359,7 +359,7 @@ func TestComputeDisjointWindowsBothAccountsSameWindow(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now)
+	agg, summary := Compute(results, now, nil)
 	if agg == nil || summary == nil {
 		t.Fatal("expected non-nil aggregate when at least one window has >= 1 contributing account")
 	}
@@ -391,7 +391,7 @@ func TestComputeSustainabilityInAggregateResult(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now)
+	agg, summary := Compute(results, now, nil)
 	if agg == nil || summary == nil {
 		t.Fatal("expected non-nil aggregate")
 	}
@@ -403,11 +403,11 @@ func TestComputeSustainabilityInAggregateResult(t *testing.T) {
 	if w5h.Sustainability != 100 {
 		t.Errorf("Sustainability = %v, want 100 (zero-rate capped)", w5h.Sustainability)
 	}
-	// Zero-rate accounts with full remaining → severe underburn (position 6)
-	// since all quota will be wasted at current (zero) rate. However, near-zero
-	// rate accounts are skipped in projectedWaste, so waste=0 → on pace (3).
-	if w5h.GaugePos != 3 {
-		t.Errorf("GaugePos = %d, want 3 (unused accounts → on pace)", w5h.GaugePos)
+	// With nil burnRates the rate-ratio gauge cold-starts to Pos=-1
+	// (rendered as dim dashes by the TTY). This is the correct new
+	// behaviour when no historical burn data is available.
+	if w5h.GaugePos != -1 {
+		t.Errorf("GaugePos = %d, want -1 (cold start without burn history)", w5h.GaugePos)
 	}
 }
 
@@ -431,7 +431,7 @@ func TestComputeRequiresTwoUsableResults(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now)
+	agg, summary := Compute(results, now, nil)
 	if agg != nil || summary != nil {
 		t.Error("expected nil aggregate when fewer than 2 usable results")
 	}

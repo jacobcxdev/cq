@@ -3,6 +3,7 @@ package aggregate
 import (
 	"math"
 
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -13,7 +14,10 @@ type acctInfo struct {
 
 // Compute calculates aggregate pace for multiple Claude accounts across windows.
 // Returns nil if fewer than 2 valid accounts exist.
-func Compute(results []quota.Result, nowEpoch int64) (map[quota.WindowName]quota.AggregateResult, *AccountSummary) {
+//
+// burnRates supplies per-account EWMA burn rates for the gauge math; a nil
+// or empty map causes the gauge to cold-start (GaugePos = -1).
+func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates) (map[quota.WindowName]quota.AggregateResult, *AccountSummary) {
 	var valid []quota.Result
 	for _, r := range results {
 		if r.IsUsable() {
@@ -48,7 +52,7 @@ func Compute(results []quota.Result, nowEpoch int64) (map[quota.WindowName]quota
 	agg := make(map[quota.WindowName]quota.AggregateResult)
 
 	for _, winName := range windows {
-		result, ok := computeWindow(winName, periods[winName], accounts, nowEpoch)
+		result, ok := computeWindow(winName, periods[winName], accounts, nowEpoch, burnRates)
 		if !ok {
 			continue
 		}
@@ -61,7 +65,7 @@ func Compute(results []quota.Result, nowEpoch int64) (map[quota.WindowName]quota
 	return agg, summary
 }
 
-func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo, nowEpoch int64) (quota.AggregateResult, bool) {
+func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo, nowEpoch int64, burnRates history.BurnRates) (quota.AggregateResult, bool) {
 	var sumRemaining, sumExpected, sumWeight float64
 	// Burndown: Σ(pct_i * m_i) / Σ((100-pct_i) * m_i / elapsed_i)
 	var burnNum, burnDen float64
@@ -137,8 +141,9 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		result.Sustainability = 0
 	}
 
-	gi := computeGaugeInfo(accounts, winName, periodS, nowEpoch)
+	gi := computeGaugeInfo(accounts, winName, periodS, nowEpoch, burnRates)
 	result.GaugePos = gi.Pos
+	result.GaugeOverride = gi.Override
 	if gi.GapStart >= 0 {
 		result.GapStartS = int64(math.Round(gi.GapStart))
 		result.GapDurationS = int64(math.Round(gi.GapDuration))

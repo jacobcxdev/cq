@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jacobcxdev/cq/internal/aggregate"
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
@@ -28,6 +29,13 @@ type Cache interface {
 	Put(ctx context.Context, id string, results []quota.Result) error
 	Delete(ctx context.Context, id string) error
 	Age(ctx context.Context, id string) (time.Duration, bool)
+}
+
+// History abstracts the persistent burn-rate store so the Runner can be
+// tested without touching the filesystem. Nil-safe: a nil History causes the
+// runner to skip rate computation, and the gauge cold-starts (GaugePos = -1).
+type History interface {
+	UpdateAndGetBurnRates(ctx context.Context, results []quota.Result, nowEpoch int64) (history.BurnRates, error)
 }
 
 type Renderer interface {
@@ -58,9 +66,19 @@ type AggregateReport struct {
 	Windows    map[quota.WindowName]quota.AggregateResult `json:"windows"`
 }
 
+// flattenFetched returns all results from the fetched map in a single slice,
+// for the history store to process in one pass.
+func flattenFetched(fetched map[provider.ID][]quota.Result) []quota.Result {
+	var out []quota.Result
+	for _, results := range fetched {
+		out = append(out, results...)
+	}
+	return out
+}
+
 // buildReport is a pure function that assembles a Report from fetched results.
 // Any provider with 2+ usable results gets aggregate computation.
-func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][]quota.Result) Report {
+func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][]quota.Result, burnRates history.BurnRates) Report {
 	report := Report{
 		GeneratedAt: now,
 		Providers:   make([]ProviderReport, 0, len(ordered)),
@@ -72,7 +90,7 @@ func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][
 			Name:    capitalise(string(id)),
 			Results: results,
 		}
-		if windows, summary := aggregate.Compute(results, now.Unix()); len(windows) > 0 && summary != nil {
+		if windows, summary := aggregate.Compute(results, now.Unix(), burnRates); len(windows) > 0 && summary != nil {
 			pr.Aggregate = &AggregateReport{
 				ProviderID: id,
 				Kind:       "weighted_pace",
