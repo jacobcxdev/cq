@@ -11,6 +11,8 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/cache"
+	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/output"
 	"github.com/jacobcxdev/cq/internal/provider"
@@ -214,9 +216,16 @@ func runCheck(cli *CLI) error {
 		c = nil
 	}
 
+	hist, err := history.New(fsutil.OSFileSystem{}, cache.DefaultDir())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: history unavailable, gauge will cold-start: %v\n", err)
+		hist = nil
+	}
+
 	runner := &app.Runner{
 		Clock:    systemClock{},
 		Cache:    c,
+		History:  hist,
 		Services: services,
 		Renderer: renderer,
 	}

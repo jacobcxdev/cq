@@ -15,7 +15,7 @@ func TestBuildReportSingleProvider(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: 1000 + 9000},
 		}}},
 	}
-	r := buildReport(now, []provider.ID{provider.Codex}, fetched)
+	r := buildReport(now, []provider.ID{provider.Codex}, fetched, nil)
 	if len(r.Providers) != 1 {
 		t.Fatalf("providers = %d, want 1", len(r.Providers))
 	}
@@ -38,7 +38,7 @@ func TestBuildReportClaudeAggregate(t *testing.T) {
 				}},
 		},
 	}
-	r := buildReport(now, []provider.ID{provider.Claude}, fetched)
+	r := buildReport(now, []provider.ID{provider.Claude}, fetched, nil)
 	if r.Providers[0].Aggregate == nil {
 		t.Fatal("Claude with 2 accounts should have aggregate")
 	}
@@ -55,7 +55,7 @@ func TestBuildReportPreservesOrder(t *testing.T) {
 		provider.Codex:  {{Status: quota.StatusOK}},
 		provider.Gemini: {{Status: quota.StatusOK}},
 	}
-	r := buildReport(now, order, fetched)
+	r := buildReport(now, order, fetched, nil)
 	for i, id := range order {
 		if r.Providers[i].ID != id {
 			t.Errorf("provider[%d] = %q, want %q", i, r.Providers[i].ID, id)
@@ -68,7 +68,7 @@ func TestBuildReportNoAggregateForSingleClaude(t *testing.T) {
 	fetched := map[provider.ID][]quota.Result{
 		provider.Claude: {{Status: quota.StatusOK}},
 	}
-	r := buildReport(now, []provider.ID{provider.Claude}, fetched)
+	r := buildReport(now, []provider.ID{provider.Claude}, fetched, nil)
 	if r.Providers[0].Aggregate != nil {
 		t.Fatal("single Claude account should not have aggregate")
 	}
