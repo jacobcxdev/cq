@@ -15,13 +15,18 @@ type CodexSelector interface {
 	Select(ctx context.Context, exclude ...string) (*codex.CodexAccount, error)
 }
 
+type codexQuotaReader interface {
+	Snapshot(identifier string) (QuotaSnapshot, bool)
+}
+
 type codexSelector struct {
 	discover CodexDiscoverer
+	quota    codexQuotaReader
 }
 
 // NewCodexSelector creates a CodexSelector backed by the given discovery function.
-func NewCodexSelector(discover CodexDiscoverer) CodexSelector {
-	return &codexSelector{discover: discover}
+func NewCodexSelector(discover CodexDiscoverer, quota codexQuotaReader) CodexSelector {
+	return &codexSelector{discover: discover, quota: quota}
 }
 
 func (s *codexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
@@ -35,10 +40,10 @@ func (s *codexSelector) Select(_ context.Context, exclude ...string) (*codex.Cod
 		excludeSet[e] = true
 	}
 
-	// Prefer the active account.
+	// Prefer the active account when it still has quota.
 	for i := range accounts {
 		a := &accounts[i]
-		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" {
+		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" || !s.hasQuota(a) {
 			continue
 		}
 		if a.IsActive {
@@ -47,20 +52,34 @@ func (s *codexSelector) Select(_ context.Context, exclude ...string) (*codex.Cod
 		}
 	}
 
-	// Fall back to first non-excluded account with a token.
+	// Fall back to first non-excluded account with a token and quota.
 	for i := range accounts {
 		a := &accounts[i]
-		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" {
+		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" || !s.hasQuota(a) {
 			continue
 		}
 		result := *a
 		return &result, nil
 	}
 
-	return nil, fmt.Errorf("no codex accounts with valid tokens")
+	return nil, fmt.Errorf("no codex accounts with valid tokens and quota")
 }
 
 // codexAcctExcluded returns true if the account matches any key in the exclude set.
+func (s *codexSelector) hasQuota(a *codex.CodexAccount) bool {
+	if s.quota == nil {
+		return true
+	}
+	snap, ok := s.quota.Snapshot(a.AccountID)
+	if !ok {
+		snap, ok = s.quota.Snapshot(a.Email)
+	}
+	if !ok {
+		return true
+	}
+	return snap.Result.MinRemainingPct() > 0
+}
+
 func codexAcctExcluded(a *codex.CodexAccount, excludeSet map[string]bool) bool {
 	return (a.Email != "" && excludeSet[a.Email]) ||
 		(a.AccountID != "" && excludeSet[a.AccountID]) ||

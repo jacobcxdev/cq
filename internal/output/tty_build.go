@@ -321,7 +321,11 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 			gaugeIcon = "\U0000F071" // fa-warning
 			sc = boldRedStyle
 		}
-		row.Reset = sc.Render(gaugeIcon) + " " + renderSustainGauge(a.GaugePos, isDim)
+		gauge := renderSustainGauge(a.GaugePos, isDim)
+		if !isDim && a.PaceDiff <= -15 {
+			gauge = renderSustainGaugeWithStyle(a.GaugePos, isDim, sc, true)
+		}
+		row.Reset = sc.Render(gaugeIcon) + " " + gauge
 
 		// Gauge-contextual columns: impact + timing (icon + value format).
 		gc := gaugeStyle(a.GaugePos)
