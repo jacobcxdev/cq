@@ -99,6 +99,14 @@ func TestRouteModel_WithEffortSuffix(t *testing.T) {
 	}
 }
 
+func TestSyntheticModelCatalogRoutesViaRouteModel(t *testing.T) {
+	for _, model := range SyntheticModelCatalog() {
+		if got := RouteModel(model.ID); got != ProviderCodex {
+			t.Fatalf("RouteModel(%q) = %d, want %d", model.ID, got, ProviderCodex)
+		}
+	}
+}
+
 func TestExtractModel(t *testing.T) {
 	tests := []struct {
 		name string

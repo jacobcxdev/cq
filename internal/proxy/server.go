@@ -19,6 +19,12 @@ import (
 
 const maxRequestBody = 10 << 20 // 10 MiB
 
+const (
+	codexResponsesPath       = "/v1/responses"
+	legacyCodexResponsesPath = "/responses"
+	codexAppServerPath       = "/app-server"
+)
+
 // Server is the reverse proxy HTTP server.
 type Server struct {
 	Config         *Config
@@ -32,20 +38,15 @@ type Server struct {
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	upstream, err := url.Parse(s.Config.ClaudeUpstream)
+	handler, err := s.handler()
 	if err != nil {
-		return fmt.Errorf("parse upstream URL: %w", err)
+		return err
 	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("/responses", s.handleNativeCodex)
-	mux.HandleFunc("/", s.proxyHandler(upstream))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.Config.Port)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -66,6 +67,124 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) handler() (http.Handler, error) {
+	upstream, err := url.Parse(s.Config.ClaudeUpstream)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream URL: %w", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
+	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
+	mux.HandleFunc(codexAppServerPath, s.handleCodexAppServerRoute)
+	mux.HandleFunc("/", s.proxyHandler(upstream))
+	return mux, nil
+}
+
+func bearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "/v1/models only supports GET")
+		return
+	}
+	if !s.isValidToken(bearerToken(r)) {
+		writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+		return
+	}
+
+	// Claude Code only refreshes live capabilities against first-party hosts, so
+	// this endpoint is necessary Anthropic-compatible groundwork but not sufficient
+	// on its own when ANTHROPIC_BASE_URL points at this proxy. We also write the
+	// local model-capabilities cache on proxy startup.
+	models := mergeModelMetadata(s.fetchUpstreamModels(r), SyntheticModelCatalog())
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data": models,
+	})
+}
+
+func (s *Server) fetchUpstreamModels(r *http.Request) []ModelMetadata {
+	if s.Config == nil || s.Config.ClaudeUpstream == "" {
+		return nil
+	}
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.Config.ClaudeUpstream+"/v1/models", nil)
+	if err != nil {
+		return nil
+	}
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		upReq.Header.Set("Authorization", auth)
+	}
+	transport := s.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	resp, err := transport.RoundTrip(upReq)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	var payload struct {
+		Data []ModelMetadata `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil
+	}
+	return payload.Data
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Request) {
+	if isWebSocketUpgrade(r) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("websocket transport is not supported on %s; use %s", codexResponsesPath, codexAppServerPath))
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", fmt.Sprintf("%s only supports POST", codexResponsesPath))
+		return
+	}
+	s.handleNativeCodex(w, r)
+}
+
+func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.Request) {
+	if isWebSocketUpgrade(r) {
+		s.proxyCodexUpgrade(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", fmt.Sprintf("%s only supports POST or websocket upgrade", legacyCodexResponsesPath))
+		return
+	}
+	s.handleNativeCodex(w, r)
+}
+
+func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Request) {
+	if !isWebSocketUpgrade(r) {
+		w.Header().Set("Upgrade", "websocket")
+		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", fmt.Sprintf("%s requires websocket upgrade", codexAppServerPath))
+		return
+	}
+	s.proxyCodexUpgrade(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -117,12 +236,6 @@ func (s *Server) isValidToken(token string) bool {
 func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	if s.CodexTransport == nil {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
-		return
-	}
-
-	// WebSocket upgrade — reverse proxy to Codex upstream.
-	if r.Header.Get("Upgrade") != "" {
-		s.proxyCodexUpgrade(w, r)
 		return
 	}
 

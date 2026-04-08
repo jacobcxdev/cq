@@ -468,6 +468,218 @@ func TestServer_NativeCodex_ForwardsWithAuth(t *testing.T) {
 	}
 }
 
+func TestServer_Handler_CodexResponsesPath_ForwardsWithAuth(t *testing.T) {
+	var gotPath, gotAuth, gotAcctID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotAcctID = r.Header.Get("ChatGPT-Account-ID")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_123"}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-1"}},
+			Inner:    http.DefaultTransport,
+		},
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if gotPath != "/responses" {
+		t.Errorf("upstream path = %q, want /responses", gotPath)
+	}
+	if gotAuth != "Bearer codex-tok" {
+		t.Errorf("upstream auth = %q, want Bearer codex-tok", gotAuth)
+	}
+	if gotAcctID != "acct-1" {
+		t.Errorf("upstream account-id = %q, want acct-1", gotAcctID)
+	}
+}
+
+func TestServer_Handler_LegacyCodexResponsesPost_Compatibility(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_legacy"}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if gotPath != "/responses" {
+		t.Errorf("upstream path = %q, want /responses", gotPath)
+	}
+}
+
+func TestServer_Handler_CodexResponsesRejectsWebsocket(t *testing.T) {
+	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, codexResponsesPath, nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), codexAppServerPath) {
+		t.Errorf("body = %q, want mention of %s", w.Body.String(), codexAppServerPath)
+	}
+}
+
+func TestServer_Handler_AppServerRequiresWebsocket(t *testing.T) {
+	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUpgradeRequired {
+		t.Fatalf("status = %d, want 426", w.Code)
+	}
+	if got := w.Header().Get("Upgrade"); got != "websocket" {
+		t.Errorf("Upgrade header = %q, want websocket", got)
+	}
+}
+
+func TestServer_ModelsEndpointRequiresAuth(t *testing.T) {
+	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}
+
+func TestServer_ModelsEndpointIncludesSyntheticModels(t *testing.T) {
+	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Data []struct {
+			ID             string `json:"id"`
+			MaxInputTokens int    `json:"max_input_tokens"`
+			MaxTokens      int    `json:"max_tokens"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	found := false
+	for _, model := range resp.Data {
+		if model.ID == "gpt-5.4" {
+			found = true
+			if model.MaxInputTokens != 1050000 {
+				t.Fatalf("gpt-5.4 max_input_tokens = %d, want 1050000", model.MaxInputTokens)
+			}
+			if model.MaxTokens != 128000 {
+				t.Fatalf("gpt-5.4 max_tokens = %d, want 128000", model.MaxTokens)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing gpt-5.4 synthetic model")
+	}
+}
+
+func TestServer_ModelsEndpointMergesUpstreamModels(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q, want /v1/models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-opus-4-6","max_input_tokens":200000,"max_tokens":32000}]}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{Config: &Config{ClaudeUpstream: upstream.URL, LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"claude-opus-4-6"`) {
+		t.Fatalf("body missing upstream Claude model: %s", body)
+	}
+	if !strings.Contains(body, `"gpt-5.4"`) {
+		t.Fatalf("body missing synthetic Codex model: %s", body)
+	}
+}
+
 func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
