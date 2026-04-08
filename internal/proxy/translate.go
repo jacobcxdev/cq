@@ -97,7 +97,7 @@ type openaiInputItem struct {
 	CallID    string `json:"call_id,omitempty"`
 
 	// function_call_output fields
-	Output string `json:"output,omitempty"`
+	Output *string `json:"output,omitempty"`
 }
 
 type openaiInputContentPart struct {
@@ -334,7 +334,7 @@ func translateMessage(msg anthropicMsg) ([]openaiInputItem, error) {
 			items = append(items, openaiInputItem{
 				Type:   "function_call_output",
 				CallID: block.ToolUseID,
-				Output: output,
+				Output: strPtr(output),
 			})
 		}
 	}
@@ -560,4 +560,5 @@ func translateUsage(usage *openaiUsage) anthropicUsage {
 	return translated
 }
 
-func intPtr(v int) *int { return &v }
+func intPtr(v int) *int       { return &v }
+func strPtr(v string) *string { return &v }
