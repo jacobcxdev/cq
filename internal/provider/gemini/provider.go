@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
@@ -94,44 +93,31 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 	token := creds.AccessToken
 	email := auth.DecodeEmail(creds.IDToken)
 
-	// Fetch tier and quota in parallel.
-	var tierRaw []byte
+	// Fetch tier first to extract the project ID for accurate quota data.
+	tierRaw, err := fetchTier(ctx, p.client, token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: gemini tier: %v\n", err)
+	}
+	tier := parseTier(tierRaw)
+	projectID := parseProjectID(tierRaw)
+
+	// Fetch quota with project ID.
 	var quotaBody []byte
 	var quotaErr error
 	quotaCode := 0
 	quotaPanic := false
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if rv := recover(); rv != nil {
-				fmt.Fprintf(os.Stderr, "cq: panic in gemini tier fetch: %v\n%s\n", rv, debug.Stack())
-			}
-		}()
-		var err error
-		tierRaw, err = fetchTier(ctx, p.client, token)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "cq: gemini tier: %v\n", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
+	func() {
 		defer func() {
 			if rv := recover(); rv != nil {
 				fmt.Fprintf(os.Stderr, "cq: panic in gemini quota fetch: %v\n%s\n", rv, debug.Stack())
 				quotaPanic = true
 			}
 		}()
-		quotaBody, quotaCode, quotaErr = fetchQuota(ctx, p.client, token)
+		quotaBody, quotaCode, quotaErr = fetchQuota(ctx, p.client, token, projectID)
 		if quotaErr != nil {
 			fmt.Fprintf(os.Stderr, "cq: gemini quota: %v\n", quotaErr)
 		}
 	}()
-	wg.Wait()
-
-	tier := parseTier(tierRaw)
 
 	if quotaPanic {
 		return []quota.Result{quota.ErrorResult("fetch_panic", "quota fetch failed (panic)", 0)}, nil

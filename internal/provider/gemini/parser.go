@@ -8,6 +8,36 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
+// parseProjectID extracts the cloudaicompanionProject ID from the
+// loadCodeAssist response body. The field may be a plain string or an object
+// with an "id" or "projectId" sub-field. Returns empty string if not found.
+func parseProjectID(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var outer struct {
+		Project json.RawMessage `json:"cloudaicompanionProject"`
+	}
+	if json.Unmarshal(data, &outer) != nil || len(outer.Project) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(outer.Project, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var obj struct {
+		ID        string `json:"id"`
+		ProjectID string `json:"projectId"`
+	}
+	if json.Unmarshal(outer.Project, &obj) == nil {
+		if id := strings.TrimSpace(obj.ID); id != "" {
+			return id
+		}
+		return strings.TrimSpace(obj.ProjectID)
+	}
+	return ""
+}
+
 // parseTier decodes the loadCodeAssist response and returns a human-readable
 // tier string: "paid", "free", "legacy", or "unknown".
 func parseTier(data []byte) string {
@@ -42,8 +72,9 @@ func parseTier(data []byte) string {
 }
 
 // parseQuota decodes the retrieveUserQuota response body and returns a
-// quota.Result. It picks the most constrained pro model; if no pro model is
-// found it falls back to the overall minimum across all buckets.
+// quota.Result with per-tier windows: quota (Pro), flash (Flash), flash-lite
+// (Flash Lite). Only windows with at least one matching bucket are populated.
+// Models that match none of the three tiers are ignored.
 func parseQuota(body []byte, tier, email string) quota.Result {
 	var resp struct {
 		Buckets []struct {
@@ -56,34 +87,45 @@ func parseQuota(body []byte, tier, email string) quota.Result {
 		return quota.ErrorResult("parse_error", "", 0)
 	}
 
-	minPct := 100
-	var resetTime string
-	foundPro := false
+	type tierMin struct {
+		pct       int
+		resetTime string
+		found     bool
+	}
+	var pro, flash, flashLite tierMin
 
 	for _, b := range resp.Buckets {
 		pct := int(math.Round(b.RemainingFraction * 100))
 		pct = max(0, min(100, pct))
-		isPro := strings.Contains(strings.ToLower(b.ModelID), "pro")
-		if isPro {
-			if !foundPro || pct < minPct {
-				minPct = pct
-				resetTime = b.ResetTime
-				foundPro = true
+		lower := strings.ToLower(b.ModelID)
+		switch {
+		case strings.Contains(lower, "flash-lite") || strings.Contains(lower, "flash_lite"):
+			if !flashLite.found || pct < flashLite.pct {
+				flashLite = tierMin{pct, b.ResetTime, true}
 			}
-		} else if !foundPro && pct < minPct {
-			minPct = pct
-			resetTime = b.ResetTime
+		case strings.Contains(lower, "flash"):
+			if !flash.found || pct < flash.pct {
+				flash = tierMin{pct, b.ResetTime, true}
+			}
+		case strings.Contains(lower, "pro"):
+			if !pro.found || pct < pro.pct {
+				pro = tierMin{pct, b.ResetTime, true}
+			}
 		}
 	}
 
-	epoch := quota.ParseResetTime(resetTime)
-
-	windows := map[quota.WindowName]quota.Window{
-		quota.WindowQuota: {
-			RemainingPct: minPct,
-			ResetAtUnix:  epoch,
-		},
+	windows := make(map[quota.WindowName]quota.Window)
+	add := func(name quota.WindowName, tm tierMin) {
+		if tm.found {
+			windows[name] = quota.Window{
+				RemainingPct: tm.pct,
+				ResetAtUnix:  quota.ParseResetTime(tm.resetTime),
+			}
+		}
 	}
+	add(quota.WindowPro, pro)
+	add(quota.WindowFlash, flash)
+	add(quota.WindowFlashLite, flashLite)
 
 	return quota.Result{
 		Status:  quota.StatusFromWindows(windows),

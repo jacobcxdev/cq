@@ -42,7 +42,7 @@ func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates
 		Label:      BuildLabel(valid),
 	}
 
-	// WindowQuota is excluded because it uses different reset semantics
+	// WindowPro is excluded because it uses different reset semantics
 	// (daily rolling) that don't compose across accounts the same way.
 	windows := []quota.WindowName{quota.Window5Hour, quota.Window7Day}
 	periods := map[quota.WindowName]int64{

@@ -103,7 +103,9 @@ func TestPeriodFor(t *testing.T) {
 	}{
 		{Window5Hour, 5 * 3600},
 		{Window7Day, 7 * 24 * 3600},
-		{WindowQuota, 24 * 3600},
+		{WindowPro, 24 * 3600},
+		{WindowFlash, 24 * 3600},
+		{WindowFlashLite, 24 * 3600},
 		{"unknown", 0},
 	}
 	for _, tt := range tests {

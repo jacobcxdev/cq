@@ -97,10 +97,15 @@ func fetchTier(ctx context.Context, client httputil.Doer, token string) ([]byte,
 }
 
 // fetchQuota calls the Code Assist retrieveUserQuota endpoint and returns the
-// response body and HTTP status code.
-func fetchQuota(ctx context.Context, client httputil.Doer, token string) ([]byte, int, error) {
+// response body and HTTP status code. projectID, when non-empty, is included in
+// the request body for accurate per-project quota data.
+func fetchQuota(ctx context.Context, client httputil.Doer, token, projectID string) ([]byte, int, error) {
+	body := "{}"
+	if projectID != "" {
+		body = `{"project":"` + projectID + `"}`
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", strings.NewReader("{}"))
+		"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", strings.NewReader(body))
 	if err != nil {
 		return nil, 0, fmt.Errorf("create quota request: %w", err)
 	}
