@@ -116,6 +116,10 @@ func runProxyStart() error {
 		Inner:    http.DefaultTransport,
 	}
 
+	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
+	}
+
 	// Start headroom compression bridge if configured.
 	var headroom *proxy.HeadroomBridge
 	if cfg.Headroom {
