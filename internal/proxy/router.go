@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -57,17 +58,23 @@ var effortSuffixes = []struct {
 	{"-low", "low"},
 }
 
+var oneMillionSuffix = regexp.MustCompile(`(?i)\[1m\]$`)
+
 // ParseModelEffort splits a model name into the base model and an optional
 // effort override from a recognised suffix. Returns ("gpt-5.4", "xhigh")
 // for input "gpt-5.4-xhigh", or ("gpt-5.4", "") for input "gpt-5.4".
 func ParseModelEffort(model string) (baseModel, effort string) {
+	baseModel = model
 	lower := strings.ToLower(model)
 	for _, es := range effortSuffixes {
 		if strings.HasSuffix(lower, es.suffix) {
-			return model[:len(model)-len(es.suffix)], es.effort
+			baseModel = model[:len(model)-len(es.suffix)]
+			effort = es.effort
+			break
 		}
 	}
-	return model, ""
+	baseModel = oneMillionSuffix.ReplaceAllString(baseModel, "")
+	return baseModel, effort
 }
 
 // extractModel performs a quick JSON parse to extract the "model" field
