@@ -99,7 +99,7 @@ func TestPeriodSeconds(t *testing.T) {
 	}{
 		{"5h", "5h", 18000},
 		{"7d", "7d", 604800},
-		{"quota", "quota", 86400},
+		{"pro", "pro", 86400},
 		{"unknown", "other", 0},
 	}
 	for _, tt := range tests {

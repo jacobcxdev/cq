@@ -170,7 +170,7 @@ func TestBuildTTYModel_MultipleSections(t *testing.T) {
 				Name: "codex",
 				Results: []quota.Result{
 					{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
-						quota.WindowQuota: {RemainingPct: 90, ResetAtUnix: 80000},
+						quota.WindowPro: {RemainingPct: 90, ResetAtUnix: 80000},
 					}},
 				},
 			},

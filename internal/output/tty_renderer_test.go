@@ -93,7 +93,7 @@ func TestTTYRendererMultipleProviders(t *testing.T) {
 					Status: quota.StatusOK,
 					Plan:   "plus",
 					Windows: map[quota.WindowName]quota.Window{
-						quota.WindowQuota: {RemainingPct: 50, ResetAtUnix: 80000},
+						quota.WindowPro: {RemainingPct: 50, ResetAtUnix: 80000},
 					},
 				}},
 			},

@@ -164,7 +164,7 @@ func TestFetchHappyPath(t *testing.T) {
 	if r.Tier != "paid" {
 		t.Errorf("tier = %q, want paid", r.Tier)
 	}
-	w, ok := r.Windows[quota.WindowQuota]
+	w, ok := r.Windows[quota.WindowPro]
 	if !ok {
 		t.Fatal("missing quota window")
 	}

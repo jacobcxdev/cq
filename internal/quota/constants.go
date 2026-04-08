@@ -13,9 +13,11 @@ const (
 type WindowName string
 
 const (
-	Window5Hour WindowName = "5h"
-	Window7Day  WindowName = "7d"
-	WindowQuota WindowName = "quota"
+	Window5Hour    WindowName = "5h"
+	Window7Day     WindowName = "7d"
+	WindowPro    WindowName = "pro"
+	WindowFlash    WindowName = "flash"
+	WindowFlashLite WindowName = "^lite"
 )
 
 func PeriodFor(name WindowName) time.Duration {
@@ -24,7 +26,7 @@ func PeriodFor(name WindowName) time.Duration {
 		return 5 * time.Hour
 	case Window7Day:
 		return 7 * 24 * time.Hour
-	case WindowQuota:
+	case WindowPro, WindowFlash, WindowFlashLite:
 		return 24 * time.Hour
 	default:
 		return 0
@@ -33,7 +35,7 @@ func PeriodFor(name WindowName) time.Duration {
 
 // OrderedWindows returns window names in canonical display order.
 func OrderedWindows() []WindowName {
-	return []WindowName{Window5Hour, Window7Day, WindowQuota}
+	return []WindowName{Window5Hour, Window7Day, WindowPro, WindowFlash, WindowFlashLite}
 }
 
 // DefaultResetEpoch returns a fallback reset epoch when the API doesn't
