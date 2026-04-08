@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -168,8 +169,54 @@ func TestTranslateRequest_ToolUseAndResult(t *testing.T) {
 	if items[2].CallID != "call_1" {
 		t.Errorf("items[2].call_id = %q, want call_1", items[2].CallID)
 	}
-	if items[2].Output != "Sunny, 22C" {
-		t.Errorf("items[2].output = %q, want 'Sunny, 22C'", items[2].Output)
+	if items[2].Output == nil || *items[2].Output != "Sunny, 22C" {
+		t.Errorf("items[2].output = %v, want 'Sunny, 22C'", items[2].Output)
+	}
+}
+
+func TestTranslateRequest_EmptyToolResult(t *testing.T) {
+	// Empty tool results must still emit "output":"" (not omit the field).
+	// The OpenAI Responses API requires output to be present on function_call_output items.
+	input := `{
+		"model": "gpt-5.4",
+		"max_tokens": 10,
+		"messages": [
+			{"role": "user", "content": "Run it"},
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "call_2", "name": "run_cmd", "input": {}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "call_2", "content": ""}
+			]}
+		]
+	}`
+
+	out, err := translateRequest([]byte(input), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var req openaiResponsesRequest
+	json.Unmarshal(out, &req)
+
+	var items []openaiInputItem
+	json.Unmarshal(req.Input, &items)
+
+	item := items[2]
+	if item.Type != "function_call_output" {
+		t.Fatalf("items[2].type = %q, want function_call_output", item.Type)
+	}
+	if item.Output == nil {
+		t.Fatal("items[2].output = nil, want non-nil (empty string must be present in JSON)")
+	}
+	if *item.Output != "" {
+		t.Errorf("items[2].output = %q, want empty string", *item.Output)
+	}
+
+	// Verify the JSON contains "output":"" not omitted.
+	raw, _ := json.Marshal(item)
+	if !bytes.Contains(raw, []byte(`"output":`)) {
+		t.Errorf("serialised item missing output field: %s", raw)
 	}
 }
 
