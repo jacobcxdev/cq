@@ -191,3 +191,25 @@ func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
 		t.Fatalf("expected no eligible accounts, got acct=%v err=%v", acct, err)
 	}
 }
+
+func TestCodexSelector_SelectsAccountWithNoWindowData(t *testing.T) {
+	// An account whose quota snapshot has no windows returns MinRemainingPct()==-1.
+	// This means "no data yet", not "exhausted". The selector must treat it as
+	// eligible, not skip it.
+	quotaReader := stubQuotaReader{
+		"acct": {Result: quota.Result{Windows: nil}},
+	}
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{AccountID: "acct", Email: "a@test.com", AccessToken: "tok", IsActive: true},
+		}
+	}, quotaReader)
+
+	acct, err := sel.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error: %v (account with no window data should be eligible)", err)
+	}
+	if acct == nil || acct.Email != "a@test.com" {
+		t.Fatalf("got %+v, want a@test.com", acct)
+	}
+}

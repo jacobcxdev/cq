@@ -122,4 +122,7 @@ func TestFetchAccountUsageRetryAfter(t *testing.T) {
 	if result.Error == nil || result.Error.Code != "api_error" || result.Error.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("unexpected error result: %+v", result.Error)
 	}
+	if result.Error.Message != "api error (retry_after=2m0s)" {
+		t.Fatalf("message = %q, want %q", result.Error.Message, "api error (retry_after=2m0s)")
+	}
 }

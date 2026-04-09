@@ -120,6 +120,7 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	var prof profile
 	var usageBody []byte
 	var usageCode int
+	var usageDiag string
 	var usageErr error
 	var wg sync.WaitGroup
 
@@ -150,7 +151,7 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 					usageErr = fmt.Errorf("panic: %v", rv)
 				}
 			}()
-			usageBody, usageCode, _, usageErr = p.client.FetchUsage(ctx, token)
+			usageBody, usageCode, _, usageDiag, usageErr = p.client.FetchUsage(ctx, token)
 			if usageErr != nil {
 				fmt.Fprintf(os.Stderr, "cq: claude usage: %v\n", usageErr)
 			}
@@ -215,7 +216,11 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		return errorWithProfile("fetch_error", fmt.Sprintf("usage: %v", usageErr), 0)
 	}
 	if usageCode != 200 {
-		return errorWithProfile("api_error", "api error", usageCode)
+		msg := "api error"
+		if usageDiag != "" {
+			msg = fmt.Sprintf("api error (%s)", usageDiag)
+		}
+		return errorWithProfile("api_error", msg, usageCode)
 	}
 
 	return parseUsage(usageBody, plan, rlt, prof.Email, prof.AccountUUID)
@@ -258,12 +263,16 @@ func (p *Provider) FetchAccountUsage(ctx context.Context, acct keyring.ClaudeOAu
 		persistRefreshedToken(&acct)
 	}
 
-	body, statusCode, retryAfter, err := p.client.FetchUsage(ctx, token)
+	body, statusCode, retryAfter, diagnostics, err := p.client.FetchUsage(ctx, token)
 	if err != nil {
 		return errorWithIdentity("fetch_error", fmt.Sprintf("usage: %v", err), 0), 0, nil
 	}
 	if statusCode != http.StatusOK {
-		return errorWithIdentity("api_error", "api error", statusCode), retryAfter, nil
+		msg := "api error"
+		if diagnostics != "" {
+			msg = fmt.Sprintf("api error (%s)", diagnostics)
+		}
+		return errorWithIdentity("api_error", msg, statusCode), retryAfter, nil
 	}
 
 	return parseUsage(body, acct.SubscriptionType, acct.RateLimitTier, acct.Email, acct.AccountUUID), 0, nil

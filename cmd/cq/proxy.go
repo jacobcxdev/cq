@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -116,6 +117,18 @@ func runProxyStart() error {
 		Inner:    http.DefaultTransport,
 	}
 
+	// WebSocket upgrades require HTTP/1.1. http.DefaultTransport may negotiate
+	// HTTP/2 via ALPN TLS, which does not support the 101 Switching Protocols
+	// response needed for WebSocket. Use a dedicated HTTP/1.1-only transport.
+	http11Transport := http.DefaultTransport.(*http.Transport).Clone()
+	http11Transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	http11Transport.ForceAttemptHTTP2 = false
+	codexUpgradeTransport := &proxy.CodexTokenTransport{
+		Selector: codexSelector,
+		Switcher: codexSwitcher,
+		Inner:    http11Transport,
+	}
+
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
 	}
@@ -137,8 +150,9 @@ func runProxyStart() error {
 		Selector:       selector,
 		Discover:       discover,
 		Transport:      transport,
-		CodexDiscover:  codexDiscover,
-		CodexTransport: codexTransport,
+		CodexDiscover:         codexDiscover,
+		CodexTransport:        codexTransport,
+		CodexUpgradeTransport: codexUpgradeTransport,
 		Headroom:       headroom,
 	}
 

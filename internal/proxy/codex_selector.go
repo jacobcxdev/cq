@@ -77,7 +77,10 @@ func (s *codexSelector) hasQuota(a *codex.CodexAccount) bool {
 	if !ok {
 		return true
 	}
-	return snap.Result.MinRemainingPct() > 0
+	// MinRemainingPct returns -1 when there is no window data (no quota
+	// information yet). Treat -1 as "assume has quota" — only return false
+	// when pct == 0, meaning the account is confirmed exhausted.
+	return snap.Result.MinRemainingPct() != 0
 }
 
 func codexAcctExcluded(a *codex.CodexAccount, excludeSet map[string]bool) bool {
