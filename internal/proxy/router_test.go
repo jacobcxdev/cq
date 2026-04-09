@@ -54,7 +54,9 @@ func TestParseModelEffort(t *testing.T) {
 		wantEffort string
 	}{
 		{"gpt-5.4", "gpt-5.4", ""},
+		{"gpt-5.4[1m]", "gpt-5.4", ""},
 		{"gpt-5.4-xhigh", "gpt-5.4", "xhigh"},
+		{"gpt-5.4[1m]-xhigh", "gpt-5.4", "xhigh"},
 		{"gpt-5.4-high", "gpt-5.4", "high"},
 		{"gpt-5.4-medium", "gpt-5.4", "medium"},
 		{"gpt-5.4-low", "gpt-5.4", "low"},
@@ -84,6 +86,8 @@ func TestRouteModel_WithEffortSuffix(t *testing.T) {
 		want  Provider
 	}{
 		{"gpt-5.4-xhigh", ProviderCodex},
+		{"gpt-5.4[1m]", ProviderCodex},
+		{"gpt-5.4[1m]-xhigh", ProviderCodex},
 		{"gpt-5.4-mini-low", ProviderCodex},
 		{"o4-mini-high", ProviderCodex},
 		{"claude-3-opus-high", ProviderClaude}, // suffix stripped → claude-3-opus → Claude
@@ -114,6 +118,7 @@ func TestExtractModel(t *testing.T) {
 		want string
 	}{
 		{"valid", `{"model":"gpt-5.4","messages":[]}`, "gpt-5.4"},
+		{"1m suffix", `{"model":"gpt-5.4[1m]","messages":[]}`, "gpt-5.4[1m]"},
 		{"empty body", ``, ""},
 		{"no model field", `{"messages":[]}`, ""},
 		{"invalid json", `{bad`, ""},

@@ -304,7 +304,7 @@ func TestHandleCodex_ModelValidationProbe(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	body := `{"model":"gpt-5.4","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"Hi","cache_control":{"type":"ephemeral"}}]}]}`
+	body := `{"model":"gpt-5.4[1m]","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"Hi","cache_control":{"type":"ephemeral"}}]}]}`
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
 
 	srv.handleCodex(w, req, []byte(body))

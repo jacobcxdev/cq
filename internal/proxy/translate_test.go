@@ -8,7 +8,7 @@ import (
 
 func TestTranslateRequest_SimpleText(t *testing.T) {
 	input := `{
-		"model": "gpt-5.4",
+		"model": "gpt-5.4[1m]",
 		"max_tokens": 100,
 		"messages": [{"role": "user", "content": "hello"}]
 	}`
