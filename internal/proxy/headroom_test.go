@@ -819,19 +819,24 @@ func TestConfigHeadroomMode(t *testing.T) {
 		{name: "empty defaults to cache", input: "{}", want: HeadroomModeCache},
 		{name: "token", input: `{"headroom_mode":"token"}`, want: HeadroomModeToken},
 		{name: "cache", input: `{"headroom_mode":"cache"}`, want: HeadroomModeCache},
-		{name: "invalid falls back to cache", input: `{"headroom_mode":"bogus"}`, want: HeadroomModeCache},
+		{name: "invalid rejected by validate", input: `{"headroom_mode":"bogus"}`, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var cfg Config
-			err := json.Unmarshal([]byte(tc.input), &cfg)
+			if err := json.Unmarshal([]byte(tc.input), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			cfg.LocalToken = "test-token"
+			cfg.setDefaults()
+			err := cfg.validate()
 			if tc.wantErr {
 				if err == nil {
-					t.Fatal("expected error")
+					t.Fatal("expected validate error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unmarshal: %v", err)
+				t.Fatalf("validate: %v", err)
 			}
 			if got := cfg.ResolvedHeadroomMode(); got != tc.want {
 				t.Fatalf("ResolvedHeadroomMode() = %v, want %v", got, tc.want)
