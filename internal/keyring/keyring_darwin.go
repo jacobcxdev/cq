@@ -74,6 +74,14 @@ func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 
 // RemovePlatformClaudeKeychainAccountsByEmail deletes matching Claude Code
 // keychain entries from the macOS login keychain.
+//
+// Two classes of entries are removed:
+//  1. Identified entries whose Email field matches the target email.
+//  2. Anonymous entries (no Email, no AccountUUID) whose RefreshToken or
+//     AccessToken matches a token from an entry that was already removed in
+//     this call. This covers the case where Claude Code wrote a post-refresh
+//     keychain entry without identity metadata — such entries would otherwise
+//     survive and be re-adopted as the target account on the next run.
 func RemovePlatformClaudeKeychainAccountsByEmail(email string) error {
 	if email == "" {
 		return nil
@@ -82,20 +90,87 @@ func RemovePlatformClaudeKeychainAccountsByEmail(email string) error {
 	for i := 2; i <= 10; i++ {
 		services = append(services, fmt.Sprintf("Claude Code-credentials-%d", i))
 	}
+
+	// Collect tokens from all identified entries we remove so that anonymous
+	// entries sharing those tokens can be matched later.
+	removedRefreshTokens := make(map[string]bool)
+	removedAccessTokens := make(map[string]bool)
+
+	// Pre-seed token sets from non-platform sources for the target email. This
+	// handles the case where an anonymous platform entry appears before the
+	// identified platform entry in the same service slot: without pre-seeding,
+	// the anonymous entry fails the affinity check (tokens not yet recorded) and
+	// the loop breaks before ever reaching the identified entry. We only seed from
+	// entries that are confidently identified as the target email; we never delete
+	// from these sources here — this function is the platform-keychain helper only.
+	for _, acct := range discoverCredentialsFile(make(map[string]bool)) {
+		if acct.Email == email {
+			if acct.RefreshToken != "" {
+				removedRefreshTokens[acct.RefreshToken] = true
+			}
+			if acct.AccessToken != "" {
+				removedAccessTokens[acct.AccessToken] = true
+			}
+		}
+	}
+	for _, acct := range discoverCQKeyring(make(map[string]bool)) {
+		if acct.Email == email {
+			if acct.RefreshToken != "" {
+				removedRefreshTokens[acct.RefreshToken] = true
+			}
+			if acct.AccessToken != "" {
+				removedAccessTokens[acct.AccessToken] = true
+			}
+		}
+	}
+
+slotLoop:
 	for _, service := range services {
-		out, err := exec.Command("security", "find-generic-password", "-s", service, "-w").Output()
-		if err != nil {
-			if service != "Claude Code-credentials" {
+		// A single service slot can hold multiple accounts (e.g. two OS users
+		// both wrote to the same keychain service name). Loop until find returns
+		// no entry matching the target email so all duplicates are cleared.
+		firstForService := true
+		for {
+			out, err := exec.Command("security", "find-generic-password", "-s", service, "-w").Output()
+			if err != nil {
+				// No more entries for this service.
+				if firstForService && service != "Claude Code-credentials" {
+					// Gap in the numbered slots — stop scanning further slots.
+					break slotLoop
+				}
 				break
 			}
-			continue
-		}
-		acct := parseKeychainEntry(strings.TrimSpace(string(out)))
-		if acct == nil || acct.Email != email {
-			continue
-		}
-		if err := exec.Command("security", "delete-generic-password", "-s", service).Run(); err != nil {
-			return err
+			firstForService = false
+			acct := parseKeychainEntry(strings.TrimSpace(string(out)))
+			if acct == nil {
+				break
+			}
+			if acct.Email == email {
+				// Identified match — record its tokens and delete.
+				if acct.RefreshToken != "" {
+					removedRefreshTokens[acct.RefreshToken] = true
+				}
+				if acct.AccessToken != "" {
+					removedAccessTokens[acct.AccessToken] = true
+				}
+				if err := exec.Command("security", "delete-generic-password", "-s", service).Run(); err != nil {
+					return err
+				}
+				continue
+			}
+			if acct.Email == "" && acct.AccountUUID == "" {
+				// Anonymous entry — check token affinity with removed accounts.
+				if (acct.RefreshToken != "" && removedRefreshTokens[acct.RefreshToken]) ||
+					(acct.AccessToken != "" && removedAccessTokens[acct.AccessToken]) {
+					if err := exec.Command("security", "delete-generic-password", "-s", service).Run(); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			// Entry exists but is not the target — leave it and stop
+			// looking in this slot (can't skip to a deeper entry).
+			break
 		}
 	}
 	return nil

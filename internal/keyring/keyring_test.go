@@ -845,6 +845,244 @@ func TestMergeIdentifiedByFreshness(t *testing.T) {
 	})
 }
 
+// ── mergeIdentifiedByFreshness tie-breaking (equal ExpiresAt) ────────────────
+
+// TestMergeIdentifiedByFreshnessTieBreaking covers the deterministic tie-break
+// policy when two entries share the same ExpiresAt. The requested policy is:
+//   1. Prefer the entry with a non-empty AccountUUID.
+//   2. Then prefer the entry with a non-nil TokenAccount.
+//   3. Then prefer the entry with richer (longer) Scopes list.
+//   4. Token winner keeps its own token fields; metadata is enriched from loser.
+//   5. When otherwise equivalent, output is stable (first-seen wins).
+func TestMergeIdentifiedByFreshnessTieBreaking(t *testing.T) {
+	t.Run("equal ExpiresAt prefers entry with non-empty AccountUUID", func(t *testing.T) {
+		// Both entries share the same email and the same ExpiresAt.
+		// Entry B has an AccountUUID; entry A does not.
+		// Policy: B (has UUID) should win; A's scopes should be merged in.
+		noUUID := ClaudeOAuth{
+			Email:       "a@example.com",
+			AccessToken: "tok-no-uuid",
+			ExpiresAt:   500,
+			Scopes:      []string{"user:inference"},
+		}
+		withUUID := ClaudeOAuth{
+			Email:       "a@example.com",
+			AccountUUID: "uuid-alice",
+			AccessToken: "tok-with-uuid",
+			ExpiresAt:   500,
+		}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{noUUID, withUUID})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		// UUID-bearing entry should be the token winner.
+		if got.AccountUUID != "uuid-alice" {
+			t.Errorf("AccountUUID = %q, want uuid-alice (UUID entry should win tie)", got.AccountUUID)
+		}
+		if got.AccessToken != "tok-with-uuid" {
+			t.Errorf("AccessToken = %q, want tok-with-uuid", got.AccessToken)
+		}
+		// Scopes from the loser should be carried forward.
+		if len(got.Scopes) == 0 || got.Scopes[0] != "user:inference" {
+			t.Errorf("Scopes = %v, want [user:inference] carried from loser", got.Scopes)
+		}
+	})
+
+	t.Run("equal ExpiresAt prefers entry with non-nil TokenAccount when UUIDs equal", func(t *testing.T) {
+		// Both entries share the same UUID and ExpiresAt.
+		// Entry B has a populated TokenAccount; entry A does not.
+		// Policy: B (has TokenAccount) should win.
+		noTA := ClaudeOAuth{
+			Email:       "b@example.com",
+			AccountUUID: "uuid-bob",
+			AccessToken: "tok-no-ta",
+			ExpiresAt:   300,
+		}
+		withTA := ClaudeOAuth{
+			Email:        "b@example.com",
+			AccountUUID:  "uuid-bob",
+			AccessToken:  "tok-with-ta",
+			ExpiresAt:    300,
+			TokenAccount: &TokenAccount{UUID: "ta-uuid", EmailAddress: "b@example.com"},
+		}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{noTA, withTA})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		if got.TokenAccount == nil {
+			t.Errorf("TokenAccount = nil, want non-nil (TokenAccount entry should win tie)")
+		}
+		if got.AccessToken != "tok-with-ta" {
+			t.Errorf("AccessToken = %q, want tok-with-ta", got.AccessToken)
+		}
+	})
+
+	t.Run("equal ExpiresAt prefers richer scopes when UUID and TokenAccount are both absent", func(t *testing.T) {
+		// Both entries share the same email and ExpiresAt; neither has UUID or TokenAccount.
+		// Entry B has more scopes.
+		// Policy: B (richer scopes) should win.
+		fewScopes := ClaudeOAuth{
+			Email:       "c@example.com",
+			AccessToken: "tok-few",
+			ExpiresAt:   200,
+			Scopes:      []string{"user:inference"},
+		}
+		moreScopes := ClaudeOAuth{
+			Email:       "c@example.com",
+			AccessToken: "tok-more",
+			ExpiresAt:   200,
+			Scopes:      []string{"user:inference", "user:profile", "user:billing"},
+		}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{fewScopes, moreScopes})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		if got.AccessToken != "tok-more" {
+			t.Errorf("AccessToken = %q, want tok-more (richer scopes entry should win tie)", got.AccessToken)
+		}
+		if len(got.Scopes) != 3 {
+			t.Errorf("Scopes = %v, want 3 scopes", got.Scopes)
+		}
+	})
+
+	t.Run("token winner keeps its own tokens while metadata enriched from loser", func(t *testing.T) {
+		// Winner (UUID) keeps AccessToken/RefreshToken/ExpiresAt; loser contributes
+		// its SubscriptionType and RateLimitTier to the merged output.
+		withMeta := ClaudeOAuth{
+			Email:            "d@example.com",
+			AccessToken:      "tok-meta",
+			ExpiresAt:        400,
+			SubscriptionType: "max",
+			RateLimitTier:    "tier1",
+		}
+		withUUID := ClaudeOAuth{
+			Email:       "d@example.com",
+			AccountUUID: "uuid-dave",
+			AccessToken: "tok-uuid",
+			ExpiresAt:   400,
+		}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{withMeta, withUUID})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		// UUID entry wins token fields.
+		if got.AccessToken != "tok-uuid" {
+			t.Errorf("AccessToken = %q, want tok-uuid", got.AccessToken)
+		}
+		// Metadata carried from loser.
+		if got.SubscriptionType != "max" {
+			t.Errorf("SubscriptionType = %q, want max", got.SubscriptionType)
+		}
+		if got.RateLimitTier != "tier1" {
+			t.Errorf("RateLimitTier = %q, want tier1", got.RateLimitTier)
+		}
+	})
+}
+
+// ── dedupByEmail tie-breaking (equal ExpiresAt) ───────────────────────────────
+
+// TestDedupByEmailTieBreaking covers the deterministic tie-break policy in
+// dedupByEmail when two entries share the same email and ExpiresAt.
+//
+// These tests are expected to FAIL against current production code because the
+// current dedupByEmail implementation only checks ExpiresAt (strict greater-than)
+// and then AccountUUID presence, with no TokenAccount or scope-richness tie-break.
+func TestDedupByEmailTieBreaking(t *testing.T) {
+	t.Run("equal ExpiresAt and no UUID: prefers entry with non-nil TokenAccount", func(t *testing.T) {
+		// Neither has a UUID; ExpiresAt is equal.
+		// Entry B has a TokenAccount; entry A does not.
+		// Policy: B should win.
+		noTA := ClaudeOAuth{
+			Email:       "e@example.com",
+			AccessToken: "tok-no-ta",
+			ExpiresAt:   100,
+		}
+		withTA := ClaudeOAuth{
+			Email:        "e@example.com",
+			AccessToken:  "tok-with-ta",
+			ExpiresAt:    100,
+			TokenAccount: &TokenAccount{UUID: "ta-uuid", EmailAddress: "e@example.com"},
+		}
+		got := dedupByEmail([]ClaudeOAuth{noTA, withTA})
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
+		}
+		if got[0].TokenAccount == nil {
+			t.Errorf("TokenAccount = nil, want non-nil (TokenAccount entry should win tie)")
+		}
+		if got[0].AccessToken != "tok-with-ta" {
+			t.Errorf("AccessToken = %q, want tok-with-ta", got[0].AccessToken)
+		}
+	})
+
+	t.Run("equal ExpiresAt and no UUID or TokenAccount: prefers richer scopes", func(t *testing.T) {
+		// Neither has a UUID or TokenAccount; ExpiresAt is equal.
+		// Entry B has more scopes.
+		// Policy: B (richer scopes) should win.
+		fewScopes := ClaudeOAuth{
+			Email:       "f@example.com",
+			AccessToken: "tok-few",
+			ExpiresAt:   100,
+			Scopes:      []string{"user:inference"},
+		}
+		moreScopes := ClaudeOAuth{
+			Email:       "f@example.com",
+			AccessToken: "tok-more",
+			ExpiresAt:   100,
+			Scopes:      []string{"user:inference", "user:profile"},
+		}
+		got := dedupByEmail([]ClaudeOAuth{fewScopes, moreScopes})
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
+		}
+		if got[0].AccessToken != "tok-more" {
+			t.Errorf("AccessToken = %q, want tok-more (richer scopes entry should win tie)", got[0].AccessToken)
+		}
+		if len(got[0].Scopes) != 2 {
+			t.Errorf("Scopes = %v, want 2 scopes", got[0].Scopes)
+		}
+	})
+
+	t.Run("equal ExpiresAt with UUID in second entry: UUID entry keeps its own token", func(t *testing.T) {
+		// First entry has fresher-looking token but no UUID.
+		// Second entry has same ExpiresAt and a UUID.
+		// The existing code path for UUID (when ExpiresAt is NOT strictly greater)
+		// promotes UUID entry but swaps in the existing (first) entry's tokens.
+		// Policy: UUID entry should win AND keep its own AccessToken (not the first entry's).
+		noUUID := ClaudeOAuth{
+			Email:       "g@example.com",
+			AccessToken: "tok-no-uuid",
+			ExpiresAt:   200,
+			Scopes:      []string{"user:inference"},
+		}
+		withUUID := ClaudeOAuth{
+			Email:       "g@example.com",
+			AccountUUID: "uuid-grace",
+			AccessToken: "tok-with-uuid",
+			ExpiresAt:   200,
+		}
+		got := dedupByEmail([]ClaudeOAuth{noUUID, withUUID})
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
+		}
+		// UUID entry should be the token winner — its own AccessToken is retained.
+		if got[0].AccessToken != "tok-with-uuid" {
+			t.Errorf("AccessToken = %q, want tok-with-uuid (UUID entry should keep its own token)", got[0].AccessToken)
+		}
+		if got[0].AccountUUID != "uuid-grace" {
+			t.Errorf("AccountUUID = %q, want uuid-grace", got[0].AccountUUID)
+		}
+		// Scopes from the no-UUID loser should be enriched in.
+		if len(got[0].Scopes) == 0 {
+			t.Errorf("Scopes should be carried from loser, got empty")
+		}
+	})
+}
+
 // ── Hash8 ─────────────────────────────────────────────────────────────────────
 
 func TestHash8(t *testing.T) {
