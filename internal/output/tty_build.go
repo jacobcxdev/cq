@@ -334,8 +334,14 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		}
 		switch {
 		case a.GaugePos >= 0 && a.GaugePos < 3: // overburn
-			row.PaceDiff = gc.Render(fmt.Sprintf("\uEE8E %7s", fmtDuration(a.GapDurationS)))
-			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", fmtDuration(a.GapStartS)))
+			gapDuration := "—"
+			gapStart := "—"
+			if a.GapStartS > 0 || a.GapDurationS > 0 {
+				gapDuration = fmtDuration(a.GapDurationS)
+				gapStart = fmtDuration(a.GapStartS)
+			}
+			row.PaceDiff = gc.Render(fmt.Sprintf("\uEE8E %7s", gapDuration))
+			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", gapStart))
 		case a.GaugePos >= 4: // underburn
 			row.PaceDiff = gc.Render(fmt.Sprintf("\uEFC7 %7s", fmt.Sprintf("%d%%", a.WastedPct)))
 			if a.WasteDeadlineS > 0 {
