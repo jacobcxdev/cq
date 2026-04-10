@@ -304,6 +304,7 @@ func TestFetchAccountProfileFailureFallsBackToStoredIdentity(t *testing.T) {
 		t.Fatalf("AccountID = %q, want %q", result.AccountID, "uuid-123")
 	}
 }
+
 func TestFetchAccountUsageRetryAfter(t *testing.T) {
 	p := &Provider{client: &Client{http: doerFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{
