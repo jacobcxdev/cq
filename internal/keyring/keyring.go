@@ -441,6 +441,56 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	return nil
 }
 
+// RemoveCQClaudeAccountsByEmail deletes cq-managed Claude account state for all
+// manifest rows matching the given email.
+func RemoveCQClaudeAccountsByEmail(email string) error {
+	if email == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("user home dir: %w", err)
+	}
+	manifestPath := filepath.Join(home, ".cache", "cq", "accounts.json")
+	entries := loadManifest(manifestPath)
+	if len(entries) == 0 {
+		return nil
+	}
+
+	filtered := make([]manifestEntry, 0, len(entries))
+	removed := false
+	for _, entry := range entries {
+		if entry.Email == email {
+			removed = true
+			if entry.UUID != "" {
+				service := ServicePrefix + Hash8(entry.UUID)
+				_ = gokeyring.Delete(service, entry.UUID)
+			}
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if !removed {
+		return nil
+	}
+	if err := saveManifest(manifestPath, filtered); err != nil {
+		return fmt.Errorf("save manifest: %w", err)
+	}
+	return nil
+}
+
+// RemoveActiveClaudeCredentialsByEmail clears the active Claude credentials when
+// they belong to the given email.
+func RemoveActiveClaudeCredentialsByEmail(email string) error {
+	if email == "" || ActiveClaudeEmail() != email {
+		return nil
+	}
+	if err := WriteCredentialsFile(&ClaudeCredentials{}); err != nil {
+		return fmt.Errorf("clear credentials: %w", err)
+	}
+	return nil
+}
+
 // BackfillCredentialsFile updates the active credentials file with profile data
 // (email, UUID, plan, tier) without overwriting the tokens.
 func BackfillCredentialsFile(acct *ClaudeOAuth) {

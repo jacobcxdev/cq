@@ -272,6 +272,19 @@ func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
 	return nil
 }
 
+// RunRemove removes the matching account for the given provider.
+func RunRemove(id provider.ID, email string, client httputil.Doer) error {
+	mgr := AccountManager(id, client)
+	if mgr == nil {
+		return fmt.Errorf("account removal not supported for %s", id)
+	}
+	if err := mgr.Remove(context.Background(), email); err != nil {
+		return err
+	}
+	fmt.Printf("Removed %s\n", email)
+	return nil
+}
+
 // AccountManager returns the AccountManager for a provider, or nil if unsupported.
 // The client is used for providers that refresh metadata on switch (e.g. Claude).
 func AccountManager(id provider.ID, client httputil.Doer) provider.AccountManager {

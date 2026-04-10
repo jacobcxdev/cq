@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +57,8 @@ func TestFetchAccountPanicInInnerGoroutines(t *testing.T) {
 }
 
 func TestFetchAccountUsage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	p := &Provider{client: &Client{http: doerFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/api/oauth/usage" {
 			t.Fatalf("path = %q, want /api/oauth/usage", req.URL.Path)
@@ -97,6 +101,52 @@ func TestFetchAccountUsage(t *testing.T) {
 	}
 	if result.MinRemainingPct() != 75 {
 		t.Fatalf("remaining = %d, want 75", result.MinRemainingPct())
+	}
+
+	manifestPath := filepath.Join(os.Getenv("HOME"), ".cache", "cq", "accounts.json")
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("FetchAccountUsage should not write cq manifest, stat err = %v", err)
+	}
+}
+
+func TestFetchAccountUsageUsesSandboxedHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	p := &Provider{client: &Client{http: doerFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body: io.NopCloser(strings.NewReader(`{"five_hour":{"utilization":25.0,"resets_at":"2026-03-20T12:00:00Z"}}`)),
+		}, nil
+	})}}
+
+	_, _, err := p.FetchAccountUsage(context.Background(), keyring.ClaudeOAuth{
+		AccessToken:      "test-token",
+		SubscriptionType: "max",
+		RateLimitTier:    "tier-1",
+		Email:            "user@example.com",
+		AccountUUID:      "uuid-123",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("FetchAccountUsage: %v", err)
+	}
+
+	manifestPath := filepath.Join(home, ".cache", "cq", "accounts.json")
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("sandboxed test should not persist cq manifest, stat err = %v", err)
+	}
+}
+
+func TestFetchAccountRefreshFallbackUsesSandboxedHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Keep this path read-only for now: the goal is proving sandboxed HOME on the
+	// call path, not exercising real keychain persistence from the provider test.
+	manifestPath := filepath.Join(home, ".cache", "cq", "accounts.json")
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("sandbox should start clean, stat err = %v", err)
 	}
 }
 

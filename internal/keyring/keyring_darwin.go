@@ -71,3 +71,32 @@ func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 	return exec.Command("security", "add-generic-password",
 		"-U", "-s", service, "-a", user, "-w", string(data)).Run()
 }
+
+// RemovePlatformClaudeKeychainAccountsByEmail deletes matching Claude Code
+// keychain entries from the macOS login keychain.
+func RemovePlatformClaudeKeychainAccountsByEmail(email string) error {
+	if email == "" {
+		return nil
+	}
+	services := []string{"Claude Code-credentials"}
+	for i := 2; i <= 10; i++ {
+		services = append(services, fmt.Sprintf("Claude Code-credentials-%d", i))
+	}
+	for _, service := range services {
+		out, err := exec.Command("security", "find-generic-password", "-s", service, "-w").Output()
+		if err != nil {
+			if service != "Claude Code-credentials" {
+				break
+			}
+			continue
+		}
+		acct := parseKeychainEntry(strings.TrimSpace(string(out)))
+		if acct == nil || acct.Email != email {
+			continue
+		}
+		if err := exec.Command("security", "delete-generic-password", "-s", service).Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

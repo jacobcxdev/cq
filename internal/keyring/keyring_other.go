@@ -13,3 +13,8 @@ func discoverPlatformKeychain(seen map[string]bool) []ClaudeOAuth {
 func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 	return nil
 }
+
+// RemovePlatformClaudeKeychainAccountsByEmail is a no-op on non-macOS platforms.
+func RemovePlatformClaudeKeychainAccountsByEmail(email string) error {
+	return nil
+}

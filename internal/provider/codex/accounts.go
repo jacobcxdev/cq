@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -205,6 +206,42 @@ func (a *Accounts) Switch(_ context.Context, identifier string) (provider.Accoun
 	return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
 }
 
+func (a *Accounts) Remove(_ context.Context, identifier string) error {
+	accts := DiscoverAccounts(a.FS)
+	home, err := a.FS.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+
+	authPath := filepath.Join(home, ".codex", "auth.json")
+	recordKeys := make(map[string]bool)
+	found := false
+	for _, acct := range accts {
+		if acct.Email != identifier {
+			continue
+		}
+		found = true
+		if acct.RecordKey != "" {
+			recordKeys[acct.RecordKey] = true
+		}
+		if acct.FilePath != "" && acct.FilePath != authPath {
+			if err := a.FS.Remove(acct.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove stored auth file: %w", err)
+			}
+		}
+		if acct.IsActive {
+			if err := a.FS.Remove(authPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove active auth file: %w", err)
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("no account found with email %q", identifier)
+	}
+	removeRegistryAccounts(a.FS, home, recordKeys)
+	return nil
+}
+
 // adoptActiveAccount saves the current ~/.codex/auth.json into
 // ~/.codex/accounts/{record_key}.auth.json if it isn't already stored there.
 // This preserves accounts originally created by `codex login` (Codex CLI)
@@ -270,6 +307,54 @@ func updateRegistryActiveKey(fs fsutil.FileSystem, home, recordKey string) {
 		return
 	}
 
+	tmp := regPath + ".tmp"
+	if err := fs.WriteFile(tmp, updated, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: update registry: write: %v\n", err)
+		return
+	}
+	if err := fs.Rename(tmp, regPath); err != nil {
+		fs.Remove(tmp)
+		fmt.Fprintf(os.Stderr, "cq: update registry: rename: %v\n", err)
+	}
+}
+
+func removeRegistryAccounts(fs fsutil.FileSystem, home string, recordKeys map[string]bool) {
+	if len(recordKeys) == 0 {
+		return
+	}
+	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
+	data, err := fs.ReadFile(regPath)
+	if err != nil {
+		return
+	}
+
+	var reg map[string]any
+	if json.Unmarshal(data, &reg) != nil {
+		return
+	}
+	if active, ok := reg["active_account_key"].(string); ok && recordKeys[active] {
+		reg["active_account_key"] = ""
+	}
+	if rawAccounts, ok := reg["accounts"].([]any); ok {
+		filtered := make([]any, 0, len(rawAccounts))
+		for _, raw := range rawAccounts {
+			acctMap, ok := raw.(map[string]any)
+			if !ok {
+				filtered = append(filtered, raw)
+				continue
+			}
+			key, _ := acctMap["account_key"].(string)
+			if recordKeys[key] {
+				continue
+			}
+			filtered = append(filtered, raw)
+		}
+		reg["accounts"] = filtered
+	}
+	updated, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return
+	}
 	tmp := regPath + ".tmp"
 	if err := fs.WriteFile(tmp, updated, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: update registry: write: %v\n", err)
