@@ -135,5 +135,6 @@ func (s *accountSelector) betterCandidate(candidate *keyring.ClaudeOAuth, candid
 
 func isExcluded(a *keyring.ClaudeOAuth, excludeSet map[string]bool) bool {
 	return (a.Email != "" && excludeSet[a.Email]) ||
-		(a.AccountUUID != "" && excludeSet[a.AccountUUID])
+		(a.AccountUUID != "" && excludeSet[a.AccountUUID]) ||
+		(a.AccessToken != "" && excludeSet[a.AccessToken])
 }

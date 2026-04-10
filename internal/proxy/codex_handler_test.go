@@ -19,9 +19,19 @@ type fakeCodexSelector struct {
 	err     error
 }
 
-func (f *fakeCodexSelector) Select(_ context.Context, _ ...string) (*codex.CodexAccount, error) {
+func (f *fakeCodexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.account == nil {
+		return nil, fmt.Errorf("no codex accounts available")
+	}
+	excludeSet := make(map[string]bool, len(exclude))
+	for _, e := range exclude {
+		excludeSet[e] = true
+	}
+	if codexAcctExcluded(f.account, excludeSet) {
+		return nil, fmt.Errorf("no codex accounts available")
 	}
 	result := *f.account
 	return &result, nil

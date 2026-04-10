@@ -31,8 +31,7 @@ func (f *fakeSelector) Select(_ context.Context, exclude ...string) (*keyring.Cl
 	}
 	for i := range f.accounts {
 		a := &f.accounts[i]
-		if (a.Email != "" && excludeSet[a.Email]) ||
-			(a.AccountUUID != "" && excludeSet[a.AccountUUID]) {
+		if isExcluded(a, excludeSet) || a.AccessToken == "" {
 			continue
 		}
 		result := *a
@@ -157,6 +156,7 @@ func TestTokenTransport_401RefreshRetry(t *testing.T) {
 			return makeResponse(200, "ok"), nil
 		}),
 	}
+	transport.suppressFailoverForKey = "stale-suppression"
 
 	resp, err := transport.RoundTrip(makeRequest(`{"test":"body"}`))
 	if err != nil {
@@ -170,6 +170,9 @@ func TestTokenTransport_401RefreshRetry(t *testing.T) {
 	}
 	if len(bodyContents) != 2 || bodyContents[1] != `{"test":"body"}` {
 		t.Errorf("body replay failed: %v", bodyContents)
+	}
+	if transport.suppressFailoverForKey != "" {
+		t.Errorf("suppression = %q, want cleared after successful 401 recovery", transport.suppressFailoverForKey)
 	}
 }
 
@@ -243,11 +246,273 @@ func TestTokenTransport_ConcurrentRefresh(t *testing.T) {
 	}
 }
 
-func TestTokenTransport_429TransientForwarded(t *testing.T) {
+// --- immediate 429 replay tests (new behavior) ---
+
+// TestTokenTransport_429ImmediateReplayToSecondAccount verifies that the first
+// /v1/messages 429 immediately replays to the second account (no counter needed).
+func TestTokenTransport_429ImmediateReplayToSecondAccount(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
-		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
+	}}
+
+	var calls int
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (immediate replay to alternate)", resp.StatusCode)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (initial + one replay)", calls)
+	}
+}
+
+// TestTokenTransport_429WalksMultipleAlternates verifies that the transport
+// walks through alternates until one succeeds.
+func TestTokenTransport_429WalksMultipleAlternates(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
+		{Email: "c@test.com", AccountUUID: "uuid-c", AccessToken: "tok-c", ExpiresAt: future},
+	}}
+
+	var calls int
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			auth := req.Header.Get("Authorization")
+			if auth == "Bearer tok-a" || auth == "Bearer tok-b" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (walk to third account)", resp.StatusCode)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (a→b→c)", calls)
+	}
+}
+
+// TestTokenTransport_429FreshQuotaWithCapacity_ReplaysButNoSwitch verifies that
+// when the failing account's fresh quota shows remaining capacity, the transport
+// still replays to an alternate (giving the client a good response) but does NOT
+// persist a switch (no Switcher call).
+func TestTokenTransport_429FreshQuotaWithCapacity_ReplaysButNoSwitch(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: future,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: future,
+	}
+
+	switchCh := make(chan string, 1)
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Quota:    quotaCacheWithSnapshot("uuid-a", 80, 0),
+		Switcher: func(_ context.Context, email string) error {
+			switchCh <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (replayed to alternate)", resp.StatusCode)
+	}
+
+	// No switch should be persisted — fresh quota says account A still has capacity.
+	select {
+	case email := <-switchCh:
+		t.Errorf("unexpected switch to %q — fresh quota shows 80%% remaining, should not persist switch", email)
+	case <-time.After(50 * time.Millisecond):
+		// good: no switch persisted
+	}
+}
+
+// TestTokenTransport_429ConfirmedExhaustion_PersistsSwitch verifies that when
+// fresh quota confirms the account is exhausted (0% remaining), the switch IS persisted.
+func TestTokenTransport_429ConfirmedExhaustion_PersistsSwitch(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: future,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: future,
+	}
+
+	switchDone := make(chan string, 1)
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Quota:    quotaCacheWithSnapshot("uuid-a", 0, 0),
+		Switcher: func(_ context.Context, email string) error {
+			switchDone <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (replay succeeded)", resp.StatusCode)
+	}
+
+	select {
+	case email := <-switchDone:
+		if email != "b@test.com" {
+			t.Errorf("switched to %q, want b@test.com", email)
+		}
+	case <-time.After(time.Second):
+		t.Error("expected switch to be persisted — quota shows 0%% remaining (confirmed exhausted)")
+	}
+}
+
+// TestTokenTransport_429UnknownQuota_TriesAlternates verifies that stale/missing
+// quota (unknown exhaustion status) still causes alternates to be tried.
+func TestTokenTransport_429UnknownQuota_TriesAlternates(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	acctA := keyring.ClaudeOAuth{
+		Email: "a@test.com", AccountUUID: "uuid-a",
+		AccessToken: "tok-a", ExpiresAt: future,
+	}
+	acctB := keyring.ClaudeOAuth{
+		Email: "b@test.com", AccountUUID: "uuid-b",
+		AccessToken: "tok-b", ExpiresAt: future,
+	}
+
+	// No quota cache → unknown status.
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Quota:    nil,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (alternates tried for unknown quota)", resp.StatusCode)
+	}
+}
+
+// TestTokenTransport_429AllAccountsExhausted_Surfaces429OnlyAfterTryingAll verifies
+// that when all accounts return 429, the client only sees 429 after all candidates
+// have been tried.
+func TestTokenTransport_429AllAccountsExhausted_Surfaces429OnlyAfterTryingAll(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
+		{Email: "c@test.com", AccountUUID: "uuid-c", AccessToken: "tok-c", ExpiresAt: future},
+	}}
+
+	var calls int
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			calls++
+			return makeResponse(429, "all exhausted"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 429 {
+		t.Errorf("status = %d, want 429 (all accounts exhausted)", resp.StatusCode)
+	}
+	// Should have tried all 3 accounts: initial + 2 alternates.
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3 (tried all accounts before surfacing 429)", calls)
+	}
+}
+
+// TestTokenTransport_429SingleAccount_Surfaces429Immediately verifies that when
+// there is only one account and it returns 429, the 429 is forwarded immediately.
+func TestTokenTransport_429SingleAccount_Surfaces429Immediately(t *testing.T) {
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "only@test.com", AccountUUID: "uuid-only", AccessToken: "tok", ExpiresAt: time.Now().UnixMilli() + 3600_000},
+	}}
+
+	var calls int
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			calls++
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 429 {
+		t.Errorf("status = %d, want 429", resp.StatusCode)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (no alternate to try)", calls)
+	}
+}
+
+// TestTokenTransport_429NonMessagesEndpoint_ForwardedUnchanged verifies that
+// non-/v1/messages 429s are forwarded without attempting replay.
+func TestTokenTransport_429NonMessagesEndpoint_ForwardedUnchanged(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccessToken: "tok-1", ExpiresAt: future},
+		{Email: "b@test.com", AccessToken: "tok-2", ExpiresAt: future},
 	}}
 
 	var upstreamCalls int
@@ -259,112 +524,159 @@ func TestTokenTransport_429TransientForwarded(t *testing.T) {
 		}),
 	}
 
-	// A single 429 should be forwarded to the client, not trigger failover.
+	// Non-messages endpoints should never trigger replay.
+	for i := 0; i < 5; i++ {
+		buf := []byte(`{}`)
+		req, _ := http.NewRequest("GET", "https://api.anthropic.com/v1/usage", bytes.NewReader(buf))
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(buf)), nil
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("req %d: %v", i+1, err)
+		}
+		if resp.StatusCode != 429 {
+			t.Errorf("req %d: status = %d, want 429 (forwarded, no replay)", i+1, resp.StatusCode)
+		}
+	}
+	if upstreamCalls != 5 {
+		t.Errorf("upstream calls = %d, want 5 (no replay on non-messages)", upstreamCalls)
+	}
+}
+
+// TestTokenTransport_429FailoverSuppression_SetAfterFullWalk verifies that
+// failover suppression is set after all accounts have been tried and all returned 429.
+func TestTokenTransport_429FailoverSuppression_SetAfterFullWalk(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
+	}}
+
+	var switchCount atomic.Int32
+	transport := &TokenTransport{
+		Selector: sel,
+		Switcher: func(_ context.Context, _ string) error {
+			switchCount.Add(1)
+			return nil
+		},
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(429, "all exhausted"), nil
+		}),
+	}
+
+	// First request: walks a→b, both 429 → suppression set.
 	resp, err := transport.RoundTrip(makeRequest(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != 429 {
-		t.Errorf("status = %d, want 429 (forwarded)", resp.StatusCode)
+		t.Errorf("status = %d, want 429", resp.StatusCode)
 	}
-	if upstreamCalls != 1 {
-		t.Errorf("upstream calls = %d, want 1 (no failover)", upstreamCalls)
+
+	if transport.suppressFailoverForKey == "" {
+		t.Error("expected failover suppression to be set after full walk")
+	}
+
+	// Second request: suppressed — no replay, just forward 429.
+	var calls int
+	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		return makeResponse(429, "still exhausted"), nil
+	})
+	resp, err = transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 429 {
+		t.Errorf("status = %d, want 429 (suppressed)", resp.StatusCode)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1 (suppressed, no replay)", calls)
 	}
 }
 
-func TestTokenTransport_429ExhaustionTriggersFailover(t *testing.T) {
+// TestTokenTransport_429FailoverSuppression_ClearedAfterSuccess verifies that
+// failover suppression is cleared after a later non-429 success.
+func TestTokenTransport_429FailoverSuppression_ClearedAfterSuccess(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
-		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
 	}}
 
-	var switchedTo string
-	var switchDone sync.WaitGroup
-	switchDone.Add(1)
-
+	var calls int
 	transport := &TokenTransport{
 		Selector: sel,
-		Switcher: func(_ context.Context, email string) error {
-			switchedTo = email
-			switchDone.Done()
-			return nil
-		},
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			auth := req.Header.Get("Authorization")
-			if auth == "Bearer tok-1" {
-				return makeResponse(429, "rate limited"), nil
-			}
-			return makeResponse(200, "ok"), nil
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(429, "all exhausted"), nil
 		}),
 	}
 
-	// First two 429s: transient, forwarded to client.
-	for i := 0; i < 2; i++ {
-		resp, err := transport.RoundTrip(makeRequest(""))
-		if err != nil {
-			t.Fatalf("req %d: %v", i+1, err)
-		}
-		if resp.StatusCode != 429 {
-			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
+	// Walk all accounts → suppression set.
+	transport.RoundTrip(makeRequest("")) //nolint:errcheck
+
+	if transport.suppressFailoverForKey == "" {
+		t.Fatal("suppression should be set before testing clear")
 	}
 
-	// Third 429: exhaustion triggers failover to secondary.
+	// Now a successful response clears suppression.
+	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		return makeResponse(200, "ok"), nil
+	})
 	resp, err := transport.RoundTrip(makeRequest(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != 200 {
-		t.Errorf("req 3: status = %d, want 200 (failover)", resp.StatusCode)
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	// Wait for async switch to complete.
-	switchDone.Wait()
-	if switchedTo != "secondary@test.com" {
-		t.Errorf("switched to %q, want secondary@test.com", switchedTo)
+	if transport.suppressFailoverForKey != "" {
+		t.Error("expected failover suppression to be cleared after success")
 	}
-}
 
-func TestTokenTransport_429NoAlternate(t *testing.T) {
-	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "only@test.com", AccessToken: "tok", ExpiresAt: time.Now().UnixMilli() + 3600_000},
-	}}
-
-	transport := &TokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+	// Next 429 should replay again (suppression is gone).
+	calls = 0
+	transport.Inner = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Header.Get("Authorization") == "Bearer tok-a" {
 			return makeResponse(429, "rate limited"), nil
-		}),
+		}
+		return makeResponse(200, "ok"), nil
+	})
+	resp, err = transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Exhaust the single account (3 consecutive 429s).
-	for i := 0; i < 3; i++ {
-		resp, err := transport.RoundTrip(makeRequest(""))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp.StatusCode != 429 {
-			t.Errorf("req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (replay resumed after suppression cleared)", resp.StatusCode)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (initial + replay after suppression cleared)", calls)
 	}
 }
 
+// TestTokenTransport_429ResetOnSuccess verifies that a successful response clears
+// any suppression state (regression: ensure non-429 paths work correctly).
 func TestTokenTransport_429ResetOnSuccess(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
+		{Email: "primary@test.com", AccountUUID: "uuid-p", AccessToken: "tok-1", ExpiresAt: future},
+		{Email: "secondary@test.com", AccountUUID: "uuid-s", AccessToken: "tok-2", ExpiresAt: future},
 	}}
 
 	var callCount int
 	transport := &TokenTransport{
 		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			callCount++
-			// First two calls: 429, then a 200, then two more 429s.
-			// The 200 should reset the counter so the final 429s don't trigger exhaustion.
+			// Calls 1,2 hit account A with 429 → walk to B → 200.
+			// Call 3 is a success on A (transport may have switched).
+			// After success, replay should work again.
 			switch callCount {
-			case 1, 2, 4, 5:
+			case 1:
 				return makeResponse(429, "rate limited"), nil
 			default:
 				return makeResponse(200, "ok"), nil
@@ -372,29 +684,23 @@ func TestTokenTransport_429ResetOnSuccess(t *testing.T) {
 		}),
 	}
 
-	// Two 429s (count=2).
-	for i := 0; i < 2; i++ {
-		resp, _ := transport.RoundTrip(makeRequest(""))
-		if resp.StatusCode != 429 {
-			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
-	}
-
-	// Success resets counter.
+	// First request: 429 on A → replay to B → 200.
 	resp, _ := transport.RoundTrip(makeRequest(""))
 	if resp.StatusCode != 200 {
-		t.Fatalf("req 3: status = %d, want 200", resp.StatusCode)
+		t.Fatalf("req 1: status = %d, want 200", resp.StatusCode)
 	}
 
-	// Two more 429s — counter is back at 2, not 4 (no exhaustion).
-	for i := 0; i < 2; i++ {
+	// Subsequent requests succeed directly.
+	for i := 0; i < 3; i++ {
 		resp, _ := transport.RoundTrip(makeRequest(""))
-		if resp.StatusCode != 429 {
-			t.Fatalf("req %d: status = %d, want 429", i+4, resp.StatusCode)
+		if resp.StatusCode != 200 {
+			t.Fatalf("req %d: status = %d, want 200", i+2, resp.StatusCode)
 		}
 	}
 }
 
+// TestTokenTransport_401RefreshRetry_CountTokens verifies that 401 refresh works
+// for the count_tokens endpoint.
 func TestTokenTransport_401RefreshRetry_CountTokens(t *testing.T) {
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{
 		Email: "a@test.com", AccessToken: "old-tok", ExpiresAt: time.Now().UnixMilli() + 3600_000, RefreshToken: "rt",
@@ -442,9 +748,14 @@ func TestTokenTransport_401RefreshRetry_CountTokens(t *testing.T) {
 	}
 }
 
+// TestTokenTransport_429CountTokensForwarded verifies that count_tokens 429s
+// are forwarded without replay (not a /v1/messages path).
 func TestTokenTransport_429CountTokensForwarded(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
-	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future}, {Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future}}}
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
+		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
+	}}
 
 	var upstreamCalls int
 	transport := &TokenTransport{
@@ -472,166 +783,7 @@ func TestTokenTransport_429CountTokensForwarded(t *testing.T) {
 	}
 }
 
-func TestTokenTransport_429NonMessagesEndpointForwarded(t *testing.T) {
-	future := time.Now().UnixMilli() + 3600_000
-	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "primary@test.com", AccessToken: "tok-1", ExpiresAt: future},
-		{Email: "secondary@test.com", AccessToken: "tok-2", ExpiresAt: future},
-	}}
-
-	transport := &TokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return makeResponse(429, "rate limited"), nil
-		}),
-	}
-
-	// Hit a non-messages endpoint 5 times — all should forward 429,
-	// never trigger exhaustion or failover.
-	for i := 0; i < 5; i++ {
-		buf := []byte(`{}`)
-		req, _ := http.NewRequest("GET", "https://api.anthropic.com/v1/usage", bytes.NewReader(buf))
-		req.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(buf)), nil
-		}
-		resp, err := transport.RoundTrip(req)
-		if err != nil {
-			t.Fatalf("req %d: %v", i+1, err)
-		}
-		if resp.StatusCode != 429 {
-			t.Errorf("req %d: status = %d, want 429 (forwarded, no exhaustion tracking)", i+1, resp.StatusCode)
-		}
-	}
-}
-
-func TestTokenTransport_429PingPongPrevention(t *testing.T) {
-	future := time.Now().UnixMilli() + 3600_000
-	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "a@test.com", AccessToken: "tok-a", ExpiresAt: future},
-		{Email: "b@test.com", AccessToken: "tok-b", ExpiresAt: future},
-	}}
-
-	var switchCount atomic.Int32
-	transport := &TokenTransport{
-		Selector: sel,
-		Switcher: func(_ context.Context, _ string) error {
-			switchCount.Add(1)
-			return nil
-		},
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			// Both accounts always return 429.
-			return makeResponse(429, "rate limited"), nil
-		}),
-	}
-
-	// Exhaust account A (3 requests) → failover to B → B returns 429.
-	// Then exhaust B (needs 3 fresh requests — the failover doRequest
-	// response bypasses handle429 so B starts at 0).
-	// Then failover back to A.
-	// Key assertion: each account gets a fresh 3-request window after
-	// being rotated away from (no infinite ping-pong).
-
-	// 3 requests exhaust A → switch to B (B's 429 is the failover response).
-	for i := 0; i < 3; i++ {
-		resp, err := transport.RoundTrip(makeRequest(""))
-		if err != nil {
-			t.Fatalf("phase1 req %d: %v", i+1, err)
-		}
-		if resp.StatusCode != 429 {
-			t.Fatalf("phase1 req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
-	}
-	// Switcher is async — give it a moment.
-	time.Sleep(10 * time.Millisecond)
-	if n := switchCount.Load(); n != 1 {
-		t.Fatalf("after phase1: switchCount = %d, want 1", n)
-	}
-
-	// B now returns 429s too, but because the initial failover also failed,
-	// we should suppress further switching until some account replenishes.
-	for i := 0; i < 3; i++ {
-		resp, err := transport.RoundTrip(makeRequest(""))
-		if err != nil {
-			t.Fatalf("phase2 req %d: %v", i+1, err)
-		}
-		if resp.StatusCode != 429 {
-			t.Fatalf("phase2 req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
-	}
-	time.Sleep(10 * time.Millisecond)
-	if n := switchCount.Load(); n != 1 {
-		t.Fatalf("after phase2: switchCount = %d, want 1", n)
-	}
-
-	// Once a request succeeds again, switching may resume later.
-	var recovered atomic.Bool
-	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		if !recovered.Swap(true) {
-			return makeResponse(200, "ok"), nil
-		}
-		return makeResponse(429, "rate limited"), nil
-	})
-
-	resp, err := transport.RoundTrip(makeRequest(""))
-	if err != nil {
-		t.Fatalf("phase3 recovery: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("phase3 recovery: status = %d, want 200", resp.StatusCode)
-	}
-
-	for i := 0; i < 3; i++ {
-		resp, err := transport.RoundTrip(makeRequest(""))
-		if err != nil {
-			t.Fatalf("phase4 req %d: %v", i+1, err)
-		}
-		if resp.StatusCode != 429 {
-			t.Fatalf("phase4 req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
-	}
-	time.Sleep(10 * time.Millisecond)
-	if n := switchCount.Load(); n != 2 {
-		t.Fatalf("after phase4: switchCount = %d, want 2", n)
-	}
-}
-
-func TestTokenTransport_429StopsSwitchingWhenAllAccountsExhausted(t *testing.T) {
-	future := time.Now().UnixMilli() + 3600_000
-	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "a@test.com", AccessToken: "tok-a", ExpiresAt: future},
-		{Email: "b@test.com", AccessToken: "tok-b", ExpiresAt: future},
-	}}
-
-	var switchCount atomic.Int32
-	transport := &TokenTransport{
-		Selector: sel,
-		Switcher: func(_ context.Context, _ string) error {
-			switchCount.Add(1)
-			return nil
-		},
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return makeResponse(429, "rate limited"), nil
-		}),
-	}
-
-	for i := 0; i < 9; i++ {
-		resp, err := transport.RoundTrip(makeRequest(""))
-		if err != nil {
-			t.Fatalf("req %d: %v", i+1, err)
-		}
-		if resp.StatusCode != 429 {
-			t.Fatalf("req %d: status = %d, want 429", i+1, resp.StatusCode)
-		}
-	}
-	time.Sleep(10 * time.Millisecond)
-	if n := switchCount.Load(); n != 1 {
-		t.Fatalf("switchCount = %d, want 1 after all accounts exhausted", n)
-	}
-	if transport.suppressFailoverForKey == "" {
-		t.Fatal("expected failover suppression to be set")
-	}
-}
-
+// TestTokenTransport_ContextCancellation verifies that context cancellation propagates.
 func TestTokenTransport_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -677,8 +829,10 @@ func quotaCacheWithSnapshot(id string, remainingPct int, age time.Duration) *Quo
 	}
 }
 
-func TestTransport_Transient429_HighQuota_NoSwitch(t *testing.T) {
-	// Account has 80% remaining — 3 consecutive 429s should be treated as transient.
+// TestTransport_Transient429_HighQuota_ReplaysNoSwitch verifies that when the
+// failing account has 80% quota remaining, replay still happens but no switch
+// is persisted.
+func TestTransport_Transient429_HighQuota_ReplaysNoSwitch(t *testing.T) {
 	acctA := keyring.ClaudeOAuth{
 		Email: "a@test.com", AccountUUID: "uuid-a",
 		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
@@ -697,31 +851,33 @@ func TestTransport_Transient429_HighQuota_NoSwitch(t *testing.T) {
 			return nil
 		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
 		}),
 	}
 
-	// Send 3+ requests to trigger exhaustion threshold.
-	for i := 0; i < exhaustionThreshold+1; i++ {
-		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != 429 {
-			t.Fatalf("request %d: expected 429, got %d", i, resp.StatusCode)
-		}
+	resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should succeed via replay to B.
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (replayed to alternate)", resp.StatusCode)
 	}
 
 	select {
 	case email := <-switchCh:
-		t.Errorf("expected no account switch — quota shows 80%% remaining, but switched to %s", email)
-	default:
+		t.Errorf("unexpected switch to %q — fresh quota shows 80%% remaining, no switch should be persisted", email)
+	case <-time.After(50 * time.Millisecond):
+		// good: no switch persisted
 	}
 }
 
+// TestTransport_Transient429_LowQuota_Switches verifies that confirmed exhaustion
+// (0% remaining) causes the switch to be persisted.
 func TestTransport_Transient429_LowQuota_Switches(t *testing.T) {
-	// Account has 5% remaining — 429s should trigger a switch.
 	acctA := keyring.ClaudeOAuth{
 		Email: "a@test.com", AccountUUID: "uuid-a",
 		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
@@ -734,34 +890,38 @@ func TestTransport_Transient429_LowQuota_Switches(t *testing.T) {
 	switchCh := make(chan string, 1)
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
-		Quota:    quotaCacheWithSnapshot("uuid-a", 5, 0),
+		Quota:    quotaCacheWithSnapshot("uuid-a", 0, 0),
 		Switcher: func(_ context.Context, email string) error {
 			switchCh <- email
 			return nil
 		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
 		}),
 	}
 
-	for i := 0; i < exhaustionThreshold; i++ {
-		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		resp.Body.Close()
+	resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+	if err != nil {
+		t.Fatal(err)
 	}
+	resp.Body.Close()
 
 	select {
-	case <-switchCh:
+	case email := <-switchCh:
+		if email != "b@test.com" {
+			t.Errorf("switched to %q, want b@test.com", email)
+		}
 	case <-time.After(time.Second):
-		t.Error("expected account switch — quota shows only 5% remaining")
+		t.Error("expected account switch — quota shows 0%% remaining (confirmed exhausted)")
 	}
 }
 
-func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
-	// Account has 80% remaining in memory, but it is 10 minutes old. Refresh()
-	// attempts an on-demand fetch, which fails, so the transport switches.
+// TestTransport_Transient429_StaleQuota_TriesAlternates verifies that stale quota
+// data (unknown exhaustion status) still causes alternates to be tried.
+func TestTransport_Transient429_StaleQuota_TriesAlternates(t *testing.T) {
 	acctA := keyring.ClaudeOAuth{
 		Email: "a@test.com", AccountUUID: "uuid-a",
 		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
@@ -771,6 +931,7 @@ func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
 		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
 	}
 
+	// Stale snapshot (10 minutes old) — Refresh() will attempt fetch, which fails → unknown.
 	var refreshCalls atomic.Int32
 	quotaCache := quotaCacheWithSnapshot("uuid-a", 80, 10*time.Minute)
 	quotaCache.UsageFetchFunc = func(context.Context, keyring.ClaudeOAuth, time.Time) (quota.Result, time.Duration, error) {
@@ -778,39 +939,197 @@ func TestTransport_Transient429_StaleQuota_Switches(t *testing.T) {
 		return quota.ErrorResult("api_error", "api error", http.StatusTooManyRequests), 0, nil
 	}
 
-	switchCh := make(chan string, 1)
+	var calls int
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
 		Quota:    quotaCache,
-		Switcher: func(_ context.Context, email string) error {
-			switchCh <- email
-			return nil
-		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+			calls++
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
 		}),
 	}
 
-	for i := 0; i < exhaustionThreshold; i++ {
-		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		resp.Body.Close()
+	resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	select {
-	case <-switchCh:
-	case <-time.After(time.Second):
-		t.Error("expected account switch — quota data is stale (10 min old)")
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (alternates tried for unknown/stale quota)", resp.StatusCode)
 	}
-	if refreshCalls.Load() != 1 {
-		t.Fatalf("refresh calls = %d, want 1", refreshCalls.Load())
+	if calls < 2 {
+		t.Errorf("calls = %d, want >= 2 (initial + replay to alternate)", calls)
 	}
 }
 
-func TestTransport_Transient429_NilQuota_Unchanged(t *testing.T) {
-	// No quota cache at all — existing behavior (switches after threshold).
+// TestTokenTransport_429WalkContinuesPastAlternateFailure verifies that the
+// replay walk continues past a non-429 alternate failure (e.g. 500) and can
+// still succeed on a later account.
+func TestTokenTransport_429WalkContinuesPastAlternateFailure(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
+		{Email: "c@test.com", AccountUUID: "uuid-c", AccessToken: "tok-c", ExpiresAt: future},
+	}}
+
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Header.Get("Authorization") {
+			case "Bearer tok-a":
+				return makeResponse(429, "rate limited"), nil
+			case "Bearer tok-b":
+				return makeResponse(500, "server error"), nil
+			default:
+				return makeResponse(200, "ok"), nil
+			}
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (walk past 500 on b, succeed on c)", resp.StatusCode)
+	}
+}
+
+// TestTokenTransport_429WalkNonSuccessReturnedWhenAllFail verifies that when no
+// account succeeds and at least one returned a non-429 failure, the last
+// non-429 failure is returned even if a later alternate returns 429.
+func TestTokenTransport_429WalkNonSuccessReturnedWhenAllFail(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future},
+		{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future},
+		{Email: "c@test.com", AccountUUID: "uuid-c", AccessToken: "tok-c", ExpiresAt: future},
+	}}
+
+	transport := &TokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Header.Get("Authorization") {
+			case "Bearer tok-a":
+				return makeResponse(429, "rate limited"), nil
+			case "Bearer tok-b":
+				return makeResponse(503, "service unavailable"), nil
+			default:
+				return makeResponse(429, "rate limited again"), nil
+			}
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 503 {
+		t.Errorf("status = %d, want 503 (preserve the last non-429 failure)", resp.StatusCode)
+	}
+	if transport.suppressFailoverForKey != "" {
+		t.Errorf("suppression = %q, want empty when a non-429 failure was seen", transport.suppressFailoverForKey)
+	}
+}
+
+// TestTokenTransport_429FailoverSuppression_ClearsOnSuccessFromDifferentAccount
+// verifies that suppression clears when a *different* account delivers a success
+// (not just the originally-suppressed one).
+func TestTokenTransport_429FailoverSuppression_ClearsOnSuccessFromDifferentAccount(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	acctA := keyring.ClaudeOAuth{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future}
+	acctB := keyring.ClaudeOAuth{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future}
+
+	// Set up: both accounts return 429 → suppression set on a.
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(429, "rate limited"), nil
+		}),
+	}
+	transport.RoundTrip(makeRequest("")) //nolint:errcheck
+	if transport.suppressFailoverForKey == "" {
+		t.Fatal("suppression should be set")
+	}
+
+	// Now selector returns b (simulating a switch happened externally), which returns 200.
+	// Suppression must clear regardless of which account key delivered the success.
+	transport.Selector = &fakeSelector{accounts: []keyring.ClaudeOAuth{acctB}}
+	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return makeResponse(200, "ok"), nil
+	})
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if transport.suppressFailoverForKey != "" {
+		t.Error("suppression should be cleared after any successful response, not just from the suppressed account")
+	}
+
+	// Confirm replay works again on next 429.
+	var calls int
+	transport.Selector = &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}}
+	transport.Inner = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Header.Get("Authorization") == "Bearer tok-a" {
+			return makeResponse(429, "rate limited"), nil
+		}
+		return makeResponse(200, "ok"), nil
+	})
+	resp, err = transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (replay resumed)", resp.StatusCode)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2", calls)
+	}
+}
+
+func TestTokenTransport_429ReplaySuccessClearsExistingSuppression(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	acctA := keyring.ClaudeOAuth{Email: "a@test.com", AccountUUID: "uuid-a", AccessToken: "tok-a", ExpiresAt: future}
+	acctB := keyring.ClaudeOAuth{Email: "b@test.com", AccountUUID: "uuid-b", AccessToken: "tok-b", ExpiresAt: future}
+	acctC := keyring.ClaudeOAuth{Email: "c@test.com", AccountUUID: "uuid-c", AccessToken: "tok-c", ExpiresAt: future}
+
+	transport := &TokenTransport{
+		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctB, acctC}},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Header.Get("Authorization") {
+			case "Bearer tok-b":
+				return makeResponse(429, "rate limited"), nil
+			case "Bearer tok-c":
+				return makeResponse(200, "ok"), nil
+			default:
+				return makeResponse(500, "unexpected account"), nil
+			}
+		}),
+	}
+	transport.suppressFailoverForKey = acctIdentifier(&acctA)
+
+	resp, err := transport.RoundTrip(makeRequest(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if transport.suppressFailoverForKey != "" {
+		t.Errorf("suppression = %q, want cleared after replay succeeds on a different account", transport.suppressFailoverForKey)
+	}
+}
+
+// TestTransport_Transient429_NilQuota_TriesAlternates verifies that nil quota
+// (no cache) still causes alternates to be tried immediately on first 429.
+func TestTransport_Transient429_NilQuota_TriesAlternates(t *testing.T) {
 	acctA := keyring.ClaudeOAuth{
 		Email: "a@test.com", AccountUUID: "uuid-a",
 		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
@@ -820,68 +1139,27 @@ func TestTransport_Transient429_NilQuota_Unchanged(t *testing.T) {
 		AccessToken: "tok-b", ExpiresAt: time.Now().UnixMilli() + 3600_000,
 	}
 
-	switchCh := make(chan string, 1)
+	var calls int
 	transport := &TokenTransport{
 		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA, acctB}},
 		Quota:    nil,
-		Switcher: func(_ context.Context, email string) error {
-			switchCh <- email
-			return nil
-		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
+			calls++
+			if req.Header.Get("Authorization") == "Bearer tok-a" {
+				return makeResponse(429, "rate limited"), nil
+			}
+			return makeResponse(200, "ok"), nil
 		}),
 	}
 
-	for i := 0; i < exhaustionThreshold; i++ {
-		resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		resp.Body.Close()
+	resp, err := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	select {
-	case <-switchCh:
-	case <-time.After(time.Second):
-		t.Error("expected account switch — nil monitor should not prevent it")
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (nil quota — alternates tried immediately)", resp.StatusCode)
 	}
-}
-
-func TestTransport_Transient429_CounterReset(t *testing.T) {
-	// After transient detection, the 429 counter should be reset so it takes
-	// another full threshold of 429s to trigger again.
-	acctA := keyring.ClaudeOAuth{
-		Email: "a@test.com", AccountUUID: "uuid-a",
-		AccessToken: "tok-a", ExpiresAt: time.Now().UnixMilli() + 3600_000,
-	}
-
-	var switchCalled bool
-	transport := &TokenTransport{
-		Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acctA}},
-		Quota:    quotaCacheWithSnapshot("uuid-a", 80, 0),
-		Switcher: func(_ context.Context, email string) error {
-			switchCalled = true
-			return nil
-		},
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader(""))}, nil
-		}),
-	}
-
-	// First batch: triggers threshold, but transient check resets counter.
-	for i := 0; i < exhaustionThreshold; i++ {
-		resp, _ := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
-		resp.Body.Close()
-	}
-	if switchCalled {
-		t.Fatal("unexpected switch after first batch")
-	}
-
-	// One more 429 should NOT trigger switch (counter was reset).
-	resp, _ := transport.RoundTrip(makeRequest(`{"model":"claude-sonnet-4-6"}`))
-	resp.Body.Close()
-	if switchCalled {
-		t.Error("expected no switch — counter should have been reset after transient detection")
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (initial + replay)", calls)
 	}
 }

@@ -115,6 +115,7 @@ func runProxyStart() error {
 	codexTransport := &proxy.CodexTokenTransport{
 		Selector: codexSelector,
 		Switcher: codexSwitcher,
+		Quota:    codexQuotaCache,
 		Inner:    http.DefaultTransport,
 	}
 
@@ -127,6 +128,7 @@ func runProxyStart() error {
 	codexUpgradeTransport := &proxy.CodexTokenTransport{
 		Selector: codexSelector,
 		Switcher: codexSwitcher,
+		Quota:    codexQuotaCache,
 		Inner:    http11Transport,
 	}
 
