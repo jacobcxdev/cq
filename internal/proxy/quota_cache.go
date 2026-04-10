@@ -34,6 +34,7 @@ type QuotaReader interface {
 type QuotaCache struct {
 	UsageFetchFunc UsageFetchFunc
 	cacheDir       string
+	cacheFile      string // filename within cacheDir; defaults to "claude.json"
 	nowFunc        func() time.Time
 
 	mu        sync.RWMutex
@@ -53,6 +54,18 @@ func NewQuotaCache(fetch UsageFetchFunc, cacheDir string) *QuotaCache {
 		nowFunc:        time.Now,
 		snapshots:      make(map[string]QuotaSnapshot),
 		cooldowns:      make(map[string]time.Time),
+	}
+}
+
+// NewCodexQuotaCache creates a read-only quota cache for Codex accounts,
+// backed by the codex.json file written by the cq CLI.
+func NewCodexQuotaCache(cacheDir string) *QuotaCache {
+	return &QuotaCache{
+		cacheDir:  cacheDir,
+		cacheFile: "codex.json",
+		nowFunc:   time.Now,
+		snapshots: make(map[string]QuotaSnapshot),
+		cooldowns: make(map[string]time.Time),
 	}
 }
 
@@ -169,7 +182,11 @@ func (q *QuotaCache) loadFileSnapshot(identifier string) (QuotaSnapshot, bool, b
 		return QuotaSnapshot{}, false, false
 	}
 
-	path := filepath.Join(q.cacheDir, "claude.json")
+	file := q.cacheFile
+	if file == "" {
+		file = "claude.json"
+	}
+	path := filepath.Join(q.cacheDir, file)
 	f, err := os.Open(path)
 	if err != nil {
 		return QuotaSnapshot{}, false, false

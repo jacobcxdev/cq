@@ -98,17 +98,17 @@ func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id p
 		results = r.backfillFromCache(ctx, id, results)
 	}
 
-	// Only cache results that have at least one usable entry.
+	// Only cache usable rows. This prevents auth_expired and other transient
+	// error rows from polluting the cache and being served as stale data.
 	if r.Cache != nil {
-		hasUsable := false
+		var usable []quota.Result
 		for _, res := range results {
 			if res.IsUsable() {
-				hasUsable = true
-				break
+				usable = append(usable, res)
 			}
 		}
-		if hasUsable {
-			if err := r.Cache.Put(ctx, string(id), results); err != nil {
+		if len(usable) > 0 {
+			if err := r.Cache.Put(ctx, string(id), usable); err != nil {
 				fmt.Fprintf(os.Stderr, "cq: cache put %s: %v\n", id, err)
 			}
 		}

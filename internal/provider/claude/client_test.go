@@ -29,7 +29,7 @@ func TestClientFetchUsage(t *testing.T) {
 	// We need a custom Doer that rewrites the URL to our test server.
 	c.http = &urlRewriter{client: srv.Client(), baseURL: srv.URL}
 
-	body, code, retryAfter, err := c.FetchUsage(context.Background(), "test-tok")
+	body, code, retryAfter, diagnostics, err := c.FetchUsage(context.Background(), "test-tok")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -42,6 +42,9 @@ func TestClientFetchUsage(t *testing.T) {
 	if string(body) != want {
 		t.Errorf("body = %q, want %q", string(body), want)
 	}
+	if diagnostics != "" {
+		t.Errorf("diagnostics = %q, want empty", diagnostics)
+	}
 }
 
 func TestClientFetchUsageError(t *testing.T) {
@@ -53,18 +56,23 @@ func TestClientFetchUsageError(t *testing.T) {
 
 	c := &Client{http: &urlRewriter{client: srv.Client(), baseURL: srv.URL}}
 
-	_, code, retryAfter, _ := c.FetchUsage(context.Background(), "bad-tok")
+	_, code, retryAfter, diagnostics, _ := c.FetchUsage(context.Background(), "bad-tok")
 	if code != 401 {
 		t.Errorf("status = %d, want 401", code)
 	}
 	if retryAfter != 0 {
 		t.Errorf("retryAfter = %v, want 0", retryAfter)
 	}
+	if diagnostics != "" {
+		t.Errorf("diagnostics = %q, want empty", diagnostics)
+	}
 }
 
 func TestClientFetchUsageRetryAfter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "120")
+		w.Header().Set("anthropic-ratelimit-requests-remaining", "0")
+		w.Header().Set("anthropic-ratelimit-requests-reset", "2026-04-08T21:15:00Z")
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"error":"rate_limited"}`))
 	}))
@@ -72,7 +80,7 @@ func TestClientFetchUsageRetryAfter(t *testing.T) {
 
 	c := &Client{http: &urlRewriter{client: srv.Client(), baseURL: srv.URL}}
 
-	_, code, retryAfter, err := c.FetchUsage(context.Background(), "rate-limited-tok")
+	_, code, retryAfter, diagnostics, err := c.FetchUsage(context.Background(), "rate-limited-tok")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -81,6 +89,9 @@ func TestClientFetchUsageRetryAfter(t *testing.T) {
 	}
 	if retryAfter != 120*time.Second {
 		t.Fatalf("retryAfter = %v, want %v", retryAfter, 120*time.Second)
+	}
+	if diagnostics != "retry_after=2m0s; anthropic-ratelimit-requests-remaining=0; anthropic-ratelimit-requests-reset=2026-04-08T21:15:00Z" {
+		t.Fatalf("diagnostics = %q", diagnostics)
 	}
 }
 

@@ -323,6 +323,9 @@ func TestDedupByEmail(t *testing.T) {
 		if got[0].AccountUUID != "uuid-1" {
 			t.Errorf("AccountUUID = %q, want %q", got[0].AccountUUID, "uuid-1")
 		}
+		if got[0].AccessToken != "old" {
+			t.Errorf("AccessToken = %q, want %q", got[0].AccessToken, "old")
+		}
 		if len(got[0].Scopes) != 1 || got[0].Scopes[0] != "user:inference" {
 			t.Errorf("Scopes = %v, want [user:inference]", got[0].Scopes)
 		}
@@ -710,6 +713,134 @@ func TestBackfillCredentialsFile(t *testing.T) {
 		}
 		if got.AccountUUID != "uuid-already" {
 			t.Errorf("AccountUUID = %q, want uuid-already", got.AccountUUID)
+		}
+	})
+}
+
+// ── mergeIdentifiedByFreshness ────────────────────────────────────────────────
+
+// TestMergeIdentifiedByFreshness covers the cross-source freshness-aware merge
+// for identified accounts keyed by UUID or Email. This is the regression test
+// for the source-order bias bug where a stale credentials-file record could
+// suppress a fresher cq-keyring record for the same logical account.
+func TestMergeIdentifiedByFreshness(t *testing.T) {
+	t.Run("fresher cq-keyring identified entry wins over stale credentials-file entry (same UUID)", func(t *testing.T) {
+		stale := ClaudeOAuth{
+			AccountUUID:      "uuid-alice",
+			Email:            "alice@example.com",
+			AccessToken:      "old-at",
+			RefreshToken:     "old-rt",
+			ExpiresAt:        100,
+			SubscriptionType: "max",
+			RateLimitTier:    "tier1",
+		}
+		fresh := ClaudeOAuth{
+			AccountUUID:  "uuid-alice",
+			Email:        "alice@example.com",
+			AccessToken:  "new-at",
+			RefreshToken: "new-rt",
+			ExpiresAt:    200,
+		}
+		// Simulate: credentials file (stale) appeared before cq-keyring (fresh)
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{stale, fresh})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		if got.AccessToken != "new-at" || got.ExpiresAt != 200 {
+			t.Errorf("tokens not updated to fresher entry: %+v", got)
+		}
+		// Metadata from loser should be preserved.
+		if got.SubscriptionType != "max" {
+			t.Errorf("SubscriptionType lost: %+v", got)
+		}
+		if got.RateLimitTier != "tier1" {
+			t.Errorf("RateLimitTier lost: %+v", got)
+		}
+	})
+
+	t.Run("fresher cq-keyring identified entry wins over stale credentials-file entry (same email, no UUID)", func(t *testing.T) {
+		stale := ClaudeOAuth{
+			Email:        "bob@example.com",
+			AccessToken:  "old-at",
+			RefreshToken: "old-rt",
+			ExpiresAt:    50,
+			Scopes:       []string{"user:inference"},
+		}
+		fresh := ClaudeOAuth{
+			Email:        "bob@example.com",
+			AccountUUID:  "uuid-bob",
+			AccessToken:  "new-at",
+			RefreshToken: "new-rt",
+			ExpiresAt:    300,
+		}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{stale, fresh})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		if got.AccessToken != "new-at" || got.ExpiresAt != 300 {
+			t.Errorf("tokens not updated to fresher entry: %+v", got)
+		}
+		// Scopes from stale should propagate when fresh lacks them.
+		if len(got.Scopes) == 0 || got.Scopes[0] != "user:inference" {
+			t.Errorf("Scopes not carried from loser: %+v", got)
+		}
+		// UUID from fresh kept.
+		if got.AccountUUID != "uuid-bob" {
+			t.Errorf("AccountUUID lost: %+v", got)
+		}
+	})
+
+	t.Run("stale cq-keyring entry does not override fresher credentials-file entry", func(t *testing.T) {
+		fresh := ClaudeOAuth{
+			AccountUUID:  "uuid-carol",
+			Email:        "carol@example.com",
+			AccessToken:  "fresh-at",
+			RefreshToken: "fresh-rt",
+			ExpiresAt:    500,
+		}
+		stale := ClaudeOAuth{
+			AccountUUID:  "uuid-carol",
+			Email:        "carol@example.com",
+			AccessToken:  "stale-at",
+			RefreshToken: "stale-rt",
+			ExpiresAt:    100,
+		}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{fresh, stale})
+		if len(result) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(result), result)
+		}
+		got := result[0]
+		if got.AccessToken != "fresh-at" || got.ExpiresAt != 500 {
+			t.Errorf("stale entry wrongly overrode fresher: %+v", got)
+		}
+	})
+
+	t.Run("two different identified accounts remain separate", func(t *testing.T) {
+		a := ClaudeOAuth{AccountUUID: "uuid-a", Email: "a@example.com", AccessToken: "at-a", ExpiresAt: 100}
+		b := ClaudeOAuth{AccountUUID: "uuid-b", Email: "b@example.com", AccessToken: "at-b", ExpiresAt: 200}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{a, b})
+		if len(result) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(result), result)
+		}
+	})
+
+	t.Run("anonymous entries pass through unchanged", func(t *testing.T) {
+		anon := ClaudeOAuth{AccessToken: "anon-at", ExpiresAt: 100}
+		identified := ClaudeOAuth{AccountUUID: "uuid-x", Email: "x@example.com", AccessToken: "x-at", ExpiresAt: 50}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{anon, identified})
+		// anonymous + identified are different logical accounts — both preserved
+		if len(result) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(result), result)
+		}
+	})
+
+	t.Run("single entry passthrough", func(t *testing.T) {
+		a := ClaudeOAuth{AccountUUID: "uuid-a", Email: "a@example.com", AccessToken: "at-a", ExpiresAt: 100}
+		result := mergeIdentifiedByFreshness([]ClaudeOAuth{a})
+		if len(result) != 1 || result[0].AccessToken != "at-a" {
+			t.Errorf("single entry not passed through: %+v", result)
 		}
 	})
 }

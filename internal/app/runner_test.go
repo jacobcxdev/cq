@@ -437,6 +437,61 @@ func TestRunnerDoesNotCacheAllErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerCachesOnlyUsableRows(t *testing.T) {
+	// Provider returns one usable result and one auth_expired error.
+	// The cache should only contain the usable result, not the error row.
+	usable := quota.Result{
+		Status:    quota.StatusOK,
+		AccountID: "acct-good",
+		Email:     "good@example.com",
+		Plan:      "max",
+		Windows:   map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 70}},
+	}
+	errRow := quota.Result{
+		Status:    quota.StatusError,
+		AccountID: "acct-expired",
+		Email:     "expired@example.com",
+		Error:     &quota.ErrorInfo{Code: "auth_expired"},
+	}
+
+	p := &mockProvider{id: provider.Claude, results: []quota.Result{usable, errRow}}
+	cr := &captureRenderer{}
+	cache := &mockCache{data: map[string][]quota.Result{}}
+	runner := &Runner{
+		Clock:    fixedClock(time.Unix(1000, 0)),
+		Cache:    cache,
+		Services: map[provider.ID]provider.Services{provider.Claude: {Usage: p}},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{
+		Providers: []provider.ID{provider.Claude},
+		Refresh:   true,
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	// The renderer should see both results (error row is not filtered from display).
+	if len(cr.report.Providers[0].Results) != 2 {
+		t.Fatalf("renderer results len = %d, want 2", len(cr.report.Providers[0].Results))
+	}
+
+	// But the cache should only contain the usable row.
+	cached, ok := cache.data[string(provider.Claude)]
+	if !ok {
+		t.Fatal("cache has no entry for Claude despite having a usable result")
+	}
+	for _, c := range cached {
+		if !c.IsUsable() {
+			t.Errorf("cache contains non-usable row: %+v", c)
+		}
+	}
+	if len(cached) != 1 || cached[0].AccountID != "acct-good" {
+		t.Errorf("cache = %+v, want only the usable result", cached)
+	}
+}
+
 func TestRunnerCacheGetErrorFallsThroughToProvider(t *testing.T) {
 	// A cache whose Get returns an error must not block the provider call.
 	fresh := []quota.Result{{Status: quota.StatusOK, Plan: "fresh"}}

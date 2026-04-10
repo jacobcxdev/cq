@@ -27,13 +27,14 @@ const (
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	Config         *Config
-	Selector       ClaudeSelector
-	Discover       ClaudeDiscoverer
-	Transport      http.RoundTripper
-	CodexDiscover  CodexDiscoverer
-	CodexTransport http.RoundTripper
-	Headroom       *HeadroomBridge
+	Config                *Config
+	Selector              ClaudeSelector
+	Discover              ClaudeDiscoverer
+	Transport             http.RoundTripper
+	CodexDiscover         CodexDiscoverer
+	CodexTransport        http.RoundTripper
+	CodexUpgradeTransport http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
+	Headroom              *HeadroomBridge
 }
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
@@ -326,13 +327,21 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade) provider=codex (native)\n", r.Method)
 
+	transport := s.CodexUpgradeTransport
+	if transport == nil {
+		transport = s.CodexTransport
+	}
+
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(codexUpstream)
 			pr.Out.URL.Path = codexUpstream.Path + "/responses"
 			pr.Out.Host = codexUpstream.Host
 		},
-		Transport: s.CodexTransport,
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			writeError(w, http.StatusBadGateway, "api_error", "codex upstream error: "+err.Error())
+		},
 	}
 	rp.ServeHTTP(w, r)
 }
