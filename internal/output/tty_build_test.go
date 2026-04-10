@@ -151,6 +151,62 @@ func TestBuildTTYModel_WithAggregate(t *testing.T) {
 	}
 }
 
+func TestBuildAggRows_OverburnWithoutGapUsesEmDash(t *testing.T) {
+	rows := buildAggRows(map[quota.WindowName]quota.AggregateResult{
+		quota.Window5Hour: {
+			RemainingPct: 20,
+			ExpectedPct:  80,
+			GaugePos:     0,
+		},
+	})
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 aggregate row, got %d", len(rows))
+	}
+
+	pace := stripANSI(rows[0].PaceDiff)
+	if strings.Contains(pace, "now") {
+		t.Fatalf("expected missing gap duration to avoid now, got %q", pace)
+	}
+	if !strings.Contains(pace, "—") {
+		t.Fatalf("expected missing gap duration to render em dash, got %q", pace)
+	}
+
+	dry := stripANSI(rows[0].Burndown)
+	if strings.Contains(dry, "now") {
+		t.Fatalf("expected missing gap start to avoid now, got %q", dry)
+	}
+	if !strings.Contains(dry, "—") {
+		t.Fatalf("expected missing gap start to render em dash, got %q", dry)
+	}
+}
+
+func TestBuildAggRows_OverburnImmediateGapRendersNowAndDuration(t *testing.T) {
+	rows := buildAggRows(map[quota.WindowName]quota.AggregateResult{
+		quota.Window5Hour: {
+			RemainingPct: 20,
+			ExpectedPct:  80,
+			GaugePos:     0,
+			GapStartS:    0,
+			GapDurationS: 3600,
+		},
+	})
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 aggregate row, got %d", len(rows))
+	}
+
+	pace := stripANSI(rows[0].PaceDiff)
+	if !strings.Contains(pace, "1h") {
+		t.Fatalf("expected immediate gap duration to render formatted duration, got %q", pace)
+	}
+
+	dry := stripANSI(rows[0].Burndown)
+	if !strings.Contains(dry, "now") {
+		t.Fatalf("expected immediate gap start to render now, got %q", dry)
+	}
+}
+
 func TestBuildTTYModel_MultipleSections(t *testing.T) {
 	now := time.Unix(1000, 0)
 	report := app.Report{
