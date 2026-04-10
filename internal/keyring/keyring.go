@@ -147,6 +147,40 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 	return result
 }
 
+// pickWinner reports whether candidate should replace current as the "token
+// winner" when two entries represent the same logical account. It implements the
+// shared tie-break policy:
+//   1. Higher ExpiresAt wins outright.
+//   2. On a tie: prefer non-empty AccountUUID.
+//   3. Then: prefer non-nil TokenAccount.
+//   4. Then: prefer richer (longer) Scopes list.
+//   5. Otherwise keep current (return false).
+func pickWinner(candidate, current ClaudeOAuth) bool {
+	if candidate.ExpiresAt > current.ExpiresAt {
+		return true
+	}
+	if candidate.ExpiresAt < current.ExpiresAt {
+		return false
+	}
+	// Equal ExpiresAt — apply tie-break policy.
+	if candidate.AccountUUID != "" && current.AccountUUID == "" {
+		return true
+	}
+	if candidate.AccountUUID == "" && current.AccountUUID != "" {
+		return false
+	}
+	if candidate.TokenAccount != nil && current.TokenAccount == nil {
+		return true
+	}
+	if candidate.TokenAccount == nil && current.TokenAccount != nil {
+		return false
+	}
+	if len(candidate.Scopes) > len(current.Scopes) {
+		return true
+	}
+	return false
+}
+
 // mergeIdentifiedByFreshness deduplicates identified accounts (those with
 // AccountUUID or Email) across discovery sources by preferring the entry with
 // the highest ExpiresAt. This fixes the source-order bias bug where a stale
@@ -195,8 +229,8 @@ func mergeIdentifiedByFreshness(accounts []ClaudeOAuth) []ClaudeOAuth {
 			idx = len(result)
 			result = append(result, a)
 		} else {
-			// Merge: keep fresher entry as winner.
-			if a.ExpiresAt > result[idx].ExpiresAt {
+			// Merge: pick the better entry as winner.
+			if pickWinner(a, result[idx]) {
 				result[idx] = mergeAccountFields(a, result[idx])
 			} else {
 				result[idx] = mergeAccountFields(result[idx], a)
@@ -252,11 +286,10 @@ func dedupByEmail(accounts []ClaudeOAuth) []ClaudeOAuth {
 	for _, a := range accounts {
 		if a.Email != "" {
 			if idx, ok := seen[a.Email]; ok {
-				existing := result[idx]
-				if a.ExpiresAt > existing.ExpiresAt {
-					result[idx] = mergeAccountFields(a, existing)
-				} else if a.AccountUUID != "" && existing.AccountUUID == "" {
-					result[idx] = mergeAccountFields(existing, a)
+				if pickWinner(a, result[idx]) {
+					result[idx] = mergeAccountFields(a, result[idx])
+				} else {
+					result[idx] = mergeAccountFields(result[idx], a)
 				}
 				continue
 			}

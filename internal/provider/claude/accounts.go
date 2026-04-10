@@ -119,14 +119,14 @@ func (a *Accounts) Remove(_ context.Context, identifier string) error {
 	if !found {
 		return fmt.Errorf("no account found with email %q", identifier)
 	}
+	if err := removePlatformClaudeKeychainAccountsByEmail(identifier); err != nil {
+		return fmt.Errorf("remove platform Claude keychain accounts: %w", err)
+	}
 	if err := removeCQClaudeAccountsByEmail(identifier); err != nil {
 		return fmt.Errorf("remove cq-managed Claude accounts: %w", err)
 	}
 	if err := removeActiveClaudeCredentialsByEmail(identifier); err != nil {
 		return fmt.Errorf("remove active Claude credentials: %w", err)
-	}
-	if err := removePlatformClaudeKeychainAccountsByEmail(identifier); err != nil {
-		return fmt.Errorf("remove platform Claude keychain accounts: %w", err)
 	}
 	return nil
 }
