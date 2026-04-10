@@ -135,14 +135,17 @@ func runProxyStart() error {
 	}
 
 	// Start headroom compression bridge if configured.
+	// HeadroomEnabled() returns true when either the legacy headroom bool is set
+	// OR when an explicit headroom_mode is configured (e.g. "cache" without "headroom: true").
 	var headroom *proxy.HeadroomBridge
-	if cfg.Headroom {
+	resolvedMode := cfg.ResolvedHeadroomMode()
+	if cfg.HeadroomEnabled() {
 		var err error
 		headroom, err = proxy.StartHeadroomBridge()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: headroom: %v (continuing without compression)\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "cq: headroom compression enabled\n")
+			fmt.Fprintf(os.Stderr, "cq: headroom compression enabled (mode: %s)\n", resolvedMode)
 		}
 	}
 
@@ -155,6 +158,7 @@ func runProxyStart() error {
 		CodexTransport:        codexTransport,
 		CodexUpgradeTransport: codexUpgradeTransport,
 		Headroom:       headroom,
+		HeadroomMode:   resolvedMode,
 	}
 
 	err = srv.ListenAndServe(context.Background())

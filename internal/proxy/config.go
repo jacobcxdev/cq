@@ -28,6 +28,29 @@ type Config struct {
 	CodexUpstream  string `json:"codex_upstream"`
 	LocalToken     string `json:"local_token"`
 	Headroom       bool   `json:"headroom,omitempty"`
+	// HeadroomMode controls the compression strategy: "token" or "cache".
+	// Omitted when empty so legacy configs without the field remain valid.
+	// When omitted, cq defaults to cache mode. Explicit "token" preserves the
+	// legacy token-optimised behaviour.
+	HeadroomMode string `json:"headroom_mode,omitempty"`
+}
+
+// ResolvedHeadroomMode returns the effective HeadroomMode for this config.
+// Explicit "token" maps to HeadroomModeToken; everything else (including an
+// omitted headroom_mode and explicit "cache") maps to HeadroomModeCache.
+func (c *Config) ResolvedHeadroomMode() HeadroomMode {
+	if c.HeadroomMode == "token" {
+		return HeadroomModeToken
+	}
+	return HeadroomModeCache
+}
+
+// HeadroomEnabled reports whether headroom compression should be started.
+// It returns true when the legacy bool is set OR when an explicit headroom_mode
+// is configured (non-empty), so that headroom_mode: "cache" alone is sufficient
+// to enable compression without also requiring headroom: true.
+func (c *Config) HeadroomEnabled() bool {
+	return c.Headroom || c.HeadroomMode != ""
 }
 
 func (c *Config) setDefaults() {
@@ -51,6 +74,12 @@ func (c *Config) validate() error {
 	}
 	if _, err := url.Parse(c.CodexUpstream); err != nil {
 		return fmt.Errorf("invalid codex_upstream URL: %w", err)
+	}
+	switch c.HeadroomMode {
+	case "", "token", "cache":
+		// valid
+	default:
+		return fmt.Errorf("invalid headroom_mode %q: must be \"token\" or \"cache\"", c.HeadroomMode)
 	}
 	return nil
 }

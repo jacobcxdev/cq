@@ -36,6 +36,18 @@ func SyntheticModelCatalog() []ModelMetadata {
 	return out
 }
 
+// ModelMaxInputTokens returns the synthetic catalogue's max input token limit
+// for a model ID, or 0 when cq has no exact match and the caller should fall
+// back to upstream resolution.
+func ModelMaxInputTokens(model string) int {
+	for _, metadata := range syntheticModelCatalog {
+		if metadata.ID == model {
+			return metadata.MaxInputTokens
+		}
+	}
+	return 0
+}
+
 type claudeModelCapabilitiesCache struct {
 	Models    []ModelMetadata `json:"models"`
 	Timestamp string          `json:"timestamp"`
