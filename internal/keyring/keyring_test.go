@@ -854,11 +854,6 @@ func TestMergeIdentifiedByFreshness(t *testing.T) {
 //   3. Then prefer the entry with richer (longer) Scopes list.
 //   4. Token winner keeps its own token fields; metadata is enriched from loser.
 //   5. When otherwise equivalent, output is stable (first-seen wins).
-//
-// These tests are expected to FAIL against current production code because the
-// current mergeIdentifiedByFreshness implementation only compares ExpiresAt
-// (strict greater-than), so equal-ExpiresAt ties are resolved purely by
-// insertion order with no UUID/TokenAccount/scope preference.
 func TestMergeIdentifiedByFreshnessTieBreaking(t *testing.T) {
 	t.Run("equal ExpiresAt prefers entry with non-empty AccountUUID", func(t *testing.T) {
 		// Both entries share the same email and the same ExpiresAt.

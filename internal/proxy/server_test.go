@@ -777,3 +777,602 @@ func TestServer_NativeCodex_NoProxyTokenRequired(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (no proxy token required for /responses)", w.Code)
 	}
 }
+
+// ── handleNativeCodex headroom compression tests ─────────────────────────────
+
+// makeResponsesBridgeResponder returns a fakeBridgeRaw responder that handles
+// compress_responses operations. When called with input present and no
+// previous_response_id, it returns compressedInput with tokensSaved.
+// For any other operation (compress_messages) it returns a no-op response.
+func makeResponsesBridgeResponder(t *testing.T, compressedInput json.RawMessage, tokensSaved int) func([]byte) []byte {
+	t.Helper()
+	return func(reqBytes []byte) []byte {
+		var req headroomResponsesRequest
+		if err := json.Unmarshal(reqBytes, &req); err != nil {
+			t.Errorf("bridge: unmarshal request: %v", err)
+			return nil
+		}
+		if req.Operation != "compress_responses" {
+			// Unexpected operation in these tests.
+			t.Errorf("bridge: unexpected operation %q", req.Operation)
+			return nil
+		}
+		resp := headroomResponsesResponse{
+			OK:          true,
+			Input:       compressedInput,
+			TokensSaved: tokensSaved,
+		}
+		b, _ := json.Marshal(resp)
+		return b
+	}
+}
+
+// TestServer_NativeCodex_HeadroomCompressesBody verifies that when Headroom is
+// configured and returns savings, handleNativeCodex sends the compressed body
+// to upstream — not the original.
+func TestServer_NativeCodex_HeadroomCompressesBody(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":"short"}]`)
+
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_compressed"}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Headroom: fakeBridgeRaw(t, makeResponsesBridgeResponder(t, compressedInput, 42)),
+	}
+
+	originalInput := `[{"role":"user","content":"hello world, this is a very long message that should be compressed"}]`
+	body := `{"model":"gpt-5.4","input":` + originalInput + `}`
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	// Upstream must have received the compressed input, not the original.
+	var upstreamBody map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &upstreamBody); err != nil {
+		t.Fatalf("upstream body is not valid JSON: %v — body: %s", err, gotBody)
+	}
+	if string(upstreamBody["input"]) != string(compressedInput) {
+		t.Errorf("upstream input = %s, want compressed %s", upstreamBody["input"], compressedInput)
+	}
+}
+
+// TestServer_NativeCodex_HeadroomBridgeError_FallsBackToOriginal verifies that
+// when the bridge returns an error, handleNativeCodex sends the original body.
+func TestServer_NativeCodex_HeadroomBridgeError_FallsBackToOriginal(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_ok"}`))
+	}))
+	defer upstream.Close()
+
+	// Bridge that returns broken JSON to trigger a parse error.
+	brokenBridge := fakeBridgeRaw(t, func(_ []byte) []byte {
+		return []byte(`{not valid json`)
+	})
+
+	originalBody := `{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Headroom: brokenBridge,
+	}
+
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(originalBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleNativeCodex(w, req)
+
+	// Request must still succeed (fail-open).
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (fail-open), body: %s", w.Code, w.Body.String())
+	}
+	// Upstream must have received the original body unchanged.
+	if string(gotBody) != originalBody {
+		t.Errorf("upstream body = %s, want original %s", gotBody, originalBody)
+	}
+}
+
+// TestServer_NativeCodex_HeadroomSkipsPreviousResponseID verifies that when
+// previous_response_id is set, compression is bypassed (the bridge is not called)
+// and the original body is forwarded.
+func TestServer_NativeCodex_HeadroomSkipsPreviousResponseID(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_cont"}`))
+	}))
+	defer upstream.Close()
+
+	// Bridge that should never be called.
+	neverCalledBridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		var req headroomResponsesRequest
+		_ = json.Unmarshal(reqBytes, &req)
+		if req.Operation == "compress_responses" {
+			t.Error("bridge compress_responses should not be called when previous_response_id is set")
+		}
+		return nil
+	})
+
+	originalBody := `{"model":"gpt-5.4","input":[{"role":"user","content":"continue"}],"previous_response_id":"resp_abc"}`
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Headroom: neverCalledBridge,
+	}
+
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(originalBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if string(gotBody) != originalBody {
+		t.Errorf("upstream body = %s, want original (bypass compression)", gotBody)
+	}
+}
+
+// TestServer_NativeCodex_HeadroomCanonicalAndLegacyPathBehaveTheSame verifies
+// that both /v1/responses and /responses compress identically when Headroom is set.
+func TestServer_NativeCodex_HeadroomCanonicalAndLegacyPathBehaveTheSame(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":"compressed"}]`)
+
+	for _, path := range []string{codexResponsesPath, legacyCodexResponsesPath} {
+		path := path
+		t.Run(path, func(t *testing.T) {
+			var gotBody []byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"id":"resp_ok"}`))
+			}))
+			defer upstream.Close()
+
+			srv := &Server{
+				Config: &Config{
+					CodexUpstream: upstream.URL,
+					LocalToken:    "tok",
+				},
+				CodexTransport: &CodexTokenTransport{
+					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+					Inner:    http.DefaultTransport,
+				},
+				Headroom: fakeBridgeRaw(t, makeResponsesBridgeResponder(t, compressedInput, 20)),
+			}
+
+			handler, err := srv.handler()
+			if err != nil {
+				t.Fatalf("handler() error = %v", err)
+			}
+
+			originalInput := `[{"role":"user","content":"hello world original"}]`
+			body := `{"model":"gpt-5.4","input":` + originalInput + `}`
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			if w.Code != 200 {
+				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+			}
+
+			var upstreamBody map[string]json.RawMessage
+			if err := json.Unmarshal(gotBody, &upstreamBody); err != nil {
+				t.Fatalf("upstream body invalid JSON: %v — body: %s", err, gotBody)
+			}
+			if string(upstreamBody["input"]) != string(compressedInput) {
+				t.Errorf("path %s: upstream input = %s, want compressed %s",
+					path, upstreamBody["input"], compressedInput)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gap 1: cache mode must use cache semantics in handleNativeCodex
+// ---------------------------------------------------------------------------
+
+// makeCacheResponsesBridgeResponder returns a raw bridge responder that tracks
+// which items were sent and verifies the bridge received the full input array
+// (not just the mutable suffix). It returns compressedFinalItem appended to
+// restored frozen prefix items, simulating correct cache semantics.
+func makeCacheResponsesBridgeResponder(t *testing.T, wantFullCount int, compressedFinal json.RawMessage) func([]byte) []byte {
+	t.Helper()
+	return func(reqBytes []byte) []byte {
+		var req headroomResponsesRequest
+		if err := json.Unmarshal(reqBytes, &req); err != nil {
+			t.Errorf("bridge: unmarshal request: %v", err)
+			return nil
+		}
+		var sentItems []json.RawMessage
+		if err := json.Unmarshal(req.Input, &sentItems); err != nil {
+			t.Errorf("bridge: parse items: %v", err)
+			return nil
+		}
+		if len(sentItems) != wantFullCount {
+			t.Errorf("bridge received %d items, want %d (cache mode must send full input)", len(sentItems), wantFullCount)
+		}
+		// Return compressed items (only the mutable final one compressed).
+		resp := headroomResponsesResponse{
+			OK:          true,
+			Input:       json.RawMessage(`[` + string(compressedFinal) + `]`),
+			TokensSaved: 25,
+		}
+		b, _ := json.Marshal(resp)
+		return b
+	}
+}
+
+// TestServer_NativeCodex_CacheModeUsesCacheSemantics verifies that when
+// s.HeadroomMode is HeadroomModeCache, handleNativeCodex routes to
+// CompressResponsesCache (full-request send + frozen-prefix restore).
+func TestServer_NativeCodex_CacheModeUsesCacheSemantics(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_cache"}`))
+	}))
+	defer upstream.Close()
+
+	compressedFinal := json.RawMessage(`{"role":"user","content":[{"type":"input_text","text":"compressed"}]}`)
+	// 3 items total (2 frozen + 1 mutable).
+	bridge := fakeBridgeRaw(t, makeCacheResponsesBridgeResponder(t, 3, compressedFinal))
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Headroom:     bridge,
+		HeadroomMode: HeadroomModeCache,
+	}
+
+	frozenItem0 := `{"role":"user","content":[{"type":"input_text","text":"prior turn"}]}`
+	frozenItem1 := `{"role":"assistant","content":[{"type":"text","text":"reply"}]}`
+	mutableItem := `{"role":"user","content":[{"type":"input_text","text":"final mutable turn that is long enough to compress"}]}`
+	inputJSON := `[` + frozenItem0 + `,` + frozenItem1 + `,` + mutableItem + `]`
+	body := `{"model":"gpt-5.4","input":` + inputJSON + `}`
+
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	// Upstream body must have the frozen prefix items restored.
+	var upstreamBody struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(gotBody, &upstreamBody); err != nil {
+		t.Fatalf("parse upstream body: %v — body: %s", err, gotBody)
+	}
+	if len(upstreamBody.Input) < 3 {
+		t.Fatalf("upstream input has %d items, want >= 3", len(upstreamBody.Input))
+	}
+	// Frozen prefix must be byte-stable.
+	var origItems []json.RawMessage
+	if err := json.Unmarshal(json.RawMessage(inputJSON), &origItems); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if string(upstreamBody.Input[i]) != string(origItems[i]) {
+			t.Errorf("upstream input[%d] = %s, want original %s (frozen in cache mode)",
+				i, upstreamBody.Input[i], origItems[i])
+		}
+	}
+}
+
+// TestServer_NativeCodex_TokenModeUsesTokenSemantics verifies that when
+// When s.HeadroomMode is HeadroomModeToken, handleNativeCodex routes to
+// CompressResponses (standard token-mode path — bridge called once with full input,
+// no frozen prefix restoration).
+func TestServer_NativeCodex_TokenModeUsesTokenSemantics(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":[{"type":"input_text","text":"token compressed"}]}]`)
+	tokenBridgeCalled := false
+
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_token"}`))
+	}))
+	defer upstream.Close()
+
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		tokenBridgeCalled = true
+		var req headroomResponsesRequest
+		if err := json.Unmarshal(reqBytes, &req); err != nil {
+			t.Errorf("bridge: unmarshal: %v", err)
+			return nil
+		}
+		resp := headroomResponsesResponse{
+			OK:          true,
+			Input:       compressedInput,
+			TokensSaved: 20,
+		}
+		b, _ := json.Marshal(resp)
+		return b
+	})
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Headroom:     bridge,
+		HeadroomMode: HeadroomModeToken, // explicit token mode
+	}
+
+	body := `{"model":"gpt-5.4","input":[{"role":"user","content":[{"type":"input_text","text":"original"}]}]}`
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if !tokenBridgeCalled {
+		t.Error("bridge was not called in token mode")
+	}
+
+	var upstreamBody map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &upstreamBody); err != nil {
+		t.Fatalf("parse upstream body: %v", err)
+	}
+	if string(upstreamBody["input"]) != string(compressedInput) {
+		t.Errorf("upstream input = %s, want compressed %s", upstreamBody["input"], compressedInput)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gap 2: cache mode must affect proxyHandler (Anthropic /v1/messages)
+// ---------------------------------------------------------------------------
+
+// TestServer_ProxyHandler_CacheModeUsesCompressCache verifies that when
+// s.HeadroomMode is HeadroomModeCache, proxyHandler calls CompressCache
+// (full-request send + frozen-prefix restore) instead of Compress.
+func TestServer_ProxyHandler_CacheModeUsesCompressCache(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"msg_cache"}`))
+	}))
+	defer upstream.Close()
+
+	// Bridge that captures messages sent to it; verifies it receives the full array.
+	compressedMutable := json.RawMessage(`{"role":"user","content":"compressed final"}`)
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		var req headroomRequest
+		if err := json.Unmarshal(reqBytes, &req); err != nil {
+			t.Errorf("bridge: unmarshal: %v", err)
+			return nil
+		}
+		var msgs []json.RawMessage
+		if err := json.Unmarshal(req.Messages, &msgs); err != nil {
+			t.Errorf("bridge: parse messages: %v", err)
+			return nil
+		}
+		if len(msgs) != 3 {
+			t.Errorf("bridge received %d messages, want 3 (full request in cache mode)", len(msgs))
+		}
+		// Return one compressed message.
+		resp := headroomResponse{
+			Messages:    json.RawMessage(`[` + string(compressedMutable) + `]`),
+			TokensSaved: 40,
+		}
+		b, _ := json.Marshal(resp)
+		return b
+	})
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: upstream.URL,
+			LocalToken:     "tok",
+		},
+		Transport:    &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
+		Headroom:     bridge,
+		HeadroomMode: HeadroomModeCache,
+	}
+
+	frozenSys := `{"role":"user","content":"first turn (frozen)"}`
+	frozenAst := `{"role":"assistant","content":"reply (frozen)"}`
+	mutableMsg := `{"role":"user","content":"final mutable user turn"}`
+	msgsJSON := `[` + frozenSys + `,` + frozenAst + `,` + mutableMsg + `]`
+	body := `{"model":"claude-sonnet","messages":` + msgsJSON + `}`
+
+	handler := srv.proxyHandler(mustParseURL(upstream.URL))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	// Frozen prefix must be restored in upstream body.
+	var upstreamBody struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(gotBody, &upstreamBody); err != nil {
+		t.Fatalf("parse upstream body: %v — body: %s", err, gotBody)
+	}
+	if len(upstreamBody.Messages) < 3 {
+		t.Fatalf("upstream messages has %d, want >= 3", len(upstreamBody.Messages))
+	}
+
+	var origMsgs []json.RawMessage
+	if err := json.Unmarshal(json.RawMessage(msgsJSON), &origMsgs); err != nil {
+		t.Fatal(err)
+	}
+	// First two messages (frozen prefix) must be byte-identical to originals.
+	for i := 0; i < 2; i++ {
+		if string(upstreamBody.Messages[i]) != string(origMsgs[i]) {
+			t.Errorf("upstream messages[%d] = %s, want original %s (frozen prefix byte-stable)",
+				i, upstreamBody.Messages[i], origMsgs[i])
+		}
+	}
+}
+
+// TestServer_ProxyHandler_TokenModeUsesCompress verifies that when
+// s.HeadroomMode is HeadroomModeToken, proxyHandler calls Compress (token mode).
+func TestServer_ProxyHandler_TokenModeUsesCompress(t *testing.T) {
+	compressedMessages := json.RawMessage(`[{"role":"user","content":"token compressed"}]`)
+	bridgeCalled := false
+
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"msg_tok"}`))
+	}))
+	defer upstream.Close()
+
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		bridgeCalled = true
+		resp := headroomResponse{
+			Messages:    compressedMessages,
+			TokensSaved: 10,
+		}
+		b, _ := json.Marshal(resp)
+		return b
+	})
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: upstream.URL,
+			LocalToken:     "tok",
+		},
+		Transport:    &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
+		Headroom:     bridge,
+		HeadroomMode: HeadroomModeToken,
+	}
+
+	body := `{"model":"claude-sonnet","messages":[{"role":"user","content":"original long message"}]}`
+	handler := srv.proxyHandler(mustParseURL(upstream.URL))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if !bridgeCalled {
+		t.Error("bridge was not called in token mode")
+	}
+	var upstreamBody map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &upstreamBody); err != nil {
+		t.Fatalf("parse upstream body: %v", err)
+	}
+	if string(upstreamBody["messages"]) != string(compressedMessages) {
+		t.Errorf("upstream messages = %s, want compressed %s", upstreamBody["messages"], compressedMessages)
+	}
+}
+
+// TestServer_NativeCodex_HeadroomNil_NoCompression verifies that when Headroom
+// is nil, no compression is attempted and the original body is forwarded.
+func TestServer_NativeCodex_HeadroomNil_NoCompression(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"resp_ok"}`))
+	}))
+	defer upstream.Close()
+
+	originalBody := `{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: upstream.URL,
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Headroom: nil, // explicitly nil
+	}
+
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(originalBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if string(gotBody) != originalBody {
+		t.Errorf("upstream body = %s, want original (no compression when nil)", gotBody)
+	}
+}

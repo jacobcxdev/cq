@@ -181,6 +181,7 @@ func pickWinner(candidate, current ClaudeOAuth) bool {
 	return false
 }
 
+
 // mergeIdentifiedByFreshness deduplicates identified accounts (those with
 // AccountUUID or Email) across discovery sources by preferring the entry with
 // the highest ExpiresAt. This fixes the source-order bias bug where a stale

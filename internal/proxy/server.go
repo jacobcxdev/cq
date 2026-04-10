@@ -35,6 +35,9 @@ type Server struct {
 	CodexTransport        http.RoundTripper
 	CodexUpgradeTransport http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
 	Headroom              *HeadroomBridge
+	// HeadroomMode is the resolved compression mode. Only meaningful when
+	// Headroom is non-nil. Reported in the /health response.
+	HeadroomMode HeadroomMode
 }
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
@@ -197,15 +200,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.CodexDiscover != nil {
 		codexCount = len(s.CodexDiscover())
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"status":   "ok",
 		"headroom": s.Headroom != nil,
 		"accounts": map[string]int{
 			"claude": claudeCount,
 			"codex":  codexCount,
 		},
-	})
+	}
+	if s.Headroom != nil {
+		switch s.HeadroomMode {
+		case HeadroomModeCache:
+			resp["headroom_mode"] = "cache"
+		default:
+			resp["headroom_mode"] = "token"
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // isValidToken returns true if token matches the local proxy token or the
@@ -254,6 +266,25 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	model := extractModel(body)
 	fmt.Fprintf(os.Stderr, "cq: route POST /responses model=%q provider=codex (native)\n", model)
+
+	// Compress Responses API input via headroom bridge if available.
+	// Fail-open: on error, log and continue with original body.
+	if s.Headroom != nil {
+		var compressed []byte
+		var saved int
+		var err error
+		if s.HeadroomMode == HeadroomModeCache {
+			compressed, saved, err = s.Headroom.CompressResponsesCache(body)
+		} else {
+			compressed, saved, err = s.Headroom.CompressResponses(body, HeadroomModeToken)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: headroom: %v\n", err)
+		} else if saved > 0 {
+			fmt.Fprintf(os.Stderr, "cq: headroom saved %d tokens\n", saved)
+			body = compressed
+		}
+	}
 
 	// Build upstream request — forward as-is, no translation.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
@@ -318,6 +349,10 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 // reverse-proxying to the Codex upstream. The CodexTokenTransport injects
 // auth on the initial HTTP upgrade request; after the upgrade the raw TCP
 // connection is relayed without further intervention.
+//
+// Note: native Codex WebSocket traffic is intentionally out of scope for
+// headroom compression — the handshake body is minimal and the subsequent
+// binary/text frames are not buffered by this proxy.
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	codexUpstream, err := url.Parse(s.Config.CodexUpstream)
 	if err != nil {
@@ -404,9 +439,18 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 		routeModel = extractModel(buf)
 
 		// Compress messages via headroom bridge if available.
+		// Dispatch to the correct path based on the resolved headroom mode.
 		if s.Headroom != nil && len(buf) > 0 {
-			if compressed, saved, err := s.Headroom.Compress(buf); err != nil {
-				fmt.Fprintf(os.Stderr, "cq: headroom: %v\n", err)
+			var compressed []byte
+			var saved int
+			var compErr error
+			if s.HeadroomMode == HeadroomModeCache {
+				compressed, saved, compErr = s.Headroom.CompressCache(buf)
+			} else {
+				compressed, saved, compErr = s.Headroom.Compress(buf)
+			}
+			if compErr != nil {
+				fmt.Fprintf(os.Stderr, "cq: headroom: %v\n", compErr)
 			} else if saved > 0 {
 				fmt.Fprintf(os.Stderr, "cq: headroom saved %d tokens\n", saved)
 				buf = compressed

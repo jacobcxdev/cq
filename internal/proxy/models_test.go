@@ -9,6 +9,27 @@ import (
 	"time"
 )
 
+func TestModelMaxInputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  int
+	}{
+		{name: "known large model", model: "gpt-5.4", want: 1050000},
+		{name: "known smaller model", model: "gpt-5.4-mini", want: 400000},
+		{name: "unknown model", model: "unknown-model-xyz", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ModelMaxInputTokens(tt.model)
+			if got != tt.want {
+				t.Fatalf("ModelMaxInputTokens(%q) = %d, want %d", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSyntheticModelCatalogRoutesViaCodex(t *testing.T) {
 	for _, model := range SyntheticModelCatalog() {
 		if got := RouteModel(model.ID); got != ProviderCodex {
