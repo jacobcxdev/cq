@@ -17,6 +17,11 @@ func TestModelMaxInputTokens(t *testing.T) {
 	}{
 		{name: "known large model", model: "gpt-5.4", want: 1050000},
 		{name: "known smaller model", model: "gpt-5.4-mini", want: 400000},
+		{name: "normalises one million suffix", model: "gpt-5.4[1m]", want: 1050000},
+		{name: "normalises effort suffix", model: "gpt-5.4-xhigh", want: 1050000},
+		{name: "normalises combined suffixes", model: "gpt-5.4[1m]-xhigh", want: 1050000},
+		{name: "normalises case", model: "GPT-5.4", want: 1050000},
+		{name: "normalises o-series effort suffix", model: "o4-mini-high", want: 400000},
 		{name: "unknown model", model: "unknown-model-xyz", want: 0},
 	}
 
