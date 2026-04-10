@@ -147,6 +147,39 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 	return result
 }
 
+// pickWinner reports whether candidate should replace current as the "token
+// winner" when two entries represent the same logical account. It implements the
+// shared tie-break policy:
+//   1. Higher ExpiresAt wins outright.
+//   2. On a tie: prefer non-empty AccountUUID.
+//   3. Then: prefer non-nil TokenAccount.
+//   4. Then: prefer richer (longer) Scopes list.
+//   5. Otherwise keep current (return false).
+func pickWinner(candidate, current ClaudeOAuth) bool {
+	if candidate.ExpiresAt > current.ExpiresAt {
+		return true
+	}
+	if candidate.ExpiresAt < current.ExpiresAt {
+		return false
+	}
+	// Equal ExpiresAt — apply tie-break policy.
+	if candidate.AccountUUID != "" && current.AccountUUID == "" {
+		return true
+	}
+	if candidate.AccountUUID == "" && current.AccountUUID != "" {
+		return false
+	}
+	if candidate.TokenAccount != nil && current.TokenAccount == nil {
+		return true
+	}
+	if candidate.TokenAccount == nil && current.TokenAccount != nil {
+		return false
+	}
+	if len(candidate.Scopes) > len(current.Scopes) {
+		return true
+	}
+	return false
+}
 // mergeIdentifiedByFreshness deduplicates identified accounts (those with
 // AccountUUID or Email) across discovery sources by preferring the entry with
 // the highest ExpiresAt. This fixes the source-order bias bug where a stale
@@ -195,8 +228,8 @@ func mergeIdentifiedByFreshness(accounts []ClaudeOAuth) []ClaudeOAuth {
 			idx = len(result)
 			result = append(result, a)
 		} else {
-			// Merge: keep fresher entry as winner.
-			if a.ExpiresAt > result[idx].ExpiresAt {
+			// Merge: pick the better entry as winner.
+			if pickWinner(a, result[idx]) {
 				result[idx] = mergeAccountFields(a, result[idx])
 			} else {
 				result[idx] = mergeAccountFields(result[idx], a)
@@ -252,11 +285,10 @@ func dedupByEmail(accounts []ClaudeOAuth) []ClaudeOAuth {
 	for _, a := range accounts {
 		if a.Email != "" {
 			if idx, ok := seen[a.Email]; ok {
-				existing := result[idx]
-				if a.ExpiresAt > existing.ExpiresAt {
-					result[idx] = mergeAccountFields(a, existing)
-				} else if a.AccountUUID != "" && existing.AccountUUID == "" {
-					result[idx] = mergeAccountFields(existing, a)
+			if pickWinner(a, result[idx]) {
+					result[idx] = mergeAccountFields(a, result[idx])
+				} else {
+					result[idx] = mergeAccountFields(result[idx], a)
 				}
 				continue
 			}
@@ -437,6 +469,56 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	}
 	if err := saveManifest(manifestPath, entries); err != nil {
 		return fmt.Errorf("save manifest: %w", err)
+	}
+	return nil
+}
+
+// RemoveCQClaudeAccountsByEmail deletes cq-managed Claude account state for all
+// manifest rows matching the given email.
+func RemoveCQClaudeAccountsByEmail(email string) error {
+	if email == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("user home dir: %w", err)
+	}
+	manifestPath := filepath.Join(home, ".cache", "cq", "accounts.json")
+	entries := loadManifest(manifestPath)
+	if len(entries) == 0 {
+		return nil
+	}
+
+	filtered := make([]manifestEntry, 0, len(entries))
+	removed := false
+	for _, entry := range entries {
+		if entry.Email == email {
+			removed = true
+			if entry.UUID != "" {
+				service := ServicePrefix + Hash8(entry.UUID)
+				_ = gokeyring.Delete(service, entry.UUID)
+			}
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if !removed {
+		return nil
+	}
+	if err := saveManifest(manifestPath, filtered); err != nil {
+		return fmt.Errorf("save manifest: %w", err)
+	}
+	return nil
+}
+
+// RemoveActiveClaudeCredentialsByEmail clears the active Claude credentials when
+// they belong to the given email.
+func RemoveActiveClaudeCredentialsByEmail(email string) error {
+	if email == "" || ActiveClaudeEmail() != email {
+		return nil
+	}
+	if err := WriteCredentialsFile(&ClaudeCredentials{}); err != nil {
+		return fmt.Errorf("clear credentials: %w", err)
 	}
 	return nil
 }

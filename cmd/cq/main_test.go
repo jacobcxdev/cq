@@ -180,3 +180,35 @@ func TestDispatchUnknownCommandReturnsError(t *testing.T) {
 		t.Fatal("dispatch returned nil error for unknown command, want non-nil")
 	}
 }
+
+func TestCLIParsesRemoveCommands(t *testing.T) {
+	var cli CLI
+	kctx, err := kong.New(&cli,
+		kong.Writers(io.Discard, io.Discard),
+		kong.Exit(func(int) {}),
+	)
+	if err != nil {
+		t.Fatalf("kong.New: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "claude remove", args: []string{"claude", "remove", "user@example.com"}, want: "claude remove <email>"},
+		{name: "codex remove", args: []string{"codex", "remove", "user@example.com"}, want: "codex remove <email>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := kctx.Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse(%v): %v", tt.args, err)
+			}
+			if got := parsed.Command(); got != tt.want {
+				t.Fatalf("Command() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

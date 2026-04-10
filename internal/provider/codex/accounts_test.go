@@ -265,3 +265,66 @@ func TestAccountsSwitchNotFound(t *testing.T) {
 		t.Fatal("expected error for nonexistent email")
 	}
 }
+
+func TestAccountsRemoveDeletesStoredStateAndPreventsRediscovery(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt)
+	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt)
+	fs.files["/fake/home/.codex/accounts/registry.json"] = []byte(`{
+		"schema_version": 3,
+		"active_account_key": "user-1::acct-1",
+		"accounts": [
+			{"account_key": "user-1::acct-1", "email": "user@test.com"}
+		]
+	}`)
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {
+			{name: "user-1::acct-1.auth.json"},
+			{name: "registry.json"},
+		},
+	}
+
+	mgr := &Accounts{FS: fs}
+	if err := mgr.Remove(context.Background(), "user@test.com"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, ok := fs.files["/fake/home/.codex/auth.json"]; ok {
+		t.Fatal("active auth.json should be removed for deleted account")
+	}
+	if _, ok := fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"]; ok {
+		t.Fatal("stored account file should be removed")
+	}
+
+	accts := DiscoverAccounts(fs)
+	if len(accts) != 0 {
+		t.Fatalf("DiscoverAccounts() = %+v, want no rediscovered accounts", accts)
+	}
+
+	data := fs.files["/fake/home/.codex/accounts/registry.json"]
+	if string(data) == "" || string(data) == `{
+		"schema_version": 3,
+		"active_account_key": "user-1::acct-1",
+		"accounts": [
+			{"account_key": "user-1::acct-1", "email": "user@test.com"}
+		]
+	}` {
+		t.Fatal("registry.json should be updated after removal")
+	}
+}
+
+func TestAccountsRemoveNotFound(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok", "acct-1", jwt)
+
+	mgr := &Accounts{FS: fs}
+	err := mgr.Remove(context.Background(), "missing@test.com")
+	if err == nil {
+		t.Fatal("expected error for nonexistent email")
+	}
+	if got, want := err.Error(), `no account found with email "missing@test.com"`; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}

@@ -43,6 +43,7 @@ type ClaudeCmd struct {
 	Login    LoginCmd    `cmd:"" help:"Add Claude account"`
 	Accounts AccountsCmd `cmd:"" help:"List Claude accounts"`
 	Switch   SwitchCmd   `cmd:"" help:"Switch active Claude account"`
+	Remove   RemoveCmd   `cmd:"" help:"Remove Claude account"`
 }
 
 // CodexCmd groups Codex-specific subcommands.
@@ -50,6 +51,7 @@ type CodexCmd struct {
 	Login    LoginCmd    `cmd:"" help:"Add Codex account"`
 	Accounts AccountsCmd `cmd:"" help:"List Codex accounts"`
 	Switch   SwitchCmd   `cmd:"" help:"Switch active Codex account"`
+	Remove   RemoveCmd   `cmd:"" help:"Remove Codex account"`
 }
 
 // GeminiCmd groups Gemini-specific subcommands.
@@ -68,6 +70,11 @@ type AccountsCmd struct{}
 // SwitchCmd switches the active account.
 type SwitchCmd struct {
 	Email string `arg:"" help:"Email of account to activate"`
+}
+
+// RemoveCmd removes a stored account.
+type RemoveCmd struct {
+	Email string `arg:"" help:"Email of account to remove"`
 }
 
 // version is set at build time via -ldflags. Falls back to "dev".
@@ -147,6 +154,12 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 			invalidateProviderCache(provider.Claude)
 		}
 		return err
+	case "claude remove <email>":
+		err := app.RunRemove(provider.Claude, cli.Claude.Remove.Email, httputil.NewClient(10*time.Second, version))
+		if err == nil {
+			invalidateProviderCache(provider.Claude)
+		}
+		return err
 	case "codex login":
 		err := app.RunCodexLogin(context.Background(), httputil.NewClient(10*time.Second, version), cli.Codex.Login.Activate)
 		if err == nil {
@@ -157,6 +170,12 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		return app.RunAccounts(provider.Codex)
 	case "codex switch <email>":
 		err := app.RunSwitch(provider.Codex, cli.Codex.Switch.Email, httputil.NewClient(10*time.Second, version))
+		if err == nil {
+			invalidateProviderCache(provider.Codex)
+		}
+		return err
+	case "codex remove <email>":
+		err := app.RunRemove(provider.Codex, cli.Codex.Remove.Email, httputil.NewClient(10*time.Second, version))
 		if err == nil {
 			invalidateProviderCache(provider.Codex)
 		}

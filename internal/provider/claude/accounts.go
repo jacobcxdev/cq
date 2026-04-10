@@ -16,6 +16,13 @@ type Accounts struct {
 	HTTP httputil.Doer
 }
 
+var (
+	discoverClaudeAccounts                    = keyring.DiscoverClaudeAccounts
+	removeCQClaudeAccountsByEmail            = keyring.RemoveCQClaudeAccountsByEmail
+	removeActiveClaudeCredentialsByEmail     = keyring.RemoveActiveClaudeCredentialsByEmail
+	removePlatformClaudeKeychainAccountsByEmail = keyring.RemovePlatformClaudeKeychainAccountsByEmail
+)
+
 func (a *Accounts) ProviderID() provider.ID { return provider.Claude }
 
 // Discover returns all known Claude accounts from the credentials file,
@@ -39,7 +46,7 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 // metadata from the profile API (best-effort), writes the credentials to
 // the credentials file, and updates Claude Code's keychain entry.
 func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Account, error) {
-	accts := keyring.DiscoverClaudeAccounts()
+	accts := discoverClaudeAccounts()
 	for _, acct := range accts {
 		if acct.Email != identifier {
 			continue
@@ -99,4 +106,27 @@ func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Acco
 		}, nil
 	}
 	return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
+}
+
+func (a *Accounts) Remove(_ context.Context, identifier string) error {
+	found := false
+	for _, acct := range discoverClaudeAccounts() {
+		if acct.Email == identifier {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("no account found with email %q", identifier)
+	}
+	if err := removePlatformClaudeKeychainAccountsByEmail(identifier); err != nil {
+		return fmt.Errorf("remove platform Claude keychain accounts: %w", err)
+	}
+	if err := removeCQClaudeAccountsByEmail(identifier); err != nil {
+		return fmt.Errorf("remove cq-managed Claude accounts: %w", err)
+	}
+	if err := removeActiveClaudeCredentialsByEmail(identifier); err != nil {
+		return fmt.Errorf("remove active Claude credentials: %w", err)
+	}
+	return nil
 }

@@ -34,6 +34,7 @@ type AccountManager interface {
 	ProviderID() ID
 	Discover(ctx context.Context) ([]Account, error)
 	Switch(ctx context.Context, identifier string) (Account, error)
+	Remove(ctx context.Context, identifier string) error
 }
 
 // Services groups the service implementations for a provider.
