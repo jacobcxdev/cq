@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -28,28 +30,8 @@ func DefaultPersister(acct *keyring.ClaudeOAuth) {
 // AccountSwitcher persists an account switch (credentials file + keychain + cq keyring).
 type AccountSwitcher func(ctx context.Context, email string) error
 
-const (
-	// exhaustionThreshold is how many consecutive 429s declare an account exhausted.
-	exhaustionThreshold = 3
-	// exhaustionWindow is the time window within which consecutive 429s must occur.
-	exhaustionWindow = 60 * time.Second
-
-	// transientQuotaThreshold: if quota shows more than this percentage remaining,
-	// treat consecutive 429s as transient rather than true exhaustion.
-	transientQuotaThreshold = 10
-	// transientQuotaMaxAge is the maximum age of a quota snapshot to trust
-	// for transient-429 detection.
-	transientQuotaMaxAge = 5 * time.Minute
-)
-
-// failure429 tracks consecutive 429 responses for one account.
-type failure429 struct {
-	count int
-	first time.Time
-}
-
 // TokenTransport is an http.RoundTripper that injects OAuth tokens
-// and handles 401 (refresh) and 429 (exhaustion-based failover).
+// and handles 401 (refresh) and 429 (immediate replay across accounts).
 type TokenTransport struct {
 	Selector    ClaudeSelector
 	Refresher   RefreshFunc
@@ -60,8 +42,7 @@ type TokenTransport struct {
 	Inner       http.RoundTripper
 
 	mu                     sync.Mutex
-	knownTokens            map[string]string      // acctIdentifier → current access token
-	failures               map[string]*failure429 // acctIdentifier → 429 tracker
+	knownTokens            map[string]string // acctIdentifier → current access token
 	suppressFailoverForKey string
 }
 
@@ -70,40 +51,6 @@ func (t *TokenTransport) inner() http.RoundTripper {
 		return t.Inner
 	}
 	return http.DefaultTransport
-}
-
-// record429 records a 429 for the account and returns true if the account is exhausted.
-func (t *TokenTransport) record429(acct *keyring.ClaudeOAuth) bool {
-	key := acctIdentifier(acct)
-	now := time.Now()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.failures == nil {
-		t.failures = make(map[string]*failure429)
-	}
-	f := t.failures[key]
-	if f == nil {
-		t.failures[key] = &failure429{count: 1, first: now}
-		return false
-	}
-	// Reset if window expired.
-	if now.Sub(f.first) > exhaustionWindow {
-		f.count = 1
-		f.first = now
-		return false
-	}
-	f.count++
-	return f.count >= exhaustionThreshold
-}
-
-// reset429 clears the 429 tracker for the account (called on non-429 responses).
-func (t *TokenTransport) reset429(acct *keyring.ClaudeOAuth) {
-	key := acctIdentifier(acct)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.failures, key)
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -135,8 +82,7 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	case http.StatusTooManyRequests:
 		return t.handle429(req, resp, acct)
 	default:
-		t.reset429(acct)
-		t.clearFailoverSuppression(acct)
+		t.clearFailoverSuppression()
 		return resp, nil
 	}
 }
@@ -157,25 +103,29 @@ func (t *TokenTransport) handleUnauthorized(req *http.Request, acct *keyring.Cla
 	if err != nil {
 		return nil, fmt.Errorf("token refresh failed: %w", err)
 	}
-	return t.doRequest(req, newToken)
+	resp, err := t.doRequest(req, newToken)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 400 {
+		t.clearFailoverSuppression()
+	}
+	return resp, nil
 }
 
+// handle429 implements immediate replay-on-first-429 across all candidate accounts.
+// On the first 429 for a /v1/messages request, the transport immediately tries every
+// alternate account before surfacing a 429 to the client.
+//
+// Quota classification controls whether the switch is persisted:
+//   - confirmed exhausted (MinRemainingPct == 0):  persist switch
+//   - fresh remaining capacity (MinRemainingPct > 0): replay but do NOT persist switch
+//   - unknown (no data, stale, or nil cache):          replay, do not persist switch
+//
+// Failover suppression is set after a full walk where all candidates returned 429,
+// preventing ping-pong until a later non-429 success clears it.
 func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, failedAcct *keyring.ClaudeOAuth) (*http.Response, error) {
 	if !tracksExhaustion(req) {
-		return resp, nil
-	}
-
-	exhausted := t.record429(failedAcct)
-	if !exhausted {
-		// Transient 429 — forward to client (Claude Code handles backoff).
-		return resp, nil
-	}
-
-	// Validate against quota data before declaring exhaustion.
-	if t.isTransient429(req.Context(), failedAcct) {
-		t.reset429(failedAcct)
-		fmt.Fprintf(os.Stderr, "cq: proxy %s got %d consecutive 429s but quota shows remaining capacity — treating as transient\n",
-			failedAcct.Email, exhaustionThreshold)
 		return resp, nil
 	}
 
@@ -183,50 +133,134 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 		return resp, nil
 	}
 
-	// Account exhausted — attempt failover to alternate.
-	alt, err := t.Selector.Select(req.Context(), acctExcludeKeys(failedAcct)...)
-	if err != nil {
-		return resp, nil // no alternate — forward upstream 429
-	}
+	// Walk alternates until one succeeds or none remain.
+	excluded := acctExcludeKeys(failedAcct)
+	last429Resp := resp
+	var fallbackResp *http.Response
 
-	// Reset the exhausted account's counter so it gets a fresh window
-	// if we rotate back to it later (prevents infinite ping-pong).
-	t.reset429(failedAcct)
-
-	fmt.Fprintf(os.Stderr, "cq: proxy account %s exhausted (%d consecutive 429s), switching to %s\n",
-		failedAcct.Email, exhaustionThreshold, alt.Email)
-
-	// Persist the switch (best-effort, async).
-	if t.Switcher != nil && alt.Email != "" {
-		go func() {
-			if err := t.Switcher(context.Background(), alt.Email); err != nil {
-				fmt.Fprintf(os.Stderr, "cq: proxy switch persist failed: %v\n", err)
-			} else {
-				fmt.Fprintf(os.Stderr, "cq: proxy active account is now %s\n", alt.Email)
-			}
-		}()
-	}
-
-	token := alt.AccessToken
-	if alt.ExpiresAt > 0 && alt.ExpiresAt <= time.Now().UnixMilli() {
-		refreshed, err := t.refreshAccount(alt, token)
+	for {
+		alt, err := t.Selector.Select(req.Context(), excluded...)
 		if err != nil {
-			return resp, nil // refresh failed — forward upstream 429
+			if fallbackResp == nil {
+				t.setFailoverSuppression(failedAcct)
+				return last429Resp, nil
+			}
+			last429Resp.Body.Close()
+			return fallbackResp, nil
 		}
-		token = refreshed
-	}
 
-	resp.Body.Close()
-	failoverResp, err := t.doRequest(req, token)
-	if err != nil {
-		return nil, err
+		token := alt.AccessToken
+		if alt.ExpiresAt > 0 && alt.ExpiresAt <= time.Now().UnixMilli() {
+			refreshed, err := t.refreshAccount(alt, token)
+			if err != nil {
+				// Can't use this alternate — skip it.
+				excluded = append(excluded, acctExcludeKeys(alt)...)
+				continue
+			}
+			token = refreshed
+		}
+
+		altResp, err := t.doRequest(req, token)
+		if err != nil {
+			last429Resp.Body.Close()
+			if fallbackResp != nil {
+				fallbackResp.Body.Close()
+			}
+			return nil, err
+		}
+
+		switch altResp.StatusCode {
+		case http.StatusTooManyRequests:
+			last429Resp.Body.Close()
+			last429Resp = altResp
+			excluded = append(excluded, acctExcludeKeys(alt)...)
+		case http.StatusUnauthorized:
+			altResp.Body.Close()
+			altResp, err = t.handleUnauthorized(req, alt, alt.AccessToken)
+			if err != nil || altResp == nil {
+				excluded = append(excluded, acctExcludeKeys(alt)...)
+				continue
+			}
+			if altResp.StatusCode < 400 {
+				if t.isConfirmedExhausted(req.Context(), failedAcct) {
+					t.persistSwitch(req.Context(), alt)
+				}
+				last429Resp.Body.Close()
+				if fallbackResp != nil {
+					fallbackResp.Body.Close()
+				}
+				t.clearFailoverSuppression()
+				return altResp, nil
+			}
+			if altResp.StatusCode == http.StatusTooManyRequests {
+				last429Resp.Body.Close()
+				last429Resp = altResp
+				excluded = append(excluded, acctExcludeKeys(alt)...)
+				continue
+			}
+			body, readErr := httputil.ReadBody(altResp.Body)
+			altResp.Body.Close()
+			if readErr != nil {
+				last429Resp.Body.Close()
+				if fallbackResp != nil {
+					fallbackResp.Body.Close()
+				}
+				return nil, readErr
+			}
+			altResp.Body = io.NopCloser(bytes.NewReader(body))
+			if fallbackResp != nil {
+				fallbackResp.Body.Close()
+			}
+			fallbackResp = altResp
+			excluded = append(excluded, acctExcludeKeys(alt)...)
+		default:
+			if altResp.StatusCode < 400 {
+				if t.isConfirmedExhausted(req.Context(), failedAcct) {
+					t.persistSwitch(req.Context(), alt)
+				}
+				last429Resp.Body.Close()
+				if fallbackResp != nil {
+					fallbackResp.Body.Close()
+				}
+				t.clearFailoverSuppression()
+				return altResp, nil
+			}
+			body, readErr := httputil.ReadBody(altResp.Body)
+			altResp.Body.Close()
+			if readErr != nil {
+				last429Resp.Body.Close()
+				if fallbackResp != nil {
+					fallbackResp.Body.Close()
+				}
+				return nil, readErr
+			}
+			altResp.Body = io.NopCloser(bytes.NewReader(body))
+			if fallbackResp != nil {
+				fallbackResp.Body.Close()
+			}
+			fallbackResp = altResp
+			excluded = append(excluded, acctExcludeKeys(alt)...)
+		}
 	}
-	if failoverResp.StatusCode == http.StatusTooManyRequests {
-		t.setFailoverSuppression(failedAcct)
-	} else {
-		t.clearFailoverSuppression(failedAcct)
+}
+
+// isConfirmedExhausted returns true only when fresh quota data positively
+// confirms the account has 0% remaining capacity.
+func (t *TokenTransport) isConfirmedExhausted(ctx context.Context, acct *keyring.ClaudeOAuth) bool {
+	if t.Quota == nil {
+		return false
 	}
-	return failoverResp, nil
+	snap, ok := t.Quota.Refresh(ctx, acct)
+	if !ok {
+		return false
+	}
+	if time.Since(snap.FetchedAt) > transientQuotaMaxAge {
+		return false
+	}
+	if !snap.Result.IsUsable() {
+		return false
+	}
+	return snap.Result.MinRemainingPct() == 0
 }
 
 func (t *TokenTransport) isFailoverSuppressed(acct *keyring.ClaudeOAuth) bool {
@@ -249,34 +283,28 @@ func (t *TokenTransport) setFailoverSuppression(acct *keyring.ClaudeOAuth) {
 	t.suppressFailoverForKey = key
 }
 
-func (t *TokenTransport) clearFailoverSuppression(acct *keyring.ClaudeOAuth) {
-	key := acctIdentifier(acct)
+func (t *TokenTransport) clearFailoverSuppression() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if key == "" || t.suppressFailoverForKey == key {
-		t.suppressFailoverForKey = ""
+	t.suppressFailoverForKey = ""
+}
+
+// persistSwitch persists the account switch asynchronously (best-effort).
+func (t *TokenTransport) persistSwitch(ctx context.Context, alt *keyring.ClaudeOAuth) {
+	if t.Switcher != nil && alt.Email != "" {
+		go func() {
+			if err := t.Switcher(context.Background(), alt.Email); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: proxy switch persist failed: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "cq: proxy active account is now %s\n", alt.Email)
+			}
+		}()
 	}
 }
 
-// isTransient429 checks whether a 429-exhausted account likely still has quota.
-// Returns true if the quota cache shows the account has more than
-// transientQuotaThreshold percent remaining and the data is fresh.
-func (t *TokenTransport) isTransient429(ctx context.Context, acct *keyring.ClaudeOAuth) bool {
-	if t.Quota == nil {
-		return false
-	}
-	snap, ok := t.Quota.Refresh(ctx, acct)
-	if !ok {
-		return false
-	}
-	if time.Since(snap.FetchedAt) > transientQuotaMaxAge {
-		return false
-	}
-	if !snap.Result.IsUsable() {
-		return false
-	}
-	return snap.Result.MinRemainingPct() > transientQuotaThreshold
-}
+// transientQuotaMaxAge is the maximum age of a quota snapshot to trust
+// for exhaustion detection.
+const transientQuotaMaxAge = 5 * time.Minute
 
 // refreshAccount obtains a fresh token, with double-check to avoid redundant refreshes.
 func (t *TokenTransport) refreshAccount(acct *keyring.ClaudeOAuth, failedToken string) (string, error) {
@@ -370,6 +398,9 @@ func acctExcludeKeys(a *keyring.ClaudeOAuth) []string {
 	}
 	if a.AccountUUID != "" {
 		keys = append(keys, a.AccountUUID)
+	}
+	if len(keys) == 0 && a.AccessToken != "" {
+		keys = append(keys, a.AccessToken)
 	}
 	return keys
 }

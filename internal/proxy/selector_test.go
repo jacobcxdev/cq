@@ -81,6 +81,15 @@ func TestAccountSelector_Select(t *testing.T) {
 			wantEmail: "b@test.com",
 		},
 		{
+			name: "exclude parameter skips anonymous account by access token",
+			accounts: []keyring.ClaudeOAuth{
+				{AccessToken: "anon-token", ExpiresAt: future},
+				{Email: "named@test.com", AccountUUID: "uuid-named", AccessToken: "named-token", ExpiresAt: future},
+			},
+			exclude:   []string{"anon-token"},
+			wantEmail: "named@test.com",
+		},
+		{
 			name: "prefers non-expired over expired-but-refreshable",
 			accounts: []keyring.ClaudeOAuth{
 				{Email: "expired@test.com", AccessToken: "t1", ExpiresAt: past, RefreshToken: "r1"},

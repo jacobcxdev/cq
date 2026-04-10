@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -77,9 +78,12 @@ func (s *codexSelector) hasQuota(a *codex.CodexAccount) bool {
 	if !ok {
 		return true
 	}
-	// MinRemainingPct returns -1 when there is no window data (no quota
-	// information yet). Treat -1 as "assume has quota" — only return false
-	// when pct == 0, meaning the account is confirmed exhausted.
+	// Only treat as exhausted when the snapshot is fresh AND MinRemainingPct()==0.
+	// Stale snapshots are treated as unknown — eligible for selection.
+	// MinRemainingPct returns -1 when there is no window data; treat that as eligible too.
+	if time.Since(snap.FetchedAt) > transientQuotaMaxAge {
+		return true // stale — unknown status, assume has quota
+	}
 	return snap.Result.MinRemainingPct() != 0
 }
 

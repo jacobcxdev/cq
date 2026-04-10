@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -154,9 +155,10 @@ func TestCodexSelector_ExcludeAll(t *testing.T) {
 }
 
 func TestCodexSelector_SkipsExhaustedAccounts(t *testing.T) {
+	now := time.Now()
 	quotaReader := stubQuotaReader{
-		"dead": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}},
-		"live": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 42}}}},
+		"dead": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
+		"live": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 42}}}, FetchedAt: now},
 	}
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
@@ -175,9 +177,10 @@ func TestCodexSelector_SkipsExhaustedAccounts(t *testing.T) {
 }
 
 func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
+	now := time.Now()
 	quotaReader := stubQuotaReader{
-		"dead-a": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}},
-		"dead-b": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}},
+		"dead-a": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
+		"dead-b": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
 	}
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
@@ -208,6 +211,33 @@ func TestCodexSelector_SelectsAccountWithNoWindowData(t *testing.T) {
 	acct, err := sel.Select(context.Background())
 	if err != nil {
 		t.Fatalf("Select error: %v (account with no window data should be eligible)", err)
+	}
+	if acct == nil || acct.Email != "a@test.com" {
+		t.Fatalf("got %+v, want a@test.com", acct)
+	}
+}
+
+// TestCodexSelector_StaleZeroPercentSnapshotIsEligible verifies that a stale
+// zero-percent quota snapshot is NOT treated as confirmed-exhausted: the account
+// must still be eligible for selection because the data is too old to trust.
+func TestCodexSelector_StaleZeroPercentSnapshotIsEligible(t *testing.T) {
+	// Snapshot with 0% remaining, but FetchedAt is 10 minutes ago (stale).
+	staleTime := time.Now().Add(-10 * time.Minute)
+	quotaReader := stubQuotaReader{
+		"acct": {
+			Result:    quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}},
+			FetchedAt: staleTime,
+		},
+	}
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{AccountID: "acct", Email: "a@test.com", AccessToken: "tok", IsActive: true},
+		}
+	}, quotaReader)
+
+	acct, err := sel.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error: %v (stale zero-pct snapshot should be treated as eligible)", err)
 	}
 	if acct == nil || acct.Email != "a@test.com" {
 		t.Fatalf("got %+v, want a@test.com", acct)

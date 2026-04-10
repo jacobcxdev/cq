@@ -18,17 +18,17 @@ import (
 type CodexAccountSwitcher func(ctx context.Context, email string) error
 
 // CodexTokenTransport is an http.RoundTripper that injects Codex OAuth tokens
-// and handles 401 (failover) and 429 (exhaustion-based failover).
+// and handles 401 (failover) and 429 (immediate replay across accounts).
 //
 // Unlike TokenTransport, Codex tokens cannot be refreshed — the only
 // recovery from auth failure is failover to an alternate account.
 type CodexTokenTransport struct {
 	Selector CodexSelector
 	Switcher CodexAccountSwitcher
+	Quota    *QuotaCache
 	Inner    http.RoundTripper
 
 	mu                     sync.Mutex
-	failures               map[string]*failure429
 	suppressFailoverForKey string
 }
 
@@ -58,8 +58,7 @@ func (t *CodexTokenTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	case http.StatusTooManyRequests:
 		return t.handle429(req, resp, acct)
 	default:
-		t.reset429(acct)
-		t.clearFailoverSuppression(acct)
+		t.clearFailoverSuppression()
 		return resp, nil
 	}
 }
@@ -85,55 +84,112 @@ func (t *CodexTokenTransport) handleUnauthorized(req *http.Request, failedAcct *
 		codexAcctIdentifier(failedAcct), codexAcctIdentifier(alt))
 
 	t.persistSwitch(alt)
-	return t.doRequest(req, alt)
+	resp, err := t.doRequest(req, alt)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 400 {
+		t.clearFailoverSuppression()
+	}
+	return resp, nil
 }
 
+// handle429 implements immediate replay-on-first-429 across all candidate accounts.
+// On the first 429, the transport immediately tries every alternate account before
+// surfacing a 429 to the client.
+//
+// Exhaustion classification controls whether the switch is persisted:
+//   - hard exhaustion (insufficient_quota in body):        persist switch
+//   - fresh snapshot MinRemainingPct == 0:                 persist switch
+//   - fresh snapshot MinRemainingPct > 0 (has capacity):  replay but do NOT persist switch
+//   - stale/missing snapshot (unknown):                    replay, do not persist switch
+//
+// Failover suppression is set after a full walk where all candidates returned 429,
+// preventing ping-pong until a later non-429 success clears it.
 func (t *CodexTokenTransport) handle429(req *http.Request, resp *http.Response, failedAcct *codex.CodexAccount) (*http.Response, error) {
-	// Read body to determine exhaustion type.
+	// Read the body once for exhaustion classification; preserve it for forwarding.
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
-
-	hard := isHardExhaustion(body)
-	if !hard {
-		exhausted := t.record429(failedAcct)
-		if !exhausted {
-			// Transient 429 — reconstruct response and forward to client.
-			return makeBufferedResponse(resp, body), nil
-		}
-	}
 
 	if t.isFailoverSuppressed(failedAcct) {
 		return makeBufferedResponse(resp, body), nil
 	}
 
-	// Account exhausted — attempt failover to alternate.
-	alt, err := t.Selector.Select(req.Context(), codexAcctExcludeKeys(failedAcct)...)
-	if err != nil {
-		return makeBufferedResponse(resp, body), nil // no alternate
-	}
+	// Classify exhaustion of the failing account.
+	hardExhausted := isHardExhaustion(body) || t.isSnapshotExhausted(failedAcct)
 
-	// Reset so a future rotation back gets a fresh window.
-	t.reset429(failedAcct)
+	// Walk alternates until one succeeds or none remain.
+	excluded := codexAcctExcludeKeys(failedAcct)
+	last429Body := body
+	last429Resp := resp
+	var fallbackBody []byte
+	var fallbackResp *http.Response
 
-	reason := "counter"
-	if hard {
-		reason = "insufficient_quota"
-	}
-	fmt.Fprintf(os.Stderr, "cq: proxy codex account %s exhausted (%s), switching to %s\n",
-		codexAcctIdentifier(failedAcct), reason, codexAcctIdentifier(alt))
+	for {
+		alt, err := t.Selector.Select(req.Context(), excluded...)
+		if err != nil {
+			if fallbackResp == nil {
+				t.setFailoverSuppression(failedAcct)
+				return makeBufferedResponse(last429Resp, last429Body), nil
+			}
+			return makeBufferedResponse(fallbackResp, fallbackBody), nil
+		}
 
-	t.persistSwitch(alt)
+		altResp, err := t.doRequest(req, alt)
+		if err != nil {
+			return nil, err
+		}
 
-	failoverResp, err := t.doRequest(req, alt)
-	if err != nil {
-		return nil, err
+		switch altResp.StatusCode {
+		case http.StatusTooManyRequests:
+			altBody, _ := io.ReadAll(io.LimitReader(altResp.Body, 1<<20))
+			altResp.Body.Close()
+			last429Body = altBody
+			last429Resp = altResp
+			excluded = append(excluded, codexAcctExcludeKeys(alt)...)
+		default:
+			if altResp.StatusCode < 400 {
+				if hardExhausted {
+					t.persistSwitch(alt)
+				}
+				t.clearFailoverSuppression()
+				return altResp, nil
+			}
+			altBody, _ := io.ReadAll(io.LimitReader(altResp.Body, 1<<20))
+			altResp.Body.Close()
+			fallbackBody = altBody
+			fallbackResp = altResp
+			excluded = append(excluded, codexAcctExcludeKeys(alt)...)
+		}
 	}
-	if failoverResp.StatusCode == http.StatusTooManyRequests {
-		t.setFailoverSuppression(failedAcct)
-	} else {
-		t.clearFailoverSuppression(failedAcct)
+}
+
+// isSnapshotExhausted returns true when a fresh quota snapshot positively
+// confirms the account has 0% remaining capacity (MinRemainingPct == 0).
+// Returns false for stale/missing snapshots (unknown status).
+func (t *CodexTokenTransport) isSnapshotExhausted(acct *codex.CodexAccount) bool {
+	if t.Quota == nil {
+		return false
 	}
-	return failoverResp, nil
+	// Try by AccountID first, then email.
+	id := acct.AccountID
+	if id == "" {
+		id = acct.Email
+	}
+	if id == "" {
+		return false
+	}
+	snap, ok := t.Quota.Snapshot(id)
+	if !ok {
+		return false
+	}
+	if time.Since(snap.FetchedAt) > transientQuotaMaxAge {
+		return false // stale — unknown status, not confirmed exhausted
+	}
+	if !snap.Result.IsUsable() {
+		return false
+	}
+	return snap.Result.MinRemainingPct() == 0
 }
 
 // persistSwitch persists the account switch asynchronously (best-effort).
@@ -147,39 +203,6 @@ func (t *CodexTokenTransport) persistSwitch(acct *codex.CodexAccount) {
 			}
 		}()
 	}
-}
-
-// record429 records a 429 for the account and returns true if the account is exhausted.
-func (t *CodexTokenTransport) record429(acct *codex.CodexAccount) bool {
-	key := codexAcctIdentifier(acct)
-	now := time.Now()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.failures == nil {
-		t.failures = make(map[string]*failure429)
-	}
-	f := t.failures[key]
-	if f == nil {
-		t.failures[key] = &failure429{count: 1, first: now}
-		return false
-	}
-	if now.Sub(f.first) > exhaustionWindow {
-		f.count = 1
-		f.first = now
-		return false
-	}
-	f.count++
-	return f.count >= exhaustionThreshold
-}
-
-// reset429 clears the 429 tracker for the account (called on non-429 responses).
-func (t *CodexTokenTransport) reset429(acct *codex.CodexAccount) {
-	key := codexAcctIdentifier(acct)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.failures, key)
 }
 
 func (t *CodexTokenTransport) isFailoverSuppressed(acct *codex.CodexAccount) bool {
@@ -202,13 +225,10 @@ func (t *CodexTokenTransport) setFailoverSuppression(acct *codex.CodexAccount) {
 	t.suppressFailoverForKey = key
 }
 
-func (t *CodexTokenTransport) clearFailoverSuppression(acct *codex.CodexAccount) {
-	key := codexAcctIdentifier(acct)
+func (t *CodexTokenTransport) clearFailoverSuppression() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if key == "" || t.suppressFailoverForKey == key {
-		t.suppressFailoverForKey = ""
-	}
+	t.suppressFailoverForKey = ""
 }
 
 // isHardExhaustion checks whether a 429 response body contains an OpenAI
