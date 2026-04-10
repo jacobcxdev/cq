@@ -48,18 +48,24 @@ type TokenAccount struct {
 // 2. Platform keychain (macOS: "Claude Code-credentials*", all: cq-claude-* via go-keyring)
 func DiscoverClaudeAccounts() []ClaudeOAuth {
 	var accounts []ClaudeOAuth
-	seen := make(map[string]bool)
 
-	// Credentials file first — has email/UUID but token may be stale.
-	accounts = append(accounts, discoverCredentialsFile(seen)...)
+	// De-dup within each source only. Cross-source de-dup would let a stale
+	// credentials-file record suppress a fresher cq-keyring record before we
+	// can compare them by freshness.
+	accounts = append(accounts, discoverCredentialsFile(make(map[string]bool))...)
 
 	// Platform-specific keychain discovery (macOS: security CLI for backward compat).
 	// Claude Code refreshes the keychain token but not the credentials file,
 	// and the keychain entry often lacks email/UUID metadata.
-	accounts = append(accounts, discoverPlatformKeychain(seen)...)
+	accounts = append(accounts, discoverPlatformKeychain(make(map[string]bool))...)
 
 	// cq-managed accounts via go-keyring (cross-platform)
-	accounts = append(accounts, discoverCQKeyring(seen)...)
+	accounts = append(accounts, discoverCQKeyring(make(map[string]bool))...)
+
+	// Merge identified accounts from different sources by freshness, keyed by
+	// AccountUUID then Email. This prevents a stale credentials-file record
+	// from suppressing a fresher cq-keyring record for the same logical account.
+	accounts = mergeIdentifiedByFreshness(accounts)
 
 	// Merge anonymous keychain entries (no email/UUID) with identified entries
 	// from the credentials file or cq keyring. Must run after all sources are
@@ -141,6 +147,73 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 	return result
 }
 
+// mergeIdentifiedByFreshness deduplicates identified accounts (those with
+// AccountUUID or Email) across discovery sources by preferring the entry with
+// the highest ExpiresAt. This fixes the source-order bias bug where a stale
+// credentials-file record could suppress a fresher cq-keyring record for the
+// same logical account.
+//
+// Two accounts are considered the same logical account when they share an
+// AccountUUID, or when both have an Email that matches (even if only one has a
+// UUID). Anonymous entries (no UUID and no Email) pass through unchanged.
+//
+// The winner keeps its own token fields (AccessToken, RefreshToken, ExpiresAt)
+// and is enriched with any metadata the loser has that the winner lacks
+// (Scopes, SubscriptionType, RateLimitTier, AccountUUID, Profile, TokenAccount).
+func mergeIdentifiedByFreshness(accounts []ClaudeOAuth) []ClaudeOAuth {
+	if len(accounts) <= 1 {
+		return accounts
+	}
+
+	// byUUID and byEmail track where in result each logical account lives.
+	byUUID := make(map[string]int)  // uuid -> index
+	byEmail := make(map[string]int) // email -> index
+	var result []ClaudeOAuth
+
+	for _, a := range accounts {
+		if a.AccountUUID == "" && a.Email == "" {
+			// Anonymous: pass through unchanged.
+			result = append(result, a)
+			continue
+		}
+
+		// Find existing canonical index — UUID match takes precedence over email.
+		idx := -1
+		if a.AccountUUID != "" {
+			if i, ok := byUUID[a.AccountUUID]; ok {
+				idx = i
+			}
+		}
+		if idx < 0 && a.Email != "" {
+			if i, ok := byEmail[a.Email]; ok {
+				idx = i
+			}
+		}
+
+		if idx < 0 {
+			// First time we see this logical account.
+			idx = len(result)
+			result = append(result, a)
+		} else {
+			// Merge: keep fresher entry as winner.
+			if a.ExpiresAt > result[idx].ExpiresAt {
+				result[idx] = mergeAccountFields(a, result[idx])
+			} else {
+				result[idx] = mergeAccountFields(result[idx], a)
+			}
+		}
+
+		// Register both stable identifiers for future lookup.
+		if result[idx].AccountUUID != "" {
+			byUUID[result[idx].AccountUUID] = idx
+		}
+		if result[idx].Email != "" {
+			byEmail[result[idx].Email] = idx
+		}
+	}
+	return result
+}
+
 // mergeAccountFields copies missing metadata from loser into winner.
 // Token fields (AccessToken, RefreshToken, ExpiresAt) come from winner;
 // everything else is filled in from loser when winner lacks it.
@@ -183,7 +256,7 @@ func dedupByEmail(accounts []ClaudeOAuth) []ClaudeOAuth {
 				if a.ExpiresAt > existing.ExpiresAt {
 					result[idx] = mergeAccountFields(a, existing)
 				} else if a.AccountUUID != "" && existing.AccountUUID == "" {
-					result[idx] = mergeAccountFields(a, existing)
+					result[idx] = mergeAccountFields(existing, a)
 				}
 				continue
 			}

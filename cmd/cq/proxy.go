@@ -89,7 +89,8 @@ func runProxyStart() error {
 	codexDiscover := proxy.CodexDiscoverer(func() []codexprov.CodexAccount {
 		return codexprov.DiscoverAccounts(fsutil.OSFileSystem{})
 	})
-	codexSelector := proxy.NewCodexSelector(codexDiscover, quotaCache)
+	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
+	codexSelector := proxy.NewCodexSelector(codexDiscover, codexQuotaCache)
 
 	codexAccounts := codexDiscover()
 	var codexEmails []string

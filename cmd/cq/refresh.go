@@ -13,6 +13,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
+	"github.com/jacobcxdev/cq/internal/provider"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 )
 
@@ -33,7 +34,8 @@ func runRefresh() error {
 	// After Claude Code rotates tokens, mergeAnonymousFresh can't match
 	// them (token affinity fails). We resolve the anonymous entry's email
 	// via the profile API and sync its tokens into the matching account.
-	accounts = syncAnonymousToIdentified(ctx, httpClient, accounts, now)
+	var claudeChanged bool
+	accounts, claudeChanged = syncAnonymousToIdentifiedWithChange(ctx, httpClient, accounts, now)
 
 	threshold := now + refreshMarginMs
 
@@ -72,7 +74,12 @@ func runRefresh() error {
 			}
 		}
 
+		claudeChanged = true
 		fmt.Fprintf(os.Stderr, "cq: refreshed %s\n", label)
+	}
+
+	if claudeChanged {
+		invalidateProviderCache(provider.Claude)
 	}
 
 	if len(needsReauth) == 0 {
@@ -118,6 +125,13 @@ func runRefresh() error {
 // This handles the case where Claude Code has rotated both access and refresh
 // tokens, breaking token affinity in mergeAnonymousFresh.
 func syncAnonymousToIdentified(ctx context.Context, client httputil.Doer, accounts []keyring.ClaudeOAuth, nowMs int64) []keyring.ClaudeOAuth {
+	result, _ := syncAnonymousToIdentifiedWithChange(ctx, client, accounts, nowMs)
+	return result
+}
+
+// syncAnonymousToIdentifiedWithChange is the testable variant of
+// syncAnonymousToIdentified that also returns whether any account was mutated.
+func syncAnonymousToIdentifiedWithChange(ctx context.Context, client httputil.Doer, accounts []keyring.ClaudeOAuth, nowMs int64) ([]keyring.ClaudeOAuth, bool) {
 	// Collect anonymous entries with fresh tokens.
 	var anonIndices []int
 	identified := make(map[string]int) // email → index
@@ -130,7 +144,7 @@ func syncAnonymousToIdentified(ctx context.Context, client httputil.Doer, accoun
 		}
 	}
 	if len(anonIndices) == 0 || len(identified) == 0 {
-		return accounts
+		return accounts, false
 	}
 
 	merged := make(map[int]bool)
@@ -172,7 +186,7 @@ func syncAnonymousToIdentified(ctx context.Context, client httputil.Doer, accoun
 	}
 
 	if len(merged) == 0 {
-		return accounts
+		return accounts, false
 	}
 	result := make([]keyring.ClaudeOAuth, 0, len(accounts)-len(merged))
 	for i, a := range accounts {
@@ -180,7 +194,7 @@ func syncAnonymousToIdentified(ctx context.Context, client httputil.Doer, accoun
 			result = append(result, a)
 		}
 	}
-	return result
+	return result, true
 }
 
 // resolveProfileEmail calls the Claude profile API to determine the email

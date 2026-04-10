@@ -105,15 +105,23 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	if acct.ExpiresAt > 0 && acct.ExpiresAt < nowMs && acct.RefreshToken != "" {
 		rr, err := RefreshToken(ctx, p.client.http, acct.RefreshToken, acct.Scopes)
 		if err != nil {
-			return errorWithIdentity("auth_expired", "auth expired", 0)
+			// Refresh exchange failed. The access token may still be valid
+			// (server-side expiry differs from the locally-stored ExpiresAt).
+			// Probe it with FetchProfile: if it succeeds the current token
+			// is still good and we continue with it; if not, return auth_expired.
+			if _, probeErr := p.client.FetchProfile(ctx, token); probeErr != nil {
+				return errorWithIdentity("auth_expired", "auth expired", 0)
+			}
+			// Current access token works — fall through with token unchanged.
+		} else {
+			token = rr.AccessToken
+			acct.AccessToken = rr.AccessToken
+			acct.ExpiresAt = nowMs + rr.ExpiresIn*1000
+			if rr.RefreshToken != "" {
+				acct.RefreshToken = rr.RefreshToken
+			}
+			persistRefreshedToken(&acct)
 		}
-		token = rr.AccessToken
-		acct.AccessToken = rr.AccessToken
-		acct.ExpiresAt = nowMs + rr.ExpiresIn*1000
-		if rr.RefreshToken != "" {
-			acct.RefreshToken = rr.RefreshToken
-		}
-		persistRefreshedToken(&acct)
 	}
 
 	// Fetch profile (always) and usage (skip for free plan) in parallel.
@@ -223,7 +231,16 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		return errorWithProfile("api_error", msg, usageCode)
 	}
 
-	return parseUsage(usageBody, plan, rlt, prof.Email, prof.AccountUUID)
+	email := prof.Email
+	if email == "" {
+		email = acct.Email
+	}
+	accountID := prof.AccountUUID
+	if accountID == "" {
+		accountID = acct.AccountUUID
+	}
+
+	return parseUsage(usageBody, plan, rlt, email, accountID)
 }
 
 // FetchAccountUsage fetches only usage data for a single account (no profile fetch).
