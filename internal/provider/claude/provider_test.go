@@ -14,6 +14,77 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
+func TestDiscoverAccounts(t *testing.T) {
+	oldDiscover := discoverClaudeAccounts
+	defer func() { discoverClaudeAccounts = oldDiscover }()
+
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{
+			AccountUUID:      "uuid-123",
+			Email:            "user@example.com",
+			SubscriptionType: "max",
+			RateLimitTier:    "tier-1",
+		}}
+	}
+
+	p := New(http.DefaultClient)
+	got, err := p.DiscoverAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverAccounts() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].AccountID != "uuid-123" {
+		t.Fatalf("got[0].AccountID = %q, want uuid-123", got[0].AccountID)
+	}
+	if got[0].Email != "user@example.com" {
+		t.Fatalf("got[0].Email = %q, want user@example.com", got[0].Email)
+	}
+	if got[0].Label != "max" {
+		t.Fatalf("got[0].Label = %q, want max", got[0].Label)
+	}
+	if got[0].RateLimitTier != "tier-1" {
+		t.Fatalf("got[0].RateLimitTier = %q, want tier-1", got[0].RateLimitTier)
+	}
+}
+
+func TestDiscoverAccountsMarksActiveAccount(t *testing.T) {
+	oldDiscover := discoverClaudeAccounts
+	defer func() { discoverClaudeAccounts = oldDiscover }()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte(`{"claudeAiOauth":{"email":"active@example.com"}}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{
+			{AccountUUID: "uuid-1", Email: "active@example.com"},
+			{AccountUUID: "uuid-2", Email: "other@example.com"},
+		}
+	}
+
+	p := New(http.DefaultClient)
+	got, err := p.DiscoverAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverAccounts() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if !got[0].Active {
+		t.Fatalf("got[0].Active = %v, want true", got[0].Active)
+	}
+	if got[1].Active {
+		t.Fatalf("got[1].Active = %v, want false", got[1].Active)
+	}
+}
+
 type doerFunc func(*http.Request) (*http.Response, error)
 
 func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }

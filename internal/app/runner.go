@@ -79,7 +79,7 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id provider.ID) []quota.Result {
 	if !refresh && r.Cache != nil {
 		if cached, ok, err := r.Cache.Get(ctx, string(id)); err == nil && ok {
-			return cached
+			return r.enrichCachedWithDiscovered(ctx, id, cached)
 		}
 	}
 
@@ -114,6 +114,58 @@ func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id p
 		}
 	}
 	return results
+}
+
+// enrichCachedWithDiscovered takes cached results and merges in locally discovered
+// accounts. For each discovered account:
+//   - if a cached usable row already matches, keep it as-is
+//   - if no cached row exists, emit an auth_expired row so the account remains visible
+//
+// This ensures expired accounts are visible on cached runs until explicitly removed.
+func (r *Runner) enrichCachedWithDiscovered(ctx context.Context, id provider.ID, cached []quota.Result) []quota.Result {
+	svc := r.Services[id]
+	disc, ok := svc.Usage.(provider.Discoverer)
+	if !ok {
+		// Provider doesn't support discovery — return cache as-is.
+		return cached
+	}
+	accounts, err := disc.DiscoverAccounts(ctx)
+	if err != nil || len(accounts) == 0 {
+		return cached
+	}
+
+	// Index cached rows by account identity.
+	byID := make(map[string]bool)
+	byEmail := make(map[string]bool)
+	for _, c := range cached {
+		if c.IsUsable() {
+			if c.AccountID != "" {
+				byID[c.AccountID] = true
+			}
+			if c.Email != "" {
+				byEmail[c.Email] = true
+			}
+		}
+	}
+
+	out := make([]quota.Result, len(cached))
+	copy(out, cached)
+
+	for _, acct := range accounts {
+		if acct.AccountID != "" && byID[acct.AccountID] {
+			continue // already represented by a usable cached row
+		}
+		if acct.Email != "" && byEmail[acct.Email] {
+			continue
+		}
+		// No usable cached row — emit a visible auth_expired row.
+		row := quota.ErrorResult("auth_expired", "auth expired", 0)
+		row.AccountID = acct.AccountID
+		row.Email = acct.Email
+		row.Active = acct.Active
+		out = append(out, row)
+	}
+	return out
 }
 
 // backfillFromCache replaces error results with cached usable results for the

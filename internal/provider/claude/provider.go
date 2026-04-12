@@ -13,6 +13,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
+	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -61,6 +62,26 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 	}
 
 	return deduped, nil
+}
+
+// DiscoverAccounts returns all locally known Claude accounts without making
+// network calls. It implements provider.Discoverer so cached runs can keep
+// expired accounts visible.
+func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
+	accts := discoverClaudeAccounts()
+	activeEmail := activeCredentialEmail()
+	out := make([]provider.Account, len(accts))
+	for i, acct := range accts {
+		out[i] = provider.Account{
+			AccountID:     acct.AccountUUID,
+			Email:         acct.Email,
+			Label:         acct.SubscriptionType,
+			RateLimitTier: acct.RateLimitTier,
+			SwitchID:      acct.Email,
+			Active:        activeEmail != "" && acct.Email == activeEmail,
+		}
+	}
+	return out, nil
 }
 
 // activeCredentialEmail reads the active Claude account's email from the

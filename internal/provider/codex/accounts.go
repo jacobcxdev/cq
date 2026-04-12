@@ -16,27 +16,30 @@ import (
 
 // CodexAccount holds parsed credentials from a Codex auth.json file.
 type CodexAccount struct {
-	AccessToken string
-	IDToken     string
-	AccountID   string // from tokens.account_id
-	UserID      string // from JWT chatgpt_user_id
-	Email       string // from JWT id_token
-	PlanType    string // from JWT id_token
-	RecordKey   string // "{user_id}::{account_id}" — codex-auth compat
-	FilePath    string // source file path
-	IsActive    bool   // true if from ~/.codex/auth.json
+	AccessToken  string
+	RefreshToken string
+	IDToken      string
+	AccountID    string // from tokens.account_id
+	UserID       string // from JWT chatgpt_user_id
+	Email        string // from JWT id_token
+	PlanType     string // from JWT id_token
+	RecordKey    string // "{user_id}::{account_id}" — codex-auth compat
+	FilePath     string // source file path
+	IsActive     bool   // true if from ~/.codex/auth.json
+	ExpiresAt    int64  // Unix ms derived from JWT exp claim; 0 = unknown
 }
 
 // codexAuthFile is the on-disk format shared with Codex CLI and codex-auth.
 type codexAuthFile struct {
-	AuthMode string `json:"auth_mode"`
-	Tokens   struct {
+	AuthMode    string `json:"auth_mode"`
+	Tokens      struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		IDToken      string `json:"id_token"`
 		AccountID    string `json:"account_id"`
 	} `json:"tokens"`
 	LastRefresh string `json:"last_refresh,omitempty"`
+	CQExpiresAt int64  `json:"cq_expires_at,omitempty"`
 }
 
 // DiscoverAccounts finds all Codex accounts from:
@@ -82,10 +85,12 @@ func DiscoverAccounts(fs fsutil.FileSystem) []CodexAccount {
 		}
 		if acct.RecordKey != "" {
 			if idx, exists := seen[acct.RecordKey]; exists {
-				// Already discovered (from auth.json). Keep the active entry
-				// but update its FilePath to the accounts/ copy for switch ops.
+				// Already discovered from auth.json. Prefer the stored accounts/
+				// copy so future reads keep using the canonical persisted tokens.
 				if accounts[idx].IsActive {
-					accounts[idx].FilePath = path
+					acct.IsActive = true
+					acct.FilePath = path
+					accounts[idx] = acct
 				}
 				continue
 			}
@@ -117,15 +122,22 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 		accountID = claims.AccountID
 	}
 
+	expiresAtMs := claims.ExpiresAt * 1000
+	if af.CQExpiresAt > expiresAtMs {
+		expiresAtMs = af.CQExpiresAt
+	}
+
 	return CodexAccount{
-		AccessToken: af.Tokens.AccessToken,
-		IDToken:     af.Tokens.IDToken,
-		AccountID:   accountID,
-		UserID:      claims.UserID,
-		Email:       claims.Email,
-		PlanType:    claims.PlanType,
-		RecordKey:   claims.RecordKey(),
-		FilePath:    path,
+		AccessToken:  af.Tokens.AccessToken,
+		RefreshToken: af.Tokens.RefreshToken,
+		IDToken:      af.Tokens.IDToken,
+		AccountID:    accountID,
+		UserID:       claims.UserID,
+		Email:        claims.Email,
+		PlanType:     claims.PlanType,
+		RecordKey:    claims.RecordKey(),
+		FilePath:     path,
+		ExpiresAt:    expiresAtMs,
 	}, true
 }
 
@@ -316,6 +328,75 @@ func updateRegistryActiveKey(fs fsutil.FileSystem, home, recordKey string) {
 		fs.Remove(tmp)
 		fmt.Fprintf(os.Stderr, "cq: update registry: rename: %v\n", err)
 	}
+}
+
+// PersistCodexAccount atomically rewrites the account's on-disk auth.json file
+// (and ~/.codex/auth.json when IsActive) with updated tokens. The write follows
+// the same tmp+rename pattern used throughout this package.
+func PersistCodexAccount(fs fsutil.FileSystem, acct CodexAccount, home string) error {
+	data, err := fs.ReadFile(acct.FilePath)
+	if err != nil {
+		return fmt.Errorf("read account file: %w", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse account file: %w", err)
+	}
+	if doc == nil {
+		doc = make(map[string]any)
+	}
+
+	tokens, _ := doc["tokens"].(map[string]any)
+	if tokens == nil {
+		tokens = make(map[string]any)
+	}
+	tokens["access_token"] = acct.AccessToken
+	if acct.RefreshToken != "" {
+		tokens["refresh_token"] = acct.RefreshToken
+	}
+	if acct.IDToken != "" {
+		tokens["id_token"] = acct.IDToken
+	}
+	if acct.AccountID != "" {
+		tokens["account_id"] = acct.AccountID
+	}
+	doc["tokens"] = tokens
+	if acct.ExpiresAt > 0 {
+		doc["cq_expires_at"] = acct.ExpiresAt
+	} else {
+		delete(doc, "cq_expires_at")
+	}
+
+	updated, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal account file: %w", err)
+	}
+
+	if err := atomicWrite(fs, acct.FilePath, updated); err != nil {
+		return fmt.Errorf("write account file: %w", err)
+	}
+
+	// If active, also update ~/.codex/auth.json.
+	if acct.IsActive {
+		activeFile := filepath.Join(home, ".codex", "auth.json")
+		if err := atomicWrite(fs, activeFile, updated); err != nil {
+			return fmt.Errorf("write active auth file: %w", err)
+		}
+	}
+	return nil
+}
+
+// atomicWrite writes data to path using a tmp+rename pattern.
+func atomicWrite(fs fsutil.FileSystem, path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := fs.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := fs.Rename(tmp, path); err != nil {
+		fs.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func removeRegistryAccounts(fs fsutil.FileSystem, home string, recordKeys map[string]bool) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -326,5 +327,139 @@ func TestAccountsRemoveNotFound(t *testing.T) {
 	}
 	if got, want := err.Error(), `no account found with email "missing@test.com"`; got != want {
 		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverAccountsIncludesRefreshMetadata(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("refresh@test.com", "acct-refresh", "user-refresh", "plus")
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-refresh", "acct-refresh", jwt)
+
+	accts := DiscoverAccounts(fs)
+	if len(accts) != 1 {
+		t.Fatalf("len(accts) = %d, want 1", len(accts))
+	}
+	refreshField := reflect.ValueOf(accts[0]).FieldByName("RefreshToken")
+	if !refreshField.IsValid() {
+		t.Fatal("RefreshToken field missing")
+	}
+	if got := refreshField.String(); got != "ref-tok" {
+		t.Fatalf("RefreshToken = %q, want ref-tok", got)
+	}
+
+	expiresField := reflect.ValueOf(accts[0]).FieldByName("ExpiresAt")
+	if !expiresField.IsValid() {
+		t.Fatal("ExpiresAt field missing")
+	}
+	if got := expiresField.Int(); got != 1774076490000 {
+		t.Fatalf("ExpiresAt = %d, want %d", got, int64(1774076490000))
+	}
+}
+
+func TestPersistCodexAccountPreservesUnknownFields(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	path := "/fake/home/.codex/accounts/user-1::acct-1.auth.json"
+	fs.files[path] = []byte(`{"auth_mode":"chatgpt","OPENAI_API_KEY":"sk-test","extra":{"keep":true},"tokens":{"access_token":"old-tok","refresh_token":"old-ref","id_token":"` + jwt + `","account_id":"acct-1"},"last_refresh":"2026-03-21T06:56:43.237634Z"}`)
+
+	acct, ok := parseAccountFile(fs, path)
+	if !ok {
+		t.Fatal("parseAccountFile returned false")
+	}
+	acct.AccessToken = "new-tok"
+	acct.RefreshToken = "new-ref"
+
+	if err := PersistCodexAccount(fs, acct, "/fake/home"); err != nil {
+		t.Fatalf("PersistCodexAccount: %v", err)
+	}
+
+		var doc map[string]any
+	if err := json.Unmarshal(fs.files[path], &doc); err != nil {
+		t.Fatalf("unmarshal updated file: %v", err)
+	}
+	if got := doc["OPENAI_API_KEY"]; got != "sk-test" {
+		t.Fatalf("OPENAI_API_KEY = %#v, want sk-test", got)
+	}
+	extra, ok := doc["extra"].(map[string]any)
+	if !ok || extra["keep"] != true {
+		t.Fatalf("extra.keep = %#v, want true", doc["extra"])
+	}
+	tokens, ok := doc["tokens"].(map[string]any)
+	if !ok {
+		t.Fatalf("tokens = %#v, want object", doc["tokens"])
+	}
+	if got := tokens["access_token"]; got != "new-tok" {
+		t.Fatalf("access_token = %#v, want new-tok", got)
+	}
+	if got := tokens["refresh_token"]; got != "new-ref" {
+		t.Fatalf("refresh_token = %#v, want new-ref", got)
+	}
+}
+
+func TestPersistCodexAccountOverwritesHigherStoredExpiresAt(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	path := "/fake/home/.codex/accounts/user-1::acct-1.auth.json"
+	// Pre-existing file has a large cq_expires_at (far future).
+	fs.files[path] = []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"old-tok","refresh_token":"old-ref","id_token":"` + jwt + `","account_id":"acct-1"},"cq_expires_at":9999999999999}`)
+
+	acct, ok := parseAccountFile(fs, path)
+	if !ok {
+		t.Fatal("parseAccountFile returned false")
+	}
+	// Assign a lower (newer real) ExpiresAt — simulates a refresh that returned
+	// a shorter-lived token (e.g. expires_in from server).
+	const lowerExpiresAt = int64(1000000)
+	acct.AccessToken = "new-tok"
+	acct.ExpiresAt = lowerExpiresAt
+
+	if err := PersistCodexAccount(fs, acct, "/fake/home"); err != nil {
+		t.Fatalf("PersistCodexAccount: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(fs.files[path], &doc); err != nil {
+		t.Fatalf("unmarshal updated file: %v", err)
+	}
+	// cq_expires_at must reflect the new (lower) value, not the old higher one.
+	got, ok := doc["cq_expires_at"].(float64)
+	if !ok {
+		t.Fatalf("cq_expires_at = %#v, want numeric", doc["cq_expires_at"])
+	}
+	if int64(got) != lowerExpiresAt {
+		t.Fatalf("cq_expires_at = %d, want %d (lower value must overwrite higher stored value)", int64(got), lowerExpiresAt)
+	}
+	tokens, ok := doc["tokens"].(map[string]any)
+	if !ok {
+		t.Fatalf("tokens = %#v, want object", doc["tokens"])
+	}
+	if got := tokens["access_token"]; got != "new-tok" {
+		t.Fatalf("access_token = %#v, want new-tok", got)
+	}
+}
+
+func TestDiscoverAccountsPrefersStoredCopyForActiveDuplicate(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-old", "acct-1", jwt)
+	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = codexAuthJSON("tok-new", "acct-1", jwt)
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {
+			{name: "user-1::acct-1.auth.json"},
+		},
+	}
+
+	accts := DiscoverAccounts(fs)
+	if len(accts) != 1 {
+		t.Fatalf("len(accts) = %d, want 1", len(accts))
+	}
+	if !accts[0].IsActive {
+		t.Fatal("expected deduped account to stay active")
+	}
+	if got := accts[0].AccessToken; got != "tok-new" {
+		t.Fatalf("AccessToken = %q, want tok-new", got)
+	}
+	if got := accts[0].FilePath; got != "/fake/home/.codex/accounts/user-1::acct-1.auth.json" {
+		t.Fatalf("FilePath = %q, want accounts path", got)
 	}
 }

@@ -33,6 +33,7 @@ type CodexTokenResponse struct {
 	IDToken      string `json:"id_token"`
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
 }
 
 // CodexLogin performs the OAuth PKCE flow for Codex/ChatGPT via Auth0.
@@ -155,6 +156,49 @@ func buildCodexAuthorizeURL(challenge, state string, port int) string {
 	q.Set("originator", "cq")
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// RefreshCodexToken exchanges a refresh_token for a new set of tokens using
+// the Auth0 form-encoded POST (same endpoint/client-id as code exchange).
+// Returns the new tokens, or an error if the refresh fails.
+func RefreshCodexToken(ctx context.Context, client httputil.Doer, refreshToken string) (*CodexTokenResponse, error) {
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {CodexClientID},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", codexIssuer+"/oauth/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("token refresh failed: HTTP %d", resp.StatusCode)
+	}
+
+	body, err := httputil.ReadBody(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var tokens CodexTokenResponse
+	if err := json.Unmarshal(body, &tokens); err != nil {
+		return nil, err
+	}
+	if tokens.AccessToken == "" {
+		return nil, fmt.Errorf("empty access token in refresh response")
+	}
+	if tokens.ExpiresIn <= 0 {
+		tokens.ExpiresIn = DefaultExpiresInSec
+	}
+	return &tokens, nil
 }
 
 // exchangeCodexCode exchanges an authorization code for tokens using

@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+func fakeJWT(payload any) string {
+	b, _ := json.Marshal(payload)
+	return "x." + base64.RawURLEncoding.EncodeToString(b) + ".y"
+}
 
 // urlRewriter implements httputil.Doer for tests by rewriting request URLs to
 // a local httptest.Server while preserving path and headers.
@@ -53,6 +59,34 @@ func withHome(t *testing.T, homeDir string) {
 func quotaResponse(buckets []map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{"buckets": buckets})
 	return b
+}
+
+func TestDiscoverAccounts(t *testing.T) {
+	tmpHome := t.TempDir()
+	withHome(t, tmpHome)
+
+	writeCredsFile(t, tmpHome, map[string]any{
+		"access_token": "test-token",
+		"id_token":     fakeJWT(map[string]any{"email": "user@example.com"}),
+	})
+
+	p := New(&urlRewriter{client: http.DefaultClient, baseURL: "http://localhost"})
+	got, err := p.DiscoverAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("DiscoverAccounts() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Email != "user@example.com" {
+		t.Fatalf("got[0].Email = %q, want user@example.com", got[0].Email)
+	}
+	if got[0].AccountID != "" {
+		t.Fatalf("got[0].AccountID = %q, want empty", got[0].AccountID)
+	}
+	if !got[0].Active {
+		t.Fatalf("got[0].Active = %v, want true", got[0].Active)
+	}
 }
 
 // --- Fetch: not configured (no creds file) ---
