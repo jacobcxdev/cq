@@ -18,6 +18,9 @@ func TestDiscoverAccounts(t *testing.T) {
 	oldDiscover := discoverClaudeAccounts
 	defer func() { discoverClaudeAccounts = oldDiscover }()
 
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
 		return []keyring.ClaudeOAuth{{
 			AccountUUID:      "uuid-123",
@@ -46,6 +49,9 @@ func TestDiscoverAccounts(t *testing.T) {
 	}
 	if got[0].RateLimitTier != "tier-1" {
 		t.Fatalf("got[0].RateLimitTier = %q, want tier-1", got[0].RateLimitTier)
+	}
+	if got[0].Active {
+		t.Fatalf("got[0].Active = %v, want false without sandboxed credentials", got[0].Active)
 	}
 }
 
@@ -82,6 +88,33 @@ func TestDiscoverAccountsMarksActiveAccount(t *testing.T) {
 	}
 	if got[1].Active {
 		t.Fatalf("got[1].Active = %v, want false", got[1].Active)
+	}
+}
+
+func TestFetchUsesInjectedDiscovery(t *testing.T) {
+	oldDiscover := discoverClaudeAccounts
+	defer func() { discoverClaudeAccounts = oldDiscover }()
+
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{
+			Email:       "stubbed@example.invalid",
+			AccountUUID: "uuid-stub",
+		}}
+	}
+
+	p := New(http.DefaultClient)
+	got, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Error == nil || got[0].Error.Code != "no_token" {
+		t.Fatalf("error = %+v, want no_token", got[0].Error)
+	}
+	if got[0].Email != "stubbed@example.invalid" || got[0].AccountID != "uuid-stub" {
+		t.Fatalf("identity = (%q, %q), want (stubbed@example.invalid, uuid-stub)", got[0].Email, got[0].AccountID)
 	}
 }
 
@@ -221,10 +254,83 @@ func TestFetchAccountRefreshFallbackUsesSandboxedHome(t *testing.T) {
 	}
 }
 
+func TestFetchAccountRefreshFallbackUsesInjectableBackfill(t *testing.T) {
+	origBackfill := backfillCredentialsFile
+	defer func() { backfillCredentialsFile = origBackfill }()
+
+	called := 0
+	var got keyring.ClaudeOAuth
+	backfillCredentialsFile = func(acct *keyring.ClaudeOAuth) error {
+		called++
+		got = *acct
+		return nil
+	}
+
+	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/oauth/token":
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant"}`)),
+			}, nil
+		case "/api/oauth/profile":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body: io.NopCloser(strings.NewReader(`{
+					"account":{"email":"user@example.com","uuid":"uuid-123"},
+					"claude_api":{"plan_type":"max","rate_limit_tier":"tier-1"}
+				}`)),
+			}, nil
+		case "/api/oauth/usage":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body: io.NopCloser(strings.NewReader(
+					`{"five_hour":{"utilization":20.0,"resets_at":"2026-03-20T12:00:00Z"}}`,
+				)),
+			}, nil
+		default:
+			t.Errorf("unexpected request to %q", req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}
+	})
+
+	p := &Provider{client: &Client{http: doer}}
+	result := p.fetchAccount(context.Background(), keyring.ClaudeOAuth{
+		AccessToken:      "still-valid-at",
+		RefreshToken:     "stale-rt",
+		ExpiresAt:        1,
+		SubscriptionType: "max",
+	}, time.Now())
+
+	if result.Status == quota.StatusError && result.Error != nil && result.Error.Code == "auth_expired" {
+		t.Fatalf("got auth_expired but current access token was still valid; result = %+v", result)
+	}
+	if !result.IsUsable() {
+		t.Fatalf("result should be usable when access token still works; result = %+v", result)
+	}
+	if called != 1 {
+		t.Fatalf("backfill called %d times, want 1", called)
+	}
+	if got.Email != "user@example.com" || got.AccountUUID != "uuid-123" {
+		t.Fatalf("backfill identity = (%q, %q), want (user@example.com, uuid-123)", got.Email, got.AccountUUID)
+	}
+}
+
 // TestFetchAccountRefreshFailsFallsBackToCurrentToken covers the provider
 // fallback fix: when refresh fails but the current access token still works
 // (profile fetch succeeds), the result must be usable and not auth_expired.
 func TestFetchAccountRefreshFailsFallsBackToCurrentToken(t *testing.T) {
+	origBackfill := backfillCredentialsFile
+	defer func() { backfillCredentialsFile = origBackfill }()
+	backfillCredentialsFile = func(acct *keyring.ClaudeOAuth) error { return nil }
+
 	// Request router: refresh endpoint returns error, profile returns OK.
 	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
@@ -400,5 +506,67 @@ func TestFetchAccountUsageRetryAfter(t *testing.T) {
 	}
 	if result.Error.Message != "api error (retry_after=2m0s)" {
 		t.Fatalf("message = %q, want %q", result.Error.Message, "api error (retry_after=2m0s)")
+	}
+}
+
+func TestFetchAccountUsageRefreshFailsFallsBackToCurrentToken(t *testing.T) {
+	p := &Provider{client: &Client{http: doerFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/oauth/token":
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant"}`)),
+			}, nil
+		case "/api/oauth/profile":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body: io.NopCloser(strings.NewReader(`{
+					"account":{"email":"user@example.com","uuid":"uuid-123"},
+					"claude_api":{"plan_type":"max","rate_limit_tier":"tier-1"}
+				}`)),
+			}, nil
+		case "/api/oauth/usage":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body: io.NopCloser(strings.NewReader(
+					`{"five_hour":{"utilization":20.0,"resets_at":"2026-03-20T12:00:00Z"}}`,
+				)),
+			}, nil
+		default:
+			t.Errorf("unexpected request to %q", req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		}
+	})}}
+
+	result, retryAfter, err := p.FetchAccountUsage(context.Background(), keyring.ClaudeOAuth{
+		AccessToken:      "still-valid-at",
+		RefreshToken:     "stale-rt",
+		ExpiresAt:        1,
+		SubscriptionType: "max",
+		RateLimitTier:    "tier-1",
+		Email:            "user@example.com",
+		AccountUUID:      "uuid-123",
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if retryAfter != 0 {
+		t.Fatalf("retryAfter = %v, want 0", retryAfter)
+	}
+	if result.Status == quota.StatusError && result.Error != nil && result.Error.Code == "auth_expired" {
+		t.Fatalf("got auth_expired but current access token was still valid; result = %+v", result)
+	}
+	if !result.IsUsable() {
+		t.Fatalf("result should be usable when access token still works; result = %+v", result)
+	}
+	if result.MinRemainingPct() != 80 {
+		t.Fatalf("remaining = %d, want 80", result.MinRemainingPct())
 	}
 }

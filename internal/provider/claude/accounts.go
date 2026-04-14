@@ -17,10 +17,13 @@ type Accounts struct {
 }
 
 var (
-	discoverClaudeAccounts                    = keyring.DiscoverClaudeAccounts
-	removeCQClaudeAccountsByEmail            = keyring.RemoveCQClaudeAccountsByEmail
-	removeActiveClaudeCredentialsByEmail     = keyring.RemoveActiveClaudeCredentialsByEmail
+	discoverClaudeAccounts                      = keyring.DiscoverClaudeAccounts
+	removeCQClaudeAccountsByEmail               = keyring.RemoveCQClaudeAccountsByEmail
+	removeActiveClaudeCredentialsByEmail        = keyring.RemoveActiveClaudeCredentialsByEmail
 	removePlatformClaudeKeychainAccountsByEmail = keyring.RemovePlatformClaudeKeychainAccountsByEmail
+	writeCredentialsFile                        = keyring.WriteCredentialsFile
+	updateKeychainEntry                         = keyring.UpdateKeychainEntry
+	storeCQAccount                              = keyring.StoreCQAccount
 )
 
 func (a *Accounts) ProviderID() provider.ID { return provider.Claude }
@@ -28,7 +31,7 @@ func (a *Accounts) ProviderID() provider.ID { return provider.Claude }
 // Discover returns all known Claude accounts from the credentials file,
 // platform keychain, and cq-managed keyring.
 func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
-	accts := keyring.DiscoverClaudeAccounts()
+	accts := discoverClaudeAccounts()
 	out := make([]provider.Account, len(accts))
 	for i, acct := range accts {
 		out[i] = provider.Account{
@@ -54,9 +57,11 @@ func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Acco
 		acctCopy := acct
 
 		// Refresh expired token before attempting profile fetch.
+		refreshFailed := false
 		if a.HTTP != nil && acctCopy.RefreshToken != "" && acctCopy.ExpiresAt > 0 && acctCopy.ExpiresAt < time.Now().UnixMilli() {
 			rr, err := RefreshToken(ctx, a.HTTP, acctCopy.RefreshToken, acctCopy.Scopes)
 			if err != nil {
+				refreshFailed = true
 				fmt.Fprintf(os.Stderr, "warning: token refresh failed: %v\n", err)
 			} else {
 				acctCopy.AccessToken = rr.AccessToken
@@ -72,6 +77,9 @@ func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Acco
 		if a.HTTP != nil {
 			client := &Client{http: a.HTTP}
 			if p, err := client.FetchProfile(ctx, acctCopy.AccessToken); err != nil {
+				if refreshFailed {
+					return provider.Account{}, fmt.Errorf("profile refresh failed after token refresh failure: %w", err)
+				}
 				fmt.Fprintf(os.Stderr, "warning: profile refresh failed: %v\n", err)
 			} else {
 				if p.Plan != "" {
@@ -84,15 +92,15 @@ func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Acco
 		}
 
 		creds := &keyring.ClaudeCredentials{ClaudeAiOauth: &acctCopy}
-		if err := keyring.WriteCredentialsFile(creds); err != nil {
+		if err := writeCredentialsFile(creds); err != nil {
 			return provider.Account{}, fmt.Errorf("write credentials: %w", err)
 		}
-		if err := keyring.UpdateKeychainEntry("Claude Code-credentials", creds); err != nil {
+		if err := updateKeychainEntry("Claude Code-credentials", creds); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: keychain update failed: %v\n", err)
 		}
 		// Persist refreshed metadata to the cq keyring.
 		if acctCopy.AccountUUID != "" {
-			if err := keyring.StoreCQAccount(&acctCopy); err != nil {
+			if err := storeCQAccount(&acctCopy); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: keyring store failed: %v\n", err)
 			}
 		}

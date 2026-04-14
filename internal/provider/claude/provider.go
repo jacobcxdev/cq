@@ -29,7 +29,7 @@ func New(httpClient httputil.Doer) *Provider {
 
 // Fetch discovers all Claude accounts and fetches quota for each in parallel.
 func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, error) {
-	accounts := keyring.DiscoverClaudeAccounts()
+	accounts := discoverClaudeAccounts()
 	if len(accounts) == 0 {
 		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
@@ -290,15 +290,18 @@ func (p *Provider) FetchAccountUsage(ctx context.Context, acct keyring.ClaudeOAu
 	if acct.ExpiresAt > 0 && acct.ExpiresAt < nowMs && acct.RefreshToken != "" {
 		rr, err := RefreshToken(ctx, p.client.http, acct.RefreshToken, acct.Scopes)
 		if err != nil {
-			return errorWithIdentity("auth_expired", "auth expired", 0), 0, nil
+			if _, probeErr := p.client.FetchProfile(ctx, token); probeErr != nil {
+				return errorWithIdentity("auth_expired", "auth expired", 0), 0, nil
+			}
+		} else {
+			token = rr.AccessToken
+			acct.AccessToken = rr.AccessToken
+			acct.ExpiresAt = nowMs + rr.ExpiresIn*1000
+			if rr.RefreshToken != "" {
+				acct.RefreshToken = rr.RefreshToken
+			}
+			persistRefreshedToken(&acct)
 		}
-		token = rr.AccessToken
-		acct.AccessToken = rr.AccessToken
-		acct.ExpiresAt = nowMs + rr.ExpiresIn*1000
-		if rr.RefreshToken != "" {
-			acct.RefreshToken = rr.RefreshToken
-		}
-		persistRefreshedToken(&acct)
 	}
 
 	body, statusCode, retryAfter, diagnostics, err := p.client.FetchUsage(ctx, token)

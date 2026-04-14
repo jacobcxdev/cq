@@ -67,6 +67,22 @@ func codexRefreshAuthJSON(accessToken, refreshToken, idToken, accountID string) 
 // fresh tokens into an identified account, it returns changed=true.
 func TestSyncAnonymousToIdentifiedReturnsChangedTrue(t *testing.T) {
 	nowMs := time.Now().UnixMilli()
+	origPersist := persistRefreshedTokenFn
+	origStore := storeCQAccountFn
+	defer func() {
+		persistRefreshedTokenFn = origPersist
+		storeCQAccountFn = origStore
+	}()
+
+	persisted := 0
+	stored := 0
+	persistRefreshedTokenFn = func(acct *keyring.ClaudeOAuth) {
+		persisted++
+	}
+	storeCQAccountFn = func(acct *keyring.ClaudeOAuth) error {
+		stored++
+		return nil
+	}
 
 	identified := keyring.ClaudeOAuth{
 		Email:        "user@example.com",
@@ -91,6 +107,12 @@ func TestSyncAnonymousToIdentifiedReturnsChangedTrue(t *testing.T) {
 
 	if !changed {
 		t.Fatal("expected changed=true when anon sync updated a stored account")
+	}
+	if persisted != 1 {
+		t.Fatalf("persisted = %d, want 1", persisted)
+	}
+	if stored != 1 {
+		t.Fatalf("stored = %d, want 1", stored)
 	}
 	found := false
 	for _, a := range result {

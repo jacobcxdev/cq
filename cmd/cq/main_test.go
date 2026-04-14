@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -211,4 +214,77 @@ func TestCLIParsesRemoveCommands(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
+	file := parseGoFile(t, "proxy.go")
+	body := findFuncBody(t, file, "runProxyStart")
+
+	if hasQualifiedSelector(body, "keyring", "DiscoverClaudeAccounts") {
+		t.Fatal("runProxyStart should not call keyring.DiscoverClaudeAccounts directly")
+	}
+	if !hasIdentifier(body, "discoverClaudeAccountsFn") {
+		t.Fatal("runProxyStart should use discoverClaudeAccountsFn")
+	}
+	if hasQualifiedSelector(body, "keyring", "ActiveClaudeEmail") {
+		t.Fatal("runProxyStart should not reference keyring.ActiveClaudeEmail directly")
+	}
+	if !hasIdentifier(body, "activeClaudeEmailFn") {
+		t.Fatal("runProxyStart should use activeClaudeEmailFn")
+	}
+}
+
+func parseGoFile(t *testing.T, path string) *ast.File {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("ParseFile(%q): %v", path, err)
+	}
+	return file
+}
+
+func findFuncBody(t *testing.T, file *ast.File, name string) *ast.BlockStmt {
+	t.Helper()
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == name {
+			return fn.Body
+		}
+	}
+	t.Fatalf("function %q not found", name)
+	return nil
+}
+
+func hasQualifiedSelector(body *ast.BlockStmt, pkg, sel string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		selector, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if ident.Name == pkg && selector.Sel.Name == sel {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func hasIdentifier(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if ok && ident.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }

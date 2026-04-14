@@ -31,6 +31,7 @@ var (
 	codexRefreshFSFactory     = func() fsutil.FileSystem { return fsutil.OSFileSystem{} }
 	persistRefreshedTokenFn   = keyring.PersistRefreshedToken
 	storeCQAccountFn          = keyring.StoreCQAccount
+	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
 	isStdinTerminalFn         = isStdinTerminal
 )
 
@@ -80,9 +81,9 @@ func runRefresh() error {
 				acct.RefreshToken = rr.RefreshToken
 			}
 
-			keyring.PersistRefreshedToken(&acct)
+			persistRefreshedTokenFn(&acct)
 			if acct.AccountUUID != "" {
-				if err := keyring.StoreCQAccount(&acct); err != nil {
+				if err := storeCQAccountFn(&acct); err != nil {
 					fmt.Fprintf(os.Stderr, "cq: store %s: %v\n", label, err)
 				}
 			}
