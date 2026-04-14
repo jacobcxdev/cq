@@ -17,15 +17,20 @@ func (c fixedClock) Now() time.Time { return time.Time(c) }
 
 // mockProvider implements provider.Provider.
 type mockProvider struct {
-	id      provider.ID // used in struct literals for clarity; not part of the interface
-	results []quota.Result
-	err     error
-	called  bool
+	id         provider.ID // used in struct literals for clarity; not part of the interface
+	results    []quota.Result
+	err        error
+	called     bool
+	discovered []provider.Account
 }
 
 func (m *mockProvider) Fetch(_ context.Context, _ time.Time) ([]quota.Result, error) {
 	m.called = true
 	return m.results, m.err
+}
+
+func (m *mockProvider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
+	return m.discovered, nil
 }
 
 // mockCache implements Cache.
@@ -177,6 +182,177 @@ func TestRunnerUsesCache(t *testing.T) {
 	}
 	if len(cr.report.Providers[0].Results) != 1 {
 		t.Fatalf("results len = %d, want 1", len(cr.report.Providers[0].Results))
+	}
+}
+
+func TestRunnerUsesCacheAndAddsExpiredDiscoveredAccount(t *testing.T) {
+	cached := []quota.Result{{
+		Status:    quota.StatusOK,
+		AccountID: "acct-1",
+		Email:     "cached@example.com",
+		Plan:      "plus",
+	}}
+	p := &mockProvider{
+		id: provider.Codex,
+		discovered: []provider.Account{
+			{AccountID: "acct-1", Email: "cached@example.com"},
+			{AccountID: "acct-2", Email: "expired@example.com"},
+		},
+	}
+	cr := &captureRenderer{}
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		Cache: &mockCache{data: map[string][]quota.Result{
+			string(provider.Codex): cached,
+		}},
+		Services: map[provider.ID]provider.Services{
+			provider.Codex: {Usage: p},
+		},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{Providers: []provider.ID{provider.Codex}})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if p.called {
+		t.Error("provider was called despite cache hit")
+	}
+	results := cr.report.Providers[0].Results
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(results))
+	}
+	if results[1].Status != quota.StatusError {
+		t.Fatalf("results[1].Status = %q, want error", results[1].Status)
+	}
+	if results[1].Error == nil || results[1].Error.Code != "auth_expired" {
+		t.Fatalf("results[1].Error = %+v, want auth_expired", results[1].Error)
+	}
+	if results[1].Email != "expired@example.com" {
+		t.Fatalf("results[1].Email = %q, want expired@example.com", results[1].Email)
+	}
+	if results[1].AccountID != "acct-2" {
+		t.Fatalf("results[1].AccountID = %q, want acct-2", results[1].AccountID)
+	}
+}
+
+func TestRunnerUsesCacheAndAddsExpiredDiscoveredClaudeAccount(t *testing.T) {
+	cached := []quota.Result{{
+		Status:    quota.StatusOK,
+		AccountID: "claude-acct-1",
+		Email:     "cached@example.com",
+		Plan:      "max",
+	}}
+	p := &mockProvider{
+		id: provider.Claude,
+		discovered: []provider.Account{
+			{AccountID: "claude-acct-1", Email: "cached@example.com"},
+			{AccountID: "claude-acct-2", Email: "expired@example.com"},
+		},
+	}
+	cr := &captureRenderer{}
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		Cache: &mockCache{data: map[string][]quota.Result{
+			string(provider.Claude): cached,
+		}},
+		Services: map[provider.ID]provider.Services{
+			provider.Claude: {Usage: p},
+		},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{Providers: []provider.ID{provider.Claude}})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if p.called {
+		t.Error("provider was called despite cache hit")
+	}
+	results := cr.report.Providers[0].Results
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(results))
+	}
+	if results[0].Status != quota.StatusOK {
+		t.Fatalf("results[0].Status = %q, want ok", results[0].Status)
+	}
+	if results[1].Error == nil || results[1].Error.Code != "auth_expired" {
+		t.Fatalf("results[1].Error = %+v, want auth_expired", results[1].Error)
+	}
+	if results[1].Email != "expired@example.com" {
+		t.Fatalf("results[1].Email = %q, want expired@example.com", results[1].Email)
+	}
+	if results[1].AccountID != "claude-acct-2" {
+		t.Fatalf("results[1].AccountID = %q, want claude-acct-2", results[1].AccountID)
+	}
+}
+
+func TestRunnerUsesCacheAndAddsExpiredDiscoveredGeminiAccount(t *testing.T) {
+	p := &mockProvider{
+		id: provider.Gemini,
+		discovered: []provider.Account{{Email: "gemini@example.com"}},
+	}
+	cr := &captureRenderer{}
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		Cache: &mockCache{data: map[string][]quota.Result{
+			string(provider.Gemini): {},
+		}},
+		Services: map[provider.ID]provider.Services{
+			provider.Gemini: {Usage: p},
+		},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{Providers: []provider.ID{provider.Gemini}})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if p.called {
+		t.Error("provider was called despite cache hit")
+	}
+	results := cr.report.Providers[0].Results
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(results))
+	}
+	if results[0].Status != quota.StatusError {
+		t.Fatalf("results[0].Status = %q, want error", results[0].Status)
+	}
+	if results[0].Error == nil || results[0].Error.Code != "auth_expired" {
+		t.Fatalf("results[0].Error = %+v, want auth_expired", results[0].Error)
+	}
+	if results[0].Email != "gemini@example.com" {
+		t.Fatalf("results[0].Email = %q, want gemini@example.com", results[0].Email)
+	}
+}
+
+func TestRunnerUsesCacheAndMarksSynthesisedDiscoveredAccountActive(t *testing.T) {
+	p := &mockProvider{
+		id: provider.Gemini,
+		discovered: []provider.Account{{Email: "active@example.com", Active: true}},
+	}
+	cr := &captureRenderer{}
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		Cache: &mockCache{data: map[string][]quota.Result{
+			string(provider.Gemini): {},
+		}},
+		Services: map[provider.ID]provider.Services{
+			provider.Gemini: {Usage: p},
+		},
+		Renderer: cr,
+	}
+
+	err := runner.Run(context.Background(), RunRequest{Providers: []provider.ID{provider.Gemini}})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	results := cr.report.Providers[0].Results
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(results))
+	}
+	if !results[0].Active {
+		t.Fatalf("results[0].Active = %v, want true", results[0].Active)
 	}
 }
 

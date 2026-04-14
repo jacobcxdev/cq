@@ -21,6 +21,13 @@ type Provider interface {
 	Fetch(ctx context.Context, now time.Time) ([]quota.Result, error)
 }
 
+// Discoverer can enumerate local accounts without making network calls.
+// Providers that support it allow the runner to synthesise auth_expired rows
+// for accounts that are locally known but not in the cache.
+type Discoverer interface {
+	DiscoverAccounts(ctx context.Context) ([]Account, error)
+}
+
 type Account struct {
 	AccountID     string `json:"id"`
 	Email         string `json:"email,omitempty"`
@@ -38,8 +45,6 @@ type AccountManager interface {
 }
 
 // Services groups the service implementations for a provider.
-// Currently only Usage is populated; additional fields can be added
-// without changing the Runner interface.
 type Services struct {
 	Usage Provider
 }

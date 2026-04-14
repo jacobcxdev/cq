@@ -3,6 +3,9 @@ package claude
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -162,4 +165,169 @@ func TestAccountsRemove(t *testing.T) {
 			t.Fatalf("error = %q, want %q", got, want)
 		}
 	})
+}
+
+func TestAccountsDiscoverUsesInjectedDiscovery(t *testing.T) {
+	oldDiscover := discoverClaudeAccounts
+	defer func() { discoverClaudeAccounts = oldDiscover }()
+
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{
+			Email:            "stubbed@example.invalid",
+			AccountUUID:      "uuid-stub",
+			SubscriptionType: "max",
+			RateLimitTier:    "tier-1",
+		}}
+	}
+
+	mgr := &Accounts{}
+	got, err := mgr.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Email != "stubbed@example.invalid" || got[0].AccountID != "uuid-stub" {
+		t.Fatalf("identity = (%q, %q), want (stubbed@example.invalid, uuid-stub)", got[0].Email, got[0].AccountID)
+	}
+	if got[0].Label != "max" || got[0].RateLimitTier != "tier-1" {
+		t.Fatalf("metadata = (%q, %q), want (max, tier-1)", got[0].Label, got[0].RateLimitTier)
+	}
+}
+
+func TestAccountsSwitchUsesInjectedPersistence(t *testing.T) {
+	oldDiscover := discoverClaudeAccounts
+	oldWriteCredentialsFile := writeCredentialsFile
+	oldUpdateKeychainEntry := updateKeychainEntry
+	oldStoreCQAccount := storeCQAccount
+	defer func() {
+		discoverClaudeAccounts = oldDiscover
+		writeCredentialsFile = oldWriteCredentialsFile
+		updateKeychainEntry = oldUpdateKeychainEntry
+		storeCQAccount = oldStoreCQAccount
+	}()
+
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{
+			Email:            "user@example.com",
+			AccountUUID:      "uuid-1",
+			AccessToken:      "token-1",
+			RefreshToken:     "refresh-1",
+			SubscriptionType: "max",
+			RateLimitTier:    "tier-1",
+		}}
+	}
+
+	wrote := 0
+	updated := 0
+	stored := 0
+	writeCredentialsFile = func(creds *keyring.ClaudeCredentials) error {
+		wrote++
+		if creds == nil || creds.ClaudeAiOauth == nil {
+			t.Fatal("expected Claude credentials payload")
+		}
+		if creds.ClaudeAiOauth.Email != "user@example.com" {
+			t.Fatalf("credentials email = %q, want user@example.com", creds.ClaudeAiOauth.Email)
+		}
+		return nil
+	}
+	updateKeychainEntry = func(service string, creds *keyring.ClaudeCredentials) error {
+		updated++
+		if service != "Claude Code-credentials" {
+			t.Fatalf("service = %q, want Claude Code-credentials", service)
+		}
+		return nil
+	}
+	storeCQAccount = func(acct *keyring.ClaudeOAuth) error {
+		stored++
+		if acct.Email != "user@example.com" || acct.AccountUUID != "uuid-1" {
+			t.Fatalf("stored account = (%q, %q), want (user@example.com, uuid-1)", acct.Email, acct.AccountUUID)
+		}
+		return nil
+	}
+
+	mgr := &Accounts{}
+	got, err := mgr.Switch(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("Switch: %v", err)
+	}
+	if !got.Active {
+		t.Fatalf("got.Active = %v, want true", got.Active)
+	}
+	if got.Email != "user@example.com" || got.AccountID != "uuid-1" {
+		t.Fatalf("identity = (%q, %q), want (user@example.com, uuid-1)", got.Email, got.AccountID)
+	}
+	if wrote != 1 || updated != 1 || stored != 1 {
+		t.Fatalf("calls = (write=%d update=%d store=%d), want (1,1,1)", wrote, updated, stored)
+	}
+}
+
+func TestAccountsSwitchFailsWhenRefreshAndProfileBothFail(t *testing.T) {
+	oldDiscover := discoverClaudeAccounts
+	oldWriteCredentialsFile := writeCredentialsFile
+	oldUpdateKeychainEntry := updateKeychainEntry
+	oldStoreCQAccount := storeCQAccount
+	defer func() {
+		discoverClaudeAccounts = oldDiscover
+		writeCredentialsFile = oldWriteCredentialsFile
+		updateKeychainEntry = oldUpdateKeychainEntry
+		storeCQAccount = oldStoreCQAccount
+	}()
+
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{
+			Email:            "user@example.com",
+			AccountUUID:      "uuid-1",
+			AccessToken:      "dead-at",
+			RefreshToken:     "dead-rt",
+			ExpiresAt:        1,
+			SubscriptionType: "max",
+			RateLimitTier:    "tier-1",
+		}}
+	}
+
+	wrote := 0
+	updated := 0
+	stored := 0
+	writeCredentialsFile = func(*keyring.ClaudeCredentials) error {
+		wrote++
+		return nil
+	}
+	updateKeychainEntry = func(string, *keyring.ClaudeCredentials) error {
+		updated++
+		return nil
+	}
+	storeCQAccount = func(*keyring.ClaudeOAuth) error {
+		stored++
+		return nil
+	}
+
+	mgr := &Accounts{HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/oauth/token":
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant"}`)),
+			}, nil
+		case "/api/oauth/profile":
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)),
+			}, nil
+		default:
+			t.Fatalf("unexpected request to %q", req.URL.Path)
+			return nil, nil
+		}
+	})}
+
+	_, err := mgr.Switch(context.Background(), "user@example.com")
+	if err == nil {
+		t.Fatal("expected error when refresh and profile both fail")
+	}
+	if wrote != 0 || updated != 0 || stored != 0 {
+		t.Fatalf("calls = (write=%d update=%d store=%d), want (0,0,0)", wrote, updated, stored)
+	}
 }

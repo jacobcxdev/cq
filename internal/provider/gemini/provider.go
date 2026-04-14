@@ -12,6 +12,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -24,6 +25,31 @@ type Provider struct {
 // New creates a Provider that uses the given HTTP client for API calls.
 func New(client httputil.Doer) *Provider {
 	return &Provider{client: client, fs: fsutil.OSFileSystem{}}
+}
+
+// DiscoverAccounts returns the locally configured Gemini account without
+// making any network calls. If credentials are absent or unusable, it returns
+// no accounts and no error.
+func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
+	home, err := p.fs.UserHomeDir()
+	if err != nil {
+		return nil, nil
+	}
+	data, err := p.fs.ReadFile(filepath.Join(home, ".gemini", "oauth_creds.json"))
+	if err != nil {
+		return nil, nil
+	}
+	var creds struct {
+		IDToken string `json:"id_token"`
+	}
+	if json.Unmarshal(data, &creds) != nil {
+		return nil, nil
+	}
+	email := auth.DecodeEmail(creds.IDToken)
+	if email == "" {
+		return nil, nil
+	}
+	return []provider.Account{{Email: email, Active: true}}, nil
 }
 
 // Fetch reads ~/.gemini/oauth_creds.json, fetches tier and quota in parallel,

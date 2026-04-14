@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -120,5 +122,83 @@ func TestExchangeCodexCodeError(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+type stubDoer func(*http.Request) (*http.Response, error)
+
+func (f stubDoer) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestRefreshCodexTokenParsesExpiresInWithoutIDToken(t *testing.T) {
+	tokens, err := RefreshCodexToken(context.Background(), stubDoer(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", req.Method)
+		}
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if got := req.FormValue("grant_type"); got != "refresh_token" {
+			t.Fatalf("grant_type = %q, want refresh_token", got)
+		}
+		if got := req.FormValue("refresh_token"); got != "old-ref" {
+			t.Fatalf("refresh_token = %q, want old-ref", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":7200}`)),
+		}, nil
+	}), "old-ref")
+	if err != nil {
+		t.Fatalf("RefreshCodexToken: %v", err)
+	}
+	field := reflect.ValueOf(tokens).Elem().FieldByName("ExpiresIn")
+	if !field.IsValid() {
+		t.Fatal("ExpiresIn field missing")
+	}
+	if got := field.Int(); got != 7200 {
+		t.Fatalf("ExpiresIn = %d, want 7200", got)
+	}
+}
+
+func TestRefreshCodexTokenDefaultsExpiresInWhenOmitted(t *testing.T) {
+	tokens, err := RefreshCodexToken(context.Background(), stubDoer(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh"}`)),
+		}, nil
+	}), "old-ref")
+	if err != nil {
+		t.Fatalf("RefreshCodexToken: %v", err)
+	}
+	field := reflect.ValueOf(tokens).Elem().FieldByName("ExpiresIn")
+	if !field.IsValid() {
+		t.Fatal("ExpiresIn field missing")
+	}
+	if got := field.Int(); got != DefaultExpiresInSec {
+		t.Fatalf("ExpiresIn = %d, want %d", got, DefaultExpiresInSec)
+	}
+}
+
+func TestRefreshCodexTokenNormalisesExplicitZeroExpiresIn(t *testing.T) {
+	tokens, err := RefreshCodexToken(context.Background(), stubDoer(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":0}`)),
+		}, nil
+	}), "old-ref")
+	if err != nil {
+		t.Fatalf("RefreshCodexToken: %v", err)
+	}
+	field := reflect.ValueOf(tokens).Elem().FieldByName("ExpiresIn")
+	if !field.IsValid() {
+		t.Fatal("ExpiresIn field missing")
+	}
+	// expires_in: 0 is explicitly returned by the server; it must be normalised
+	// to DefaultExpiresInSec (same as when the field is omitted).
+	if got := field.Int(); got != DefaultExpiresInSec {
+		t.Fatalf("ExpiresIn = %d, want %d (server explicit 0 must be normalised)", got, DefaultExpiresInSec)
 	}
 }

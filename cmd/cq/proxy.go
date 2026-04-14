@@ -12,8 +12,6 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
-	"github.com/jacobcxdev/cq/internal/httputil"
-	"github.com/jacobcxdev/cq/internal/keyring"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -48,7 +46,7 @@ func runProxyStart() error {
 
 	fmt.Fprintf(os.Stderr, "cq: proxy token: %s\n", cfg.LocalToken)
 
-	accounts := keyring.DiscoverClaudeAccounts()
+	accounts := discoverClaudeAccountsFn()
 	var emails []string
 	for _, a := range accounts {
 		if a.Email != "" {
@@ -61,9 +59,9 @@ func runProxyStart() error {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	discover := proxy.ClaudeDiscoverer(keyring.DiscoverClaudeAccounts)
-	activeEmail := proxy.ActiveEmailFunc(keyring.ActiveClaudeEmail)
-	refreshClient := httputil.NewClient(30*time.Second, version)
+	discover := proxy.ClaudeDiscoverer(discoverClaudeAccountsFn)
+	activeEmail := proxy.ActiveEmailFunc(activeClaudeEmailFn)
+	refreshClient := newHTTPClientFn(30*time.Second, version)
 
 	claudeProvider := claudeprov.New(refreshClient)
 	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())

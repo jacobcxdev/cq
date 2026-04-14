@@ -8,8 +8,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -52,25 +54,102 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 	return dedup(results), nil
 }
 
-// fetchAccount fetches quota for a single Codex account.
+// DiscoverAccounts returns all locally known Codex accounts without making
+// network calls. It implements provider.Discoverer so the runner can
+// synthesise auth_expired rows for accounts absent from the cache.
+func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
+	accts := DiscoverAccounts(p.fs)
+	out := make([]provider.Account, len(accts))
+	for i, a := range accts {
+		out[i] = provider.Account{
+			AccountID: a.AccountID,
+			Email:     a.Email,
+			Label:     a.PlanType,
+			Active:    a.IsActive,
+		}
+	}
+	return out, nil
+}
+
+// fetchAccount fetches quota for a single Codex account, attempting token
+// refresh on 401/403 before giving up. On final failure, identity fields
+// (Email, AccountID) are preserved in the error result.
 func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Result {
 	if acct.AccessToken == "" {
-		return quota.ErrorResult("no_token", "no token", 0)
+		r := quota.ErrorResult("no_token", "no token", 0)
+		r.Email = acct.Email
+		r.AccountID = acct.AccountID
+		return r
 	}
 
 	body, code, err := fetchUsage(ctx, p.client, acct.AccessToken, acct.AccountID)
 	if err != nil {
-		return quota.ErrorResult("transport_error", err.Error(), 0)
+		r := quota.ErrorResult("transport_error", err.Error(), 0)
+		r.Email = acct.Email
+		r.AccountID = acct.AccountID
+		return r
 	}
 
-	// Do not refresh — cq shares credentials with codex CLI and codex-auth,
-	// and Auth0 refresh token rotation would invalidate their copies.
 	if code == 401 || code == 403 {
-		return quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code)
+		// Attempt refresh if we have a refresh token. Always retry usage once
+		// after the attempt, whether or not refresh succeeded.
+		if acct.RefreshToken != "" {
+			tokens, refreshErr := auth.RefreshCodexToken(ctx, p.client, acct.RefreshToken)
+			if refreshErr == nil {
+				acct.AccessToken = tokens.AccessToken
+				if tokens.RefreshToken != "" {
+					acct.RefreshToken = tokens.RefreshToken
+				}
+				if tokens.IDToken != "" {
+					acct.IDToken = tokens.IDToken
+				}
+				claims := auth.DecodeCodexClaims(tokens.IDToken)
+				if claims.ExpiresAt > 0 {
+					acct.ExpiresAt = claims.ExpiresAt * 1000
+				} else {
+					acct.ExpiresAt = time.Now().UnixMilli() + tokens.ExpiresIn*1000
+				}
+				if home, homeErr := p.fs.UserHomeDir(); homeErr == nil {
+					if err := PersistCodexAccount(p.fs, acct, home); err != nil {
+						fmt.Fprintf(os.Stderr, "cq: persist codex tokens: %v\n", err)
+					}
+				}
+			}
+
+			// Retry usage regardless of whether refresh succeeded.
+			body2, code2, err2 := fetchUsage(ctx, p.client, acct.AccessToken, acct.AccountID)
+			if err2 != nil {
+				r := quota.ErrorResult("transport_error", err2.Error(), 0)
+				r.Email = acct.Email
+				r.AccountID = acct.AccountID
+				return r
+			}
+			if code2 == 200 {
+				return parseUsage(body2, acct.Email, acct.AccountID)
+			}
+			if code2 == 401 || code2 == 403 {
+				r := quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code2)
+				r.Email = acct.Email
+				r.AccountID = acct.AccountID
+				return r
+			}
+			r := quota.ErrorResult("api_error", "api error", code2)
+			r.Email = acct.Email
+			r.AccountID = acct.AccountID
+			return r
+		}
+		// No refresh token — return auth_expired with identity.
+		r := quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code)
+		r.Email = acct.Email
+		r.AccountID = acct.AccountID
+		return r
 	}
 
 	if code != 200 {
-		return quota.ErrorResult("api_error", "api error", code)
+		r := quota.ErrorResult("api_error", "api error", code)
+		r.Email = acct.Email
+		r.AccountID = acct.AccountID
+		return r
 	}
 
 	return parseUsage(body, acct.Email, acct.AccountID)
