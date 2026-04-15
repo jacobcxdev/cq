@@ -55,27 +55,37 @@ func parseUsage(body []byte, plan, rateLimitTier, email, uuid string) quota.Resu
 			Utilization float64 `json:"utilization"`
 			ResetsAt    string  `json:"resets_at"`
 		} `json:"seven_day"`
+		SevenDaySonnet *struct {
+			Utilization float64 `json:"utilization"`
+			ResetsAt    string  `json:"resets_at"`
+		} `json:"seven_day_sonnet"`
+		SevenDayOpus *struct {
+			Utilization float64 `json:"utilization"`
+			ResetsAt    string  `json:"resets_at"`
+		} `json:"seven_day_opus"`
 	}
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)
 	}
 
+	toWindow := func(utilization float64, resetsAt string) quota.Window {
+		pct := int(math.Round(100 - utilization))
+		pct = max(0, min(100, pct))
+		return quota.Window{RemainingPct: pct, ResetAtUnix: quota.ParseResetTime(resetsAt)}
+	}
+
 	windows := make(map[quota.WindowName]quota.Window)
 	if usage.FiveHour != nil {
-		pct := int(math.Round(100 - usage.FiveHour.Utilization))
-		pct = max(0, min(100, pct))
-		windows[quota.Window5Hour] = quota.Window{
-			RemainingPct: pct,
-			ResetAtUnix:  quota.ParseResetTime(usage.FiveHour.ResetsAt),
-		}
+		windows[quota.Window5Hour] = toWindow(usage.FiveHour.Utilization, usage.FiveHour.ResetsAt)
 	}
 	if usage.SevenDay != nil {
-		pct := int(math.Round(100 - usage.SevenDay.Utilization))
-		pct = max(0, min(100, pct))
-		windows[quota.Window7Day] = quota.Window{
-			RemainingPct: pct,
-			ResetAtUnix:  quota.ParseResetTime(usage.SevenDay.ResetsAt),
-		}
+		windows[quota.Window7Day] = toWindow(usage.SevenDay.Utilization, usage.SevenDay.ResetsAt)
+	}
+	if usage.SevenDaySonnet != nil {
+		windows[quota.WindowName("7d:sonnet")] = toWindow(usage.SevenDaySonnet.Utilization, usage.SevenDaySonnet.ResetsAt)
+	}
+	if usage.SevenDayOpus != nil {
+		windows[quota.WindowName("7d:opus")] = toWindow(usage.SevenDayOpus.Utilization, usage.SevenDayOpus.ResetsAt)
 	}
 
 	return quota.Result{

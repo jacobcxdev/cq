@@ -163,3 +163,36 @@ func TestTTYRendererWithAggregate(t *testing.T) {
 		t.Error("output should contain aggregate percentage '75%'")
 	}
 }
+
+func TestTTYRendererBucketHeadersHaveBlankLine(t *testing.T) {
+	var buf bytes.Buffer
+	now := time.Unix(1000, 0)
+	r := &TTYRenderer{W: &buf, Now: now}
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Codex,
+				Name: "codex",
+				Results: []quota.Result{{
+					Status: quota.StatusOK,
+					Plan:   "pro",
+					Windows: map[quota.WindowName]quota.Window{
+						quota.Window5Hour:                           {RemainingPct: 98, ResetAtUnix: 10000},
+						quota.Window7Day:                            {RemainingPct: 92, ResetAtUnix: 20000},
+						quota.WindowName("5h:GPT-5.3-Codex-Spark"): {RemainingPct: 100, ResetAtUnix: 11000},
+						quota.WindowName("7d:GPT-5.3-Codex-Spark"): {RemainingPct: 100, ResetAtUnix: 21000},
+					},
+				}},
+			},
+		},
+	}
+	if err := r.Render(context.Background(), report); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "\n\n       GPT-5.3-Codex-Spark\n") {
+		t.Fatalf("expected blank line before bucket header, got:\n%s", output)
+	}
+}
+

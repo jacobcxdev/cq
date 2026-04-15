@@ -518,6 +518,84 @@ func TestRenderBarMarkerAt100Pct(t *testing.T) {
 	}
 }
 
+func TestOrderedWindowKeys_DynamicWindowOrder(t *testing.T) {
+	windows := map[quota.WindowName]quota.Window{
+		quota.Window5Hour:                                 {},
+		quota.Window7Day:                                  {},
+		quota.WindowName("7d:sonnet"):                    {},
+		quota.WindowName("5h:gpt-5.3-codex-spark"):       {},
+		quota.WindowName("7d:gpt-5.3-codex-spark"):       {},
+		quota.WindowPro:                                   {},
+	}
+
+	got := orderedWindowKeys(windows)
+	want := []quota.WindowName{
+		quota.Window5Hour,
+		quota.Window7Day,
+		quota.WindowName("7d:sonnet"),
+		quota.WindowName("5h:gpt-5.3-codex-spark"),
+		quota.WindowName("7d:gpt-5.3-codex-spark"),
+		quota.WindowPro,
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("orderedWindowKeys length = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("orderedWindowKeys[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestBuildTTYModel_ModelScopedWindowsUseBucketHeaders(t *testing.T) {
+	now := time.Unix(1000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Codex,
+				Name: "codex",
+				Results: []quota.Result{
+					{
+						Status: quota.StatusOK,
+						Plan:   "plus",
+						Windows: map[quota.WindowName]quota.Window{
+							quota.Window5Hour:                           {RemainingPct: 75, ResetAtUnix: 10000},
+							quota.Window7Day:                            {RemainingPct: 90, ResetAtUnix: 20000},
+							quota.WindowName("7d:sonnet"):              {RemainingPct: 70, ResetAtUnix: 30000},
+							quota.WindowName("5h:gpt-5.3-codex-spark"): {RemainingPct: 65, ResetAtUnix: 11000},
+							quota.WindowName("7d:gpt-5.3-codex-spark"): {RemainingPct: 85, ResetAtUnix: 21000},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	model := BuildTTYModel(report, now)
+	sec := model.Sections[0]
+
+	labels := make([]string, 0, len(sec.WindowRows))
+	for _, row := range sec.WindowRows {
+		labels = append(labels, strings.TrimSpace(stripANSI(row.Label)))
+	}
+
+	want := []string{"5h", "7d", "sonnet", "7d", "gpt-5.3-codex-spark", "5h", "7d"}
+	if len(labels) != len(want) {
+		t.Fatalf("window row count = %d, want %d (%v)", len(labels), len(want), labels)
+	}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Fatalf("labels[%d] = %q, want %q (all=%v)", i, labels[i], want[i], labels)
+		}
+	}
+
+	if strings.Contains(sec.WindowRows[2].Label, "\x1b[3m") || strings.Contains(sec.WindowRows[4].Label, "\x1b[3m") {
+		t.Fatalf("bucket header labels should not be italic: %q / %q", sec.WindowRows[2].Label, sec.WindowRows[4].Label)
+	}
+}
+
 // stripANSI removes ANSI escape sequences from a string.
 func stripANSI(s string) string {
 	var b strings.Builder

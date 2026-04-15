@@ -66,7 +66,7 @@ func (b BurnRates) Get(k BurnRateKey) (float64, bool) {
 // BurnState is the on-disk persistence schema.
 type BurnState struct {
 	Version  int                      `json:"version"`
-	Accounts map[string]*AccountState `json:"accounts"` // key = "<provider>:<accountKey>"
+	Accounts map[string]*AccountState `json:"accounts"` // key = "<accountKey>"
 }
 
 // AccountState holds all window states for a single (provider, account).
@@ -342,7 +342,7 @@ func computeDelta(prev *WindowState, w quota.Window, winName quota.WindowName) (
 //
 // Tuning is an open question; revisit after observing real-world usage.
 func halfLifeFor(win quota.WindowName) float64 {
-	switch win {
+	switch quota.BaseWindow(win) {
 	case quota.Window5Hour:
 		return 30 * 60 // 1800s
 	case quota.Window7Day:
