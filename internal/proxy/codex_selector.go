@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -25,12 +26,14 @@ type codexSelector struct {
 	quota    codexQuotaReader
 }
 
+type codexModelContextKey struct{}
+
 // NewCodexSelector creates a CodexSelector backed by the given discovery function.
 func NewCodexSelector(discover CodexDiscoverer, quota codexQuotaReader) CodexSelector {
 	return &codexSelector{discover: discover, quota: quota}
 }
 
-func (s *codexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
+func (s *codexSelector) Select(ctx context.Context, exclude ...string) (*codex.CodexAccount, error) {
 	accounts := s.discover()
 	if len(accounts) == 0 {
 		return nil, fmt.Errorf("no codex accounts available")
@@ -41,29 +44,70 @@ func (s *codexSelector) Select(_ context.Context, exclude ...string) (*codex.Cod
 		excludeSet[e] = true
 	}
 
-	// Prefer the active account when it still has quota.
+	requestedModel := codexRequestedModel(ctx)
+	if codexModelRequiresPro(requestedModel) {
+		if acct := s.selectAccount(accounts, excludeSet, requestedModel, true); acct != nil {
+			return acct, nil
+		}
+	}
+	if acct := s.selectAccount(accounts, excludeSet, requestedModel, false); acct != nil {
+		return acct, nil
+	}
+
+	return nil, fmt.Errorf("no codex accounts with valid tokens and quota")
+}
+
+func (s *codexSelector) selectAccount(accounts []codex.CodexAccount, excludeSet map[string]bool, requestedModel string, requireCompatible bool) *codex.CodexAccount {
 	for i := range accounts {
 		a := &accounts[i]
-		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" || !s.hasQuota(a) {
+		if !s.isEligible(a, excludeSet, requestedModel, requireCompatible) {
 			continue
 		}
 		if a.IsActive {
 			result := *a
-			return &result, nil
+			return &result
 		}
 	}
 
-	// Fall back to first non-excluded account with a token and quota.
 	for i := range accounts {
 		a := &accounts[i]
-		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" || !s.hasQuota(a) {
+		if !s.isEligible(a, excludeSet, requestedModel, requireCompatible) {
 			continue
 		}
 		result := *a
-		return &result, nil
+		return &result
 	}
+	return nil
+}
 
-	return nil, fmt.Errorf("no codex accounts with valid tokens and quota")
+func (s *codexSelector) isEligible(a *codex.CodexAccount, excludeSet map[string]bool, requestedModel string, requireCompatible bool) bool {
+	if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" || !s.hasQuota(a) {
+		return false
+	}
+	if requireCompatible && !codexPlanSupportsModel(a.PlanType, requestedModel) {
+		return false
+	}
+	return true
+}
+
+func codexRequestedModel(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	model, _ := ctx.Value(codexModelContextKey{}).(string)
+	return model
+}
+
+func codexModelRequiresPro(model string) bool {
+	baseModel, _ := ParseModelEffort(model)
+	return strings.EqualFold(baseModel, codexSparkModel)
+}
+
+func codexPlanSupportsModel(plan, model string) bool {
+	if !codexModelRequiresPro(model) {
+		return true
+	}
+	return strings.EqualFold(plan, "pro")
 }
 
 // codexAcctExcluded returns true if the account matches any key in the exclude set.

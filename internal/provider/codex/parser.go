@@ -4,8 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/quota"
+)
+
+var (
+	nowFunc          = time.Now
+	codexPromoEndsAt = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
 )
 
 // parseUsage decodes a Codex usage API JSON body and returns a quota.Result.
@@ -52,12 +58,7 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 		plan = "unknown"
 	}
 
-	// Codex Pro has ~6.7x the rate limits of Plus (rounded to 7x).
-	// Encode as a synthetic rateLimitTier so ExtractMultiplier can parse it.
-	var rlt string
-	if plan == "pro" {
-		rlt = "codex_pro_7x"
-	}
+	rlt := rateLimitTierForPlan(plan, nowFunc())
 
 	return quota.Result{
 		Status:        quota.StatusFromWindows(windows),
@@ -66,6 +67,23 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 		Email:         email,
 		AccountID:     accountID,
 		Windows:       windows,
+	}
+}
+
+func rateLimitTierForPlan(plan string, now time.Time) string {
+	switch plan {
+	case "pro":
+		if now.Before(codexPromoEndsAt) {
+			return "codex_pro_20x"
+		}
+		return "codex_pro_10x"
+	case "prolite":
+		if now.Before(codexPromoEndsAt) {
+			return "codex_prolite_10x"
+		}
+		return "codex_prolite_5x"
+	default:
+		return ""
 	}
 }
 

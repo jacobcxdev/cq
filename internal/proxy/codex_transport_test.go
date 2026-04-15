@@ -153,6 +153,191 @@ func TestCodexTokenTransport_401Failover(t *testing.T) {
 	}
 }
 
+func TestCodexTokenTransport_401Failover_RewritesSparkForPlusAlternate(t *testing.T) {
+	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
+		{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro"},
+		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
+	}}
+
+	models := make([]string, 0, 2)
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			models = append(models, extractModel(body))
+			if req.Header.Get("Authorization") == "Bearer tok-pro" {
+				return makeResponse(401, "unauthorized"), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 after failover", resp.StatusCode)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models seen = %d, want 2", len(models))
+	}
+	if models[0] != "gpt-5.3-codex-spark" {
+		t.Fatalf("initial model = %q, want gpt-5.3-codex-spark", models[0])
+	}
+	if models[1] != "gpt-5.3-codex" {
+		t.Fatalf("failover model = %q, want gpt-5.3-codex", models[1])
+	}
+}
+
+func TestCodexTokenTransport_429InsufficientQuota_RewritesSparkSuffixForPlusAlternate(t *testing.T) {
+	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
+		{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro"},
+		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
+	}}
+
+	models := make([]string, 0, 2)
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			models = append(models, extractModel(body))
+			if req.Header.Get("Authorization") == "Bearer tok-pro" {
+				return makeResponse(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded"}}`), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark-high"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 after failover", resp.StatusCode)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models seen = %d, want 2", len(models))
+	}
+	if models[0] != "gpt-5.3-codex-spark-high" {
+		t.Fatalf("initial model = %q, want gpt-5.3-codex-spark-high", models[0])
+	}
+	if models[1] != "gpt-5.3-codex-high" {
+		t.Fatalf("failover model = %q, want gpt-5.3-codex-high", models[1])
+	}
+}
+
+func TestCodexTokenTransport_PrefersProAccountForInitialSparkRequest(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+			{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro", IsActive: false},
+		}
+	}, nil)
+
+	var gotAuth, gotModel string
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			gotAuth = req.Header.Get("Authorization")
+			gotModel = extractModel(body)
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotAuth != "Bearer tok-pro" {
+		t.Fatalf("authorization = %q, want Bearer tok-pro", gotAuth)
+	}
+	if gotModel != "gpt-5.3-codex-spark" {
+		t.Fatalf("model = %q, want gpt-5.3-codex-spark", gotModel)
+	}
+}
+
+func TestCodexTokenTransport_RewritesSparkForInitialPlusSelection(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+		}
+	}, nil)
+
+	var gotAuth, gotModel string
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			gotAuth = req.Header.Get("Authorization")
+			gotModel = extractModel(body)
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotAuth != "Bearer tok-plus" {
+		t.Fatalf("authorization = %q, want Bearer tok-plus", gotAuth)
+	}
+	if gotModel != "gpt-5.3-codex" {
+		t.Fatalf("model = %q, want gpt-5.3-codex", gotModel)
+	}
+}
+
+func TestCodexTokenTransport_RewritesSparkSuffixForInitialPlusSelection(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+		}
+	}, nil)
+
+	var gotModel string
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			gotModel = extractModel(body)
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark-high"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotModel != "gpt-5.3-codex-high" {
+		t.Fatalf("model = %q, want gpt-5.3-codex-high", gotModel)
+	}
+}
+
 func TestCodexTokenTransport_401NoAlternate(t *testing.T) {
 	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
 		{Email: "a@test.com", AccessToken: "tok-a"},
@@ -286,6 +471,60 @@ func TestCodexTokenTransport_429InsufficientQuota_PersistsSwitch(t *testing.T) {
 // TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch verifies
 // that when fresh quota shows remaining capacity, replay happens but no switch
 // is persisted.
+func TestCodexTokenTransport_429InsufficientQuota_RewritesSparkForPlusAlternate(t *testing.T) {
+	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
+		{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro"},
+		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
+	}}
+
+	switchDone := make(chan string, 1)
+	models := make([]string, 0, 2)
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Switcher: func(_ context.Context, email string) error {
+			switchDone <- email
+			return nil
+		},
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			models = append(models, extractModel(body))
+			if req.Header.Get("Authorization") == "Bearer tok-pro" {
+				return makeResponse(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded"}}`), nil
+			}
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 after failover", resp.StatusCode)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models seen = %d, want 2", len(models))
+	}
+	if models[0] != "gpt-5.3-codex-spark" {
+		t.Fatalf("initial model = %q, want gpt-5.3-codex-spark", models[0])
+	}
+	if models[1] != "gpt-5.3-codex" {
+		t.Fatalf("failover model = %q, want gpt-5.3-codex", models[1])
+	}
+
+	select {
+	case email := <-switchDone:
+		if email != "plus@test.com" {
+			t.Errorf("switched to %q, want plus@test.com", email)
+		}
+	case <-time.After(time.Second):
+		t.Error("expected switch to be persisted for insufficient_quota")
+	}
+}
+
 func TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch(t *testing.T) {
 	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
 		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},

@@ -467,6 +467,30 @@ func TestBuildLabel(t *testing.T) {
 			want: "1 × max 20x + 1 × pro = 21x",
 		},
 		{
+			name: "codex plus accounts use 1x baseline",
+			results: []quota.Result{
+				{Status: quota.StatusOK, Plan: "plus"},
+				{Status: quota.StatusOK, Plan: "plus"},
+			},
+			want: "2 × plus = 2x",
+		},
+		{
+			name: "codex pro promo accounts multiply aggregate total",
+			results: []quota.Result{
+				{Status: quota.StatusOK, Plan: "pro", RateLimitTier: "codex_pro_20x"},
+				{Status: quota.StatusOK, Plan: "pro", RateLimitTier: "codex_pro_20x"},
+			},
+			want: "2 × pro 20x = 40x",
+		},
+		{
+			name: "codex mixed plus and promo pro",
+			results: []quota.Result{
+				{Status: quota.StatusOK, Plan: "pro", RateLimitTier: "codex_pro_20x"},
+				{Status: quota.StatusOK, Plan: "plus"},
+			},
+			want: "1 × pro 20x + 1 × plus = 21x",
+		},
+		{
 			name:    "empty group no usable results",
 			results: []quota.Result{},
 			want:    "",

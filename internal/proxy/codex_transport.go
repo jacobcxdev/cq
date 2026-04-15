@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,7 @@ func (t *CodexTokenTransport) inner() http.RoundTripper {
 
 // RoundTrip implements http.RoundTripper.
 func (t *CodexTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = withCodexModelContext(req)
 	acct, err := t.Selector.Select(req.Context())
 	if err != nil {
 		return nil, err
@@ -63,14 +65,115 @@ func (t *CodexTokenTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 }
 
+const (
+	codexSparkModel    = "gpt-5.3-codex-spark"
+	codexFallbackModel = "gpt-5.3-codex"
+)
+
 func (t *CodexTokenTransport) doRequest(req *http.Request, acct *codex.CodexAccount) (*http.Response, error) {
 	out := shallowCloneRequest(req)
+	rewriteCodexModelForAccount(out, acct)
 	out.Header.Set("Authorization", "Bearer "+acct.AccessToken)
 	if acct.AccountID != "" {
 		out.Header.Set("ChatGPT-Account-ID", acct.AccountID)
 	}
 	out.Header.Del("x-api-key")
 	return t.inner().RoundTrip(out)
+}
+
+func rewriteCodexModelForAccount(req *http.Request, acct *codex.CodexAccount) {
+	if acct != nil && codexPlanSupportsModel(acct.PlanType, codexRequestedModel(req.Context())) {
+		return
+	}
+	if req.GetBody == nil {
+		return
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return
+	}
+	defer body.Close()
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return
+	}
+
+	rewritten, ok := rewriteCodexModelBody(data)
+	if !ok {
+		return
+	}
+
+	req.Body = io.NopCloser(bytes.NewReader(rewritten))
+	req.ContentLength = int64(len(rewritten))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(rewritten)), nil
+	}
+}
+
+func rewriteCodexModelBody(body []byte) ([]byte, bool) {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(body, &payload) != nil {
+		return nil, false
+	}
+
+	rawModel, ok := payload["model"]
+	if !ok {
+		return nil, false
+	}
+
+	var model string
+	if json.Unmarshal(rawModel, &model) != nil {
+		return nil, false
+	}
+
+	rewrittenModel, ok := rewriteCodexModelName(model)
+	if !ok {
+		return nil, false
+	}
+	rawRewrittenModel, err := json.Marshal(rewrittenModel)
+	if err != nil {
+		return nil, false
+	}
+
+	payload["model"] = rawRewrittenModel
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	return rewritten, true
+}
+
+func rewriteCodexModelName(model string) (string, bool) {
+	baseModel, effort := ParseModelEffort(model)
+	if !strings.EqualFold(baseModel, codexSparkModel) {
+		return "", false
+	}
+	if effort == "" {
+		return codexFallbackModel, true
+	}
+	return codexFallbackModel + "-" + effort, true
+}
+
+func withCodexModelContext(req *http.Request) *http.Request {
+	if req == nil || codexRequestedModel(req.Context()) != "" || req.GetBody == nil {
+		return req
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return req
+	}
+	defer body.Close()
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return req
+	}
+	model := extractModel(data)
+	if model == "" {
+		return req
+	}
+	return req.WithContext(context.WithValue(req.Context(), codexModelContextKey{}, model))
 }
 
 func (t *CodexTokenTransport) handleUnauthorized(req *http.Request, failedAcct *codex.CodexAccount) (*http.Response, error) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	claude "github.com/jacobcxdev/cq/internal/provider/claude"
@@ -583,6 +584,232 @@ func TestServer_Handler_AppServerRequiresWebsocket(t *testing.T) {
 	}
 	if got := w.Header().Get("Upgrade"); got != "websocket" {
 		t.Errorf("Upgrade header = %q, want websocket", got)
+	}
+}
+
+func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
+	var gotModel string
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upstream upgrade error = %v", err)
+			return
+		}
+		defer conn.Close()
+
+		if got := r.Header.Get("Authorization"); got != "Bearer plus-tok" {
+			t.Errorf("upstream auth = %q, want Bearer plus-tok", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "acct-plus" {
+			t.Errorf("upstream account ID = %q, want acct-plus", got)
+		}
+
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("upstream read error = %v", err)
+			return
+		}
+		var payload struct {
+			Params struct {
+				Model string `json:"model"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(msg, &payload); err != nil {
+			t.Errorf("unmarshal websocket payload: %v", err)
+			return
+		}
+		gotModel = payload.Params.Model
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
+			t.Errorf("upstream write error = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus"}},
+			Inner:    http.DefaultTransport,
+		},
+	}
+	proxyHandler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + codexAppServerPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"method":"thread/start","params":{"model":"gpt-5.3-codex-spark"}}`)); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+
+	if gotModel != "gpt-5.3-codex" {
+		t.Fatalf("upstream model = %q, want gpt-5.3-codex", gotModel)
+	}
+}
+
+func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
+	var gotModel string
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upstream upgrade error = %v", err)
+			return
+		}
+		defer conn.Close()
+
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("upstream read error = %v", err)
+			return
+		}
+		var payload struct {
+			Params struct {
+				Model string `json:"model"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(msg, &payload); err != nil {
+			t.Errorf("unmarshal websocket payload: %v", err)
+			return
+		}
+		gotModel = payload.Params.Model
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
+			t.Errorf("upstream write error = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus"}},
+			Inner:    http.DefaultTransport,
+		},
+	}
+	proxyHandler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + codexAppServerPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"method":"thread/start","params":{"model":"gpt-5.3-codex-spark-high"}}`)); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+
+	if gotModel != "gpt-5.3-codex-high" {
+		t.Fatalf("upstream model = %q, want gpt-5.3-codex-high", gotModel)
+	}
+}
+
+func TestServer_AppServerPrefersProAccountForSpark(t *testing.T) {
+	var gotModel, gotAuth string
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upstream upgrade error = %v", err)
+			return
+		}
+		defer conn.Close()
+
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("upstream read error = %v", err)
+			return
+		}
+		var payload struct {
+			Params struct {
+				Model string `json:"model"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(msg, &payload); err != nil {
+			t.Errorf("unmarshal websocket payload: %v", err)
+			return
+		}
+		gotModel = payload.Params.Model
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
+			t.Errorf("upstream write error = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: NewCodexSelector(func() []codex.CodexAccount {
+				return []codex.CodexAccount{
+					{Email: "plus@test.com", AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+					{Email: "pro@test.com", AccessToken: "pro-tok", AccountID: "acct-pro", PlanType: "pro", IsActive: false},
+				}
+			}, nil),
+			Inner: http.DefaultTransport,
+		},
+	}
+	proxyHandler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(proxyHandler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + codexAppServerPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":1,"method":"thread/start","params":{"model":"gpt-5.3-codex-spark"}}`)); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+
+	if gotAuth != "Bearer pro-tok" {
+		t.Fatalf("upstream auth = %q, want Bearer pro-tok", gotAuth)
+	}
+	if gotModel != "gpt-5.3-codex-spark" {
+		t.Fatalf("upstream model = %q, want gpt-5.3-codex-spark", gotModel)
 	}
 }
 

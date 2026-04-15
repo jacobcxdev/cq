@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/alecthomas/kong v1.14.0
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/zalando/go-keyring v0.2.6
 )
 
