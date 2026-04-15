@@ -13,7 +13,7 @@ func TestTranslateRequest_SimpleText(t *testing.T) {
 		"messages": [{"role": "user", "content": "hello"}]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +42,37 @@ func TestTranslateRequest_SimpleText(t *testing.T) {
 	}
 }
 
+// TestTranslateRequest_SuffixNamedModelNoReasoning verifies that a model name
+// containing a former effort suffix (e.g. "gpt-5.4-xhigh") is forwarded as-is
+// to upstream WITHOUT setting a reasoning effort override. The suffix is part of
+// the model name, not an effort directive.
+func TestTranslateRequest_SuffixNamedModelNoReasoning(t *testing.T) {
+	input := `{
+		"model": "gpt-5.4-xhigh",
+		"max_tokens": 100,
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	out, err := translateRequest([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var req openaiResponsesRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+
+	// The model name must be forwarded unchanged (no suffix stripping).
+	if req.Model != "gpt-5.4-xhigh" {
+		t.Errorf("model = %q, want gpt-5.4-xhigh (suffix is not stripped)", req.Model)
+	}
+	// No reasoning effort must be set from the model name.
+	if req.Reasoning != nil {
+		t.Errorf("reasoning = %+v, want nil (effort not derived from model name)", req.Reasoning)
+	}
+}
+
 func TestTranslateRequest_SystemString(t *testing.T) {
 	input := `{
 		"model": "gpt-5.4",
@@ -50,7 +81,7 @@ func TestTranslateRequest_SystemString(t *testing.T) {
 		"messages": [{"role": "user", "content": "hi"}]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +102,7 @@ func TestTranslateRequest_SystemBlocks(t *testing.T) {
 		"messages": [{"role": "user", "content": "hi"}]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +127,7 @@ func TestTranslateRequest_ToolDefinitions(t *testing.T) {
 		}]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +162,7 @@ func TestTranslateRequest_ToolUseAndResult(t *testing.T) {
 		]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +222,7 @@ func TestTranslateRequest_EmptyToolResult(t *testing.T) {
 		]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +283,7 @@ func TestTranslateRequest_MultiTurn(t *testing.T) {
 		]
 	}`
 
-	out, err := translateRequest([]byte(input), "")
+	out, err := translateRequest([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,5 +459,79 @@ func TestTranslateResponse_Incomplete(t *testing.T) {
 
 	if resp.StopReason != "max_tokens" {
 		t.Errorf("stop_reason = %q, want max_tokens", resp.StopReason)
+	}
+}
+
+// TestTranslateEffort_NativeEffortField verifies that the Anthropic effort field
+// is correctly mapped to OpenAI reasoning effort, including "max" → "xhigh".
+func TestTranslateEffort_NativeEffortField(t *testing.T) {
+	tests := []struct {
+		name       string
+		effort     string
+		wantEffort string
+	}{
+		{"low passes through", "low", "low"},
+		{"medium passes through", "medium", "medium"},
+		{"high passes through", "high", "high"},
+		{"max maps to xhigh", "max", "xhigh"},
+		{"empty returns nil", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := translateEffort(tt.effort, nil)
+			if tt.wantEffort == "" {
+				if got != nil {
+					t.Errorf("translateEffort(%q, nil) = %+v, want nil", tt.effort, got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("translateEffort(%q, nil) = nil, want effort %q", tt.effort, tt.wantEffort)
+			}
+			if got.Effort != tt.wantEffort {
+				t.Errorf("translateEffort(%q, nil).Effort = %q, want %q", tt.effort, got.Effort, tt.wantEffort)
+			}
+			if got.Summary != "auto" {
+				t.Errorf("translateEffort(%q, nil).Summary = %q, want auto", tt.effort, got.Summary)
+			}
+		})
+	}
+}
+
+// TestTranslateRequest_NativeEffortSetReasoning verifies that the request-level
+// "effort" field drives the reasoning block (not the model name).
+func TestTranslateRequest_NativeEffortSetReasoning(t *testing.T) {
+	tests := []struct {
+		name       string
+		effort     string
+		wantEffort string
+	}{
+		{"high effort", "high", "high"},
+		{"max effort maps to xhigh", "max", "xhigh"},
+		{"low effort", "low", "low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := `{"model":"gpt-5.4","max_tokens":10,"effort":"` + tt.effort + `","messages":[{"role":"user","content":"hi"}]}`
+
+			out, err := translateRequest([]byte(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var req openaiResponsesRequest
+			if err := json.Unmarshal(out, &req); err != nil {
+				t.Fatal(err)
+			}
+
+			if req.Reasoning == nil {
+				t.Fatalf("reasoning = nil, want effort %q", tt.wantEffort)
+			}
+			if req.Reasoning.Effort != tt.wantEffort {
+				t.Errorf("reasoning.effort = %q, want %q", req.Reasoning.Effort, tt.wantEffort)
+			}
+		})
 	}
 }

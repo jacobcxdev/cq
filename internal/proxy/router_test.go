@@ -49,48 +49,43 @@ func TestRouteModel(t *testing.T) {
 
 func TestParseModelEffort(t *testing.T) {
 	tests := []struct {
-		input      string
-		wantModel  string
-		wantEffort string
+		input     string
+		wantModel string
 	}{
-		{"gpt-5.4", "gpt-5.4", ""},
-		{"gpt-5.4[1m]", "gpt-5.4", ""},
-		{"gpt-5.4-xhigh", "gpt-5.4", "xhigh"},
-		{"gpt-5.4[1m]-xhigh", "gpt-5.4", "xhigh"},
-		{"gpt-5.4-high", "gpt-5.4", "high"},
-		{"gpt-5.4-medium", "gpt-5.4", "medium"},
-		{"gpt-5.4-low", "gpt-5.4", "low"},
-		{"gpt-5.4-mini-xhigh", "gpt-5.4-mini", "xhigh"},
-		{"gpt-5.4-mini-low", "gpt-5.4-mini", "low"},
-		{"claude-3-opus", "claude-3-opus", ""},
-		{"o4-mini-high", "o4-mini", "high"},
-		{"GPT-5.4-XHIGH", "GPT-5.4", "xhigh"}, // case insensitive suffix
+		// [1m] suffix is stripped; no effort is extracted from model name.
+		{"gpt-5.4", "gpt-5.4"},
+		{"gpt-5.4[1m]", "gpt-5.4"},
+		{"gpt-5.4-mini", "gpt-5.4-mini"},
+		{"claude-3-opus", "claude-3-opus"},
+		{"o4-mini", "o4-mini"},
+		// Suffix-like strings that are not [1m] are left as-is.
+		{"gpt-5.4-xhigh", "gpt-5.4-xhigh"},
+		{"gpt-5.4-high", "gpt-5.4-high"},
+		{"gpt-5.4-medium", "gpt-5.4-medium"},
+		{"gpt-5.4-low", "gpt-5.4-low"},
+		{"gpt-5.4-mini-xhigh", "gpt-5.4-mini-xhigh"},
+		{"o4-mini-high", "o4-mini-high"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			model, effort := ParseModelEffort(tt.input)
+			model := ParseModel(tt.input)
 			if model != tt.wantModel {
-				t.Errorf("model = %q, want %q", model, tt.wantModel)
-			}
-			if effort != tt.wantEffort {
-				t.Errorf("effort = %q, want %q", effort, tt.wantEffort)
+				t.Errorf("ParseModel(%q) = %q, want %q", tt.input, model, tt.wantModel)
 			}
 		})
 	}
 }
 
-func TestRouteModel_WithEffortSuffix(t *testing.T) {
+func TestRouteModel_WithOneMSuffix(t *testing.T) {
 	tests := []struct {
 		model string
 		want  Provider
 	}{
-		{"gpt-5.4-xhigh", ProviderCodex},
+		{"gpt-5.4", ProviderCodex},
 		{"gpt-5.4[1m]", ProviderCodex},
-		{"gpt-5.4[1m]-xhigh", ProviderCodex},
-		{"gpt-5.4-mini-low", ProviderCodex},
-		{"o4-mini-high", ProviderCodex},
-		{"claude-3-opus-high", ProviderClaude}, // suffix stripped → claude-3-opus → Claude
+		{"gpt-5.4-mini", ProviderCodex},
+		{"o4-mini", ProviderCodex},
 	}
 
 	for _, tt := range tests {
