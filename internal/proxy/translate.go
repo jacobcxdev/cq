@@ -152,32 +152,25 @@ type openaiUsage struct {
 // --- Translation functions ---
 
 // translateRequest converts an Anthropic Messages request to an OpenAI Responses request.
-// translateRequest converts an Anthropic Messages request to an OpenAI Responses request.
-// effortOverride, if non-empty, forces a specific reasoning effort (from model name suffix).
-func translateRequest(body []byte, effortOverride string) ([]byte, error) {
+// The model name is normalised via ParseModel ([1m] stripped); reasoning effort comes
+// exclusively from the request's native effort/thinking fields via translateEffort.
+func translateRequest(body []byte) ([]byte, error) {
 	var req anthropicRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, err
 	}
 
-	// Strip effort suffix from model name for upstream.
-	baseModel, _ := ParseModelEffort(req.Model)
-
 	storeFalse := false
 	oReq := openaiResponsesRequest{
-		Model:       baseModel,
+		Model:       ParseModel(req.Model),
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		Stream:      true, // ChatGPT backend requires streaming
 		Store:       &storeFalse,
 	}
 
-	// Effort: suffix override > request effort field > thinking budget fallback.
-	if effortOverride != "" {
-		oReq.Reasoning = &openaiReasoning{Effort: effortOverride, Summary: "auto"}
-	} else {
-		oReq.Reasoning = translateEffort(req.Effort, req.Thinking)
-	}
+	// Effort comes only from the native request fields; no model-name suffix extraction.
+	oReq.Reasoning = translateEffort(req.Effort, req.Thinking)
 
 	// System → instructions (Responses API requires this field to be non-empty).
 	oReq.Instructions = translateSystem(req.System)
@@ -394,7 +387,7 @@ func translateTools(tools []anthropicTool) []openaiTool {
 // translateEffort maps Anthropic effort/thinking to OpenAI reasoning.
 // Claude Code sends effort as a top-level string: "low","medium","high","max".
 // Fallback: thinking.budget_tokens is mapped to effort levels.
-// OpenAI supports: "low","medium","high" (no "max" — clamped to "high").
+// Anthropic "max" is translated to OpenAI "xhigh".
 func translateEffort(effort string, thinking *anthropicThinking) *openaiReasoning {
 	// Prefer explicit effort field.
 	if effort != "" {

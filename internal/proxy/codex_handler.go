@@ -23,10 +23,9 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model %q is not a Codex model", rawModel))
 		return
 	}
-	baseModel, effortOverride := ParseModelEffort(rawModel)
 
 	// Translate Anthropic → OpenAI Responses.
-	translated, err := translateRequest(body, effortOverride)
+	translated, err := translateRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("request translation failed: %v", err))
 		return
@@ -34,8 +33,8 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 
 	// Determine if streaming.
 	streaming := extractStream(body)
-	// Use base model (without effort suffix) for response translation.
-	model := baseModel
+	// Normalise [1m] suffix for response translation (effort suffixes are not stripped).
+	model := ParseModel(rawModel)
 
 	// Build upstream request.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
