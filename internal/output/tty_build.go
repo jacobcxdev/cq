@@ -129,7 +129,6 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 		return header, nil
 	}
 
-	// Header
 	minPct := r.MinRemainingPct()
 	iconStyle := pctStyle(minPct)
 	if r.Status == quota.StatusExhausted {
@@ -176,7 +175,6 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 			dimStyle.Render(fmt.Sprintf("\u2014 using cache from %s ago", fmtDuration(r.CacheAge)))
 	}
 
-	// Window rows
 	isExhausted := r.Status == quota.StatusExhausted
 	var barForce lipgloss.Style
 	if isExhausted {
@@ -185,18 +183,24 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 
 	keys := orderedWindowKeys(r.Windows)
 	rows := make([]TTYWindowRow, 0, len(keys))
+	currentBucket := ""
 	for _, winName := range keys {
+		bucket := quota.WindowBucket(winName)
+		if bucket == "" {
+			currentBucket = ""
+		} else if bucket != currentBucket {
+			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(bucket)})
+			currentBucket = bucket
+		}
+
 		w := r.Windows[winName]
 		periodS := periodSeconds(winName)
 		if w.ResetAtUnix <= 0 && periodS > 0 && !isExhausted {
 			w.ResetAtUnix = quota.DefaultResetEpoch(periodS, nowEpoch)
 		}
 
-		row := TTYWindowRow{
-			Label: fmt.Sprintf("       %5s  ", winName),
-		}
+		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
 
-		// Bar with pace marker
 		var pace int
 		hasPace := false
 		if periodS > 0 && w.ResetAtUnix > 0 {
@@ -209,14 +213,12 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 		}
 		row.Bar = renderBar(w.RemainingPct, barForce, pacePtr)
 
-		// Percentage
 		pc := pctStyle(w.RemainingPct)
 		if isExhausted {
 			pc = dimStyle
 		}
 		row.Pct = pc.Render(fmt.Sprintf("\U000F0A9F %3d%%", w.RemainingPct))
 
-		// Reset time
 		if w.ResetAtUnix > 0 {
 			rel := fmtDuration(w.ResetAtUnix - nowEpoch)
 			rc := resetStyle(w.RemainingPct, w.ResetAtUnix, nowEpoch, periodS)
@@ -228,7 +230,6 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 			row.Reset = dimStyle.Render(fmt.Sprintf("\U000F0996 %7s", "\u2014"))
 		}
 
-		// Pace diff + burndown
 		if hasPace {
 			diff := w.RemainingPct - pace
 			dc := diffStyle(diff)
@@ -282,17 +283,20 @@ func buildAggHeader(agg *app.AggregateReport) string {
 
 // buildAggRows builds window rows for aggregate data.
 func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindowRow {
-	orderedKeys := quota.OrderedWindows()
+	orderedKeys := orderedAggWindowKeys(windows)
 	rows := make([]TTYWindowRow, 0, len(orderedKeys))
+	currentBucket := ""
 	for _, winName := range orderedKeys {
-		a, ok := windows[winName]
-		if !ok {
-			continue
+		bucket := quota.WindowBucket(winName)
+		if bucket == "" {
+			currentBucket = ""
+		} else if bucket != currentBucket {
+			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(bucket)})
+			currentBucket = bucket
 		}
 
-		row := TTYWindowRow{
-			Label: fmt.Sprintf("       %5s  ", winName),
-		}
+		a := windows[winName]
+		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
 
 		var barForce lipgloss.Style
 		if a.RemainingPct <= 0 {
@@ -300,7 +304,6 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		}
 		row.Bar = renderBar(a.RemainingPct, barForce, a.ExpectedPct)
 
-		// Percentage
 		pc := pctStyle(a.RemainingPct)
 		if a.RemainingPct <= 0 {
 			pc = dimStyle
@@ -315,9 +318,9 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		if isDim {
 			sc = dimStyle
 		}
-		gaugeIcon := "\U000F029A" // mdi-refresh
+		gaugeIcon := "\U000F029A"
 		if a.GaugeOverride == "imminent_block" && !isDim {
-			gaugeIcon = "\U0000F071" // fa-warning
+			gaugeIcon = "\U0000F071"
 			sc = boldRedStyle
 		}
 		gauge := renderSustainGauge(a.GaugePos, isDim)
@@ -326,13 +329,12 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		}
 		row.Reset = sc.Render(gaugeIcon) + " " + gauge
 
-		// Gauge-contextual columns: impact + timing (icon + value format).
 		gc := gaugeStyle(a.GaugePos)
 		if a.RemainingPct <= 0 {
 			gc = dimStyle
 		}
 		switch {
-		case a.GaugePos >= 0 && a.GaugePos < 3: // overburn
+		case a.GaugePos >= 0 && a.GaugePos < 3:
 			gapDuration := "—"
 			gapStart := "—"
 			if a.GapStartS > 0 || a.GapDurationS > 0 {
@@ -341,14 +343,14 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 			}
 			row.PaceDiff = gc.Render(fmt.Sprintf("\uEE8E %7s", gapDuration))
 			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", gapStart))
-		case a.GaugePos >= 4: // underburn
+		case a.GaugePos >= 4:
 			row.PaceDiff = gc.Render(fmt.Sprintf("\uEFC7 %7s", fmt.Sprintf("%d%%", a.WastedPct)))
 			if a.WasteDeadlineS > 0 {
 				row.Burndown = gc.Render(fmt.Sprintf("\U000F1557 %7s", fmtDuration(a.WasteDeadlineS)))
 			} else {
 				row.Burndown = gc.Render(fmt.Sprintf("\U000F1557 %7s", "\u2014"))
 			}
-		default: // on pace or unknown
+		default:
 			row.PaceDiff = gc.Render(fmt.Sprintf("\U000F012C %7s", "\u2014"))
 			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
 		}
@@ -395,7 +397,9 @@ func measuredSepWidth(model TTYModel) int {
 // rowVisibleWidth returns the visible character width of a rendered window row.
 // Mirrors the concatenation in writeWindowRow.
 func rowVisibleWidth(row TTYWindowRow) int {
-	// row.Label + row.Bar + "  " + row.Pct + "  " + row.Reset + "  " + row.PaceDiff + "  " + row.Burndown
+	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
+		return visibleWidth(row.Label)
+	}
 	return visibleWidth(row.Label) + visibleWidth(row.Bar) +
 		2 + visibleWidth(row.Pct) +
 		2 + visibleWidth(row.Reset) +
@@ -467,12 +471,17 @@ func providerIcon(id provider.ID) string {
 // orderedWindowKeys returns window names in canonical display order, filtered
 // to only those present in the given map.
 func orderedWindowKeys(windows map[quota.WindowName]quota.Window) []quota.WindowName {
-	all := quota.OrderedWindows()
 	keys := make([]quota.WindowName, 0, len(windows))
-	for _, k := range all {
-		if _, ok := windows[k]; ok {
-			keys = append(keys, k)
-		}
+	for k := range windows {
+		keys = append(keys, k)
 	}
-	return keys
+	return quota.OrderedWindowNames(keys)
+}
+
+func orderedAggWindowKeys(windows map[quota.WindowName]quota.AggregateResult) []quota.WindowName {
+	keys := make([]quota.WindowName, 0, len(windows))
+	for k := range windows {
+		keys = append(keys, k)
+	}
+	return quota.OrderedWindowNames(keys)
 }

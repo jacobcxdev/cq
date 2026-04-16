@@ -83,3 +83,29 @@ func TestColoriseJSONKeys(t *testing.T) {
 		t.Error("expected dim for null")
 	}
 }
+
+func TestJSONRendererScopedWindowKeys(t *testing.T) {
+	var buf bytes.Buffer
+	r := &JSONRenderer{W: &buf}
+	report := app.Report{
+		GeneratedAt: time.Unix(1000, 0),
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Claude,
+				Name: "claude",
+				Results: []quota.Result{{
+					Status: quota.StatusOK,
+					Windows: map[quota.WindowName]quota.Window{
+						quota.WindowName("7d:sonnet"): {RemainingPct: 75, ResetAtUnix: 1234},
+					},
+				}},
+			},
+		},
+	}
+	if err := r.Render(context.Background(), report); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"7d:sonnet"`) {
+		t.Fatalf("expected scoped window key in JSON output, got %s", buf.String())
+	}
+}

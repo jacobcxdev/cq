@@ -38,12 +38,10 @@ func SyntheticModelCatalog() []ModelMetadata {
 
 // ModelMaxInputTokens returns the synthetic catalogue's max input token limit
 // for a model ID, or 0 when cq has no exact match and the caller should fall
-// back to upstream resolution. Normalises effort suffixes, [1m] suffixes, and
-// case before lookup so aliases like "gpt-5.4[1m]-xhigh" or "GPT-5.4" resolve
-// to the same entry as "gpt-5.4".
+// back to upstream resolution. Normalises [1m] suffixes and case before lookup
+// so aliases like "gpt-5.4[1m]" or "GPT-5.4" resolve to the same entry as "gpt-5.4".
 func ModelMaxInputTokens(model string) int {
-	base, _ := ParseModelEffort(model)
-	normalised := strings.ToLower(base)
+	normalised := strings.ToLower(ParseModel(model))
 	for _, metadata := range syntheticModelCatalog {
 		if metadata.ID == normalised {
 			return metadata.MaxInputTokens

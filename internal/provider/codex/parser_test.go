@@ -526,3 +526,47 @@ func TestParseNumericResetAt(t *testing.T) {
 		})
 	}
 }
+
+func TestParseUsageAdditionalRateLimits(t *testing.T) {
+	body := []byte(`{
+		"plan_type": "plus",
+		"rate_limit": {
+			"primary_window": {"used_percent": 25.0, "reset_at": 1774051200},
+			"secondary_window": {"used_percent": 10.0, "reset_at": 1774569600}
+		},
+		"additional_rate_limits": [
+			{
+				"limit_name": "gpt-5.3-codex-spark",
+				"metered_feature": "responses",
+				"rate_limit": {
+					"primary_window": {"used_percent": 40.0, "reset_at": 1774051300},
+					"secondary_window": {"used_percent": 15.0, "reset_at": 1774569700}
+				}
+			}
+		]
+	}`)
+
+	result := parseUsage(body, "user@example.com", "acct-1")
+
+	spark5h, ok := result.Windows[quota.WindowName("5h:gpt-5.3-codex-spark")]
+	if !ok {
+		t.Fatal("missing 5h:gpt-5.3-codex-spark window")
+	}
+	if spark5h.RemainingPct != 60 {
+		t.Errorf("5h:gpt-5.3-codex-spark remaining_pct = %d, want 60", spark5h.RemainingPct)
+	}
+	if spark5h.ResetAtUnix != 1774051300 {
+		t.Errorf("5h:gpt-5.3-codex-spark reset_at_unix = %d, want 1774051300", spark5h.ResetAtUnix)
+	}
+
+	spark7d, ok := result.Windows[quota.WindowName("7d:gpt-5.3-codex-spark")]
+	if !ok {
+		t.Fatal("missing 7d:gpt-5.3-codex-spark window")
+	}
+	if spark7d.RemainingPct != 85 {
+		t.Errorf("7d:gpt-5.3-codex-spark remaining_pct = %d, want 85", spark7d.RemainingPct)
+	}
+	if spark7d.ResetAtUnix != 1774569700 {
+		t.Errorf("7d:gpt-5.3-codex-spark reset_at_unix = %d, want 1774569700", spark7d.ResetAtUnix)
+	}
+}

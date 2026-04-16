@@ -323,7 +323,7 @@ func buildSustainersAndRatios(
 	haveData, hasWindowData bool,
 ) {
 	periodS := int64(period)
-	allWeeklyExhausted := winName == quota.Window5Hour && allWeeklyExhaustedForSession(accounts)
+	allWeeklyExhausted := quota.BaseWindow(winName) == quota.Window5Hour && allWeeklyExhaustedForSession(accounts, winName)
 
 	for _, a := range accounts {
 		w, ok := a.result.Windows[winName]
@@ -347,8 +347,15 @@ func buildSustainersAndRatios(
 		// exhausted. If every 5h account is gated, we treat them as gated
 		// with a zero-length offset so the aggregate still reports data
 		// instead of going silent.
-		if winName == quota.Window5Hour && weeklyExhausted(a.result) {
-			w7d, have7d := a.result.Windows[quota.Window7Day]
+		if quota.BaseWindow(winName) == quota.Window5Hour && weeklyExhausted(a.result, winName) {
+			gateName := quota.Window7Day
+			if bucket := quota.WindowBucket(winName); bucket != "" {
+				bucketGate := quota.WindowName("7d:" + bucket)
+				if _, ok := a.result.Windows[bucketGate]; ok {
+					gateName = bucketGate
+				}
+			}
+			w7d, have7d := a.result.Windows[gateName]
 			if have7d && w7d.ResetAtUnix > 0 {
 				offset := float64(w7d.ResetAtUnix - nowEpoch)
 				if offset < 0 {
@@ -358,9 +365,6 @@ func buildSustainersAndRatios(
 					gateOffset = offset
 					gated = true
 				} else if allWeeklyExhausted {
-					// Horizon beyond the 5h window but every account is in
-					// the same boat — include with a clipped gate so the
-					// aggregate still emits a row.
 					gateOffset = period
 					gated = true
 				} else {
@@ -480,7 +484,7 @@ func posFromRho(rho float64) int {
 // GaugeOverride is set to "imminent_block" while the natural rho-derived
 // GaugePos is preserved. These values are ergonomic, not derived.
 func imminentThresholdFor(win quota.WindowName) float64 {
-	switch win {
+	switch quota.BaseWindow(win) {
 	case quota.Window5Hour:
 		return 3600 // 1h
 	case quota.Window7Day:

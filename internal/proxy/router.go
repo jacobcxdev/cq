@@ -27,10 +27,9 @@ const (
 )
 
 // RouteModel maps a model name to the provider that serves it.
-// Effort suffixes (e.g. "-xhigh") are stripped before matching.
+// The [1m] suffix is stripped before matching; all other name characters are preserved.
 func RouteModel(model string) Provider {
-	base, _ := ParseModelEffort(model)
-	lower := strings.ToLower(base)
+	lower := strings.ToLower(ParseModel(model))
 	switch {
 	case strings.HasPrefix(lower, "gpt-"):
 		return ProviderCodex
@@ -45,36 +44,13 @@ func RouteModel(model string) Provider {
 	}
 }
 
-// effortSuffixes maps model name suffixes to OpenAI reasoning effort levels.
-// Users can append these to any Codex model name (e.g. "gpt-5.4-xhigh")
-// to force a specific reasoning effort without the dynamic effort selector.
-var effortSuffixes = []struct {
-	suffix string
-	effort string
-}{
-	{"-xhigh", "xhigh"},
-	{"-high", "high"},
-	{"-medium", "medium"},
-	{"-low", "low"},
-}
-
 var oneMillionSuffix = regexp.MustCompile(`(?i)\[1m\]$`)
 
-// ParseModelEffort splits a model name into the base model and an optional
-// effort override from a recognised suffix. Returns ("gpt-5.4", "xhigh")
-// for input "gpt-5.4-xhigh", or ("gpt-5.4", "") for input "gpt-5.4".
-func ParseModelEffort(model string) (baseModel, effort string) {
-	baseModel = model
-	lower := strings.ToLower(model)
-	for _, es := range effortSuffixes {
-		if strings.HasSuffix(lower, es.suffix) {
-			baseModel = model[:len(model)-len(es.suffix)]
-			effort = es.effort
-			break
-		}
-	}
-	baseModel = oneMillionSuffix.ReplaceAllString(baseModel, "")
-	return baseModel, effort
+// ParseModel normalises a model name by stripping a trailing [1m] suffix (case-insensitive).
+// No other transformations are applied: effort-like substrings such as "-xhigh" are
+// preserved as part of the model name and passed to upstream unchanged.
+func ParseModel(model string) string {
+	return oneMillionSuffix.ReplaceAllString(model, "")
 }
 
 // extractModel performs a quick JSON parse to extract the "model" field

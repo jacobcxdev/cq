@@ -10,6 +10,7 @@ var (
 	redStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	dimStyle           = lipgloss.NewStyle().Faint(true)
 	boldStyle          = lipgloss.NewStyle().Bold(true)
+	boldDimStyle       = lipgloss.NewStyle().Bold(true).Faint(true)
 	boldDimItalicStyle = lipgloss.NewStyle().Bold(true).Faint(true).Italic(true)
 	boldRedStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
 	brightBlackStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))

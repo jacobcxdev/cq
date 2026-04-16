@@ -255,3 +255,36 @@ func TestDedupExhaustedKept(t *testing.T) {
 		t.Fatalf("len = %d, want 2 (error for different account must be kept)", len(out))
 	}
 }
+
+func TestParseUsageModelSpecificSevenDayWindows(t *testing.T) {
+	body := []byte(`{
+		"five_hour": {"utilization": 30.0, "resets_at": "2026-03-20T12:00:00Z"},
+		"seven_day": {"utilization": 10.0, "resets_at": "2026-03-25T00:00:00Z"},
+		"seven_day_sonnet": {"utilization": 25.0, "resets_at": "2026-03-24T00:00:00Z"},
+		"seven_day_opus": {"utilization": 40.0, "resets_at": "2026-03-23T00:00:00Z"}
+	}`)
+
+	result := parseUsage(body, "max", "default_claude_max_20x", "user@example.com", "abc-123")
+
+	sonnet, ok := result.Windows[quota.WindowName("7d:sonnet")]
+	if !ok {
+		t.Fatal("missing 7d:sonnet window")
+	}
+	if sonnet.RemainingPct != 75 {
+		t.Errorf("7d:sonnet remaining_pct = %d, want 75", sonnet.RemainingPct)
+	}
+	if sonnet.ResetAtUnix == 0 {
+		t.Error("7d:sonnet reset_at_unix should be non-zero")
+	}
+
+	opus, ok := result.Windows[quota.WindowName("7d:opus")]
+	if !ok {
+		t.Fatal("missing 7d:opus window")
+	}
+	if opus.RemainingPct != 60 {
+		t.Errorf("7d:opus remaining_pct = %d, want 60", opus.RemainingPct)
+	}
+	if opus.ResetAtUnix == 0 {
+		t.Error("7d:opus reset_at_unix should be non-zero")
+	}
+}

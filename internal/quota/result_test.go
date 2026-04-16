@@ -30,6 +30,15 @@ func TestResultMinRemainingPct(t *testing.T) {
 			Window5Hour: {RemainingPct: 80},
 			Window7Day:  {RemainingPct: 30},
 		}, 30},
+		{"ignores scoped windows when shared windows exist", map[WindowName]Window{
+			Window5Hour:             {RemainingPct: 60},
+			Window7Day:              {RemainingPct: 80},
+			WindowName("7d:sonnet"): {RemainingPct: 0},
+		}, 60},
+		{"falls back to scoped windows when no shared windows exist", map[WindowName]Window{
+			WindowName("7d:sonnet"): {RemainingPct: 25},
+			WindowName("7d:opus"):   {RemainingPct: 10},
+		}, 10},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,6 +83,14 @@ func TestStatusFromWindows(t *testing.T) {
 		{"mixed one 0 one positive", map[WindowName]Window{
 			Window5Hour: {RemainingPct: 0},
 			Window7Day:  {RemainingPct: 80},
+		}, StatusExhausted},
+		{"scoped exhaustion does not exhaust whole account when shared windows remain", map[WindowName]Window{
+			Window5Hour:             {RemainingPct: 60},
+			Window7Day:              {RemainingPct: 80},
+			WindowName("7d:sonnet"): {RemainingPct: 0},
+		}, StatusOK},
+		{"scoped-only windows still exhaust when depleted", map[WindowName]Window{
+			WindowName("7d:sonnet"): {RemainingPct: 0},
 		}, StatusExhausted},
 	}
 	for _, tt := range tests {

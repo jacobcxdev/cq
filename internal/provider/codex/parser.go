@@ -18,7 +18,7 @@ var (
 func parseUsage(body []byte, email, accountID string) quota.Result {
 	var usage struct {
 		PlanType  string `json:"plan_type"`
-		RateLimit struct {
+		RateLimit *struct {
 			PrimaryWindow *struct {
 				UsedPercent float64 `json:"used_percent"`
 				ResetAt     any     `json:"reset_at"`
@@ -28,28 +28,48 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 				ResetAt     any     `json:"reset_at"`
 			} `json:"secondary_window"`
 		} `json:"rate_limit"`
+		AdditionalRateLimits []struct {
+			LimitName string `json:"limit_name"`
+			RateLimit *struct {
+				PrimaryWindow *struct {
+					UsedPercent float64 `json:"used_percent"`
+					ResetAt     any     `json:"reset_at"`
+				} `json:"primary_window"`
+				SecondaryWindow *struct {
+					UsedPercent float64 `json:"used_percent"`
+					ResetAt     any     `json:"reset_at"`
+				} `json:"secondary_window"`
+			} `json:"rate_limit"`
+		} `json:"additional_rate_limits"`
 	}
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)
 	}
 
-	windows := make(map[quota.WindowName]quota.Window)
-	if usage.RateLimit.PrimaryWindow != nil {
-		pct := int(math.Round(100 - usage.RateLimit.PrimaryWindow.UsedPercent))
+	toWindow := func(usedPercent float64, resetAt any) quota.Window {
+		pct := int(math.Round(100 - usedPercent))
 		pct = max(0, min(100, pct))
-		epoch := parseNumericResetAt(usage.RateLimit.PrimaryWindow.ResetAt)
-		windows[quota.Window5Hour] = quota.Window{
-			RemainingPct: pct,
-			ResetAtUnix:  epoch,
+		return quota.Window{RemainingPct: pct, ResetAtUnix: parseNumericResetAt(resetAt)}
+	}
+
+	windows := make(map[quota.WindowName]quota.Window)
+	if usage.RateLimit != nil {
+		if usage.RateLimit.PrimaryWindow != nil {
+			windows[quota.Window5Hour] = toWindow(usage.RateLimit.PrimaryWindow.UsedPercent, usage.RateLimit.PrimaryWindow.ResetAt)
+		}
+		if usage.RateLimit.SecondaryWindow != nil {
+			windows[quota.Window7Day] = toWindow(usage.RateLimit.SecondaryWindow.UsedPercent, usage.RateLimit.SecondaryWindow.ResetAt)
 		}
 	}
-	if usage.RateLimit.SecondaryWindow != nil {
-		pct := int(math.Round(100 - usage.RateLimit.SecondaryWindow.UsedPercent))
-		pct = max(0, min(100, pct))
-		epoch := parseNumericResetAt(usage.RateLimit.SecondaryWindow.ResetAt)
-		windows[quota.Window7Day] = quota.Window{
-			RemainingPct: pct,
-			ResetAtUnix:  epoch,
+	for _, extra := range usage.AdditionalRateLimits {
+		if extra.LimitName == "" || extra.RateLimit == nil {
+			continue
+		}
+		if extra.RateLimit.PrimaryWindow != nil {
+			windows[quota.WindowName("5h:"+extra.LimitName)] = toWindow(extra.RateLimit.PrimaryWindow.UsedPercent, extra.RateLimit.PrimaryWindow.ResetAt)
+		}
+		if extra.RateLimit.SecondaryWindow != nil {
+			windows[quota.WindowName("7d:"+extra.LimitName)] = toWindow(extra.RateLimit.SecondaryWindow.UsedPercent, extra.RateLimit.SecondaryWindow.ResetAt)
 		}
 	}
 

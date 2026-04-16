@@ -512,3 +512,72 @@ func TestBuildLabel(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeAggregatesDynamicSevenDayWindow(t *testing.T) {
+	now := int64(1_000)
+	key := quota.WindowName("7d:sonnet")
+	results := []quota.Result{
+		{
+			Status:        quota.StatusOK,
+			RateLimitTier: "default_claude_max_1x",
+			Windows: map[quota.WindowName]quota.Window{
+				key: {RemainingPct: 80, ResetAtUnix: now + 302_400},
+			},
+		},
+		{
+			Status:        quota.StatusOK,
+			RateLimitTier: "default_claude_max_1x",
+			Windows: map[quota.WindowName]quota.Window{
+				key: {RemainingPct: 60, ResetAtUnix: now + 302_400},
+			},
+		},
+	}
+
+	agg, _ := Compute(results, now, nil)
+	if agg == nil {
+		t.Fatal("expected non-nil aggregate")
+	}
+
+	sonnet, ok := agg[key]
+	if !ok {
+		t.Fatal("missing aggregate 7d:sonnet window")
+	}
+	if sonnet.RemainingPct != 70 {
+		t.Errorf("7d:sonnet remaining_pct = %d, want 70", sonnet.RemainingPct)
+	}
+}
+
+func TestComputeGatesDynamic5hWithMatching7dBucket(t *testing.T) {
+	now := int64(1_000)
+	fiveHour := quota.WindowName("5h:gpt-5.3-codex-spark")
+	sevenDay := quota.WindowName("7d:gpt-5.3-codex-spark")
+	results := []quota.Result{
+		{
+			Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				fiveHour: {RemainingPct: 80, ResetAtUnix: now + 9_000},
+				sevenDay: {RemainingPct: 0, ResetAtUnix: now + 302_400},
+			},
+		},
+		{
+			Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				fiveHour: {RemainingPct: 40, ResetAtUnix: now + 8_000},
+				sevenDay: {RemainingPct: 50, ResetAtUnix: now + 302_400},
+			},
+		},
+	}
+
+	agg, _ := Compute(results, now, nil)
+	if agg == nil {
+		t.Fatal("expected non-nil aggregate")
+	}
+
+	spark, ok := agg[fiveHour]
+	if !ok {
+		t.Fatal("missing aggregate 5h:gpt-5.3-codex-spark window")
+	}
+	if spark.RemainingPct != 40 {
+		t.Errorf("5h:gpt-5.3-codex-spark remaining_pct = %d, want 40", spark.RemainingPct)
+	}
+}

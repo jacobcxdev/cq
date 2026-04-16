@@ -70,6 +70,13 @@ func writeTTY(w io.Writer, model TTYModel) error {
 }
 
 func writeWindowRow(ew *errWriter, row TTYWindowRow) {
+	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
+		ew.write("\n")
+		ew.write(row.Label)
+		ew.write("\n")
+		return
+	}
+
 	ew.write(row.Label)
 	ew.write(row.Bar)
 	ew.write("  ")
