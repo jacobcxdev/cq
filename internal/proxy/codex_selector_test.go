@@ -261,6 +261,40 @@ func TestCodexSelector_PrefersProAccountForSparkModel(t *testing.T) {
 	}
 }
 
+func TestCodexSelector_PrefersProAccountForSparkVariant(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: true},
+			{Email: "pro@test.com", AccessToken: "tok-pro", PlanType: "pro", IsActive: false},
+		}
+	}, nil)
+
+	acct, err := sel.Select(context.WithValue(context.Background(), codexModelContextKey{}, "gpt-5.3-codex-spark-high"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.Email != "pro@test.com" {
+		t.Fatalf("email = %q, want pro@test.com", acct.Email)
+	}
+}
+
+func TestCodexSelector_PrefersProAccountForSparkWithOneMSuffix(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: true},
+			{Email: "pro@test.com", AccessToken: "tok-pro", PlanType: "pro", IsActive: false},
+		}
+	}, nil)
+
+	acct, err := sel.Select(context.WithValue(context.Background(), codexModelContextKey{}, "gpt-5.3-codex-spark[1m]"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.Email != "pro@test.com" {
+		t.Fatalf("email = %q, want pro@test.com", acct.Email)
+	}
+}
+
 func TestCodexSelector_UsesNonProAccountForNonSparkModel(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
