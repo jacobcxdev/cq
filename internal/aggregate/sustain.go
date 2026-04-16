@@ -158,8 +158,9 @@ func computeSustainability(accounts []acctInfo, winName quota.WindowName, period
 // feeds the imminent-block override. A "hot" EWMA relative to cumulative
 // indicates a recent ramp-up that cumulative rho has not caught yet; if
 // the ramp-up projects a gap within the window's imminent threshold we
-// flip the glyph and snap Pos to 0. Displayed GapStart/Duration stay on
-// the cumulative pass so the user's mental model is coherent.
+// set Override so the renderer can escalate the warning glyph without
+// rewriting the natural rho-derived Pos. Displayed GapStart/Duration stay
+// on the cumulative pass so the user's mental model is coherent.
 //
 // Displayed GapStart/Duration are populated only from the cumulative pass
 // so the gauge direction, the dry-spot deadline, and the pace-diff column
@@ -273,14 +274,12 @@ func computeGaugeInfo(
 		if gapStartMax, _, hasGapMax := firstGapSpan(ivsMax, period); hasGapMax &&
 			gapStartMax >= 0 && gapStartMax < imminentThresholdFor(winName) {
 			gi.Override = "imminent_block"
-			gi.Pos = 0
 		}
 	} else if hasGapCum && gapStartCum >= 0 && gapStartCum < imminentThresholdFor(winName) {
 		// Cumulative pass already sees an imminent gap — the override
 		// still fires even without an EWMA boost so the renderer shows
-		// the warning glyph.
+		// the warning glyph while preserving the natural rho-derived Pos.
 		gi.Override = "imminent_block"
-		gi.Pos = 0
 	}
 
 	// Populate projected-waste display fields (timing-weighted UX metric,
@@ -476,10 +475,10 @@ func posFromRho(rho float64) int {
 	}
 }
 
-// imminentThresholdFor returns the snap-to-severe threshold in seconds for
-// the given window. When a coverage gap is predicted within this threshold,
-// the gauge is one-way snapped to severe overburn regardless of the rate
-// ratio verdict. These values are ergonomic, not derived.
+// imminentThresholdFor returns the warning threshold in seconds for the given
+// window. When a coverage gap is predicted within this threshold,
+// GaugeOverride is set to "imminent_block" while the natural rho-derived
+// GaugePos is preserved. These values are ergonomic, not derived.
 func imminentThresholdFor(win quota.WindowName) float64 {
 	switch win {
 	case quota.Window5Hour:

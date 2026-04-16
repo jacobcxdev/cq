@@ -151,6 +151,58 @@ func TestBuildTTYModel_WithAggregate(t *testing.T) {
 	}
 }
 
+// TestBuildAggRows_UnderburnWithImminentOverrideKeepsUnderburn verifies that
+// when GaugePos is in the underburn range (>= 4) and GaugeOverride is
+// "imminent_block", buildAggRows must render the underburn columns (waste pct
+// + deadline) rather than the overburn columns (dry-gap duration + start).
+//
+// This is the renderer half of the GaugeOverride contract: override is an
+// orthogonal warning flag (shown via the warning glyph on the gauge icon) and
+// must not change the layout branch selected by GaugePos. Before the fix,
+// sustain.go rewrites Pos to 0, so the overburn branch fires in the renderer
+// even though the natural rate is underburn.
+func TestBuildAggRows_UnderburnWithImminentOverrideKeepsUnderburn(t *testing.T) {
+	rows := buildAggRows(map[quota.WindowName]quota.AggregateResult{
+		quota.Window7Day: {
+			RemainingPct:   90,
+			ExpectedPct:    50,
+			GaugePos:       6, // severe underburn (natural position)
+			GaugeOverride:  "imminent_block",
+			WastedPct:      42,
+			WasteDeadlineS: 7200, // 2h
+		},
+	})
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 aggregate row, got %d", len(rows))
+	}
+
+	// PaceDiff column must show waste pct (underburn: waste magnitude), not a dry-gap duration.
+	pace := stripANSI(rows[0].PaceDiff)
+	if strings.Contains(pace, "—") {
+		t.Errorf("underburn override: PaceDiff should show waste pct, got em-dash %q", pace)
+	}
+	if !strings.Contains(pace, "42%") {
+		t.Errorf("underburn override: PaceDiff should contain waste pct 42%%, got %q", pace)
+	}
+
+	// Burndown column must show waste deadline (2h), not a dry-gap start.
+	dry := stripANSI(rows[0].Burndown)
+	if strings.Contains(dry, "—") {
+		t.Errorf("underburn override: Burndown should show deadline, got em-dash %q", dry)
+	}
+	if !strings.Contains(dry, "2h") {
+		t.Errorf("underburn override: Burndown should contain deadline 2h, got %q", dry)
+	}
+
+	// The warning glyph must appear in the Reset slot (override indicator).
+	reset := rows[0].Reset
+	// fa-warning U+F071 is the override glyph; it must be present.
+	if !strings.Contains(reset, "\U0000F071") {
+		t.Errorf("underburn override: Reset slot should contain warning glyph \\uF071, got %q", reset)
+	}
+}
+
 func TestBuildAggRows_OverburnWithoutGapUsesEmDash(t *testing.T) {
 	rows := buildAggRows(map[quota.WindowName]quota.AggregateResult{
 		quota.Window5Hour: {
