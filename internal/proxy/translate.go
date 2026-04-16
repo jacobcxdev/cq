@@ -17,7 +17,7 @@ type anthropicRequest struct {
 	StopSequences []string          `json:"stop_sequences,omitempty"`
 	Metadata      json.RawMessage   `json:"metadata,omitempty"`
 	Thinking      *anthropicThinking `json:"thinking,omitempty"`
-	Effort        string            `json:"effort,omitempty"` // "low","medium","high","max"
+	Effort        string            `json:"effort,omitempty"` // "low","medium","high","xhigh","max"
 }
 
 type anthropicThinking struct {
@@ -385,9 +385,9 @@ func translateTools(tools []anthropicTool) []openaiTool {
 }
 
 // translateEffort maps Anthropic effort/thinking to OpenAI reasoning.
-// Claude Code sends effort as a top-level string: "low","medium","high","max".
+// Claude Code sends effort as a top-level string: "low","medium","high","xhigh","max".
 // Fallback: thinking.budget_tokens is mapped to effort levels.
-// Anthropic "max" is translated to OpenAI "xhigh".
+// Anthropic "max" is translated to OpenAI "xhigh"; explicit "xhigh" passes through unchanged.
 func translateEffort(effort string, thinking *anthropicThinking) *openaiReasoning {
 	// Prefer explicit effort field.
 	if effort != "" {

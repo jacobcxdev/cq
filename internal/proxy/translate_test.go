@@ -473,6 +473,7 @@ func TestTranslateEffort_NativeEffortField(t *testing.T) {
 		{"low passes through", "low", "low"},
 		{"medium passes through", "medium", "medium"},
 		{"high passes through", "high", "high"},
+		{"xhigh passes through", "xhigh", "xhigh"},
 		{"max maps to xhigh", "max", "xhigh"},
 		{"empty returns nil", "", ""},
 	}
@@ -508,6 +509,7 @@ func TestTranslateRequest_NativeEffortSetReasoning(t *testing.T) {
 		wantEffort string
 	}{
 		{"high effort", "high", "high"},
+		{"xhigh effort", "xhigh", "xhigh"},
 		{"max effort maps to xhigh", "max", "xhigh"},
 		{"low effort", "low", "low"},
 	}
