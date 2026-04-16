@@ -145,14 +145,17 @@ func rewriteCodexModelBody(body []byte) ([]byte, bool) {
 }
 
 func rewriteCodexModelName(model string) (string, bool) {
-	baseModel, effort := ParseModelEffort(model)
-	if !strings.EqualFold(baseModel, codexSparkModel) {
-		return "", false
-	}
-	if effort == "" {
+	normalised := ParseModel(model)
+	lower := strings.ToLower(normalised)
+	spark := strings.ToLower(codexSparkModel)
+	if lower == spark {
 		return codexFallbackModel, true
 	}
-	return codexFallbackModel + "-" + effort, true
+	if strings.HasPrefix(lower, spark+"-") {
+		suffix := normalised[len(codexSparkModel):]
+		return codexFallbackModel + suffix, true
+	}
+	return "", false
 }
 
 func withCodexModelContext(req *http.Request) *http.Request {

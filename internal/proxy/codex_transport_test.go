@@ -338,6 +338,38 @@ func TestCodexTokenTransport_RewritesSparkSuffixForInitialPlusSelection(t *testi
 	}
 }
 
+func TestCodexTokenTransport_RewritesSparkWithOneMSuffixForInitialPlusSelection(t *testing.T) {
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+		}
+	}, nil)
+
+	var gotModel string
+	transport := &CodexTokenTransport{
+		Selector: sel,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			gotModel = extractModel(body)
+			return makeResponse(200, "ok"), nil
+		}),
+	}
+
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark[1m]"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotModel != "gpt-5.3-codex" {
+		t.Fatalf("model = %q, want gpt-5.3-codex", gotModel)
+	}
+}
+
 func TestCodexTokenTransport_401NoAlternate(t *testing.T) {
 	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
 		{Email: "a@test.com", AccessToken: "tok-a"},

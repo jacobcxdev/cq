@@ -310,6 +310,9 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		}
 		row.Pct = pc.Render(fmt.Sprintf("\U000F0A9F %3d%%", a.RemainingPct))
 
+		// Sustainability gauge (replaces reset time slot). GaugeOverride only
+		// controls the warning glyph; GaugePos still selects the natural gauge
+		// styling and downstream overburn/on-pace/underburn layout.
 		isDim := a.RemainingPct <= 0
 		sc := gaugeStyle(a.GaugePos)
 		if isDim {

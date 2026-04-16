@@ -99,8 +99,9 @@ func codexRequestedModel(ctx context.Context) string {
 }
 
 func codexModelRequiresPro(model string) bool {
-	baseModel, _ := ParseModelEffort(model)
-	return strings.EqualFold(baseModel, codexSparkModel)
+	normalised := strings.ToLower(ParseModel(model))
+	spark := strings.ToLower(codexSparkModel)
+	return normalised == spark || strings.HasPrefix(normalised, spark+"-")
 }
 
 func codexPlanSupportsModel(plan, model string) bool {

@@ -165,8 +165,11 @@ func sweepPositions(
 // assertPhaseInvariant checks that the set of observed gauge positions across
 // a phase sweep is phase-stable: either a singleton matching the expected
 // bucket, or (for overburn scenarios where one account reaches near-zero at
-// some phase) a mix of the expected bucket and position 0 — the imminent-block
-// override escalation. Any other pattern — different non-zero non-expected
+// some phase) a mix of the expected natural bucket and the natural severe
+// overburn bucket (pos 0). The imminent-block override is an orthogonal
+// warning flag (GaugeOverride) and must NOT rewrite GaugePos to a different
+// value — so any position 0 seen here must be a natural rho result, not an
+// override side effect. Any other pattern — different non-zero non-expected
 // positions, flipping between overburn and underburn, etc. — indicates
 // phase dependence in the rate-ratio severity and fails the test.
 func assertPhaseInvariant(t *testing.T, observed []int, expected int, burnFactor float64) {
@@ -187,12 +190,11 @@ func assertPhaseInvariant(t *testing.T, observed []int, expected int, burnFactor
 		return
 	}
 
-	// Overburn scenarios may additionally hit position 0 via the
-	// imminent-block override at phases where one account's remaining
-	// becomes near-zero. This is correct behaviour: when a coverage gap is
-	// imminent in absolute clock time, the gauge MUST escalate regardless
-	// of the long-term rate ratio. We accept {expected} or {expected, 0}
-	// as long as expected is an overburn bucket.
+	// Overburn scenarios may additionally hit position 0 (severe overburn)
+	// at phases where one account's remaining becomes near-zero and rho
+	// crosses into the severe bucket naturally. We accept {expected} or
+	// {expected, 0} as long as expected is an overburn bucket. This is
+	// purely a natural rho result — GaugeOverride does not change GaugePos.
 	if burnFactor > 1.05 && len(uniq) == 2 && uniq[0] == 0 && uniq[1] == expected {
 		return
 	}
@@ -206,44 +208,79 @@ func assertPhaseInvariant(t *testing.T, observed []int, expected int, burnFactor
 	)
 }
 
-// TestGaugeImminentOverrideForShiftedTraffic verifies the imminent-block
-// override fires via the max-rate pass when EWMA signals a recent ramp-up
-// that cumulative rho hasn't caught yet. The shifted-traffic flaw would
-// otherwise mask this by averaging over accounts.
+// TestGaugeImminentOverridePreservesNaturalPos verifies the new contract:
+// GaugeOverride is an orthogonal warning flag that must NOT rewrite GaugePos.
+// When an imminent-block override fires on a scenario whose natural rho lands
+// in the underburn bucket, the natural position must be preserved.
 //
-// Cumulative pass alone sees no gap here: heavy's cumulative rate is only
-// 98/302400 ≈ 3.24e-4 pct/s (based on its 50%-elapsed state), which under
-// the uniform drain model gives light enough room to carry the period. The
-// override fires because heavy's EWMA (0.005 pct/s, ~15× cumulative) pushes
-// the max-rate demand high enough that light's apparent coverage runs out
-// inside the 21600s 7d imminent threshold.
+// Scenario: one 1x account "heavy", RemainingPct=90, window elapsed 300000s
+// out of 604800s (7d period). ResetAtUnix = now + 304800.
 //
-// Displayed GapStart comes from the cumulative pass (no gap → -1), while
-// Override and Pos come from the max-rate escalation.
-func TestGaugeImminentOverrideForShiftedTraffic(t *testing.T) {
+// Cumulative rate: used/elapsed = 10/300000 ≈ 3.33e-5 pct/s.
+// totalSupply = 1 × 100/604800 ≈ 1.653e-4 pct/s.
+// rho = 3.33e-5 / 1.653e-4 ≈ 0.2 → surplus > 0.60 → natural Pos = 6 (severe underburn).
+//
+// EWMA rate 0.005 pct/s far exceeds cumulative. Under the max-rate model,
+// remaining/ewmaRate = 90/0.005 = 18000s < 21600s imminent threshold → override fires.
+//
+// New contract: Override == "imminent_block" but Pos stays 6 (natural bucket).
+// Old (broken) behaviour: Pos was overwritten to 0, masking the true rate signal.
+func TestGaugeImminentOverridePreservesNaturalPos(t *testing.T) {
 	now := int64(10_000_000)
-	periodS := int64(7 * 24 * 3600)
+	periodS := int64(7 * 24 * 3600) // 604800
 	accounts := []acctInfo{
-		{multiplier: 20, result: quota.Result{AccountID: "heavy", Status: quota.StatusOK,
+		{multiplier: 1, result: quota.Result{AccountID: "heavy", Status: quota.StatusOK,
 			Windows: map[quota.WindowName]quota.Window{
-				quota.Window7Day: {RemainingPct: 2, ResetAtUnix: now + periodS/2},
-			}}},
-		{multiplier: 1, result: quota.Result{AccountID: "light", Status: quota.StatusOK,
-			Windows: map[quota.WindowName]quota.Window{
-				quota.Window7Day: {RemainingPct: 100, ResetAtUnix: now + periodS},
+				// elapsed = periodS - (ResetAtUnix - now) = 604800 - 304800 = 300000
+				// used = 10, rate = 10/300000, rho ≈ 0.2 → Pos 6 (severe underburn)
+				quota.Window7Day: {RemainingPct: 90, ResetAtUnix: now + 304800},
 			}}},
 	}
 
-	// Heavy's EWMA is 0.005 pct/s, ~15× its cumulative rate. The max-rate
-	// pass uses the larger value and drives the imminent-block decision.
+	// EWMA 0.005 pct/s → remaining/ewmaRate = 90/0.005 = 18000s < 21600s → fires.
 	rates := burnRateFor("heavy", quota.Window7Day, 0.005)
 
 	gi := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, rates)
-	if gi.Pos != 0 {
-		t.Errorf("Pos = %d, want 0 (imminent block)", gi.Pos)
-	}
 	if gi.Override != "imminent_block" {
 		t.Errorf("Override = %q, want %q", gi.Override, "imminent_block")
+	}
+	// Natural rho position must be preserved; override must not rewrite Pos.
+	if gi.Pos != 6 {
+		t.Errorf("Pos = %d, want 6 (natural underburn bucket preserved despite override)", gi.Pos)
+	}
+}
+
+// TestGaugeCumulativeImminentOverridePreservesNaturalPos covers the sibling
+// imminent-block path that fires without any EWMA boost. The active account is
+// only mildly overburn by rho (Pos 2), but it still runs dry before a weekly-
+// gated account becomes usable, so the cumulative pass predicts an imminent gap.
+// GaugeOverride must fire without rewriting the natural rho bucket.
+func TestGaugeCumulativeImminentOverridePreservesNaturalPos(t *testing.T) {
+	now := int64(10_000_000)
+	periodS := int64(quota.PeriodFor(quota.Window5Hour).Seconds())
+	accounts := []acctInfo{
+		{multiplier: 1, result: quota.Result{AccountID: "active", Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				// elapsed = 18000 - 4000 = 14000, used = 85, rate = 85/14000 ≈ 0.00607.
+				// totalSupply = 100/18000 ≈ 0.00556, so rho ≈ 1.09 → Pos 2 (mild overburn).
+				quota.Window5Hour: {RemainingPct: 15, ResetAtUnix: now + 4000},
+				quota.Window7Day:  {RemainingPct: 100, ResetAtUnix: now + int64(quota.PeriodFor(quota.Window7Day).Seconds())},
+			}}},
+		{multiplier: 1, result: quota.Result{AccountID: "gated", Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: now + periodS},
+				// Weekly exhaustion gates this account for 3600s, leaving a cumulative gap
+				// from active's depletion at ~2470s until the gate lifts.
+				quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now + 3600},
+			}}},
+	}
+
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, periodS, now, nil)
+	if gi.Override != "imminent_block" {
+		t.Errorf("Override = %q, want %q", gi.Override, "imminent_block")
+	}
+	if gi.Pos != 2 {
+		t.Errorf("Pos = %d, want 2 (natural mild overburn bucket preserved despite cumulative override)", gi.Pos)
 	}
 }
 
