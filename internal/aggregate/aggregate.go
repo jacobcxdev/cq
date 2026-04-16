@@ -30,10 +30,16 @@ func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates
 
 	accounts := make([]acctInfo, 0, len(valid))
 	totalMulti := 0
+	windowSet := make(map[quota.WindowName]struct{})
 	for _, r := range valid {
 		m := quota.ExtractMultiplier(r.RateLimitTier)
 		accounts = append(accounts, acctInfo{result: r, multiplier: m})
 		totalMulti += m
+		for winName := range r.Windows {
+			if quota.IsAggregable(winName) {
+				windowSet[winName] = struct{}{}
+			}
+		}
 	}
 
 	summary := &AccountSummary{
@@ -42,17 +48,16 @@ func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates
 		Label:      BuildLabel(valid),
 	}
 
-	// WindowPro is excluded because it uses different reset semantics
-	// (daily rolling) that don't compose across accounts the same way.
-	windows := []quota.WindowName{quota.Window5Hour, quota.Window7Day}
-	periods := map[quota.WindowName]int64{
-		quota.Window5Hour: int64(quota.PeriodFor(quota.Window5Hour).Seconds()),
-		quota.Window7Day:  int64(quota.PeriodFor(quota.Window7Day).Seconds()),
+	windowNames := make([]quota.WindowName, 0, len(windowSet))
+	for winName := range windowSet {
+		windowNames = append(windowNames, winName)
 	}
-	agg := make(map[quota.WindowName]quota.AggregateResult)
+	windowNames = quota.OrderedWindowNames(windowNames)
 
-	for _, winName := range windows {
-		result, ok := computeWindow(winName, periods[winName], accounts, nowEpoch, burnRates)
+	agg := make(map[quota.WindowName]quota.AggregateResult)
+	for _, winName := range windowNames {
+		periodS := int64(quota.PeriodFor(winName).Seconds())
+		result, ok := computeWindow(winName, periodS, accounts, nowEpoch, burnRates)
 		if !ok {
 			continue
 		}
@@ -71,7 +76,7 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 	var burnNum, burnDen float64
 	var sustainAccounts []acctInfo
 
-	allWeeklyExhausted := winName == quota.Window5Hour && allWeeklyExhaustedForSession(accounts)
+	allWeeklyExhausted := quota.BaseWindow(winName) == quota.Window5Hour && allWeeklyExhaustedForSession(accounts, winName)
 
 	for _, a := range accounts {
 		w, ok := a.result.Windows[winName]
@@ -86,8 +91,8 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		pct := float64(w.RemainingPct)
 		weeklyGated := false
 
-		if winName == quota.Window5Hour {
-			if weeklyExhausted(a.result) {
+		if quota.BaseWindow(winName) == quota.Window5Hour {
+			if weeklyExhausted(a.result, winName) {
 				if !allWeeklyExhausted {
 					continue
 				}
@@ -158,26 +163,38 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 	return result, true
 }
 
-func allWeeklyExhaustedForSession(accounts []acctInfo) bool {
+func allWeeklyExhaustedForSession(accounts []acctInfo, winName quota.WindowName) bool {
 	hasSessionData := false
 	for _, a := range accounts {
-		if _, ok := a.result.Windows[quota.Window5Hour]; !ok {
+		if _, ok := a.result.Windows[winName]; !ok {
 			continue
 		}
 		hasSessionData = true
-		if !weeklyExhausted(a.result) {
+		if !weeklyExhausted(a.result, winName) {
 			return false
 		}
 	}
 	return hasSessionData
 }
 
-// weeklyExhausted returns true when the 7-day window is at 0%. When this
-// happens the 5-hour window is effectively gated by the API regardless of its
-// own percentage — the account cannot consume quota until the weekly window
-// resets.
-func weeklyExhausted(result quota.Result) bool {
-	w, ok := result.Windows[quota.Window7Day]
+// weeklyExhausted returns true when the matching 7-day window is at 0%.
+// Bucket-scoped 5h windows are gated by their matching bucket-scoped 7d
+// window when present, otherwise they fall back to the shared 7d window.
+func weeklyExhausted(result quota.Result, winName quota.WindowName) bool {
+	base := quota.BaseWindow(winName)
+	if base != quota.Window5Hour {
+		return false
+	}
+
+	gateName := quota.Window7Day
+	if bucket := quota.WindowBucket(winName); bucket != "" {
+		bucketGate := quota.WindowName("7d:" + bucket)
+		if _, ok := result.Windows[bucketGate]; ok {
+			gateName = bucketGate
+		}
+	}
+
+	w, ok := result.Windows[gateName]
 	if !ok {
 		return false
 	}

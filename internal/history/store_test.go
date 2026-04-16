@@ -364,6 +364,12 @@ func TestStoreHalfLifeTable(t *testing.T) {
 	if halfLifeFor(quota.Window7Day) != 21600 {
 		t.Errorf("7d half-life = %v, want 21600", halfLifeFor(quota.Window7Day))
 	}
+	if halfLifeFor(quota.WindowName("5h:gpt-5.3-codex-spark")) != 1800 {
+		t.Errorf("5h:gpt-5.3-codex-spark half-life = %v, want 1800", halfLifeFor(quota.WindowName("5h:gpt-5.3-codex-spark")))
+	}
+	if halfLifeFor(quota.WindowName("7d:sonnet")) != 21600 {
+		t.Errorf("7d:sonnet half-life = %v, want 21600", halfLifeFor(quota.WindowName("7d:sonnet")))
+	}
 }
 
 func TestStoreClockBackward(t *testing.T) {
