@@ -13,7 +13,6 @@ import (
 // It translates the Anthropic-format request body, forwards it with Codex credentials,
 // and translates the response back to Anthropic format.
 func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte) {
-	fmt.Fprintf(os.Stderr, "cq: codex debug marker=handleCodex_entry method=%s path=%s body_bytes=%d\n", r.Method, r.URL.Path, len(body))
 	if s.CodexTransport == nil {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
@@ -42,7 +41,6 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	// Normalise [1m] suffix for response translation (effort suffixes are not stripped).
 	model := ParseModel(rawModel)
 	fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=codex protocol=anthropic-messages translated_upstream=/responses stream=%t\n", r.Method, r.URL.Path, rawModel, streaming)
-	fmt.Fprintf(os.Stderr, "cq: codex debug marker=after_translated_route_log model=%q stream=%t translated_bytes=%d\n", rawModel, streaming, len(translated))
 
 	// Build upstream request.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
