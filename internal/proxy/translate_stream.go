@@ -21,12 +21,12 @@ type StreamTranslator struct {
 	msgID      string
 
 	// accumulated state for non-streaming assembly
-	contentBlocks []anthropicContentBlock
-	currentText   strings.Builder
-	currentTool   *anthropicContentBlock
+	contentBlocks   []anthropicContentBlock
+	currentText     strings.Builder
+	currentTool     *anthropicContentBlock
 	currentToolArgs strings.Builder
-	stopReason    string
-	usage         anthropicUsage
+	stopReason      string
+	usage           anthropicUsage
 }
 
 // NewStreamTranslator creates a StreamTranslator for the given model.
@@ -123,10 +123,10 @@ func (st *StreamTranslator) handleResponseCreated(data []byte) []sseEvent {
 	msgStart := map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
-			"id":    st.msgID,
-			"type":  "message",
-			"role":  "assistant",
-			"model": st.model,
+			"id":      st.msgID,
+			"type":    "message",
+			"role":    "assistant",
+			"model":   st.model,
 			"content": []any{},
 			"usage": map[string]int{
 				"input_tokens":  0,
@@ -157,7 +157,7 @@ func (st *StreamTranslator) handleOutputItemAdded(data []byte) []sseEvent {
 		st.currentToolArgs.Reset()
 
 		block := map[string]any{
-			"type": "content_block_start",
+			"type":  "content_block_start",
 			"index": st.blockIndex,
 			"content_block": map[string]any{
 				"type":  "tool_use",
@@ -302,7 +302,6 @@ func (st *StreamTranslator) handleResponseCompleted(data []byte) []sseEvent {
 	if ev.Response.Status == "incomplete" {
 		stopReason = "max_tokens"
 	}
-	// If last block is a tool_use, set stop_reason to tool_use.
 	if len(st.contentBlocks) > 0 && st.contentBlocks[len(st.contentBlocks)-1].Type == "tool_use" {
 		stopReason = "tool_use"
 	}
