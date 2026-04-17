@@ -11,7 +11,7 @@ const countTokensPath = "/v1/messages/count_tokens"
 
 func RouteRequest(method, path, model string) Provider {
 	if method == http.MethodPost && path == countTokensPath {
-		return ProviderClaude
+		return RouteModel(model)
 	}
 	return RouteModel(model)
 }

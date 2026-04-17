@@ -138,7 +138,8 @@ func TestRouteRequest(t *testing.T) {
 		model  string
 		want   Provider
 	}{
-		{"count tokens always claude", http.MethodPost, countTokensPath, "gpt-5.4", ProviderClaude},
+		{"count tokens gpt routes codex", http.MethodPost, countTokensPath, "gpt-5.4", ProviderCodex},
+		{"count tokens claude routes claude", http.MethodPost, countTokensPath, "claude-opus-4-6", ProviderClaude},
 		{"messages codex model", http.MethodPost, "/v1/messages", "gpt-5.4", ProviderCodex},
 		{"messages claude model", http.MethodPost, "/v1/messages", "claude-opus-4-6", ProviderClaude},
 		{"non-post count tokens by model", http.MethodGet, countTokensPath, "gpt-5.4", ProviderCodex},

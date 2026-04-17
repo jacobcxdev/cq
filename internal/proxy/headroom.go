@@ -541,6 +541,9 @@ func shouldSuppressHeadroomStderrLine(line string) bool {
 	if strings.Contains(line, "Tag placeholder lost during compression, appending:") {
 		return true
 	}
+	if strings.Contains(line, " - INFO - ") {
+		return true
+	}
 	return false
 }
 

@@ -370,6 +370,17 @@ func TestDrainStderr_SuppressesKnownNoise(t *testing.T) {
 	}
 }
 
+func TestDrainStderr_SuppressesHeadroomInfoLogs(t *testing.T) {
+	text := "2026-04-17 04:31:41,662 - headroom.transforms.pipeline - INFO - Pipeline using ContentRouter for intelligent content-aware compression\n"
+	got := captureStderr(t, func() {
+		bridge := &HeadroomBridge{}
+		bridge.drainStderr(strings.NewReader(text))
+	})
+	if got != "" {
+		t.Fatalf("stderr = %q, want empty", got)
+	}
+}
+
 func TestDrainStderr_PreservesUnexpectedDiagnostics(t *testing.T) {
 	text := "unexpected diagnostic\n"
 	got := captureStderr(t, func() {

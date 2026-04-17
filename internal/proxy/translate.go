@@ -149,24 +149,51 @@ type openaiUsage struct {
 	} `json:"output_tokens_details,omitempty"`
 }
 
+type openaiInputTokenCountResponse struct {
+	Object      string `json:"object"`
+	InputTokens int    `json:"input_tokens"`
+}
+
+type anthropicCountTokensResponse struct {
+	InputTokens int `json:"input_tokens"`
+}
+
 // --- Translation functions ---
 
 // translateRequest converts an Anthropic Messages request to an OpenAI Responses request.
 // The model name is normalised via ParseModel ([1m] stripped); reasoning effort comes
 // exclusively from the request's native effort/thinking fields via translateEffort.
 func translateRequest(body []byte) ([]byte, error) {
-	var req anthropicRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	oReq, err := translateOpenAIRequest(body, true, true)
+	if err != nil {
 		return nil, err
 	}
+	return json.Marshal(oReq)
+}
 
-	storeFalse := false
+func translateCountTokensRequest(body []byte) ([]byte, error) {
+	oReq, err := translateOpenAIRequest(body, false, false)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(oReq)
+}
+
+func translateOpenAIRequest(body []byte, stream bool, includeStore bool) (openaiResponsesRequest, error) {
+	var req anthropicRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return openaiResponsesRequest{}, err
+	}
+
 	oReq := openaiResponsesRequest{
 		Model:       ParseModel(req.Model),
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
-		Stream:      true, // ChatGPT backend requires streaming
-		Store:       &storeFalse,
+		Stream:      stream,
+	}
+	if includeStore {
+		storeFalse := false
+		oReq.Store = &storeFalse
 	}
 
 	// Effort comes only from the native request fields; no model-name suffix extraction.
@@ -178,24 +205,19 @@ func translateRequest(body []byte) ([]byte, error) {
 		oReq.Instructions = "You are a helpful assistant."
 	}
 
-	// Messages → input items
 	input, err := translateMessages(req.Messages)
 	if err != nil {
-		return nil, err
+		return openaiResponsesRequest{}, err
 	}
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
-		return nil, err
+		return openaiResponsesRequest{}, err
 	}
 	oReq.Input = inputJSON
-
-	// Tools
 	oReq.Tools = translateTools(req.Tools)
-
-	// Tool choice
 	oReq.ToolChoice = translateToolChoice(req.ToolChoice)
 
-	return json.Marshal(oReq)
+	return oReq, nil
 }
 
 // translateSystem extracts a string from Anthropic's system field.

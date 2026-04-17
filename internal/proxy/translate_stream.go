@@ -64,7 +64,6 @@ func (st *StreamTranslator) Translate(w http.ResponseWriter, r io.Reader) error 
 		if json.Unmarshal([]byte(data), &event) != nil {
 			continue
 		}
-
 		events := st.translateEvent(event.Type, []byte(data))
 		for _, ev := range events {
 			st.writeSSE(w, ev.event, ev.data)
