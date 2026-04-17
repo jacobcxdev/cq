@@ -427,6 +427,246 @@ func TestHandleCodex_UpstreamError(t *testing.T) {
 	}
 }
 
+func TestHandleCodexCountTokens_SelectorError(t *testing.T) {
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://api.openai.com",
+			LocalToken:     "test-tok",
+		},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{err: fmt.Errorf("no accounts")}),
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(body))
+
+	srv.handleCodexCountTokens(w, req, []byte(body))
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+}
+
+func TestHandleCodexCountTokens_Upstream429(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "test-tok",
+		},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
+			account: &codex.CodexAccount{AccessToken: "tok", AccountID: "acct"},
+		}),
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(body))
+
+	srv.handleCodexCountTokens(w, req, []byte(body))
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
+	}
+}
+
+func TestHandleCodexCountTokens_RejectsClaudeModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("codex upstream should not be called for Claude count_tokens")
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "test-tok",
+		},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
+			account: &codex.CodexAccount{AccessToken: "tok", AccountID: "acct"},
+		}),
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(body))
+
+	srv.handleCodexCountTokens(w, req, []byte(body))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "is not a Codex model") {
+		t.Fatalf("response = %s, want local model guard error", w.Body.String())
+	}
+}
+
+func TestTranslateCountTokensRequest_DisablesStreamingAndStore(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`)
+
+	translated, err := translateCountTokensRequest(body)
+	if err != nil {
+		t.Fatalf("translateCountTokensRequest() error = %v", err)
+	}
+
+	var req openaiResponsesRequest
+	if err := json.Unmarshal(translated, &req); err != nil {
+		t.Fatalf("unmarshal translated request: %v", err)
+	}
+	if req.Stream {
+		t.Fatal("translated count_tokens request should not enable streaming")
+	}
+	if req.Store != nil {
+		t.Fatalf("translated count_tokens request store = %v, want nil", *req.Store)
+	}
+	if req.Model != "gpt-5.4" {
+		t.Fatalf("translated model = %q, want gpt-5.4", req.Model)
+	}
+}
+
+func TestRouteRequest_CountTokensRoutesByModel(t *testing.T) {
+	if got := RouteRequest(http.MethodPost, countTokensPath, "gpt-5.4"); got != ProviderCodex {
+		t.Fatalf("gpt count_tokens provider = %v, want %v", got, ProviderCodex)
+	}
+	if got := RouteRequest(http.MethodPost, countTokensPath, "claude-sonnet-4-6"); got != ProviderClaude {
+		t.Fatalf("claude count_tokens provider = %v, want %v", got, ProviderClaude)
+	}
+}
+
+func TestServer_GPTCountTokensRoutesToCodex(t *testing.T) {
+	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("claude upstream should not be called for GPT count_tokens")
+	}))
+	defer claudeUpstream.Close()
+
+	codexHits := 0
+	codexUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		codexHits++
+		if r.URL.Path != "/v1/responses/input_tokens" {
+			t.Fatalf("upstream path = %q, want %q", r.URL.Path, "/v1/responses/input_tokens")
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-tok" {
+			t.Fatalf("upstream auth = %q, want Bearer codex-tok", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-ID"); got != "acct" {
+			t.Fatalf("upstream account-id = %q, want acct", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		var req openaiResponsesRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("unmarshal upstream body: %v", err)
+		}
+		if req.Model != "gpt-5.4" {
+			t.Fatalf("upstream model = %q, want gpt-5.4", req.Model)
+		}
+		if req.Stream {
+			t.Fatal("count_tokens upstream request should not enable streaming")
+		}
+		if req.Store != nil {
+			t.Fatalf("count_tokens upstream request store = %v, want nil", *req.Store)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"object":"response.input_tokens","input_tokens":123}`))
+	}))
+	defer codexUpstream.Close()
+
+	future := int64(9999999999999)
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{Email: "a@test.com", AccessToken: "claude-tok", ExpiresAt: future}}}
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: claudeUpstream.URL,
+			CodexUpstream:  codexUpstream.URL,
+			LocalToken:     "tok",
+		},
+		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
+			account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"},
+		}),
+	}
+
+	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", countTokensPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if codexHits != 1 {
+		t.Fatalf("codex hits = %d, want 1", codexHits)
+	}
+	if strings.TrimSpace(w.Body.String()) != `{"input_tokens":123}` {
+		t.Fatalf("response = %s, want count_tokens payload", w.Body.String())
+	}
+}
+
+func TestServer_ClaudeCountTokensStillRoutesToClaude(t *testing.T) {
+	claudeHits := 0
+	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claudeHits++
+		if r.URL.Path != countTokensPath {
+			t.Fatalf("upstream path = %q, want %q", r.URL.Path, countTokensPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"input_tokens":123}`))
+	}))
+	defer claudeUpstream.Close()
+
+	codexUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("codex upstream should not be called for Claude count_tokens")
+	}))
+	defer codexUpstream.Close()
+
+	future := int64(9999999999999)
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{Email: "a@test.com", AccessToken: "claude-tok", ExpiresAt: future}}}
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: claudeUpstream.URL,
+			CodexUpstream:  codexUpstream.URL,
+			LocalToken:     "tok",
+		},
+		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
+		CodexTransport: newCodexTransport(&fakeCodexSelector{
+			account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"},
+		}),
+	}
+
+	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
+
+	w := httptest.NewRecorder()
+	body := `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", countTokensPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if claudeHits != 1 {
+		t.Fatalf("claude hits = %d, want 1", claudeHits)
+	}
+	if strings.TrimSpace(w.Body.String()) != `{"input_tokens":123}` {
+		t.Fatalf("response = %s, want count_tokens payload", w.Body.String())
+	}
+}
+
 func TestServer_CodexRouting(t *testing.T) {
 	// Claude upstream — should NOT be hit for Codex model.
 	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -486,58 +726,6 @@ func TestServer_CodexRouting(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if len(resp.Content) == 0 || resp.Content[0].Text != "routed!" {
 		t.Errorf("unexpected response: %s", w.Body.String())
-	}
-}
-
-func TestServer_CountTokensAlwaysRoutesToClaude(t *testing.T) {
-	claudeHits := 0
-	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		claudeHits++
-		if r.URL.Path != countTokensPath {
-			t.Fatalf("upstream path = %q, want %q", r.URL.Path, countTokensPath)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"input_tokens":123}`))
-	}))
-	defer claudeUpstream.Close()
-
-	codexUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Fatal("codex upstream should not be called for count_tokens")
-	}))
-	defer codexUpstream.Close()
-
-	future := int64(9999999999999)
-	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{{Email: "a@test.com", AccessToken: "claude-tok", ExpiresAt: future}}}
-
-	srv := &Server{
-		Config: &Config{
-			ClaudeUpstream: claudeUpstream.URL,
-			CodexUpstream:  codexUpstream.URL,
-			LocalToken:     "tok",
-		},
-		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
-			account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"},
-		}),
-	}
-
-	handler := srv.proxyHandler(mustParseURL(claudeUpstream.URL))
-
-	w := httptest.NewRecorder()
-	body := `{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`
-	req := httptest.NewRequest("POST", countTokensPath, strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok")
-	req.Header.Set("Content-Type", "application/json")
-	handler(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	if claudeHits != 1 {
-		t.Fatalf("claude hits = %d, want 1", claudeHits)
-	}
-	if strings.TrimSpace(w.Body.String()) != `{"input_tokens":123}` {
-		t.Fatalf("response = %s, want count_tokens payload", w.Body.String())
 	}
 }
 

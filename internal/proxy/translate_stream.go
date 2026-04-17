@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -64,6 +65,7 @@ func (st *StreamTranslator) Translate(w http.ResponseWriter, r io.Reader) error 
 		if json.Unmarshal([]byte(data), &event) != nil {
 			continue
 		}
+		fmt.Fprintf(os.Stderr, "cq: codex translated stream event=%s\n", event.Type)
 
 		events := st.translateEvent(event.Type, []byte(data))
 		for _, ev := range events {
@@ -309,6 +311,7 @@ func (st *StreamTranslator) handleResponseCompleted(data []byte) []sseEvent {
 	}
 	st.stopReason = stopReason
 
+	fmt.Fprintf(os.Stderr, "cq: codex translated stream response.completed usage_present=%t status=%s\n", ev.Response.Usage != nil, ev.Response.Status)
 	if ev.Response.Usage != nil {
 		st.usage = translateUsage(ev.Response.Usage)
 	}
@@ -331,6 +334,7 @@ func (st *StreamTranslator) handleThreadTokenUsageUpdated(data []byte) []sseEven
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return nil
 	}
+	fmt.Fprintf(os.Stderr, "cq: codex translated stream thread.token_usage.updated usage_present=%t\n", ev.Usage != nil)
 	if ev.Usage != nil {
 		st.usage = translateUsage(ev.Usage)
 	}

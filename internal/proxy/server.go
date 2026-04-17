@@ -702,6 +702,7 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 		fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
 			r.Method, r.URL.Path, routeModel, providerName(routeProvider))
 		if routeProvider == ProviderCodex {
+			fmt.Fprintf(os.Stderr, "cq: codex debug marker=before_handleCodex method=%s path=%s model=%q\n", r.Method, r.URL.Path, routeModel)
 			s.handleCodex(w, r, buf)
 			return
 		}
