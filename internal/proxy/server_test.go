@@ -942,7 +942,9 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 	req := httptest.NewRequest("POST", "/responses", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	srv.handleNativeCodex(w, req)
+	stderr := captureStderr(t, func() {
+		srv.handleNativeCodex(w, req)
+	})
 
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -953,6 +955,12 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(result, "response.completed") {
 		t.Error("missing response.completed event")
+	}
+	if !strings.Contains(stderr, "provider=codex (native)") {
+		t.Fatalf("stderr missing native route log: %s", stderr)
+	}
+	if strings.Contains(stderr, "protocol=anthropic-messages") {
+		t.Fatalf("stderr unexpectedly logged translated protocol for native route: %s", stderr)
 	}
 }
 

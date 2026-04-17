@@ -189,7 +189,9 @@ func TestHandleCodex_Streaming(t *testing.T) {
 	body := `{"model":"gpt-5.4-mini","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
 
-	srv.handleCodex(w, req, []byte(body))
+	stderr := captureStderr(t, func() {
+		srv.handleCodex(w, req, []byte(body))
+	})
 
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -204,6 +206,18 @@ func TestHandleCodex_Streaming(t *testing.T) {
 	}
 	if !strings.Contains(result, "event: message_stop") {
 		t.Error("missing message_stop")
+	}
+	if !strings.Contains(result, `"input_tokens":3`) {
+		t.Error("missing translated input token usage")
+	}
+	if !strings.Contains(result, `"output_tokens":1`) {
+		t.Error("missing translated output token usage")
+	}
+	if !strings.Contains(stderr, "protocol=anthropic-messages") {
+		t.Fatalf("stderr missing translated protocol log: %s", stderr)
+	}
+	if !strings.Contains(stderr, "translated_upstream=/responses") {
+		t.Fatalf("stderr missing translated upstream log: %s", stderr)
 	}
 }
 

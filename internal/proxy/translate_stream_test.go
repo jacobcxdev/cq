@@ -140,6 +140,48 @@ func TestStreamTranslator_UsageFromThreadTokenUsageUpdated(t *testing.T) {
 	})
 }
 
+func TestStreamTranslator_UsageFromResponseCompletedOverridesEarlierTokenUpdate(t *testing.T) {
+	events := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_usage_override"}}`,
+		`data: {"type":"thread.token_usage.updated","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}`,
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4200,"output_tokens":1700,"total_tokens":5900,"input_tokens_details":{"cached_tokens":1100},"output_tokens_details":{"reasoning_tokens":700}}}}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	w := httptest.NewRecorder()
+	st := NewStreamTranslator("gpt-5.4")
+	if err := st.Translate(w, strings.NewReader(events)); err != nil {
+		t.Fatal(err)
+	}
+
+	assertMessageDeltaUsage(t, w.Body.String(), map[string]float64{
+		"input_tokens":            4200,
+		"output_tokens":           1700,
+		"total_tokens":            5900,
+		"cache_read_input_tokens": 1100,
+		"reasoning_output_tokens": 700,
+	})
+}
+
+func TestStreamTranslator_MissingUsageEmitsZeroMessageDelta(t *testing.T) {
+	events := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_zero_usage"}}`,
+		`data: {"type":"response.completed","response":{"status":"completed"}}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	w := httptest.NewRecorder()
+	st := NewStreamTranslator("gpt-5.4")
+	if err := st.Translate(w, strings.NewReader(events)); err != nil {
+		t.Fatal(err)
+	}
+
+	assertMessageDeltaUsage(t, w.Body.String(), map[string]float64{
+		"input_tokens":  0,
+		"output_tokens": 0,
+	})
+}
+
 func assertMessageDeltaUsage(t *testing.T, body string, want map[string]float64) {
 	t.Helper()
 	for _, line := range strings.Split(body, "\n") {

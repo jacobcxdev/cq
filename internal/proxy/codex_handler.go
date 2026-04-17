@@ -67,7 +67,7 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	}
 	defer resp.Body.Close()
 
-	fmt.Fprintf(os.Stderr, "cq: proxy POST %s → %d (codex)\n", upstreamURL, resp.StatusCode)
+	fmt.Fprintf(os.Stderr, "cq: proxy POST %s → %d (codex translated)\n", upstreamURL, resp.StatusCode)
 
 	// If upstream returned an error, forward it as an Anthropic-format error.
 	if resp.StatusCode >= 400 {
