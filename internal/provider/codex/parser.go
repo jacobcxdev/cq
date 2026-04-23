@@ -52,10 +52,16 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 		return quota.Window{RemainingPct: pct, ResetAtUnix: parseNumericResetAt(resetAt)}
 	}
 
+	// Free accounts have only a weekly limit; their primary_window is a 7d window.
+	primaryWindowName := quota.Window5Hour
+	if usage.PlanType == "free" {
+		primaryWindowName = quota.Window7Day
+	}
+
 	windows := make(map[quota.WindowName]quota.Window)
 	if usage.RateLimit != nil {
 		if usage.RateLimit.PrimaryWindow != nil {
-			windows[quota.Window5Hour] = toWindow(usage.RateLimit.PrimaryWindow.UsedPercent, usage.RateLimit.PrimaryWindow.ResetAt)
+			windows[primaryWindowName] = toWindow(usage.RateLimit.PrimaryWindow.UsedPercent, usage.RateLimit.PrimaryWindow.ResetAt)
 		}
 		if usage.RateLimit.SecondaryWindow != nil {
 			windows[quota.Window7Day] = toWindow(usage.RateLimit.SecondaryWindow.UsedPercent, usage.RateLimit.SecondaryWindow.ResetAt)
