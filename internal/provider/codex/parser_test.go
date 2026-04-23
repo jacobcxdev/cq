@@ -105,7 +105,7 @@ func TestParseUsageMissingWindows(t *testing.T) {
 	}
 }
 
-func TestParseUsageOnlyPrimaryWindow(t *testing.T) {
+func TestParseUsageFreeOnlyPrimaryWindowMapsTo7d(t *testing.T) {
 	onlyPrimaryJSON := []byte(`{
 		"plan_type": "free",
 		"rate_limit": {
@@ -121,15 +121,18 @@ func TestParseUsageOnlyPrimaryWindow(t *testing.T) {
 	if result.Plan != "free" {
 		t.Errorf("plan = %q, want free", result.Plan)
 	}
-	if _, ok := result.Windows[quota.Window5Hour]; !ok {
-		t.Error("expected 5h window")
+	if _, ok := result.Windows[quota.Window5Hour]; ok {
+		t.Error("unexpected 5h window for free plan — free accounts have weekly limits only")
 	}
-	if _, ok := result.Windows[quota.Window7Day]; ok {
-		t.Error("unexpected 7d window when secondary absent")
+	sevenDay, ok := result.Windows[quota.Window7Day]
+	if !ok {
+		t.Fatal("expected 7d window for free plan primary_window")
 	}
-	fiveHour := result.Windows[quota.Window5Hour]
-	if fiveHour.RemainingPct != 70 {
-		t.Errorf("5h remaining_pct = %d, want 70", fiveHour.RemainingPct)
+	if sevenDay.RemainingPct != 70 {
+		t.Errorf("7d remaining_pct = %d, want 70", sevenDay.RemainingPct)
+	}
+	if sevenDay.ResetAtUnix != 1774051200 {
+		t.Errorf("7d reset_at_unix = %d, want 1774051200", sevenDay.ResetAtUnix)
 	}
 }
 
