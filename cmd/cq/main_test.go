@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -216,6 +217,16 @@ func TestCLIParsesRemoveCommands(t *testing.T) {
 	}
 }
 
+func TestParseProxyCommandOptionsPort(t *testing.T) {
+	opts, err := parseProxyCommandOptions([]string{"--port", "19281"})
+	if err != nil {
+		t.Fatalf("parseProxyCommandOptions() error = %v", err)
+	}
+	if opts.Port != 19281 {
+		t.Fatalf("Port = %d, want 19281", opts.Port)
+	}
+}
+
 func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
 	body := findFuncBody(t, file, "runProxyStart")
@@ -281,6 +292,19 @@ func hasIdentifier(body *ast.BlockStmt, name string) bool {
 	ast.Inspect(body, func(n ast.Node) bool {
 		ident, ok := n.(*ast.Ident)
 		if ok && ident.Name == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func hasStringLiteral(body *ast.BlockStmt, value string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if ok && lit.Value == strconv.Quote(value) {
 			found = true
 			return false
 		}

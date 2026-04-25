@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/modelregistry"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -24,7 +27,11 @@ func runProxy(args []string) error {
 	}
 	switch args[0] {
 	case "start":
-		return runProxyStart()
+		opts, err := parseProxyCommandOptions(args[1:])
+		if err != nil {
+			return err
+		}
+		return runProxyStart(opts)
 	case "install":
 		return installProxyAgent()
 	case "uninstall":
@@ -32,16 +39,48 @@ func runProxy(args []string) error {
 	case "restart":
 		return restartProxyAgent()
 	case "status":
-		return runProxyStatus()
+		opts, err := parseProxyCommandOptions(args[1:])
+		if err != nil {
+			return err
+		}
+		return runProxyStatus(opts)
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
 }
 
-func runProxyStart() error {
+type proxyCommandOptions struct {
+	Port int
+}
+
+func parseProxyCommandOptions(args []string) (proxyCommandOptions, error) {
+	var opts proxyCommandOptions
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--port":
+			if i+1 >= len(args) {
+				return opts, fmt.Errorf("proxy start: --port requires a value")
+			}
+			port, err := strconv.Atoi(args[i+1])
+			if err != nil || port <= 0 || port > 65535 {
+				return opts, fmt.Errorf("proxy start: invalid port %q", args[i+1])
+			}
+			opts.Port = port
+			i++
+		default:
+			return opts, fmt.Errorf("proxy start: unknown argument %s", args[i])
+		}
+	}
+	return opts, nil
+}
+
+func runProxyStart(opts proxyCommandOptions) error {
 	cfg, err := proxy.LoadConfig()
 	if err != nil {
 		return err
+	}
+	if opts.Port != 0 {
+		cfg.Port = opts.Port
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: proxy token: %s\n", cfg.LocalToken)
@@ -134,6 +173,75 @@ func runProxyStart() error {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
 	}
 
+	fsys := fsutil.OSFileSystem{}
+	homeDir, homeErr := fsys.UserHomeDir()
+	if homeErr != nil {
+		fmt.Fprintf(os.Stderr, "cq: registry: resolve home dir: %v (registry disabled)\n", homeErr)
+	}
+
+	var pipeline *registryPipeline
+	if homeErr == nil {
+		pipeline, err = newRegistryPipeline(registryPipelineOptions{
+			FS:                 fsys,
+			HomeDir:            homeDir,
+			ClaudeUpstream:     cfg.ClaudeUpstream,
+			CodexUpstream:      cfg.CodexUpstream,
+			HTTPClient:         refreshClient,
+			CodexClientVersion: defaultCodexClientVersion(),
+			ClaudeToken:        firstClaudeAccessToken,
+			CodexToken: func() (string, error) {
+				return firstCodexAccessTokenWithRefresh(
+					context.Background(),
+					codexDiscover(),
+					func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error) {
+						return auth.RefreshCodexToken(ctx, refreshClient, refreshToken)
+					},
+					fsys,
+					homeDir,
+					codexprov.PersistCodexAccount,
+				)
+			},
+			Env:    os.Getenv,
+			Stderr: os.Stderr,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: registry: configure: %v (registry disabled)\n", err)
+			pipeline = nil
+		}
+	}
+
+	var catalog *modelregistry.Catalog
+	var registryRefresher *modelregistry.Refresher
+	publishRegistry := func() {}
+	if pipeline != nil {
+		catalog = pipeline.Catalog
+		registryRefresher = pipeline.Refresher
+		publishRegistry = pipeline.Publish
+	}
+
+	var proxyRefresher proxy.RegistryRefresher
+	if registryRefresher != nil {
+		proxyRefresher = proxy.RegistryRefresherFunc(func(ctx context.Context) (modelregistry.RefreshDiagnostics, error) {
+			diag, err := registryRefresher.Refresh(ctx)
+			writeRegistrySourceDiagnostics(os.Stderr, diag)
+			if err == nil {
+				publishRegistry()
+			}
+			return diag, err
+		})
+		initialRefreshCtx, initialRefreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if initDiag, err := registryRefresher.Refresh(initialRefreshCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: registry: initial refresh failed: %v (continuing with empty registry)\n", err)
+		} else {
+			writeRegistrySourceDiagnostics(os.Stderr, initDiag)
+			publishRegistry()
+		}
+		initialRefreshCancel()
+		if pipeline.StartReconciler != nil {
+			pipeline.StartReconciler(context.Background())
+		}
+	}
+
 	// Start headroom compression bridge if configured.
 	// HeadroomEnabled() returns true when either the legacy headroom bool is set
 	// OR when an explicit headroom_mode is configured (e.g. "cache" without "headroom: true").
@@ -145,20 +253,23 @@ func runProxyStart() error {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: headroom: %v (continuing without compression)\n", err)
 		} else {
+			headroom.Catalog = catalog
 			fmt.Fprintf(os.Stderr, "cq: headroom compression enabled (mode: %s)\n", resolvedMode)
 		}
 	}
 
 	srv := &proxy.Server{
-		Config:         cfg,
-		Selector:       selector,
-		Discover:       discover,
-		Transport:      transport,
+		Config:                cfg,
+		Selector:              selector,
+		Discover:              discover,
+		Transport:             transport,
 		CodexDiscover:         codexDiscover,
 		CodexTransport:        codexTransport,
 		CodexUpgradeTransport: codexUpgradeTransport,
-		Headroom:       headroom,
-		HeadroomMode:   resolvedMode,
+		Headroom:              headroom,
+		HeadroomMode:          resolvedMode,
+		Catalog:               catalog,
+		Refresher:             proxyRefresher,
 	}
 
 	err = srv.ListenAndServe(context.Background())
@@ -168,10 +279,13 @@ func runProxyStart() error {
 	return err
 }
 
-func runProxyStatus() error {
+func runProxyStatus(opts proxyCommandOptions) error {
 	cfg, err := proxy.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if opts.Port != 0 {
+		cfg.Port = opts.Port
 	}
 
 	addr := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.Port)

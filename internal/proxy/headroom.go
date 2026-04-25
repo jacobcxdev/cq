@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
 // HeadroomMode controls the compression strategy used by the bridge.
@@ -128,6 +130,7 @@ type HeadroomBridge struct {
 	stdin         io.WriteCloser
 	stdout        *bufio.Scanner
 	mu            sync.Mutex
+	Catalog       *modelregistry.Catalog
 	shuttingDown  atomic.Bool
 	stderrDrainWG sync.WaitGroup
 }
@@ -313,7 +316,7 @@ func (b *HeadroomBridge) compress(messages json.RawMessage, model string) (json.
 	req := headroomRequest{
 		Messages:   messages,
 		Model:      model,
-		ModelLimit: ModelMaxInputTokens(model),
+		ModelLimit: ModelMaxInputTokensWithCatalog(model, b.Catalog),
 	}
 	line, err := json.Marshal(req)
 	if err != nil {
@@ -416,7 +419,7 @@ func (b *HeadroomBridge) compressResponses(
 	req := headroomResponsesRequest{
 		Operation:    "compress_responses",
 		Model:        model,
-		ModelLimit:   ModelMaxInputTokens(model),
+		ModelLimit:   ModelMaxInputTokensWithCatalog(model, b.Catalog),
 		Input:        input,
 		Instructions: instructions,
 	}

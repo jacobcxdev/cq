@@ -24,7 +24,7 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	}
 
 	rawModel := extractModel(body)
-	if RouteModel(rawModel) != ProviderCodex {
+	if RouteModelWithCatalog(rawModel, s.Catalog) != ProviderCodex {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model %q is not a Codex model", rawModel))
 		return
 	}
@@ -111,7 +111,7 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 
 func (s *Server) handleCodexCountTokens(w http.ResponseWriter, r *http.Request, body []byte) {
 	rawModel := extractModel(body)
-	if RouteModel(rawModel) != ProviderCodex {
+	if RouteModelWithCatalog(rawModel, s.Catalog) != ProviderCodex {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("model %q is not a Codex model", rawModel))
 		return
 	}
