@@ -124,20 +124,20 @@ func attemptProxyRegistryRefresh(ctx context.Context, client httputil.Doer, port
 
 func runModelsRefresh() error {
 	deps := normaliseModelsDeps(modelsDeps{})
-	if err := pruneOverlayModels(deps); err != nil {
-		return err
-	}
-	return runRegistryRefresh(registryRefreshStrategy{
+	if err := runRegistryRefresh(registryRefreshStrategy{
 		TryProxy:     defaultTryProxyRegistryRefresh,
 		LocalRefresh: defaultLocalRegistryRefresh,
-	})
+	}); err != nil {
+		return err
+	}
+	return pruneOverlayModels(deps)
 }
 
 func runModelsRefreshWithDeps(deps modelsDeps) error {
-	if err := pruneOverlayModels(deps); err != nil {
+	if err := deps.Refresh(); err != nil {
 		return err
 	}
-	return deps.Refresh()
+	return pruneOverlayModels(deps)
 }
 
 func defaultTryProxyRegistryRefresh() (bool, error) {
@@ -287,6 +287,7 @@ func runModelsList(args []string, deps modelsDeps) error {
 	if err != nil {
 		return err
 	}
+	natives = removeNativesShadowedByOverlays(natives, overlays.Models)
 	merged := modelregistry.Merge(natives, overlays.Models)
 	entries := filterModelEntries(merged.Active, providerFilter)
 	if jsonOut {
@@ -324,10 +325,10 @@ func runModelsOverlay(args []string, deps modelsDeps) error {
 		}
 		return deps.Refresh()
 	case "prune":
-		if err := pruneOverlayModels(deps); err != nil {
+		if err := deps.Refresh(); err != nil {
 			return err
 		}
-		return deps.Refresh()
+		return pruneOverlayModels(deps)
 	default:
 		return fmt.Errorf("unknown models overlay command: %s", args[0])
 	}
@@ -482,6 +483,26 @@ func loadCachedNativeEntries(deps modelsDeps) ([]modelregistry.Entry, error) {
 	}
 
 	return all, nil
+}
+
+func removeNativesShadowedByOverlays(natives, overlays []modelregistry.Entry) []modelregistry.Entry {
+	type key struct {
+		provider modelregistry.Provider
+		id       string
+	}
+	overlaySet := make(map[key]struct{}, len(overlays))
+	for _, overlay := range overlays {
+		overlaySet[key{overlay.Provider, overlay.ID}] = struct{}{}
+	}
+
+	out := make([]modelregistry.Entry, 0, len(natives))
+	for _, native := range natives {
+		if _, ok := overlaySet[key{native.Provider, native.ID}]; ok {
+			continue
+		}
+		out = append(out, native)
+	}
+	return out
 }
 
 func filterModelEntries(entries []modelregistry.Entry, provider modelregistry.Provider) []modelregistry.Entry {
