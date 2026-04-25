@@ -108,23 +108,39 @@ func TestRunModels_OverlayAddUpdatesExisting(t *testing.T) {
 	}
 }
 
-func TestRunModels_OverlayPruneUsesCachedNativesByDefault(t *testing.T) {
+func TestRunModels_OverlayPruneKeepsOverlayWhenFreshNativesDoNotContainIt(t *testing.T) {
 	fsys, stdout, _, deps := testModelsDeps()
-	deps.Natives = nil
 	_ = fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
 "client_version":"0.124.0",
 "models":[{"slug":"gpt-5.5","display_name":"GPT-5.5","context_window":272000}]
 }`), 0o600)
-
-	if err := runModels([]string{"overlay", "add", "--provider", "codex", "--id", "gpt-5.5"}, deps); err != nil {
+	if err := runModels([]string{"overlay", "add", "--provider", "codex", "--id", "gpt-5.5", "--clone-from", "gpt-5.4"}, deps); err != nil {
 		t.Fatalf("add prunable: %v", err)
 	}
+	deps.Refresh = func() error {
+		return fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
+"client_version":"0.124.0",
+"models":[{"slug":"gpt-5.4","display_name":"GPT-5.4","context_window":272000}]
+}`), 0o600)
+	}
+
 	if err := runModels([]string{"overlay", "prune"}, deps); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "pruned 1 overlay models") {
-		t.Fatalf("stdout = %q, want prune count", stdout.String())
+	stdout.Reset()
+	if err := runModels([]string{"list", "--json"}, deps); err != nil {
+		t.Fatalf("list: %v", err)
 	}
+	var listed []modelregistry.Entry
+	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	for _, e := range listed {
+		if e.Provider == modelregistry.ProviderCodex && e.ID == "gpt-5.5" && e.Source == modelregistry.SourceOverlay {
+			return
+		}
+	}
+	t.Fatalf("listed = %+v, want gpt-5.5 overlay preserved", listed)
 }
 
 func TestRunModels_OverlayPruneUsesInjectedNatives(t *testing.T) {
@@ -152,6 +168,33 @@ func TestRunModels_OverlayPruneUsesInjectedNatives(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].ID != "gpt-5.6" {
 		t.Fatalf("listed = %+v, want only gpt-5.6", listed)
+	}
+}
+
+func TestRunModels_ListPreservesOverlaySourceWhenProjectedIntoCodexCache(t *testing.T) {
+	fsys, stdout, _, deps := testModelsDeps()
+	_ = fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
+"client_version":"0.124.0",
+"models":[{"slug":"gpt-5.5","display_name":"GPT-5.5","context_window":272000}]
+}`), 0o600)
+	if err := runModels([]string{"overlay", "add", "--provider", "codex", "--id", "gpt-5.5", "--clone-from", "gpt-5.4"}, deps); err != nil {
+		t.Fatalf("overlay add: %v", err)
+	}
+	stdout.Reset()
+
+	if err := runModels([]string{"list", "--json"}, deps); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	var listed []modelregistry.Entry
+	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("listed = %+v, want one overlay entry", listed)
+	}
+	if listed[0].Provider != modelregistry.ProviderCodex || listed[0].ID != "gpt-5.5" || listed[0].Source != modelregistry.SourceOverlay {
+		t.Fatalf("listed[0] = %+v, want codex gpt-5.5 overlay", listed[0])
 	}
 }
 
@@ -216,33 +259,40 @@ func TestRunModels_ListProviderFilterHuman(t *testing.T) {
 	}
 }
 
-func TestRunModels_RefreshPrunesBeforeRefresh(t *testing.T) {
-	fsys, _, _, deps := testModelsDeps()
+func TestRunModels_RefreshKeepsOverlayWhenFreshNativesDoNotContainIt(t *testing.T) {
+	fsys, stdout, _, deps := testModelsDeps()
 	_ = fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
 "client_version":"0.124.0",
 "models":[{"slug":"gpt-5.5","display_name":"GPT-5.5","context_window":272000}]
 }`), 0o600)
-	if err := runModels([]string{"overlay", "add", "--provider", "codex", "--id", "gpt-5.5"}, deps); err != nil {
+	if err := runModels([]string{"overlay", "add", "--provider", "codex", "--id", "gpt-5.5", "--clone-from", "gpt-5.4"}, deps); err != nil {
 		t.Fatalf("overlay add: %v", err)
+	}
+	deps.Refresh = func() error {
+		return fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
+"client_version":"0.124.0",
+"models":[{"slug":"gpt-5.4","display_name":"GPT-5.4","context_window":272000}]
+}`), 0o600)
 	}
 
 	if err := runModels([]string{"refresh"}, deps); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	deps.Stdout.(*bytes.Buffer).Reset()
+	stdout.Reset()
 	if err := runModels([]string{"list", "--json"}, deps); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 
 	var listed []modelregistry.Entry
-	if err := json.Unmarshal(deps.Stdout.(*bytes.Buffer).Bytes(), &listed); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
 		t.Fatalf("unmarshal list: %v", err)
 	}
 	for _, e := range listed {
 		if e.Provider == modelregistry.ProviderCodex && e.ID == "gpt-5.5" && e.Source == modelregistry.SourceOverlay {
-			t.Fatal("refresh should prune overlay shadowed by native model")
+			return
 		}
 	}
+	t.Fatalf("listed = %+v, want gpt-5.5 overlay preserved", listed)
 }
 
 func TestRunModels_RefreshCallsInjectedFallback(t *testing.T) {
