@@ -234,8 +234,36 @@ func TestFirstCodexAccessTokenWithRefresh_FreshTokenSkipsRefresh(t *testing.T) {
 	}
 }
 
-// TestFirstCodexAccessTokenWithRefresh_NoAccountsErrors verifies that an empty
-// account list returns an error.
+// TestFirstCodexAccessTokenWithRefresh_PrefersActiveFreshToken verifies that
+// the active account wins over an inactive account with a later expiry.
+func TestFirstCodexAccessTokenWithRefresh_PrefersActiveFreshToken(t *testing.T) {
+	now := time.Now()
+	accounts := []codexprov.CodexAccount{
+		{
+			AccessToken: "active-token",
+			ExpiresAt:   now.Add(time.Hour).UnixMilli(),
+			IsActive:    true,
+		},
+		{
+			AccessToken: "inactive-later-token",
+			ExpiresAt:   now.Add(2 * time.Hour).UnixMilli(),
+		},
+	}
+
+	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
+		return nil, errors.New("should not be called")
+	}
+	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error { return nil }
+
+	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsutil.NewMemFS(), "/home/test", persistFn)
+	if err != nil {
+		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
+	}
+	if tok != "active-token" {
+		t.Errorf("token = %q, want active-token", tok)
+	}
+}
+
 func TestFirstCodexAccessTokenWithRefresh_NoAccountsErrors(t *testing.T) {
 	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
 		return nil, errors.New("should not be called")

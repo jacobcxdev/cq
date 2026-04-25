@@ -104,8 +104,19 @@ func firstCodexAccessTokenWithRefresh(
 	}
 	now := time.Now()
 
-	// First pass: pick the best already-fresh token.
+	// First pass: prefer the active account when it already has a fresh token.
 	best, bestExpires := "", int64(0)
+	for _, account := range accounts {
+		if !account.IsActive {
+			continue
+		}
+		best, bestExpires = betterTokenCandidate(best, bestExpires, account.AccessToken, account.ExpiresAt, now)
+	}
+	if best != "" {
+		return best, nil
+	}
+
+	// Second pass: pick the best already-fresh fallback token.
 	for _, account := range accounts {
 		best, bestExpires = betterTokenCandidate(best, bestExpires, account.AccessToken, account.ExpiresAt, now)
 	}
@@ -113,7 +124,7 @@ func firstCodexAccessTokenWithRefresh(
 		return best, nil
 	}
 
-	// Second pass: attempt refresh for accounts that have a RefreshToken.
+	// Third pass: attempt refresh for accounts that have a RefreshToken.
 	// We try each in order and return the first successful refreshed token.
 	for _, account := range accounts {
 		if account.RefreshToken == "" {
