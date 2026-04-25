@@ -1,6 +1,6 @@
 # cq
 
-A CLI tool to check your AI provider quota usage at a glance. Supports **Claude**, **Codex**, and **Gemini**.
+A CLI tool to check AI provider quota usage at a glance. Supports **Claude**, **Codex**, and **Gemini**, with optional local proxy support for quota-aware routing and model registry publishing.
 
 ## Install
 
@@ -17,23 +17,98 @@ go install github.com/jacobcxdev/cq/cmd/cq@latest
 ## Usage
 
 ```bash
-cq                       # Check all providers
-cq check claude          # Check specific providers
-cq --json                # JSON output
-cq --refresh             # Bypass cache
+cq                         # Check all providers
+cq check claude codex      # Check specific providers
+cq --json                  # JSON output
+cq --refresh               # Bypass cached quota results
+cq --version               # Print version
 ```
 
-### Account Management (Claude & Codex)
+`check` accepts `claude`, `codex`, and `gemini` provider names.
+
+## Account Management
+
+Claude and Codex support stored account management:
 
 ```bash
-cq claude login          # Add account via OAuth
-cq claude accounts       # List accounts
-cq claude switch EMAIL   # Switch active account
-cq codex accounts        # List accounts
-cq codex switch EMAIL    # Switch active account
+cq claude login --activate # Add Claude account via OAuth and make it active
+cq claude accounts         # List Claude accounts
+cq claude switch EMAIL     # Switch active Claude account
+cq claude remove EMAIL     # Remove Claude account
+
+cq codex login --activate  # Add Codex account via OAuth and make it active
+cq codex accounts          # List Codex accounts
+cq codex switch EMAIL      # Switch active Codex account
+cq codex remove EMAIL      # Remove Codex account
 ```
 
-> **Note:** After switching accounts, MCP servers that use the provider's credentials (e.g. Codex MCP) may need to be reconnected to pick up the new active account.
+Gemini currently exposes account discovery only:
+
+```bash
+cq gemini accounts         # Show Gemini account
+```
+
+> **Note:** After switching accounts, MCP servers that use the provider's credentials (for example Codex MCP) may need to be reconnected to pick up the new active account.
+
+## Proxy
+
+`cq proxy` runs a local Anthropic-compatible proxy for Claude Code and other clients. It can route runtime traffic through cq while preserving provider credentials and quota awareness.
+
+```bash
+cq proxy start             # Start the proxy
+cq proxy start --port 19280
+cq proxy status            # Check proxy health
+cq proxy status --port 19280
+cq proxy install           # Install the user launch agent
+cq proxy uninstall         # Remove the user launch agent
+cq proxy restart           # Restart the user launch agent
+```
+
+The proxy config is stored at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json` when `XDG_CONFIG_HOME` is not set. If it does not exist, `cq proxy start` creates it with a random local token.
+
+Important `proxy.json` fields:
+
+| JSON field | Default | Description |
+|------------|---------|-------------|
+| `port` | `19280` | Local proxy listen port. |
+| `claude_upstream` | `https://api.anthropic.com` | Anthropic API upstream. |
+| `codex_upstream` | `https://chatgpt.com/backend-api/codex` | Codex backend upstream. |
+| `local_token` | generated | Required bearer token for local proxy requests. |
+| `headroom` | `false` | Enables the headroom compression bridge when true. |
+| `headroom_mode` | `cache` | Compression strategy when set; valid values are `cache` and `token`. |
+
+## Model Registry
+
+`cq models` manages the local model registry used by the proxy, Claude Code model caches, and Codex model cache integration.
+
+```bash
+cq models refresh                         # Refresh registry data and publish caches
+cq models list                            # List active registry models
+cq models list --json                     # JSON model list
+cq models list --provider codex           # Filter by provider: codex or anthropic
+
+cq models overlay add --provider codex --id gpt-5.5 --clone-from gpt-5.4
+cq models overlay remove --provider codex --id gpt-5.5
+cq models overlay prune                   # Remove overlays shadowed by native models
+```
+
+Registry overlays are stored at `$XDG_CONFIG_HOME/cq/models.json`, or `~/.config/cq/models.json` when `XDG_CONFIG_HOME` is not set.
+
+A registry refresh publishes provider-specific caches where supported:
+
+- Codex model cache: `$CODEX_HOME/models_cache.json`, or `~/.codex/models_cache.json`.
+- Claude Code model capabilities: `$CLAUDE_CONFIG_DIR/cache/model-capabilities.json`, or `~/.claude/cache/model-capabilities.json`.
+- Claude Code picker options: `additionalModelOptionsCache` in `~/.claude.json`.
+
+Claude Code still needs `ANTHROPIC_BASE_URL` pointed at the running proxy for runtime API traffic. The `/model` picker is populated from Claude Code config/cache files, so `cq models refresh` and the proxy publish registry-backed picker entries there.
+
+## Background Agent
+
+```bash
+cq agent install           # Install the quota refresh launch agent
+cq agent uninstall         # Remove the quota refresh launch agent
+cq refresh                 # Run a one-shot refresh
+```
 
 ## What It Shows
 
@@ -43,9 +118,26 @@ For each provider, cq displays remaining quota as a percentage bar, pace indicat
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CQ_TTL` | `30s` | Cache duration (e.g., `1m`, `5m`) |
+### Environment variables
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `CQ_TTL` | `30s` | Quota cache duration, e.g. `1m`, `5m`. |
+| `XDG_CONFIG_HOME` | `~/.config` | Base directory for cq config files. |
+| `XDG_CACHE_HOME` | platform cache dir | Base directory for cq quota cache files. |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory for model capability cache publication. |
+| `CODEX_HOME` | `~/.codex` | Codex config directory for model cache reads/writes. |
+
+### Config and cache files
+
+| Path | Purpose |
+|------|---------|
+| `~/.config/cq/proxy.json` | Local proxy port, upstreams, token, and headroom settings. |
+| `~/.config/cq/models.json` | User-managed model registry overlays. |
+| `~/.cache/cq/*.json` | Cached quota results and account metadata. |
+| `~/.claude/.credentials.json` | Claude credentials read/written for account management. |
+| `~/.claude.json` | Claude Code global config; cq writes managed model picker entries. |
+| `~/.codex/models_cache.json` | Codex model cache populated by registry refresh. |
 
 ## Licence
 
