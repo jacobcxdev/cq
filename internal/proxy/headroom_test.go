@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
 func TestConfigHeadroomJSON(t *testing.T) {
@@ -169,6 +171,38 @@ func TestCompress_KnownModel_IncludesModelLimit(t *testing.T) {
 	}
 	if *captured.ModelLimit != 1050000 {
 		t.Fatalf("model_limit = %d, want 1050000", *captured.ModelLimit)
+	}
+}
+
+func TestCompress_RegistryModel_IncludesCatalogLimit(t *testing.T) {
+	var captured struct {
+		ModelLimit *int `json:"model_limit,omitempty"`
+	}
+
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		if err := json.Unmarshal(reqBytes, &captured); err != nil {
+			t.Fatalf("unmarshal bridge request: %v", err)
+		}
+		resp, _ := json.Marshal(headroomResponse{
+			Messages:    json.RawMessage(`[{"role":"user","content":"compressed"}]`),
+			TokensSaved: 10,
+		})
+		return resp
+	})
+	bridge.Catalog = modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{
+		{Provider: modelregistry.ProviderCodex, ID: "gpt-5.5", Source: modelregistry.SourceOverlay, ContextWindow: 2000000},
+	}})
+
+	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`)
+	if _, _, err := bridge.Compress(body); err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+
+	if captured.ModelLimit == nil {
+		t.Fatal("model_limit missing from bridge request")
+	}
+	if *captured.ModelLimit != 2000000 {
+		t.Fatalf("model_limit = %d, want 2000000", *captured.ModelLimit)
 	}
 }
 

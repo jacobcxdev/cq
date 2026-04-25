@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
 // ModelMetadata is the minimal capability shape used by the proxy model catalogue,
@@ -48,6 +50,44 @@ func ModelMaxInputTokens(model string) int {
 		}
 	}
 	return 0
+}
+
+// ModelMaxInputTokensWithCatalog returns the max input token limit for a model,
+// consulting the registry Catalog first (for overlay/inferred entries) and
+// falling back to the synthetic catalog. Returns 0 if no entry is found in
+// either source.
+func ModelMaxInputTokensWithCatalog(model string, cat *modelregistry.Catalog) int {
+	if cat != nil {
+		normalised := strings.ToLower(ParseModel(model))
+		snap := cat.Snapshot()
+		for _, e := range snap.Entries {
+			if strings.ToLower(e.ID) == normalised && e.ContextWindow > 0 {
+				return e.ContextWindow
+			}
+		}
+	}
+	return ModelMaxInputTokens(model)
+}
+
+// registryCatalogModelMetadata converts registry Codex entries to ModelMetadata
+// for inclusion in the /v1/models response. Only Codex entries are included.
+func registryCatalogModelMetadata(cat *modelregistry.Catalog) []ModelMetadata {
+	if cat == nil {
+		return nil
+	}
+	snap := cat.Snapshot()
+	var out []ModelMetadata
+	for _, e := range snap.Entries {
+		if e.Provider != modelregistry.ProviderCodex {
+			continue
+		}
+		out = append(out, ModelMetadata{
+			ID:             e.ID,
+			MaxInputTokens: e.ContextWindow,
+			MaxTokens:      e.MaxOutputTokens,
+		})
+	}
+	return out
 }
 
 type claudeModelCapabilitiesCache struct {

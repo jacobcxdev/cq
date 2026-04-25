@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	internalhttputil "github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -28,6 +29,20 @@ const (
 	legacyCodexResponsesPath = "/responses"
 	codexAppServerPath       = "/app-server"
 )
+
+// RegistryRefresher is the interface for triggering a registry refresh.
+// Implementations must be safe for concurrent calls.
+type RegistryRefresher interface {
+	Refresh(context.Context) (modelregistry.RefreshDiagnostics, error)
+}
+
+// RegistryRefresherFunc is a function adapter for RegistryRefresher.
+type RegistryRefresherFunc func(context.Context) (modelregistry.RefreshDiagnostics, error)
+
+// Refresh implements RegistryRefresher.
+func (f RegistryRefresherFunc) Refresh(ctx context.Context) (modelregistry.RefreshDiagnostics, error) {
+	return f(ctx)
+}
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
@@ -42,6 +57,12 @@ type Server struct {
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
+	// Catalog is the optional model registry catalog. When non-nil, it backs
+	// /v1/models projections, /v1/registry, and routing decisions.
+	Catalog *modelregistry.Catalog
+	// Refresher is the optional registry refresher. When non-nil, it backs
+	// the /v1/registry/refresh endpoint.
+	Refresher RegistryRefresher
 }
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
@@ -86,6 +107,9 @@ func (s *Server) handler() (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc("GET /models", s.handleCodexNativeModels)
+	mux.HandleFunc("GET /v1/registry", s.handleRegistry)
+	mux.HandleFunc("POST /v1/registry/refresh", s.handleRegistryRefresh)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
 	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
 	mux.HandleFunc(codexAppServerPath, s.handleCodexAppServerRoute)
@@ -112,15 +136,113 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Claude Code only refreshes live capabilities against first-party hosts, so
-	// this endpoint is necessary Anthropic-compatible groundwork but not sufficient
-	// on its own when ANTHROPIC_BASE_URL points at this proxy. We also write the
-	// local model-capabilities cache on proxy startup.
-	models := mergeModelMetadata(s.fetchUpstreamModels(r), SyntheticModelCatalog())
+	// /v1/models keeps runtime/API model metadata compatible with ANTHROPIC_BASE_URL.
+	// Claude Code's interactive /model picker is populated separately from
+	// additionalModelOptionsCache in ~/.claude.json; bootstrap/OAuth discovery does
+	// not use ANTHROPIC_BASE_URL and custom OAuth hosts are allowlist-restricted.
+	models := mergeModelMetadata(SyntheticModelCatalog(), registryCatalogModelMetadata(s.Catalog), s.fetchUpstreamModels(r))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"data": models,
 	})
+}
+
+// handleCodexNativeModels serves GET /models?client_version=... in the native
+// Codex ModelsResponse shape. This endpoint is used by Codex CLI to fetch the
+// available model list. No proxy token is required — the proxy binds to 127.0.0.1
+// only, so only local processes can reach this endpoint.
+func (s *Server) handleCodexNativeModels(w http.ResponseWriter, r *http.Request) {
+	if s.Catalog == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "model registry not configured")
+		return
+	}
+	snap := s.Catalog.Snapshot()
+	resp := modelregistry.CodexModelsResponse(snap)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleRegistry serves GET /v1/registry and returns the current registry
+// snapshot as JSON. Requires a valid local proxy token.
+func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
+	if !s.isValidToken(bearerToken(r)) {
+		writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+		return
+	}
+	if s.Catalog == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "model registry not configured")
+		return
+	}
+	snap := s.Catalog.Snapshot()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snap)
+}
+
+// handleRegistryRefresh serves POST /v1/registry/refresh. It calls the
+// injected Refresher and returns the result. Requires a valid local proxy token.
+// Concurrent refresh requests are safe — the Refresher is responsible for
+// serialisation (Refresher.Refresh acquires its own mutex).
+func (s *Server) handleRegistryRefresh(w http.ResponseWriter, r *http.Request) {
+	if !s.isValidToken(bearerToken(r)) {
+		writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+		return
+	}
+	if s.Refresher == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "model registry refresher not configured")
+		return
+	}
+	diag, err := s.Refresher.Refresh(r.Context())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: registry refresh: %v\n", err)
+		writeError(w, http.StatusInternalServerError, "api_error", "registry refresh failed")
+		return
+	}
+	resp := map[string]any{
+		"ok":     true,
+		"counts": diag.Counts,
+	}
+	if se := refreshSourceErrors(diag); se != nil {
+		resp["source_errors"] = se
+	}
+	if mc := refreshMalformedCounts(diag); mc != nil {
+		resp["malformed"] = mc
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// refreshSourceErrors converts the SourceErrors map in RefreshDiagnostics to a
+// map[string]string suitable for JSON serialisation. Returns nil when there are
+// no errors so the field is omitted from the response.
+func refreshSourceErrors(diag modelregistry.RefreshDiagnostics) map[string]string {
+	var out map[string]string
+	for provider, err := range diag.SourceErrors {
+		if err == nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[string(provider)] = err.Error()
+	}
+	return out
+}
+
+// refreshMalformedCounts converts the MalformedCounts map in RefreshDiagnostics
+// to a map[string]int suitable for JSON serialisation. Returns nil when there
+// are no malformed entries so the field is omitted from the response.
+func refreshMalformedCounts(diag modelregistry.RefreshDiagnostics) map[string]int {
+	var out map[string]int
+	for provider, count := range diag.MalformedCounts {
+		if count <= 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]int)
+		}
+		out[string(provider)] = count
+	}
+	return out
 }
 
 func (s *Server) fetchUpstreamModels(r *http.Request) []ModelMetadata {
@@ -698,7 +820,7 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			}
 		}
 
-		routeProvider = RouteRequest(r.Method, r.URL.Path, routeModel)
+		routeProvider = RouteRequestWithCatalog(r.Method, r.URL.Path, routeModel, s.Catalog)
 		fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
 			r.Method, r.URL.Path, routeModel, providerName(routeProvider))
 		if routeProvider == ProviderCodex {
