@@ -88,9 +88,10 @@ type codexRefreshFunc func(ctx context.Context, refreshToken string) (*auth.Code
 type codexPersistFunc func(fs fsutil.FileSystem, acct codexprov.CodexAccount, home string) error
 
 // firstCodexAccessTokenWithRefresh returns the best available Codex access token
-// from accounts. If all tokens are stale or empty but an account has a RefreshToken,
-// it calls refreshFn to obtain new tokens, persists them via persistFn, and returns
-// the refreshed access token. Fresh tokens are returned immediately without refresh.
+// from accounts. The active account's access token is returned optimistically
+// when present because upstream may still accept it despite stale local expiry
+// metadata. Otherwise, fresh fallback tokens are preferred before refreshFn is
+// used to obtain and persist new tokens from a RefreshToken.
 func firstCodexAccessTokenWithRefresh(
 	ctx context.Context,
 	accounts []codexprov.CodexAccount,
@@ -104,19 +105,16 @@ func firstCodexAccessTokenWithRefresh(
 	}
 	now := time.Now()
 
-	// First pass: prefer the active account when it already has a fresh token.
-	best, bestExpires := "", int64(0)
+	// First pass: try the active account token optimistically. Codex access tokens
+	// can remain accepted by upstream even when local expiry metadata is stale.
 	for _, account := range accounts {
-		if !account.IsActive {
-			continue
+		if account.IsActive && account.AccessToken != "" {
+			return account.AccessToken, nil
 		}
-		best, bestExpires = betterTokenCandidate(best, bestExpires, account.AccessToken, account.ExpiresAt, now)
-	}
-	if best != "" {
-		return best, nil
 	}
 
 	// Second pass: pick the best already-fresh fallback token.
+	best, bestExpires := "", int64(0)
 	for _, account := range accounts {
 		best, bestExpires = betterTokenCandidate(best, bestExpires, account.AccessToken, account.ExpiresAt, now)
 	}
