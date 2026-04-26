@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -459,6 +460,30 @@ func TestTranslateResponse_Incomplete(t *testing.T) {
 
 	if resp.StopReason != "max_tokens" {
 		t.Errorf("stop_reason = %q, want max_tokens", resp.StopReason)
+	}
+}
+
+func TestTranslateResponse_UntranslatableOutputReturnsClearError(t *testing.T) {
+	oResp := `{
+		"id": "resp_empty",
+		"status": "completed",
+		"model": "gpt-5.5",
+		"output": [{
+			"type": "message",
+			"role": "assistant",
+			"content": [{"type": "reasoning", "summary": "hidden"}]
+		}]
+	}`
+
+	_, err := translateResponse([]byte(oResp), "gpt-5.5")
+	if err == nil {
+		t.Fatal("translateResponse succeeded, want clear untranslatable output error")
+	}
+	if !strings.Contains(err.Error(), "no translatable content") {
+		t.Fatalf("error = %q, want no translatable content", err)
+	}
+	if !strings.Contains(err.Error(), "message.reasoning") {
+		t.Fatalf("error = %q, want observed content type", err)
 	}
 }
 

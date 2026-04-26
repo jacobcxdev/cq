@@ -158,7 +158,7 @@ func TestServer_CodexHandlerUsesRegistryRouting(t *testing.T) {
 		Catalog: cat,
 		CodexTransport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			called = true
-			return makeResponse(http.StatusOK, "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\ndata: [DONE]\n\n"), nil
+			return makeResponse(http.StatusOK, "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.content_part.done\",\"part\":{\"type\":\"output_text\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\ndata: [DONE]\n\n"), nil
 		}),
 	}
 
@@ -542,8 +542,8 @@ func TestServer_RegistryRefreshEndpoint_ReturnsMalformedCounts(t *testing.T) {
 	}
 
 	var resp struct {
-		OK       bool           `json:"ok"`
-		Counts   map[string]int `json:"counts"`
+		OK        bool           `json:"ok"`
+		Counts    map[string]int `json:"counts"`
 		Malformed map[string]int `json:"malformed"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {

@@ -227,7 +227,14 @@ func TestServer_HeadroomPreservesOriginalModelRouting(t *testing.T) {
 
 	codexUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"type":"response.created","response":{"id":"resp_headroom"}}`,
+			`data: {"type":"response.content_part.added","part":{"type":"output_text"}}`,
+			`data: {"type":"response.output_text.delta","delta":"ok"}`,
+			`data: {"type":"response.content_part.done","part":{"type":"output_text"}}`,
+			`data: {"type":"response.completed","response":{"status":"completed"}}`,
+			`data: [DONE]`,
+		}, "\n\n")))
 	}))
 	defer codexUpstream.Close()
 

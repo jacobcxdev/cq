@@ -97,6 +97,18 @@ func TestStreamTranslator_FunctionCall(t *testing.T) {
 	}
 }
 
+func TestStreamTranslator_AssembleResponseUntranslatableOutputReturnsClearError(t *testing.T) {
+	st := NewStreamTranslator("gpt-5.5")
+
+	_, err := st.AssembleResponse("gpt-5.5")
+	if err == nil {
+		t.Fatal("AssembleResponse succeeded, want clear untranslatable output error")
+	}
+	if !strings.Contains(err.Error(), "no translatable content") {
+		t.Fatalf("error = %q, want no translatable content", err)
+	}
+}
+
 func TestStreamTranslator_UsageInMessageDelta(t *testing.T) {
 	events := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_3"}}`,
