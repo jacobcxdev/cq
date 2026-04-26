@@ -1,23 +1,27 @@
 package proxy
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // --- Anthropic Messages types (subset for translation) ---
 
 type anthropicRequest struct {
-	Model         string            `json:"model"`
-	System        json.RawMessage   `json:"system,omitempty"`
-	Messages      []anthropicMsg    `json:"messages"`
-	MaxTokens     int               `json:"max_tokens,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	TopP          *float64          `json:"top_p,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	Tools         []anthropicTool   `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage   `json:"tool_choice,omitempty"`
-	StopSequences []string          `json:"stop_sequences,omitempty"`
-	Metadata      json.RawMessage   `json:"metadata,omitempty"`
+	Model         string             `json:"model"`
+	System        json.RawMessage    `json:"system,omitempty"`
+	Messages      []anthropicMsg     `json:"messages"`
+	MaxTokens     int                `json:"max_tokens,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	TopP          *float64           `json:"top_p,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	Tools         []anthropicTool    `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage    `json:"tool_choice,omitempty"`
+	StopSequences []string           `json:"stop_sequences,omitempty"`
+	Metadata      json.RawMessage    `json:"metadata,omitempty"`
 	Thinking      *anthropicThinking `json:"thinking,omitempty"`
-	Effort        string            `json:"effort,omitempty"` // "low","medium","high","xhigh","max"
+	Effort        string             `json:"effort,omitempty"` // "low","medium","high","xhigh","max"
 }
 
 type anthropicThinking struct {
@@ -47,38 +51,38 @@ type anthropicTool struct {
 }
 
 type anthropicResponse struct {
-	ID           string                  `json:"id"`
-	Type         string                  `json:"type"`
-	Role         string                  `json:"role"`
-	Content      []anthropicContentBlock `json:"content"`
-	Model        string                  `json:"model"`
-	StopReason   string                  `json:"stop_reason"`
-	Usage        anthropicUsage          `json:"usage"`
+	ID         string                  `json:"id"`
+	Type       string                  `json:"type"`
+	Role       string                  `json:"role"`
+	Content    []anthropicContentBlock `json:"content"`
+	Model      string                  `json:"model"`
+	StopReason string                  `json:"stop_reason"`
+	Usage      anthropicUsage          `json:"usage"`
 }
 
 type anthropicUsage struct {
-	InputTokens           int  `json:"input_tokens"`
-	OutputTokens          int  `json:"output_tokens"`
+	InputTokens              int  `json:"input_tokens"`
+	OutputTokens             int  `json:"output_tokens"`
 	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens  *int `json:"cache_read_input_tokens,omitempty"`
-	ReasoningOutputTokens *int `json:"reasoning_output_tokens,omitempty"`
-	TotalTokens           *int `json:"total_tokens,omitempty"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens,omitempty"`
+	ReasoningOutputTokens    *int `json:"reasoning_output_tokens,omitempty"`
+	TotalTokens              *int `json:"total_tokens,omitempty"`
 }
 
 // --- OpenAI Responses API types (subset for translation) ---
 
 type openaiResponsesRequest struct {
-	Model           string                `json:"model"`
-	Instructions    string                `json:"instructions,omitempty"`
-	Input           json.RawMessage       `json:"input"` // string or []inputItem
-	MaxOutputTokens int                   `json:"max_output_tokens,omitempty"`
-	Temperature     *float64              `json:"temperature,omitempty"`
-	TopP            *float64              `json:"top_p,omitempty"`
-	Stream          bool                  `json:"stream,omitempty"`
-	Store           *bool                 `json:"store,omitempty"`
-	Tools           []openaiTool          `json:"tools,omitempty"`
-	ToolChoice      json.RawMessage       `json:"tool_choice,omitempty"`
-	Reasoning       *openaiReasoning      `json:"reasoning,omitempty"`
+	Model           string           `json:"model"`
+	Instructions    string           `json:"instructions,omitempty"`
+	Input           json.RawMessage  `json:"input"` // string or []inputItem
+	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+	TopP            *float64         `json:"top_p,omitempty"`
+	Stream          bool             `json:"stream,omitempty"`
+	Store           *bool            `json:"store,omitempty"`
+	Tools           []openaiTool     `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage  `json:"tool_choice,omitempty"`
+	Reasoning       *openaiReasoning `json:"reasoning,omitempty"`
 }
 
 type openaiReasoning struct {
@@ -481,6 +485,37 @@ func translateToolChoice(raw json.RawMessage) json.RawMessage {
 	}
 }
 
+func describeOutputContentTypes(output []openaiOutputItem) string {
+	var types []string
+	for _, item := range output {
+		if item.Type != "message" {
+			types = append(types, item.Type)
+			continue
+		}
+
+		var parts []openaiOutputContent
+		if err := json.Unmarshal(item.Content, &parts); err != nil {
+			types = append(types, item.Type+".unparseable_content")
+			continue
+		}
+		if len(parts) == 0 {
+			types = append(types, item.Type+".empty_content")
+			continue
+		}
+		for _, part := range parts {
+			partType := part.Type
+			if partType == "" {
+				partType = "unknown"
+			}
+			types = append(types, item.Type+"."+partType)
+		}
+	}
+	if len(types) == 0 {
+		return "none"
+	}
+	return strings.Join(types, ",")
+}
+
 // translateResponse converts an OpenAI Responses response to an Anthropic Messages response.
 func translateResponse(body []byte, model string) ([]byte, error) {
 	var oResp openaiResponse
@@ -527,9 +562,8 @@ func translateResponse(body []byte, model string) ([]byte, error) {
 		}
 	}
 
-	// If no content was produced, add an empty text block.
 	if len(resp.Content) == 0 {
-		resp.Content = []anthropicContentBlock{{Type: "text", Text: ""}}
+		return nil, fmt.Errorf("upstream response from %s contained no translatable content (observed output types: %s)", model, describeOutputContentTypes(oResp.Output))
 	}
 
 	// Stop reason.

@@ -369,7 +369,7 @@ func (st *StreamTranslator) Collect(r io.Reader) error {
 func (st *StreamTranslator) AssembleResponse(model string) ([]byte, error) {
 	content := st.contentBlocks
 	if len(content) == 0 {
-		content = []anthropicContentBlock{{Type: "text", Text: ""}}
+		return nil, fmt.Errorf("upstream response from %s contained no translatable content", model)
 	}
 
 	stopReason := st.stopReason
@@ -402,4 +402,4 @@ func (d *discardResponseWriter) Header() http.Header {
 }
 
 func (d *discardResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (d *discardResponseWriter) WriteHeader(int)              {}
+func (d *discardResponseWriter) WriteHeader(int)             {}
