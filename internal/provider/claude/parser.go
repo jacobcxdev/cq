@@ -63,6 +63,10 @@ func parseUsage(body []byte, plan, rateLimitTier, email, uuid string) quota.Resu
 			Utilization float64 `json:"utilization"`
 			ResetsAt    string  `json:"resets_at"`
 		} `json:"seven_day_opus"`
+		SevenDayOmelette *struct {
+			Utilization float64 `json:"utilization"`
+			ResetsAt    string  `json:"resets_at"`
+		} `json:"seven_day_omelette"`
 	}
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)
@@ -86,6 +90,9 @@ func parseUsage(body []byte, plan, rateLimitTier, email, uuid string) quota.Resu
 	}
 	if usage.SevenDayOpus != nil {
 		windows[quota.WindowName("7d:opus")] = toWindow(usage.SevenDayOpus.Utilization, usage.SevenDayOpus.ResetsAt)
+	}
+	if usage.SevenDayOmelette != nil {
+		windows[quota.WindowName("7d:design")] = toWindow(usage.SevenDayOmelette.Utilization, usage.SevenDayOmelette.ResetsAt)
 	}
 
 	return quota.Result{
