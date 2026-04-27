@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/keyring"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // innerSelectorFunc adapts a function to the ClaudeSelector interface.
@@ -36,7 +37,7 @@ func makePinnedSelector(accounts []keyring.ClaudeOAuth, pin string) (*PinnedClau
 	discover := ClaudeDiscoverer(func() []keyring.ClaudeOAuth {
 		return accounts
 	})
-	sel := NewPinnedClaudeSelector(inner, discover, pin)
+	sel := NewPinnedClaudeSelector(inner, discover, pin, nil)
 	return sel, &inner
 }
 
@@ -107,6 +108,44 @@ func TestPinnedClaudeSelector_ExcludedPinDelegatesToInner(t *testing.T) {
 	}
 	if acct.Email != "fallback@test.com" {
 		t.Errorf("email = %q, want fallback@test.com", acct.Email)
+	}
+}
+
+func TestPinnedClaudeSelector_ExhaustedPinClearsAndDelegatesToInner(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "pinned@test.com", AccountUUID: "uuid-pin", AccessToken: "tok-pin", ExpiresAt: future},
+		{Email: "fallback@test.com", AccountUUID: "uuid-fallback", AccessToken: "tok-fb", ExpiresAt: future},
+	}
+	inner := innerSelectorFunc(func(ctx context.Context, exclude ...string) (*keyring.ClaudeOAuth, error) {
+		return &keyring.ClaudeOAuth{Email: "fallback@test.com", AccessToken: "tok-fb", ExpiresAt: future}, nil
+	})
+	sel := NewPinnedClaudeSelector(inner, func() []keyring.ClaudeOAuth { return accounts }, "pinned@test.com", stubQuotaReader{
+		"uuid-pin": {
+			Result: quota.Result{
+				Status: quota.StatusExhausted,
+				Windows: map[quota.WindowName]quota.Window{
+					"5h": {RemainingPct: 0},
+				},
+			},
+			FetchedAt: time.Now(),
+		},
+	})
+	expiredPin := ""
+	sel.SetPinExpireFunc(func(pin string) { expiredPin = pin })
+
+	acct, err := sel.Select(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acct.Email != "fallback@test.com" {
+		t.Errorf("email = %q, want fallback@test.com", acct.Email)
+	}
+	if got := sel.Pin(); got != "" {
+		t.Errorf("pin = %q, want cleared", got)
+	}
+	if expiredPin != "pinned@test.com" {
+		t.Errorf("expired pin = %q, want pinned@test.com", expiredPin)
 	}
 }
 

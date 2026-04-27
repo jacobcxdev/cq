@@ -149,7 +149,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 	claudeProvider := claudeprov.New(refreshClient)
 	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())
 	baseSelector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
-	selector := proxy.NewPinnedClaudeSelector(baseSelector, discover, cfg.PinnedClaudeAccount)
+	selector := proxy.NewPinnedClaudeSelector(baseSelector, discover, cfg.PinnedClaudeAccount, quotaCache)
+	selector.SetPinExpireFunc(clearPersistedClaudePin)
 	if cfg.PinnedClaudeAccount != "" {
 		fmt.Fprintf(os.Stderr, "cq: pinned claude account: %s\n", cfg.PinnedClaudeAccount)
 	}
@@ -328,6 +329,23 @@ func runProxyStart(opts proxyCommandOptions) error {
 		headroom.Stop()
 	}
 	return err
+}
+
+func clearPersistedClaudePin(pin string) {
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: clear expired claude pin %q: %v\n", pin, err)
+		return
+	}
+	if cfg.PinnedClaudeAccount != pin {
+		return
+	}
+	cfg.PinnedClaudeAccount = ""
+	if err := proxy.SaveConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: clear expired claude pin %q: %v\n", pin, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "cq: cleared expired claude pin: %s\n", pin)
 }
 
 func startProxyConfigReload(ctx context.Context, selector *proxy.PinnedClaudeSelector) {

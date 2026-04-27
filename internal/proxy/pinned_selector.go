@@ -14,8 +14,10 @@ import (
 // If the pinned account is excluded or unusable, it delegates to the inner
 // selector. Thread-safe: pin may be updated while the proxy is running.
 type PinnedClaudeSelector struct {
-	inner    ClaudeSelector
-	discover ClaudeDiscoverer
+	inner       ClaudeSelector
+	discover    ClaudeDiscoverer
+	quota       QuotaReader
+	onPinExpire func(string)
 
 	mu  sync.RWMutex
 	pin string // email or AccountUUID; empty means no pin
@@ -23,12 +25,20 @@ type PinnedClaudeSelector struct {
 
 // NewPinnedClaudeSelector creates a PinnedClaudeSelector.
 // initialPin may be empty (no pin active).
-func NewPinnedClaudeSelector(inner ClaudeSelector, discover ClaudeDiscoverer, initialPin string) *PinnedClaudeSelector {
+func NewPinnedClaudeSelector(inner ClaudeSelector, discover ClaudeDiscoverer, initialPin string, quota QuotaReader) *PinnedClaudeSelector {
 	return &PinnedClaudeSelector{
 		inner:    inner,
 		discover: discover,
 		pin:      initialPin,
+		quota:    quota,
 	}
+}
+
+// SetPinExpireFunc configures a callback invoked after the selector clears an exhausted pin.
+func (s *PinnedClaudeSelector) SetPinExpireFunc(f func(string)) {
+	s.mu.Lock()
+	s.onPinExpire = f
+	s.mu.Unlock()
 }
 
 // SetPin atomically updates the active pin. An empty string clears the pin.
@@ -88,6 +98,10 @@ func (s *PinnedClaudeSelector) Select(ctx context.Context, exclude ...string) (*
 	if isExcluded(matched, excludeSet) {
 		return s.inner.Select(ctx, exclude...)
 	}
+	if s.pinExhausted(matched) {
+		s.expirePin(pin)
+		return s.inner.Select(ctx, exclude...)
+	}
 
 	// Usability check: must have an access token, and must be either unexpired,
 	// have no expiry, or be expired with a refresh token (transport will refresh).
@@ -101,4 +115,25 @@ func (s *PinnedClaudeSelector) Select(ctx context.Context, exclude ...string) (*
 
 	result := *matched
 	return &result, nil
+}
+
+func (s *PinnedClaudeSelector) pinExhausted(acct *keyring.ClaudeOAuth) bool {
+	if s.quota == nil {
+		return false
+	}
+	snap, ok := s.quota.Snapshot(acctIdentifier(acct))
+	return ok && snap.Result.MinRemainingPct() == 0
+}
+
+func (s *PinnedClaudeSelector) expirePin(pin string) {
+	var onExpire func(string)
+	s.mu.Lock()
+	if s.pin == pin {
+		s.pin = ""
+		onExpire = s.onPinExpire
+	}
+	s.mu.Unlock()
+	if onExpire != nil {
+		onExpire(pin)
+	}
 }
