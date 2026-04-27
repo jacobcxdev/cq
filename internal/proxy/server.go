@@ -25,9 +25,11 @@ import (
 const maxRequestBody = 10 << 20 // 10 MiB
 
 const (
-	codexResponsesPath       = "/v1/responses"
-	legacyCodexResponsesPath = "/responses"
-	codexAppServerPath       = "/app-server"
+	codexResponsesPath              = "/v1/responses"
+	legacyCodexResponsesPath        = "/responses"
+	codexCompactResponsesPath       = "/v1/responses/compact"
+	legacyCodexCompactResponsesPath = "/responses/compact"
+	codexAppServerPath              = "/app-server"
 )
 
 // RegistryRefresher is the interface for triggering a registry refresh.
@@ -112,6 +114,10 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST /v1/registry/refresh", s.handleRegistryRefresh)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
 	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
+	mux.HandleFunc("GET "+codexCompactResponsesPath, s.handleCodexCompactResponsesGetRoute)
+	mux.HandleFunc("GET "+legacyCodexCompactResponsesPath, s.handleLegacyCodexCompactResponsesGetRoute)
+	mux.HandleFunc("POST "+codexCompactResponsesPath, s.handleCodexCompactResponsesRoute)
+	mux.HandleFunc("POST "+legacyCodexCompactResponsesPath, s.handleLegacyCodexCompactResponsesRoute)
 	mux.HandleFunc(codexAppServerPath, s.handleCodexAppServerRoute)
 	mux.HandleFunc("/", s.proxyHandler(upstream))
 	return mux, nil

@@ -62,6 +62,9 @@ cq proxy status --port 19280
 cq proxy install           # Install the user launch agent
 cq proxy uninstall         # Remove the user launch agent
 cq proxy restart           # Restart the user launch agent
+cq proxy pin               # Show the pinned Claude account, if any
+cq proxy pin <email-or-account-uuid>
+cq proxy pin --clear       # Clear the pinned Claude account
 ```
 
 The proxy config is stored at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json` when `XDG_CONFIG_HOME` is not set. If it does not exist, `cq proxy start` creates it with a random local token.
@@ -74,6 +77,7 @@ Important `proxy.json` fields:
 | `claude_upstream` | `https://api.anthropic.com` | Anthropic API upstream. |
 | `codex_upstream` | `https://chatgpt.com/backend-api/codex` | Codex backend upstream. |
 | `local_token` | generated | Required bearer token for local proxy requests. |
+| `pinned_claude_account` | unset | Optional Claude account email or UUID to force proxy selection. |
 | `headroom` | `false` | Enables the headroom compression bridge when true. |
 | `headroom_mode` | `cache` | Compression strategy when set; valid values are `cache` and `token`. |
 
@@ -85,7 +89,8 @@ Important `proxy.json` fields:
 cq models refresh                         # Refresh registry data and publish caches
 cq models list                            # List active registry models
 cq models list --json                     # JSON model list
-cq models list --provider codex           # Filter by provider: codex or anthropic
+cq models list --provider codex           # Filter by provider
+cq models list --provider anthropic
 
 cq models overlay add --provider codex --id gpt-5.5 --clone-from gpt-5.4
 cq models overlay remove --provider codex --id gpt-5.5
@@ -100,7 +105,7 @@ A registry refresh publishes provider-specific caches where supported:
 - Claude Code model capabilities: `$CLAUDE_CONFIG_DIR/cache/model-capabilities.json`, or `~/.claude/cache/model-capabilities.json`.
 - Claude Code picker options: `additionalModelOptionsCache` in `~/.claude.json`.
 
-Claude Code still needs `ANTHROPIC_BASE_URL` pointed at the running proxy for runtime API traffic. The `/model` picker is populated from Claude Code config/cache files, so `cq models refresh` and the proxy publish registry-backed picker entries there.
+Claude Code still needs `ANTHROPIC_BASE_URL` pointed at the running proxy for runtime API traffic. The `/model` picker is populated from Claude Code config/cache files, so `cq models refresh` and the proxy publish registry-backed picker entries there. The proxy also re-publishes picker entries automatically when it detects drift.
 
 ## Background Agent
 
@@ -122,7 +127,7 @@ For each provider, cq displays remaining quota as a percentage bar, pace indicat
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
-| `CQ_TTL` | `30s` | Quota cache duration, e.g. `1m`, `5m`. |
+| `CQ_TTL` | `30` | Quota cache duration in seconds, e.g. `60`, `300`. |
 | `XDG_CONFIG_HOME` | `~/.config` | Base directory for cq config files. |
 | `XDG_CACHE_HOME` | platform cache dir | Base directory for cq quota cache files. |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory for model capability cache publication. |
@@ -138,6 +143,8 @@ For each provider, cq displays remaining quota as a percentage bar, pace indicat
 | `~/.claude/.credentials.json` | Claude credentials read/written for account management. |
 | `~/.claude.json` | Claude Code global config; cq writes managed model picker entries. |
 | `~/.codex/models_cache.json` | Codex model cache populated by registry refresh. |
+| `~/Library/Logs/cq/proxy.log` | macOS launch agent log for the proxy service. |
+| `~/Library/Logs/cq/refresh.log` | macOS launch agent log for quota refresh. |
 
 ## Licence
 
