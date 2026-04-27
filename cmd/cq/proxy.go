@@ -22,7 +22,7 @@ import (
 
 func runProxy(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: cq proxy <start|install|uninstall|restart|status>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cq proxy <start|install|uninstall|restart|status|pin>\n")
 		return fmt.Errorf("missing subcommand")
 	}
 	switch args[0] {
@@ -44,9 +44,53 @@ func runProxy(args []string) error {
 			return err
 		}
 		return runProxyStatus(opts)
+	case "pin":
+		return runProxyPin(args[1:])
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
+}
+
+func runProxyPin(args []string) error {
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	// cq proxy pin --clear
+	if len(args) == 1 && args[0] == "--clear" {
+		cfg.PinnedClaudeAccount = ""
+		if err := proxy.SaveConfig(cfg); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		fmt.Println("Pinned Claude account cleared.")
+		fmt.Println("A running proxy will pick up the change shortly.")
+		return nil
+	}
+
+	// cq proxy pin <email-or-uuid>
+	if len(args) == 1 {
+		cfg.PinnedClaudeAccount = args[0]
+		if err := proxy.SaveConfig(cfg); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		fmt.Printf("Pinned Claude account set to %q.\n", args[0])
+		fmt.Println("A running proxy will pick up the change shortly.")
+		return nil
+	}
+
+	// cq proxy pin (no args) — show current pin
+	if len(args) == 0 {
+		if cfg.PinnedClaudeAccount == "" {
+			fmt.Println("No pin is active. All Claude requests use automatic account selection.")
+		} else {
+			fmt.Printf("Pinned Claude account: %s\n", cfg.PinnedClaudeAccount)
+		}
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Usage: cq proxy pin [--clear | <email-or-account-uuid>]\n")
+	return fmt.Errorf("unexpected arguments")
 }
 
 type proxyCommandOptions struct {
@@ -104,7 +148,15 @@ func runProxyStart(opts proxyCommandOptions) error {
 
 	claudeProvider := claudeprov.New(refreshClient)
 	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())
-	selector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
+	baseSelector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
+	selector := proxy.NewPinnedClaudeSelector(baseSelector, discover, cfg.PinnedClaudeAccount, quotaCache)
+	selector.SetPinExpireFunc(clearPersistedClaudePin)
+	if cfg.PinnedClaudeAccount != "" {
+		fmt.Fprintf(os.Stderr, "cq: pinned claude account: %s\n", cfg.PinnedClaudeAccount)
+	}
+	proxyCtx, proxyCancel := context.WithCancel(context.Background())
+	defer proxyCancel()
+	startProxyConfigReload(proxyCtx, selector)
 
 	accountsMgr := &claudeprov.Accounts{HTTP: refreshClient}
 	switcher := proxy.AccountSwitcher(func(ctx context.Context, email string) error {
@@ -272,11 +324,58 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Refresher:             proxyRefresher,
 	}
 
-	err = srv.ListenAndServe(context.Background())
+	err = srv.ListenAndServe(proxyCtx)
 	if headroom != nil {
 		headroom.Stop()
 	}
 	return err
+}
+
+func clearPersistedClaudePin(pin string) {
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: clear expired claude pin %q: %v\n", pin, err)
+		return
+	}
+	if cfg.PinnedClaudeAccount != pin {
+		return
+	}
+	cfg.PinnedClaudeAccount = ""
+	if err := proxy.SaveConfig(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: clear expired claude pin %q: %v\n", pin, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "cq: cleared expired claude pin: %s\n", pin)
+}
+
+func startProxyConfigReload(ctx context.Context, selector *proxy.PinnedClaudeSelector) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reloadProxyConfig(selector)
+			}
+		}
+	}()
+}
+
+func reloadProxyConfig(selector *proxy.PinnedClaudeSelector) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "cq: proxy config reload panic: %v\n", r)
+		}
+	}()
+
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: proxy config reload: %v\n", err)
+		return
+	}
+	selector.SetPin(cfg.PinnedClaudeAccount)
 }
 
 func runProxyStatus(opts proxyCommandOptions) error {

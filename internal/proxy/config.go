@@ -33,6 +33,9 @@ type Config struct {
 	// When omitted, cq defaults to cache mode. Explicit "token" preserves the
 	// legacy token-optimised behaviour.
 	HeadroomMode string `json:"headroom_mode,omitempty"`
+	// PinnedClaudeAccount forces the proxy to route all Claude requests through
+	// a specific account identified by email or AccountUUID. Omitted when empty.
+	PinnedClaudeAccount string `json:"pinned_claude_account,omitempty"`
 }
 
 // ResolvedHeadroomMode returns the effective HeadroomMode for this config.
@@ -127,6 +130,19 @@ func generateToken() (string, error) {
 		return "", fmt.Errorf("generate proxy token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// SaveConfig writes cfg to the standard proxy config path atomically.
+func SaveConfig(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("proxy config is nil")
+	}
+	saved := *cfg
+	saved.setDefaults()
+	if err := saved.validate(); err != nil {
+		return err
+	}
+	return saveConfig(filepath.Join(configDir(), "proxy.json"), &saved)
 }
 
 func saveConfig(path string, cfg *Config) error {
