@@ -261,30 +261,38 @@ func TestParseUsageModelSpecificSevenDayWindows(t *testing.T) {
 		"five_hour": {"utilization": 30.0, "resets_at": "2026-03-20T12:00:00Z"},
 		"seven_day": {"utilization": 10.0, "resets_at": "2026-03-25T00:00:00Z"},
 		"seven_day_sonnet": {"utilization": 25.0, "resets_at": "2026-03-24T00:00:00Z"},
-		"seven_day_opus": {"utilization": 40.0, "resets_at": "2026-03-23T00:00:00Z"}
+		"seven_day_opus": {"utilization": 40.0, "resets_at": "2026-03-23T00:00:00Z"},
+		"seven_day_omelette": {"utilization": 55.0, "resets_at": "2026-03-22T00:00:00Z"}
 	}`)
 
 	result := parseUsage(body, "max", "default_claude_max_20x", "user@example.com", "abc-123")
-
-	sonnet, ok := result.Windows[quota.WindowName("7d:sonnet")]
-	if !ok {
-		t.Fatal("missing 7d:sonnet window")
-	}
-	if sonnet.RemainingPct != 75 {
-		t.Errorf("7d:sonnet remaining_pct = %d, want 75", sonnet.RemainingPct)
-	}
-	if sonnet.ResetAtUnix == 0 {
-		t.Error("7d:sonnet reset_at_unix should be non-zero")
+	tests := []struct {
+		name string
+		want int
+	}{
+		{name: "7d:sonnet", want: 75},
+		{name: "7d:opus", want: 60},
+		{name: "7d:design", want: 45},
 	}
 
-	opus, ok := result.Windows[quota.WindowName("7d:opus")]
-	if !ok {
-		t.Fatal("missing 7d:opus window")
+	for _, tc := range tests {
+		window, ok := result.Windows[quota.WindowName(tc.name)]
+		if !ok {
+			t.Fatalf("missing %s window", tc.name)
+		}
+		if window.RemainingPct != tc.want {
+			t.Errorf("%s remaining_pct = %d, want %d", tc.name, window.RemainingPct, tc.want)
+		}
+		if window.ResetAtUnix == 0 {
+			t.Errorf("%s reset_at_unix should be non-zero", tc.name)
+		}
 	}
-	if opus.RemainingPct != 60 {
-		t.Errorf("7d:opus remaining_pct = %d, want 60", opus.RemainingPct)
-	}
-	if opus.ResetAtUnix == 0 {
-		t.Error("7d:opus reset_at_unix should be non-zero")
+}
+
+func TestParseUsageDoesNotEmitDesignWindowWhenOmeletteAbsent(t *testing.T) {
+	result := parseUsage(usageJSON, "max", "default_claude_max_20x", "user@example.com", "abc-123")
+
+	if _, ok := result.Windows[quota.WindowName("7d:design")]; ok {
+		t.Fatal("unexpected 7d:design window")
 	}
 }
