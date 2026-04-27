@@ -681,6 +681,67 @@ func TestServer_ClaudeCountTokensStillRoutesToClaude(t *testing.T) {
 	}
 }
 
+func TestServer_ClaudeCodeOpenAIRequestsUseResponsesNotCompactEndpoint(t *testing.T) {
+	var gotPath string
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.test",
+			CodexUpstream:  "https://codex.test",
+			LocalToken:     "tok",
+		},
+		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			t.Fatal("claude upstream should not be called for Codex model")
+			return nil, fmt.Errorf("unexpected claude upstream request")
+		}),
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{
+				account: &codex.CodexAccount{AccessToken: "codex-tok"},
+			},
+			Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				gotPath = r.URL.Path
+				if got := r.Header.Get("Authorization"); got != "Bearer codex-tok" {
+					t.Fatalf("upstream auth = %q, want Bearer codex-tok", got)
+				}
+				body := strings.Join([]string{
+					`data: {"type":"response.created","response":{"id":"resp_123"}}`,
+					`data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant"}}`,
+					`data: {"type":"response.content_part.added","part":{"type":"output_text"}}`,
+					`data: {"type":"response.output_text.delta","delta":"ok"}`,
+					`data: {"type":"response.content_part.done","part":{"type":"output_text"}}`,
+					`data: {"type":"response.output_item.done","item":{"type":"message"}}`,
+					`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+					`data: [DONE]`,
+				}, "\n\n")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			}),
+		},
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"model":"gpt-5.4","max_tokens":64,"messages":[{"role":"user","content":"Summarise this conversation."}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("upstream path = %q, want /responses", gotPath)
+	}
+}
+
 func TestServer_CodexRouting(t *testing.T) {
 	// Claude upstream — should NOT be hit for Codex model.
 	claudeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
