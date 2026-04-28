@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
 
 // handleCodexCompactResponsesRoute handles POST /v1/responses/compact.
@@ -55,6 +56,24 @@ func rejectCodexCompactWebSocket(w http.ResponseWriter, requestPath string) {
 // No headroom compression is applied — compact requests already represent
 // a summarisation boundary; compressing them further is counterproductive.
 func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request, requestPath string) {
+	start := time.Now()
+	var model string
+	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
+		w = wrapped
+		defer func() {
+			s.emitDiagnostics(RouteEvent{
+				Time:       start.UTC(),
+				Method:     r.Method,
+				Path:       r.URL.Path,
+				Provider:   "codex",
+				RouteKind:  "codex_compact",
+				Model:      model,
+				StatusCode: rec.statusCode(),
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+		}()
+	}
+
 	if s.CodexTransport == nil {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
@@ -72,7 +91,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	model := extractModel(body)
+	model = extractModel(body)
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=codex (native compact)\n", requestPath, model)
 
 	// Build upstream request targeting /responses/compact (no headroom applied).

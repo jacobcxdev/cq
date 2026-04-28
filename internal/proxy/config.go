@@ -36,6 +36,7 @@ type Config struct {
 	// PinnedClaudeAccount forces the proxy to route all Claude requests through
 	// a specific account identified by email or AccountUUID. Omitted when empty.
 	PinnedClaudeAccount string `json:"pinned_claude_account,omitempty"`
+	DiagnosticsLog      string `json:"diagnostics_log,omitempty"`
 }
 
 // ResolvedHeadroomMode returns the effective HeadroomMode for this config.

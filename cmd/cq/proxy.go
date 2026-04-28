@@ -57,6 +57,16 @@ func runProxyPin(args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// cq proxy pin (no args) — show current pin
+	if len(args) == 0 {
+		if cfg.PinnedClaudeAccount == "" {
+			fmt.Println("No pin is active. All Claude requests use automatic account selection.")
+		} else {
+			fmt.Printf("Pinned Claude account: %s\n", cfg.PinnedClaudeAccount)
+		}
+		return nil
+	}
+
 	// cq proxy pin --clear
 	if len(args) == 1 && args[0] == "--clear" {
 		cfg.PinnedClaudeAccount = ""
@@ -70,22 +80,27 @@ func runProxyPin(args []string) error {
 
 	// cq proxy pin <email-or-uuid>
 	if len(args) == 1 {
-		cfg.PinnedClaudeAccount = args[0]
+		arg := args[0]
+		lower := strings.ToLower(arg)
+
+		// Reject reserved words that look like commands but aren't flags.
+		if lower == "clear" || lower == "remove" {
+			fmt.Fprintf(os.Stderr, "Usage: cq proxy pin [--clear | <email-or-account-uuid>]\n")
+			return fmt.Errorf("reserved word %q is not valid; did you mean --clear?", arg)
+		}
+
+		// Reject any argument that looks like an unknown flag.
+		if strings.HasPrefix(arg, "-") {
+			fmt.Fprintf(os.Stderr, "Usage: cq proxy pin [--clear | <email-or-account-uuid>]\n")
+			return fmt.Errorf("unknown flag %q", arg)
+		}
+
+		cfg.PinnedClaudeAccount = arg
 		if err := proxy.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
-		fmt.Printf("Pinned Claude account set to %q.\n", args[0])
+		fmt.Printf("Pinned Claude account set to %q.\n", arg)
 		fmt.Println("A running proxy will pick up the change shortly.")
-		return nil
-	}
-
-	// cq proxy pin (no args) — show current pin
-	if len(args) == 0 {
-		if cfg.PinnedClaudeAccount == "" {
-			fmt.Println("No pin is active. All Claude requests use automatic account selection.")
-		} else {
-			fmt.Printf("Pinned Claude account: %s\n", cfg.PinnedClaudeAccount)
-		}
 		return nil
 	}
 
@@ -310,6 +325,21 @@ func runProxyStart(opts proxyCommandOptions) error {
 		}
 	}
 
+	var diagnostics *proxy.DiagnosticsWriter
+	if cfg.DiagnosticsLog != "" {
+		diagnostics, err = proxy.OpenDiagnosticsWriter(cfg.DiagnosticsLog)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: diagnostics: %v (continuing without diagnostics)\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "cq: diagnostics enabled\n")
+			defer func() {
+				if err := diagnostics.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: diagnostics: close: %v\n", err)
+				}
+			}()
+		}
+	}
+
 	srv := &proxy.Server{
 		Config:                cfg,
 		Selector:              selector,
@@ -319,6 +349,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		CodexTransport:        codexTransport,
 		CodexUpgradeTransport: codexUpgradeTransport,
 		Headroom:              headroom,
+		Diag:                  diagnostics,
 		HeadroomMode:          resolvedMode,
 		Catalog:               catalog,
 		Refresher:             proxyRefresher,
