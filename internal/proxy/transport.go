@@ -59,6 +59,7 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	noteRouteAccount(req.Context(), claudeAccountHint(acct), false)
 
 	// Refresh upfront if token is already expired.
 	token := acct.AccessToken
@@ -160,6 +161,7 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 			token = refreshed
 		}
 
+		noteRouteAccount(req.Context(), claudeAccountHint(alt), true)
 		altResp, err := t.doRequest(req, token)
 		if err != nil {
 			last429Resp.Body.Close()
@@ -385,6 +387,13 @@ func acctIdentifier(a *keyring.ClaudeOAuth) string {
 		return a.Email
 	}
 	return a.AccessToken
+}
+
+func claudeAccountHint(a *keyring.ClaudeOAuth) string {
+	if a == nil {
+		return ""
+	}
+	return redactedAccountHint("claude", a.AccountUUID, a.Email, a.AccessToken)
 }
 
 func tracksExhaustion(req *http.Request) bool {

@@ -56,6 +56,7 @@ type Server struct {
 	CodexTransport        http.RoundTripper
 	CodexUpgradeTransport http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
 	Headroom              *HeadroomBridge
+	Diag                  *DiagnosticsWriter
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -316,14 +317,42 @@ func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.
 
 func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Request) {
 	if !isWebSocketUpgrade(r) {
+		start := time.Now()
+		message := fmt.Sprintf("%s requires websocket upgrade", codexAppServerPath)
 		w.Header().Set("Upgrade", "websocket")
-		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", fmt.Sprintf("%s requires websocket upgrade", codexAppServerPath))
+		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", message)
+		s.emitDiagnostics(RouteEvent{
+			Time:       start.UTC(),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			Provider:   "codex",
+			RouteKind:  "codex_app_server",
+			StatusCode: http.StatusUpgradeRequired,
+			LatencyMS:  time.Since(start).Milliseconds(),
+			Error:      diagnosticsErrorCode("invalid_request_error", message),
+		})
 		return
 	}
 	s.proxyCodexAppServer(w, r)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
+		w = wrapped
+		defer func() {
+			s.emitDiagnostics(RouteEvent{
+				Time:       start.UTC(),
+				Method:     r.Method,
+				Path:       r.URL.Path,
+				Provider:   "proxy",
+				RouteKind:  "health",
+				StatusCode: rec.statusCode(),
+				LatencyMS:  time.Since(start).Milliseconds(),
+			})
+		}()
+	}
+
 	var claudeCount int
 	if s.Discover != nil {
 		claudeCount = len(s.Discover())
@@ -338,6 +367,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"accounts": map[string]int{
 			"claude": claudeCount,
 			"codex":  codexCount,
+		},
+		"diagnostics": map[string]bool{
+			"enabled": s.Diag != nil,
 		},
 	}
 	if s.Headroom != nil {
@@ -379,6 +411,28 @@ func (s *Server) isValidToken(token string) bool {
 // so only local processes can reach this endpoint. Codex CLI in ChatGPT auth
 // mode doesn't support custom API keys, so we can't require the proxy token.
 func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	var model string
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
+		w = wrapped
+		defer func() {
+			event := RouteEvent{
+				Time:       start.UTC(),
+				Method:     r.Method,
+				Path:       r.URL.Path,
+				Provider:   "codex",
+				RouteKind:  "codex_native",
+				Model:      model,
+				StatusCode: rec.statusCode(),
+				LatencyMS:  time.Since(start).Milliseconds(),
+				Error:      rec.diagnosticsError(),
+			}
+			event.applyRouteDiagnostics(routeDiag)
+			s.emitDiagnostics(event)
+		}()
+	}
+
 	if s.CodexTransport == nil {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
@@ -396,7 +450,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	model := extractModel(body)
+	model = extractModel(body)
 	fmt.Fprintf(os.Stderr, "cq: route POST /responses model=%q provider=codex (native)\n", model)
 
 	// Compress Responses API input via headroom bridge if available.
@@ -420,7 +474,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	// Build upstream request — forward as-is, no translation.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
-	upReq, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	upReq, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
 		return
@@ -486,6 +540,33 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 // headroom compression — the handshake body is minimal and the subsequent
 // binary/text frames are not buffered by this proxy.
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	var rec *diagnosticsResponseWriter
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	r = r.WithContext(ctx)
+	if wrapped, recorder := s.wrapDiagnosticsResponseWriter(w); recorder != nil {
+		w = wrapped
+		rec = recorder
+		defer func() {
+			status := rec.statusCode()
+			if rec.status == 0 {
+				status = http.StatusSwitchingProtocols
+			}
+			event := RouteEvent{
+				Time:       start.UTC(),
+				Method:     r.Method,
+				Path:       r.URL.Path,
+				Provider:   "codex",
+				RouteKind:  "codex_legacy_websocket",
+				StatusCode: status,
+				LatencyMS:  time.Since(start).Milliseconds(),
+				Error:      rec.diagnosticsError(),
+			}
+			event.applyRouteDiagnostics(routeDiag)
+			s.emitDiagnostics(event)
+		}()
+	}
+
 	codexUpstream, err := url.Parse(s.Config.CodexUpstream)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
@@ -519,14 +600,41 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 // inspect that frame before selecting an account and opening the upstream
 // websocket.
 func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	statusCode := 0
+	requestedModel := ""
+	diagError := ""
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	r = r.WithContext(ctx)
+	defer func() {
+		event := RouteEvent{
+			Time:       start.UTC(),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			Provider:   "codex",
+			RouteKind:  "codex_app_server",
+			Model:      requestedModel,
+			StatusCode: statusCode,
+			LatencyMS:  time.Since(start).Milliseconds(),
+			Error:      diagError,
+		}
+		event.applyRouteDiagnostics(routeDiag)
+		s.emitDiagnostics(event)
+	}()
+
 	transport, err := s.codexAppServerTransport()
 	if err != nil {
+		statusCode = http.StatusServiceUnavailable
+		diagError = diagnosticsErrorCode("api_error", err.Error())
 		writeError(w, http.StatusServiceUnavailable, "api_error", err.Error())
 		return
 	}
 	upstreamURL, err := codexAppServerWebSocketURL(s.Config.CodexUpstream)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
+		statusCode = http.StatusInternalServerError
+		message := "invalid codex upstream URL"
+		diagError = diagnosticsErrorCode("api_error", message)
+		writeError(w, http.StatusInternalServerError, "api_error", message)
 		return
 	}
 
@@ -538,6 +646,7 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	statusCode = http.StatusSwitchingProtocols
 	defer clientConn.Close()
 	clientConn.SetReadLimit(maxRequestBody)
 
@@ -545,7 +654,6 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	requestedModel := ""
 	if messageType == websocket.TextMessage {
 		requestedModel = extractCodexAppServerThreadStartModel(message)
 	}
@@ -554,6 +662,7 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 
 	upstreamConn, acct, err := s.dialCodexAppServer(r.Context(), transport, upstreamURL, r.Header, requestedModel)
 	if err != nil {
+		diagError = diagnosticsErrorCode("api_error", "codex upstream error: "+err.Error())
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
 	}
@@ -614,6 +723,7 @@ func (s *Server) dialCodexAppServer(ctx context.Context, transport *CodexTokenTr
 			}
 			return nil, nil, fmt.Errorf("no alternate codex account available for app-server websocket")
 		}
+		noteRouteAccount(ctx, codexAccountHint(acct), len(excluded) > 0)
 		conn, resp, body, err := dialCodexAppServerWithAccount(ctx, upstreamURL, incomingHeaders, acct)
 		if err == nil {
 			if persistSwitch {
@@ -768,9 +878,34 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		var routeModel string
 		var routeProvider Provider
 		var buf []byte
+		ctx, routeDiag := withRouteDiagnostics(r.Context())
+		r = r.WithContext(ctx)
+		if diagnosticsAnthropicRouteKind(r.URL.Path) != "" {
+			if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
+				w = wrapped
+				defer func() {
+					provider := providerName(routeProvider)
+					event := RouteEvent{
+						Time:       start.UTC(),
+						Method:     r.Method,
+						Path:       r.URL.Path,
+						Provider:   provider,
+						RouteKind:  diagnosticsAnthropicRouteKind(r.URL.Path),
+						Model:      routeModel,
+						PinActive:  provider == "claude" && s.claudePinActive(),
+						StatusCode: rec.statusCode(),
+						LatencyMS:  time.Since(start).Milliseconds(),
+						Error:      rec.diagnosticsError(),
+					}
+					event.applyRouteDiagnostics(routeDiag)
+					s.emitDiagnostics(event)
+				}()
+			}
+		}
 
 		// Auth check: accept local proxy token or a known Claude account token.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -838,6 +973,99 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 	}
 }
 
+type diagnosticsResponseWriter struct {
+	http.ResponseWriter
+	status          int
+	diagnosticError string
+}
+
+func (w *diagnosticsResponseWriter) WriteHeader(status int) {
+	if status >= 200 && w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *diagnosticsResponseWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *diagnosticsResponseWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *diagnosticsResponseWriter) SetDiagnosticsError(err string) {
+	w.diagnosticError = err
+}
+
+func (w *diagnosticsResponseWriter) diagnosticsError() string {
+	return w.diagnosticError
+}
+
+func (w *diagnosticsResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+type diagnosticsFlushWriter struct {
+	*diagnosticsResponseWriter
+}
+
+func (w diagnosticsFlushWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *Server) wrapDiagnosticsResponseWriter(w http.ResponseWriter) (http.ResponseWriter, *diagnosticsResponseWriter) {
+	if s == nil || s.Diag == nil {
+		return w, nil
+	}
+	rec := &diagnosticsResponseWriter{ResponseWriter: w}
+	if _, ok := w.(http.Flusher); ok {
+		return diagnosticsFlushWriter{diagnosticsResponseWriter: rec}, rec
+	}
+	return rec, rec
+}
+
+func (s *Server) emitDiagnostics(event RouteEvent) {
+	if s == nil || s.Diag == nil {
+		return
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	}
+	if err := s.Diag.Write(event); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: diagnostics: write: %v\n", err)
+	}
+}
+
+func (s *Server) claudePinActive() bool {
+	if s == nil {
+		return false
+	}
+	if selector, ok := s.Selector.(interface{ Pin() string }); ok {
+		return selector.Pin() != ""
+	}
+	return s.Config != nil && s.Config.PinnedClaudeAccount != ""
+}
+
+func diagnosticsAnthropicRouteKind(path string) string {
+	switch path {
+	case "/v1/messages":
+		return "anthropic_messages"
+	case countTokensPath:
+		return "anthropic_count_tokens"
+	default:
+		return ""
+	}
+}
+
 func providerName(provider Provider) string {
 	switch provider {
 	case ProviderCodex:
@@ -898,6 +1126,9 @@ func truncateDebugText(text string) string {
 }
 
 func writeError(w http.ResponseWriter, status int, errType, message string) {
+	if rec, ok := w.(interface{ SetDiagnosticsError(string) }); ok {
+		rec.SetDiagnosticsError(diagnosticsErrorCode(errType, message))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -907,4 +1138,55 @@ func writeError(w http.ResponseWriter, status int, errType, message string) {
 			"message": message,
 		},
 	})
+}
+
+func diagnosticsErrorCode(errType, message string) string {
+	msg := strings.ToLower(message)
+	switch {
+	case strings.Contains(msg, "invalid proxy token"):
+		return errType + ":invalid_proxy_token"
+	case strings.Contains(msg, "no codex accounts configured") ||
+		strings.Contains(msg, "no codex accounts available") ||
+		strings.Contains(msg, "no codex accounts with valid tokens and quota"):
+		return errType + ":no_codex_accounts"
+	case strings.Contains(msg, "websocket transport is not supported"):
+		return errType + ":unsupported_websocket_transport"
+	case strings.Contains(msg, "requires websocket upgrade"):
+		return errType + ":websocket_upgrade_required"
+	case strings.Contains(msg, "only supports"):
+		return errType + ":method_not_allowed"
+	case strings.Contains(msg, "invalid codex upstream url") ||
+		strings.Contains(msg, "unsupported codex upstream scheme"):
+		return errType + ":invalid_codex_upstream"
+	case strings.Contains(msg, "create upstream request"):
+		return errType + ":invalid_upstream"
+	case strings.Contains(msg, "codex upstream error") ||
+		strings.Contains(msg, "codex upstream:") ||
+		strings.Contains(msg, "codex websocket upgrade failed"):
+		return errType + ":codex_upstream_error"
+	case strings.Contains(msg, "request translation failed"):
+		return errType + ":request_translation_failed"
+	case strings.Contains(msg, "failed to read request body"):
+		return errType + ":read_request_body"
+	case strings.Contains(msg, "request body exceeds"):
+		return errType + ":request_body_too_large"
+	case strings.Contains(msg, "not a codex model"):
+		return errType + ":invalid_route_model"
+	case strings.Contains(msg, "stream collection failed"):
+		return errType + ":stream_collection_failed"
+	case strings.Contains(msg, "response assembly failed"):
+		return errType + ":response_assembly_failed"
+	case strings.Contains(msg, "decode count_tokens response"):
+		return errType + ":decode_count_tokens_response"
+	case strings.Contains(msg, "model registry refresher not configured"):
+		return errType + ":model_registry_refresher_not_configured"
+	case strings.Contains(msg, "model registry not configured"):
+		return errType + ":model_registry_not_configured"
+	case strings.Contains(msg, "registry refresh failed"):
+		return errType + ":registry_refresh_failed"
+	case errType == "api_error":
+		return errType + ":upstream_error"
+	default:
+		return errType
+	}
 }

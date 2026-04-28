@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	claude "github.com/jacobcxdev/cq/internal/provider/claude"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 func mustParseURL(s string) *url.URL {
@@ -57,6 +60,1178 @@ func TestServer_HealthEndpoint(t *testing.T) {
 	accounts := resp["accounts"].(map[string]any)
 	if accounts["claude"].(float64) != 2 {
 		t.Errorf("claude accounts = %v, want 2", accounts["claude"])
+	}
+}
+
+type diagnosticsControllerTestWriter struct {
+	header        http.Header
+	statuses      []int
+	body          []byte
+	flushed       bool
+	writeDeadline time.Time
+}
+
+func (w *diagnosticsControllerTestWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *diagnosticsControllerTestWriter) Write(b []byte) (int, error) {
+	if !w.hasFinalStatus() {
+		w.statuses = append(w.statuses, http.StatusOK)
+	}
+	w.body = append(w.body, b...)
+	return len(b), nil
+}
+
+func (w *diagnosticsControllerTestWriter) WriteHeader(status int) {
+	w.statuses = append(w.statuses, status)
+}
+
+func (w *diagnosticsControllerTestWriter) Flush() {
+	w.flushed = true
+}
+
+func (w *diagnosticsControllerTestWriter) SetWriteDeadline(deadline time.Time) error {
+	w.writeDeadline = deadline
+	return nil
+}
+
+func (w *diagnosticsControllerTestWriter) hasFinalStatus() bool {
+	for _, status := range w.statuses {
+		if status >= 200 {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDiagnosticsResponseWriterRecordsFinalNonInformationalStatus(t *testing.T) {
+	underlying := &diagnosticsControllerTestWriter{}
+	rec := &diagnosticsResponseWriter{ResponseWriter: underlying}
+
+	rec.WriteHeader(http.StatusEarlyHints)
+	rec.WriteHeader(http.StatusAccepted)
+	rec.WriteHeader(http.StatusInternalServerError)
+
+	if got := rec.statusCode(); got != http.StatusAccepted {
+		t.Fatalf("statusCode = %d, want %d", got, http.StatusAccepted)
+	}
+	wantStatuses := []int{http.StatusEarlyHints, http.StatusAccepted, http.StatusInternalServerError}
+	if fmt.Sprint(underlying.statuses) != fmt.Sprint(wantStatuses) {
+		t.Fatalf("underlying statuses = %v, want %v", underlying.statuses, wantStatuses)
+	}
+
+	underlying = &diagnosticsControllerTestWriter{}
+	rec = &diagnosticsResponseWriter{ResponseWriter: underlying}
+	rec.WriteHeader(http.StatusEarlyHints)
+	if _, err := rec.Write([]byte("ok")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := rec.statusCode(); got != http.StatusOK {
+		t.Fatalf("statusCode after informational then Write = %d, want %d", got, http.StatusOK)
+	}
+}
+
+func TestDiagnosticsResponseWriterUnwrapsForResponseController(t *testing.T) {
+	underlying := &diagnosticsControllerTestWriter{}
+	wrapped, rec := (&Server{Diag: &DiagnosticsWriter{}}).wrapDiagnosticsResponseWriter(underlying)
+	if rec == nil {
+		t.Fatal("recorder is nil")
+	}
+	if _, ok := wrapped.(http.Flusher); !ok {
+		t.Fatal("wrapped writer does not preserve http.Flusher")
+	}
+
+	deadline := time.Unix(123, 0).UTC()
+	if err := http.NewResponseController(wrapped).SetWriteDeadline(deadline); err != nil {
+		t.Fatalf("SetWriteDeadline: %v", err)
+	}
+	if !underlying.writeDeadline.Equal(deadline) {
+		t.Fatalf("write deadline = %v, want %v", underlying.writeDeadline, deadline)
+	}
+	if err := http.NewResponseController(wrapped).Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if !underlying.flushed {
+		t.Fatal("underlying writer was not flushed")
+	}
+}
+
+func TestServerDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	claudeAccount := keyring.ClaudeOAuth{Email: "user@test.com", AccountUUID: "account-uuid-secret", AccessToken: "real-token", ExpiresAt: future}
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		claudeAccount,
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream:      "https://api.anthropic.com",
+			LocalToken:          "local-tok",
+			PinnedClaudeAccount: "user@test.com",
+		},
+		Transport: &TokenTransport{
+			Selector: sel,
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return makeResponse(http.StatusOK, `{"id":"msg_123"}`), nil
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Method != http.MethodPost || ev.Path != "/v1/messages" || ev.Provider != "claude" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "anthropic_messages" {
+		t.Fatalf("RouteKind = %q, want anthropic_messages", ev.RouteKind)
+	}
+	if ev.Model != "claude-sonnet" {
+		t.Fatalf("Model = %q, want claude-sonnet", ev.Model)
+	}
+	if !ev.PinActive {
+		t.Fatal("PinActive = false, want true")
+	}
+	if ev.AccountHint != claudeAccountHint(&claudeAccount) {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, claudeAccountHint(&claudeAccount))
+	}
+	if ev.Failover {
+		t.Fatal("Failover = true, want false")
+	}
+	if ev.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
+	}
+	if ev.Time.IsZero() {
+		t.Fatal("Time is zero")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "local-tok")
+	assertDiagnosticsLogDoesNotContain(t, path, "user@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "account-uuid-secret")
+	assertDiagnosticsLogDoesNotContain(t, path, "real-token")
+}
+
+func TestServerDiagnosticsClaudeRouteRecordsFailover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "primary@test.com", AccountUUID: "primary-uuid", AccessToken: "primary-token", ExpiresAt: future},
+		{Email: "fallback@test.com", AccountUUID: "fallback-uuid", AccessToken: "fallback-token", ExpiresAt: future},
+	}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: &fakeSelector{accounts: accounts},
+			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.Header.Get("Authorization") {
+				case "Bearer primary-token":
+					return makeResponse(http.StatusTooManyRequests, `{"error":"rate_limited"}`), nil
+				case "Bearer fallback-token":
+					return makeResponse(http.StatusOK, `{"id":"msg_456"}`), nil
+				default:
+					t.Fatalf("unexpected Authorization = %q", req.Header.Get("Authorization"))
+					return nil, nil
+				}
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.AccountHint != claudeAccountHint(&accounts[1]) {
+		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, claudeAccountHint(&accounts[1]))
+	}
+	if !ev.Failover {
+		t.Fatal("Failover = false, want true")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "primary@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-uuid")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-uuid")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-token")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-token")
+}
+
+func TestServerDiagnosticsClaudeTransportFailureEmitsSafeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	acct := keyring.ClaudeOAuth{Email: "error@test.com", AccountUUID: "error-uuid", AccessToken: "error-token", ExpiresAt: future}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acct}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("dial failed for error-token")
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Error != "api_error:upstream_error" {
+		t.Fatalf("Error = %q, want safe upstream error code", ev.Error)
+	}
+	if ev.AccountHint != claudeAccountHint(&acct) {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, claudeAccountHint(&acct))
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "error@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "error-uuid")
+	assertDiagnosticsLogDoesNotContain(t, path, "error-token")
+}
+
+func TestServerDiagnosticsClaudeRouteReadsLiveSelectorPin(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "fallback@test.com", AccountUUID: "uuid-fallback", AccessToken: "fallback-token", ExpiresAt: future},
+		{Email: "pinned@test.com", AccountUUID: "uuid-pin", AccessToken: "pinned-token", ExpiresAt: future},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		configPin string
+		livePin   string
+		quota     QuotaReader
+		wantPin   bool
+	}{
+		{
+			name:    "set by config reload",
+			livePin: "pinned@test.com",
+			wantPin: true,
+		},
+		{
+			name:      "cleared by config reload",
+			configPin: "pinned@test.com",
+			wantPin:   false,
+		},
+		{
+			name:      "cleared by automatic expiry",
+			configPin: "pinned@test.com",
+			livePin:   "pinned@test.com",
+			quota: stubQuotaReader{
+				"uuid-pin": {
+					Result: quota.Result{
+						Status: quota.StatusExhausted,
+						Windows: map[quota.WindowName]quota.Window{
+							"5h": {RemainingPct: 0},
+						},
+					},
+					FetchedAt: time.Now(),
+				},
+			},
+			wantPin: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			diag, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatalf("OpenDiagnosticsWriter: %v", err)
+			}
+			defer diag.Close()
+
+			inner := innerSelectorFunc(func(_ context.Context, exclude ...string) (*keyring.ClaudeOAuth, error) {
+				excludeSet := make(map[string]bool, len(exclude))
+				for _, e := range exclude {
+					excludeSet[e] = true
+				}
+				for i := range accounts {
+					acct := &accounts[i]
+					if isExcluded(acct, excludeSet) {
+						continue
+					}
+					result := *acct
+					return &result, nil
+				}
+				return nil, fmt.Errorf("no accounts available")
+			})
+			selector := NewPinnedClaudeSelector(inner, func() []keyring.ClaudeOAuth { return accounts }, tc.livePin, tc.quota)
+			srv := &Server{
+				Config: &Config{
+					ClaudeUpstream:      "https://api.anthropic.com",
+					LocalToken:          "local-tok",
+					PinnedClaudeAccount: tc.configPin,
+				},
+				Selector: selector,
+				Transport: &TokenTransport{
+					Selector: selector,
+					Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+						return makeResponse(http.StatusOK, `{"id":"msg_123"}`), nil
+					}),
+				},
+				Diag: diag,
+			}
+
+			handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+			req.Header.Set("Authorization", "Bearer local-tok")
+			req.Header.Set("Content-Type", "application/json")
+			handler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+			}
+			if err := diag.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			events := readDiagnosticsEvents(t, path)
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			if events[0].PinActive != tc.wantPin {
+				t.Fatalf("PinActive = %v, want %v; event = %+v", events[0].PinActive, tc.wantPin, events[0])
+			}
+		})
+	}
+}
+
+func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	codexAccount := codex.CodexAccount{Email: "codex-user@test.com", AccountID: "codex-account-secret", AccessToken: "codex-tok"}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codexAccount},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusAccepted,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"resp_123"}`)),
+				}, nil
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Method != http.MethodPost || ev.Path != codexResponsesPath || ev.Provider != "codex" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "codex_native" {
+		t.Fatalf("RouteKind = %q, want codex_native", ev.RouteKind)
+	}
+	if ev.Model != "gpt-5.4" {
+		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	}
+	if ev.StatusCode != http.StatusAccepted {
+		t.Fatalf("StatusCode = %d, want 202", ev.StatusCode)
+	}
+	if ev.AccountHint != codexAccountHint(&codexAccount) {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, codexAccountHint(&codexAccount))
+	}
+	if ev.Failover {
+		t.Fatal("Failover = true, want false")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-user@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-account-secret")
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
+}
+
+func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	accounts := []codex.CodexAccount{
+		{Email: "primary-codex@test.com", AccountID: "primary-codex-account", AccessToken: "primary-codex-token"},
+		{Email: "fallback-codex@test.com", AccountID: "fallback-codex-account", AccessToken: "fallback-codex-token"},
+	}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &multiCodexSelector{accounts: accounts},
+			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.Header.Get("Authorization") {
+				case "Bearer primary-codex-token":
+					return makeResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+				case "Bearer fallback-codex-token":
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"id":"resp_456"}`)),
+					}, nil
+				default:
+					t.Fatalf("unexpected Authorization = %q", req.Header.Get("Authorization"))
+					return nil, nil
+				}
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.AccountHint != codexAccountHint(&accounts[1]) {
+		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, codexAccountHint(&accounts[1]))
+	}
+	if !ev.Failover {
+		t.Fatal("Failover = false, want true")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex-account")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-account")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex-token")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-token")
+}
+
+func TestServerDiagnosticsCodexNoTransportEmitsSafeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "local-token-secret",
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Error != "api_error:no_codex_accounts" {
+		t.Fatalf("Error = %q, want no account code", ev.Error)
+	}
+	if ev.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode = %d, want 503", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "local-token-secret")
+}
+
+func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		model        string
+		wantProvider string
+		wantBody     string
+	}{
+		{name: "claude", model: "claude-sonnet-4-6", wantProvider: "claude", wantBody: `{"input_tokens":321}`},
+		{name: "codex", model: "gpt-5.4", wantProvider: "codex", wantBody: `{"input_tokens":123}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			diag, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatalf("OpenDiagnosticsWriter: %v", err)
+			}
+			defer diag.Close()
+
+			codexTransport := &CodexTokenTransport{
+				Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+				Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if tc.wantProvider != "codex" {
+						t.Fatal("codex upstream should not be called")
+					}
+					if !strings.HasSuffix(r.URL.Path, "/v1/responses/input_tokens") {
+						t.Fatalf("codex path = %q, want suffix /v1/responses/input_tokens", r.URL.Path)
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"object":"response.input_tokens","input_tokens":123}`)),
+					}, nil
+				}),
+			}
+			srv := &Server{
+				Config: &Config{
+					ClaudeUpstream: "https://api.anthropic.com",
+					CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+					LocalToken:     "local-tok",
+				},
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if tc.wantProvider != "claude" {
+						t.Fatal("claude upstream should not be called")
+					}
+					if r.URL.Path != countTokensPath {
+						t.Fatalf("claude path = %q, want %q", r.URL.Path, countTokensPath)
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(tc.wantBody)),
+					}, nil
+				}),
+				CodexTransport: codexTransport,
+				Diag:           diag,
+			}
+
+			handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+			w := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, tc.model)
+			req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer local-tok")
+			req.Header.Set("Content-Type", "application/json")
+			handler(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+			}
+			if strings.TrimSpace(w.Body.String()) != tc.wantBody {
+				t.Fatalf("body = %s, want %s", w.Body.String(), tc.wantBody)
+			}
+			if err := diag.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			events := readDiagnosticsEvents(t, path)
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			ev := events[0]
+			if ev.Method != http.MethodPost || ev.Path != countTokensPath || ev.Provider != tc.wantProvider {
+				t.Fatalf("event route = %+v", ev)
+			}
+			if ev.RouteKind != "anthropic_count_tokens" {
+				t.Fatalf("RouteKind = %q, want anthropic_count_tokens", ev.RouteKind)
+			}
+			if ev.Model != tc.model {
+				t.Fatalf("Model = %q, want %s", ev.Model, tc.model)
+			}
+			if ev.StatusCode != http.StatusOK {
+				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
+			}
+			assertDiagnosticsLogDoesNotContain(t, path, "local-tok")
+		})
+	}
+}
+
+func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	const localToken = "secret-proxy-token"
+	var gotPath string
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com",
+			LocalToken:     localToken,
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				gotPath = r.URL.Path
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"resp_legacy"}`)),
+				}, nil
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+localToken)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201, body: %s", w.Code, w.Body.String())
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("upstream path = %q, want /responses", gotPath)
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Method != http.MethodPost || ev.Path != legacyCodexResponsesPath || ev.Provider != "codex" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "codex_native" {
+		t.Fatalf("RouteKind = %q, want codex_native", ev.RouteKind)
+	}
+	if ev.Model != "gpt-5.4" {
+		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	}
+	if ev.StatusCode != http.StatusCreated {
+		t.Fatalf("StatusCode = %d, want 201", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, localToken)
+}
+
+func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path = %q, want /responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-tok" {
+			t.Errorf("upstream auth = %q, want Bearer codex-tok", got)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upstream upgrade error = %v", err)
+			return
+		}
+		defer conn.Close()
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("upstream read error = %v", err)
+			return
+		}
+		if string(message) != "ping" {
+			t.Errorf("upstream message = %q, want ping", message)
+		}
+		if err := conn.WriteMessage(messageType, []byte("pong")); err != nil {
+			t.Errorf("upstream write error = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "local-tok",
+		},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + legacyCodexResponsesPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if _, message, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	} else if string(message) != "pong" {
+		t.Fatalf("message = %q, want pong", message)
+	}
+	_ = conn.Close()
+
+	events := waitForDiagnosticsEvents(t, path, 1)
+	ev := events[0]
+	if ev.Method != http.MethodGet || ev.Path != legacyCodexResponsesPath || ev.Provider != "codex" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "codex_legacy_websocket" {
+		t.Fatalf("RouteKind = %q, want codex_legacy_websocket", ev.RouteKind)
+	}
+	if ev.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("StatusCode = %d, want 101", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
+}
+
+func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "canonical", path: codexCompactResponsesPath},
+		{name: "legacy", path: legacyCodexCompactResponsesPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			diag, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatalf("OpenDiagnosticsWriter: %v", err)
+			}
+			defer diag.Close()
+
+			var gotPath string
+			srv := &Server{
+				Config: &Config{
+					ClaudeUpstream: "https://api.anthropic.com",
+					CodexUpstream:  "https://chatgpt.com",
+					LocalToken:     "tok",
+				},
+				CodexTransport: &CodexTokenTransport{
+					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+					Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						gotPath = r.URL.Path
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": []string{"application/json"}},
+							Body:       io.NopCloser(strings.NewReader(`{"object":"response.compact"}`)),
+						}, nil
+					}),
+				},
+				Diag: diag,
+			}
+
+			handler, err := srv.handler()
+			if err != nil {
+				t.Fatalf("handler() error = %v", err)
+			}
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"model":"gpt-5.4","previous_response_id":"resp_abc"}`))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+			}
+			if gotPath != "/responses/compact" {
+				t.Fatalf("upstream path = %q, want /responses/compact", gotPath)
+			}
+			if err := diag.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			events := readDiagnosticsEvents(t, path)
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			ev := events[0]
+			if ev.Method != http.MethodPost || ev.Path != tc.path || ev.Provider != "codex" {
+				t.Fatalf("event route = %+v", ev)
+			}
+			if ev.RouteKind != "codex_compact" {
+				t.Fatalf("RouteKind = %q, want codex_compact", ev.RouteKind)
+			}
+			if ev.Model != "gpt-5.4" {
+				t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+			}
+			if ev.StatusCode != http.StatusOK {
+				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
+			}
+		})
+	}
+}
+
+func TestServerDiagnosticsLegacyCodexAppServerNonUpgradeRejectionEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	const localToken = "secret-proxy-token"
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     localToken,
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUpgradeRequired {
+		t.Fatalf("status = %d, want 426, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Method != http.MethodGet || ev.Path != codexAppServerPath || ev.Provider != "codex" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "codex_app_server" {
+		t.Fatalf("RouteKind = %q, want codex_app_server", ev.RouteKind)
+	}
+	if ev.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("StatusCode = %d, want 426", ev.StatusCode)
+	}
+	if ev.Error != "invalid_request_error:websocket_upgrade_required" {
+		t.Fatalf("Error = %q, want websocket upgrade error code", ev.Error)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, localToken)
+}
+
+func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "ftp://chatgpt.example",
+			LocalToken:     "local-token-secret",
+		},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{Email: "codex@test.com", AccountID: "codex-account", AccessToken: "codex-token"}},
+			Inner:    http.DefaultTransport,
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Error != "api_error:invalid_codex_upstream" {
+		t.Fatalf("Error = %q, want invalid upstream code", ev.Error)
+	}
+	if ev.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want 500", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "local-token-secret")
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-token")
+}
+
+func TestServerDiagnosticsHealthEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	const localToken = "secret-proxy-token"
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     localToken,
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Method != http.MethodGet || ev.Path != "/health" || ev.Provider != "proxy" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "health" {
+		t.Fatalf("RouteKind = %q, want health", ev.RouteKind)
+	}
+	if ev.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, localToken)
+}
+
+func TestServerDiagnosticsDisabledNoEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: sel,
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return makeResponse(http.StatusOK, `{"id":"msg_123"}`), nil
+			}),
+		},
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("diagnostics file exists or stat failed: %v", err)
+	}
+}
+
+func TestServerHealthReportsDiagnosticsEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled", enabled: false},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			srv := &Server{}
+			if tc.enabled {
+				diag, err := OpenDiagnosticsWriter(path)
+				if err != nil {
+					t.Fatalf("OpenDiagnosticsWriter: %v", err)
+				}
+				defer diag.Close()
+				srv.Diag = diag
+			}
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			srv.handleHealth(w, req)
+
+			var resp struct {
+				Diagnostics struct {
+					Enabled bool `json:"enabled"`
+				} `json:"diagnostics"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Diagnostics.Enabled != tc.enabled {
+				t.Fatalf("diagnostics.enabled = %v, want %v", resp.Diagnostics.Enabled, tc.enabled)
+			}
+			if strings.Contains(w.Body.String(), path) {
+				t.Fatalf("health leaked diagnostics path: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func assertDiagnosticsLogDoesNotContain(t *testing.T, path, needle string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read diagnostics log: %v", err)
+	}
+	if strings.Contains(string(raw), needle) {
+		t.Fatalf("diagnostics log leaked %q: %s", needle, raw)
+	}
+}
+
+func waitForDiagnosticsEvents(t *testing.T, path string, want int) []RouteEvent {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events := readDiagnosticsEvents(t, path)
+		if len(events) >= want {
+			return events
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("events = %d, want at least %d", len(events), want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

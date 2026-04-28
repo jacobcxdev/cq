@@ -77,6 +77,8 @@ cq proxy pin <email-or-account-uuid>
 cq proxy pin --clear       # Clear the pinned Claude account
 ```
 
+Use `cq proxy pin --clear` to clear a pin. `clear` and `remove` are reserved words, not valid literal pin values.
+
 The proxy config is stored at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json` when `XDG_CONFIG_HOME` is not set. If it does not exist, `cq proxy start` creates it with a random local token.
 
 Important `proxy.json` fields:
@@ -88,8 +90,11 @@ Important `proxy.json` fields:
 | `codex_upstream` | `https://chatgpt.com/backend-api/codex` | Codex backend upstream. |
 | `local_token` | generated | Required bearer token for local proxy requests. |
 | `pinned_claude_account` | unset | Optional Claude account email or UUID to force proxy selection. |
+| `diagnostics_log` | unset | Optional JSONL routing diagnostics log path for advanced local debugging. |
 | `headroom` | `false` | Enables the headroom compression bridge when true. |
 | `headroom_mode` | `cache` | Compression strategy when set; valid values are `cache` and `token`. |
+
+Routing diagnostics are disabled by default. To enable them, set `diagnostics_log` in `proxy.json` to a local file path and restart the proxy. The log is append-only JSONL containing redacted route metadata such as method, path, provider, route kind, status, latency, selected-account hint, failover flag, and safe error code. It is intended for advanced local debugging and UAT, and enabling it does not change routing policy.
 
 ## Model Registry
 

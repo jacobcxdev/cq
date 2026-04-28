@@ -47,6 +47,7 @@ func (t *CodexTokenTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	if err != nil {
 		return nil, err
 	}
+	noteRouteAccount(req.Context(), codexAccountHint(acct), false)
 
 	resp, err := t.doRequest(req, acct)
 	if err != nil {
@@ -190,6 +191,7 @@ func (t *CodexTokenTransport) handleUnauthorized(req *http.Request, failedAcct *
 		codexAcctIdentifier(failedAcct), codexAcctIdentifier(alt))
 
 	t.persistSwitch(alt)
+	noteRouteAccount(req.Context(), codexAccountHint(alt), true)
 	resp, err := t.doRequest(req, alt)
 	if err != nil {
 		return nil, err
@@ -241,6 +243,7 @@ func (t *CodexTokenTransport) handle429(req *http.Request, resp *http.Response, 
 			return makeBufferedResponse(fallbackResp, fallbackBody), nil
 		}
 
+		noteRouteAccount(req.Context(), codexAccountHint(alt), true)
 		altResp, err := t.doRequest(req, alt)
 		if err != nil {
 			return nil, err
