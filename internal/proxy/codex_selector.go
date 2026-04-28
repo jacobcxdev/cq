@@ -163,3 +163,10 @@ func codexAcctIdentifier(a *codex.CodexAccount) string {
 	}
 	return a.AccessToken
 }
+
+func codexAccountHint(a *codex.CodexAccount) string {
+	if a == nil {
+		return ""
+	}
+	return redactedAccountHint("codex", a.AccountID, a.Email, a.RecordKey, a.AccessToken)
+}

@@ -318,8 +318,9 @@ func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.
 func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Request) {
 	if !isWebSocketUpgrade(r) {
 		start := time.Now()
+		message := fmt.Sprintf("%s requires websocket upgrade", codexAppServerPath)
 		w.Header().Set("Upgrade", "websocket")
-		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", fmt.Sprintf("%s requires websocket upgrade", codexAppServerPath))
+		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", message)
 		s.emitDiagnostics(RouteEvent{
 			Time:       start.UTC(),
 			Method:     r.Method,
@@ -328,6 +329,7 @@ func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Reques
 			RouteKind:  "codex_app_server",
 			StatusCode: http.StatusUpgradeRequired,
 			LatencyMS:  time.Since(start).Milliseconds(),
+			Error:      diagnosticsErrorCode("invalid_request_error", message),
 		})
 		return
 	}
@@ -411,10 +413,11 @@ func (s *Server) isValidToken(token string) bool {
 func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var model string
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped
 		defer func() {
-			s.emitDiagnostics(RouteEvent{
+			event := RouteEvent{
 				Time:       start.UTC(),
 				Method:     r.Method,
 				Path:       r.URL.Path,
@@ -423,7 +426,10 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 				Model:      model,
 				StatusCode: rec.statusCode(),
 				LatencyMS:  time.Since(start).Milliseconds(),
-			})
+				Error:      rec.diagnosticsError(),
+			}
+			event.applyRouteDiagnostics(routeDiag)
+			s.emitDiagnostics(event)
 		}()
 	}
 
@@ -468,7 +474,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	// Build upstream request — forward as-is, no translation.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
-	upReq, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	upReq, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
 		return
@@ -536,6 +542,8 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var rec *diagnosticsResponseWriter
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	r = r.WithContext(ctx)
 	if wrapped, recorder := s.wrapDiagnosticsResponseWriter(w); recorder != nil {
 		w = wrapped
 		rec = recorder
@@ -544,7 +552,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			if rec.status == 0 {
 				status = http.StatusSwitchingProtocols
 			}
-			s.emitDiagnostics(RouteEvent{
+			event := RouteEvent{
 				Time:       start.UTC(),
 				Method:     r.Method,
 				Path:       r.URL.Path,
@@ -552,7 +560,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 				RouteKind:  "codex_legacy_websocket",
 				StatusCode: status,
 				LatencyMS:  time.Since(start).Milliseconds(),
-			})
+				Error:      rec.diagnosticsError(),
+			}
+			event.applyRouteDiagnostics(routeDiag)
+			s.emitDiagnostics(event)
 		}()
 	}
 
@@ -592,8 +603,11 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	statusCode := 0
 	requestedModel := ""
+	diagError := ""
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	r = r.WithContext(ctx)
 	defer func() {
-		s.emitDiagnostics(RouteEvent{
+		event := RouteEvent{
 			Time:       start.UTC(),
 			Method:     r.Method,
 			Path:       r.URL.Path,
@@ -602,19 +616,25 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 			Model:      requestedModel,
 			StatusCode: statusCode,
 			LatencyMS:  time.Since(start).Milliseconds(),
-		})
+			Error:      diagError,
+		}
+		event.applyRouteDiagnostics(routeDiag)
+		s.emitDiagnostics(event)
 	}()
 
 	transport, err := s.codexAppServerTransport()
 	if err != nil {
 		statusCode = http.StatusServiceUnavailable
+		diagError = diagnosticsErrorCode("api_error", err.Error())
 		writeError(w, http.StatusServiceUnavailable, "api_error", err.Error())
 		return
 	}
 	upstreamURL, err := codexAppServerWebSocketURL(s.Config.CodexUpstream)
 	if err != nil {
 		statusCode = http.StatusInternalServerError
-		writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
+		message := "invalid codex upstream URL"
+		diagError = diagnosticsErrorCode("api_error", message)
+		writeError(w, http.StatusInternalServerError, "api_error", message)
 		return
 	}
 
@@ -642,6 +662,7 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 
 	upstreamConn, acct, err := s.dialCodexAppServer(r.Context(), transport, upstreamURL, r.Header, requestedModel)
 	if err != nil {
+		diagError = diagnosticsErrorCode("api_error", "codex upstream error: "+err.Error())
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
 	}
@@ -702,6 +723,7 @@ func (s *Server) dialCodexAppServer(ctx context.Context, transport *CodexTokenTr
 			}
 			return nil, nil, fmt.Errorf("no alternate codex account available for app-server websocket")
 		}
+		noteRouteAccount(ctx, codexAccountHint(acct), len(excluded) > 0)
 		conn, resp, body, err := dialCodexAppServerWithAccount(ctx, upstreamURL, incomingHeaders, acct)
 		if err == nil {
 			if persistSwitch {
@@ -860,12 +882,14 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 		var routeModel string
 		var routeProvider Provider
 		var buf []byte
+		ctx, routeDiag := withRouteDiagnostics(r.Context())
+		r = r.WithContext(ctx)
 		if diagnosticsAnthropicRouteKind(r.URL.Path) != "" {
 			if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 				w = wrapped
 				defer func() {
 					provider := providerName(routeProvider)
-					s.emitDiagnostics(RouteEvent{
+					event := RouteEvent{
 						Time:       start.UTC(),
 						Method:     r.Method,
 						Path:       r.URL.Path,
@@ -875,7 +899,10 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 						PinActive:  provider == "claude" && s.claudePinActive(),
 						StatusCode: rec.statusCode(),
 						LatencyMS:  time.Since(start).Milliseconds(),
-					})
+						Error:      rec.diagnosticsError(),
+					}
+					event.applyRouteDiagnostics(routeDiag)
+					s.emitDiagnostics(event)
 				}()
 			}
 		}
@@ -948,7 +975,8 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 
 type diagnosticsResponseWriter struct {
 	http.ResponseWriter
-	status int
+	status          int
+	diagnosticError string
 }
 
 func (w *diagnosticsResponseWriter) WriteHeader(status int) {
@@ -970,6 +998,14 @@ func (w *diagnosticsResponseWriter) statusCode() int {
 		return http.StatusOK
 	}
 	return w.status
+}
+
+func (w *diagnosticsResponseWriter) SetDiagnosticsError(err string) {
+	w.diagnosticError = err
+}
+
+func (w *diagnosticsResponseWriter) diagnosticsError() string {
+	return w.diagnosticError
 }
 
 func (w *diagnosticsResponseWriter) Unwrap() http.ResponseWriter {
@@ -1090,6 +1126,9 @@ func truncateDebugText(text string) string {
 }
 
 func writeError(w http.ResponseWriter, status int, errType, message string) {
+	if rec, ok := w.(interface{ SetDiagnosticsError(string) }); ok {
+		rec.SetDiagnosticsError(diagnosticsErrorCode(errType, message))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -1099,4 +1138,55 @@ func writeError(w http.ResponseWriter, status int, errType, message string) {
 			"message": message,
 		},
 	})
+}
+
+func diagnosticsErrorCode(errType, message string) string {
+	msg := strings.ToLower(message)
+	switch {
+	case strings.Contains(msg, "invalid proxy token"):
+		return errType + ":invalid_proxy_token"
+	case strings.Contains(msg, "no codex accounts configured") ||
+		strings.Contains(msg, "no codex accounts available") ||
+		strings.Contains(msg, "no codex accounts with valid tokens and quota"):
+		return errType + ":no_codex_accounts"
+	case strings.Contains(msg, "websocket transport is not supported"):
+		return errType + ":unsupported_websocket_transport"
+	case strings.Contains(msg, "requires websocket upgrade"):
+		return errType + ":websocket_upgrade_required"
+	case strings.Contains(msg, "only supports"):
+		return errType + ":method_not_allowed"
+	case strings.Contains(msg, "invalid codex upstream url") ||
+		strings.Contains(msg, "unsupported codex upstream scheme"):
+		return errType + ":invalid_codex_upstream"
+	case strings.Contains(msg, "create upstream request"):
+		return errType + ":invalid_upstream"
+	case strings.Contains(msg, "codex upstream error") ||
+		strings.Contains(msg, "codex upstream:") ||
+		strings.Contains(msg, "codex websocket upgrade failed"):
+		return errType + ":codex_upstream_error"
+	case strings.Contains(msg, "request translation failed"):
+		return errType + ":request_translation_failed"
+	case strings.Contains(msg, "failed to read request body"):
+		return errType + ":read_request_body"
+	case strings.Contains(msg, "request body exceeds"):
+		return errType + ":request_body_too_large"
+	case strings.Contains(msg, "not a codex model"):
+		return errType + ":invalid_route_model"
+	case strings.Contains(msg, "stream collection failed"):
+		return errType + ":stream_collection_failed"
+	case strings.Contains(msg, "response assembly failed"):
+		return errType + ":response_assembly_failed"
+	case strings.Contains(msg, "decode count_tokens response"):
+		return errType + ":decode_count_tokens_response"
+	case strings.Contains(msg, "model registry refresher not configured"):
+		return errType + ":model_registry_refresher_not_configured"
+	case strings.Contains(msg, "model registry not configured"):
+		return errType + ":model_registry_not_configured"
+	case strings.Contains(msg, "registry refresh failed"):
+		return errType + ":registry_refresh_failed"
+	case errType == "api_error":
+		return errType + ":upstream_error"
+	default:
+		return errType
+	}
 }

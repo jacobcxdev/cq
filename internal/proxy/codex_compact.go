@@ -58,10 +58,11 @@ func rejectCodexCompactWebSocket(w http.ResponseWriter, requestPath string) {
 func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request, requestPath string) {
 	start := time.Now()
 	var model string
+	ctx, routeDiag := withRouteDiagnostics(r.Context())
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped
 		defer func() {
-			s.emitDiagnostics(RouteEvent{
+			event := RouteEvent{
 				Time:       start.UTC(),
 				Method:     r.Method,
 				Path:       r.URL.Path,
@@ -70,7 +71,10 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 				Model:      model,
 				StatusCode: rec.statusCode(),
 				LatencyMS:  time.Since(start).Milliseconds(),
-			})
+				Error:      rec.diagnosticsError(),
+			}
+			event.applyRouteDiagnostics(routeDiag)
+			s.emitDiagnostics(event)
 		}()
 	}
 
@@ -96,7 +100,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 
 	// Build upstream request targeting /responses/compact (no headroom applied).
 	upstreamURL := s.Config.CodexUpstream + "/responses/compact"
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
 		return

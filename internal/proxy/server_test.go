@@ -169,8 +169,9 @@ func TestServerDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
 	defer diag.Close()
 
 	future := time.Now().UnixMilli() + 3600_000
+	claudeAccount := keyring.ClaudeOAuth{Email: "user@test.com", AccountUUID: "account-uuid-secret", AccessToken: "real-token", ExpiresAt: future}
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
-		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+		claudeAccount,
 	}}
 	srv := &Server{
 		Config: &Config{
@@ -217,6 +218,12 @@ func TestServerDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
 	if !ev.PinActive {
 		t.Fatal("PinActive = false, want true")
 	}
+	if ev.AccountHint != claudeAccountHint(&claudeAccount) {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, claudeAccountHint(&claudeAccount))
+	}
+	if ev.Failover {
+		t.Fatal("Failover = true, want false")
+	}
 	if ev.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
 	}
@@ -224,6 +231,129 @@ func TestServerDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
 		t.Fatal("Time is zero")
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, "local-tok")
+	assertDiagnosticsLogDoesNotContain(t, path, "user@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "account-uuid-secret")
+	assertDiagnosticsLogDoesNotContain(t, path, "real-token")
+}
+
+func TestServerDiagnosticsClaudeRouteRecordsFailover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "primary@test.com", AccountUUID: "primary-uuid", AccessToken: "primary-token", ExpiresAt: future},
+		{Email: "fallback@test.com", AccountUUID: "fallback-uuid", AccessToken: "fallback-token", ExpiresAt: future},
+	}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: &fakeSelector{accounts: accounts},
+			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.Header.Get("Authorization") {
+				case "Bearer primary-token":
+					return makeResponse(http.StatusTooManyRequests, `{"error":"rate_limited"}`), nil
+				case "Bearer fallback-token":
+					return makeResponse(http.StatusOK, `{"id":"msg_456"}`), nil
+				default:
+					t.Fatalf("unexpected Authorization = %q", req.Header.Get("Authorization"))
+					return nil, nil
+				}
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.AccountHint != claudeAccountHint(&accounts[1]) {
+		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, claudeAccountHint(&accounts[1]))
+	}
+	if !ev.Failover {
+		t.Fatal("Failover = false, want true")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "primary@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-uuid")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-uuid")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-token")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-token")
+}
+
+func TestServerDiagnosticsClaudeTransportFailureEmitsSafeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	acct := keyring.ClaudeOAuth{Email: "error@test.com", AccountUUID: "error-uuid", AccessToken: "error-token", ExpiresAt: future}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: &fakeSelector{accounts: []keyring.ClaudeOAuth{acct}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("dial failed for error-token")
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Error != "api_error:upstream_error" {
+		t.Fatalf("Error = %q, want safe upstream error code", ev.Error)
+	}
+	if ev.AccountHint != claudeAccountHint(&acct) {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, claudeAccountHint(&acct))
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "error@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "error-uuid")
+	assertDiagnosticsLogDoesNotContain(t, path, "error-token")
 }
 
 func TestServerDiagnosticsClaudeRouteReadsLiveSelectorPin(t *testing.T) {
@@ -340,6 +470,7 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	}
 	defer diag.Close()
 
+	codexAccount := codex.CodexAccount{Email: "codex-user@test.com", AccountID: "codex-account-secret", AccessToken: "codex-tok"}
 	srv := &Server{
 		Config: &Config{
 			ClaudeUpstream: "https://api.anthropic.com",
@@ -347,7 +478,7 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 			LocalToken:     "tok",
 		},
 		CodexTransport: &CodexTokenTransport{
-			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Selector: &fakeCodexSelector{account: &codexAccount},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusAccepted,
@@ -391,6 +522,134 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	if ev.StatusCode != http.StatusAccepted {
 		t.Fatalf("StatusCode = %d, want 202", ev.StatusCode)
 	}
+	if ev.AccountHint != codexAccountHint(&codexAccount) {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, codexAccountHint(&codexAccount))
+	}
+	if ev.Failover {
+		t.Fatal("Failover = true, want false")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-user@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-account-secret")
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
+}
+
+func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	accounts := []codex.CodexAccount{
+		{Email: "primary-codex@test.com", AccountID: "primary-codex-account", AccessToken: "primary-codex-token"},
+		{Email: "fallback-codex@test.com", AccountID: "fallback-codex-account", AccessToken: "fallback-codex-token"},
+	}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &multiCodexSelector{accounts: accounts},
+			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.Header.Get("Authorization") {
+				case "Bearer primary-codex-token":
+					return makeResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+				case "Bearer fallback-codex-token":
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"id":"resp_456"}`)),
+					}, nil
+				default:
+					t.Fatalf("unexpected Authorization = %q", req.Header.Get("Authorization"))
+					return nil, nil
+				}
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.AccountHint != codexAccountHint(&accounts[1]) {
+		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, codexAccountHint(&accounts[1]))
+	}
+	if !ev.Failover {
+		t.Fatal("Failover = false, want true")
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex@test.com")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex-account")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-account")
+	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex-token")
+	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-token")
+}
+
+func TestServerDiagnosticsCodexNoTransportEmitsSafeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "local-token-secret",
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Error != "api_error:no_codex_accounts" {
+		t.Fatalf("Error = %q, want no account code", ev.Error)
+	}
+	if ev.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode = %d, want 503", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "local-token-secret")
 }
 
 func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
@@ -768,7 +1027,62 @@ func TestServerDiagnosticsLegacyCodexAppServerNonUpgradeRejectionEmitsEvent(t *t
 	if ev.StatusCode != http.StatusUpgradeRequired {
 		t.Fatalf("StatusCode = %d, want 426", ev.StatusCode)
 	}
+	if ev.Error != "invalid_request_error:websocket_upgrade_required" {
+		t.Fatalf("Error = %q, want websocket upgrade error code", ev.Error)
+	}
 	assertDiagnosticsLogDoesNotContain(t, path, localToken)
+}
+
+func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "ftp://chatgpt.example",
+			LocalToken:     "local-token-secret",
+		},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{Email: "codex@test.com", AccountID: "codex-account", AccessToken: "codex-token"}},
+			Inner:    http.DefaultTransport,
+		},
+		Diag: diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Error != "api_error:invalid_codex_upstream" {
+		t.Fatalf("Error = %q, want invalid upstream code", ev.Error)
+	}
+	if ev.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want 500", ev.StatusCode)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "local-token-secret")
+	assertDiagnosticsLogDoesNotContain(t, path, "codex-token")
 }
 
 func TestServerDiagnosticsHealthEmitsEvent(t *testing.T) {

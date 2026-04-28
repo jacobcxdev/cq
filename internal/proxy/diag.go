@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"sync"
@@ -20,6 +23,68 @@ type RouteEvent struct {
 	StatusCode  int       `json:"status_code,omitempty"`
 	LatencyMS   int64     `json:"latency_ms,omitempty"`
 	Error       string    `json:"error,omitempty"`
+}
+
+type routeDiagnosticsContextKey struct{}
+
+type routeDiagnostics struct {
+	mu          sync.Mutex
+	accountHint string
+	failover    bool
+}
+
+func withRouteDiagnostics(ctx context.Context) (context.Context, *routeDiagnostics) {
+	diag := &routeDiagnostics{}
+	return context.WithValue(ctx, routeDiagnosticsContextKey{}, diag), diag
+}
+
+func noteRouteAccount(ctx context.Context, accountHint string, failover bool) {
+	if ctx == nil {
+		return
+	}
+	diag, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics)
+	if diag == nil {
+		return
+	}
+	diag.mu.Lock()
+	defer diag.mu.Unlock()
+	if accountHint != "" {
+		diag.accountHint = accountHint
+	}
+	diag.failover = diag.failover || failover
+}
+
+func (d *routeDiagnostics) fields() (accountHint string, failover bool) {
+	if d == nil {
+		return "", false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.accountHint, d.failover
+}
+
+func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
+	if event == nil {
+		return
+	}
+	accountHint, failover := diag.fields()
+	if accountHint != "" {
+		event.AccountHint = accountHint
+	}
+	if failover {
+		event.Failover = true
+	}
+}
+
+func redactedAccountHint(prefix string, identifiers ...string) string {
+	for _, identifier := range identifiers {
+		if identifier == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(identifier))
+		return prefix + ":" + hex.EncodeToString(sum[:])[:12]
+	}
+	return ""
 }
 
 type DiagnosticsWriter struct {
