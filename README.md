@@ -94,7 +94,7 @@ Important `proxy.json` fields:
 | `headroom` | `false` | Enables the headroom compression bridge when true. |
 | `headroom_mode` | `cache` | Compression strategy when set; valid values are `cache` and `token`. |
 
-Routing diagnostics are disabled by default. To enable them, set `diagnostics_log` in `proxy.json` to a local file path and restart the proxy. The log is append-only JSONL containing redacted route metadata such as method, path, provider, route kind, status, and latency. It is intended for advanced local debugging and UAT, and enabling it does not change routing policy.
+Routing diagnostics are disabled by default. To enable them, set `diagnostics_log` in `proxy.json` to a local file path and restart the proxy. The log is append-only JSONL containing redacted route metadata such as method, path, provider, route kind, status, latency, selected-account hint, failover flag, and safe error code. It is intended for advanced local debugging and UAT, and enabling it does not change routing policy.
 
 ## Model Registry
 
