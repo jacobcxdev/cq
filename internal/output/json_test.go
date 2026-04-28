@@ -109,3 +109,44 @@ func TestJSONRendererScopedWindowKeys(t *testing.T) {
 		t.Fatalf("expected scoped window key in JSON output, got %s", buf.String())
 	}
 }
+
+func TestJSONRendererIncludesAvailabilityAndAccountActive(t *testing.T) {
+	var buf bytes.Buffer
+	r := &JSONRenderer{W: &buf}
+	report := app.Report{
+		GeneratedAt: time.Unix(1000, 0),
+		Providers: []app.ProviderReport{
+			{
+				ID:   provider.Claude,
+				Name: "claude",
+				Availability: app.ProviderAvailability{
+					State:           app.ProviderAvailabilityExhausted,
+					Guidance:        "Provider is exhausted.",
+					Reason:          "exhausted_quota",
+					MinRemainingPct: 0,
+				},
+				Results: []quota.Result{{
+					Active: true,
+					Status: quota.StatusExhausted,
+				}},
+			},
+		},
+	}
+
+	if err := r.Render(context.Background(), report); err != nil {
+		t.Fatalf("Render error: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), `"availability"`) {
+		t.Fatalf("expected availability in JSON output, got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"state":"exhausted"`) {
+		t.Fatalf("expected exhausted availability in JSON output, got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"min_remaining_pct":0`) {
+		t.Fatalf("expected zero min remaining in JSON output, got %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"active":true`) {
+		t.Fatalf("expected account active compatibility field in JSON output, got %s", buf.String())
+	}
+}

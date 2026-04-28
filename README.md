@@ -26,6 +26,16 @@ cq --version               # Print version
 
 `check` accepts `claude`, `codex`, and `gemini` provider names.
 
+### JSON availability
+
+`cq --json` includes a provider-level `availability` object for agents and other automated consumers. Use `availability.state` and `availability.guidance` to decide whether to send new work to a provider:
+
+- `available`: provider is available for normal work.
+- `limited`: provider can route work, but quota is low; conserve it for small, necessary, or user-approved work.
+- `exhausted`: provider is exhausted or unavailable for new work.
+
+Account-level `active` fields are retained for compatibility and mean credential default/current account. They are not proxy routing decisions and should not be used as provider availability signals; the proxy may route differently because of quota, manual pins, or failover.
+
 ## Account Management
 
 Claude and Codex support stored account management:
