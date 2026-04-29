@@ -326,6 +326,27 @@ func TestAccountSelector_Select_QuotaAware(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown quota beats known exhausted", func(t *testing.T) {
+		quotaReader := buildQuotaReader(map[string]QuotaSnapshot{
+			"uuid-exhausted": {Result: quotaResult("uuid-exhausted", "exhausted@test.com", 0)},
+			// uuid-unknown has no snapshot
+		})
+		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{
+				{Email: "unknown@test.com", AccountUUID: "uuid-unknown", AccessToken: "t1", ExpiresAt: future},
+				{Email: "exhausted@test.com", AccountUUID: "uuid-exhausted", AccessToken: "t2", ExpiresAt: future + 5000},
+			}
+		}, nil, quotaReader)
+
+		acct, err := sel.Select(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acct.Email != "unknown@test.com" {
+			t.Errorf("got %q, want unknown@test.com (unknown beats confirmed exhausted)", acct.Email)
+		}
+	})
+
 	t.Run("nil quota falls back to existing logic", func(t *testing.T) {
 		sel := NewAccountSelector(func() []keyring.ClaudeOAuth {
 			return []keyring.ClaudeOAuth{

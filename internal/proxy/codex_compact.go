@@ -74,6 +74,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 				Error:      rec.diagnosticsError(),
 			}
 			event.applyRouteDiagnostics(routeDiag)
+			event.applySessionCorrelation(r.Header)
 			s.emitDiagnostics(event)
 		}()
 	}
@@ -97,6 +98,24 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 
 	model = extractModel(body)
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=codex (native compact)\n", requestPath, model)
+
+	// Emit payload diagnostics before forwarding.
+	if s.PayloadDiag != nil {
+		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, body)
+		s.emitPayloadDiagnostics(PayloadEvent{
+			Time:          time.Now().UTC(),
+			Method:        r.Method,
+			Path:          r.URL.Path,
+			Provider:      "codex",
+			RouteKind:     "codex_compact",
+			Model:         model,
+			ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
+			SessionKey:    sessionKey,
+			SessionSource: sessionSource,
+			BodyBytes:     len(body),
+			Body:          encodeBody(body),
+		})
+	}
 
 	// Build upstream request targeting /responses/compact (no headroom applied).
 	upstreamURL := s.Config.CodexUpstream + "/responses/compact"

@@ -55,10 +55,12 @@ func (t *TokenTransport) inner() http.RoundTripper {
 
 // RoundTrip implements http.RoundTripper.
 func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	acct, err := t.Selector.Select(req.Context())
+	ctx := contextWithRequestHeaders(req.Context(), req.Header)
+	acct, err := t.Selector.Select(ctx)
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(ctx)
 	noteRouteAccount(req.Context(), claudeAccountHint(acct), false)
 
 	// Refresh upfront if token is already expired.
@@ -83,6 +85,9 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	case http.StatusTooManyRequests:
 		return t.handle429(req, resp, acct)
 	default:
+		if resp.StatusCode < 400 {
+			t.rememberRequestSessionAccount(req, acct)
+		}
 		t.clearFailoverSuppression()
 		return resp, nil
 	}
@@ -187,6 +192,7 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 				if t.isConfirmedExhausted(req.Context(), failedAcct) {
 					t.persistSwitch(req.Context(), alt)
 				}
+				t.rememberRequestSessionAccount(req, alt)
 				last429Resp.Body.Close()
 				if fallbackResp != nil {
 					fallbackResp.Body.Close()
@@ -220,6 +226,7 @@ func (t *TokenTransport) handle429(req *http.Request, resp *http.Response, faile
 				if t.isConfirmedExhausted(req.Context(), failedAcct) {
 					t.persistSwitch(req.Context(), alt)
 				}
+				t.rememberRequestSessionAccount(req, alt)
 				last429Resp.Body.Close()
 				if fallbackResp != nil {
 					fallbackResp.Body.Close()
@@ -301,6 +308,20 @@ func (t *TokenTransport) persistSwitch(ctx context.Context, alt *keyring.ClaudeO
 				fmt.Fprintf(os.Stderr, "cq: proxy active account is now %s\n", alt.Email)
 			}
 		}()
+	}
+}
+
+func (t *TokenTransport) rememberRequestSessionAccount(req *http.Request, acct *keyring.ClaudeOAuth) {
+	sessionKey, _ := sessionCorrelation(req.Header)
+	rememberSessionAccount(t.Selector, sessionKey, acct)
+}
+
+func rememberSessionAccount(selector ClaudeSelector, sessionKey string, acct *keyring.ClaudeOAuth) {
+	switch s := selector.(type) {
+	case *SessionAffinitySelector:
+		s.Remember(sessionKey, acct)
+	case *PinnedClaudeSelector:
+		rememberSessionAccount(s.inner, sessionKey, acct)
 	}
 }
 

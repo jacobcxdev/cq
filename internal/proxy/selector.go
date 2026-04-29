@@ -115,6 +115,12 @@ func (s *accountSelector) betterCandidate(candidate *keyring.ClaudeOAuth, candid
 	// Quota-based comparison (when at least one has data).
 	if candidateRemaining >= 0 || currentRemaining >= 0 {
 		if candidateRemaining != currentRemaining {
+			if candidateRemaining == 0 && currentRemaining < 0 {
+				return false
+			}
+			if currentRemaining == 0 && candidateRemaining < 0 {
+				return true
+			}
 			return candidateRemaining > currentRemaining
 		}
 		// Equal remaining — fall through to tiebreakers.

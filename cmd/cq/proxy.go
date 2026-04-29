@@ -164,7 +164,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 	claudeProvider := claudeprov.New(refreshClient)
 	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())
 	baseSelector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
-	selector := proxy.NewPinnedClaudeSelector(baseSelector, discover, cfg.PinnedClaudeAccount, quotaCache)
+	affinitySelector := proxy.NewSessionAffinitySelector(baseSelector, discover, quotaCache)
+	selector := proxy.NewPinnedClaudeSelector(affinitySelector, discover, cfg.PinnedClaudeAccount, quotaCache)
 	selector.SetPinExpireFunc(clearPersistedClaudePin)
 	if cfg.PinnedClaudeAccount != "" {
 		fmt.Fprintf(os.Stderr, "cq: pinned claude account: %s\n", cfg.PinnedClaudeAccount)
@@ -340,6 +341,21 @@ func runProxyStart(opts proxyCommandOptions) error {
 		}
 	}
 
+	var payloadDiag *proxy.PayloadWriter
+	if cfg.PayloadDiagnosticsLog != "" {
+		payloadDiag, err = proxy.OpenPayloadWriter(cfg.PayloadDiagnosticsLog)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: payload diagnostics: %v (continuing without payload diagnostics)\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "cq: payload diagnostics enabled — WARNING: log contains raw request bodies including prompts and message content\n")
+			defer func() {
+				if err := payloadDiag.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: payload diagnostics: close: %v\n", err)
+				}
+			}()
+		}
+	}
+
 	srv := &proxy.Server{
 		Config:                cfg,
 		Selector:              selector,
@@ -350,6 +366,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		CodexUpgradeTransport: codexUpgradeTransport,
 		Headroom:              headroom,
 		Diag:                  diagnostics,
+		PayloadDiag:           payloadDiag,
 		HeadroomMode:          resolvedMode,
 		Catalog:               catalog,
 		Refresher:             proxyRefresher,

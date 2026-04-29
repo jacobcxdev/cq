@@ -58,26 +58,25 @@ func (s *codexSelector) Select(ctx context.Context, exclude ...string) (*codex.C
 }
 
 func (s *codexSelector) selectAccount(accounts []codex.CodexAccount, excludeSet map[string]bool, requestedModel string, requireCompatible bool) *codex.CodexAccount {
-	for i := range accounts {
-		a := &accounts[i]
-		if !s.isEligible(a, excludeSet, requestedModel, requireCompatible) {
-			continue
-		}
-		if a.IsActive {
-			result := *a
-			return &result
-		}
-	}
+	var best *codex.CodexAccount
+	bestRemaining := -1
 
 	for i := range accounts {
 		a := &accounts[i]
 		if !s.isEligible(a, excludeSet, requestedModel, requireCompatible) {
 			continue
 		}
-		result := *a
-		return &result
+		remaining := s.accountRemaining(a)
+		if s.betterCandidate(a, remaining, best, bestRemaining) {
+			best = a
+			bestRemaining = remaining
+		}
 	}
-	return nil
+	if best == nil {
+		return nil
+	}
+	result := *best
+	return &result
 }
 
 func (s *codexSelector) isEligible(a *codex.CodexAccount, excludeSet map[string]bool, requestedModel string, requireCompatible bool) bool {
@@ -88,6 +87,38 @@ func (s *codexSelector) isEligible(a *codex.CodexAccount, excludeSet map[string]
 		return false
 	}
 	return true
+}
+
+func (s *codexSelector) accountRemaining(a *codex.CodexAccount) int {
+	if s.quota == nil {
+		return -1
+	}
+	snap, ok := s.snapshot(a)
+	if !ok || time.Since(snap.FetchedAt) > transientQuotaMaxAge {
+		return -1
+	}
+	return snap.Result.MinRemainingPct()
+}
+
+func (s *codexSelector) betterCandidate(candidate *codex.CodexAccount, candidateRemaining int, current *codex.CodexAccount, currentRemaining int) bool {
+	if current == nil {
+		return true
+	}
+	if candidateRemaining >= 0 || currentRemaining >= 0 {
+		if candidateRemaining != currentRemaining {
+			if candidateRemaining == 0 && currentRemaining < 0 {
+				return false
+			}
+			if currentRemaining == 0 && candidateRemaining < 0 {
+				return true
+			}
+			return candidateRemaining > currentRemaining
+		}
+	}
+	if candidate.IsActive != current.IsActive {
+		return candidate.IsActive
+	}
+	return false
 }
 
 func codexRequestedModel(ctx context.Context) string {
@@ -116,10 +147,7 @@ func (s *codexSelector) hasQuota(a *codex.CodexAccount) bool {
 	if s.quota == nil {
 		return true
 	}
-	snap, ok := s.quota.Snapshot(a.AccountID)
-	if !ok {
-		snap, ok = s.quota.Snapshot(a.Email)
-	}
+	snap, ok := s.snapshot(a)
 	if !ok {
 		return true
 	}
@@ -130,6 +158,14 @@ func (s *codexSelector) hasQuota(a *codex.CodexAccount) bool {
 		return true // stale — unknown status, assume has quota
 	}
 	return snap.Result.MinRemainingPct() != 0
+}
+
+func (s *codexSelector) snapshot(a *codex.CodexAccount) (QuotaSnapshot, bool) {
+	snap, ok := s.quota.Snapshot(a.AccountID)
+	if !ok {
+		snap, ok = s.quota.Snapshot(a.Email)
+	}
+	return snap, ok
 }
 
 func codexAcctExcluded(a *codex.CodexAccount, excludeSet map[string]bool) bool {

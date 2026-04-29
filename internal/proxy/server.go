@@ -57,6 +57,7 @@ type Server struct {
 	CodexUpgradeTransport http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
 	Headroom              *HeadroomBridge
 	Diag                  *DiagnosticsWriter
+	PayloadDiag           *PayloadWriter
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -321,7 +322,7 @@ func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Reques
 		message := fmt.Sprintf("%s requires websocket upgrade", codexAppServerPath)
 		w.Header().Set("Upgrade", "websocket")
 		writeError(w, http.StatusUpgradeRequired, "invalid_request_error", message)
-		s.emitDiagnostics(RouteEvent{
+		event := RouteEvent{
 			Time:       start.UTC(),
 			Method:     r.Method,
 			Path:       r.URL.Path,
@@ -330,7 +331,9 @@ func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Reques
 			StatusCode: http.StatusUpgradeRequired,
 			LatencyMS:  time.Since(start).Milliseconds(),
 			Error:      diagnosticsErrorCode("invalid_request_error", message),
-		})
+		}
+		event.applySessionCorrelation(r.Header)
+		s.emitDiagnostics(event)
 		return
 	}
 	s.proxyCodexAppServer(w, r)
@@ -370,6 +373,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		"diagnostics": map[string]bool{
 			"enabled": s.Diag != nil,
+			"payload": s.PayloadDiag != nil,
 		},
 	}
 	if s.Headroom != nil {
@@ -429,6 +433,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 				Error:      rec.diagnosticsError(),
 			}
 			event.applyRouteDiagnostics(routeDiag)
+			event.applySessionCorrelation(r.Header)
 			s.emitDiagnostics(event)
 		}()
 	}
@@ -452,6 +457,24 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	model = extractModel(body)
 	fmt.Fprintf(os.Stderr, "cq: route POST /responses model=%q provider=codex (native)\n", model)
+
+	// Emit payload diagnostics before any body rewrite.
+	if s.PayloadDiag != nil {
+		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, body)
+		s.emitPayloadDiagnostics(PayloadEvent{
+			Time:          time.Now().UTC(),
+			Method:        r.Method,
+			Path:          r.URL.Path,
+			Provider:      "codex",
+			RouteKind:     "codex_native",
+			Model:         model,
+			ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
+			SessionKey:    sessionKey,
+			SessionSource: sessionSource,
+			BodyBytes:     len(body),
+			Body:          encodeBody(body),
+		})
+	}
 
 	// Compress Responses API input via headroom bridge if available.
 	// Fail-open: on error, log and continue with original body.
@@ -541,57 +564,78 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 // binary/text frames are not buffered by this proxy.
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	var rec *diagnosticsResponseWriter
+	statusCode := 0
+	diagError := ""
 	ctx, routeDiag := withRouteDiagnostics(r.Context())
 	r = r.WithContext(ctx)
-	if wrapped, recorder := s.wrapDiagnosticsResponseWriter(w); recorder != nil {
-		w = wrapped
-		rec = recorder
-		defer func() {
-			status := rec.statusCode()
-			if rec.status == 0 {
-				status = http.StatusSwitchingProtocols
-			}
-			event := RouteEvent{
-				Time:       start.UTC(),
-				Method:     r.Method,
-				Path:       r.URL.Path,
-				Provider:   "codex",
-				RouteKind:  "codex_legacy_websocket",
-				StatusCode: status,
-				LatencyMS:  time.Since(start).Milliseconds(),
-				Error:      rec.diagnosticsError(),
-			}
-			event.applyRouteDiagnostics(routeDiag)
-			s.emitDiagnostics(event)
-		}()
-	}
+	defer func() {
+		event := RouteEvent{
+			Time:       start.UTC(),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			Provider:   "codex",
+			RouteKind:  "codex_legacy_websocket",
+			StatusCode: statusCode,
+			LatencyMS:  time.Since(start).Milliseconds(),
+			Error:      diagError,
+		}
+		event.applyRouteDiagnostics(routeDiag)
+		event.applySessionCorrelation(r.Header)
+		s.emitDiagnostics(event)
+	}()
 
-	codexUpstream, err := url.Parse(s.Config.CodexUpstream)
+	transport, err := s.codexAppServerTransport()
 	if err != nil {
+		statusCode = http.StatusServiceUnavailable
+		diagError = diagnosticsErrorCode("api_error", err.Error())
+		writeError(w, http.StatusServiceUnavailable, "api_error", err.Error())
+		return
+	}
+	upstreamURL, err := codexAppServerWebSocketURL(s.Config.CodexUpstream)
+	if err != nil {
+		statusCode = http.StatusInternalServerError
+		diagError = diagnosticsErrorCode("api_error", "invalid codex upstream URL")
 		writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
 		return
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade) provider=codex (native)\n", r.Method)
 
-	transport := s.CodexUpgradeTransport
-	if transport == nil {
-		transport = s.CodexTransport
+	upgrader := websocket.Upgrader{
+		CheckOrigin:  func(_ *http.Request) bool { return true },
+		Subprotocols: websocket.Subprotocols(r),
 	}
+	clientConn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	statusCode = http.StatusSwitchingProtocols
+	defer clientConn.Close()
+	clientConn.SetReadLimit(maxRequestBody)
 
-	rp := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(codexUpstream)
-			pr.Out.URL.Path = codexUpstream.Path + "/responses"
-			pr.Out.Host = codexUpstream.Host
-		},
-		Transport: transport,
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			writeError(w, http.StatusBadGateway, "api_error", "codex upstream error: "+err.Error())
-		},
+	messageType, message, err := clientConn.ReadMessage()
+	if err != nil {
+		return
 	}
-	rp.ServeHTTP(w, r)
+	requestedModel := ""
+	if messageType == websocket.TextMessage {
+		requestedModel = extractCodexWebSocketFrameModel(message)
+		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, message, 1)
+	}
+	upstreamConn, _, err := s.dialCodexAppServer(r.Context(), transport, upstreamURL, r.Header, requestedModel)
+	if err != nil {
+		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
+		return
+	}
+	defer upstreamConn.Close()
+	upstreamConn.SetReadLimit(maxRequestBody)
+	if err := upstreamConn.WriteMessage(messageType, message); err != nil {
+		return
+	}
+	errCh := make(chan error, 2)
+	go func() { errCh <- relayWebSocketMessages(clientConn, upstreamConn) }()
+	go func() { errCh <- relayWebSocketMessages(upstreamConn, clientConn) }()
+	<-errCh
 }
 
 // proxyCodexAppServer handles the Codex /app-server websocket path. Unlike the
@@ -619,6 +663,7 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 			Error:      diagError,
 		}
 		event.applyRouteDiagnostics(routeDiag)
+		event.applySessionCorrelation(r.Header)
 		s.emitDiagnostics(event)
 	}()
 
@@ -656,6 +701,7 @@ func (s *Server) proxyCodexAppServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if messageType == websocket.TextMessage {
 		requestedModel = extractCodexAppServerThreadStartModel(message)
+		s.emitCodexWebSocketPayloadDiagnostics(r, codexAppServerPath, requestedModel, message, 1)
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=codex (native)\n", r.Method, codexAppServerPath, requestedModel)
@@ -802,6 +848,22 @@ func extractCodexAppServerThreadStartModel(message []byte) string {
 	return payload.Params.Model
 }
 
+func extractCodexWebSocketFrameModel(message []byte) string {
+	var payload struct {
+		Model  string `json:"model"`
+		Params struct {
+			Model string `json:"model"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(message, &payload) != nil {
+		return ""
+	}
+	if payload.Model != "" {
+		return payload.Model
+	}
+	return payload.Params.Model
+}
+
 func rewriteCodexAppServerThreadStartMessage(message []byte, acct *codex.CodexAccount) []byte {
 	var payload map[string]json.RawMessage
 	if json.Unmarshal(message, &payload) != nil {
@@ -902,6 +964,7 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 						Error:      rec.diagnosticsError(),
 					}
 					event.applyRouteDiagnostics(routeDiag)
+					event.applySessionCorrelation(r.Header)
 					s.emitDiagnostics(event)
 				}()
 			}
@@ -936,6 +999,26 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 
 		// Route based on the original endpoint and model before any body rewriting.
 		routeModel = extractModel(buf)
+
+		// Emit payload diagnostics before any body rewrite, while buf still holds
+		// the original request body. Only emitted for buffered Anthropic endpoints.
+		if diagnosticsAnthropicRouteKind(r.URL.Path) != "" && s.PayloadDiag != nil {
+			sessionKey, sessionSource := payloadSessionCorrelation(r.Header, buf)
+			routeProvider = RouteRequestWithCatalog(r.Method, r.URL.Path, routeModel, s.Catalog)
+			s.emitPayloadDiagnostics(PayloadEvent{
+				Time:          start.UTC(),
+				Method:        r.Method,
+				Path:          r.URL.Path,
+				Provider:      providerName(routeProvider),
+				RouteKind:     diagnosticsAnthropicRouteKind(r.URL.Path),
+				Model:         routeModel,
+				ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
+				SessionKey:    sessionKey,
+				SessionSource: sessionSource,
+				BodyBytes:     len(buf),
+				Body:          encodeBody(buf),
+			})
+		}
 
 		// Compress messages via headroom bridge if available.
 		// Dispatch to the correct path based on the resolved headroom mode.
@@ -1045,6 +1128,40 @@ func (s *Server) emitDiagnostics(event RouteEvent) {
 	}
 }
 
+func (s *Server) emitPayloadDiagnostics(event PayloadEvent) {
+	if s == nil || s.PayloadDiag == nil {
+		return
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	}
+	if err := s.PayloadDiag.Write(event); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: payload diagnostics: write: %v\n", err)
+	}
+}
+
+func (s *Server) emitCodexWebSocketPayloadDiagnostics(r *http.Request, path, model string, frame []byte, frameIndex int) {
+	if s == nil || s.PayloadDiag == nil || r == nil {
+		return
+	}
+	sessionKey, sessionSource, signal := codexWebSocketFrameCorrelation(r.Header, frame)
+	s.emitPayloadDiagnostics(PayloadEvent{
+		Time:          time.Now().UTC(),
+		Method:        r.Method,
+		Path:          path,
+		Provider:      "codex",
+		RouteKind:     "codex_websocket_frame",
+		Model:         model,
+		ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
+		SessionKey:    sessionKey,
+		SessionSource: sessionSource,
+		SessionSignal: signal,
+		FrameIndex:    frameIndex,
+		BodyBytes:     len(frame),
+		Body:          encodeBody(frame),
+	})
+}
+
 func (s *Server) claudePinActive() bool {
 	if s == nil {
 		return false
@@ -1063,6 +1180,24 @@ func diagnosticsAnthropicRouteKind(path string) string {
 		return "anthropic_count_tokens"
 	default:
 		return ""
+	}
+}
+
+// clientKindFromUserAgent classifies the client type from a User-Agent string.
+// Returns a short lowercase label suitable for diagnostics.
+func clientKindFromUserAgent(ua string) string {
+	lower := strings.ToLower(ua)
+	switch {
+	case strings.Contains(lower, "claude-code"):
+		return "claude-code"
+	case strings.Contains(lower, "codex"):
+		return "codex"
+	case strings.Contains(lower, "anthropic"):
+		return "anthropic-sdk"
+	case ua == "":
+		return ""
+	default:
+		return "other"
 	}
 }
 
