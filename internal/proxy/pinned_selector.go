@@ -122,7 +122,10 @@ func (s *PinnedClaudeSelector) pinExhausted(acct *keyring.ClaudeOAuth) bool {
 		return false
 	}
 	snap, ok := s.quota.Snapshot(acctIdentifier(acct))
-	return ok && snap.Result.MinRemainingPct() == 0
+	if !ok || time.Since(snap.FetchedAt) > transientQuotaMaxAge {
+		return false
+	}
+	return snap.Result.MinRemainingPct() == 0
 }
 
 func (s *PinnedClaudeSelector) expirePin(pin string) {

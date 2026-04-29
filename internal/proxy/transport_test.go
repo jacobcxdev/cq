@@ -101,6 +101,95 @@ func TestTokenTransport_HappyPath(t *testing.T) {
 	}
 }
 
+func TestTokenTransport_SessionAffinityReusesWarmAccount(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "low@test.com", AccountUUID: "uuid-low", AccessToken: "tok-low", ExpiresAt: future},
+		{Email: "high@test.com", AccountUUID: "uuid-high", AccessToken: "tok-high", ExpiresAt: future},
+	}
+	quotaReader := stubQuotaReader{
+		"uuid-low":  {Result: quotaResult("uuid-low", "low@test.com", 20), FetchedAt: time.Now()},
+		"uuid-high": {Result: quotaResult("uuid-high", "high@test.com", 80), FetchedAt: time.Now()},
+	}
+	baseSelector := NewAccountSelector(func() []keyring.ClaudeOAuth { return accounts }, nil, quotaReader)
+	affinitySelector := NewSessionAffinitySelector(baseSelector, func() []keyring.ClaudeOAuth { return accounts }, quotaReader)
+	transport := &TokenTransport{
+		Selector: affinitySelector,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(200, `{"ok":true}`), nil
+		}),
+	}
+	req := makeRequest(`{"msg":"hello"}`)
+	req.Header.Set("X-Claude-Code-Session-Id", "session-a")
+	sessionKey, _ := sessionCorrelation(req.Header)
+	affinitySelector.Remember(sessionKey, &accounts[0])
+	ctx, diag := withRouteDiagnostics(req.Context())
+	req = req.WithContext(ctx)
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	accountHint, _ := diag.fields()
+	wantHint := claudeAccountHint(&accounts[0])
+	if accountHint != wantHint {
+		t.Fatalf("account hint = %q, want warm account hint %q", accountHint, wantHint)
+	}
+}
+
+func TestTokenTransport_SessionAffinityRecordsThroughPinnedSelector(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "low@test.com", AccountUUID: "uuid-low", AccessToken: "tok-low", ExpiresAt: future},
+		{Email: "high@test.com", AccountUUID: "uuid-high", AccessToken: "tok-high", ExpiresAt: future},
+	}
+	quotaReader := stubQuotaReader{
+		"uuid-low":  {Result: quotaResult("uuid-low", "low@test.com", 20), FetchedAt: time.Now()},
+		"uuid-high": {Result: quotaResult("uuid-high", "high@test.com", 80), FetchedAt: time.Now()},
+	}
+	baseSelector := NewAccountSelector(func() []keyring.ClaudeOAuth { return accounts }, nil, quotaReader)
+	affinitySelector := NewSessionAffinitySelector(baseSelector, func() []keyring.ClaudeOAuth { return accounts }, quotaReader)
+	pinnedSelector := NewPinnedClaudeSelector(affinitySelector, func() []keyring.ClaudeOAuth { return accounts }, "", quotaReader)
+	transport := &TokenTransport{
+		Selector: pinnedSelector,
+		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return makeResponse(200, `{"ok":true}`), nil
+		}),
+	}
+
+	firstReq := makeRequest(`{"msg":"first"}`)
+	firstReq.Header.Set("X-Claude-Code-Session-Id", "session-a")
+	if resp, err := transport.RoundTrip(firstReq); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("first RoundTrip status=%v err=%v", statusCode(resp), err)
+	}
+	quotaReader["uuid-low"] = QuotaSnapshot{Result: quotaResult("uuid-low", "low@test.com", 90), FetchedAt: time.Now()}
+	quotaReader["uuid-high"] = QuotaSnapshot{Result: quotaResult("uuid-high", "high@test.com", 10), FetchedAt: time.Now()}
+
+	secondReq := makeRequest(`{"msg":"second"}`)
+	secondReq.Header.Set("X-Claude-Code-Session-Id", "session-a")
+	ctx, diag := withRouteDiagnostics(secondReq.Context())
+	secondReq = secondReq.WithContext(ctx)
+	if resp, err := transport.RoundTrip(secondReq); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("second RoundTrip status=%v err=%v", statusCode(resp), err)
+	}
+
+	accountHint, _ := diag.fields()
+	wantHint := claudeAccountHint(&accounts[1])
+	if accountHint != wantHint {
+		t.Fatalf("account hint = %q, want first successful account hint %q", accountHint, wantHint)
+	}
+}
+
+func statusCode(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
+}
+
 func TestTokenTransport_AppendsBeta(t *testing.T) {
 	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
 		{Email: "a@test.com", AccessToken: "tok", ExpiresAt: time.Now().UnixMilli() + 3600_000},

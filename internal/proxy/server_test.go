@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +194,7 @@ func TestServerDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
 	req.Header.Set("Authorization", "Bearer local-tok")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Claude-Code-Session-Id", "raw-session-secret")
 	handler(w, req)
 
 	if w.Code != http.StatusOK {
@@ -230,6 +232,13 @@ func TestServerDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
 	if ev.Time.IsZero() {
 		t.Fatal("Time is zero")
 	}
+	if ev.SessionSource != "x-claude-code-session-id" {
+		t.Fatalf("SessionSource = %q, want x-claude-code-session-id", ev.SessionSource)
+	}
+	if ev.SessionKey == "" || !strings.HasPrefix(ev.SessionKey, "claude-session:") {
+		t.Fatalf("SessionKey = %q, want claude-session:<hash>", ev.SessionKey)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, "raw-session-secret")
 	assertDiagnosticsLogDoesNotContain(t, path, "local-tok")
 	assertDiagnosticsLogDoesNotContain(t, path, "user@test.com")
 	assertDiagnosticsLogDoesNotContain(t, path, "account-uuid-secret")
@@ -903,6 +912,188 @@ func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
 		t.Fatalf("StatusCode = %d, want 101", ev.StatusCode)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
+}
+
+func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path = %q, want /responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-tok" {
+			t.Errorf("upstream auth = %q, want Bearer codex-tok", got)
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upstream upgrade error = %v", err)
+			return
+		}
+		defer conn.Close()
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("upstream read error = %v", err)
+			return
+		}
+		if !strings.Contains(string(message), "response/create") {
+			t.Errorf("upstream message = %q, want response/create frame", message)
+		}
+		if err := conn.WriteMessage(messageType, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
+			t.Errorf("upstream write error = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-codex"}},
+			Inner:    http.DefaultTransport,
+		},
+		PayloadDiag: payloadDiag,
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + legacyCodexResponsesPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	frame := []byte(`{"jsonrpc":"2.0","id":1,"method":"response/create","params":{"model":"gpt-5.5","previous_response_id":"resp_prev"}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, frame); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Path != legacyCodexResponsesPath || ev.RouteKind != "codex_websocket_frame" || ev.Provider != "codex" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.Model != "gpt-5.5" {
+		t.Fatalf("Model = %q, want gpt-5.5", ev.Model)
+	}
+	if ev.SessionSource != "ws:previous_response_id" || ev.SessionSignal != "continuation" {
+		t.Fatalf("source/signal = %q/%q, want ws:previous_response_id/continuation", ev.SessionSource, ev.SessionSignal)
+	}
+	if ev.SessionKey == "" || !strings.HasPrefix(ev.SessionKey, "ws-session:") {
+		t.Fatalf("SessionKey = %q, want ws-session:<hash>", ev.SessionKey)
+	}
+	assertPayloadLogDoesNotContain(t, path, "codex-tok")
+	assertPayloadLogDoesNotContain(t, path, "acct-codex")
+}
+
+func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upstream upgrade error = %v", err)
+			return
+		}
+		defer conn.Close()
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("upstream read error = %v", err)
+			return
+		}
+		if !strings.Contains(string(message), "thread/start") {
+			t.Errorf("upstream message = %q, want thread/start frame", message)
+		}
+		if err := conn.WriteMessage(messageType, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
+			t.Errorf("upstream write error = %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-codex"}},
+			Inner:    http.DefaultTransport,
+		},
+		PayloadDiag: payloadDiag,
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + codexAppServerPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	frame := []byte(`{"jsonrpc":"2.0","id":1,"method":"thread/start","params":{"model":"gpt-5.5","thread_id":"thread-ws-1"}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, frame); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Path != codexAppServerPath || ev.RouteKind != "codex_websocket_frame" || ev.Provider != "codex" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.Model != "gpt-5.5" {
+		t.Fatalf("Model = %q, want gpt-5.5", ev.Model)
+	}
+	if ev.SessionSource != "ws:thread_id" || ev.SessionSignal != "new_session" {
+		t.Fatalf("source/signal = %q/%q, want ws:thread_id/new_session", ev.SessionSource, ev.SessionSignal)
+	}
+	if ev.SessionKey == "" || !strings.HasPrefix(ev.SessionKey, "ws-session:") {
+		t.Fatalf("SessionKey = %q, want ws-session:<hash>", ev.SessionKey)
+	}
+	if ev.FrameIndex != 1 {
+		t.Fatalf("FrameIndex = %d, want 1", ev.FrameIndex)
+	}
+	if string(ev.Body) != string(frame) {
+		t.Fatalf("Body = %s, want raw frame %s", ev.Body, frame)
+	}
+	assertPayloadLogDoesNotContain(t, path, "codex-tok")
+	assertPayloadLogDoesNotContain(t, path, "acct-codex")
 }
 
 func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
@@ -2752,6 +2943,540 @@ func TestServer_ProxyHandler_TokenModeUsesCompress(t *testing.T) {
 	}
 	if string(upstreamBody["messages"]) != string(compressedMessages) {
 		t.Errorf("upstream messages = %s, want compressed %s", upstreamBody["messages"], compressedMessages)
+	}
+}
+
+// ── Payload diagnostics tests ────────────────────────────────────────────────
+
+func TestServerPayloadDiagnosticsClaudeRouteEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: sel,
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return makeResponse(http.StatusOK, `{"id":"msg_123"}`), nil
+			}),
+		},
+		PayloadDiag: payloadDiag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	reqBody := `{"model":"claude-sonnet","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "claude-code/1.0.0")
+	req.Header.Set("X-Claude-Code-Session-Id", "test-session-abc")
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Method != http.MethodPost || ev.Path != "/v1/messages" || ev.Provider != "claude" {
+		t.Fatalf("event route = %+v", ev)
+	}
+	if ev.RouteKind != "anthropic_messages" {
+		t.Fatalf("RouteKind = %q, want anthropic_messages", ev.RouteKind)
+	}
+	if ev.Model != "claude-sonnet" {
+		t.Fatalf("Model = %q, want claude-sonnet", ev.Model)
+	}
+	if ev.ClientKind != "claude-code" {
+		t.Fatalf("ClientKind = %q, want claude-code", ev.ClientKind)
+	}
+	if ev.SessionSource != "x-claude-code-session-id" {
+		t.Fatalf("SessionSource = %q, want x-claude-code-session-id", ev.SessionSource)
+	}
+	if ev.SessionKey == "" {
+		t.Fatal("SessionKey is empty, want non-empty")
+	}
+	if ev.BodyBytes != len(reqBody) {
+		t.Fatalf("BodyBytes = %d, want %d", ev.BodyBytes, len(reqBody))
+	}
+	if ev.Body == nil {
+		t.Fatal("Body is nil, want non-nil")
+	}
+	// Must not leak credentials.
+	assertPayloadLogDoesNotContain(t, path, "local-tok")
+	assertPayloadLogDoesNotContain(t, path, "real-token")
+	assertPayloadLogDoesNotContain(t, path, "user@test.com")
+	// Must not leak raw session ID.
+	assertPayloadLogDoesNotContain(t, path, "test-session-abc")
+}
+
+func TestServerPayloadDiagnosticsCountTokensEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"input_tokens":42}`)),
+			}, nil
+		}),
+		Discover: func() []keyring.ClaudeOAuth {
+			return []keyring.ClaudeOAuth{{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future}}
+		},
+		PayloadDiag: payloadDiag,
+	}
+	_ = sel
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	reqBody := `{"model":"claude-sonnet","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	handler(w, req)
+
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Path != countTokensPath {
+		t.Fatalf("Path = %q, want %q", ev.Path, countTokensPath)
+	}
+	if ev.RouteKind != "anthropic_count_tokens" {
+		t.Fatalf("RouteKind = %q, want anthropic_count_tokens", ev.RouteKind)
+	}
+}
+
+func TestServerPayloadDiagnosticsNativeCodexEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: "https://chatgpt.com/backend-api/codex",
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"resp_codex"}`)),
+				}, nil
+			}),
+		},
+		PayloadDiag: payloadDiag,
+	}
+
+	w := httptest.NewRecorder()
+	reqBody := `{"model":"gpt-5.4","input":"tell me about go"}`
+	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "codex-cli/1.0")
+	srv.handleNativeCodex(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Provider != "codex" || ev.RouteKind != "codex_native" {
+		t.Fatalf("event = %+v, want codex/codex_native", ev)
+	}
+	if ev.Model != "gpt-5.4" {
+		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	}
+	if ev.ClientKind != "codex" {
+		t.Fatalf("ClientKind = %q, want codex", ev.ClientKind)
+	}
+	if ev.BodyBytes != len(reqBody) {
+		t.Fatalf("BodyBytes = %d, want %d", ev.BodyBytes, len(reqBody))
+	}
+	assertPayloadLogDoesNotContain(t, path, "codex-tok")
+}
+
+func TestServerPayloadDiagnosticsCompactEmitsEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			CodexUpstream: "https://chatgpt.com/backend-api/codex",
+			LocalToken:    "tok",
+		},
+		CodexTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"object":"response.compact"}`)),
+				}, nil
+			}),
+		},
+		PayloadDiag: payloadDiag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	w := httptest.NewRecorder()
+	reqBody := `{"model":"gpt-5.4","previous_response_id":"resp_abc"}`
+	req := httptest.NewRequest(http.MethodPost, codexCompactResponsesPath, strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Provider != "codex" || ev.RouteKind != "codex_compact" {
+		t.Fatalf("event = %+v, want codex/codex_compact", ev)
+	}
+	if ev.Model != "gpt-5.4" {
+		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	}
+	assertPayloadLogDoesNotContain(t, path, "codex-tok")
+}
+
+func TestServerPayloadDiagnosticsNoEventForBinaryWebSocketFrame(t *testing.T) {
+	// Binary WebSocket frames are not captured by payload diagnostics.
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, msg, _ := conn.ReadMessage()
+		_ = conn.WriteMessage(websocket.TextMessage, msg)
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "local-tok",
+		},
+		CodexUpgradeTransport: &CodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    http.DefaultTransport,
+		},
+		PayloadDiag: payloadDiag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxy.URL, "http") + legacyCodexResponsesPath
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("Dial() error = %v", err)
+	}
+	_ = conn.WriteMessage(websocket.BinaryMessage, []byte("ping"))
+	conn.ReadMessage()
+	_ = conn.Close()
+
+	// Allow brief time for any async writes.
+	time.Sleep(50 * time.Millisecond)
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// No payload event should be emitted for binary WebSocket frames.
+	if _, err := os.Stat(path); err == nil {
+		events := readPayloadEvents(t, path)
+		if len(events) != 0 {
+			t.Fatalf("binary websocket emitted %d payload events, want 0", len(events))
+		}
+	}
+}
+
+func TestServerPayloadDiagnosticsDistinctParallelSessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: sel,
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return makeResponse(http.StatusOK, `{"id":"msg"}`), nil
+			}),
+		},
+		PayloadDiag: payloadDiag,
+	}
+
+	sessions := []string{"session-alpha", "session-beta", "session-gamma"}
+	var wg sync.WaitGroup
+	for _, sess := range sessions {
+		sess := sess
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+			req.Header.Set("Authorization", "Bearer local-tok")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Claude-Code-Session-Id", sess)
+			handler(w, req)
+		}()
+	}
+	wg.Wait()
+
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != len(sessions) {
+		t.Fatalf("events = %d, want %d", len(events), len(sessions))
+	}
+
+	// All session keys must be distinct.
+	seen := make(map[string]bool)
+	for _, ev := range events {
+		if seen[ev.SessionKey] {
+			t.Fatalf("duplicate session key %q across parallel sessions", ev.SessionKey)
+		}
+		seen[ev.SessionKey] = true
+	}
+}
+
+func TestServerPayloadDiagnosticsDistinctParallelBodySessionsWithIdenticalHeaders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: sel,
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return makeResponse(http.StatusOK, `{"id":"msg"}`), nil
+			}),
+		},
+		PayloadDiag: payloadDiag,
+	}
+
+	conversationIDs := []string{"conv-alpha", "conv-beta", "conv-gamma"}
+	var wg sync.WaitGroup
+	for _, conversationID := range conversationIDs {
+		conversationID := conversationID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+			w := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"model":"claude-sonnet","conversation_id":%q,"messages":[]}`, conversationID)
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer local-tok")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "claude-code/1.0.0")
+			handler(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+			}
+		}()
+	}
+	wg.Wait()
+
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readPayloadEvents(t, path)
+	if len(events) != len(conversationIDs) {
+		t.Fatalf("events = %d, want %d", len(events), len(conversationIDs))
+	}
+	seen := make(map[string]bool)
+	for _, ev := range events {
+		if ev.SessionSource != "body:conversation_id" {
+			t.Fatalf("SessionSource = %q, want body:conversation_id", ev.SessionSource)
+		}
+		if ev.SessionKey == "" || !strings.HasPrefix(ev.SessionKey, "body-session:") {
+			t.Fatalf("SessionKey = %q, want body-session:<hash>", ev.SessionKey)
+		}
+		if seen[ev.SessionKey] {
+			t.Fatalf("duplicate session key %q across body-distinguished sessions", ev.SessionKey)
+		}
+		seen[ev.SessionKey] = true
+	}
+	assertPayloadLogDoesNotContain(t, path, "local-tok")
+	assertPayloadLogDoesNotContain(t, path, "real-token")
+}
+
+func TestServerPayloadDiagnosticsDisabledNoFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	future := time.Now().UnixMilli() + 3600_000
+	sel := &fakeSelector{accounts: []keyring.ClaudeOAuth{
+		{Email: "user@test.com", AccessToken: "real-token", ExpiresAt: future},
+	}}
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			LocalToken:     "local-tok",
+		},
+		Transport: &TokenTransport{
+			Selector: sel,
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return makeResponse(http.StatusOK, `{"id":"msg"}`), nil
+			}),
+		},
+		// PayloadDiag intentionally nil.
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	handler(w, req)
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("payload file should not exist when PayloadDiag is nil: %v", err)
+	}
+}
+
+func TestServerHealthReportsPayloadEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled", enabled: false},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "payloads.jsonl")
+			srv := &Server{}
+			if tc.enabled {
+				pw, err := OpenPayloadWriter(path)
+				if err != nil {
+					t.Fatalf("OpenPayloadWriter: %v", err)
+				}
+				defer pw.Close()
+				srv.PayloadDiag = pw
+			}
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			srv.handleHealth(w, req)
+
+			var resp struct {
+				Diagnostics struct {
+					Payload bool `json:"payload"`
+				} `json:"diagnostics"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Diagnostics.Payload != tc.enabled {
+				t.Fatalf("diagnostics.payload = %v, want %v", resp.Diagnostics.Payload, tc.enabled)
+			}
+		})
+	}
+}
+
+func assertPayloadLogDoesNotContain(t *testing.T, path, needle string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read payload log: %v", err)
+	}
+	if strings.Contains(string(raw), needle) {
+		t.Fatalf("payload log leaked %q: %s", needle, raw)
 	}
 }
 

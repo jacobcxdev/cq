@@ -59,6 +59,58 @@ func TestConfigDiagnosticsLogDefaultDisabled(t *testing.T) {
 	}
 }
 
+func TestConfigPayloadDiagnosticsLogJSONRoundTrip(t *testing.T) {
+	cfg := Config{
+		Port:                  DefaultPort,
+		ClaudeUpstream:        DefaultUpstream,
+		CodexUpstream:         DefaultCodexUpstream,
+		LocalToken:            "tok",
+		PayloadDiagnosticsLog: "/tmp/cq-payloads.jsonl",
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["payload_diagnostics_log"]) != `"/tmp/cq-payloads.jsonl"` {
+		t.Fatalf("payload_diagnostics_log = %s, want configured path in %s", raw["payload_diagnostics_log"], data)
+	}
+
+	var roundTrip Config
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.PayloadDiagnosticsLog != cfg.PayloadDiagnosticsLog {
+		t.Fatalf("PayloadDiagnosticsLog = %q, want %q", roundTrip.PayloadDiagnosticsLog, cfg.PayloadDiagnosticsLog)
+	}
+}
+
+func TestConfigPayloadDiagnosticsLogDefaultDisabled(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"port":19280,"local_token":"tok"}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PayloadDiagnosticsLog != "" {
+		t.Fatalf("PayloadDiagnosticsLog = %q, want empty", cfg.PayloadDiagnosticsLog)
+	}
+
+	data, err := json.Marshal(Config{Port: DefaultPort, LocalToken: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["payload_diagnostics_log"]; ok {
+		t.Fatalf("payload_diagnostics_log should be omitted when empty: %s", data)
+	}
+}
+
 func TestConfigDiagnosticsLogPersisted(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)

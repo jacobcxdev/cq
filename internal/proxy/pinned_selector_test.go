@@ -149,6 +149,44 @@ func TestPinnedClaudeSelector_ExhaustedPinClearsAndDelegatesToInner(t *testing.T
 	}
 }
 
+func TestPinnedClaudeSelector_StaleExhaustedPinDoesNotClear(t *testing.T) {
+	future := time.Now().UnixMilli() + 3600_000
+	accounts := []keyring.ClaudeOAuth{
+		{Email: "pinned@test.com", AccountUUID: "uuid-pin", AccessToken: "tok-pin", ExpiresAt: future},
+		{Email: "fallback@test.com", AccountUUID: "uuid-fallback", AccessToken: "tok-fb", ExpiresAt: future},
+	}
+	inner := innerSelectorFunc(func(ctx context.Context, exclude ...string) (*keyring.ClaudeOAuth, error) {
+		return &keyring.ClaudeOAuth{Email: "fallback@test.com", AccessToken: "tok-fb", ExpiresAt: future}, nil
+	})
+	sel := NewPinnedClaudeSelector(inner, func() []keyring.ClaudeOAuth { return accounts }, "pinned@test.com", stubQuotaReader{
+		"uuid-pin": {
+			Result: quota.Result{
+				Status: quota.StatusExhausted,
+				Windows: map[quota.WindowName]quota.Window{
+					quota.Window5Hour: {RemainingPct: 0},
+				},
+			},
+			FetchedAt: time.Now().Add(-10 * time.Minute),
+		},
+	})
+	expiredPin := ""
+	sel.SetPinExpireFunc(func(pin string) { expiredPin = pin })
+
+	acct, err := sel.Select(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acct.Email != "pinned@test.com" {
+		t.Errorf("email = %q, want pinned@test.com", acct.Email)
+	}
+	if got := sel.Pin(); got != "pinned@test.com" {
+		t.Errorf("pin = %q, want pinned@test.com", got)
+	}
+	if expiredPin != "" {
+		t.Errorf("expired pin = %q, want empty", expiredPin)
+	}
+}
+
 func TestPinnedClaudeSelector_NotFoundReturnsError(t *testing.T) {
 	future := time.Now().UnixMilli() + 3600_000
 	accounts := []keyring.ClaudeOAuth{

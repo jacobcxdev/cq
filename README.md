@@ -91,10 +91,15 @@ Important `proxy.json` fields:
 | `local_token` | generated | Required bearer token for local proxy requests. |
 | `pinned_claude_account` | unset | Optional Claude account email or UUID to force proxy selection. |
 | `diagnostics_log` | unset | Optional JSONL routing diagnostics log path for advanced local debugging. |
+| `payload_diagnostics_log` | unset | Optional JSONL payload diagnostics log path. **Disabled by default.** See warning below. |
 | `headroom` | `false` | Enables the headroom compression bridge when true. |
 | `headroom_mode` | `cache` | Compression strategy when set; valid values are `cache` and `token`. |
 
 Routing diagnostics are disabled by default. To enable them, set `diagnostics_log` in `proxy.json` to a local file path and restart the proxy. The log is append-only JSONL containing redacted route metadata such as method, path, provider, route kind, status, latency, selected-account hint, failover flag, and safe error code. It is intended for advanced local debugging and UAT, and enabling it does not change routing policy.
+
+**Payload diagnostics** (`payload_diagnostics_log`) are disabled by default. To enable them, set `payload_diagnostics_log` in `proxy.json` to a local file path and **restart the proxy** (hot reload is not supported). Each entry in the log is a JSONL record with fields including `time`, `method`, `path`, `provider`, `route_kind`, `model`, `client_kind`, `session_key`, `session_source`, `session_signal`, `frame_index`, `body_bytes`, and `body`. Codex WebSocket client text frames are logged with `route_kind: codex_websocket_frame` so native Codex sessions can expose signals such as new session, continuation, long session, clear, and compact transitions.
+
+> **WARNING:** The payload diagnostics log contains **raw request bodies** including prompts, tool inputs, system prompts, compact summaries, and message content. It is unsafe to share without careful review. The log does not record headers, tokens, or credential values by itself, but the body content may contain sensitive information. The `session_key` and `session_source` fields are derived correlation metadata — `session_key` is a deterministic 12-hex-character hash of a session identifier (never the raw value), and `session_source` identifies which signal was used (e.g. `x-claude-code-session-id`, `session_id`, `x-codex-window-id`, `body:conversation_id`, `body:thread_id`, `body:previous_response_id`, `ws:thread_id`, `ws:previous_response_id`). Payload diagnostics can derive the key from known conversation/thread identifiers in JSON request bodies or Codex WebSocket frames when otherwise-identical local client sessions have no differentiating session header.
 
 ## Model Registry
 

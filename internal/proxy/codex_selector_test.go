@@ -176,6 +176,28 @@ func TestCodexSelector_SkipsExhaustedAccounts(t *testing.T) {
 	}
 }
 
+func TestCodexSelector_PrefersHigherQuotaOverActiveLowQuota(t *testing.T) {
+	now := time.Now()
+	quotaReader := stubQuotaReader{
+		"low":  {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 5}}}, FetchedAt: now},
+		"high": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 80}}}, FetchedAt: now},
+	}
+	sel := NewCodexSelector(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{AccountID: "low", Email: "low@test.com", AccessToken: "t1", IsActive: true},
+			{AccountID: "high", Email: "high@test.com", AccessToken: "t2", IsActive: false},
+		}
+	}, quotaReader)
+
+	acct, err := sel.Select(context.Background())
+	if err != nil {
+		t.Fatalf("Select error: %v", err)
+	}
+	if acct == nil || acct.Email != "high@test.com" {
+		t.Fatalf("got %+v, want high@test.com", acct)
+	}
+}
+
 func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
