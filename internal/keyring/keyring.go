@@ -150,11 +150,11 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 // pickWinner reports whether candidate should replace current as the "token
 // winner" when two entries represent the same logical account. It implements the
 // shared tie-break policy:
-//   1. Higher ExpiresAt wins outright.
-//   2. On a tie: prefer non-empty AccountUUID.
-//   3. Then: prefer non-nil TokenAccount.
-//   4. Then: prefer richer (longer) Scopes list.
-//   5. Otherwise keep current (return false).
+//  1. Higher ExpiresAt wins outright.
+//  2. On a tie: prefer non-empty AccountUUID.
+//  3. Then: prefer non-nil TokenAccount.
+//  4. Then: prefer richer (longer) Scopes list.
+//  5. Otherwise keep current (return false).
 func pickWinner(candidate, current ClaudeOAuth) bool {
 	if candidate.ExpiresAt > current.ExpiresAt {
 		return true
@@ -180,7 +180,6 @@ func pickWinner(candidate, current ClaudeOAuth) bool {
 	}
 	return false
 }
-
 
 // mergeIdentifiedByFreshness deduplicates identified accounts (those with
 // AccountUUID or Email) across discovery sources by preferring the entry with
@@ -586,61 +585,100 @@ func BackfillCredentialsFile(acct *ClaudeOAuth) {
 	}
 }
 
+var (
+	updateKeychainEntryForRefresh = UpdateKeychainEntry
+	storeCQAccountForRefresh      = StoreCQAccount
+)
+
 // PersistRefreshedToken updates stored Claude credentials after a successful refresh.
 func PersistRefreshedToken(acct *ClaudeOAuth) {
+	cqAccount := *acct
+
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	path := filepath.Join(home, ".claude", ".credentials.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var creds ClaudeCredentials
-	if json.Unmarshal(data, &creds) != nil || creds.ClaudeAiOauth == nil {
-		return
-	}
-	stored := creds.ClaudeAiOauth
-	if !sameStoredAccount(stored, acct) {
-		return
+	if err == nil {
+		path := filepath.Join(home, ".claude", ".credentials.json")
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var creds ClaudeCredentials
+			if json.Unmarshal(data, &creds) == nil && canUpdateStoredAccount(creds.ClaudeAiOauth, acct) {
+				stored := creds.ClaudeAiOauth
+				updated := mergeRefreshedAccount(stored, acct)
+				creds.ClaudeAiOauth = &updated
+				cqAccount = updated
+				if err := WriteCredentialsFile(&creds); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: write creds: %v\n", err)
+				} else if err := updateKeychainEntryForRefresh("Claude Code-credentials", &creds); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: update keychain: %v\n", err)
+				}
+			}
+		}
 	}
 
-	updated := *stored
-	changed := false
-	if acct.AccessToken != "" && stored.AccessToken != acct.AccessToken {
-		updated.AccessToken = acct.AccessToken
-		changed = true
+	if cqAccount.AccountUUID == "" {
+		cqAccount.AccountUUID = acct.AccountUUID
 	}
-	if acct.ExpiresAt > 0 && stored.ExpiresAt != acct.ExpiresAt {
-		updated.ExpiresAt = acct.ExpiresAt
-		changed = true
+	if cqAccount.Email == "" {
+		cqAccount.Email = acct.Email
 	}
-	if acct.RefreshToken != "" && stored.RefreshToken != acct.RefreshToken {
-		updated.RefreshToken = acct.RefreshToken
-		changed = true
-	}
-	if len(acct.Scopes) > 0 && len(stored.Scopes) == 0 {
-		updated.Scopes = acct.Scopes
-		changed = true
-	}
-	if !changed {
-		return
-	}
-	creds.ClaudeAiOauth = &updated
-
-	if err := WriteCredentialsFile(&creds); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: write creds: %v\n", err)
-		return
-	}
-	if err := UpdateKeychainEntry("Claude Code-credentials", &creds); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: update keychain: %v\n", err)
-	}
-	if updated.AccountUUID != "" {
-		if err := StoreCQAccount(&updated); err != nil {
+	if cqAccount.AccountUUID != "" {
+		if err := storeCQAccountForRefresh(&cqAccount); err != nil {
 			fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: store cq account: %v\n", err)
 		}
 	}
+}
+
+func canUpdateStoredAccount(stored, acct *ClaudeOAuth) bool {
+	if stored == nil || acct == nil {
+		return false
+	}
+	if stored.Email != "" && acct.Email != "" && stored.Email != acct.Email {
+		return false
+	}
+	if stored.AccountUUID != "" && acct.AccountUUID != "" && stored.AccountUUID != acct.AccountUUID {
+		return false
+	}
+	if stored.Email != "" && acct.Email != "" {
+		return true
+	}
+	if stored.AccountUUID != "" && acct.AccountUUID != "" {
+		return true
+	}
+	return sameStoredAccount(stored, acct)
+}
+
+func mergeRefreshedAccount(stored, acct *ClaudeOAuth) ClaudeOAuth {
+	updated := *stored
+	if acct.AccessToken != "" {
+		updated.AccessToken = acct.AccessToken
+	}
+	if acct.ExpiresAt > 0 {
+		updated.ExpiresAt = acct.ExpiresAt
+	}
+	if acct.RefreshToken != "" {
+		updated.RefreshToken = acct.RefreshToken
+	}
+	if len(acct.Scopes) > 0 && len(stored.Scopes) == 0 {
+		updated.Scopes = acct.Scopes
+	}
+	if updated.Email == "" {
+		updated.Email = acct.Email
+	}
+	if updated.AccountUUID == "" {
+		updated.AccountUUID = acct.AccountUUID
+	}
+	if updated.SubscriptionType == "" {
+		updated.SubscriptionType = acct.SubscriptionType
+	}
+	if updated.RateLimitTier == "" {
+		updated.RateLimitTier = acct.RateLimitTier
+	}
+	if updated.Profile == nil {
+		updated.Profile = acct.Profile
+	}
+	if updated.TokenAccount == nil {
+		updated.TokenAccount = acct.TokenAccount
+	}
+	return updated
 }
 
 // ActiveClaudeEmail returns the email of the currently active Claude account
