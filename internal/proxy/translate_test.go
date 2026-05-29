@@ -562,3 +562,92 @@ func TestTranslateRequest_NativeEffortSetReasoning(t *testing.T) {
 		})
 	}
 }
+
+// TestTranslateRequest_SystemRoleMessageBecomesDeveloper verifies that a
+// message carrying role "system" (sent by newer Claude Code clients when
+// targeting OpenAI models) is mapped to the "developer" role. The ChatGPT
+// Codex backend rejects "system"-role input items with
+// {"detail":"System messages are not allowed"}; "developer" is its equivalent.
+func TestTranslateRequest_SystemRoleMessageBecomesDeveloper(t *testing.T) {
+	input := `{
+		"model": "gpt-5.4",
+		"max_tokens": 10,
+		"messages": [
+			{"role": "system", "content": "Be terse."},
+			{"role": "user", "content": "hi"}
+		]
+	}`
+
+	out, err := translateRequest([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte(`"role":"system"`)) {
+		t.Fatalf("translated output must not contain a system-role item: %s", out)
+	}
+
+	var req openaiResponsesRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	var items []openaiInputItem
+	if err := json.Unmarshal(req.Input, &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
+	}
+	if items[0].Role != "developer" {
+		t.Errorf("items[0].Role = %q, want developer", items[0].Role)
+	}
+	var parts []openaiInputContentPart
+	if err := json.Unmarshal(items[0].Content, &parts); err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 || parts[0].Type != "input_text" || parts[0].Text != "Be terse." {
+		t.Errorf("parts = %+v, want one input_text 'Be terse.'", parts)
+	}
+	if items[1].Role != "user" {
+		t.Errorf("items[1].Role = %q, want user (unchanged)", items[1].Role)
+	}
+}
+
+// TestTranslateRequest_SystemRoleBlocksBecomeDeveloper verifies the same role
+// mapping when system-role content is an array of content blocks.
+func TestTranslateRequest_SystemRoleBlocksBecomeDeveloper(t *testing.T) {
+	input := `{
+		"model": "gpt-5.4",
+		"max_tokens": 10,
+		"messages": [
+			{"role": "system", "content": [{"type":"text","text":"Rule A"}]},
+			{"role": "user", "content": "hi"}
+		]
+	}`
+
+	out, err := translateRequest([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte(`"role":"system"`)) {
+		t.Fatalf("translated output must not contain a system-role item: %s", out)
+	}
+
+	var req openaiResponsesRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatal(err)
+	}
+	var items []openaiInputItem
+	if err := json.Unmarshal(req.Input, &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 || items[0].Role != "developer" {
+		t.Fatalf("items[0].Role = %q, want developer", items[0].Role)
+	}
+	var parts []openaiInputContentPart
+	if err := json.Unmarshal(items[0].Content, &parts); err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 || parts[0].Type != "input_text" || parts[0].Text != "Rule A" {
+		t.Errorf("parts = %+v, want one input_text 'Rule A'", parts)
+	}
+}
