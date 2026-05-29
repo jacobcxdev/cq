@@ -281,12 +281,21 @@ func translateMessages(msgs []anthropicMsg) ([]openaiInputItem, error) {
 }
 
 func translateMessage(msg anthropicMsg) ([]openaiInputItem, error) {
+	// The ChatGPT Codex backend rejects "system"-role input items with
+	// {"detail":"System messages are not allowed"}; "developer" is its
+	// equivalent. Newer Claude Code clients send system content as a
+	// system-role message when targeting OpenAI models, so map it here.
+	role := msg.Role
+	if role == "system" {
+		role = "developer"
+	}
+
 	// Content can be a string or array of content blocks.
 	// Try string first.
 	var text string
 	if json.Unmarshal(msg.Content, &text) == nil {
 		contentType := "input_text"
-		if msg.Role == "assistant" {
+		if role == "assistant" {
 			contentType = "output_text"
 		}
 		part := openaiInputContentPart{Type: contentType, Text: text}
@@ -296,7 +305,7 @@ func translateMessage(msg anthropicMsg) ([]openaiInputItem, error) {
 		}
 		return []openaiInputItem{{
 			Type:    "message",
-			Role:    msg.Role,
+			Role:    role,
 			Content: partJSON,
 		}}, nil
 	}
@@ -316,7 +325,7 @@ func translateMessage(msg anthropicMsg) ([]openaiInputItem, error) {
 		partJSON, _ := json.Marshal(msgParts)
 		items = append(items, openaiInputItem{
 			Type:    "message",
-			Role:    msg.Role,
+			Role:    role,
 			Content: partJSON,
 		})
 		msgParts = nil
@@ -326,7 +335,7 @@ func translateMessage(msg anthropicMsg) ([]openaiInputItem, error) {
 		switch block.Type {
 		case "text":
 			contentType := "input_text"
-			if msg.Role == "assistant" {
+			if role == "assistant" {
 				contentType = "output_text"
 			}
 			msgParts = append(msgParts, openaiInputContentPart{
