@@ -193,6 +193,125 @@ func TestMergeAnonymousFreshScopesCarried(t *testing.T) {
 	}
 }
 
+// ── dropOrphanAnonymousExpired ────────────────────────────────────────────────
+
+func TestDropOrphanAnonymousExpired(t *testing.T) {
+	const now = int64(1000)
+
+	hasEmail := func(accts []ClaudeOAuth, email string) bool {
+		for _, a := range accts {
+			if a.Email == email {
+				return true
+			}
+		}
+		return false
+	}
+	hasAnonExpired := func(accts []ClaudeOAuth) bool {
+		for _, a := range accts {
+			if a.Email == "" && a.AccountUUID == "" && a.ExpiresAt != 0 && a.ExpiresAt <= now {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("nil passthrough", func(t *testing.T) {
+		if got := dropOrphanAnonymousExpired(nil, now); got != nil {
+			t.Errorf("got %v, want nil", got)
+		}
+	})
+
+	t.Run("orphan anonymous expired dropped when identified account present", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "keep@example.com", AccountUUID: "uuid-keep", AccessToken: "tok", ExpiresAt: 5000},
+			{AccessToken: "orphan", RefreshToken: "rt-orphan", ExpiresAt: 500}, // anonymous, expired
+		}
+		got := dropOrphanAnonymousExpired(input, now)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1; got %+v", len(got), got)
+		}
+		if !hasEmail(got, "keep@example.com") {
+			t.Errorf("identified account dropped: %+v", got)
+		}
+		if hasAnonExpired(got) {
+			t.Errorf("phantom anonymous entry survived: %+v", got)
+		}
+	})
+
+	t.Run("anonymous expired preserved when it is the only account", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{AccessToken: "solo", RefreshToken: "rt-solo", ExpiresAt: 500}, // anonymous, expired, no identified peer
+		}
+		got := dropOrphanAnonymousExpired(input, now)
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1 (sole login preserved); got %+v", len(got), got)
+		}
+	})
+
+	t.Run("anonymous fresh preserved alongside identified account", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "keep@example.com", AccountUUID: "uuid-keep", AccessToken: "tok", ExpiresAt: 5000},
+			{AccessToken: "fresh-anon", RefreshToken: "rt-fresh", ExpiresAt: 9000}, // anonymous, not expired
+		}
+		got := dropOrphanAnonymousExpired(input, now)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (fresh anonymous kept); got %+v", len(got), got)
+		}
+	})
+
+	t.Run("anonymous with unknown expiry preserved", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "keep@example.com", AccountUUID: "uuid-keep", AccessToken: "tok", ExpiresAt: 5000},
+			{AccessToken: "no-expiry", RefreshToken: "rt-x", ExpiresAt: 0}, // anonymous, unknown expiry
+		}
+		got := dropOrphanAnonymousExpired(input, now)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (unknown-expiry anonymous kept); got %+v", len(got), got)
+		}
+	})
+
+	t.Run("all identified untouched", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "a@example.com", AccountUUID: "uuid-a", ExpiresAt: 500},
+			{Email: "b@example.com", AccountUUID: "uuid-b", ExpiresAt: 5000},
+		}
+		got := dropOrphanAnonymousExpired(input, now)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2 (identified never dropped, even expired); got %+v", len(got), got)
+		}
+	})
+
+	t.Run("multiple orphans dropped, identified and fresh anonymous kept", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{AccessToken: "orphan1", RefreshToken: "rt1", ExpiresAt: 100},  // drop
+			{Email: "keep@example.com", AccountUUID: "uuid-keep", ExpiresAt: 5000},
+			{AccessToken: "orphan2", RefreshToken: "rt2", ExpiresAt: 200},  // drop
+			{AccessToken: "fresh-anon", RefreshToken: "rt3", ExpiresAt: 9000}, // keep (fresh)
+		}
+		got := dropOrphanAnonymousExpired(input, now)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2; got %+v", len(got), got)
+		}
+		if !hasEmail(got, "keep@example.com") {
+			t.Errorf("identified account dropped: %+v", got)
+		}
+		if hasAnonExpired(got) {
+			t.Errorf("a phantom survived: %+v", got)
+		}
+	})
+
+	t.Run("input slice not mutated", func(t *testing.T) {
+		input := []ClaudeOAuth{
+			{Email: "keep@example.com", AccountUUID: "uuid-keep", ExpiresAt: 5000},
+			{AccessToken: "orphan", RefreshToken: "rt-orphan", ExpiresAt: 500},
+		}
+		_ = dropOrphanAnonymousExpired(input, now)
+		if len(input) != 2 || input[1].AccessToken != "orphan" {
+			t.Errorf("input was mutated: %+v", input)
+		}
+	})
+}
+
 // ── dedupByEmail ─────────────────────────────────────────────────────────────
 
 func TestDedupByEmail(t *testing.T) {
