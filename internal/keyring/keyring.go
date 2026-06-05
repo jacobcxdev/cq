@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	gokeyring "github.com/zalando/go-keyring"
 )
@@ -71,6 +72,13 @@ func DiscoverClaudeAccounts() []ClaudeOAuth {
 	// from the credentials file or cq keyring. Must run after all sources are
 	// discovered so token affinity can match against cq keyring entries.
 	accounts = mergeAnonymousFresh(accounts)
+
+	// Drop phantom anonymous entries: an expired, identity-less keychain slot
+	// left behind by a removed account whose tokens drifted from the stored
+	// copies (so neither remove-by-affinity nor mergeAnonymousFresh could
+	// attribute it). Runs after the merge so genuine fresh anonymous logins are
+	// already absorbed into their identified account.
+	accounts = dropOrphanAnonymousExpired(accounts, time.Now().UnixMilli())
 
 	// Post-discovery dedup: entries from different sources may represent
 	// the same account with different tokens (e.g. before/after refresh).
@@ -143,6 +151,46 @@ func mergeAnonymousFresh(accounts []ClaudeOAuth) []ClaudeOAuth {
 		if !merged[i] {
 			result = append(result, a)
 		}
+	}
+	return result
+}
+
+// dropOrphanAnonymousExpired removes anonymous entries (no Email, no AccountUUID)
+// that are expired, but only when at least one identified account is also present.
+//
+// Such an entry is a phantom: typically a leftover "Claude Code" keychain slot
+// from an account removed via `cq claude remove`, whose live tokens had already
+// drifted from the stored copies — so removal-by-token-affinity could not delete
+// it and mergeAnonymousFresh could not attribute it to any identified account. It
+// carries no identity and cannot be merged, so it would otherwise resurface as a
+// standalone "auth expired" account on every run.
+//
+// Guards:
+//   - No identified account present → the anonymous entry is the user's only
+//     login; preserve it (a legitimately expired session still worth surfacing).
+//   - ExpiresAt == 0 (unknown expiry) → preserve; absence of data is not expiry.
+//   - Non-expired anonymous entry → preserve; may be a freshly written Claude Code
+//     login cq has not yet matched to an identity.
+//
+// The input slice is not mutated; a new slice is returned.
+func dropOrphanAnonymousExpired(accounts []ClaudeOAuth, nowMs int64) []ClaudeOAuth {
+	hasIdentified := false
+	for i := range accounts {
+		if accounts[i].Email != "" || accounts[i].AccountUUID != "" {
+			hasIdentified = true
+			break
+		}
+	}
+	if !hasIdentified {
+		return accounts
+	}
+
+	var result []ClaudeOAuth
+	for _, a := range accounts {
+		if a.Email == "" && a.AccountUUID == "" && a.ExpiresAt != 0 && a.ExpiresAt <= nowMs {
+			continue // phantom: identity-less and expired
+		}
+		result = append(result, a)
 	}
 	return result
 }
