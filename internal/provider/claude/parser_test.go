@@ -260,7 +260,7 @@ func TestParseUsageModelSpecificSevenDayWindows(t *testing.T) {
 	body := []byte(`{
 		"five_hour": {"utilization": 30.0, "resets_at": "2026-03-20T12:00:00Z"},
 		"seven_day": {"utilization": 10.0, "resets_at": "2026-03-25T00:00:00Z"},
-		"seven_day_sonnet": {"utilization": 25.0, "resets_at": "2026-03-24T00:00:00Z"},
+		"seven_day_fable": {"utilization": 25.0, "resets_at": "2026-03-24T00:00:00Z"},
 		"seven_day_opus": {"utilization": 40.0, "resets_at": "2026-03-23T00:00:00Z"},
 		"seven_day_omelette": {"utilization": 55.0, "resets_at": "2026-03-22T00:00:00Z"}
 	}`)
@@ -270,7 +270,7 @@ func TestParseUsageModelSpecificSevenDayWindows(t *testing.T) {
 		name string
 		want int
 	}{
-		{name: "7d:sonnet", want: 75},
+		{name: "7d:fable", want: 75},
 		{name: "7d:opus", want: 60},
 		{name: "7d:design", want: 45},
 	}
@@ -286,6 +286,98 @@ func TestParseUsageModelSpecificSevenDayWindows(t *testing.T) {
 		if window.ResetAtUnix == 0 {
 			t.Errorf("%s reset_at_unix should be non-zero", tc.name)
 		}
+	}
+}
+
+func TestParseUsageIncludesFutureBackendFedModelSpecificWindows(t *testing.T) {
+	body := []byte(`{
+		"five_hour": {"utilization": 30.0, "resets_at": "2026-03-20T12:00:00Z"},
+		"seven_day": {"utilization": 10.0, "resets_at": "2026-03-25T00:00:00Z"},
+		"seven_day_haiku": {"utilization": 35.0, "resets_at": "2026-03-24T00:00:00Z"}
+	}`)
+
+	result := parseUsage(body, "max", "default_claude_max_20x", "user@example.com", "abc-123")
+
+	window, ok := result.Windows[quota.WindowName("7d:haiku")]
+	if !ok {
+		t.Fatal("missing 7d:haiku window")
+	}
+	if window.RemainingPct != 65 {
+		t.Errorf("7d:haiku remaining_pct = %d, want 65", window.RemainingPct)
+	}
+	if window.ResetAtUnix == 0 {
+		t.Error("7d:haiku reset_at_unix should be non-zero")
+	}
+}
+
+func TestParseUsageIncludesLimitsArrayScopedWindows(t *testing.T) {
+	body := []byte(`{
+		"limits": [
+			{
+				"kind": "session",
+				"group": "session",
+				"percent": 33,
+				"resets_at": "2026-07-10T06:30:00Z",
+				"scope": null
+			},
+			{
+				"kind": "weekly_all",
+				"group": "weekly",
+				"percent": 13,
+				"resets_at": "2026-07-14T07:00:00Z",
+				"scope": null
+			},
+			{
+				"kind": "weekly_scoped",
+				"group": "weekly",
+				"percent": 19,
+				"resets_at": "2026-07-14T07:00:00Z",
+				"scope": {
+					"model": {
+						"id": null,
+						"display_name": "Fable"
+					},
+					"surface": null
+				}
+			}
+		]
+	}`)
+
+	result := parseUsage(body, "max", "default_claude_max_20x", "user@example.com", "abc-123")
+
+	tests := []struct {
+		name string
+		want int
+	}{
+		{name: "5h", want: 67},
+		{name: "7d", want: 87},
+		{name: "7d:fable", want: 81},
+	}
+	for _, tc := range tests {
+		window, ok := result.Windows[quota.WindowName(tc.name)]
+		if !ok {
+			t.Fatalf("missing %s window", tc.name)
+		}
+		if window.RemainingPct != tc.want {
+			t.Errorf("%s remaining_pct = %d, want %d", tc.name, window.RemainingPct, tc.want)
+		}
+		if window.ResetAtUnix == 0 {
+			t.Errorf("%s reset_at_unix should be non-zero", tc.name)
+		}
+	}
+}
+
+func TestParseUsageIgnoresNullBackendFedWindows(t *testing.T) {
+	body := []byte(`{
+		"five_hour": {"utilization": 30.0, "resets_at": "2026-03-20T12:00:00Z"},
+		"seven_day": {"utilization": 10.0, "resets_at": "2026-03-25T00:00:00Z"},
+		"seven_day_fable": null
+	}`)
+
+	result := parseUsage(body, "max", "default_claude_max_20x", "user@example.com", "abc-123")
+
+	if _, ok := result.Windows[quota.WindowName("7d:fable")]; ok {
+		t.Fatal("unexpected 7d:fable window")
 	}
 }
 
