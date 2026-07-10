@@ -27,10 +27,14 @@ type CLI struct {
 	Refresh bool             `help:"Bypass cache" short:"r"`
 	Version kong.VersionFlag `help:"Print version" short:"v"`
 
-	Check  CheckCmd  `cmd:"" default:"withargs" help:"Check quota usage"`
-	Claude ClaudeCmd `cmd:"" help:"Claude account management"`
-	Codex  CodexCmd  `cmd:"" help:"Codex account management"`
-	Gemini GeminiCmd `cmd:"" help:"Gemini account management"`
+	Check     CheckCmd   `cmd:"" default:"withargs" help:"Check provider quota usage"`
+	Claude    ClaudeCmd  `cmd:"" help:"Manage Claude accounts"`
+	Codex     CodexCmd   `cmd:"" help:"Manage Codex accounts"`
+	Gemini    GeminiCmd  `cmd:"" help:"Show Gemini account configuration"`
+	RefreshFn RefreshCmd `cmd:"" name:"refresh" help:"Refresh stored OAuth tokens"`
+	Agent     AgentCmd   `cmd:"" help:"Manage background quota refresh agent"`
+	Proxy     ProxyCmd   `cmd:"" help:"Run and configure local API proxy"`
+	Models    ModelsCmd  `cmd:"" help:"Manage local model registry"`
 }
 
 // CheckCmd is the default command that checks provider quota usage.
@@ -59,6 +63,77 @@ type GeminiCmd struct {
 	Accounts AccountsCmd `cmd:"" help:"Show Gemini account"`
 }
 
+// RefreshCmd refreshes stored provider tokens.
+type RefreshCmd struct{}
+
+// AgentCmd groups background refresh agent commands.
+type AgentCmd struct {
+	Install   AgentInstallCmd   `cmd:"" help:"Install background refresh agent"`
+	Uninstall AgentUninstallCmd `cmd:"" help:"Uninstall background refresh agent"`
+}
+
+type AgentInstallCmd struct{}
+type AgentUninstallCmd struct{}
+
+// ProxyCmd groups local proxy commands.
+type ProxyCmd struct {
+	Start     ProxyStartCmd     `cmd:"" help:"Start local Claude and Codex proxy"`
+	Install   ProxyInstallCmd   `cmd:"" help:"Install proxy launch agent"`
+	Uninstall ProxyUninstallCmd `cmd:"" help:"Uninstall proxy launch agent"`
+	Restart   ProxyRestartCmd   `cmd:"" help:"Restart proxy launch agent"`
+	Status    ProxyStatusCmd    `cmd:"" help:"Show proxy health"`
+	Pin       ProxyPinCmd       `cmd:"" help:"Pin Claude proxy routing"`
+}
+
+type ProxyStartCmd struct {
+	Port int `help:"Override listen port" placeholder:"PORT"`
+}
+
+type ProxyInstallCmd struct{}
+type ProxyUninstallCmd struct{}
+type ProxyRestartCmd struct{}
+
+type ProxyStatusCmd struct {
+	Port int `help:"Override health-check port" placeholder:"PORT"`
+}
+
+type ProxyPinCmd struct {
+	Clear bool   `help:"Clear active Claude account pin"`
+	Value string `arg:"" optional:"" name:"email-or-account-uuid" help:"Claude account email or UUID to pin"`
+}
+
+// ModelsCmd groups local model registry commands.
+type ModelsCmd struct {
+	List    ModelsListCmd    `cmd:"" help:"List active registry models"`
+	Refresh ModelsRefreshCmd `cmd:"" help:"Refresh registry data and publish caches"`
+	Overlay ModelsOverlayCmd `cmd:"" help:"Manage user model overlays"`
+}
+
+type ModelsListCmd struct {
+	Provider string `help:"Filter by provider: anthropic or codex" placeholder:"PROVIDER"`
+}
+
+type ModelsRefreshCmd struct{}
+
+type ModelsOverlayCmd struct {
+	Add    ModelsOverlayAddCmd    `cmd:"" help:"Add or update user model overlay"`
+	Remove ModelsOverlayRemoveCmd `cmd:"" help:"Remove user model overlay"`
+	Prune  ModelsOverlayPruneCmd  `cmd:"" help:"Remove overlays now supplied natively"`
+}
+
+type ModelsOverlayAddCmd struct {
+	Provider  string `help:"Provider: anthropic or codex" placeholder:"PROVIDER"`
+	ID        string `help:"Model ID to add" placeholder:"MODEL"`
+	CloneFrom string `help:"Native model ID to copy metadata from" placeholder:"MODEL"`
+}
+
+type ModelsOverlayRemoveCmd struct {
+	Provider string `help:"Provider: anthropic or codex" placeholder:"PROVIDER"`
+	ID       string `help:"Model ID to remove" placeholder:"MODEL"`
+}
+
+type ModelsOverlayPruneCmd struct{}
+
 // LoginCmd adds a new account via OAuth.
 type LoginCmd struct {
 	Activate bool `help:"Set as active account after login"`
@@ -80,6 +155,15 @@ type RemoveCmd struct {
 // version is set at build time via -ldflags. Falls back to "dev".
 var version = "dev"
 
+func cliKongOptions() []kong.Option {
+	return []kong.Option{
+		kong.Name("cq"),
+		kong.Description("Check AI provider usage limits"),
+		kong.UsageOnError(),
+		kong.Vars{"version": version},
+	}
+}
+
 func main() {
 	// Handle commands that conflict with kong's default:"withargs" on CheckCmd.
 	// Kong validates the enum constraint on providers before trying command
@@ -87,7 +171,7 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "refresh":
-			if err := runRefresh(); err != nil {
+			if err := runRefreshCommand(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "cq: %v\n", err)
 				os.Exit(1)
 			}
@@ -114,12 +198,7 @@ func main() {
 	}
 
 	var cli CLI
-	ctx := kong.Parse(&cli,
-		kong.Name("cq"),
-		kong.Description("Check AI provider usage limits"),
-		kong.UsageOnError(),
-		kong.Vars{"version": version},
-	)
+	ctx := kong.Parse(&cli, cliKongOptions()...)
 	if err := dispatch(ctx, &cli); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: %v\n", err)
 		os.Exit(1)
@@ -128,14 +207,27 @@ func main() {
 }
 
 func runAgent(args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		path := []string{"agent"}
+		if len(args) > 1 && args[0] == "help" {
+			path = append(path, args[1:]...)
+		}
+		return writeManualHelp(os.Stdout, path)
+	}
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: cq agent <install|uninstall>\n")
+		_ = writeManualHelp(os.Stderr, []string{"agent"})
 		return fmt.Errorf("missing subcommand")
 	}
 	switch args[0] {
 	case "install":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"agent", "install"})
+		}
 		return installAgent(1800)
 	case "uninstall":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"agent", "uninstall"})
+		}
 		return uninstallAgent()
 	default:
 		return fmt.Errorf("unknown agent command: %s", args[0])

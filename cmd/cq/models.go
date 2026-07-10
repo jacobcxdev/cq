@@ -212,14 +212,28 @@ func writeRegistrySourceDiagnostics(w io.Writer, diag modelregistry.RefreshDiagn
 
 func runModels(args []string, deps modelsDeps) error {
 	deps = normaliseModelsDeps(deps)
+	if len(args) > 0 && isHelpToken(args[0]) {
+		path := []string{"models"}
+		if len(args) > 1 && args[0] == "help" {
+			path = append(path, args[1:]...)
+		}
+		return writeManualHelp(deps.Stdout, path)
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cq models <list|refresh|overlay>")
+		_ = writeManualHelp(deps.Stderr, []string{"models"})
+		return fmt.Errorf("models: missing subcommand")
 	}
 
 	switch args[0] {
 	case "list":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(deps.Stdout, []string{"models", "list"})
+		}
 		return runModelsList(args[1:], deps)
 	case "refresh":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(deps.Stdout, []string{"models", "refresh"})
+		}
 		if err := runModelsRefreshWithDeps(deps); err != nil {
 			return fmt.Errorf("models refresh: %w", err)
 		}
@@ -302,11 +316,22 @@ func runModelsList(args []string, deps modelsDeps) error {
 }
 
 func runModelsOverlay(args []string, deps modelsDeps) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		path := []string{"models", "overlay"}
+		if len(args) > 1 && args[0] == "help" {
+			path = append(path, args[1:]...)
+		}
+		return writeManualHelp(deps.Stdout, path)
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cq models overlay <add|remove|prune>")
+		_ = writeManualHelp(deps.Stderr, []string{"models", "overlay"})
+		return fmt.Errorf("models overlay: missing subcommand")
 	}
 	switch args[0] {
 	case "add":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(deps.Stdout, []string{"models", "overlay", "add"})
+		}
 		provider, id, cloneFrom, err := parseOverlayModelFlags(args[1:], true)
 		if err != nil {
 			return err
@@ -316,6 +341,9 @@ func runModelsOverlay(args []string, deps modelsDeps) error {
 		}
 		return deps.Refresh()
 	case "remove":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(deps.Stdout, []string{"models", "overlay", "remove"})
+		}
 		provider, id, _, err := parseOverlayModelFlags(args[1:], false)
 		if err != nil {
 			return err
@@ -325,6 +353,9 @@ func runModelsOverlay(args []string, deps modelsDeps) error {
 		}
 		return deps.Refresh()
 	case "prune":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(deps.Stdout, []string{"models", "overlay", "prune"})
+		}
 		if err := deps.Refresh(); err != nil {
 			return err
 		}

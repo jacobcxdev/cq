@@ -24,7 +24,7 @@ import (
 const refreshMarginMs = 30 * 60 * 1000
 
 var (
-	discoverClaudeAccountsFn   = keyring.DiscoverClaudeAccounts
+	discoverClaudeAccountsFn  = keyring.DiscoverClaudeAccounts
 	newHTTPClientFn           = func(timeout time.Duration, version string) httputil.Doer { return httputil.NewClient(timeout, version) }
 	refreshCodexAccountsFn    = refreshCodexAccounts
 	invalidateProviderCacheFn = invalidateProviderCache
@@ -34,6 +34,16 @@ var (
 	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
 	isStdinTerminalFn         = isStdinTerminal
 )
+
+func runRefreshCommand(args []string) error {
+	if helpRequested(args) {
+		return writeManualHelp(os.Stdout, []string{"refresh"})
+	}
+	if len(args) > 0 {
+		return fmt.Errorf("refresh: unexpected arguments")
+	}
+	return runRefresh()
+}
 
 func runRefresh() error {
 	accounts := discoverClaudeAccountsFn()
@@ -285,7 +295,6 @@ func syncAnonymousToIdentifiedWithChange(ctx context.Context, client httputil.Do
 	}
 	return result, true
 }
-
 
 // resolveProfileEmail calls the Claude profile API to determine the email
 // associated with an access token.
