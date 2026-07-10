@@ -1885,6 +1885,153 @@ func TestServer_Handler_CodexResponsesPath_ForwardsWithAuth(t *testing.T) {
 	}
 }
 
+func TestServer_Handler_CodexImagesPath_ForwardsWithoutProxyToken(t *testing.T) {
+	tests := []struct {
+		name         string
+		requestPath  string
+		upstreamPath string
+	}{
+		{
+			name:         "root images path",
+			requestPath:  "/images/generations?api-version=1",
+			upstreamPath: "/images/generations",
+		},
+		{
+			name:         "openai compatible images path",
+			requestPath:  "/v1/images/generations?api-version=1",
+			upstreamPath: "/images/generations",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath, gotQuery, gotAuth, gotAcctID, gotBody string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotQuery = r.URL.RawQuery
+				gotAuth = r.Header.Get("Authorization")
+				gotAcctID = r.Header.Get("ChatGPT-Account-ID")
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("ReadAll() error = %v", err)
+				}
+				gotBody = string(body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"abc"}]}`))
+			}))
+			defer upstream.Close()
+
+			srv := &Server{
+				Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
+				CodexTransport: &CodexTokenTransport{
+					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-1"}},
+					Inner:    http.DefaultTransport,
+				},
+			}
+
+			handler, err := srv.handler()
+			if err != nil {
+				t.Fatalf("handler() error = %v", err)
+			}
+
+			w := httptest.NewRecorder()
+			body := `{"model":"gpt-image-1","prompt":"pingy","size":"1024x1024"}`
+			req := httptest.NewRequest(http.MethodPost, tt.requestPath, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "invalid proxy token") {
+				t.Fatalf("body contains invalid proxy token: %s", w.Body.String())
+			}
+			if gotPath != tt.upstreamPath {
+				t.Errorf("upstream path = %q, want %s", gotPath, tt.upstreamPath)
+			}
+			if gotQuery != "api-version=1" {
+				t.Errorf("upstream query = %q, want api-version=1", gotQuery)
+			}
+			if gotAuth != "Bearer codex-tok" {
+				t.Errorf("upstream auth = %q, want Bearer codex-tok", gotAuth)
+			}
+			if gotAcctID != "acct-1" {
+				t.Errorf("upstream account-id = %q, want acct-1", gotAcctID)
+			}
+			if gotBody != body {
+				t.Errorf("upstream body = %q, want %q", gotBody, body)
+			}
+		})
+	}
+}
+
+func TestServer_Handler_CodexImagesPath_RequiresPost(t *testing.T) {
+	srv := &Server{
+		Config:         &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: http.DefaultTransport,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/images/generations", nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405, body: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "invalid proxy token") {
+		t.Fatalf("body contains invalid proxy token: %s", w.Body.String())
+	}
+	if allow := w.Header().Get("Allow"); allow != http.MethodPost {
+		t.Fatalf("Allow = %q, want POST", allow)
+	}
+}
+
+func TestServer_GenericProxy_InvalidTokenEmitsDiagnosticsForUnknownPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diag.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		Diag:   diag,
+	}
+
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/unknown/imagegen/path?secret=nope", nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	events := waitForDiagnosticsEvents(t, path, 1)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Path != "/unknown/imagegen/path" {
+		t.Fatalf("event path = %q, want path without query", ev.Path)
+	}
+	if ev.RouteKind != "proxy_auth" {
+		t.Fatalf("RouteKind = %q, want proxy_auth", ev.RouteKind)
+	}
+	if ev.Error != "authentication_error:invalid_proxy_token" {
+		t.Fatalf("Error = %q, want authentication_error:invalid_proxy_token", ev.Error)
+	}
+}
+
 func TestServer_Handler_LegacyCodexResponsesPost_Compatibility(t *testing.T) {
 	var gotPath string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

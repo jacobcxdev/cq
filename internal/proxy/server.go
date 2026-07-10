@@ -30,6 +30,8 @@ const (
 	codexCompactResponsesPath       = "/v1/responses/compact"
 	legacyCodexCompactResponsesPath = "/responses/compact"
 	codexAppServerPath              = "/app-server"
+	codexImagesPathPrefix           = "/v1/images/"
+	legacyCodexImagesPathPrefix     = "/images/"
 )
 
 // RegistryRefresher is the interface for triggering a registry refresh.
@@ -121,6 +123,8 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST "+codexCompactResponsesPath, s.handleCodexCompactResponsesRoute)
 	mux.HandleFunc("POST "+legacyCodexCompactResponsesPath, s.handleLegacyCodexCompactResponsesRoute)
 	mux.HandleFunc(codexAppServerPath, s.handleCodexAppServerRoute)
+	mux.HandleFunc(codexImagesPathPrefix, s.handleCodexImagesRoute)
+	mux.HandleFunc(legacyCodexImagesPathPrefix, s.handleCodexImagesRoute)
 	mux.HandleFunc("/", s.proxyHandler(upstream))
 	return mux, nil
 }
@@ -140,7 +144,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.isValidToken(bearerToken(r)) {
-		writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+		s.rejectInvalidProxyToken(w, r, "models", time.Now(), true)
 		return
 	}
 
@@ -152,6 +156,24 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"data": models,
+	})
+}
+
+func (s *Server) rejectInvalidProxyToken(w http.ResponseWriter, r *http.Request, routeKind string, start time.Time, emitDiag bool) {
+	fmt.Fprintf(os.Stderr, "cq: reject %s %s: invalid proxy token\n", r.Method, r.URL.Path)
+	writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+	if !emitDiag {
+		return
+	}
+	s.emitDiagnostics(RouteEvent{
+		Time:       start.UTC(),
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		Provider:   "unknown",
+		RouteKind:  routeKind,
+		StatusCode: http.StatusForbidden,
+		LatencyMS:  time.Since(start).Milliseconds(),
+		Error:      diagnosticsErrorCode("authentication_error", "invalid proxy token"),
 	})
 }
 
@@ -174,7 +196,7 @@ func (s *Server) handleCodexNativeModels(w http.ResponseWriter, r *http.Request)
 // snapshot as JSON. Requires a valid local proxy token.
 func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
 	if !s.isValidToken(bearerToken(r)) {
-		writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+		s.rejectInvalidProxyToken(w, r, "registry", time.Now(), true)
 		return
 	}
 	if s.Catalog == nil {
@@ -192,7 +214,7 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request) {
 // serialisation (Refresher.Refresh acquires its own mutex).
 func (s *Server) handleRegistryRefresh(w http.ResponseWriter, r *http.Request) {
 	if !s.isValidToken(bearerToken(r)) {
-		writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+		s.rejectInvalidProxyToken(w, r, "registry_refresh", time.Now(), true)
 		return
 	}
 	if s.Refresher == nil {
@@ -337,6 +359,109 @@ func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.proxyCodexAppServer(w, r)
+}
+
+func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	statusCode := 0
+	diagError := ""
+	defer func() {
+		s.emitDiagnostics(RouteEvent{
+			Time:       start.UTC(),
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			Provider:   "codex",
+			RouteKind:  "codex_images",
+			StatusCode: statusCode,
+			LatencyMS:  time.Since(start).Milliseconds(),
+			Error:      diagError,
+		})
+	}()
+
+	if r.Method != http.MethodPost {
+		statusCode = http.StatusMethodNotAllowed
+		message := fmt.Sprintf("%s only supports POST", r.URL.Path)
+		diagError = diagnosticsErrorCode("invalid_request_error", message)
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", message)
+		return
+	}
+
+	if s.CodexTransport == nil {
+		statusCode = http.StatusServiceUnavailable
+		diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
+		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
+		return
+	}
+
+	var body []byte
+	if r.Body != nil {
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+		r.Body.Close()
+		if err != nil {
+			statusCode = http.StatusBadRequest
+			diagError = diagnosticsErrorCode("invalid_request_error", "failed to read request body")
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
+			return
+		}
+		if len(body) > maxRequestBody {
+			statusCode = http.StatusRequestEntityTooLarge
+			diagError = diagnosticsErrorCode("invalid_request_error", "request body exceeds 10 MiB")
+			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds 10 MiB")
+			return
+		}
+	}
+
+	upstreamURL := strings.TrimRight(s.Config.CodexUpstream, "/") + codexImagesUpstreamPath(r.URL.EscapedPath())
+	if r.URL.RawQuery != "" {
+		upstreamURL += "?" + r.URL.RawQuery
+	}
+	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		statusCode = http.StatusInternalServerError
+		diagError = diagnosticsErrorCode("api_error", fmt.Sprintf("create upstream request: %v", err))
+		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
+		return
+	}
+	upReq.ContentLength = int64(len(body))
+	upReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	for key, vals := range r.Header {
+		for _, v := range vals {
+			upReq.Header.Add(key, v)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "cq: route %s %s provider=codex (images)\n", r.Method, r.URL.Path)
+	resp, err := s.CodexTransport.RoundTrip(upReq)
+	if err != nil {
+		statusCode = http.StatusBadGateway
+		diagError = diagnosticsErrorCode("api_error", fmt.Sprintf("codex upstream error: %v", err))
+		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	fmt.Fprintf(os.Stderr, "cq: proxy %s %s → %d (codex images)\n", r.Method, r.URL.Path, resp.StatusCode)
+	for key, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(key, v)
+		}
+	}
+	statusCode = resp.StatusCode
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: codex images response copy: %v\n", err)
+	}
+}
+
+func codexImagesUpstreamPath(path string) string {
+	if strings.HasPrefix(path, codexImagesPathPrefix) {
+		return strings.TrimPrefix(path, "/v1")
+	}
+	return path
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -973,7 +1098,7 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 		// Auth check: accept local proxy token or a known Claude account token.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !s.isValidToken(token) {
-			writeError(w, http.StatusForbidden, "authentication_error", "invalid proxy token")
+			s.rejectInvalidProxyToken(w, r, "proxy_auth", start, diagnosticsAnthropicRouteKind(r.URL.Path) == "")
 			return
 		}
 
