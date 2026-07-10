@@ -21,25 +21,47 @@ import (
 )
 
 func runProxy(args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		path := []string{"proxy"}
+		if len(args) > 1 && args[0] == "help" {
+			path = append(path, args[1:]...)
+		}
+		return writeManualHelp(os.Stdout, path)
+	}
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: cq proxy <start|install|uninstall|restart|status|pin>\n")
+		_ = writeManualHelp(os.Stderr, []string{"proxy"})
 		return fmt.Errorf("missing subcommand")
 	}
 	switch args[0] {
 	case "start":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "start"})
+		}
 		opts, err := parseProxyCommandOptions(args[1:])
 		if err != nil {
 			return err
 		}
 		return runProxyStart(opts)
 	case "install":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "install"})
+		}
 		return installProxyAgent()
 	case "uninstall":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "uninstall"})
+		}
 		return uninstallProxyAgent()
 	case "restart":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "restart"})
+		}
 		return restartProxyAgent()
 	case "status":
-		opts, err := parseProxyCommandOptions(args[1:])
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "status"})
+		}
+		opts, err := parseProxyCommandOptionsFor("proxy status", args[1:])
 		if err != nil {
 			return err
 		}
@@ -52,6 +74,9 @@ func runProxy(args []string) error {
 }
 
 func runProxyPin(args []string) error {
+	if helpRequested(args) {
+		return writeManualHelp(os.Stdout, []string{"proxy", "pin"})
+	}
 	cfg, err := proxy.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -113,21 +138,25 @@ type proxyCommandOptions struct {
 }
 
 func parseProxyCommandOptions(args []string) (proxyCommandOptions, error) {
+	return parseProxyCommandOptionsFor("proxy start", args)
+}
+
+func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOptions, error) {
 	var opts proxyCommandOptions
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
 			if i+1 >= len(args) {
-				return opts, fmt.Errorf("proxy start: --port requires a value")
+				return opts, fmt.Errorf("%s: --port requires a value", command)
 			}
 			port, err := strconv.Atoi(args[i+1])
 			if err != nil || port <= 0 || port > 65535 {
-				return opts, fmt.Errorf("proxy start: invalid port %q", args[i+1])
+				return opts, fmt.Errorf("%s: invalid port %q", command, args[i+1])
 			}
 			opts.Port = port
 			i++
 		default:
-			return opts, fmt.Errorf("proxy start: unknown argument %s", args[i])
+			return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 		}
 	}
 	return opts, nil

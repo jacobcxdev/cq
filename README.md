@@ -16,6 +16,21 @@ go install github.com/jacobcxdev/cq/cmd/cq@latest
 
 ## Usage
 
+Start with help if you are new to cq:
+
+```bash
+cq --help                    # Show every command family
+cq check --help              # Provider quota checks
+cq claude --help             # Claude account commands
+cq codex --help              # Codex account commands
+cq proxy --help              # Local proxy commands
+cq models --help             # Model registry commands
+cq agent --help              # Background refresh agent commands
+cq refresh --help            # One-shot token refresh
+```
+
+Every command path has its own help text, including leaves such as `cq proxy pin --help`, `cq models overlay add --help`, and `cq claude login --help`.
+
 ```bash
 cq                         # Check all providers
 cq check claude codex      # Check specific providers
@@ -25,6 +40,19 @@ cq --version               # Print version
 ```
 
 `check` accepts `claude`, `codex`, and `gemini` provider names.
+
+Common command families:
+
+| Command | Purpose |
+|---------|---------|
+| `cq` / `cq check` | Fetch quota usage for all or selected providers. |
+| `cq claude ...` | Add, list, switch, or remove Claude accounts. |
+| `cq codex ...` | Add, list, switch, or remove Codex accounts. |
+| `cq gemini accounts` | Show Gemini credential discovery state. |
+| `cq refresh` | Refresh stored OAuth tokens before they expire. |
+| `cq agent ...` | Install or uninstall background quota refresh. |
+| `cq proxy ...` | Run, inspect, install, or configure the local proxy. |
+| `cq models ...` | Refresh, list, or override local model registry entries. |
 
 ### JSON availability
 

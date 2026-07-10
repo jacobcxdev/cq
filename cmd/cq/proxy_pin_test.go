@@ -121,11 +121,11 @@ func TestProxyPin(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown flag returns error and leaves pin unchanged", func(t *testing.T) {
+	t.Run("--help returns help and leaves pin unchanged", func(t *testing.T) {
 		setupPinTest(t, "user@example.com")
 		err := runProxyPin([]string{"--help"})
-		if err == nil {
-			t.Fatal("runProxyPin(--help) expected error, got nil")
+		if err != nil {
+			t.Fatalf("runProxyPin(--help) returned error: %v", err)
 		}
 		if got := loadPin(t); got != "user@example.com" {
 			t.Errorf("pin changed to %q, want %q", got, "user@example.com")
