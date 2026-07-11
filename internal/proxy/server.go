@@ -32,6 +32,7 @@ const (
 	codexAppServerPath              = "/app-server"
 	codexImagesPathPrefix           = "/v1/images/"
 	legacyCodexImagesPathPrefix     = "/images/"
+	codexSearchPath                 = "/alpha/search"
 )
 
 // RegistryRefresher is the interface for triggering a registry refresh.
@@ -125,6 +126,10 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc(codexAppServerPath, s.handleCodexAppServerRoute)
 	mux.HandleFunc(codexImagesPathPrefix, s.handleCodexImagesRoute)
 	mux.HandleFunc(legacyCodexImagesPathPrefix, s.handleCodexImagesRoute)
+	mux.HandleFunc("POST "+codexSearchPath, s.handleCodexSearchRoute)
+	for _, pattern := range unsupportedOpenAICompatibleRoutePatterns() {
+		mux.HandleFunc(pattern, s.handleUnsupportedOpenAICompatibleRoute)
+	}
 	mux.HandleFunc("/", s.proxyHandler(upstream))
 	return mux, nil
 }
@@ -143,16 +148,22 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "/v1/models only supports GET")
 		return
 	}
-	if !s.isValidToken(bearerToken(r)) {
-		s.rejectInvalidProxyToken(w, r, "models", time.Now(), true)
-		return
+
+	var upstreamModels []ModelMetadata
+	if s.isValidToken(bearerToken(r)) {
+		upstreamModels = s.fetchUpstreamModels(r)
 	}
 
 	// /v1/models keeps runtime/API model metadata compatible with ANTHROPIC_BASE_URL.
 	// Claude Code's interactive /model picker is populated separately from
 	// additionalModelOptionsCache in ~/.claude.json; bootstrap/OAuth discovery does
 	// not use ANTHROPIC_BASE_URL and custom OAuth hosts are allowlist-restricted.
-	models := mergeModelMetadata(SyntheticModelCatalog(), registryCatalogModelMetadata(s.Catalog), s.fetchUpstreamModels(r))
+	//
+	// Local OpenAI-compatible clients also probe /v1/models when openai_base_url
+	// points at CQ, but they do not know CQ's local_token. Serve local metadata
+	// without auth and only query Claude upstream when the supplied bearer token
+	// is a valid CQ/Claude token, so arbitrary OpenAI API keys are never relayed.
+	models := mergeModelMetadata(SyntheticModelCatalog(), registryCatalogModelMetadata(s.Catalog), upstreamModels)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"data": models,
@@ -362,6 +373,14 @@ func (s *Server) handleCodexAppServerRoute(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) {
+	s.handleCodexHTTPRoute(w, r, "codex_images", "images", codexImagesUpstreamPath(r.URL.EscapedPath()))
+}
+
+func (s *Server) handleCodexSearchRoute(w http.ResponseWriter, r *http.Request) {
+	s.handleCodexHTTPRoute(w, r, "codex_search", "search", r.URL.EscapedPath())
+}
+
+func (s *Server) handleCodexHTTPRoute(w http.ResponseWriter, r *http.Request, routeKind, logKind, upstreamPath string) {
 	start := time.Now()
 	statusCode := 0
 	diagError := ""
@@ -371,7 +390,7 @@ func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) 
 			Method:     r.Method,
 			Path:       r.URL.Path,
 			Provider:   "codex",
-			RouteKind:  "codex_images",
+			RouteKind:  routeKind,
 			StatusCode: statusCode,
 			LatencyMS:  time.Since(start).Milliseconds(),
 			Error:      diagError,
@@ -413,7 +432,7 @@ func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	upstreamURL := strings.TrimRight(s.Config.CodexUpstream, "/") + codexImagesUpstreamPath(r.URL.EscapedPath())
+	upstreamURL := strings.TrimRight(s.Config.CodexUpstream, "/") + upstreamPath
 	if r.URL.RawQuery != "" {
 		upstreamURL += "?" + r.URL.RawQuery
 	}
@@ -434,7 +453,7 @@ func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "cq: route %s %s provider=codex (images)\n", r.Method, r.URL.Path)
+	fmt.Fprintf(os.Stderr, "cq: route %s %s provider=codex (%s)\n", r.Method, r.URL.Path, logKind)
 	resp, err := s.CodexTransport.RoundTrip(upReq)
 	if err != nil {
 		statusCode = http.StatusBadGateway
@@ -444,7 +463,7 @@ func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) 
 	}
 	defer resp.Body.Close()
 
-	fmt.Fprintf(os.Stderr, "cq: proxy %s %s → %d (codex images)\n", r.Method, r.URL.Path, resp.StatusCode)
+	fmt.Fprintf(os.Stderr, "cq: proxy %s %s → %d (codex %s)\n", r.Method, r.URL.Path, resp.StatusCode, logKind)
 	for key, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(key, v)
@@ -453,7 +472,7 @@ func (s *Server) handleCodexImagesRoute(w http.ResponseWriter, r *http.Request) 
 	statusCode = resp.StatusCode
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: codex images response copy: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cq: codex %s response copy: %v\n", logKind, err)
 	}
 }
 
@@ -462,6 +481,79 @@ func codexImagesUpstreamPath(path string) string {
 		return strings.TrimPrefix(path, "/v1")
 	}
 	return path
+}
+
+func unsupportedOpenAICompatibleRoutePatterns() []string {
+	return []string{
+		"/v1/responses/",
+		"/responses/",
+		"/v1/chat/completions",
+		"/chat/completions",
+		"/v1/completions",
+		"/completions",
+		"/v1/audio/",
+		"/audio/",
+		"/v1/embeddings",
+		"/embeddings",
+		"/v1/moderations",
+		"/moderations",
+		"/v1/realtime/",
+		"/realtime/",
+		"/v1/files",
+		"/v1/files/",
+		"/files",
+		"/files/",
+		"/v1/uploads",
+		"/v1/uploads/",
+		"/uploads",
+		"/uploads/",
+		"/v1/vector_stores",
+		"/v1/vector_stores/",
+		"/vector_stores",
+		"/vector_stores/",
+		"/v1/batches",
+		"/v1/batches/",
+		"/batches",
+		"/batches/",
+		"/v1/assistants",
+		"/v1/assistants/",
+		"/assistants",
+		"/assistants/",
+		"/v1/threads",
+		"/v1/threads/",
+		"/threads",
+		"/threads/",
+		"/v1/fine_tuning/",
+		"/fine_tuning/",
+		"/v1/evals",
+		"/v1/evals/",
+		"/evals",
+		"/evals/",
+		"/v1/containers",
+		"/v1/containers/",
+		"/containers",
+		"/containers/",
+		"/v1/conversations",
+		"/v1/conversations/",
+		"/conversations",
+		"/conversations/",
+	}
+}
+
+func (s *Server) handleUnsupportedOpenAICompatibleRoute(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	message := fmt.Sprintf("%s is an OpenAI-compatible endpoint that CQ does not support through Codex OAuth; supported local Codex endpoints are /v1/responses, /responses, /v1/images/*, /images/*, /alpha/search, /models, and /app-server", r.URL.Path)
+	writeError(w, http.StatusNotImplemented, "invalid_request_error", message)
+	s.emitDiagnostics(RouteEvent{
+		Time:       start.UTC(),
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		Provider:   "codex",
+		RouteKind:  "openai_unsupported",
+		StatusCode: http.StatusNotImplemented,
+		LatencyMS:  time.Since(start).Milliseconds(),
+		Error:      diagnosticsErrorCode("invalid_request_error", message),
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -1411,6 +1503,8 @@ func diagnosticsErrorCode(errType, message string) string {
 		return errType + ":no_codex_accounts"
 	case strings.Contains(msg, "websocket transport is not supported"):
 		return errType + ":unsupported_websocket_transport"
+	case strings.Contains(msg, "openai-compatible endpoint") && strings.Contains(msg, "does not support"):
+		return errType + ":unsupported_openai_endpoint"
 	case strings.Contains(msg, "requires websocket upgrade"):
 		return errType + ":websocket_upgrade_required"
 	case strings.Contains(msg, "only supports"):
