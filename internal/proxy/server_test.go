@@ -2333,7 +2333,7 @@ func TestServer_AppServerPrefersProAccountForSpark(t *testing.T) {
 	}
 }
 
-func TestServer_ModelsEndpointRequiresAuth(t *testing.T) {
+func TestServer_ModelsEndpointAllowsLocalProbeWithoutAuth(t *testing.T) {
 	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
 	handler, err := srv.handler()
 	if err != nil {
@@ -2344,8 +2344,146 @@ func TestServer_ModelsEndpointRequiresAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestServer_CodexSearchAllowsLocalToolWithoutProxyToken(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	defer upstream.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: upstream.URL,
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "secret-proxy-token",
+		},
+		CodexTransport: http.DefaultTransport,
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, codexSearchPath, strings.NewReader(`{"query":"test"}`))
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gotPath != codexSearchPath {
+		t.Fatalf("upstream path = %q, want %q", gotPath, codexSearchPath)
+	}
+	if strings.Contains(w.Body.String(), "invalid proxy token") {
+		t.Fatalf("body contains invalid proxy token: %s", w.Body.String())
+	}
+}
+
+func TestServer_ModelsEndpointAllowsLocalOpenAIProbeWithoutProxyToken(t *testing.T) {
+	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "invalid proxy token") {
+		t.Fatalf("body contains invalid proxy token: %s", w.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	for _, model := range resp.Data {
+		if model.ID == "gpt-5.4" {
+			return
+		}
+	}
+	t.Fatalf("missing gpt-5.4 synthetic model in response: %s", w.Body.String())
+}
+
+func TestServer_ModelsEndpointDoesNotForwardInvalidBearerToUpstream(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		t.Errorf("unexpected upstream request with Authorization %q", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer upstream.Close()
+
+	srv := &Server{Config: &Config{ClaudeUpstream: upstream.URL, LocalToken: "tok"}}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-not-a-cq-token")
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("upstream was called for invalid bearer token")
+	}
+}
+
+func TestServer_OpenAICompatibleUnsupportedPathWithoutProxyTokenDoesNotReturnInvalidProxyToken(t *testing.T) {
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "tok",
+		},
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+
+	for _, path := range []string{
+		"/v1/chat/completions",
+		"/chat/completions",
+		"/v1/audio/transcriptions",
+		"/audio/transcriptions",
+		"/v1/responses/resp_123",
+		"/responses/resp_123",
+		"/v1/embeddings",
+		"/v1/files",
+		"/v1/files/file_123",
+		"/v1/realtime/sessions",
+	} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-5-search-api"}`))
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusNotImplemented {
+				t.Fatalf("status = %d, want 501, body: %s", w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "invalid proxy token") {
+				t.Fatalf("body contains invalid proxy token: %s", w.Body.String())
+			}
+		})
 	}
 }
 
