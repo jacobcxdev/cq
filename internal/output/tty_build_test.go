@@ -68,6 +68,35 @@ func TestBuildTTYModel_SingleProvider(t *testing.T) {
 	}
 }
 
+func TestBuildTTYModel_GenericDurationWindowUsesExactPeriod(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	report := app.Report{
+		GeneratedAt: now,
+		Providers: []app.ProviderReport{{
+			ID:   provider.Codex,
+			Name: "codex",
+			Results: []quota.Result{{
+				Status: quota.StatusOK,
+				Windows: map[quota.WindowName]quota.Window{
+					"1d": {RemainingPct: 75, ResetAtUnix: now.Unix() + 43_200},
+				},
+			}},
+		}},
+	}
+
+	model := BuildTTYModel(report, now)
+	if len(model.Sections) != 1 || len(model.Sections[0].WindowRows) != 1 {
+		t.Fatalf("model = %#v, want one 1d row", model)
+	}
+	row := model.Sections[0].WindowRows[0]
+	if got := strings.TrimSpace(stripANSI(row.Label)); got != "1d" {
+		t.Errorf("label = %q, want 1d", got)
+	}
+	if !strings.Contains(stripANSI(row.PaceDiff), "+25") {
+		t.Errorf("pace diff = %q, want +25", stripANSI(row.PaceDiff))
+	}
+}
+
 func TestBuildTTYModel_ErrorResult(t *testing.T) {
 	now := time.Unix(1000, 0)
 	report := app.Report{

@@ -2,6 +2,7 @@ package quota
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -49,25 +50,76 @@ func DisplayWindowLabel(w WindowName) string {
 }
 
 func IsAggregable(w WindowName) bool {
-	switch BaseWindow(w) {
-	case Window5Hour, Window7Day:
-		return true
-	default:
-		return false
-	}
+	_, ok := durationPeriodFor(w)
+	return ok
 }
 
 func PeriodFor(name WindowName) time.Duration {
 	switch BaseWindow(name) {
-	case Window5Hour:
-		return 5 * time.Hour
-	case Window7Day:
-		return 7 * 24 * time.Hour
 	case WindowPro, WindowFlash, WindowFlashLite:
 		return 24 * time.Hour
-	default:
-		return 0
 	}
+	period, _ := durationPeriodFor(name)
+	return period
+}
+
+// WindowNameForPeriod returns a canonical duration-backed window name.
+// Periods use the largest exact whole unit and optionally include a bucket.
+func WindowNameForPeriod(periodSeconds int64, bucket string) (WindowName, bool) {
+	const maxPeriodSeconds = int64(1<<63-1) / int64(time.Second)
+	if periodSeconds <= 0 || periodSeconds > maxPeriodSeconds {
+		return "", false
+	}
+
+	var base string
+	switch {
+	case periodSeconds%int64(24*time.Hour/time.Second) == 0:
+		base = strconv.FormatInt(periodSeconds/int64(24*time.Hour/time.Second), 10) + "d"
+	case periodSeconds%int64(time.Hour/time.Second) == 0:
+		base = strconv.FormatInt(periodSeconds/int64(time.Hour/time.Second), 10) + "h"
+	case periodSeconds%int64(time.Minute/time.Second) == 0:
+		base = strconv.FormatInt(periodSeconds/int64(time.Minute/time.Second), 10) + "m"
+	default:
+		base = strconv.FormatInt(periodSeconds, 10) + "s"
+	}
+	return scopedWindow(WindowName(base), bucket), true
+}
+
+func durationPeriodFor(name WindowName) (time.Duration, bool) {
+	base := string(BaseWindow(name))
+	if len(base) < 2 {
+		return 0, false
+	}
+
+	value, err := strconv.ParseInt(base[:len(base)-1], 10, 64)
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+
+	var unitSeconds int64
+	switch base[len(base)-1] {
+	case 'd':
+		unitSeconds = int64(24 * time.Hour / time.Second)
+	case 'h':
+		unitSeconds = int64(time.Hour / time.Second)
+	case 'm':
+		unitSeconds = int64(time.Minute / time.Second)
+	case 's':
+		unitSeconds = 1
+	default:
+		return 0, false
+	}
+
+	const maxPeriodSeconds = int64(1<<63-1) / int64(time.Second)
+	if value > maxPeriodSeconds/unitSeconds {
+		return 0, false
+	}
+	periodSeconds := value * unitSeconds
+	canonical, ok := WindowNameForPeriod(periodSeconds, "")
+	if !ok || BaseWindow(name) != canonical {
+		return 0, false
+	}
+	return time.Duration(periodSeconds) * time.Second, true
 }
 
 // OrderedWindows returns fixed window names in canonical display order.
@@ -76,7 +128,7 @@ func OrderedWindows() []WindowName {
 }
 
 // OrderedWindowNames returns the provided windows in canonical display order:
-// shared windows first, then bucket-scoped 5h/7d windows grouped by bucket,
+// shared duration windows first, then scoped duration windows grouped by bucket,
 // then fixed provider-specific daily windows, then any remaining unknown keys.
 func OrderedWindowNames(keys []WindowName) []WindowName {
 	present := make(map[WindowName]struct{}, len(keys))
@@ -97,7 +149,20 @@ func OrderedWindowNames(keys []WindowName) []WindowName {
 		seen[name] = struct{}{}
 	}
 
-	shared := []WindowName{Window5Hour, Window7Day}
+	shared := make([]WindowName, 0, len(present))
+	for name := range present {
+		if WindowBucket(name) == "" && IsAggregable(name) {
+			shared = append(shared, name)
+		}
+	}
+	sort.Slice(shared, func(i, j int) bool {
+		pi := PeriodFor(shared[i])
+		pj := PeriodFor(shared[j])
+		if pi != pj {
+			return pi < pj
+		}
+		return shared[i] < shared[j]
+	})
 	for _, name := range shared {
 		add(name)
 	}
@@ -123,7 +188,7 @@ func OrderedWindowNames(keys []WindowName) []WindowName {
 			_, has5h := bases[Window5Hour]
 			_, has7d := bases[Window7Day]
 			switch {
-			case has7d && !has5h:
+			case len(bases) == 1 && has7d:
 				return 0
 			case has5h:
 				return 1
@@ -139,7 +204,19 @@ func OrderedWindowNames(keys []WindowName) []WindowName {
 		return buckets[i] < buckets[j]
 	})
 	for _, bucket := range buckets {
-		for _, base := range shared {
+		bases := make([]WindowName, 0, len(bucketBases[bucket]))
+		for base := range bucketBases[bucket] {
+			bases = append(bases, base)
+		}
+		sort.Slice(bases, func(i, j int) bool {
+			pi := PeriodFor(bases[i])
+			pj := PeriodFor(bases[j])
+			if pi != pj {
+				return pi < pj
+			}
+			return bases[i] < bases[j]
+		})
+		for _, base := range bases {
 			add(scopedWindow(base, bucket))
 		}
 	}

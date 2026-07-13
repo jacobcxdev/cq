@@ -167,7 +167,7 @@ func validAuthJSON(accessToken, refreshToken, idToken, accountID string) []byte 
 }
 
 // happyUsageBody is a minimal valid usage API response.
-const happyUsageBody = `{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":20.0,"reset_at":1774051200}}}`
+const happyUsageBody = `{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":20.0,"limit_window_seconds":18000,"reset_at":1774051200}}}`
 
 func TestFetchMissingAuthFile(t *testing.T) {
 	fs := newFakeFS()

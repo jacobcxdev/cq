@@ -14,32 +14,25 @@ var (
 	codexPromoEndsAt = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
 )
 
+type usageWindow struct {
+	UsedPercent        float64 `json:"used_percent"`
+	LimitWindowSeconds int64   `json:"limit_window_seconds"`
+	ResetAt            any     `json:"reset_at"`
+}
+
+type usageRateLimit struct {
+	PrimaryWindow   *usageWindow `json:"primary_window"`
+	SecondaryWindow *usageWindow `json:"secondary_window"`
+}
+
 // parseUsage decodes a Codex usage API JSON body and returns a quota.Result.
 func parseUsage(body []byte, email, accountID string) quota.Result {
 	var usage struct {
-		PlanType  string `json:"plan_type"`
-		RateLimit *struct {
-			PrimaryWindow *struct {
-				UsedPercent float64 `json:"used_percent"`
-				ResetAt     any     `json:"reset_at"`
-			} `json:"primary_window"`
-			SecondaryWindow *struct {
-				UsedPercent float64 `json:"used_percent"`
-				ResetAt     any     `json:"reset_at"`
-			} `json:"secondary_window"`
-		} `json:"rate_limit"`
+		PlanType             string          `json:"plan_type"`
+		RateLimit            *usageRateLimit `json:"rate_limit"`
 		AdditionalRateLimits []struct {
-			LimitName string `json:"limit_name"`
-			RateLimit *struct {
-				PrimaryWindow *struct {
-					UsedPercent float64 `json:"used_percent"`
-					ResetAt     any     `json:"reset_at"`
-				} `json:"primary_window"`
-				SecondaryWindow *struct {
-					UsedPercent float64 `json:"used_percent"`
-					ResetAt     any     `json:"reset_at"`
-				} `json:"secondary_window"`
-			} `json:"rate_limit"`
+			LimitName string          `json:"limit_name"`
+			RateLimit *usageRateLimit `json:"rate_limit"`
 		} `json:"additional_rate_limits"`
 	}
 	if err := json.Unmarshal(body, &usage); err != nil {
@@ -52,30 +45,42 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 		return quota.Window{RemainingPct: pct, ResetAtUnix: parseNumericResetAt(resetAt)}
 	}
 
-	// Free accounts have only a weekly limit; their primary_window is a 7d window.
-	primaryWindowName := quota.Window5Hour
-	if usage.PlanType == "free" {
-		primaryWindowName = quota.Window7Day
+	windows := make(map[quota.WindowName]quota.Window)
+	addWindows := func(rateLimit *usageRateLimit, bucket string) error {
+		if rateLimit == nil {
+			return nil
+		}
+		for _, entry := range []struct {
+			slot   string
+			window *usageWindow
+		}{
+			{slot: "primary_window", window: rateLimit.PrimaryWindow},
+			{slot: "secondary_window", window: rateLimit.SecondaryWindow},
+		} {
+			if entry.window == nil {
+				continue
+			}
+			name, ok := quota.WindowNameForPeriod(entry.window.LimitWindowSeconds, bucket)
+			if !ok {
+				return fmt.Errorf("invalid %s limit_window_seconds", entry.slot)
+			}
+			if _, exists := windows[name]; exists {
+				return fmt.Errorf("conflicting rate limit window %q", name)
+			}
+			windows[name] = toWindow(entry.window.UsedPercent, entry.window.ResetAt)
+		}
+		return nil
 	}
 
-	windows := make(map[quota.WindowName]quota.Window)
-	if usage.RateLimit != nil {
-		if usage.RateLimit.PrimaryWindow != nil {
-			windows[primaryWindowName] = toWindow(usage.RateLimit.PrimaryWindow.UsedPercent, usage.RateLimit.PrimaryWindow.ResetAt)
-		}
-		if usage.RateLimit.SecondaryWindow != nil {
-			windows[quota.Window7Day] = toWindow(usage.RateLimit.SecondaryWindow.UsedPercent, usage.RateLimit.SecondaryWindow.ResetAt)
-		}
+	if err := addWindows(usage.RateLimit, ""); err != nil {
+		return quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)
 	}
 	for _, extra := range usage.AdditionalRateLimits {
 		if extra.LimitName == "" || extra.RateLimit == nil {
 			continue
 		}
-		if extra.RateLimit.PrimaryWindow != nil {
-			windows[quota.WindowName("5h:"+extra.LimitName)] = toWindow(extra.RateLimit.PrimaryWindow.UsedPercent, extra.RateLimit.PrimaryWindow.ResetAt)
-		}
-		if extra.RateLimit.SecondaryWindow != nil {
-			windows[quota.WindowName("7d:"+extra.LimitName)] = toWindow(extra.RateLimit.SecondaryWindow.UsedPercent, extra.RateLimit.SecondaryWindow.ResetAt)
+		if err := addWindows(extra.RateLimit, extra.LimitName); err != nil {
+			return quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)
 		}
 	}
 

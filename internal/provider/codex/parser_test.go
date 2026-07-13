@@ -10,8 +10,8 @@ import (
 var codexUsageJSON = []byte(`{
 	"plan_type": "plus",
 	"rate_limit": {
-		"primary_window": {"used_percent": 25.0, "reset_at": 1774051200},
-		"secondary_window": {"used_percent": 10.0, "reset_at": 1774569600}
+		"primary_window": {"used_percent": 25.0, "limit_window_seconds": 18000, "reset_at": 1774051200},
+		"secondary_window": {"used_percent": 10.0, "limit_window_seconds": 604800, "reset_at": 1774569600}
 	}
 }`)
 
@@ -58,8 +58,8 @@ func TestParseUsageExhausted(t *testing.T) {
 	exhaustedJSON := []byte(`{
 		"plan_type": "plus",
 		"rate_limit": {
-			"primary_window": {"used_percent": 100.0, "reset_at": 1774051200},
-			"secondary_window": {"used_percent": 50.0, "reset_at": 1774569600}
+			"primary_window": {"used_percent": 100.0, "limit_window_seconds": 18000, "reset_at": 1774051200},
+			"secondary_window": {"used_percent": 50.0, "limit_window_seconds": 604800, "reset_at": 1774569600}
 		}
 	}`)
 
@@ -109,7 +109,7 @@ func TestParseUsageFreeOnlyPrimaryWindowMapsTo7d(t *testing.T) {
 	onlyPrimaryJSON := []byte(`{
 		"plan_type": "free",
 		"rate_limit": {
-			"primary_window": {"used_percent": 30.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 30.0, "limit_window_seconds": 604800, "reset_at": 1774051200}
 		}
 	}`)
 
@@ -139,7 +139,7 @@ func TestParseUsageFreeOnlyPrimaryWindowMapsTo7d(t *testing.T) {
 func TestParseUsageUnknownPlanType(t *testing.T) {
 	noPlanJSON := []byte(`{
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`)
 
@@ -158,7 +158,7 @@ func TestParseUsageProMultiplier(t *testing.T) {
 	proJSON := []byte(`{
 		"plan_type": "pro",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`)
 
@@ -183,7 +183,7 @@ func TestParseUsageProMultiplierAfterPromoEnds(t *testing.T) {
 	proJSON := []byte(`{
 		"plan_type": "pro",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`)
 
@@ -205,7 +205,7 @@ func TestParseUsageProLiteMultiplier(t *testing.T) {
 	proLiteJSON := []byte(`{
 		"plan_type": "prolite",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`)
 
@@ -230,7 +230,7 @@ func TestParseUsageProLiteMultiplierAfterPromoEnds(t *testing.T) {
 	proLiteJSON := []byte(`{
 		"plan_type": "prolite",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`)
 
@@ -276,7 +276,7 @@ func TestParseUsageSparkNotEncodedInPlanMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "pro",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -293,7 +293,7 @@ func TestParseUsageBusinessDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "business",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -310,7 +310,7 @@ func TestParseUsageEnterpriseDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "enterprise",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -327,7 +327,7 @@ func TestParseUsageEduDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "edu",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -344,7 +344,7 @@ func TestParseUsageGoDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "go",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -361,7 +361,7 @@ func TestParseUsageFreeDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "free",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -378,7 +378,7 @@ func TestParseUsageGuestDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "guest",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -395,7 +395,7 @@ func TestParseUsageFreeWorkspaceDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "free_workspace",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -412,7 +412,7 @@ func TestParseUsageQuorumDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "quorum",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -429,7 +429,7 @@ func TestParseUsageK12DoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "k12",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -446,7 +446,7 @@ func TestParseUsageUnknownDoesNotReceivePromoMultiplier(t *testing.T) {
 	result := parseUsage([]byte(`{
 		"plan_type": "mystery-tier",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 
@@ -463,7 +463,7 @@ func TestParseUsagePromoAppliesOnlyBeforeDeadline(t *testing.T) {
 	proBefore := parseUsage([]byte(`{
 		"plan_type": "pro",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 	if proBefore.RateLimitTier != "codex_pro_20x" {
@@ -474,7 +474,7 @@ func TestParseUsagePromoAppliesOnlyBeforeDeadline(t *testing.T) {
 	proAfter := parseUsage([]byte(`{
 		"plan_type": "pro",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 	if proAfter.RateLimitTier != "codex_pro_10x" {
@@ -490,7 +490,7 @@ func TestParseUsageProLitePromoAppliesOnlyBeforeDeadline(t *testing.T) {
 	proLiteBefore := parseUsage([]byte(`{
 		"plan_type": "prolite",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 	if proLiteBefore.RateLimitTier != "codex_prolite_10x" {
@@ -501,7 +501,7 @@ func TestParseUsageProLitePromoAppliesOnlyBeforeDeadline(t *testing.T) {
 	proLiteAfter := parseUsage([]byte(`{
 		"plan_type": "prolite",
 		"rate_limit": {
-			"primary_window": {"used_percent": 10.0, "reset_at": 1774051200}
+			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
 	if proLiteAfter.RateLimitTier != "codex_prolite_5x" {
@@ -534,16 +534,16 @@ func TestParseUsageAdditionalRateLimits(t *testing.T) {
 	body := []byte(`{
 		"plan_type": "plus",
 		"rate_limit": {
-			"primary_window": {"used_percent": 25.0, "reset_at": 1774051200},
-			"secondary_window": {"used_percent": 10.0, "reset_at": 1774569600}
+			"primary_window": {"used_percent": 25.0, "limit_window_seconds": 18000, "reset_at": 1774051200},
+			"secondary_window": {"used_percent": 10.0, "limit_window_seconds": 604800, "reset_at": 1774569600}
 		},
 		"additional_rate_limits": [
 			{
 				"limit_name": "gpt-5.3-codex-spark",
 				"metered_feature": "responses",
 				"rate_limit": {
-					"primary_window": {"used_percent": 40.0, "reset_at": 1774051300},
-					"secondary_window": {"used_percent": 15.0, "reset_at": 1774569700}
+					"primary_window": {"used_percent": 40.0, "limit_window_seconds": 18000, "reset_at": 1774051300},
+					"secondary_window": {"used_percent": 15.0, "limit_window_seconds": 604800, "reset_at": 1774569700}
 				}
 			}
 		]
@@ -571,5 +571,108 @@ func TestParseUsageAdditionalRateLimits(t *testing.T) {
 	}
 	if spark7d.ResetAtUnix != 1774569700 {
 		t.Errorf("7d:gpt-5.3-codex-spark reset_at_unix = %d, want 1774569700", spark7d.ResetAtUnix)
+	}
+}
+
+func TestParseUsageDerivesWeeklyOnlyWindowsFromDuration(t *testing.T) {
+	body := []byte(`{
+		"plan_type": "pro",
+		"rate_limit": {
+			"primary_window": {
+				"used_percent": 7,
+				"limit_window_seconds": 604800,
+				"reset_at": 1784488012
+			},
+			"secondary_window": null
+		},
+		"additional_rate_limits": [{
+			"limit_name": "GPT-5.3-Codex-Spark",
+			"rate_limit": {
+				"primary_window": {
+					"used_percent": 0,
+					"limit_window_seconds": 604800,
+					"reset_at": 1784573327
+				},
+				"secondary_window": null
+			}
+		}]
+	}`)
+
+	result := parseUsage(body, "user@example.com", "acct-1")
+	if result.Status != quota.StatusOK {
+		t.Fatalf("status = %q, want %q", result.Status, quota.StatusOK)
+	}
+	if _, ok := result.Windows[quota.Window5Hour]; ok {
+		t.Fatal("unexpected fabricated 5h window")
+	}
+	if got := result.Windows[quota.Window7Day].RemainingPct; got != 93 {
+		t.Errorf("7d remaining_pct = %d, want 93", got)
+	}
+	spark := quota.WindowName("7d:GPT-5.3-Codex-Spark")
+	if got := result.Windows[spark].RemainingPct; got != 100 {
+		t.Errorf("%s remaining_pct = %d, want 100", spark, got)
+	}
+}
+
+func TestParseUsageWindowSlotsDoNotDetermineDuration(t *testing.T) {
+	body := []byte(`{
+		"plan_type": "plus",
+		"rate_limit": {
+			"primary_window": {"used_percent": 10, "limit_window_seconds": 604800, "reset_at": 1774569600},
+			"secondary_window": {"used_percent": 25, "limit_window_seconds": 18000, "reset_at": 1774051200}
+		}
+	}`)
+
+	result := parseUsage(body, "user@example.com", "")
+	if got := result.Windows[quota.Window5Hour].RemainingPct; got != 75 {
+		t.Errorf("5h remaining_pct = %d, want 75", got)
+	}
+	if got := result.Windows[quota.Window7Day].RemainingPct; got != 90 {
+		t.Errorf("7d remaining_pct = %d, want 90", got)
+	}
+}
+
+func TestParseUsageSupportsArbitraryWindowDuration(t *testing.T) {
+	body := []byte(`{
+		"plan_type": "plus",
+		"rate_limit": {
+			"primary_window": {"used_percent": 30, "limit_window_seconds": 86400, "reset_at": 1774051200},
+			"secondary_window": null
+		}
+	}`)
+
+	result := parseUsage(body, "user@example.com", "")
+	if got := result.Windows[quota.WindowName("1d")].RemainingPct; got != 70 {
+		t.Errorf("1d remaining_pct = %d, want 70", got)
+	}
+}
+
+func TestParseUsageRejectsMissingWindowDuration(t *testing.T) {
+	body := []byte(`{
+		"plan_type": "plus",
+		"rate_limit": {
+			"primary_window": {"used_percent": 30, "reset_at": 1774051200},
+			"secondary_window": null
+		}
+	}`)
+
+	result := parseUsage(body, "user@example.com", "")
+	if result.Status != quota.StatusError || result.Error == nil || result.Error.Code != "parse_error" {
+		t.Fatalf("result = %#v, want parse_error", result)
+	}
+}
+
+func TestParseUsageRejectsConflictingWindowDurations(t *testing.T) {
+	body := []byte(`{
+		"plan_type": "plus",
+		"rate_limit": {
+			"primary_window": {"used_percent": 30, "limit_window_seconds": 604800, "reset_at": 1774051200},
+			"secondary_window": {"used_percent": 20, "limit_window_seconds": 604800, "reset_at": 1774569600}
+		}
+	}`)
+
+	result := parseUsage(body, "user@example.com", "")
+	if result.Status != quota.StatusError || result.Error == nil || result.Error.Code != "parse_error" {
+		t.Fatalf("result = %#v, want parse_error", result)
 	}
 }

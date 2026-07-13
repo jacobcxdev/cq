@@ -547,6 +547,34 @@ func TestComputeAggregatesDynamicSevenDayWindow(t *testing.T) {
 	}
 }
 
+func TestComputeAggregatesGenericDurationWindow(t *testing.T) {
+	now := int64(1_000)
+	key := quota.WindowName("1d")
+	results := []quota.Result{
+		{
+			Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				key: {RemainingPct: 80, ResetAtUnix: now + 43_200},
+			},
+		},
+		{
+			Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				key: {RemainingPct: 60, ResetAtUnix: now + 43_200},
+			},
+		},
+	}
+
+	agg, _ := Compute(results, now, nil)
+	got, ok := agg[key]
+	if !ok {
+		t.Fatal("missing aggregate 1d window")
+	}
+	if got.RemainingPct != 70 || got.ExpectedPct != 50 || got.PaceDiff != 20 {
+		t.Fatalf("aggregate 1d = %#v, want remaining=70 expected=50 pace=20", got)
+	}
+}
+
 func TestComputeGatesDynamic5hWithMatching7dBucket(t *testing.T) {
 	now := int64(1_000)
 	fiveHour := quota.WindowName("5h:gpt-5.3-codex-spark")

@@ -1,6 +1,9 @@
 package quota
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestResultIsUsable(t *testing.T) {
 	tests := []struct {
@@ -123,6 +126,10 @@ func TestPeriodFor(t *testing.T) {
 		{WindowPro, 24 * 3600},
 		{WindowFlash, 24 * 3600},
 		{WindowFlashLite, 24 * 3600},
+		{"1d", 24 * 3600},
+		{"90m:scoped", 90 * 60},
+		{"24h", 0},
+		{"60m", 0},
 		{"unknown", 0},
 	}
 	for _, tt := range tests {
@@ -132,5 +139,77 @@ func TestPeriodFor(t *testing.T) {
 				t.Errorf("PeriodFor(%q) = %d, want %d", tt.name, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWindowNameForPeriod(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int64
+		bucket  string
+		want    WindowName
+		wantOK  bool
+	}{
+		{name: "five hours", seconds: 5 * 60 * 60, want: "5h", wantOK: true},
+		{name: "one day", seconds: 24 * 60 * 60, want: "1d", wantOK: true},
+		{name: "seven days", seconds: 7 * 24 * 60 * 60, want: "7d", wantOK: true},
+		{name: "ninety minutes", seconds: 90 * 60, want: "90m", wantOK: true},
+		{name: "scoped", seconds: 7 * 24 * 60 * 60, bucket: "spark", want: "7d:spark", wantOK: true},
+		{name: "seconds", seconds: 61, want: "61s", wantOK: true},
+		{name: "zero", seconds: 0},
+		{name: "negative", seconds: -1},
+		{name: "overflow", seconds: math.MaxInt64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := WindowNameForPeriod(tt.seconds, tt.bucket)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("WindowNameForPeriod(%d, %q) = (%q, %v), want (%q, %v)", tt.seconds, tt.bucket, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestGenericDurationWindowsAreAggregable(t *testing.T) {
+	for _, name := range []WindowName{"1d", "90m:scoped"} {
+		if !IsAggregable(name) {
+			t.Errorf("IsAggregable(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []WindowName{WindowPro, WindowFlash, WindowFlashLite, "unknown"} {
+		if IsAggregable(name) {
+			t.Errorf("IsAggregable(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestOrderedWindowNamesGenericDurations(t *testing.T) {
+	got := OrderedWindowNames([]WindowName{
+		"7d:spark",
+		"1d:spark",
+		WindowPro,
+		"1d",
+		Window7Day,
+		Window5Hour,
+		"7d:weekly-only",
+	})
+	want := []WindowName{
+		Window5Hour,
+		"1d",
+		Window7Day,
+		"7d:weekly-only",
+		"1d:spark",
+		"7d:spark",
+		WindowPro,
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("OrderedWindowNames() length = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("OrderedWindowNames()[%d] = %q, want %q (all=%v)", i, got[i], want[i], got)
+		}
 	}
 }
