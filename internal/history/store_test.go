@@ -113,6 +113,44 @@ func TestStoreSecondObservationEWMAUpdate(t *testing.T) {
 	}
 }
 
+func TestStoreReseedsAfterObservationGapExceedsWindowPeriod(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	now := int64(1_000_000)
+	period := int64(quota.PeriodFor(quota.Window5Hour).Seconds())
+	reset := now + 9_000
+
+	_, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+		makeResult("acct1", map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: reset},
+		}),
+	}, now)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rates, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+		makeResult("acct1", map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: 70, ResetAtUnix: reset + period},
+		}),
+	}, now+period+60)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if _, ok := rates.Get(BurnRateKey{AccountKey: "acct1", Window: "5h"}); ok {
+		t.Fatal("stale observation produced burn rate after period-sized gap")
+	}
+
+	state, err := s.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	w := state.Accounts["acct1"].Windows["5h"]
+	if w.Samples != 1 || w.EWMARatePctPerS != 0 || w.LastRemainingPct != 70 {
+		t.Fatalf("reseeded state = %#v, want fresh sample at 70%%", w)
+	}
+}
+
 func TestStoreResetUnwrap(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()

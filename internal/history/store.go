@@ -231,6 +231,18 @@ func (s *Store) UpdateAndGetBurnRates(
 				// a zero-delta would produce a divide-by-zero below.
 				continue
 			}
+			period := int64(quota.PeriodFor(winName).Seconds())
+			if period > 0 && dt > period {
+				// A gap longer than the window cannot distinguish suspended or
+				// unobserved resets from actual consumption. Cold-start instead.
+				*prev = WindowState{
+					LastSeenUnix:     nowEpoch,
+					LastRemainingPct: w.RemainingPct,
+					LastResetAtUnix:  w.ResetAtUnix,
+					Samples:          1,
+				}
+				continue
+			}
 
 			deltaPct, resetOK := computeDelta(prev, w, winName)
 			if !resetOK {
