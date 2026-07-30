@@ -51,16 +51,18 @@ func (f RegistryRefresherFunc) Refresh(ctx context.Context) (modelregistry.Refre
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	Config                *Config
-	Selector              ClaudeSelector
-	Discover              ClaudeDiscoverer
-	Transport             http.RoundTripper
-	CodexDiscover         CodexDiscoverer
-	CodexTransport        http.RoundTripper
-	CodexUpgradeTransport http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
-	Headroom              *HeadroomBridge
-	Diag                  *DiagnosticsWriter
-	PayloadDiag           *PayloadWriter
+	Config                    *Config
+	Selector                  ClaudeSelector
+	Discover                  ClaudeDiscoverer
+	Transport                 http.RoundTripper
+	CodexDiscover             CodexDiscoverer
+	CodexTransport            http.RoundTripper
+	CodexUpgradeTransport     http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
+	codexLiveSidebandUpstream string
+	codexLive                 codexLiveState
+	Headroom                  *HeadroomBridge
+	Diag                      *DiagnosticsWriter
+	PayloadDiag               *PayloadWriter
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -127,6 +129,16 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc(codexImagesPathPrefix, s.handleCodexImagesRoute)
 	mux.HandleFunc(legacyCodexImagesPathPrefix, s.handleCodexImagesRoute)
 	mux.HandleFunc("POST "+codexSearchPath, s.handleCodexSearchRoute)
+	mux.HandleFunc("POST /live", s.handleCodexLiveCall)
+	mux.HandleFunc("POST /v1/live", s.handleCodexLiveCall)
+	mux.HandleFunc("POST /realtime/calls", s.handleCodexLiveCall)
+	mux.HandleFunc("POST /v1/realtime/calls", s.handleCodexLiveCall)
+	mux.HandleFunc("GET /live/", s.handleCodexLiveSideband)
+	mux.HandleFunc("GET /v1/live/", s.handleCodexLiveSideband)
+	mux.HandleFunc("GET /realtime/calls/", s.handleCodexLiveSideband)
+	mux.HandleFunc("GET /v1/realtime/calls/", s.handleCodexLiveSideband)
+	mux.HandleFunc("GET /realtime", s.handleCodexLiveSideband)
+	mux.HandleFunc("GET /v1/realtime", s.handleCodexLiveSideband)
 	for _, pattern := range unsupportedOpenAICompatibleRoutePatterns() {
 		mux.HandleFunc(pattern, s.handleUnsupportedOpenAICompatibleRoute)
 	}
