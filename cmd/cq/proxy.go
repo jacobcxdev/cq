@@ -290,11 +290,17 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl)
 	var codexHTTPEnforcer *proxy.CodexHTTPEnforcer
-	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce {
+	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce || len(codexRouting.HTTP.RetainedAuthoritativeEpochs) != 0 {
 		if codexObserver == nil || codexObserver.Store == nil {
 			return fmt.Errorf("Codex HTTP enforcement: lease store unavailable")
 		}
-		codexHTTPEnforcer, err = proxy.NewCodexHTTPEnforcer(codexRequestRouter, codexRouting.HTTP.ModeEpoch, codexObserver.Store)
+		codexHTTPEnforcer, err = proxy.NewCodexHTTPEnforcerWithRetainedEpochs(
+			codexRequestRouter,
+			codexRouting.HTTP.ModeEpoch,
+			codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce,
+			codexRouting.HTTP.RetainedAuthoritativeEpochs,
+			codexObserver.Store,
+		)
 		if err != nil {
 			return fmt.Errorf("Codex HTTP enforcement: %w", err)
 		}

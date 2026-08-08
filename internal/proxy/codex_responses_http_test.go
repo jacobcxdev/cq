@@ -324,19 +324,94 @@ func TestCodexHTTPEnforcerPinsAndValidatesTurnState(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPFenceOnlyRestoresRetainedAuthority(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	store := openTestCodexLeaseStore(t, fsys)
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	lease := CodexTurnLease{
+		Key:           NewCodexLeaseKey(request.Metadata.Metadata),
+		State:         LeaseBoundQuiescent,
+		AccountKey:    "one",
+		Generation:    4,
+		ModeEpoch:     6,
+		Authoritative: true,
+		LastSeen:      time.Now(),
+	}
+	if err := store.CommitCurrentLeases([]CodexTurnLease{lease}); err != nil {
+		t.Fatal(err)
+	}
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "two"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusOK, body: completedSSE("response")}},
+	}}
+	enforcer, err := NewCodexHTTPEnforcerWithRetainedEpochs(testHTTPRouter(chooser, executor), 9, false, []uint64{6}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, choice, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if choice.AccountKey != "one" || chooser.calls != 0 {
+		t.Fatalf("choice=%q selector calls=%d", choice.AccountKey, chooser.calls)
+	}
+}
+
+func TestCodexHTTPFenceOnlyLeavesUnseenTurnToLegacyRoute(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "two"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{}}
+	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
+	enforcer, err := NewCodexHTTPEnforcerWithRetainedEpochs(testHTTPRouter(chooser, executor), 9, false, []uint64{6}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := strongHTTPProtocolRequest(t, "thread", "unseen", CodexRequestTurn, "")
+	_, _, _, err = enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if !errors.Is(err, ErrCodexNoAuthorityFence) || chooser.calls != 0 || len(executor.accounts) != 0 {
+		t.Fatalf("error=%v selector calls=%d attempts=%v", err, chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPFenceOnlyServerFallbackUsesLegacyRoute(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "two"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"two": {{status: http.StatusOK, body: completedSSE("response")}},
+	}}
+	router := testHTTPRouter(chooser, executor)
+	enforcer, err := NewCodexHTTPEnforcerWithRetainedEpochs(router, 9, false, []uint64{6}, openTestCodexLeaseStore(t, fsutil.NewMemFS()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{CodexRequests: router, CodexHTTPEnforcer: enforcer}
+	request := strongHTTPProtocolRequest(t, "thread", "unseen", CodexRequestTurn, "")
+	response, choice, observation, err := server.doCodexHTTPRoute(context.Background(), request.Model, request, protocolHTTPRequest(request), nil, nil, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if choice.AccountKey != "two" || observation != nil || chooser.calls != 1 || len(executor.accounts) != 1 {
+		t.Fatalf("choice=%q observation=%v selector calls=%d attempts=%v", choice.AccountKey, observation, chooser.calls, executor.accounts)
+	}
+}
+
 func testHTTPEnforcer(t *testing.T, chooser CodexRouteChooser, executor ExplicitAccountExecutor, fsys fsutil.DurableFileSystem) *CodexHTTPEnforcer {
 	t.Helper()
-	accounts := []codex.LogicalAccount{}
-	for _, key := range []codex.AccountKey{"one", "two"} {
-		accounts = append(accounts, codex.LogicalAccount{Key: key, Routable: true, Candidates: []codex.CredentialCandidate{{Ref: codex.CandidateRef{AccountKey: key, CandidateID: codex.CandidateID(key + "-candidate")}, Revision: "revision", Source: codex.SourceManaged, CQAuthored: true, AccessExpiresAt: time.Now().Add(time.Hour)}}})
-	}
-	router := &CodexRequestRouter{Scope: &CodexRequestScope{Chooser: chooser, Inventory: staticCredentialInventory{inventory: codex.Inventory{Accounts: accounts}}}, Executor: executor}
 	store := openTestCodexLeaseStore(t, fsys)
-	enforcer, err := NewCodexHTTPEnforcer(router, 7, store)
+	enforcer, err := NewCodexHTTPEnforcer(testHTTPRouter(chooser, executor), 7, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return enforcer
+}
+
+func testHTTPRouter(chooser CodexRouteChooser, executor ExplicitAccountExecutor) *CodexRequestRouter {
+	accounts := []codex.LogicalAccount{}
+	for _, key := range []codex.AccountKey{"one", "two"} {
+		accounts = append(accounts, codex.LogicalAccount{Key: key, Routable: true, Candidates: []codex.CredentialCandidate{{Ref: codex.CandidateRef{AccountKey: key, CandidateID: codex.CandidateID(key + "-candidate")}, Revision: "revision", Source: codex.SourceManaged, CQAuthored: true, AccessExpiresAt: time.Now().Add(time.Hour)}}})
+	}
+	return &CodexRequestRouter{Scope: &CodexRequestScope{Chooser: chooser, Inventory: staticCredentialInventory{inventory: codex.Inventory{Accounts: accounts}}}, Executor: executor}
 }
 
 func strongHTTPProtocolRequest(t *testing.T, thread, turn string, kind CodexRequestKind, phase CodexCompactionPhase) CodexProtocolRequest {

@@ -105,13 +105,6 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	if enforce && protocolRequest.Model != "" {
 		model = protocolRequest.Model
 	}
-	var observation *CodexTurnObservation
-	if !enforce {
-		observation = s.beginCodexHTTPObservation(ctx, body, r.Header, true)
-	}
-	if observation != nil {
-		ctx = withCodexObservation(ctx, observation)
-	}
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=codex (native compact)\n", requestPath, model)
 
 	// Emit payload diagnostics before forwarding.
@@ -154,13 +147,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	var resp *http.Response
-	var choice RouteChoice
-	if enforce {
-		resp, choice, _, err = s.CodexHTTPEnforcer.Do(ctx, CodexRouteRequirements{RequestedModel: model}, protocolRequest, upReq)
-	} else {
-		resp, choice, _, err = s.doCodexRequest(ctx, model, upReq)
-	}
+	resp, choice, observation, err := s.doCodexHTTPRoute(ctx, model, protocolRequest, upReq, body, r.Header, true, enforce)
 	if err != nil {
 		if observation != nil {
 			observation.Finish(err)

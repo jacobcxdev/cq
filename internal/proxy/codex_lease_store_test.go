@@ -76,6 +76,21 @@ func TestCodexJournalKeepsShadowAndAuthorityDistinct(t *testing.T) {
 	}
 }
 
+func TestCodexRuntimeObserverOpensForRetainedAuthorityWhileOff(t *testing.T) {
+	runtime := &CodexRoutingRuntime{HTTP: CodexModeStatus{
+		Effective:                   CodexRoutingOff,
+		ModeEpoch:                   9,
+		RetainedAuthoritativeEpochs: []uint64{6},
+	}}
+	observer, err := OpenCodexRuntimeObserver(runtime, fsutil.NewMemFS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observer == nil || observer.Store == nil {
+		t.Fatal("retained authority store unavailable")
+	}
+}
+
 func TestCodexJournalKeyLossFailsClosed(t *testing.T) {
 	t.Parallel()
 	fsys := fsutil.NewMemFS()

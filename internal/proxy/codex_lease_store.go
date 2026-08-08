@@ -123,7 +123,11 @@ func OpenDefaultCodexLeaseStore(fsys fsutil.DurableFileSystem) (*CodexLeaseStore
 }
 
 func OpenCodexRuntimeObserver(runtime *CodexRoutingRuntime, fsys fsutil.DurableFileSystem) (*CodexTurnObserver, error) {
-	if runtime == nil || runtime.HTTP.Effective == CodexRoutingOff && runtime.WebSocket.Effective == CodexRoutingOff {
+	if runtime == nil {
+		return nil, nil
+	}
+	hasRetainedAuthority := len(runtime.HTTP.RetainedAuthoritativeEpochs) != 0 || len(runtime.WebSocket.RetainedAuthoritativeEpochs) != 0
+	if runtime.HTTP.Effective == CodexRoutingOff && runtime.WebSocket.Effective == CodexRoutingOff && !hasRetainedAuthority {
 		return nil, nil
 	}
 	epoch := max(runtime.HTTP.ModeEpoch, runtime.WebSocket.ModeEpoch)

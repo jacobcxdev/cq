@@ -13,10 +13,11 @@ import (
 const CodexResponsesNamespace = "codex-responses"
 
 var (
-	ErrCodexStaleTurn       = errors.New("stale Codex turn")
-	ErrCodexConcurrentTurn  = errors.New("concurrent Codex turn")
-	ErrCodexContinuity      = errors.New("Codex turn continuity unavailable")
-	ErrCodexLeaseTransition = errors.New("invalid Codex lease transition")
+	ErrCodexStaleTurn        = errors.New("stale Codex turn")
+	ErrCodexConcurrentTurn   = errors.New("concurrent Codex turn")
+	ErrCodexContinuity       = errors.New("Codex turn continuity unavailable")
+	ErrCodexLeaseTransition  = errors.New("invalid Codex lease transition")
+	ErrCodexNoAuthorityFence = errors.New("no retained Codex authority fence")
 )
 
 type LaneKey struct {

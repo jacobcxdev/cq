@@ -12,14 +12,20 @@ import (
 )
 
 type CodexHTTPEnforcer struct {
-	Router   *CodexRequestRouter
-	Leases   *CodexTurnLeaseManager
-	Store    *CodexLeaseStore
-	Observer *CodexTurnObserver
-	Canary   *CodexCanaryRecorder
+	Router                      *CodexRequestRouter
+	Leases                      *CodexTurnLeaseManager
+	Store                       *CodexLeaseStore
+	Observer                    *CodexTurnObserver
+	Canary                      *CodexCanaryRecorder
+	EnforceNew                  bool
+	RetainedAuthoritativeEpochs []uint64
 }
 
 func NewCodexHTTPEnforcer(router *CodexRequestRouter, modeEpoch uint64, store *CodexLeaseStore) (*CodexHTTPEnforcer, error) {
+	return NewCodexHTTPEnforcerWithRetainedEpochs(router, modeEpoch, true, nil, store)
+}
+
+func NewCodexHTTPEnforcerWithRetainedEpochs(router *CodexRequestRouter, modeEpoch uint64, enforceNew bool, retained []uint64, store *CodexLeaseStore) (*CodexHTTPEnforcer, error) {
 	if router == nil || store == nil || modeEpoch == 0 {
 		return nil, errors.New("Codex HTTP enforcement dependencies unavailable")
 	}
@@ -28,7 +34,14 @@ func NewCodexHTTPEnforcer(router *CodexRequestRouter, modeEpoch uint64, store *C
 	if err != nil {
 		return nil, err
 	}
-	return &CodexHTTPEnforcer{Router: router, Leases: leases, Store: store, Observer: observer}, nil
+	return &CodexHTTPEnforcer{
+		Router:                      router,
+		Leases:                      leases,
+		Store:                       store,
+		Observer:                    observer,
+		EnforceNew:                  enforceNew,
+		RetainedAuthoritativeEpochs: append([]uint64(nil), retained...),
+	}, nil
 }
 
 func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (CodexProtocolRequest, bool, error) {
@@ -75,8 +88,12 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 	if request.Metadata.Metadata.RequestKind == CodexRequestCompaction && request.Metadata.Metadata.CompactionPhase == CodexCompactionPreTurn {
 		requirements.RequiredModels = append(requirements.RequiredModels, "gpt-5.4", codexSparkModel)
 	}
-	if err := enforcer.restore(ctx, key); err != nil {
+	restored, err := enforcer.restore(ctx, key)
+	if err != nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, err
+	}
+	if !restored && !enforcer.EnforceNew {
+		return nil, RouteChoice{}, CandidateAttempt{}, ErrCodexNoAuthorityFence
 	}
 	if request.Metadata.Metadata.RequestKind == CodexRequestCompaction &&
 		request.Metadata.Metadata.CompactionPhase != CodexCompactionStandalone &&
@@ -212,22 +229,46 @@ func (enforcer *CodexHTTPEnforcer) finishUnadmitted(key LeaseKey) {
 	_ = enforcer.Leases.ReleaseRouting(key)
 }
 
+func (s *Server) doCodexHTTPRoute(ctx context.Context, model string, request CodexProtocolRequest, upstream *http.Request, body []byte, header http.Header, compact, enforce bool) (*http.Response, RouteChoice, *CodexTurnObservation, error) {
+	if enforce {
+		response, choice, _, err := s.CodexHTTPEnforcer.Do(ctx, CodexRouteRequirements{RequestedModel: model}, request, upstream)
+		if !errors.Is(err, ErrCodexNoAuthorityFence) {
+			return response, choice, nil, err
+		}
+	}
+	observation := s.beginCodexHTTPObservation(ctx, body, header, compact)
+	if observation != nil {
+		ctx = withCodexObservation(ctx, observation)
+		upstream = upstream.WithContext(ctx)
+	}
+	response, choice, _, err := s.doCodexRequest(ctx, model, upstream)
+	return response, choice, observation, err
+}
+
 func (enforcer *CodexHTTPEnforcer) persist(leases []CodexTurnLease) error {
 	return enforcer.Store.CommitCurrentLeases(leases)
 }
 
-func (enforcer *CodexHTTPEnforcer) restore(ctx context.Context, key LeaseKey) error {
+func (enforcer *CodexHTTPEnforcer) restore(ctx context.Context, key LeaseKey) (bool, error) {
 	if _, found := enforcer.Leases.Get(key); found {
-		return nil
+		return true, nil
 	}
 	accounts, err := enforcer.Router.AccountKeys(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	modeEpoch, authoritative := enforcer.Leases.Mode()
 	record, account, found := enforcer.Store.LookupMode(key, accounts, modeEpoch, authoritative)
 	if !found {
-		return nil
+		for _, retainedEpoch := range enforcer.RetainedAuthoritativeEpochs {
+			record, account, found = enforcer.Store.LookupMode(key, accounts, retainedEpoch, true)
+			if found {
+				break
+			}
+		}
+	}
+	if !found {
+		return false, nil
 	}
 	lease := CodexTurnLease{
 		Key:                  key,
@@ -235,8 +276,8 @@ func (enforcer *CodexHTTPEnforcer) restore(ctx context.Context, key LeaseKey) er
 		AccountKey:           account,
 		Choice:               RouteChoice{AccountKey: account},
 		Generation:           record.LeaseGeneration,
-		ModeEpoch:            record.ModeEpoch,
-		Authoritative:        record.Authoritative,
+		ModeEpoch:            modeEpoch,
+		Authoritative:        true,
 		HasEncryptedState:    record.HasEncryptedState,
 		TurnStateUnavailable: record.HasTurnState,
 		NonMigratable:        record.NonMigratable || account == "",
@@ -244,7 +285,7 @@ func (enforcer *CodexHTTPEnforcer) restore(ctx context.Context, key LeaseKey) er
 	}
 	enforcer.Leases.Restore([]CodexTurnLease{lease})
 	if account == "" {
-		return fmt.Errorf("%w: persisted account no longer exists", ErrCodexContinuity)
+		return true, fmt.Errorf("%w: persisted account no longer exists", ErrCodexContinuity)
 	}
-	return nil
+	return true, nil
 }
