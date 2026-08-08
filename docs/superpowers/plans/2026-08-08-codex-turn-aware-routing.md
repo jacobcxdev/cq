@@ -349,16 +349,16 @@ type ExplicitAccountExecutor interface {
 - Modify: `go.mod`
 - Modify: `go.sum`
 
-- [ ] Add dependency `github.com/klauspost/compress/zstd` (or standard-library equivalent if available) only after red compressed fixtures require it.
-- [ ] Add exact synthetic 0.146 fixtures: canonical header; nested metadata JSON string/object; flat compatibility; request kinds; compaction phases; memory without turn; typed empty prewarm; malformed/incomplete/oversized metadata.
-- [ ] Parser priority: nested client metadata, direct HTTP header, flat fields, handshake hint. Validate complete session/thread/turn tuple; compare IDs as opaque strings only.
-- [ ] Add bounded zstd tests for decoded-size limit, expansion ratio, malformed streams, exact original-byte replay, and no allocation before bounds.
-- [ ] Add SSE parser tests for split/coalesced chunks, CRLF, multiline data, malformed/unknown/oversized events, `response.metadata`, well-formed `response.created` with response object, deltas, `response.completed.end_turn` tri-state, errors, and `codex.rate_limits`.
-- [ ] Add WS parser tests for wrapped 401/403 and exact hard-429 predicate: top-level error, 429 status, nested `usage_limit_reached`; every near-match stays soft.
-- [ ] Add unary compact parser and response-header turn-state parser.
-- [ ] Parsers remain observation-only. Relays still use Stage 8 behaviour.
-- [ ] Run `go test -race -count=100 ./internal/proxy -run 'TurnMetadata|CodexProtocol|CodexSSE|CodexZstd'`.
-- [ ] Commit `feat: parsed Codex Responses lifecycle`.
+- [x] Add dependency `github.com/klauspost/compress/zstd` (or standard-library equivalent if available) only after red compressed fixtures require it.
+- [x] Add exact synthetic 0.146 fixture cases: canonical nested metadata JSON string/object; flat compatibility; request kinds; compaction phases; memory without turn; typed empty prewarm; malformed/incomplete/oversized metadata.
+- [x] Parser priority: nested client metadata, direct HTTP header, flat fields, handshake hint. Validate complete session/thread/turn tuple; compare IDs as opaque strings only.
+- [x] Add bounded zstd tests for decoded-size limit, expansion ratio, malformed streams, exact original-byte replay, and no decoder allocation before header bounds.
+- [x] Add SSE parser tests for split/coalesced chunks, CRLF, multiline data, malformed/unknown/oversized events, `response.metadata`, well-formed `response.created` with response object, deltas, `response.completed.end_turn` tri-state, errors, and `codex.rate_limits`.
+- [x] Add WS parser tests for wrapped 401/403 and exact hard-429 predicate: top-level error, 429 status, nested `usage_limit_reached`; every near-match stays soft.
+- [x] Add unary compact parser and response-header turn-state parser.
+- [x] Parsers remain observation-only. Relays still use Stage 8 behaviour.
+- [x] Run `go test -race -count=100 ./internal/proxy -run 'TurnMetadata|CodexProtocol|CodexSSE|CodexZstd'`.
+- [x] Commit `feat: parsed Codex Responses lifecycle`.
 
 ## Stage 10: Durable lane and lease core
 
