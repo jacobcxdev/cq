@@ -392,20 +392,20 @@ const (
 )
 ```
 
-- [ ] Add red state-table tests for every allowed/forbidden logical and attempt transition. `response.completed` never releases. `end_turn=false` becomes continuation-pending; true/absent becomes quiescent.
-- [ ] Add red lane tests: concurrent first acquisition selects once; same key reuses; different unseen ID supersedes only after predecessor routing refs drain; retained historical ID fails stale; opaque inequality only; root/subagent same session remain independent; failed successor never resurrects predecessor.
-- [ ] Add red prewarm tests: empty ID allowed only typed prewarm; admission fixes account/socket; one matching real turn atomically adopts response anchor/turn state/socket; mismatch/restart cannot inherit extinct lineage.
-- [ ] Add red continuation tests: first turn state wins; later mismatch fails; normal turns never inherit turn state; `previous_response_id` requires exact live `(AccountKey, UpstreamSocketGeneration)`; encrypted content retains account affinity.
-- [ ] Implement keyed HMAC journal with separate hashes for session/thread/turn/account/correlation and queryable lane components. Never hash whole composite into one unqueryable field.
-- [ ] Add red journal crash/corruption tests: key generation, `0o600`/`0o700`, write/sync/rename/dir-sync, ENOSPC, corrupt record, HMAC key loss, generation fence, compaction, restart orphaning, socket extinction, seven-day retention, active-ref no expiry, late-resume block.
-- [ ] Keep shadow and authoritative records distinct by mode epoch. Once in-memory admission occurs, journal failure leaves non-migratable fail-closed lease.
+- [x] Add red state-table tests for every allowed/forbidden logical and attempt transition. `response.completed` never releases. `end_turn=false` becomes continuation-pending; true/absent becomes quiescent.
+- [x] Add red lane tests: concurrent first acquisition selects once; same key reuses; different unseen ID supersedes only after predecessor routing refs drain; retained historical ID fails stale; opaque inequality only; root/subagent same session remain independent; failed successor never resurrects predecessor.
+- [x] Add red prewarm tests: empty ID allowed only typed prewarm; admission fixes account/socket; one matching real turn atomically adopts response anchor/turn state/socket; mismatch/restart cannot inherit extinct lineage.
+- [x] Add red continuation tests: first turn state wins; later mismatch fails; normal turns never inherit turn state; `previous_response_id` requires exact live `(AccountKey, UpstreamSocketGeneration)`; encrypted content retains account affinity.
+- [x] Implement keyed HMAC journal with separate hashes for session/thread/turn/account/correlation and queryable lane components. Never hash whole composite into one unqueryable field.
+- [x] Add red journal crash/corruption tests: key generation, `0o600`/`0o700`, write/sync/rename/dir-sync, ENOSPC, corrupt record, HMAC key loss, generation fence, compaction, restart orphaning, socket extinction, seven-day retention, active-ref no expiry, late-resume block.
+- [x] Keep shadow and authoritative records distinct by mode epoch. Once in-memory admission occurs, journal failure leaves non-migratable fail-closed lease.
 - [ ] Run:
 
 ```bash
 go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewarm|CodexJournal'
 ```
 
-- [ ] Commit `feat: added durable Codex turn leases`.
+- [x] Commit `feat: added durable Codex turn leases`.
 
 ## Stage 11: Observe-only integration
 

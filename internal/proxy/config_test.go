@@ -97,12 +97,24 @@ func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
 	if cfg.CodexTurnRouting != CodexRoutingOff || cfg.CodexWSTurnRouting != CodexRoutingOff {
 		t.Fatalf("modes = %q/%q, want off/off", cfg.CodexTurnRouting, cfg.CodexWSTurnRouting)
 	}
+	if cfg.CodexLeaseRetentionDays != 7 {
+		t.Fatalf("retention = %d, want 7", cfg.CodexLeaseRetentionDays)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "cq", "proxy.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), `"codex_turn_routing": "off"`) || !strings.Contains(string(data), `"codex_ws_turn_routing": "off"`) {
 		t.Fatalf("generated config missing explicit safe modes: %s", data)
+	}
+}
+
+func TestConfigRejectsInvalidCodexLeaseRetention(t *testing.T) {
+	for _, days := range []int{-1, 366} {
+		cfg := &Config{LocalToken: "token", ClaudeUpstream: DefaultUpstream, CodexUpstream: DefaultCodexUpstream, CodexLeaseRetentionDays: days}
+		if err := cfg.validate(); err == nil {
+			t.Fatalf("retention %d accepted", days)
+		}
 	}
 }
 

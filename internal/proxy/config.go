@@ -45,8 +45,9 @@ type Config struct {
 	// share without review. Requires a proxy restart to take effect.
 	PayloadDiagnosticsLog string `json:"payload_diagnostics_log,omitempty"`
 	// CodexTurnRouting and CodexWSTurnRouting apply only after proxy restart.
-	CodexTurnRouting   CodexRoutingMode `json:"codex_turn_routing"`
-	CodexWSTurnRouting CodexRoutingMode `json:"codex_ws_turn_routing"`
+	CodexTurnRouting        CodexRoutingMode `json:"codex_turn_routing"`
+	CodexWSTurnRouting      CodexRoutingMode `json:"codex_ws_turn_routing"`
+	CodexLeaseRetentionDays int              `json:"codex_lease_retention_days"`
 
 	unknownFields map[string]json.RawMessage
 }
@@ -56,7 +57,7 @@ var configKnownFields = map[string]bool{
 	"local_token": true, "headroom": true, "headroom_mode": true,
 	"pinned_claude_account": true, "diagnostics_log": true,
 	"payload_diagnostics_log": true, "codex_turn_routing": true,
-	"codex_ws_turn_routing": true,
+	"codex_ws_turn_routing": true, "codex_lease_retention_days": true,
 }
 
 // UnmarshalJSON retains fields unknown to this build for N/N-1 safe writes.
@@ -134,6 +135,9 @@ func (c *Config) setDefaults() {
 	if c.CodexWSTurnRouting == "" {
 		c.CodexWSTurnRouting = CodexRoutingOff
 	}
+	if c.CodexLeaseRetentionDays == 0 {
+		c.CodexLeaseRetentionDays = 7
+	}
 }
 
 func (c *Config) validate() error {
@@ -157,6 +161,9 @@ func (c *Config) validate() error {
 	}
 	if err := c.CodexWSTurnRouting.validate("codex_ws_turn_routing"); err != nil {
 		return err
+	}
+	if c.CodexLeaseRetentionDays < 1 || c.CodexLeaseRetentionDays > 365 {
+		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
 	}
 	return nil
 }
@@ -188,12 +195,13 @@ func generateDefaultConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		Port:               DefaultPort,
-		ClaudeUpstream:     DefaultUpstream,
-		CodexUpstream:      DefaultCodexUpstream,
-		LocalToken:         token,
-		CodexTurnRouting:   CodexRoutingOff,
-		CodexWSTurnRouting: CodexRoutingOff,
+		Port:                    DefaultPort,
+		ClaudeUpstream:          DefaultUpstream,
+		CodexUpstream:           DefaultCodexUpstream,
+		LocalToken:              token,
+		CodexTurnRouting:        CodexRoutingOff,
+		CodexWSTurnRouting:      CodexRoutingOff,
+		CodexLeaseRetentionDays: 7,
 	}
 	if err := saveConfig(path, cfg); err != nil {
 		return nil, err
