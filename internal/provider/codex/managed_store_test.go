@@ -13,8 +13,10 @@ import (
 
 type durableFakeFS struct {
 	*fakeFS
-	modes    map[string]os.FileMode
-	failStep string
+	modes        map[string]os.FileMode
+	failStep     string
+	failRenameAt int
+	renameCount  int
 }
 
 func newDurableFakeFS() *durableFakeFS {
@@ -33,6 +35,12 @@ func (f *durableFakeFS) WriteFile(name string, data []byte, mode os.FileMode) er
 }
 
 func (f *durableFakeFS) Rename(oldpath, newpath string) error {
+	if bytes.Contains([]byte(oldpath), []byte(".tmp_")) {
+		f.renameCount++
+	}
+	if f.failRenameAt > 0 && f.renameCount == f.failRenameAt {
+		return os.ErrPermission
+	}
 	if f.failStep == "rename" && bytes.Contains([]byte(oldpath), []byte(".tmp_")) {
 		return os.ErrPermission
 	}

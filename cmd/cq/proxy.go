@@ -170,7 +170,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 		cfg.Port = opts.Port
 	}
 	fsys := fsutil.OSFileSystem{}
-	credentialControl, err := codexprov.OpenDefaultCredentialControl(context.Background(), fsys)
+	refreshClient := newHTTPClientFn(30*time.Second, version)
+	credentialControl, err := codexprov.OpenDefaultCredentialRefreshControl(context.Background(), fsys, refreshClient)
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
@@ -193,8 +194,6 @@ func runProxyStart(opts proxyCommandOptions) error {
 
 	discover := proxy.ClaudeDiscoverer(discoverClaudeAccountsFn)
 	activeEmail := proxy.ActiveEmailFunc(activeClaudeEmailFn)
-	refreshClient := newHTTPClientFn(30*time.Second, version)
-
 	claudeProvider := claudeprov.New(refreshClient)
 	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())
 	baseSelector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
@@ -302,8 +301,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 			HTTPClient:         refreshClient,
 			CodexClientVersion: defaultCodexClientVersion(),
 			ClaudeToken:        firstClaudeAccessToken,
-			CodexToken: func() (string, error) {
-				return firstCodexAccessToken(codexDiscover())
+			CodexTokenContext: func(ctx context.Context) (string, error) {
+				return firstCodexAccessTokenFromInventory(ctx, codexprov.DiscoverInventory(fsys), credentialControl)
 			},
 			Env:    os.Getenv,
 			Stderr: os.Stderr,

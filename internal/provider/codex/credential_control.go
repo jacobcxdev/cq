@@ -31,7 +31,7 @@ func DefaultCredentialControlPath(home string) string {
 
 // OpenDefaultCredentialControl connects to the per-user credential owner or
 // becomes the ephemeral owner when no endpoint exists.
-func OpenDefaultCredentialControl(ctx context.Context, fs fsutil.DurableFileSystem) (*CredentialControl, error) {
+func OpenDefaultCredentialControl(ctx context.Context, fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialControl, error) {
 	store, err := NewManagedStore(fs)
 	if err != nil {
 		return nil, err
@@ -39,6 +39,9 @@ func OpenDefaultCredentialControl(ctx context.Context, fs fsutil.DurableFileSyst
 	coordinator, err := NewCredentialCoordinator(store)
 	if err != nil {
 		return nil, err
+	}
+	if len(exchanges) > 0 {
+		coordinator.RefreshExchange = exchanges[0]
 	}
 	control, err := OpenCredentialControl(DefaultCredentialControlPath(store.Home), coordinator)
 	if err != nil {
@@ -51,6 +54,22 @@ func OpenDefaultCredentialControl(ctx context.Context, fs fsutil.DurableFileSyst
 		}
 	}
 	return control, nil
+}
+
+type RefreshRPCArgs struct {
+	Ref      CandidateRef
+	Revision Revision
+}
+
+type RefreshRPCReply struct{ Result RefreshResult }
+
+func (c *CredentialControl) Refresh(ctx context.Context, ref CandidateRef, revision Revision) (RefreshResult, error) {
+	if c.owner {
+		return c.coordinator.Refresh(ctx, ref, revision)
+	}
+	var reply RefreshRPCReply
+	err := c.client.Call("CredentialRPC.Refresh", RefreshRPCArgs{Ref: ref, Revision: revision}, &reply)
+	return reply.Result, err
 }
 
 func (c *CredentialControl) Owner() bool { return c != nil && c.owner }
@@ -176,6 +195,11 @@ func (r *credentialRPC) List(_ struct{}, reply *Inventory) error {
 func (r *credentialRPC) Resolve(ref CandidateRef, reply *CredentialMaterial) error {
 	result, err := r.Coordinator.Resolve(context.Background(), ref)
 	*reply = result
+	return err
+}
+func (r *credentialRPC) Refresh(args RefreshRPCArgs, reply *RefreshRPCReply) error {
+	result, err := r.Coordinator.Refresh(context.Background(), args.Ref, args.Revision)
+	reply.Result = result
 	return err
 }
 func (r *credentialRPC) SaveLogin(args SaveLoginRPCArgs, reply *SaveLoginRPCReply) error {

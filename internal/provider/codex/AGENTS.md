@@ -2,7 +2,7 @@
 
 # provider/codex
 
-Multi-account Codex provider. Returns `auth_expired` on 401/403. Automatic code reads system auth but never refreshes, activates, removes, or rewrites it.
+Multi-account Codex provider. Returns `auth_expired` on 401/403. Automatic code never refreshes, activates, removes, or rewrites system auth. Eligible CQ-owned managed lineages refresh only through the credential coordinator.
 
 ## Key Files
 
@@ -16,7 +16,7 @@ Multi-account Codex provider. Returns `auth_expired` on 401/403. Automatic code 
 
 ### Working In This Directory
 
-- No automatic token refresh — CQ shares `~/.codex/auth.json` with Codex and other account tools; Auth0 rotation can invalidate another writer's copy
+- Never refresh system, borrowed, legacy, exported, or uncertain credentials. Managed refresh requires `cq_oauth + cq_owned_never_exported + ready` through the coordinator broker.
 - Automatic routing never writes `~/.codex/auth.json`, updates registry active state, or invokes account switching
 - `parseNumericResetAt` only handles `float64` and `string` (standard `json.Unmarshal` types)
 - Tests use `fakeFS` with injectable errors rather than `fsutil.MemFS` (needs error injection)

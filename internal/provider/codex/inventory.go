@@ -44,6 +44,7 @@ type CredentialCandidate struct {
 	Credential      CodexAccount
 	AccessExpiresAt time.Time
 	CQAuthored      bool
+	DispatchBlocked bool
 }
 
 type LogicalAccount struct {
@@ -164,7 +165,8 @@ func DiscoverInventory(fs fsutil.FileSystem) Inventory {
 		logical.Candidates = append(logical.Candidates, CredentialCandidate{
 			Ref: ref, Revision: credential.Revision, Source: candidate.source,
 			Credential: credential, AccessExpiresAt: unixMilliTime(credential.ExpiresAt),
-			CQAuthored: candidate.cqAuthored,
+			CQAuthored:      candidate.cqAuthored,
+			DispatchBlocked: candidate.metadata != nil && candidate.metadata.OperationState != OperationReady,
 		})
 		logical.Active = logical.Active || candidate.source == SourceSystem
 		logical.Routable = logical.Routable || (credential.AccountID != "" && credential.AccessToken != "")
@@ -321,7 +323,12 @@ func unixMilliTime(value int64) time.Time {
 
 // ResolveCandidate returns deterministic candidates in retry order.
 func ResolveCandidate(logical LogicalAccount, accepted Revision, now time.Time) []CredentialCandidate {
-	candidates := append([]CredentialCandidate(nil), logical.Candidates...)
+	candidates := make([]CredentialCandidate, 0, len(logical.Candidates))
+	for _, candidate := range logical.Candidates {
+		if !candidate.DispatchBlocked {
+			candidates = append(candidates, candidate)
+		}
+	}
 	sortCandidates(candidates, accepted, now)
 	return candidates
 }

@@ -16,8 +16,9 @@ import (
 
 // Provider implements provider.Provider for Codex (OpenAI).
 type Provider struct {
-	client httputil.Doer
-	fs     fsutil.FileSystem
+	client        httputil.Doer
+	fs            fsutil.FileSystem
+	refreshBroker CredentialRefreshBroker
 }
 
 // New creates a Provider that uses the given HTTP client for API calls.
@@ -32,6 +33,19 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
 
+	broker := p.refreshBroker
+	var control *CredentialControl
+	if broker == nil {
+		if durableFS, ok := p.fs.(fsutil.DurableFileSystem); ok {
+			var err error
+			control, err = OpenDefaultCredentialRefreshControl(ctx, durableFS, p.client)
+			if err == nil {
+				defer control.Close()
+				broker = control
+			}
+		}
+	}
+
 	results := make([]quota.Result, len(inventory.Accounts))
 	var wg sync.WaitGroup
 	for i, logical := range inventory.Accounts {
@@ -44,7 +58,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
 				}
 			}()
-			results[i] = p.fetchLogicalAccount(ctx, logical)
+			results[i] = p.fetchLogicalAccount(ctx, logical, broker)
 			results[i].Active = logical.Active
 		}(i, logical)
 	}
@@ -53,7 +67,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 	return results, nil
 }
 
-func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount) quota.Result {
+func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, broker CredentialRefreshBroker) quota.Result {
 	candidates := ResolveCandidate(logical, "", time.Now())
 	if len(candidates) == 0 {
 		r := quota.ErrorResult("no_token", "no token", 0)
@@ -64,6 +78,27 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 	var last quota.Result
 	for _, candidate := range candidates {
 		last = p.fetchAccount(ctx, candidate.Credential)
+		if last.Error == nil || last.Error.Code != "auth_expired" {
+			return last
+		}
+	}
+	if broker == nil {
+		return last
+	}
+	for _, candidate := range candidates {
+		if candidate.Source != SourceManaged {
+			continue
+		}
+		refreshed, err := broker.Refresh(ctx, candidate.Ref, candidate.Revision)
+		if err != nil {
+			continue
+		}
+		credential := candidate.Credential
+		credential.AccessToken = refreshed.Material.AccessToken
+		credential.RefreshToken = refreshed.Material.RefreshToken
+		credential.IDToken = refreshed.Material.IDToken
+		credential.AccountID = refreshed.Material.AccountID
+		last = p.fetchAccount(ctx, credential)
 		if last.Error == nil || last.Error.Code != "auth_expired" {
 			return last
 		}
@@ -88,9 +123,8 @@ func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, erro
 	return out, nil
 }
 
-// fetchAccount fetches quota for a single Codex account. CQ must not refresh a
-// shared Codex credential automatically; 401/403 preserves identity and asks
-// the caller to re-authenticate.
+// fetchAccount fetches quota for one concrete candidate. Refresh decisions
+// stay at the logical-account broker boundary; this method never mutates auth.
 func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Result {
 	if acct.AccessToken == "" {
 		r := quota.ErrorResult("no_token", "no token", 0)

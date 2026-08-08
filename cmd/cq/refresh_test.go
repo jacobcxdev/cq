@@ -324,7 +324,7 @@ func TestInvalidateProviderCacheRemovesCodexFile(t *testing.T) {
 	}
 }
 
-func TestRunRefreshSkipsCodexRefreshPass(t *testing.T) {
+func TestRunRefreshUsesBrokeredCodexRefreshPass(t *testing.T) {
 	origDiscover := discoverClaudeAccountsFn
 	origNewClient := newHTTPClientFn
 	origRefreshCodex := refreshCodexAccountsFn
@@ -358,16 +358,46 @@ func TestRunRefreshSkipsCodexRefreshPass(t *testing.T) {
 	if err := runRefresh(); err != nil {
 		t.Fatalf("runRefresh returned error: %v", err)
 	}
-	if codexCalled {
-		t.Fatal("Codex refresh pass ran")
+	if !codexCalled {
+		t.Fatal("Codex refresh pass did not run")
 	}
-	if cacheInvalidated {
-		t.Fatal("Codex cache invalidated without a brokered credential change")
+	if !cacheInvalidated {
+		t.Fatal("Codex cache was not invalidated after brokered credential change")
+	}
+}
+
+func TestRefreshManagedCodexInventoryUsesBrokerOnlyForExpiredManagedCandidate(t *testing.T) {
+	now := time.Now()
+	broker := &testCodexRefreshBroker{result: codexprov.RefreshResult{Material: codexprov.CredentialMaterial{AccessToken: "refreshed"}}}
+	inventory := codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Candidates: []codexprov.CredentialCandidate{
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
+				Revision: "managed-revision", Source: codexprov.SourceManaged,
+				Credential: codexprov.CodexAccount{ExpiresAt: now.Add(-time.Minute).UnixMilli()},
+			},
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "system", CandidateID: "system-candidate"},
+				Revision: "system-revision", Source: codexprov.SourceSystem,
+				Credential: codexprov.CodexAccount{ExpiresAt: now.Add(-time.Minute).UnixMilli()},
+			},
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "fresh", CandidateID: "fresh-candidate"},
+				Revision: "fresh-revision", Source: codexprov.SourceManaged,
+				Credential: codexprov.CodexAccount{ExpiresAt: now.Add(time.Hour).UnixMilli()},
+			},
+		},
+	}}}
+	if !refreshManagedCodexInventory(context.Background(), inventory, broker, now.UnixMilli()) {
+		t.Fatal("refresh pass reported no change")
+	}
+	if broker.calls != 1 {
+		t.Fatalf("broker calls = %d, want 1", broker.calls)
 	}
 }
 
 func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	now := time.Now()
 	expiredIDToken := fakeRefreshCodexJWT("refresh@example.com", "acct-1", "user-1", now.Add(-time.Hour))
 	accountPath := "/fake/home/.codex/accounts/user-1::acct-1.auth.json"
@@ -399,7 +429,7 @@ func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing
 	client := newHTTPClientFn(10*time.Second, version)
 	origFS := codexRefreshFSFactory
 	defer func() { codexRefreshFSFactory = origFS }()
-	codexRefreshFSFactory = func() fsutil.FileSystem { return fs }
+	codexRefreshFSFactory = func() fsutil.DurableFileSystem { return fs }
 
 	if !refreshCodexAccounts(context.Background(), client, now.UnixMilli()) {
 		t.Fatal("expected refreshCodexAccounts to report changed=true")
@@ -415,7 +445,7 @@ func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing
 }
 
 func TestRefreshCodexAccountsWithIDTokenMissingExpFallsBackToExpiresIn(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	now := time.Now()
 	expiredIDToken := fakeRefreshCodexJWT("refresh@example.com", "acct-1", "user-1", now.Add(-time.Hour))
 	refreshedBody, _ := json.Marshal(map[string]any{
@@ -455,7 +485,7 @@ func TestRefreshCodexAccountsWithIDTokenMissingExpFallsBackToExpiresIn(t *testin
 	client := newHTTPClientFn(10*time.Second, version)
 	origFS := codexRefreshFSFactory
 	defer func() { codexRefreshFSFactory = origFS }()
-	codexRefreshFSFactory = func() fsutil.FileSystem { return fs }
+	codexRefreshFSFactory = func() fsutil.DurableFileSystem { return fs }
 
 	if !refreshCodexAccounts(context.Background(), client, now.UnixMilli()) {
 		t.Fatal("expected refreshCodexAccounts to report changed=true")
@@ -527,6 +557,9 @@ func (f *refreshCodexFS) Remove(name string) error {
 	delete(f.files, name)
 	return nil
 }
+func (f *refreshCodexFS) Chmod(name string, mode os.FileMode) error { return nil }
+func (f *refreshCodexFS) SyncFile(name string) error                { return nil }
+func (f *refreshCodexFS) SyncDir(name string) error                 { return nil }
 
 type refreshDirEntry struct{ name string }
 

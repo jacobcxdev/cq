@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/auth"
 )
 
 func TestCredentialControlFirstOwnerSecondDelegates(t *testing.T) {
@@ -60,6 +62,41 @@ func TestCredentialControlFirstOwnerSecondDelegates(t *testing.T) {
 	}
 	if material.AccessToken != "access" {
 		t.Fatalf("delegated material = %+v", material)
+	}
+}
+
+func TestCredentialControlDelegatesRefreshToOwner(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	coordinator.RefreshExchange = func(context.Context, string) (*auth.CodexTokenResponse, error) {
+		return &auth.CodexTokenResponse{AccessToken: "rpc-refreshed", RefreshToken: "rpc-rotated"}, nil
+	}
+	path := shortControlPath(t)
+	owner, err := OpenCredentialControl(path, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	client, err := OpenCredentialControl(path, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	credential := testLoginCredential()
+	credential.Tokens.IDToken = fakeCodexJWT("rpc@test.invalid", "rpc-account", "rpc-user", "plus")
+	credential.Claims = auth.DecodeCodexClaims(credential.Tokens.IDToken)
+	ref, revision, err := client.SaveLogin(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
+	}
+	result, err := client.Refresh(context.Background(), ref, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Material.AccessToken != "rpc-refreshed" {
+		t.Fatalf("result material did not come from owner")
 	}
 }
 

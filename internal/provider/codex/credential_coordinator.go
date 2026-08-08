@@ -31,12 +31,21 @@ type CredentialAdmin interface {
 	RemoveManaged(context.Context, AccountKey, RevisionSet, bool) (RemovalResult, error)
 }
 
+type CredentialRefreshBroker interface {
+	Refresh(context.Context, CandidateRef, Revision) (RefreshResult, error)
+}
+
 type CredentialCoordinator struct {
-	Store     *ManagedStore
-	Activator *FileSystemActivator
-	Registry  Registry
-	Journal   RemovalJournal
-	mu        sync.Mutex
+	Store           *ManagedStore
+	Activator       *FileSystemActivator
+	Registry        Registry
+	Journal         RemovalJournal
+	RefreshExchange RefreshExchange
+	Now             func() time.Time
+	mu              sync.Mutex
+	refreshMu       sync.Mutex
+	refreshFlights  map[string]*refreshFlight
+	refreshRetained map[CandidateID]retainedRefresh
 }
 
 func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, error) {
@@ -50,6 +59,7 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 	coordinator := &CredentialCoordinator{
 		Store: store, Activator: activator,
 		Registry: Registry{FS: store.FS, Home: store.Home},
+		Now:      time.Now,
 	}
 	activator.Replace = store.durableReplace
 	activator.Remove = func(path string) error {

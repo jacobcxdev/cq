@@ -183,8 +183,55 @@ func TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenNeverRefreshes(
 	}
 }
 
+type testCodexRefreshBroker struct {
+	calls  int
+	result codexprov.RefreshResult
+	err    error
+}
+
+func (b *testCodexRefreshBroker) Refresh(context.Context, codexprov.CandidateRef, codexprov.Revision) (codexprov.RefreshResult, error) {
+	b.calls++
+	return b.result, b.err
+}
+
+func TestFirstCodexAccessTokenFromInventoryUsesBrokerForStaleManagedCandidate(t *testing.T) {
+	ref := codexprov.CandidateRef{AccountKey: "account", CandidateID: "candidate"}
+	inventory := codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Key: "account",
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref: ref, Revision: "revision", Source: codexprov.SourceManaged,
+			Credential: codexprov.CodexAccount{AccessToken: "stale", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()},
+		}},
+	}}}
+	broker := &testCodexRefreshBroker{result: codexprov.RefreshResult{Material: codexprov.CredentialMaterial{AccessToken: "brokered"}}}
+	token, err := firstCodexAccessTokenFromInventory(context.Background(), inventory, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "brokered" || broker.calls != 1 {
+		t.Fatalf("token = %q, broker calls = %d", token, broker.calls)
+	}
+}
+
+func TestFirstCodexAccessTokenFromInventorySkipsBrokerForFreshCandidate(t *testing.T) {
+	inventory := codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Candidates: []codexprov.CredentialCandidate{{
+			Source:     codexprov.SourceManaged,
+			Credential: codexprov.CodexAccount{AccessToken: "fresh", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		}},
+	}}}
+	broker := &testCodexRefreshBroker{err: errors.New("unexpected")}
+	token, err := firstCodexAccessTokenFromInventory(context.Background(), inventory, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "fresh" || broker.calls != 0 {
+		t.Fatalf("token = %q, broker calls = %d", token, broker.calls)
+	}
+}
+
 func TestFirstCodexAccessTokenWithRefresh_NoActiveTokenTriggersRefresh(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	staleMs := time.Now().Add(-time.Hour).UnixMilli() // expired one hour ago
 	accounts := []codexprov.CodexAccount{
 		{

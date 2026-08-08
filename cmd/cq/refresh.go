@@ -16,6 +16,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 // refreshMarginMs is how far ahead of expiry we proactively refresh (30 min).
@@ -26,7 +27,7 @@ var (
 	newHTTPClientFn           = func(timeout time.Duration, version string) httputil.Doer { return httputil.NewClient(timeout, version) }
 	refreshCodexAccountsFn    = refreshCodexAccounts
 	invalidateProviderCacheFn = invalidateProviderCache
-	codexRefreshFSFactory     = func() fsutil.FileSystem { return fsutil.OSFileSystem{} }
+	codexRefreshFSFactory     = func() fsutil.DurableFileSystem { return fsutil.OSFileSystem{} }
 	persistRefreshedTokenFn   = keyring.PersistRefreshedToken
 	storeCQAccountFn          = keyring.StoreCQAccount
 	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
@@ -104,6 +105,9 @@ func runRefresh() error {
 	if claudeChanged {
 		invalidateProviderCacheFn(provider.Claude)
 	}
+	if refreshCodexAccountsFn(ctx, httpClient, now) {
+		invalidateProviderCacheFn(provider.Codex)
+	}
 
 	if len(accounts) == 0 {
 		return nil
@@ -147,11 +151,35 @@ func runRefresh() error {
 	return nil
 }
 
-// refreshCodexAccounts is retained as a compatibility seam until Stage 5
-// replaces it with a coordinator-owned broker. Direct Codex refresh is disabled.
 func refreshCodexAccounts(ctx context.Context, client httputil.Doer, nowMs int64) bool {
-	_, _, _ = ctx, client, nowMs
-	return false
+	fs := codexRefreshFSFactory()
+	control, err := codexprov.OpenDefaultCredentialRefreshControl(ctx, fs, client)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: Codex credential coordinator: %v\n", err)
+		return false
+	}
+	defer control.Close()
+	return refreshManagedCodexInventory(ctx, codexprov.DiscoverInventory(fs), control, nowMs)
+}
+
+func refreshManagedCodexInventory(ctx context.Context, inventory codexprov.Inventory, broker codexprov.CredentialRefreshBroker, nowMs int64) bool {
+	if broker == nil {
+		return false
+	}
+	threshold := nowMs + refreshMarginMs
+	changed := false
+	for _, logical := range inventory.Accounts {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", time.UnixMilli(nowMs)) {
+			if candidate.Source != codexprov.SourceManaged || candidate.Credential.ExpiresAt == 0 || candidate.Credential.ExpiresAt > threshold {
+				continue
+			}
+			if _, err := broker.Refresh(ctx, candidate.Ref, candidate.Revision); err != nil {
+				continue
+			}
+			changed = true
+		}
+	}
+	return changed
 }
 
 // syncAnonymousToIdentified resolves anonymous keychain entries via the

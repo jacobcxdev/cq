@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -433,8 +434,46 @@ func TestFetch401WithRefreshTokenNeverCallsOAuthOrWritesCredentials(t *testing.T
 	}
 }
 
+func TestFetch401RequestsManagedRefreshBrokerThenRetriesUsage(t *testing.T) {
+	coordinator, fs, _, _ := testRefreshRecord(t)
+	var exchanges atomic.Int32
+	coordinator.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+		exchanges.Add(1)
+		if token != "managed-refresh" {
+			t.Fatalf("refresh token mismatch")
+		}
+		return successfulRefresh(ctx, token)
+	}
+	var usageCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usageCalls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer refreshed-access" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(happyUsageBody))
+	}))
+	defer srv.Close()
+	p := &Provider{
+		client:        &urlRewriter{client: srv.Client(), baseURL: srv.URL},
+		fs:            fs,
+		refreshBroker: coordinator,
+	}
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != quota.StatusOK {
+		t.Fatalf("results = %+v", results)
+	}
+	if usageCalls.Load() != 2 || exchanges.Load() != 1 {
+		t.Fatalf("usage calls = %d, exchanges = %d", usageCalls.Load(), exchanges.Load())
+	}
+}
+
 func TestFetch401RefreshesAndRetriesUsage(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	idToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
 		"exp":   float64(time.Now().Add(time.Hour).Unix()),
@@ -510,7 +549,7 @@ func TestFetch401RefreshesAndRetriesUsage(t *testing.T) {
 }
 
 func TestFetch401RefreshWithoutIDTokenPersistsRediscoverableExpiry(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	now := time.Now()
 	expiredIDToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
@@ -583,7 +622,7 @@ func TestFetch401RefreshWithoutIDTokenPersistsRediscoverableExpiry(t *testing.T)
 }
 
 func TestFetch401RefreshWithIDTokenMissingExpFallsBackToExpiresIn(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	now := time.Now()
 	expiredIDToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
@@ -722,7 +761,7 @@ func TestFetch401ReturnsAuthExpiredWithIdentity(t *testing.T) {
 }
 
 func TestFetch401RetryPreservesAPIError(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	idToken := fakeJWT(map[string]any{
 		"email": "retry@example.com",
 		"https://api.openai.com/auth": map[string]any{
@@ -789,7 +828,7 @@ func TestFetch401RetryPreservesAPIError(t *testing.T) {
 }
 
 func TestFetch401RefreshSucceedsWhenPersistFails(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	// When PersistCodexAccount cannot write (writeErr / renameErr on fakeFS),
 	// the refreshed access token must still be used for the retry and the
 	// result must be usable quota — persistence failure must not break the
@@ -860,7 +899,7 @@ func TestFetch401RefreshSucceedsWhenPersistFails(t *testing.T) {
 }
 
 func TestFetch401RefreshesAndRetriesWhenHomeDirLookupFails(t *testing.T) {
-	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	idToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
 		"exp":   float64(time.Now().Add(time.Hour).Unix()),

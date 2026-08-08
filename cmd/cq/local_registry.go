@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -19,6 +20,7 @@ type localRegistry struct {
 	Catalog   *modelregistry.Catalog
 	Refresher *modelregistry.Refresher
 	Publish   func()
+	Close     func() error
 }
 
 // buildLocalRegistry constructs a fresh catalog, refresher, and publisher
@@ -33,9 +35,9 @@ func buildLocalRegistry(cfg *proxy.Config, versionStr string) (*localRegistry, e
 
 	httpClient := newHTTPClientFn(30*time.Second, versionStr)
 	codexClientVersion := defaultCodexClientVersion()
-
-	codexDiscover := func() []codexprov.CodexAccount {
-		return codexprov.DiscoverAccounts(fsys)
+	credentialControl, err := codexprov.OpenDefaultCredentialRefreshControl(context.Background(), fsys, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("Codex credential coordinator: %w", err)
 	}
 	pipeline, err := newRegistryPipeline(registryPipelineOptions{
 		FS:                 fsys,
@@ -45,13 +47,14 @@ func buildLocalRegistry(cfg *proxy.Config, versionStr string) (*localRegistry, e
 		HTTPClient:         httpClient,
 		CodexClientVersion: codexClientVersion,
 		ClaudeToken:        firstClaudeAccessToken,
-		CodexToken: func() (string, error) {
-			return firstCodexAccessToken(codexDiscover())
+		CodexTokenContext: func(ctx context.Context) (string, error) {
+			return firstCodexAccessTokenFromInventory(ctx, codexprov.DiscoverInventory(fsys), credentialControl)
 		},
 		Env:    os.Getenv,
 		Stderr: os.Stderr,
 	})
 	if err != nil {
+		_ = credentialControl.Close()
 		return nil, err
 	}
 
@@ -59,5 +62,6 @@ func buildLocalRegistry(cfg *proxy.Config, versionStr string) (*localRegistry, e
 		Catalog:   pipeline.Catalog,
 		Refresher: pipeline.Refresher,
 		Publish:   pipeline.Publish,
+		Close:     credentialControl.Close,
 	}, nil
 }

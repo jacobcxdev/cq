@@ -340,6 +340,9 @@ func managedRecordDocument(document map[string]any, material CredentialMaterial,
 			metadataDocument[key] = value
 		}
 	}
+	// Optional known fields must disappear when cleared; preserving the old
+	// value would keep a completed operation permanently pending.
+	delete(metadataDocument, "operation_id")
 	knownData, _ := json.Marshal(metadata)
 	var known map[string]any
 	_ = json.Unmarshal(knownData, &known)

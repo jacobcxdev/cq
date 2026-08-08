@@ -243,15 +243,15 @@ go test -race -count=1 ./internal/app ./cmd/cq
 - Modify: `cmd/cq/local_registry.go`
 - Modify corresponding tests.
 
-- [ ] Add red eligibility table: only `cq_oauth + cq_owned_never_exported + ready` refreshes. Borrowed, legacy, exported, unknown, activation-pending, refreshing, and uncertain never call OAuth.
-- [ ] Add red equality/inequality tests: equal refresh token marks sharing/exported; unequal tokens never restore independence; activation makes ownership permanently exported; new CQ login creates new lineage.
-- [ ] Add red two-process race tests: refresh vs refresh exchanges once; refresh vs activate/remove has one coordinator outcome; stale expected revision rejects before exchange.
-- [ ] Add red crash tests: commit `refreshing` before exchange; uncertain network keeps old token unusable; success plus final-commit failure becomes `rotation_uncertain`; live process may retry commit only from retained response; restart never reuses uncertain token.
-- [ ] Implement per-lineage coordinator lock plus RPC revision fence. Singleflight coalesces same request inside owner but never substitutes for owner exclusivity.
-- [ ] Expose broker call to provider/quota/registry paths. These callers request eligible refresh; they never call `auth.RefreshCodexToken` or persist directly.
-- [ ] Require durable refreshed credential commit before returning candidate usable for dispatch.
-- [ ] Run `go test -race -count=100 ./internal/provider/codex -run 'Refresh|Lineage|Rotation|Coordinator'` and `go test -race -count=1 ./cmd/cq`.
-- [ ] Commit `feat: brokered Codex credential refresh`.
+- [x] Add red eligibility table: only `cq_oauth + cq_owned_never_exported + ready` refreshes. Borrowed, legacy, exported, unknown, activation-pending, refreshing, and uncertain never call OAuth.
+- [x] Add red equality/inequality tests: equal refresh token marks sharing/exported; unequal tokens never restore independence; activation makes ownership permanently exported; new CQ login creates new lineage.
+- [x] Add red two-process race tests: refresh vs refresh exchanges once; refresh vs activate/remove has one coordinator outcome; stale expected revision rejects before exchange.
+- [x] Add red crash tests: commit `refreshing` before exchange; uncertain network keeps old token unusable; success plus final-commit failure becomes `rotation_uncertain`; live process may retry commit only from retained response; restart never reuses uncertain token.
+- [x] Implement per-lineage coordinator lock plus RPC revision fence. Singleflight coalesces same request inside owner but never substitutes for owner exclusivity.
+- [x] Expose broker call to provider/quota/registry paths. These callers request eligible refresh; they never call `auth.RefreshCodexToken` or persist directly.
+- [x] Require durable refreshed credential commit before returning candidate usable for dispatch.
+- [x] Run `go test -race -count=100 ./internal/provider/codex -run 'Refresh|Lineage|Rotation|Coordinator'` and `go test -race -count=1 ./cmd/cq`.
+- [x] Commit `feat: brokered Codex credential refresh`.
 
 ## Stage 6: Capacity ledger and indivisible route choice
 

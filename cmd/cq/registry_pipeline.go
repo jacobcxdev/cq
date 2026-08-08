@@ -79,6 +79,37 @@ func firstCodexAccessToken(accounts []codexprov.CodexAccount) (string, error) {
 	return best, nil
 }
 
+func firstCodexAccessTokenFromInventory(ctx context.Context, inventory codexprov.Inventory, broker codexprov.CredentialRefreshBroker) (string, error) {
+	if len(inventory.Accounts) == 0 {
+		return "", fmt.Errorf("no codex accounts")
+	}
+	now := time.Now()
+	best, bestExpires := "", int64(0)
+	for _, logical := range inventory.Accounts {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
+			best, bestExpires = betterTokenCandidate(best, bestExpires, candidate.Credential.AccessToken, candidate.Credential.ExpiresAt, now)
+		}
+	}
+	if best != "" {
+		return best, nil
+	}
+	if broker == nil {
+		return "", fmt.Errorf("no codex account with token")
+	}
+	for _, logical := range inventory.Accounts {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
+			if candidate.Source != codexprov.SourceManaged {
+				continue
+			}
+			result, err := broker.Refresh(ctx, candidate.Ref, candidate.Revision)
+			if err == nil && result.Material.AccessToken != "" {
+				return result.Material.AccessToken, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no codex account with token")
+}
+
 // codexRefreshFunc is the signature for a Codex token refresh function.
 // It matches auth.RefreshCodexToken so real callers can pass it directly.
 type codexRefreshFunc func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error)
@@ -122,8 +153,8 @@ func firstCodexAccessTokenWithRefresh(
 		return best, nil
 	}
 
-	// Direct refresh of shared Codex credentials is forbidden. Stage 5 replaces
-	// this compatibility seam with a coordinator-owned managed-lineage broker.
+	// Direct refresh of shared Codex credentials is permanently forbidden.
+	// Production callers use firstCodexAccessTokenFromInventory and the broker.
 	_, _, _, _, _ = ctx, refreshFn, fs, home, persistFn
 
 	return "", fmt.Errorf("no codex account with token")
@@ -163,6 +194,7 @@ type registryPipelineOptions struct {
 	CodexClientVersion string
 	ClaudeToken        func() (string, error)
 	CodexToken         func() (string, error)
+	CodexTokenContext  func(context.Context) (string, error)
 	Env                func(string) string
 	Stderr             io.Writer
 }
@@ -209,7 +241,7 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	if opts.ClaudeToken == nil {
 		return nil, fmt.Errorf("registry pipeline: missing Claude token provider")
 	}
-	if opts.CodexToken == nil {
+	if opts.CodexToken == nil && opts.CodexTokenContext == nil {
 		return nil, fmt.Errorf("registry pipeline: missing Codex token provider")
 	}
 	if opts.Env == nil {
@@ -232,9 +264,14 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 			},
 		},
 		Codex: &modelregistry.CodexSource{
-			Client:        opts.HTTPClient,
-			BaseURL:       opts.CodexUpstream,
-			Token:         func(ctx context.Context) (string, error) { return opts.CodexToken() },
+			Client:  opts.HTTPClient,
+			BaseURL: opts.CodexUpstream,
+			Token: func(ctx context.Context) (string, error) {
+				if opts.CodexTokenContext != nil {
+					return opts.CodexTokenContext(ctx)
+				}
+				return opts.CodexToken()
+			},
 			ClientVersion: opts.CodexClientVersion,
 		},
 		Overlays: modelregistry.FileOverlayStore{
