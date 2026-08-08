@@ -18,6 +18,8 @@ import (
 type Provider struct {
 	client        httputil.Doer
 	fs            fsutil.FileSystem
+	inventory     CredentialInventory
+	secrets       SecretResolver
 	refreshBroker CredentialRefreshBroker
 }
 
@@ -28,22 +30,40 @@ func New(client httputil.Doer) *Provider {
 
 // Fetch discovers all Codex accounts and fetches quota for each in parallel.
 func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, error) {
-	inventory := DiscoverInventory(p.fs)
-	if len(inventory.Accounts) == 0 {
-		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
-	}
-
 	broker := p.refreshBroker
+	inventoryReader := p.inventory
+	secrets := p.secrets
 	var control *CredentialControl
-	if broker == nil {
+	if broker == nil || inventoryReader == nil || secrets == nil {
 		if durableFS, ok := p.fs.(fsutil.DurableFileSystem); ok {
 			var err error
 			control, err = OpenDefaultCredentialRefreshControl(ctx, durableFS, p.client)
 			if err == nil {
 				defer control.Close()
-				broker = control
+				if broker == nil {
+					broker = control
+				}
+				if inventoryReader == nil {
+					inventoryReader = control
+				}
+				if secrets == nil {
+					secrets = control
+				}
 			}
 		}
+	}
+	var inventory Inventory
+	if inventoryReader != nil {
+		listed, err := inventoryReader.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list Codex credential inventory: %w", err)
+		}
+		inventory = listed
+	} else {
+		inventory = DiscoverInventory(p.fs)
+	}
+	if len(inventory.Accounts) == 0 {
+		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
 
 	results := make([]quota.Result, len(inventory.Accounts))
@@ -58,7 +78,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
 				}
 			}()
-			results[i] = p.fetchLogicalAccount(ctx, logical, broker)
+			results[i] = p.fetchLogicalAccount(ctx, logical, secrets, broker)
 			results[i].Active = logical.Active
 		}(i, logical)
 	}
@@ -67,7 +87,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 	return results, nil
 }
 
-func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, broker CredentialRefreshBroker) quota.Result {
+func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, secrets SecretResolver, broker CredentialRefreshBroker) quota.Result {
 	candidates := ResolveCandidate(logical, "", time.Now())
 	if len(candidates) == 0 {
 		r := quota.ErrorResult("no_token", "no token", 0)
@@ -77,7 +97,23 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 	}
 	var last quota.Result
 	for _, candidate := range candidates {
-		last = p.fetchAccount(ctx, candidate.Credential)
+		credential := candidate.Credential
+		if credential.AccessToken == "" && secrets != nil {
+			material, err := secrets.Resolve(ctx, candidate.Ref)
+			if err != nil {
+				last = quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", 0)
+				last.Email = logical.Identity.Email
+				last.AccountID = logical.Identity.AccountID
+				continue
+			}
+			credential = CodexAccount{
+				AccessToken: material.AccessToken, RefreshToken: material.RefreshToken,
+				IDToken: material.IDToken, AccountID: material.AccountID,
+				Email: logical.Identity.Email, UserID: logical.Identity.UserID,
+				PlanType: logical.Identity.PlanType, RecordKey: logical.Identity.RecordKey,
+			}
+		}
+		last = p.fetchAccount(ctx, credential)
 		if last.Error == nil || last.Error.Code != "auth_expired" {
 			return last
 		}

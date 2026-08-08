@@ -1,9 +1,11 @@
 package codex
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,6 +29,7 @@ type CredentialSource uint8
 const (
 	SourceSystem CredentialSource = iota + 1
 	SourceManaged
+	SourceExternal
 )
 
 type AccountIdentity struct {
@@ -45,6 +48,7 @@ type CredentialCandidate struct {
 	AccessExpiresAt time.Time
 	CQAuthored      bool
 	DispatchBlocked bool
+	externalRef     *ExternalCandidateRef
 }
 
 type LogicalAccount struct {
@@ -70,8 +74,15 @@ type InventoryIntent struct {
 }
 
 type Inventory struct {
-	Accounts []LogicalAccount
-	Intents  []InventoryIntent
+	Accounts        []LogicalAccount
+	Intents         []InventoryIntent
+	ExternalSources []ExternalSourceStatus
+}
+
+type ExternalSourceStatus struct {
+	Name           string
+	CandidateCount int
+	ErrorCode      string
 }
 
 type rawCandidate struct {
@@ -85,6 +96,12 @@ type rawCandidate struct {
 
 // DiscoverInventory builds one generation-local read model without writing.
 func DiscoverInventory(fs fsutil.FileSystem) Inventory {
+	return DiscoverInventoryWithSources(context.Background(), fs)
+}
+
+// DiscoverInventoryWithSources adds validated read-only candidates to the
+// local system/managed inventory without copying their credential material.
+func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sources ...ExternalCredentialSource) Inventory {
 	home, err := fs.UserHomeDir()
 	if err != nil {
 		return Inventory{}
@@ -170,6 +187,23 @@ func DiscoverInventory(fs fsutil.FileSystem) Inventory {
 		})
 		logical.Active = logical.Active || candidate.source == SourceSystem
 		logical.Routable = logical.Routable || (credential.AccountID != "" && credential.AccessToken != "")
+	}
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		status := ExternalSourceStatus{Name: source.Name()}
+		candidates, err := source.List(ctx)
+		if err != nil {
+			status.ErrorCode = externalSourceErrorCode(err)
+			inventory.ExternalSources = append(inventory.ExternalSources, status)
+			continue
+		}
+		status.CandidateCount = len(candidates)
+		inventory.ExternalSources = append(inventory.ExternalSources, status)
+		for _, candidate := range candidates {
+			appendExternalCandidate(&inventory, source.Name(), candidate)
+		}
 	}
 
 	for i := range inventory.Accounts {
@@ -303,10 +337,59 @@ func generationCandidateID(source CredentialSource, account CodexAccount, source
 }
 
 func (s CredentialSource) String() string {
-	if s == SourceSystem {
+	switch s {
+	case SourceSystem:
 		return "system"
+	case SourceManaged:
+		return "managed"
+	case SourceExternal:
+		return "external"
+	default:
+		return "unknown"
 	}
-	return "managed"
+}
+
+func appendExternalCandidate(inventory *Inventory, sourceName string, candidate ExternalCandidate) {
+	account := CodexAccount{
+		AccountID: candidate.Identity.AccountID, UserID: candidate.Identity.UserID,
+		Email: candidate.Identity.Email, PlanType: candidate.Identity.PlanType,
+		RecordKey: candidate.Identity.RecordKey,
+	}
+	matches := compatibleLogicalAccounts(inventory.Accounts, account)
+	index := -1
+	if len(matches) == 1 {
+		index = matches[0]
+	}
+	if index < 0 {
+		key := generationAccountKey(candidate.Identity, SourceExternal, sourceName+":"+candidate.Ref.RecordID)
+		inventory.Accounts = append(inventory.Accounts, LogicalAccount{
+			Key: key, Identity: candidate.Identity, Unstable: true,
+		})
+		index = len(inventory.Accounts) - 1
+	}
+	logical := &inventory.Accounts[index]
+	enrichIdentity(&logical.Identity, account)
+	candidateID := CandidateID(SourceExternal.String() + ":" + shortHash(sourceName+":"+candidate.Ref.RecordID+":"+string(candidate.Ref.Revision)))
+	ref := CandidateRef{AccountKey: logical.Key, CandidateID: candidateID}
+	externalRef := candidate.Ref
+	logical.Candidates = append(logical.Candidates, CredentialCandidate{
+		Ref: ref, Revision: candidate.Ref.Revision, Source: SourceExternal,
+		AccessExpiresAt: candidate.AccessExpiresAt, externalRef: &externalRef,
+	})
+	logical.Routable = logical.Routable || candidate.Routable
+}
+
+func externalSourceErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrExternalUnavailable):
+		return "unavailable"
+	case errors.Is(err, ErrExternalUnsafePath):
+		return "unsafe_path"
+	case errors.Is(err, ErrExternalInvalid):
+		return "invalid"
+	default:
+		return "fetch_error"
+	}
 }
 
 func shortHash(value string) string {
@@ -350,10 +433,23 @@ func sortCandidates(candidates []CredentialCandidate, accepted Revision, now tim
 			return a.AccessExpiresAt.After(b.AccessExpiresAt)
 		}
 		if a.Source != b.Source {
-			return a.Source == SourceSystem
+			return sourcePriority(a.Source) < sourcePriority(b.Source)
 		}
 		return a.Ref.CandidateID < b.Ref.CandidateID
 	})
+}
+
+func sourcePriority(source CredentialSource) int {
+	switch source {
+	case SourceSystem:
+		return 0
+	case SourceManaged:
+		return 1
+	case SourceExternal:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func expiryClass(expires time.Time, now time.Time) int {

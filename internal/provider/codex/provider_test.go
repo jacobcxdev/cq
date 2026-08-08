@@ -147,6 +147,16 @@ type urlRewriter struct {
 	baseURL string
 }
 
+type staticCredentialInventory struct{ inventory Inventory }
+
+func (s staticCredentialInventory) List(context.Context) (Inventory, error) { return s.inventory, nil }
+
+type staticSecretResolver struct{ material CredentialMaterial }
+
+func (s staticSecretResolver) Resolve(context.Context, CandidateRef) (CredentialMaterial, error) {
+	return s.material, nil
+}
+
 func (u *urlRewriter) Do(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.URL.Scheme = "http"
@@ -249,6 +259,48 @@ func TestFetchHappyPath(t *testing.T) {
 	}
 	if !results[0].Active {
 		t.Error("expected Active=true for auth.json account")
+	}
+}
+
+func TestFetchResolvesMetadataOnlyExternalCandidate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer external-secret" || r.Header.Get("ChatGPT-Account-ID") != "acct-1" {
+			t.Fatalf("credential headers = %q/%q", r.Header.Get("Authorization"), r.Header.Get("ChatGPT-Account-ID"))
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(happyUsageBody))
+	}))
+	defer srv.Close()
+
+	p := &Provider{
+		client: &urlRewriter{client: srv.Client(), baseURL: srv.URL},
+		fs:     newFakeFS(),
+		inventory: staticCredentialInventory{inventory: Inventory{Accounts: []LogicalAccount{{
+			Key: "account-1", Identity: AccountIdentity{AccountID: "acct-1", Email: "user@example.test"}, Routable: true,
+			Candidates: []CredentialCandidate{{
+				Ref: CandidateRef{AccountKey: "account-1", CandidateID: "external-1"}, Revision: "revision-1",
+				Source: SourceExternal, AccessExpiresAt: time.Now().Add(time.Hour),
+			}},
+		}}}},
+		secrets: staticSecretResolver{material: CredentialMaterial{AccessToken: "external-secret", AccountID: "acct-1"}},
+	}
+
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !results[0].IsUsable() || results[0].AccountID != "acct-1" {
+		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestNewCredentialCoordinatorIncludesDefaultCodexBarSource(t *testing.T) {
+	coordinator, err := NewCredentialCoordinator(testManagedStore(t, newDurableFakeFS()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(coordinator.ExternalSources) != 1 || coordinator.ExternalSources[0].Name() != codexBarSourceName {
+		t.Fatalf("external sources = %+v", coordinator.ExternalSources)
 	}
 }
 

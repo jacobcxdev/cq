@@ -1,11 +1,30 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
 )
+
+type fakeExternalCredentialSource struct {
+	candidates []ExternalCandidate
+	material   CredentialMaterial
+	resolveRef ExternalCandidateRef
+}
+
+func (s *fakeExternalCredentialSource) Name() string { return "external-test" }
+func (s *fakeExternalCredentialSource) List(context.Context) ([]ExternalCandidate, error) {
+	return append([]ExternalCandidate(nil), s.candidates...), nil
+}
+func (s *fakeExternalCredentialSource) Resolve(_ context.Context, ref ExternalCandidateRef) (CredentialMaterial, error) {
+	s.resolveRef = ref
+	if ref != s.candidates[0].Ref {
+		return CredentialMaterial{}, ErrStaleRevision
+	}
+	return s.material, nil
+}
 
 func inventoryAuth(accessToken, accountID, idToken string, expiresAt int64) []byte {
 	data, _ := json.Marshal(map[string]any{
@@ -164,5 +183,75 @@ func TestResolveCandidateKeepsAcceptedRevisionFirst(t *testing.T) {
 	ordered := ResolveCandidate(logical, "accepted", now)
 	if ordered[0].Revision != "accepted" {
 		t.Fatalf("first revision = %q, want accepted", ordered[0].Revision)
+	}
+}
+
+func TestInventoryFederatesFreshExternalCandidateIntoLogicalAccount(t *testing.T) {
+	fs := newFakeFS()
+	now := time.Now()
+	jwt := fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus")
+	fs.files["/fake/home/.codex/accounts/stale.auth.json"] = inventoryAuth("stale-managed", "acct-1", jwt, now.Add(-time.Hour).UnixMilli())
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "stale.auth.json"}},
+	}
+	source := &fakeExternalCredentialSource{candidates: []ExternalCandidate{{
+		Ref: ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "fresh-revision"},
+		Identity: AccountIdentity{
+			AccountID: "acct-1", UserID: "user-1", Email: "user@example.test",
+			PlanType: "plus", RecordKey: "user-1::acct-1",
+		},
+		AccessExpiresAt: now.Add(time.Hour),
+		Routable:        true,
+	}}}
+
+	inventory := DiscoverInventoryWithSources(context.Background(), fs, source)
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 2 {
+		t.Fatalf("inventory = %+v, want one logical account with two candidates", inventory)
+	}
+	ordered := ResolveCandidate(inventory.Accounts[0], "", now)
+	if ordered[0].Source != SourceExternal || ordered[0].Revision != "fresh-revision" {
+		t.Fatalf("preferred candidate = %+v, want fresh external", ordered[0])
+	}
+	if ordered[0].Credential.AccessToken != "" {
+		t.Fatal("external inventory candidate exposed credential material")
+	}
+	if len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].CandidateCount != 1 || inventory.ExternalSources[0].ErrorCode != "" {
+		t.Fatalf("external source status = %+v", inventory.ExternalSources)
+	}
+}
+
+func TestCredentialCoordinatorResolvesExternalCandidateWithoutListingSecrets(t *testing.T) {
+	fs := newDurableFakeFS()
+	coordinator, err := NewCredentialCoordinator(testManagedStore(t, fs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeExternalCredentialSource{
+		candidates: []ExternalCandidate{{
+			Ref:             ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity:        AccountIdentity{AccountID: "acct-1", UserID: "user-1", RecordKey: "user-1::acct-1"},
+			AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+		}},
+		material: CredentialMaterial{AccessToken: "external-secret", AccountID: "acct-1"},
+	}
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
+		t.Fatalf("inventory = %+v", inventory)
+	}
+	candidate := inventory.Accounts[0].Candidates[0]
+	if candidate.Credential.AccessToken != "" {
+		t.Fatal("coordinator list exposed external secret")
+	}
+	material, err := coordinator.Resolve(context.Background(), candidate.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if material.AccessToken != "external-secret" || source.resolveRef.Revision != "revision-1" {
+		t.Fatalf("resolved material/access revision = %t/%q", material.AccessToken != "", source.resolveRef.Revision)
 	}
 }

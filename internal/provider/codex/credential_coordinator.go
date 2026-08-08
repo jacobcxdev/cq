@@ -42,6 +42,7 @@ type CredentialCoordinator struct {
 	Journal         RemovalJournal
 	RefreshExchange RefreshExchange
 	Now             func() time.Time
+	ExternalSources []ExternalCredentialSource
 	mu              sync.Mutex
 	refreshMu       sync.Mutex
 	refreshFlights  map[string]*refreshFlight
@@ -60,6 +61,9 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 		Store: store, Activator: activator,
 		Registry: Registry{FS: store.FS, Home: store.Home},
 		Now:      time.Now,
+		ExternalSources: []ExternalCredentialSource{
+			NewCodexBarSource(DefaultCodexBarRoot(store.Home)),
+		},
 	}
 	activator.Replace = store.durableReplace
 	activator.Remove = func(path string) error {
@@ -72,8 +76,8 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 	return coordinator, nil
 }
 
-func (c *CredentialCoordinator) List(context.Context) (Inventory, error) {
-	return sanitiseCredentialInventory(DiscoverInventory(c.Store.FS)), nil
+func (c *CredentialCoordinator) List(ctx context.Context) (Inventory, error) {
+	return sanitiseCredentialInventory(DiscoverInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)), nil
 }
 
 func sanitiseCredentialInventory(inventory Inventory) Inventory {
@@ -147,10 +151,10 @@ func (c *CredentialCoordinator) upsertLoginRegistry(accountKey AccountKey, crede
 	})
 }
 
-func (c *CredentialCoordinator) Resolve(_ context.Context, ref CandidateRef) (CredentialMaterial, error) {
+func (c *CredentialCoordinator) Resolve(ctx context.Context, ref CandidateRef) (CredentialMaterial, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, logical := range DiscoverInventory(c.Store.FS).Accounts {
+	for _, logical := range DiscoverInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...).Accounts {
 		for _, candidate := range logical.Candidates {
 			if candidate.Ref.AccountKey != ref.AccountKey || candidate.Ref.CandidateID != ref.CandidateID {
 				continue
@@ -165,6 +169,14 @@ func (c *CredentialCoordinator) Resolve(_ context.Context, ref CandidateRef) (Cr
 					IDToken:      candidate.Credential.IDToken,
 					AccountID:    candidate.Credential.AccountID,
 				}, nil
+			}
+			if candidate.Source == SourceExternal && candidate.externalRef != nil {
+				for _, source := range c.ExternalSources {
+					if source != nil && source.Name() == candidate.externalRef.Source {
+						return source.Resolve(ctx, *candidate.externalRef)
+					}
+				}
+				return CredentialMaterial{}, ErrStaleRevision
 			}
 			break
 		}
