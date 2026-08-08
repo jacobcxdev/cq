@@ -35,6 +35,7 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 		"proxy restart",
 		"proxy status",
 		"proxy pin",
+		"proxy prime",
 		"models list",
 		"models refresh",
 		"models overlay add",
@@ -72,6 +73,11 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 			name: "proxy pin",
 			path: []string{"proxy", "pin"},
 			want: []string{"Usage: cq proxy pin [--clear | <email-or-account-uuid>]", "Pin Claude proxy routing"},
+		},
+		{
+			name: "proxy prime",
+			path: []string{"proxy", "prime"},
+			want: []string{"Usage: cq proxy prime <command>", "prime enable", "prime disable", "prime status"},
 		},
 		{
 			name: "models list",

@@ -4,7 +4,21 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 )
+
+func TestCodexPrimerUsageURLFollowsCodexUpstream(t *testing.T) {
+	got, err := CodexPrimerUsageURL("https://chatgpt.example/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://chatgpt.example/backend-api/wham/usage" {
+		t.Fatalf("usage URL = %q", got)
+	}
+	if _, err := CodexPrimerUsageURL("https://chatgpt.example/v1"); err == nil {
+		t.Fatal("non-Codex upstream accepted")
+	}
+}
 
 func TestCodexPrimerUsageReadsExactAccountDescriptors(t *testing.T) {
 	executor := &primerCaptureExecutor{stream: `{
@@ -32,5 +46,15 @@ func TestCodexPrimerUsageRejectsAuthFailure(t *testing.T) {
 	}
 	if executor.calls != 1 {
 		t.Fatalf("calls = %d, want exact-account attempt only", executor.calls)
+	}
+}
+
+func TestCodexPrimerUsageBoundsTotalTime(t *testing.T) {
+	reader := &CodexPrimerUsageReader{
+		Router: primerTestRouter(&blockingPrimerExecutor{}), UsageURL: "https://chatgpt.example/backend-api/wham/usage",
+		Timeout: time.Millisecond,
+	}
+	if _, err := reader.Read(context.Background(), "account-1"); err == nil {
+		t.Fatal("usage timeout returned no error")
 	}
 }

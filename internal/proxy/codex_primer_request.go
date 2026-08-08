@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 const codexPrimerResponseLimit = 1 << 20
+const defaultCodexPrimerRequestTimeout = time.Minute
 
 type PrimerRequestState string
 
@@ -29,12 +31,19 @@ type PrimerRequestResult struct {
 type CodexPrimerRequester struct {
 	Router       *CodexRequestRouter
 	ResponsesURL string
+	Timeout      time.Duration
 }
 
 func (r *CodexPrimerRequester) Send(ctx context.Context, account codex.AccountKey, modelID string) (PrimerRequestResult, error) {
 	if r == nil || r.Router == nil || r.ResponsesURL == "" || account == "" || modelID == "" {
 		return PrimerRequestResult{}, fmt.Errorf("Codex primer requester unavailable")
 	}
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = defaultCodexPrimerRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	payload := map[string]any{
 		"model":        modelID,
 		"instructions": "Reply with pong.",

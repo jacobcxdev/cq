@@ -40,6 +40,25 @@ func ResolveCodexPrimerModel(scope string, overrides map[string]string, entries 
 	return matches[0], nil
 }
 
+func ValidateCodexPrimerOverrides(overrides map[string]string, entries []modelregistry.Entry) error {
+	scopes := make([]string, 0, len(overrides))
+	for scope := range overrides {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	for _, scope := range scopes {
+		if _, err := ResolveCodexPrimerModel(scope, overrides, entries); err != nil {
+			return fmt.Errorf("Codex primer override %q: %w", scope, err)
+		}
+	}
+	return nil
+}
+
+func ValidateCodexPrimerRegistry(entries []modelregistry.Entry) error {
+	_, err := preferredSharedCodexPrimerModel(entries)
+	return err
+}
+
 func visibleCodexModels(entries []modelregistry.Entry) []modelregistry.Entry {
 	models := make([]modelregistry.Entry, 0, len(entries))
 	for _, entry := range entries {

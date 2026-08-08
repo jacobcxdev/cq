@@ -84,6 +84,7 @@ type ProxyCmd struct {
 	Restart   ProxyRestartCmd   `cmd:"" help:"Restart proxy launch agent"`
 	Status    ProxyStatusCmd    `cmd:"" help:"Show proxy health"`
 	Pin       ProxyPinCmd       `cmd:"" help:"Pin Claude proxy routing"`
+	Prime     ProxyPrimeCmd     `cmd:"" help:"Manage Codex quota-window priming"`
 }
 
 type ProxyStartCmd struct {
@@ -102,6 +103,16 @@ type ProxyPinCmd struct {
 	Clear bool   `help:"Clear active Claude account pin"`
 	Value string `arg:"" optional:"" name:"email-or-account-uuid" help:"Claude account email or UUID to pin"`
 }
+
+type ProxyPrimeCmd struct {
+	Status  ProxyPrimeStatusCmd  `cmd:"" help:"Show Codex window priming configuration"`
+	Enable  ProxyPrimeEnableCmd  `cmd:"" help:"Enable Codex window priming"`
+	Disable ProxyPrimeDisableCmd `cmd:"" help:"Disable Codex window priming"`
+}
+
+type ProxyPrimeStatusCmd struct{}
+type ProxyPrimeEnableCmd struct{}
+type ProxyPrimeDisableCmd struct{}
 
 // ModelsCmd groups local model registry commands.
 type ModelsCmd struct {

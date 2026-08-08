@@ -8,7 +8,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+type CodexWindowPrimingConfig struct {
+	Enabled        bool              `json:"enabled"`
+	ModelOverrides map[string]string `json:"model_overrides,omitempty"`
+}
 
 const (
 	// DefaultPort is the default proxy listen port.
@@ -45,9 +51,10 @@ type Config struct {
 	// share without review. Requires a proxy restart to take effect.
 	PayloadDiagnosticsLog string `json:"payload_diagnostics_log,omitempty"`
 	// CodexTurnRouting and CodexWSTurnRouting apply only after proxy restart.
-	CodexTurnRouting        CodexRoutingMode `json:"codex_turn_routing"`
-	CodexWSTurnRouting      CodexRoutingMode `json:"codex_ws_turn_routing"`
-	CodexLeaseRetentionDays int              `json:"codex_lease_retention_days"`
+	CodexTurnRouting        CodexRoutingMode         `json:"codex_turn_routing"`
+	CodexWSTurnRouting      CodexRoutingMode         `json:"codex_ws_turn_routing"`
+	CodexLeaseRetentionDays int                      `json:"codex_lease_retention_days"`
+	CodexWindowPriming      CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
 
 	unknownFields map[string]json.RawMessage
 }
@@ -58,6 +65,7 @@ var configKnownFields = map[string]bool{
 	"pinned_claude_account": true, "diagnostics_log": true,
 	"payload_diagnostics_log": true, "codex_turn_routing": true,
 	"codex_ws_turn_routing": true, "codex_lease_retention_days": true,
+	"codex_window_priming": true,
 }
 
 // UnmarshalJSON retains fields unknown to this build for N/N-1 safe writes.
@@ -164,6 +172,11 @@ func (c *Config) validate() error {
 	}
 	if c.CodexLeaseRetentionDays < 1 || c.CodexLeaseRetentionDays > 365 {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
+	}
+	for scope, modelID := range c.CodexWindowPriming.ModelOverrides {
+		if strings.TrimSpace(scope) == "" || strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("invalid Codex window priming model override %q", scope)
+		}
 	}
 	return nil
 }

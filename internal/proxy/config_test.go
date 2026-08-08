@@ -38,6 +38,48 @@ func TestConfigDiagnosticsLogJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigCodexWindowPrimingDefaultsDisabled(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"local_token":"tok"}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodexWindowPriming.Enabled || len(cfg.CodexWindowPriming.ModelOverrides) != 0 {
+		t.Fatalf("priming default = %+v", cfg.CodexWindowPriming)
+	}
+}
+
+func TestConfigCodexWindowPrimingRoundTrip(t *testing.T) {
+	cfg := Config{
+		LocalToken: "tok", ClaudeUpstream: DefaultUpstream, CodexUpstream: DefaultCodexUpstream,
+		CodexWindowPriming: CodexWindowPrimingConfig{
+			Enabled: true, ModelOverrides: map[string]string{"codex_spark": "gpt-5.3-codex-spark"},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip Config
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if !roundTrip.CodexWindowPriming.Enabled || roundTrip.CodexWindowPriming.ModelOverrides["codex_spark"] != "gpt-5.3-codex-spark" {
+		t.Fatalf("priming round trip = %+v in %s", roundTrip.CodexWindowPriming, data)
+	}
+}
+
+func TestConfigCodexWindowPrimingRejectsEmptyOverride(t *testing.T) {
+	cfg := &Config{
+		LocalToken: "tok", ClaudeUpstream: DefaultUpstream, CodexUpstream: DefaultCodexUpstream,
+		CodexLeaseRetentionDays: 7,
+		CodexWindowPriming:      CodexWindowPrimingConfig{ModelOverrides: map[string]string{"codex_spark": ""}},
+	}
+	cfg.setDefaults()
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "model override") {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
 func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

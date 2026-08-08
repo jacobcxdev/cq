@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	claude "github.com/jacobcxdev/cq/internal/provider/claude"
@@ -95,6 +96,34 @@ func TestServerHealthReportsConfiguredEffectiveCodexModes(t *testing.T) {
 	}
 	if response.WS.Configured != CodexRoutingOff || response.WS.Effective != CodexRoutingOff {
 		t.Fatalf("WS health = %+v", response.WS)
+	}
+}
+
+func TestServerHealthReportsPrivacySafeCodexPrimerSummary(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe("secret-account", testPrimerTarget()); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		Config:      &Config{CodexWindowPriming: CodexWindowPrimingConfig{Enabled: true}},
+		CodexPrimer: &CodexPrimer{Store: store},
+	}
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if strings.Contains(w.Body.String(), "secret-account") || strings.Contains(w.Body.String(), "backend-scope-secret") {
+		t.Fatalf("health leaked primer identity: %s", w.Body.String())
+	}
+	var response struct {
+		Primer CodexPrimerHealth `json:"codex_window_priming"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Primer.Configured || !response.Primer.Owner || response.Primer.Counts[PrimerStateObserved] != 1 {
+		t.Fatalf("primer health = %+v", response.Primer)
 	}
 }
 

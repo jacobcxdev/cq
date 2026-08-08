@@ -12,6 +12,13 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
+type blockingPrimerExecutor struct{}
+
+func (*blockingPrimerExecutor) Do(ctx context.Context, _ RouteChoice, _ CandidateAttempt, _ *http.Request) (*http.Response, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 type primerCaptureExecutor struct {
 	request *http.Request
 	body    []byte
@@ -99,5 +106,16 @@ func TestCodexPrimerRequestTreatsSuccessWithoutAdmissionAsAmbiguous(t *testing.T
 	}
 	if result.State != PrimerRequestAmbiguous {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestCodexPrimerRequestBoundsTotalTime(t *testing.T) {
+	requester := &CodexPrimerRequester{
+		Router: primerTestRouter(&blockingPrimerExecutor{}), ResponsesURL: "https://chatgpt.example/responses",
+		Timeout: time.Millisecond,
+	}
+	result, err := requester.Send(context.Background(), "account-1", "gpt-5.4")
+	if err != nil || result.State != PrimerRequestAmbiguous {
+		t.Fatalf("timeout result = %+v, %v", result, err)
 	}
 }

@@ -44,6 +44,7 @@ Commands:
   proxy uninstall     Uninstall proxy launch agent
   proxy restart       Restart proxy launch agent
   proxy pin           Pin Claude proxy routing
+  proxy prime         Manage Codex quota-window priming
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT]
 
@@ -80,6 +81,27 @@ Examples:
   cq proxy pin user@example.com
   cq proxy pin 550e8400-e29b-41d4-a716-446655440000
   cq proxy pin --clear
+`,
+	"proxy prime": `Usage: cq proxy prime <command>
+
+Manage automatic Codex backend quota-window priming.
+
+Commands:
+  prime status        Show current priming configuration
+  prime enable        Enable priming after proxy restart
+  prime disable       Disable priming after proxy restart
+`,
+	"proxy prime status": `Usage: cq proxy prime status
+
+Show current Codex window priming configuration.
+`,
+	"proxy prime enable": `Usage: cq proxy prime enable
+
+Enable automatic Codex window priming. Restart proxy to apply.
+`,
+	"proxy prime disable": `Usage: cq proxy prime disable
+
+Disable automatic Codex window priming. Restart proxy to apply.
 `,
 	"models": `Usage: cq models <command>
 

@@ -76,6 +76,51 @@ func TestCodexPrimerStoreNeverReplaysAdmittedGenerationAfterRestart(t *testing.T
 	}
 }
 
+func TestCodexPrimerStoreBoundsRejectedGenerationRetries(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := testPrimerTarget()
+	if err := store.Observe("account-secret", target); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		claimed, err := store.Claim("account-secret", target)
+		if err != nil || !claimed {
+			t.Fatalf("claim %d = %v, %v", attempt, claimed, err)
+		}
+		if err := store.Mark("account-secret", target, PrimerStateRejected, "pre_admission"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if claimed, err := store.Claim("account-secret", target); err != nil || claimed {
+		t.Fatalf("third claim = %v, %v", claimed, err)
+	}
+	record, found := store.Lookup("account-secret", target)
+	if !found || record.Attempts != 2 {
+		t.Fatalf("record = %+v, %v", record, found)
+	}
+}
+
+func TestCodexPrimerStoreGenerationIdentityIgnoresSelectedModel(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := testPrimerTarget()
+	if err := store.Observe("account-secret", target); err != nil {
+		t.Fatal(err)
+	}
+	target.ModelID = "new-registry-preference"
+	if err := store.Observe("account-secret", target); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Records()) != 1 {
+		t.Fatalf("model change created duplicate generation: %+v", store.Records())
+	}
+}
+
 func TestCodexPrimerStoreUsesPrivateFiles(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenCodexPrimerStore(fsutil.OSFileSystem{}, dir+"/primer.json", dir+"/primer.key")

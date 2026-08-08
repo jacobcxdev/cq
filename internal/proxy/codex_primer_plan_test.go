@@ -47,6 +47,15 @@ func TestResolveCodexPrimerModelUsesExactOverride(t *testing.T) {
 	}
 }
 
+func TestValidateCodexPrimerOverridesRequiresVisibleRegistryModels(t *testing.T) {
+	if err := ValidateCodexPrimerOverrides(map[string]string{"codex_spark": "gpt-5.3-codex-spark"}, primerRegistryEntries()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCodexPrimerOverrides(map[string]string{"codex_spark": "missing"}, primerRegistryEntries()); err == nil {
+		t.Fatal("missing override model accepted")
+	}
+}
+
 func TestPlanCodexPrimerTargetsCoalescesScopedAndSharedWindows(t *testing.T) {
 	reset := time.Unix(1774569600, 0)
 	descriptors := []codex.WindowDescriptor{

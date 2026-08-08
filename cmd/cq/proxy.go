@@ -67,9 +67,53 @@ func runProxy(args []string) error {
 		return runProxyStatus(opts)
 	case "pin":
 		return runProxyPin(args[1:])
+	case "prime":
+		return runProxyPrime(args[1:])
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
+}
+
+func runProxyPrime(args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		path := []string{"proxy", "prime"}
+		if len(args) > 1 && args[0] == "help" {
+			path = append(path, args[1:]...)
+		}
+		return writeManualHelp(os.Stdout, path)
+	}
+	if len(args) == 2 && helpRequested(args[1:]) {
+		return writeManualHelp(os.Stdout, []string{"proxy", "prime", args[0]})
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("usage: cq proxy prime <status|enable|disable>")
+	}
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	switch args[0] {
+	case "status":
+		state := "disabled"
+		if cfg.CodexWindowPriming.Enabled {
+			state = "enabled"
+		}
+		fmt.Printf("Codex window priming: %s\n", state)
+		fmt.Printf("Model overrides: %d\n", len(cfg.CodexWindowPriming.ModelOverrides))
+		return nil
+	case "enable":
+		cfg.CodexWindowPriming.Enabled = true
+	case "disable":
+		cfg.CodexWindowPriming.Enabled = false
+	default:
+		return fmt.Errorf("unknown proxy prime command: %s", args[0])
+	}
+	if err := proxy.SaveConfig(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	fmt.Printf("Codex window priming %s.\n", args[0]+"d")
+	fmt.Println("Restart proxy to apply change.")
+	return nil
 }
 
 func runProxyPin(args []string) error {
@@ -384,6 +428,31 @@ func runProxyStart(opts proxyCommandOptions) error {
 		}
 	}
 
+	codexPrimer, err := buildCodexPrimer(cfg, credentialControl.Owner(), codexRequestRouter, catalog, fsys)
+	if err != nil {
+		return err
+	}
+	var codexPrimerDone chan struct{}
+	if cfg.CodexWindowPriming.Enabled && codexPrimer == nil {
+		fmt.Fprintln(os.Stderr, "cq: Codex window priming configured; credential-coordinator delegate remains read-only")
+	}
+	if codexPrimer != nil {
+		codexPrimer.OnError = func(err error) {
+			fmt.Fprintf(os.Stderr, "cq: Codex window primer: %v\n", err)
+		}
+		codexPrimerDone = make(chan struct{})
+		go func() {
+			defer close(codexPrimerDone)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					fmt.Fprintf(os.Stderr, "cq: Codex window primer panic: %v\n", recovered)
+				}
+			}()
+			_ = codexPrimer.Run(proxyCtx)
+		}()
+		fmt.Fprintln(os.Stderr, "cq: Codex window priming enabled")
+	}
+
 	// Start headroom compression bridge if configured.
 	// HeadroomEnabled() returns true when either the legacy headroom bool is set
 	// OR when an explicit headroom_mode is configured (e.g. "cache" without "headroom: true").
@@ -444,16 +513,55 @@ func runProxyStart(opts proxyCommandOptions) error {
 		CodexRouting:           codexRouting,
 		CodexObserver:          codexObserver,
 		CodexHTTPEnforcer:      codexHTTPEnforcer,
+		CodexPrimer:            codexPrimer,
 		HeadroomMode:           resolvedMode,
 		Catalog:                catalog,
 		Refresher:              proxyRefresher,
 	}
 
 	err = srv.ListenAndServe(proxyCtx)
+	proxyCancel()
+	if codexPrimerDone != nil {
+		<-codexPrimerDone
+	}
 	if headroom != nil {
 		headroom.Stop()
 	}
 	return err
+}
+
+func buildCodexPrimer(cfg *proxy.Config, owner bool, router *proxy.CodexRequestRouter, catalog *modelregistry.Catalog, fsys fsutil.DurableFileSystem) (*proxy.CodexPrimer, error) {
+	if cfg == nil || !cfg.CodexWindowPriming.Enabled || !owner {
+		return nil, nil
+	}
+	if router == nil || catalog == nil {
+		return nil, fmt.Errorf("Codex window priming dependencies unavailable")
+	}
+	entries := catalog.Snapshot().Entries
+	if err := proxy.ValidateCodexPrimerRegistry(entries); err != nil {
+		return nil, fmt.Errorf("Codex window priming registry: %w", err)
+	}
+	if err := proxy.ValidateCodexPrimerOverrides(cfg.CodexWindowPriming.ModelOverrides, entries); err != nil {
+		return nil, err
+	}
+	usageURL, err := proxy.CodexPrimerUsageURL(cfg.CodexUpstream)
+	if err != nil {
+		return nil, err
+	}
+	store, err := proxy.OpenDefaultCodexPrimerStore(fsys)
+	if err != nil {
+		return nil, fmt.Errorf("Codex window primer journal: %w", err)
+	}
+	return &proxy.CodexPrimer{
+		Accounts: router.AccountKeys,
+		Usage:    &proxy.CodexPrimerUsageReader{Router: router, UsageURL: usageURL},
+		Requester: &proxy.CodexPrimerRequester{
+			Router: router, ResponsesURL: strings.TrimRight(cfg.CodexUpstream, "/") + "/responses",
+		},
+		Store:          store,
+		Models:         func() []modelregistry.Entry { return catalog.Snapshot().Entries },
+		ModelOverrides: cfg.CodexWindowPriming.ModelOverrides,
+	}, nil
 }
 
 func clearPersistedClaudePin(pin string) {

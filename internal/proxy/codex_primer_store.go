@@ -19,6 +19,7 @@ import (
 )
 
 const codexPrimerJournalVersion = 1
+const codexPrimerMaxRejectedAttempts = 2
 
 type PrimerState string
 
@@ -44,6 +45,7 @@ type PrimerRecord struct {
 	Generation  uint64      `json:"generation"`
 	NextCheckAt time.Time   `json:"next_check_at,omitempty"`
 	ResultCode  string      `json:"result_code,omitempty"`
+	Attempts    int         `json:"attempts,omitempty"`
 }
 
 type codexPrimerEnvelope struct {
@@ -118,8 +120,13 @@ func (s *CodexPrimerStore) Observe(account codex.AccountKey, target CodexPrimerT
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	accountHash, scopeHash := s.identity(account, target)
-	if s.index(accountHash, scopeHash) >= 0 {
-		return nil
+	if index := s.index(accountHash, scopeHash); index >= 0 {
+		if s.records[index].ModelID == target.ModelID {
+			return nil
+		}
+		records := append([]PrimerRecord(nil), s.records...)
+		records[index].ModelID = target.ModelID
+		return s.commitLocked(records)
 	}
 	records := append([]PrimerRecord(nil), s.records...)
 	records = append(records, PrimerRecord{
@@ -134,11 +141,12 @@ func (s *CodexPrimerStore) Claim(account codex.AccountKey, target CodexPrimerTar
 	defer s.mu.Unlock()
 	accountHash, scopeHash := s.identity(account, target)
 	index := s.index(accountHash, scopeHash)
-	if index < 0 || (s.records[index].State != PrimerStateObserved && s.records[index].State != PrimerStateRejected) {
+	if index < 0 || (s.records[index].State != PrimerStateObserved && s.records[index].State != PrimerStateRejected) || s.records[index].Attempts >= codexPrimerMaxRejectedAttempts {
 		return false, nil
 	}
 	records := append([]PrimerRecord(nil), s.records...)
 	records[index].State = PrimerStateClaimed
+	records[index].Attempts++
 	if err := s.commitLocked(records); err != nil {
 		return false, err
 	}
@@ -174,6 +182,40 @@ func (s *CodexPrimerStore) Lookup(account codex.AccountKey, target CodexPrimerTa
 	return s.records[index], true
 }
 
+func (s *CodexPrimerStore) ReconcileAdvanced(account codex.AccountKey, resetEpochs []time.Time, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accountHash := s.hash("account", string(account))
+	currentEpochs := make(map[int64]struct{}, len(resetEpochs))
+	for _, resetAt := range resetEpochs {
+		currentEpochs[resetAt.UTC().UnixNano()] = struct{}{}
+	}
+	records := append([]PrimerRecord(nil), s.records...)
+	changed := false
+	for i := range records {
+		if records[i].AccountHash != accountHash || records[i].ResetAt.After(now) {
+			continue
+		}
+		if _, current := currentEpochs[records[i].ResetAt.UTC().UnixNano()]; current {
+			continue
+		}
+		switch records[i].State {
+		case PrimerStateObserved, PrimerStateRejected:
+			records[i].State = PrimerStatePrimedExternally
+			records[i].ResultCode = "reset_advanced"
+			changed = true
+		case PrimerStateClaimed, PrimerStateAdmitted, PrimerStateAmbiguous, PrimerStateVerifying:
+			records[i].State = PrimerStateVerified
+			records[i].ResultCode = "reset_advanced"
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.commitLocked(records)
+}
+
 func (s *CodexPrimerStore) Records() []PrimerRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -186,7 +228,7 @@ func (s *CodexPrimerStore) identity(account codex.AccountKey, target CodexPrimer
 		windowIDs = append(windowIDs, window.RawLimitName+"|"+string(window.WindowName)+"|"+window.Period.String())
 	}
 	sort.Strings(windowIDs)
-	return s.hash("account", string(account)), s.hash("scope", target.ModelID+"|"+target.ResetAt.UTC().Format(time.RFC3339Nano)+"|"+strings.Join(windowIDs, ","))
+	return s.hash("account", string(account)), s.hash("scope", target.ResetAt.UTC().Format(time.RFC3339Nano)+"|"+strings.Join(windowIDs, ","))
 }
 
 func (s *CodexPrimerStore) index(accountHash, scopeHash string) int {

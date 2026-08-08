@@ -71,6 +71,8 @@ type Server struct {
 	CodexObserver *CodexTurnObserver
 	// CodexHTTPEnforcer owns readiness-gated turns and retained authority fences.
 	CodexHTTPEnforcer *CodexHTTPEnforcer
+	// CodexPrimer is non-nil only in credential-coordinator owner process.
+	CodexPrimer *CodexPrimer
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -652,6 +654,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.CodexHTTPEnforcer != nil {
 		resp["codex_turn_enforcement"] = s.CodexHTTPEnforcer.Observer.Health()
 	}
+	primerConfigured := s.Config != nil && s.Config.CodexWindowPriming.Enabled
+	resp["codex_window_priming"] = s.CodexPrimer.Health(primerConfigured)
 	if s.Headroom != nil {
 		switch s.HeadroomMode {
 		case HeadroomModeCache:
