@@ -50,8 +50,8 @@ func TestFileSystemActivatorActivatesExactCandidateAndPreservesSystemUnknowns(t 
 	if tokens["access_token"] != "new" {
 		t.Fatalf("system access token = %#v, want new", tokens["access_token"])
 	}
-	if _, ok := fs.files["/fake/home/.codex/accounts/user-old::acct-old.auth.json"]; !ok {
-		t.Fatal("outgoing system credential was not adopted")
+	if _, ok := fs.files["/fake/home/.codex/accounts/user-old::acct-old.auth.json"]; ok {
+		t.Fatal("system activator created managed credential outside coordinator")
 	}
 }
 

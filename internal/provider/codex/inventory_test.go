@@ -133,6 +133,28 @@ func TestInventoryOrderingIgnoresReadDirOrder(t *testing.T) {
 	}
 }
 
+func TestInventoryRestoresPersistedOpaqueAccountAndCandidateKeys(t *testing.T) {
+	fs := newDurableFakeFS()
+	store := testManagedStore(t, fs)
+	credential := testLoginCredential()
+	credential.Tokens.IDToken = fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	record, err := store.SaveNew(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(record.Metadata.CandidateID) + ".auth.json"}},
+	}
+	first := DiscoverInventory(fs)
+	second := DiscoverInventory(fs)
+	if len(first.Accounts) != 1 || first.Accounts[0].Key != record.Metadata.AccountKey {
+		t.Fatalf("first inventory = %+v", first)
+	}
+	if !reflect.DeepEqual(first, second) || first.Accounts[0].Candidates[0].Ref.CandidateID != record.Metadata.CandidateID || first.Accounts[0].Unstable {
+		t.Fatalf("persisted inventory changed across restart: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestResolveCandidateKeepsAcceptedRevisionFirst(t *testing.T) {
 	now := time.Now()
 	logical := LogicalAccount{Candidates: []CredentialCandidate{

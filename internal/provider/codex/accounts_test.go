@@ -164,94 +164,13 @@ func TestAccountsDiscover(t *testing.T) {
 	}
 }
 
-func TestAccountsSwitch(t *testing.T) {
-	fs := newFakeFS()
-
-	jwt1 := fakeCodexJWT("active@test.com", "acct-1", "user-1", "plus")
-	jwt2 := fakeCodexJWT("other@test.com", "acct-2", "user-2", "pro")
-
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt1)
-	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt1)
-	fs.files["/fake/home/.codex/accounts/user-2::acct-2.auth.json"] = codexAuthJSON("tok-2", "acct-2", jwt2)
-	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {
-			{name: "user-1::acct-1.auth.json"},
-			{name: "user-2::acct-2.auth.json"},
-		},
+func TestAccountsMutationRequiresCoordinator(t *testing.T) {
+	mgr := &Accounts{FS: newFakeFS()}
+	if _, err := mgr.Switch(context.Background(), "user@test.com"); err == nil {
+		t.Fatal("Switch error = nil")
 	}
-
-	mgr := &Accounts{FS: fs}
-	acct, err := mgr.Switch(context.Background(), "other@test.com")
-	if err != nil {
-		t.Fatalf("Switch: %v", err)
-	}
-	if acct.Email != "other@test.com" {
-		t.Errorf("Email = %q, want other@test.com", acct.Email)
-	}
-	if !acct.Active {
-		t.Error("expected Active=true after switch")
-	}
-
-	// Verify auth.json was overwritten
-	data, ok := fs.files["/fake/home/.codex/auth.json"]
-	if !ok {
-		t.Fatal("auth.json should exist after switch")
-	}
-	var af codexAuthFile
-	if err := json.Unmarshal(data, &af); err != nil {
-		t.Fatalf("parse switched auth.json: %v", err)
-	}
-	if af.Tokens.AccessToken != "tok-2" {
-		t.Errorf("switched auth.json token = %q, want tok-2", af.Tokens.AccessToken)
-	}
-}
-
-func TestAccountsSwitchAdoptsActiveAccount(t *testing.T) {
-	fs := newFakeFS()
-
-	// Active account from codex login (only in auth.json, NOT in accounts/)
-	jwt1 := fakeCodexJWT("original@test.com", "acct-1", "user-1", "plus")
-	// Second account added via cq codex login (in accounts/)
-	jwt2 := fakeCodexJWT("second@test.com", "acct-2", "user-2", "pro")
-
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt1)
-	fs.files["/fake/home/.codex/accounts/user-2::acct-2.auth.json"] = codexAuthJSON("tok-2", "acct-2", jwt2)
-	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {
-			{name: "user-2::acct-2.auth.json"},
-		},
-	}
-
-	mgr := &Accounts{FS: fs}
-	acct, err := mgr.Switch(context.Background(), "second@test.com")
-	if err != nil {
-		t.Fatalf("Switch: %v", err)
-	}
-	if acct.Email != "second@test.com" {
-		t.Errorf("Email = %q, want second@test.com", acct.Email)
-	}
-
-	// The original account should have been adopted into accounts/
-	adopted, ok := fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"]
-	if !ok {
-		t.Fatal("expected original account to be adopted into accounts/")
-	}
-	var af codexAuthFile
-	if err := json.Unmarshal(adopted, &af); err != nil {
-		t.Fatalf("parse adopted file: %v", err)
-	}
-	if af.Tokens.AccessToken != "tok-1" {
-		t.Errorf("adopted token = %q, want tok-1", af.Tokens.AccessToken)
-	}
-
-	// auth.json should now be the switched-to account
-	active := fs.files["/fake/home/.codex/auth.json"]
-	var activeAF codexAuthFile
-	if err := json.Unmarshal(active, &activeAF); err != nil {
-		t.Fatalf("parse active auth.json: %v", err)
-	}
-	if activeAF.Tokens.AccessToken != "tok-2" {
-		t.Errorf("active token = %q, want tok-2", activeAF.Tokens.AccessToken)
+	if err := mgr.Remove(context.Background(), "user@test.com"); err == nil {
+		t.Fatal("Remove error = nil")
 	}
 }
 
@@ -264,6 +183,78 @@ func TestAccountsSwitchNotFound(t *testing.T) {
 	_, err := mgr.Switch(context.Background(), "nonexistent@test.com")
 	if err == nil {
 		t.Fatal("expected error for nonexistent email")
+	}
+}
+
+func TestAccountsSwitchThroughCoordinatorActivatesExactManagedCandidate(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	credential := testLoginCredential()
+	credential.Tokens.IDToken = fakeCodexJWT("target@test.com", "acct-1", "user-1", "plus")
+	ref, _, err := coordinator.SaveLogin(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
+	}
+	mgr := &Accounts{FS: fs, Admin: coordinator}
+	account, err := mgr.Switch(context.Background(), "target@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !account.Active || account.Email != "target@test.com" {
+		t.Fatalf("account = %+v", account)
+	}
+	active, err := coordinator.Activator.Active(context.Background())
+	if err != nil || !active.Present {
+		t.Fatalf("active = %+v, %v", active, err)
+	}
+}
+
+func TestAccountsRemoveThroughCoordinatorDeactivatesExactActiveAccount(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	credential := testLoginCredential()
+	credential.Tokens.IDToken = fakeCodexJWT("target@test.com", "acct-1", "user-1", "plus")
+	ref, revision, err := coordinator.SaveLogin(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
+	}
+	if _, err := coordinator.Activate(context.Background(), ref, revision); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &Accounts{FS: fs, Admin: coordinator}
+	if err := mgr.Remove(context.Background(), "target@test.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.files["/fake/home/.codex/auth.json"]; ok {
+		t.Fatal("active system credential remains")
+	}
+	if _, ok := fs.files[ref.path]; ok {
+		t.Fatal("managed candidate remains")
+	}
+}
+
+func TestAccountsCoordinatorSupportsRefreshSuspendedLegacyCandidate(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	jwt := fakeCodexJWT("legacy@test.com", "acct-legacy", "user-legacy", "plus")
+	path := "/fake/home/.codex/accounts/user-legacy::acct-legacy.auth.json"
+	fs.files[path] = codexAuthJSON("legacy", "acct-legacy", jwt)
+	fs.modes[path] = 0o600
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "user-legacy::acct-legacy.auth.json"}},
+	}
+	mgr := &Accounts{FS: fs, Admin: coordinator}
+	if _, err := mgr.Switch(context.Background(), "legacy@test.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Remove(context.Background(), "legacy@test.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fs.files[path]; ok {
+		t.Fatal("legacy managed candidate remains")
 	}
 }
 
@@ -286,94 +277,6 @@ func TestAccountsSwitchRefusesAmbiguousEmail(t *testing.T) {
 	}
 	if _, ok := fs.files["/fake/home/.codex/auth.json"]; ok {
 		t.Fatal("ambiguous switch wrote system auth")
-	}
-}
-
-func TestAccountsRemoveDeletesStoredStateAndPreventsRediscovery(t *testing.T) {
-	fs := newFakeFS()
-	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt)
-	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt)
-	fs.files["/fake/home/.codex/accounts/registry.json"] = []byte(`{
-		"schema_version": 3,
-		"active_account_key": "user-1::acct-1",
-		"accounts": [
-			{"account_key": "user-1::acct-1", "email": "user@test.com"}
-		]
-	}`)
-	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {
-			{name: "user-1::acct-1.auth.json"},
-			{name: "registry.json"},
-		},
-	}
-
-	mgr := &Accounts{FS: fs}
-	if err := mgr.Remove(context.Background(), "user@test.com"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-
-	if _, ok := fs.files["/fake/home/.codex/auth.json"]; ok {
-		t.Fatal("active auth.json should be removed for deleted account")
-	}
-	if _, ok := fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"]; ok {
-		t.Fatal("stored account file should be removed")
-	}
-
-	accts := DiscoverAccounts(fs)
-	if len(accts) != 0 {
-		t.Fatalf("DiscoverAccounts() = %+v, want no rediscovered accounts", accts)
-	}
-
-	data := fs.files["/fake/home/.codex/accounts/registry.json"]
-	if string(data) == "" || string(data) == `{
-		"schema_version": 3,
-		"active_account_key": "user-1::acct-1",
-		"accounts": [
-			{"account_key": "user-1::acct-1", "email": "user@test.com"}
-		]
-	}` {
-		t.Fatal("registry.json should be updated after removal")
-	}
-}
-
-func TestAccountsRemoveNotFound(t *testing.T) {
-	fs := newFakeFS()
-	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok", "acct-1", jwt)
-
-	mgr := &Accounts{FS: fs}
-	err := mgr.Remove(context.Background(), "missing@test.com")
-	if err == nil {
-		t.Fatal("expected error for nonexistent email")
-	}
-	if got, want := err.Error(), `no account found with email "missing@test.com"`; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
-	}
-}
-
-func TestAccountsRemoveInactiveLeavesSystemAuthUntouched(t *testing.T) {
-	fs := newFakeFS()
-	activeJWT := fakeCodexJWT("active@test.com", "acct-1", "user-1", "plus")
-	inactiveJWT := fakeCodexJWT("inactive@test.com", "acct-2", "user-2", "pro")
-	systemPath := "/fake/home/.codex/auth.json"
-	inactivePath := "/fake/home/.codex/accounts/user-2::acct-2.auth.json"
-	before := codexAuthJSON("tok-active", "acct-1", activeJWT)
-	fs.files[systemPath] = before
-	fs.files[inactivePath] = codexAuthJSON("tok-inactive", "acct-2", inactiveJWT)
-	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {{name: "user-2::acct-2.auth.json"}},
-	}
-
-	mgr := &Accounts{FS: fs}
-	if err := mgr.Remove(context.Background(), "inactive@test.com"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if got := string(fs.files[systemPath]); got != string(before) {
-		t.Fatal("inactive removal changed system auth")
-	}
-	if _, ok := fs.files[inactivePath]; ok {
-		t.Fatal("inactive managed credential still present")
 	}
 }
 

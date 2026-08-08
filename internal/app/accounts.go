@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -100,12 +101,34 @@ func RunLogin(ctx context.Context, client httputil.Doer, activate bool) error {
 // RunCodexLogin performs the Codex OAuth PKCE login flow via Auth0.
 // After login, it stores the account to ~/.codex/accounts/ for codex-auth interop.
 func RunCodexLogin(ctx context.Context, client httputil.Doer, activate bool) error {
-	return runCodexLogin(ctx, client, activate, fsutil.OSFileSystem{}, auth.CodexLogin, time.Now, os.Stdout)
+	fs := fsutil.OSFileSystem{}
+	control, err := codexprov.OpenDefaultCredentialControl(ctx, fs)
+	if err != nil {
+		return err
+	}
+	defer control.Close()
+	return runCodexLoginWithAdmin(ctx, client, activate, auth.CodexLogin, time.Now, os.Stdout, control)
 }
 
 type codexLoginFunc func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error)
 
 func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs fsutil.FileSystem, login codexLoginFunc, now func() time.Time, stdout io.Writer) error {
+	durable, ok := fs.(fsutil.DurableFileSystem)
+	if !ok {
+		return errors.New("durable credential storage unavailable")
+	}
+	store, err := codexprov.NewManagedStore(durable)
+	if err != nil {
+		return err
+	}
+	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	if err != nil {
+		return err
+	}
+	return runCodexLoginWithAdmin(ctx, client, activate, login, now, stdout, coordinator)
+}
+
+func runCodexLoginWithAdmin(ctx context.Context, client httputil.Doer, activate bool, login codexLoginFunc, now func() time.Time, stdout io.Writer, admin codexprov.CredentialAdmin) error {
 	tokens, claims, err := login(ctx, client)
 	if err != nil {
 		return err
@@ -113,22 +136,14 @@ func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs 
 	if claims.AccountID == "" || claims.UserID == "" {
 		return fmt.Errorf("login succeeded but JWT missing account or user ID")
 	}
-	home, err := fs.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
-	}
-	ref, revision, err := codexprov.SaveLogin(fs, home, codexprov.LoginCredential{
+	ref, revision, err := admin.SaveLogin(ctx, codexprov.LoginCredential{
 		Tokens: *tokens, Claims: *claims, CreatedAt: now().UTC(),
 	})
 	if err != nil {
 		return err
 	}
 	if activate {
-		activator, err := codexprov.NewFileSystemActivator(fs)
-		if err != nil {
-			return err
-		}
-		result, err := activator.Activate(ctx, ref, revision)
+		result, err := admin.Activate(ctx, ref, revision)
 		if err != nil {
 			return err
 		}
@@ -171,12 +186,23 @@ func RunAccounts(id provider.ID) error {
 
 // RunSwitch switches the active account for the given provider.
 func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
+	ctx := context.Background()
 	mgr := AccountManager(id, client)
+	var control *codexprov.CredentialControl
+	if id == provider.Codex {
+		var err error
+		control, err = codexprov.OpenDefaultCredentialControl(ctx, fsutil.OSFileSystem{})
+		if err != nil {
+			return err
+		}
+		defer control.Close()
+		mgr = &codexprov.Accounts{FS: fsutil.OSFileSystem{}, Admin: control}
+	}
 	if mgr == nil {
 		return fmt.Errorf("account switching not supported for %s", id)
 	}
 
-	acct, err := mgr.Switch(context.Background(), email)
+	acct, err := mgr.Switch(ctx, email)
 	if err != nil {
 		return err
 	}
@@ -186,11 +212,22 @@ func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
 
 // RunRemove removes the matching account for the given provider.
 func RunRemove(id provider.ID, email string, client httputil.Doer) error {
+	ctx := context.Background()
 	mgr := AccountManager(id, client)
+	var control *codexprov.CredentialControl
+	if id == provider.Codex {
+		var err error
+		control, err = codexprov.OpenDefaultCredentialControl(ctx, fsutil.OSFileSystem{})
+		if err != nil {
+			return err
+		}
+		defer control.Close()
+		mgr = &codexprov.Accounts{FS: fsutil.OSFileSystem{}, Admin: control}
+	}
 	if mgr == nil {
 		return fmt.Errorf("account removal not supported for %s", id)
 	}
-	if err := mgr.Remove(context.Background(), email); err != nil {
+	if err := mgr.Remove(ctx, email); err != nil {
 		return err
 	}
 	fmt.Printf("Removed %s\n", email)

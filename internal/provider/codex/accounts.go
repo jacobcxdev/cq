@@ -104,7 +104,8 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 
 // Accounts implements provider.AccountManager for Codex.
 type Accounts struct {
-	FS fsutil.FileSystem
+	FS    fsutil.FileSystem
+	Admin CredentialAdmin
 }
 
 func (a *Accounts) ProviderID() provider.ID { return provider.Codex }
@@ -125,104 +126,91 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 	return out, nil
 }
 
-// Switch is an explicit-only compatibility adapter around SystemActivator.
+// Switch requires the credential coordinator for all system mutations.
 func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Account, error) {
-	accts := DiscoverAccounts(a.FS)
-	var matches []CodexAccount
-	for _, acct := range accts {
-		if acct.Email == identifier {
-			matches = append(matches, acct)
-		}
+	if a.Admin == nil {
+		return provider.Account{}, errors.New("Codex credential coordinator required")
 	}
-	if len(matches) == 0 {
-		return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
-	}
-	if len(matches) != 1 {
-		return provider.Account{}, fmt.Errorf("email %q matches multiple Codex accounts", identifier)
-	}
-	acct := matches[0]
-	ref, revision, err := candidateRefFromFS(a.FS, acct)
-	if err != nil {
-		return provider.Account{}, err
-	}
-	activator, err := NewFileSystemActivator(a.FS)
-	if err != nil {
-		return provider.Account{}, err
-	}
-	result, err := activator.Activate(ctx, ref, revision)
-	if err != nil {
-		return provider.Account{}, err
-	}
-	if result.ProjectionError != nil {
-		fmt.Fprintf(os.Stderr, "cq: Codex active projection: %v\n", result.ProjectionError)
-	}
-	return provider.Account{
-		AccountID: acct.AccountID, Email: acct.Email, Label: acct.PlanType,
-		Active: true, SwitchID: acct.Email,
-	}, nil
+	return a.switchThroughCoordinator(ctx, identifier)
 }
 
-// Remove is an explicit-only compatibility adapter. Active system credentials
-// are deactivated through SystemActivator before managed candidates are removed.
-func (a *Accounts) Remove(ctx context.Context, identifier string) error {
-	accts := DiscoverAccounts(a.FS)
-	home, err := a.FS.UserHomeDir()
+func (a *Accounts) switchThroughCoordinator(ctx context.Context, identifier string) (provider.Account, error) {
+	logical, err := matchingLogicalAccount(DiscoverInventory(a.FS), identifier)
 	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
+		return provider.Account{}, err
 	}
-	var matches []CodexAccount
-	for _, acct := range accts {
-		if acct.Email == identifier {
-			matches = append(matches, acct)
+	if logical.Active {
+		return providerAccount(logical, true), nil
+	}
+	for _, candidate := range logical.Candidates {
+		if candidate.Source != SourceManaged {
+			continue
+		}
+		result, err := a.Admin.Activate(ctx, candidate.Ref, candidate.Revision)
+		if err != nil {
+			return provider.Account{}, err
+		}
+		if result.ProjectionError != nil {
+			fmt.Fprintf(os.Stderr, "cq: Codex active projection: %v\n", result.ProjectionError)
+		}
+		return providerAccount(logical, true), nil
+	}
+	return provider.Account{}, errors.New("Codex account has no managed activation candidate")
+}
+
+// Remove requires the credential coordinator for all managed/system mutations.
+func (a *Accounts) Remove(ctx context.Context, identifier string) error {
+	if a.Admin == nil {
+		return errors.New("Codex credential coordinator required")
+	}
+	return a.removeThroughCoordinator(ctx, identifier)
+}
+
+func (a *Accounts) removeThroughCoordinator(ctx context.Context, identifier string) error {
+	logical, err := matchingLogicalAccount(DiscoverInventory(a.FS), identifier)
+	if err != nil {
+		return err
+	}
+	revisions := make(RevisionSet)
+	for _, candidate := range logical.Candidates {
+		if candidate.Source == SourceManaged {
+			revisions[candidate.Ref.CandidateID] = candidate.Revision
+		}
+	}
+	result, err := a.Admin.RemoveManaged(ctx, logical.Key, revisions, false)
+	if err != nil {
+		return err
+	}
+	if result.ProjectionError != nil {
+		fmt.Fprintf(os.Stderr, "cq: Codex inactive projection: %v\n", result.ProjectionError)
+	}
+	if result.PendingRecovery {
+		return errors.New("Codex account removal requires recovery")
+	}
+	return nil
+}
+
+func matchingLogicalAccount(inventory Inventory, identifier string) (LogicalAccount, error) {
+	var matches []LogicalAccount
+	for _, logical := range inventory.Accounts {
+		if logical.Identity.Email == identifier {
+			matches = append(matches, logical)
 		}
 	}
 	if len(matches) == 0 {
-		return fmt.Errorf("no account found with email %q", identifier)
+		return LogicalAccount{}, fmt.Errorf("no account found with email %q", identifier)
 	}
 	if len(matches) != 1 {
-		return fmt.Errorf("email %q matches multiple Codex accounts", identifier)
+		return LogicalAccount{}, fmt.Errorf("email %q matches multiple Codex accounts", identifier)
 	}
-	target := matches[0]
-	authPath := filepath.Join(home, ".codex", "auth.json")
-	recordKeys := make(map[string]bool)
-	if target.RecordKey != "" {
-		recordKeys[target.RecordKey] = true
+	return matches[0], nil
+}
+
+func providerAccount(logical LogicalAccount, active bool) provider.Account {
+	return provider.Account{
+		AccountID: logical.Identity.AccountID, Email: logical.Identity.Email,
+		Label: logical.Identity.PlanType, Active: active, SwitchID: logical.Identity.Email,
 	}
-	if target.IsActive {
-		activator, err := NewFileSystemActivator(a.FS)
-		if err != nil {
-			return err
-		}
-		active, err := activator.Active(ctx)
-		if err != nil {
-			return err
-		}
-		result, err := activator.Deactivate(ctx, active.AccountKey, active.Revision)
-		if err != nil {
-			return err
-		}
-		if result.ProjectionError != nil {
-			fmt.Fprintf(os.Stderr, "cq: Codex inactive projection: %v\n", result.ProjectionError)
-		}
-	}
-	if target.FilePath != "" && target.FilePath != authPath {
-		if err := a.FS.Remove(target.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove stored auth file: %w", err)
-		}
-	}
-	// Discovery deliberately keeps a matching live system credential instead of
-	// replacing it with a managed duplicate. Explicit removal still removes the
-	// matching managed compatibility record by its validated record key.
-	for recordKey := range recordKeys {
-		path := filepath.Join(home, ".codex", "accounts", recordKey+".auth.json")
-		if err := a.FS.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove stored auth file: %w", err)
-		}
-	}
-	if err := (Registry{FS: a.FS, Home: home}).RemoveAccounts(recordKeys); err != nil {
-		return err
-	}
-	return nil
 }
 
 // PersistCodexAccount atomically rewrites one CQ-managed account file. Automatic

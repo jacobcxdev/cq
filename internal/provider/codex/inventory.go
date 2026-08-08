@@ -79,6 +79,7 @@ type rawCandidate struct {
 	source     CredentialSource
 	sourceName string
 	cqAuthored bool
+	metadata   *ManagedMetadata
 }
 
 // DiscoverInventory builds one generation-local read model without writing.
@@ -113,25 +114,53 @@ func DiscoverInventory(fs fsutil.FileSystem) Inventory {
 	for _, candidate := range raw {
 		matches := compatibleLogicalAccounts(inventory.Accounts, candidate.account)
 		index := -1
+		if candidate.metadata != nil {
+			for i := range inventory.Accounts {
+				if inventory.Accounts[i].Key == candidate.metadata.AccountKey {
+					index = i
+					break
+				}
+			}
+		}
 		if len(matches) == 1 {
-			index = matches[0]
+			if index < 0 {
+				index = matches[0]
+			}
 		}
 		if index < 0 {
 			identity := identityFromAccount(candidate.account)
 			key := generationAccountKey(identity, candidate.source, candidate.sourceName)
+			unstable := true
+			if candidate.metadata != nil {
+				key = candidate.metadata.AccountKey
+				unstable = false
+			}
 			inventory.Accounts = append(inventory.Accounts, LogicalAccount{
-				Key: key, Identity: identity, Unstable: true,
+				Key: key, Identity: identity, Unstable: unstable,
 			})
 			index = len(inventory.Accounts) - 1
 		}
 		logical := &inventory.Accounts[index]
+		if candidate.metadata != nil && logical.Unstable {
+			logical.Key = candidate.metadata.AccountKey
+			logical.Unstable = false
+			for i := range logical.Candidates {
+				logical.Candidates[i].Ref.AccountKey = logical.Key
+				logical.Candidates[i].Credential.AccountKey = logical.Key
+			}
+		}
 		enrichIdentity(&logical.Identity, candidate.account)
 		candidateID := generationCandidateID(candidate.source, candidate.account, candidate.sourceName)
+		revision := credentialRevision(candidate.data)
+		if candidate.metadata != nil {
+			candidateID = candidate.metadata.CandidateID
+			revision = candidate.metadata.Revision
+		}
 		ref := CandidateRef{AccountKey: logical.Key, CandidateID: candidateID, path: candidate.account.FilePath}
 		credential := candidate.account
 		credential.AccountKey = logical.Key
 		credential.CandidateID = candidateID
-		credential.Revision = credentialRevision(candidate.data)
+		credential.Revision = revision
 		logical.Candidates = append(logical.Candidates, CredentialCandidate{
 			Ref: ref, Revision: credential.Revision, Source: candidate.source,
 			Credential: credential, AccessExpiresAt: unixMilliTime(credential.ExpiresAt),
@@ -176,15 +205,34 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 	if !ok {
 		return rawCandidate{}, false
 	}
-	var doc struct {
-		CQ struct {
-			Provenance string `json:"provenance"`
-		} `json:"_cq"`
-	}
+	var doc map[string]any
 	_ = json.Unmarshal(data, &doc)
+	var metadata *ManagedMetadata
+	if rawMetadata, ok := doc["_cq"]; ok && source == SourceManaged {
+		var parsed ManagedMetadata
+		metadataData, marshalErr := json.Marshal(rawMetadata)
+		valid := marshalErr == nil && json.Unmarshal(metadataData, &parsed) == nil && parsed.Version == 1 && parsed.AccountKey != "" && parsed.CandidateID != "" && parsed.LineageID != "" && parsed.Generation > 0
+		if !valid {
+			return rawCandidate{}, false
+		}
+		if valid {
+			material := CredentialMaterial{
+				AccessToken: account.AccessToken, RefreshToken: account.RefreshToken,
+				IDToken: account.IDToken, AccountID: account.AccountID,
+			}
+			if parsed.Revision != managedRecordRevision(doc, material, parsed) {
+				return rawCandidate{}, false
+			}
+			if info, err := fs.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+				return rawCandidate{}, false
+			}
+			metadata = &parsed
+		}
+	}
 	return rawCandidate{
 		account: account, data: data, source: source, sourceName: sourceName,
-		cqAuthored: doc.CQ.Provenance == "cq_oauth",
+		cqAuthored: metadata != nil && metadata.Provenance == ProvenanceCQOAuth,
+		metadata:   metadata,
 	}, true
 }
 

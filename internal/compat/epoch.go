@@ -11,7 +11,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
-const CurrentEpoch = 1
+const CurrentEpoch = 2
 
 var ErrIncompatibleEpoch = errors.New("CQ binary predates persisted compatibility epoch")
 

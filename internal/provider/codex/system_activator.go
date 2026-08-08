@@ -49,6 +49,8 @@ type FileSystemActivator struct {
 	FS       fsutil.FileSystem
 	Home     string
 	Registry Registry
+	Replace  func(string, []byte) error
+	Remove   func(string) error
 }
 
 func NewFileSystemActivator(fs fsutil.FileSystem) (*FileSystemActivator, error) {
@@ -56,11 +58,14 @@ func NewFileSystemActivator(fs fsutil.FileSystem) (*FileSystemActivator, error) 
 	if err != nil {
 		return nil, fmt.Errorf("home dir: %w", err)
 	}
-	return &FileSystemActivator{
+	activator := &FileSystemActivator{
 		FS:       fs,
 		Home:     home,
 		Registry: Registry{FS: fs, Home: home},
-	}, nil
+	}
+	activator.Replace = func(path string, data []byte) error { return atomicWrite(fs, path, data) }
+	activator.Remove = fs.Remove
+	return activator, nil
 }
 
 func credentialRevision(data []byte) Revision {
@@ -124,42 +129,20 @@ func (a *FileSystemActivator) Activate(_ context.Context, ref CandidateRef, expe
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return ActivationResult{}, fmt.Errorf("read system auth: %w", readErr)
 	}
-	if readErr == nil {
-		if err := a.adoptOutgoing(existing); err != nil {
-			return ActivationResult{}, err
-		}
-	}
 	merged, err := mergeSystemCredential(existing, candidateData)
 	if err != nil {
 		return ActivationResult{}, err
 	}
-	if err := atomicWrite(a.FS, systemPath, merged); err != nil {
+	if a.Replace == nil {
+		return ActivationResult{}, errors.New("system credential writer unavailable")
+	}
+	if err := a.Replace(systemPath, merged); err != nil {
 		return ActivationResult{}, fmt.Errorf("write system auth: %w", err)
 	}
 
 	result := ActivationResult{SystemCommitted: true}
 	result.ProjectionError = a.Registry.ProjectActive(string(ref.AccountKey))
 	return result, nil
-}
-
-func (a *FileSystemActivator) adoptOutgoing(data []byte) error {
-	acct, ok := parseAccountData(data, filepath.Join(a.Home, ".codex", "auth.json"))
-	if !ok || acct.RecordKey == "" {
-		return errors.New("outgoing system auth lacks stable identity")
-	}
-	path := filepath.Join(a.Home, ".codex", "accounts", acct.RecordKey+".auth.json")
-	if _, err := a.FS.ReadFile(path); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read outgoing managed credential: %w", err)
-	}
-	if err := a.FS.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create accounts directory: %w", err)
-	}
-	if err := atomicWrite(a.FS, path, data); err != nil {
-		return fmt.Errorf("adopt outgoing system auth: %w", err)
-	}
-	return nil
 }
 
 func (a *FileSystemActivator) Deactivate(ctx context.Context, expectedKey AccountKey, expectedRevision Revision) (DeactivationResult, error) {
@@ -171,7 +154,10 @@ func (a *FileSystemActivator) Deactivate(ctx context.Context, expectedKey Accoun
 		return DeactivationResult{}, errors.New("active system credential changed")
 	}
 	path := filepath.Join(a.Home, ".codex", "auth.json")
-	if err := a.FS.Remove(path); err != nil {
+	if a.Remove == nil {
+		return DeactivationResult{}, errors.New("system credential remover unavailable")
+	}
+	if err := a.Remove(path); err != nil {
 		return DeactivationResult{}, fmt.Errorf("remove system auth: %w", err)
 	}
 	result := DeactivationResult{SystemRemoved: true}

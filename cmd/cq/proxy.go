@@ -169,6 +169,12 @@ func runProxyStart(opts proxyCommandOptions) error {
 	if opts.Port != 0 {
 		cfg.Port = opts.Port
 	}
+	fsys := fsutil.OSFileSystem{}
+	credentialControl, err := codexprov.OpenDefaultCredentialControl(context.Background(), fsys)
+	if err != nil {
+		return fmt.Errorf("Codex credential coordinator: %w", err)
+	}
+	defer credentialControl.Close()
 
 	fmt.Fprintf(os.Stderr, "cq: proxy token: %s\n", cfg.LocalToken)
 
@@ -220,8 +226,29 @@ func runProxyStart(opts proxyCommandOptions) error {
 
 	// Codex account discovery (no refresh — tokens shared with Codex CLI).
 	codexDiscover := proxy.CodexDiscoverer(func() []codexprov.CodexAccount {
-		return codexprov.DiscoverAccounts(fsutil.OSFileSystem{})
+		return codexprov.DiscoverAccounts(fsys)
 	})
+	if inventory, err := credentialControl.List(context.Background()); err != nil {
+		return fmt.Errorf("Codex credential inventory: %w", err)
+	} else {
+		for _, intent := range inventory.Intents {
+			if intent.Kind != codexprov.IntentAdopt {
+				continue
+			}
+			activator, err := codexprov.NewFileSystemActivator(fsys)
+			if err != nil {
+				return err
+			}
+			snapshot, err := activator.Active(context.Background())
+			if err != nil {
+				return fmt.Errorf("Codex system snapshot: %w", err)
+			}
+			if _, _, err := credentialControl.Adopt(context.Background(), snapshot); err != nil {
+				return fmt.Errorf("Codex credential adoption: %w", err)
+			}
+			break
+		}
+	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexSelector := proxy.NewCodexSelector(codexDiscover, codexQuotaCache)
 
@@ -260,7 +287,6 @@ func runProxyStart(opts proxyCommandOptions) error {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
 	}
 
-	fsys := fsutil.OSFileSystem{}
 	homeDir, homeErr := fsys.UserHomeDir()
 	if homeErr != nil {
 		fmt.Fprintf(os.Stderr, "cq: registry: resolve home dir: %v (registry disabled)\n", homeErr)

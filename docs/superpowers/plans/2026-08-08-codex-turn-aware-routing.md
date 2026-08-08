@@ -211,23 +211,23 @@ type RefreshOwnership string
 type OperationState string
 ```
 
-- [ ] Add red managed-store crash matrix: write, file sync, rename, directory sync, restart recovery, stale revision, bad permissions, unknown enum, corrupt `_cq`, and unknown-field round trip.
-- [ ] Extend `fsutil.FileSystem` only with minimum operations required for unique temp files and durable sync. Add OS and memory/test implementations.
-- [ ] Implement persisted random opaque `AccountKey`, `CandidateID`, lineage, generation, revision, provenance, ownership, operation state, and credential material as one JSON commit. Existing files load as refresh-suspended `legacy_unknown` without rewrite.
-- [ ] Add red ownership tests: first coordinator binds fixed socket; second delegates; simultaneous startup has one owner; stale/unreachable endpoint fails closed; unsupported platforms disable mutation/refresh; RPC uses current-user-only socket permissions.
-- [ ] Implement typed local RPC split: read/automatic broker versus administrative mutation methods. No raw credentials cross diagnostic/log surfaces.
-- [ ] Add red adoption/race tests: unseen system identity yields intent; coordinator adopts once; external system rotation rolls forward `system_borrowed`; CQ-owned candidate is never overwritten; activate/adopt/remove races have one revision-fenced result.
-- [ ] Implement durable removal journal before deleting exact candidate set/system projection. Recovery resumes exact IDs/revisions only. Return `RemovalResult` with managed/system/projection/recovery fields.
-- [ ] Route Codex login, switch, remove, and adoption through coordinator RPC. If no owner exists, command binds endpoint for one ephemeral transaction; existing unreachable endpoint never triggers direct-write fallback.
-- [ ] Advance compatibility epoch atomically before first new managed-record commit.
-- [ ] Run:
+- [x] Add red managed-store crash matrix: write, file sync, rename, directory sync, restart recovery, stale revision, bad permissions, unknown enum, corrupt `_cq`, and unknown-field round trip.
+- [x] Extend `fsutil.FileSystem` only with minimum operations required for unique temp files and durable sync. Add OS and memory/test implementations.
+- [x] Implement persisted random opaque `AccountKey`, `CandidateID`, lineage, generation, revision, provenance, ownership, operation state, and credential material as one JSON commit. Existing files load as refresh-suspended `legacy_unknown` without rewrite.
+- [x] Add red ownership tests: first coordinator binds fixed socket; second delegates; simultaneous startup has one owner; stale/unreachable endpoint fails closed; unsupported platforms disable mutation/refresh; RPC uses current-user-only socket permissions.
+- [x] Implement typed local RPC split: read/automatic broker versus administrative mutation methods. No raw credentials cross diagnostic/log surfaces.
+- [x] Add red adoption/race tests: unseen system identity yields intent; coordinator adopts once; external system rotation rolls forward `system_borrowed`; CQ-owned candidate is never overwritten; activate/adopt/remove races have one revision-fenced result.
+- [x] Implement durable removal journal before deleting exact candidate set/system projection. Recovery resumes exact IDs/revisions only. Return `RemovalResult` with managed/system/projection/recovery fields.
+- [x] Route Codex login, switch, remove, and adoption through coordinator RPC. If no owner exists, command binds endpoint for one ephemeral transaction; existing unreachable endpoint never triggers direct-write fallback.
+- [x] Advance compatibility epoch atomically before first new managed-record commit.
+- [x] Run:
 
 ```bash
 go test -race -count=100 ./internal/provider/codex -run 'Coordinator|ManagedStore|Adopt|Activate|Remove|Crash|Epoch'
 go test -race -count=1 ./internal/app ./cmd/cq
 ```
 
-- [ ] Commit `feat: added Codex credential coordinator`.
+- [x] Commit `feat: added Codex credential coordinator`.
 
 ## Stage 5: Managed refresh broker
 
