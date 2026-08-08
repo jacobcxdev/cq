@@ -1006,6 +1006,7 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 }
 
 func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	path := filepath.Join(t.TempDir(), "payloads.jsonl")
 	payloadDiag, err := OpenPayloadWriter(path)
 	if err != nil {
@@ -1198,8 +1199,8 @@ func TestServerDiagnosticsLegacyCodexAppServerNonUpgradeRejectionEmitsEvent(t *t
 	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUpgradeRequired {
-		t.Fatalf("status = %d, want 426, body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410, body: %s", w.Code, w.Body.String())
 	}
 	if err := diag.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1215,16 +1216,16 @@ func TestServerDiagnosticsLegacyCodexAppServerNonUpgradeRejectionEmitsEvent(t *t
 	if ev.RouteKind != "codex_app_server" {
 		t.Fatalf("RouteKind = %q, want codex_app_server", ev.RouteKind)
 	}
-	if ev.StatusCode != http.StatusUpgradeRequired {
-		t.Fatalf("StatusCode = %d, want 426", ev.StatusCode)
+	if ev.StatusCode != http.StatusGone {
+		t.Fatalf("StatusCode = %d, want 410", ev.StatusCode)
 	}
-	if ev.Error != "invalid_request_error:websocket_upgrade_required" {
-		t.Fatalf("Error = %q, want websocket upgrade error code", ev.Error)
+	if ev.Error != "invalid_request_error" {
+		t.Fatalf("Error = %q, want invalid_request_error", ev.Error)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, localToken)
 }
 
-func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing.T) {
+func TestServerDiagnosticsCodexAppServerRetirementIgnoresUpstream(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
 	if err != nil {
@@ -1255,8 +1256,8 @@ func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing
 	req.Header.Set("Upgrade", "websocket")
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500, body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410, body: %s", w.Code, w.Body.String())
 	}
 	if err := diag.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1266,11 +1267,11 @@ func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing
 		t.Fatalf("events = %d, want 1", len(events))
 	}
 	ev := events[0]
-	if ev.Error != "api_error:invalid_codex_upstream" {
-		t.Fatalf("Error = %q, want invalid upstream code", ev.Error)
+	if ev.Error != "invalid_request_error" {
+		t.Fatalf("Error = %q, want retirement error", ev.Error)
 	}
-	if ev.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("StatusCode = %d, want 500", ev.StatusCode)
+	if ev.StatusCode != http.StatusGone {
+		t.Fatalf("StatusCode = %d, want 410", ev.StatusCode)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, "local-token-secret")
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-token")
@@ -2083,12 +2084,12 @@ func TestServer_Handler_CodexResponsesRejectsWebsocket(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), codexAppServerPath) {
-		t.Errorf("body = %q, want mention of %s", w.Body.String(), codexAppServerPath)
+	if !strings.Contains(w.Body.String(), legacyCodexResponsesPath) {
+		t.Errorf("body = %q, want mention of %s", w.Body.String(), legacyCodexResponsesPath)
 	}
 }
 
-func TestServer_Handler_AppServerRequiresWebsocket(t *testing.T) {
+func TestServer_Handler_AppServerIsRetired(t *testing.T) {
 	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
 	handler, err := srv.handler()
 	if err != nil {
@@ -2099,15 +2100,16 @@ func TestServer_Handler_AppServerRequiresWebsocket(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUpgradeRequired {
-		t.Fatalf("status = %d, want 426", w.Code)
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410", w.Code)
 	}
-	if got := w.Header().Get("Upgrade"); got != "websocket" {
-		t.Errorf("Upgrade header = %q, want websocket", got)
+	if !strings.Contains(w.Body.String(), "retired") || !strings.Contains(w.Body.String(), legacyCodexResponsesPath) {
+		t.Fatalf("body = %q, want retirement guidance", w.Body.String())
 	}
 }
 
 func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	var gotModel string
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2185,6 +2187,7 @@ func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
 }
 
 func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	var gotModel string
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2255,6 +2258,7 @@ func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
 }
 
 func TestServer_AppServerPrefersProAccountForSpark(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	var gotModel, gotAuth string
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

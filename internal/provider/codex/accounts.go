@@ -31,8 +31,8 @@ type CodexAccount struct {
 
 // codexAuthFile is the on-disk format shared with Codex CLI and codex-auth.
 type codexAuthFile struct {
-	AuthMode    string `json:"auth_mode"`
-	Tokens      struct {
+	AuthMode string `json:"auth_mode"`
+	Tokens   struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		IDToken      string `json:"id_token"`
@@ -85,13 +85,9 @@ func DiscoverAccounts(fs fsutil.FileSystem) []CodexAccount {
 		}
 		if acct.RecordKey != "" {
 			if idx, exists := seen[acct.RecordKey]; exists {
-				// Already discovered from auth.json. Prefer the stored accounts/
-				// copy so future reads keep using the canonical persisted tokens.
-				if accounts[idx].IsActive {
-					acct.IsActive = true
-					acct.FilePath = path
-					accounts[idx] = acct
-				}
+				// Keep the live system credential authoritative. A managed copy can
+				// be stale after Codex or another account tool rotates system auth.
+				_ = idx
 				continue
 			}
 			seen[acct.RecordKey] = len(accounts)
@@ -250,6 +246,15 @@ func (a *Accounts) Remove(_ context.Context, identifier string) error {
 	if !found {
 		return fmt.Errorf("no account found with email %q", identifier)
 	}
+	// Discovery deliberately keeps a matching live system credential instead of
+	// replacing it with a managed duplicate. Explicit removal still removes the
+	// matching managed compatibility record by its validated record key.
+	for recordKey := range recordKeys {
+		path := filepath.Join(home, ".codex", "accounts", recordKey+".auth.json")
+		if err := a.FS.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stored auth file: %w", err)
+		}
+	}
 	removeRegistryAccounts(a.FS, home, recordKeys)
 	return nil
 }
@@ -330,10 +335,13 @@ func updateRegistryActiveKey(fs fsutil.FileSystem, home, recordKey string) {
 	}
 }
 
-// PersistCodexAccount atomically rewrites the account's on-disk auth.json file
-// (and ~/.codex/auth.json when IsActive) with updated tokens. The write follows
-// the same tmp+rename pattern used throughout this package.
+// PersistCodexAccount atomically rewrites one CQ-managed account file. Automatic
+// code must never mirror a managed refresh into the shared system auth file.
 func PersistCodexAccount(fs fsutil.FileSystem, acct CodexAccount, home string) error {
+	systemAuthPath := filepath.Join(home, ".codex", "auth.json")
+	if filepath.Clean(acct.FilePath) == filepath.Clean(systemAuthPath) {
+		return errors.New("refusing to rewrite Codex system auth")
+	}
 	data, err := fs.ReadFile(acct.FilePath)
 	if err != nil {
 		return fmt.Errorf("read account file: %w", err)
@@ -376,13 +384,6 @@ func PersistCodexAccount(fs fsutil.FileSystem, acct CodexAccount, home string) e
 		return fmt.Errorf("write account file: %w", err)
 	}
 
-	// If active, also update ~/.codex/auth.json.
-	if acct.IsActive {
-		activeFile := filepath.Join(home, ".codex", "auth.json")
-		if err := atomicWrite(fs, activeFile, updated); err != nil {
-			return fmt.Errorf("write active auth file: %w", err)
-		}
-	}
 	return nil
 }
 

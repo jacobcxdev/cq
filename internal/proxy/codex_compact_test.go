@@ -132,8 +132,8 @@ func TestServer_CodexCompact_RejectsWebsocket(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), codexAppServerPath) {
-		t.Errorf("body = %q, want mention of %s", w.Body.String(), codexAppServerPath)
+	if !strings.Contains(w.Body.String(), legacyCodexResponsesPath) {
+		t.Errorf("body = %q, want mention of %s", w.Body.String(), legacyCodexResponsesPath)
 	}
 }
 
@@ -175,8 +175,8 @@ func TestServer_CodexCompact_RejectsGetWebsocket(t *testing.T) {
 			if !strings.Contains(w.Body.String(), "invalid_request_error") {
 				t.Errorf("body = %q, want invalid_request_error", w.Body.String())
 			}
-			if !strings.Contains(w.Body.String(), codexAppServerPath) {
-				t.Errorf("body = %q, want mention of %s", w.Body.String(), codexAppServerPath)
+			if !strings.Contains(w.Body.String(), legacyCodexResponsesPath) {
+				t.Errorf("body = %q, want mention of %s", w.Body.String(), legacyCodexResponsesPath)
 			}
 		})
 	}

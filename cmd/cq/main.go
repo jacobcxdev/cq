@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/cache"
+	"github.com/jacobcxdev/cq/internal/compat"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -165,6 +166,10 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if err := ensureCompatibilityEpoch(); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: compatibility: %v\n", err)
+		os.Exit(1)
+	}
 	// Handle commands that conflict with kong's default:"withargs" on CheckCmd.
 	// Kong validates the enum constraint on providers before trying command
 	// matching, so "refresh" and "agent" must be intercepted first.
@@ -204,6 +209,15 @@ func main() {
 		os.Exit(1)
 	}
 	ensureAgent()
+}
+
+func ensureCompatibilityEpoch() error {
+	fs := fsutil.OSFileSystem{}
+	path, err := compat.DefaultEpochPath(fs, os.Getenv)
+	if err != nil {
+		return err
+	}
+	return compat.EnsureEpoch(fs, path, compat.CurrentEpoch)
 }
 
 func runAgent(args []string) error {

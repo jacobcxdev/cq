@@ -149,9 +149,7 @@ func TestNewRegistryPipelineToleratesCrossProviderDuplicateInSeed(t *testing.T) 
 	}
 }
 
-// TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenTriggersRefresh verifies that
-// an active account with no access token still uses its RefreshToken.
-func TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenTriggersRefresh(t *testing.T) {
+func TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenNeverRefreshes(t *testing.T) {
 	accounts := []codexprov.CodexAccount{
 		{
 			AccessToken:  "",
@@ -162,41 +160,31 @@ func TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenTriggersRefresh
 	}
 
 	refreshCalled := false
-	refreshedToken := "refreshed-access-token"
 	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
 		refreshCalled = true
-		return &auth.CodexTokenResponse{
-			AccessToken:  refreshedToken,
-			RefreshToken: "new-refresh-tok",
-			ExpiresIn:    3600,
-		}, nil
+		return nil, errors.New("must not be called")
 	}
 	persistCalled := false
-	persistFn := func(_ fsutil.FileSystem, acct codexprov.CodexAccount, home string) error {
+	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error {
 		persistCalled = true
-		if acct.AccessToken != refreshedToken {
-			t.Errorf("persist: AccessToken = %q, want %q", acct.AccessToken, refreshedToken)
-		}
 		return nil
 	}
 
 	fsys := fsutil.NewMemFS()
-	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsys, "/home/test", persistFn)
-	if err != nil {
-		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
+	_, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsys, "/home/test", persistFn)
+	if err == nil {
+		t.Fatal("firstCodexAccessTokenWithRefresh() error = nil")
 	}
-	if tok != refreshedToken {
-		t.Errorf("token = %q, want %q", tok, refreshedToken)
+	if refreshCalled {
+		t.Error("refresh function was called")
 	}
-	if !refreshCalled {
-		t.Error("refresh function was not called for active account with empty token")
-	}
-	if !persistCalled {
-		t.Error("persist function was not called after successful refresh")
+	if persistCalled {
+		t.Error("persist function was called")
 	}
 }
 
 func TestFirstCodexAccessTokenWithRefresh_NoActiveTokenTriggersRefresh(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	staleMs := time.Now().Add(-time.Hour).UnixMilli() // expired one hour ago
 	accounts := []codexprov.CodexAccount{
 		{
@@ -385,43 +373,43 @@ func TestBetterTokenCandidate(t *testing.T) {
 		wantExpires    int64
 	}{
 		{
-			name: "empty next returns current",
+			name:         "empty next returns current",
 			currentToken: "cur", currentExpires: future,
 			nextToken: "", nextExpires: farFuture,
 			wantToken: "cur", wantExpires: future,
 		},
 		{
-			name: "stale next is skipped",
+			name:         "stale next is skipped",
 			currentToken: "cur", currentExpires: future,
 			nextToken: "next", nextExpires: nowMs - 1,
 			wantToken: "cur", wantExpires: future,
 		},
 		{
-			name: "empty current accepts next",
+			name:         "empty current accepts next",
 			currentToken: "", currentExpires: 0,
 			nextToken: "next", nextExpires: future,
 			wantToken: "next", wantExpires: future,
 		},
 		{
-			name: "unknown current expiry prefers known-fresh next",
+			name:         "unknown current expiry prefers known-fresh next",
 			currentToken: "cur", currentExpires: 0,
 			nextToken: "next", nextExpires: future,
 			wantToken: "next", wantExpires: future,
 		},
 		{
-			name: "both unknown expiry returns current",
+			name:         "both unknown expiry returns current",
 			currentToken: "cur", currentExpires: 0,
 			nextToken: "next", nextExpires: 0,
 			wantToken: "cur", wantExpires: 0,
 		},
 		{
-			name: "later expiry wins",
+			name:         "later expiry wins",
 			currentToken: "cur", currentExpires: future,
 			nextToken: "next", nextExpires: farFuture,
 			wantToken: "next", wantExpires: farFuture,
 		},
 		{
-			name: "current has later expiry",
+			name:         "current has later expiry",
 			currentToken: "cur", currentExpires: farFuture,
 			nextToken: "next", nextExpires: future,
 			wantToken: "cur", wantExpires: farFuture,

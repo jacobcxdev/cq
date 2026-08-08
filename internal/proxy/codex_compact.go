@@ -48,7 +48,7 @@ func handleCodexCompactGet(w http.ResponseWriter, r *http.Request, requestPath s
 
 func rejectCodexCompactWebSocket(w http.ResponseWriter, requestPath string) {
 	writeError(w, http.StatusBadRequest, "invalid_request_error",
-		fmt.Sprintf("websocket transport is not supported on %s; use %s", requestPath, codexAppServerPath))
+		fmt.Sprintf("websocket transport is not supported on %s; use %s", requestPath, legacyCodexResponsesPath))
 }
 
 // handleNativeCodexCompact forwards a compact request to the upstream

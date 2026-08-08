@@ -1,12 +1,10 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -48,16 +46,7 @@ func buildLocalRegistry(cfg *proxy.Config, versionStr string) (*localRegistry, e
 		CodexClientVersion: codexClientVersion,
 		ClaudeToken:        firstClaudeAccessToken,
 		CodexToken: func() (string, error) {
-			return firstCodexAccessTokenWithRefresh(
-				context.Background(),
-				codexDiscover(),
-				func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error) {
-					return auth.RefreshCodexToken(ctx, httpClient, refreshToken)
-				},
-				fsys,
-				home,
-				codexprov.PersistCodexAccount,
-			)
+			return firstCodexAccessToken(codexDiscover())
 		},
 		Env:    os.Getenv,
 		Stderr: os.Stderr,

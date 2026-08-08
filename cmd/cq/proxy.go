@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
@@ -239,16 +238,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	// Codex account switcher (best-effort, persists switch to disk).
-	codexAccountsMgr := &codexprov.Accounts{FS: fsutil.OSFileSystem{}}
-	codexSwitcher := proxy.CodexAccountSwitcher(func(ctx context.Context, email string) error {
-		_, err := codexAccountsMgr.Switch(ctx, email)
-		return err
-	})
-
 	codexTransport := &proxy.CodexTokenTransport{
 		Selector: codexSelector,
-		Switcher: codexSwitcher,
 		Quota:    codexQuotaCache,
 		Inner:    http.DefaultTransport,
 	}
@@ -261,7 +252,6 @@ func runProxyStart(opts proxyCommandOptions) error {
 	http11Transport.ForceAttemptHTTP2 = false
 	codexUpgradeTransport := &proxy.CodexTokenTransport{
 		Selector: codexSelector,
-		Switcher: codexSwitcher,
 		Quota:    codexQuotaCache,
 		Inner:    http11Transport,
 	}
@@ -287,16 +277,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 			CodexClientVersion: defaultCodexClientVersion(),
 			ClaudeToken:        firstClaudeAccessToken,
 			CodexToken: func() (string, error) {
-				return firstCodexAccessTokenWithRefresh(
-					context.Background(),
-					codexDiscover(),
-					func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error) {
-						return auth.RefreshCodexToken(ctx, refreshClient, refreshToken)
-					},
-					fsys,
-					homeDir,
-					codexprov.PersistCodexAccount,
-				)
+				return firstCodexAccessToken(codexDiscover())
 			},
 			Env:    os.Getenv,
 			Stderr: os.Stderr,

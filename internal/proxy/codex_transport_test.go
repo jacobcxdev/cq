@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,17 +138,12 @@ func TestCodexTokenTransport_401Failover(t *testing.T) {
 			return makeResponse(200, "ok"), nil
 		}),
 	}
-	transport.suppressFailoverForKey = "stale-suppression"
-
 	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d, want 200 (failover to b)", resp.StatusCode)
-	}
-	if transport.suppressFailoverForKey != "" {
-		t.Errorf("suppression = %q, want cleared after successful 401 failover", transport.suppressFailoverForKey)
 	}
 }
 
@@ -459,21 +453,14 @@ func TestCodexTokenTransport_429WalksMultipleAlternates(t *testing.T) {
 	}
 }
 
-// TestCodexTokenTransport_429InsufficientQuota_PersistsSwitch verifies that an
-// insufficient_quota 429 persists a real switch.
-func TestCodexTokenTransport_429InsufficientQuota_PersistsSwitch(t *testing.T) {
+func TestCodexTokenTransport_429InsufficientQuotaNeverChangesSystemAccount(t *testing.T) {
 	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
 		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
 		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
 	}}
 
-	switchDone := make(chan string, 1)
 	transport := &CodexTokenTransport{
 		Selector: sel,
-		Switcher: func(_ context.Context, email string) error {
-			switchDone <- email
-			return nil
-		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if req.Header.Get("Authorization") == "Bearer tok-a" {
 				return makeResponse(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded"}}`), nil
@@ -489,15 +476,6 @@ func TestCodexTokenTransport_429InsufficientQuota_PersistsSwitch(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d, want 200 (failover on insufficient_quota)", resp.StatusCode)
 	}
-
-	select {
-	case email := <-switchDone:
-		if email != "b@test.com" {
-			t.Errorf("switched to %q, want b@test.com", email)
-		}
-	case <-time.After(time.Second):
-		t.Error("expected switch to be persisted for insufficient_quota")
-	}
 }
 
 // TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch verifies
@@ -509,14 +487,9 @@ func TestCodexTokenTransport_429InsufficientQuota_RewritesSparkForPlusAlternate(
 		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
 	}}
 
-	switchDone := make(chan string, 1)
 	models := make([]string, 0, 2)
 	transport := &CodexTokenTransport{
 		Selector: sel,
-		Switcher: func(_ context.Context, email string) error {
-			switchDone <- email
-			return nil
-		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
@@ -546,15 +519,6 @@ func TestCodexTokenTransport_429InsufficientQuota_RewritesSparkForPlusAlternate(
 	if models[1] != "gpt-5.3-codex" {
 		t.Fatalf("failover model = %q, want gpt-5.3-codex", models[1])
 	}
-
-	select {
-	case email := <-switchDone:
-		if email != "plus@test.com" {
-			t.Errorf("switched to %q, want plus@test.com", email)
-		}
-	case <-time.After(time.Second):
-		t.Error("expected switch to be persisted for insufficient_quota")
-	}
 }
 
 func TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch(t *testing.T) {
@@ -563,14 +527,9 @@ func TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch(t *testin
 		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
 	}}
 
-	switchCh := make(chan string, 1)
 	transport := &CodexTokenTransport{
 		Selector: sel,
 		Quota:    codexQuotaCacheWithSnapshot("acct-1", 80, 0),
-		Switcher: func(_ context.Context, email string) error {
-			switchCh <- email
-			return nil
-		},
 		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if req.Header.Get("Authorization") == "Bearer tok-a" {
 				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
@@ -585,13 +544,6 @@ func TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch(t *testin
 	}
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d, want 200 (replayed to alternate)", resp.StatusCode)
-	}
-
-	select {
-	case email := <-switchCh:
-		t.Errorf("unexpected switch to %q — fresh quota shows 80%% remaining, no switch should be persisted", email)
-	case <-time.After(50 * time.Millisecond):
-		// good: no switch persisted
 	}
 }
 
@@ -687,27 +639,22 @@ func TestCodexTokenTransport_429BodyPreserved(t *testing.T) {
 	}
 }
 
-// TestCodexTokenTransport_429FailoverSuppression_SetAfterFullWalk verifies that
-// failover suppression is set after all accounts have been tried and all returned 429.
-func TestCodexTokenTransport_429FailoverSuppression_SetAfterFullWalk(t *testing.T) {
+// TestCodexTokenTransport_429AlwaysWalksBoundedAccounts verifies that each
+// request gets one bounded walk instead of inheriting request-global state.
+func TestCodexTokenTransport_429AlwaysWalksBoundedAccounts(t *testing.T) {
 	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
 		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
 		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
 	}}
 
-	var switchCount atomic.Int32
 	transport := &CodexTokenTransport{
 		Selector: sel,
-		Switcher: func(_ context.Context, _ string) error {
-			switchCount.Add(1)
-			return nil
-		},
 		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
 		}),
 	}
 
-	// First request: walks a→b, both 429 → suppression set.
+	// First request walks a→b and surfaces 429.
 	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -716,11 +663,7 @@ func TestCodexTokenTransport_429FailoverSuppression_SetAfterFullWalk(t *testing.
 		t.Errorf("status = %d, want 429", resp.StatusCode)
 	}
 
-	if transport.suppressFailoverForKey == "" {
-		t.Error("expected failover suppression to be set after full walk")
-	}
-
-	// Second request: suppressed — no replay, just forward 429.
+	// Independent second request gets its own bounded walk.
 	var calls int
 	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		calls++
@@ -731,10 +674,10 @@ func TestCodexTokenTransport_429FailoverSuppression_SetAfterFullWalk(t *testing.
 		t.Fatal(err)
 	}
 	if resp.StatusCode != 429 {
-		t.Errorf("status = %d, want 429 (suppressed)", resp.StatusCode)
+		t.Errorf("status = %d, want 429", resp.StatusCode)
 	}
-	if calls != 1 {
-		t.Errorf("calls = %d, want 1 (suppressed, no replay)", calls)
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (one bounded walk)", calls)
 	}
 }
 
@@ -802,14 +745,11 @@ func TestCodexTokenTransport_429WalkNonSuccessReturnedWhenAllFail(t *testing.T) 
 	if resp.StatusCode != 503 {
 		t.Errorf("status = %d, want 503 (preserve the last non-429 failure)", resp.StatusCode)
 	}
-	if transport.suppressFailoverForKey != "" {
-		t.Errorf("suppression = %q, want empty when a non-429 failure was seen", transport.suppressFailoverForKey)
-	}
 }
 
-// TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess verifies
-// that failover suppression is cleared after a later non-429 success.
-func TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess(t *testing.T) {
+// TestCodexTokenTransport_429WalksAgainAfterSuccess verifies that each later
+// request can perform its own bounded replay.
+func TestCodexTokenTransport_429WalksAgainAfterSuccess(t *testing.T) {
 	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
 		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
 		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
@@ -822,14 +762,10 @@ func TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess(t *testi
 		}),
 	}
 
-	// Walk all accounts → suppression set.
+	// Walk all accounts and surface 429.
 	transport.RoundTrip(makeCodexRequest(`{}`)) //nolint:errcheck
 
-	if transport.suppressFailoverForKey == "" {
-		t.Fatal("suppression should be set before testing clear")
-	}
-
-	// A successful response clears suppression.
+	// Later request succeeds.
 	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return makeResponse(200, "ok"), nil
 	})
@@ -841,11 +777,7 @@ func TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess(t *testi
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	if transport.suppressFailoverForKey != "" {
-		t.Error("expected failover suppression to be cleared after success")
-	}
-
-	// Next 429 should replay again (suppression is gone).
+	// Next 429 gets its own bounded replay.
 	var calls int
 	transport.Inner = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
@@ -859,7 +791,7 @@ func TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess(t *testi
 		t.Fatal(err)
 	}
 	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (replay resumed after suppression cleared)", resp.StatusCode)
+		t.Errorf("status = %d, want 200 (bounded replay)", resp.StatusCode)
 	}
 	if calls != 2 {
 		t.Errorf("calls = %d, want 2 (initial + replay)", calls)

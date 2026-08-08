@@ -27,7 +27,7 @@ func fakeCodexJWT(email, accountID, userID, planType string) string {
 
 func codexAuthJSON(accessToken, accountID, idToken string) []byte {
 	m := map[string]any{
-		"auth_mode":   "chatgpt",
+		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
 		"tokens": map[string]any{
 			"access_token":  accessToken,
@@ -97,9 +97,9 @@ func TestDiscoverAccountsMultiple(t *testing.T) {
 	if !accts[0].IsActive {
 		t.Error("accts[0] should be active")
 	}
-	// Active account's FilePath should be updated to accounts/ copy
-	if accts[0].FilePath != "/fake/home/.codex/accounts/user-aaa::acct-aaa.auth.json" {
-		t.Errorf("accts[0].FilePath = %q, want accounts/ path", accts[0].FilePath)
+	// Automatic discovery keeps the live system credential authoritative.
+	if accts[0].FilePath != "/fake/home/.codex/auth.json" {
+		t.Errorf("accts[0].FilePath = %q, want live system path", accts[0].FilePath)
 	}
 
 	if accts[1].Email != "bob@test.com" {
@@ -373,7 +373,7 @@ func TestPersistCodexAccountPreservesUnknownFields(t *testing.T) {
 		t.Fatalf("PersistCodexAccount: %v", err)
 	}
 
-		var doc map[string]any
+	var doc map[string]any
 	if err := json.Unmarshal(fs.files[path], &doc); err != nil {
 		t.Fatalf("unmarshal updated file: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestPersistCodexAccountOverwritesHigherStoredExpiresAt(t *testing.T) {
 	}
 }
 
-func TestDiscoverAccountsPrefersStoredCopyForActiveDuplicate(t *testing.T) {
+func TestDiscoverAccountsPrefersLiveCopyForActiveDuplicate(t *testing.T) {
 	fs := newFakeFS()
 	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
 	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-old", "acct-1", jwt)
@@ -456,10 +456,76 @@ func TestDiscoverAccountsPrefersStoredCopyForActiveDuplicate(t *testing.T) {
 	if !accts[0].IsActive {
 		t.Fatal("expected deduped account to stay active")
 	}
-	if got := accts[0].AccessToken; got != "tok-new" {
-		t.Fatalf("AccessToken = %q, want tok-new", got)
+	if got := accts[0].AccessToken; got != "tok-old" {
+		t.Fatalf("AccessToken = %q, want live token", got)
 	}
-	if got := accts[0].FilePath; got != "/fake/home/.codex/accounts/user-1::acct-1.auth.json" {
-		t.Fatalf("FilePath = %q, want accounts path", got)
+	if got := accts[0].FilePath; got != "/fake/home/.codex/auth.json" {
+		t.Fatalf("FilePath = %q, want live system path", got)
+	}
+}
+
+func TestDiscoverAccountsMalformedClaimsDoNotCollapseAtEmptyRecordKey(t *testing.T) {
+	fs := newFakeFS()
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("system-token", "", "")
+	fs.files["/fake/home/.codex/accounts/first.auth.json"] = codexAuthJSON("managed-token", "", "")
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "first.auth.json"}},
+	}
+
+	accts := DiscoverAccounts(fs)
+	if len(accts) != 2 {
+		t.Fatalf("len(accts) = %d, want 2 distinct malformed candidates", len(accts))
+	}
+	for i, acct := range accts {
+		if acct.RecordKey != "" {
+			t.Fatalf("accts[%d].RecordKey = %q, want empty", i, acct.RecordKey)
+		}
+	}
+}
+
+func TestPersistCodexAccountNeverMirrorsManagedRefreshToSystemAuth(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	managedPath := "/fake/home/.codex/accounts/user-1::acct-1.auth.json"
+	fs.files[managedPath] = codexAuthJSON("managed-old", "acct-1", jwt)
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("system-current", "acct-1", jwt)
+
+	acct, ok := parseAccountFile(fs, managedPath)
+	if !ok {
+		t.Fatal("parseAccountFile returned false")
+	}
+	acct.IsActive = true // stale discovery metadata must not grant write authority.
+	acct.AccessToken = "managed-new"
+
+	if err := PersistCodexAccount(fs, acct, "/fake/home"); err != nil {
+		t.Fatalf("PersistCodexAccount: %v", err)
+	}
+	var system codexAuthFile
+	if err := json.Unmarshal(fs.files["/fake/home/.codex/auth.json"], &system); err != nil {
+		t.Fatalf("parse system auth: %v", err)
+	}
+	if got := system.Tokens.AccessToken; got != "system-current" {
+		t.Fatalf("system access token changed to %q", got)
+	}
+}
+
+func TestPersistCodexAccountRejectsSystemAuthPath(t *testing.T) {
+	fs := newFakeFS()
+	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+	systemPath := "/fake/home/.codex/auth.json"
+	before := codexAuthJSON("system-current", "acct-1", jwt)
+	fs.files[systemPath] = before
+
+	acct, ok := parseAccountFile(fs, systemPath)
+	if !ok {
+		t.Fatal("parseAccountFile returned false")
+	}
+	acct.AccessToken = "replacement"
+
+	if err := PersistCodexAccount(fs, acct, "/fake/home"); err == nil {
+		t.Fatal("PersistCodexAccount() error = nil, want system auth rejection")
+	}
+	if got := string(fs.files[systemPath]); got != string(before) {
+		t.Fatal("system auth changed after rejected persistence")
 	}
 }

@@ -122,41 +122,9 @@ func firstCodexAccessTokenWithRefresh(
 		return best, nil
 	}
 
-	// Third pass: attempt refresh for accounts that have a RefreshToken.
-	// We try each in order and return the first successful refreshed token.
-	for _, account := range accounts {
-		if account.RefreshToken == "" {
-			continue
-		}
-		tokens, err := refreshFn(ctx, account.RefreshToken)
-		if err != nil {
-			continue
-		}
-		if tokens.AccessToken == "" {
-			continue
-		}
-		// Update account fields with refreshed tokens.
-		account.AccessToken = tokens.AccessToken
-		if tokens.RefreshToken != "" {
-			account.RefreshToken = tokens.RefreshToken
-		}
-		if tokens.IDToken != "" {
-			account.IDToken = tokens.IDToken
-		}
-		claims := auth.DecodeCodexClaims(tokens.IDToken)
-		if claims.ExpiresAt > 0 {
-			account.ExpiresAt = claims.ExpiresAt * 1000
-		} else {
-			account.ExpiresAt = now.UnixMilli() + tokens.ExpiresIn*1000
-		}
-		// Persist if the account has a file path.
-		if account.FilePath != "" && persistFn != nil {
-			if err := persistFn(fs, account, home); err != nil {
-				fmt.Fprintf(nilSafeStderr(nil), "cq: persist codex tokens (registry): %v\n", err)
-			}
-		}
-		return tokens.AccessToken, nil
-	}
+	// Direct refresh of shared Codex credentials is forbidden. Stage 5 replaces
+	// this compatibility seam with a coordinator-owned managed-lineage broker.
+	_, _, _, _, _ = ctx, refreshFn, fs, home, persistFn
 
 	return "", fmt.Errorf("no codex account with token")
 }

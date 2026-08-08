@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -39,9 +40,9 @@ type fakeDirEntry struct {
 }
 
 func (e fakeDirEntry) Name() string               { return e.name }
-func (e fakeDirEntry) IsDir() bool                 { return e.isDir }
-func (e fakeDirEntry) Type() os.FileMode           { return 0 }
-func (e fakeDirEntry) Info() (os.FileInfo, error)   { return nil, nil }
+func (e fakeDirEntry) IsDir() bool                { return e.isDir }
+func (e fakeDirEntry) Type() os.FileMode          { return 0 }
+func (e fakeDirEntry) Info() (os.FileInfo, error) { return nil, nil }
 
 func newFakeFS() *fakeFS {
 	return &fakeFS{files: make(map[string][]byte)}
@@ -99,12 +100,12 @@ type fakeFileInfo struct {
 	name string
 }
 
-func (fi fakeFileInfo) Name() string      { return fi.name }
-func (fi fakeFileInfo) Size() int64       { return 0 }
-func (fi fakeFileInfo) Mode() os.FileMode { return 0o644 }
+func (fi fakeFileInfo) Name() string       { return fi.name }
+func (fi fakeFileInfo) Size() int64        { return 0 }
+func (fi fakeFileInfo) Mode() os.FileMode  { return 0o644 }
 func (fi fakeFileInfo) ModTime() time.Time { return time.Now() }
-func (fi fakeFileInfo) IsDir() bool       { return false }
-func (fi fakeFileInfo) Sys() any          { return nil }
+func (fi fakeFileInfo) IsDir() bool        { return false }
+func (fi fakeFileInfo) Sys() any           { return nil }
 
 func (f *fakeFS) Stat(name string) (os.FileInfo, error) {
 	_, ok := f.files[name]
@@ -346,7 +347,55 @@ func TestFetch401ReturnsAuthExpiredNoRefreshToken(t *testing.T) {
 	}
 }
 
+func TestFetch401WithRefreshTokenNeverCallsOAuthOrWritesCredentials(t *testing.T) {
+	var usageCalls atomic.Int32
+	var refreshCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/wham/usage":
+			usageCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/oauth/token":
+			refreshCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	fs := newFakeFS()
+	idToken := fakeJWT(map[string]any{
+		"email": "synthetic@example.invalid",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_user_id":    "synthetic-user",
+			"chatgpt_account_id": "synthetic-account",
+		},
+	})
+	original := validAuthJSON("synthetic-access", "synthetic-refresh", idToken, "synthetic-account")
+	fs.files["/fake/home/.codex/auth.json"] = append([]byte(nil), original...)
+
+	p := &Provider{client: &urlRewriter{client: srv.Client(), baseURL: srv.URL}, fs: fs}
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "auth_expired" {
+		t.Fatalf("results = %+v, want one auth_expired result", results)
+	}
+	if got := usageCalls.Load(); got != 1 {
+		t.Fatalf("usage calls = %d, want 1", got)
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Fatalf("refresh calls = %d, want 0", got)
+	}
+	if got := fs.files["/fake/home/.codex/auth.json"]; !bytes.Equal(got, original) {
+		t.Fatal("system auth changed during quota fetch")
+	}
+}
+
 func TestFetch401RefreshesAndRetriesUsage(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	idToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
 		"exp":   float64(time.Now().Add(time.Hour).Unix()),
@@ -422,6 +471,7 @@ func TestFetch401RefreshesAndRetriesUsage(t *testing.T) {
 }
 
 func TestFetch401RefreshWithoutIDTokenPersistsRediscoverableExpiry(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	now := time.Now()
 	expiredIDToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
@@ -494,6 +544,7 @@ func TestFetch401RefreshWithoutIDTokenPersistsRediscoverableExpiry(t *testing.T)
 }
 
 func TestFetch401RefreshWithIDTokenMissingExpFallsBackToExpiresIn(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	now := time.Now()
 	expiredIDToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
@@ -623,15 +674,16 @@ func TestFetch401ReturnsAuthExpiredWithIdentity(t *testing.T) {
 	if results[0].AccountID != "acct-1" {
 		t.Fatalf("accountID = %q, want acct-1", results[0].AccountID)
 	}
-	if usageCalls.Load() != 2 {
-		t.Fatalf("usageCalls = %d, want 2", usageCalls.Load())
+	if usageCalls.Load() != 1 {
+		t.Fatalf("usageCalls = %d, want 1", usageCalls.Load())
 	}
-	if refreshCalls.Load() != 1 {
-		t.Fatalf("refreshCalls = %d, want 1", refreshCalls.Load())
+	if refreshCalls.Load() != 0 {
+		t.Fatalf("refreshCalls = %d, want 0", refreshCalls.Load())
 	}
 }
 
 func TestFetch401RetryPreservesAPIError(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	idToken := fakeJWT(map[string]any{
 		"email": "retry@example.com",
 		"https://api.openai.com/auth": map[string]any{
@@ -698,6 +750,7 @@ func TestFetch401RetryPreservesAPIError(t *testing.T) {
 }
 
 func TestFetch401RefreshSucceedsWhenPersistFails(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	// When PersistCodexAccount cannot write (writeErr / renameErr on fakeFS),
 	// the refreshed access token must still be used for the retry and the
 	// result must be usable quota — persistence failure must not break the
@@ -768,6 +821,7 @@ func TestFetch401RefreshSucceedsWhenPersistFails(t *testing.T) {
 }
 
 func TestFetch401RefreshesAndRetriesWhenHomeDirLookupFails(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	idToken := fakeJWT(map[string]any{
 		"email": "refresh@example.com",
 		"exp":   float64(time.Now().Add(time.Hour).Unix()),

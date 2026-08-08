@@ -217,6 +217,16 @@ func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
 	}
 }
 
+func TestCodexAccountIdentityNeverFallsBackToAccessToken(t *testing.T) {
+	acct := &codex.CodexAccount{AccessToken: "synthetic-secret-token"}
+	if got := codexAcctIdentifier(acct); got != "" {
+		t.Fatalf("codexAcctIdentifier = %q, want empty", got)
+	}
+	if got := codexAccountHint(acct); got != "" {
+		t.Fatalf("codexAccountHint = %q, want empty", got)
+	}
+}
+
 func TestCodexSelector_SelectsAccountWithNoWindowData(t *testing.T) {
 	// An account whose quota snapshot has no windows returns MinRemainingPct()==-1.
 	// This means "no data yet", not "exhausted". The selector must treat it as

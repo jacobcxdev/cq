@@ -15,7 +15,7 @@ Shared interfaces and per-provider implementations.
 | Directory | Purpose |
 |-----------|---------|
 | `claude/` | Multi-account provider with parallel profile+usage fetch, dedup, token refresh ([AGENTS.md](claude/AGENTS.md)) |
-| `codex/` | Single-account provider with reactive 401/403 token refresh ([AGENTS.md](codex/AGENTS.md)) |
+| `codex/` | Multi-account provider with read-only automatic credential use ([AGENTS.md](codex/AGENTS.md)) |
 | `gemini/` | Single-account provider with expiry-based refresh, PATH-based credential discovery ([AGENTS.md](gemini/AGENTS.md)) |
 
 ## For AI Agents
@@ -26,4 +26,4 @@ Shared interfaces and per-provider implementations.
 - All providers use `httputil.Doer` for HTTP — tests inject `urlRewriter` transports
 - Panic recovery is mandatory in all fetch goroutines
 - Error results use `quota.ErrorResult` with specific codes — never return bare errors to the runner
-- Claude is the only multi-account provider; its parser includes dedup logic
+- Claude and Codex are multi-account providers; Codex system credentials remain read-only automatically

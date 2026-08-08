@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/provider"
@@ -71,9 +70,9 @@ func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, erro
 	return out, nil
 }
 
-// fetchAccount fetches quota for a single Codex account, attempting token
-// refresh on 401/403 before giving up. On final failure, identity fields
-// (Email, AccountID) are preserved in the error result.
+// fetchAccount fetches quota for a single Codex account. CQ must not refresh a
+// shared Codex credential automatically; 401/403 preserves identity and asks
+// the caller to re-authenticate.
 func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Result {
 	if acct.AccessToken == "" {
 		r := quota.ErrorResult("no_token", "no token", 0)
@@ -91,54 +90,6 @@ func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Re
 	}
 
 	if code == 401 || code == 403 {
-		// Attempt refresh if we have a refresh token. Always retry usage once
-		// after the attempt, whether or not refresh succeeded.
-		if acct.RefreshToken != "" {
-			tokens, refreshErr := auth.RefreshCodexToken(ctx, p.client, acct.RefreshToken)
-			if refreshErr == nil {
-				acct.AccessToken = tokens.AccessToken
-				if tokens.RefreshToken != "" {
-					acct.RefreshToken = tokens.RefreshToken
-				}
-				if tokens.IDToken != "" {
-					acct.IDToken = tokens.IDToken
-				}
-				claims := auth.DecodeCodexClaims(tokens.IDToken)
-				if claims.ExpiresAt > 0 {
-					acct.ExpiresAt = claims.ExpiresAt * 1000
-				} else {
-					acct.ExpiresAt = time.Now().UnixMilli() + tokens.ExpiresIn*1000
-				}
-				if home, homeErr := p.fs.UserHomeDir(); homeErr == nil {
-					if err := PersistCodexAccount(p.fs, acct, home); err != nil {
-						fmt.Fprintf(os.Stderr, "cq: persist codex tokens: %v\n", err)
-					}
-				}
-			}
-
-			// Retry usage regardless of whether refresh succeeded.
-			body2, code2, err2 := fetchUsage(ctx, p.client, acct.AccessToken, acct.AccountID)
-			if err2 != nil {
-				r := quota.ErrorResult("transport_error", err2.Error(), 0)
-				r.Email = acct.Email
-				r.AccountID = acct.AccountID
-				return r
-			}
-			if code2 == 200 {
-				return parseUsage(body2, acct.Email, acct.AccountID)
-			}
-			if code2 == 401 || code2 == 403 {
-				r := quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code2)
-				r.Email = acct.Email
-				r.AccountID = acct.AccountID
-				return r
-			}
-			r := quota.ErrorResult("api_error", "api error", code2)
-			r.Email = acct.Email
-			r.AccountID = acct.AccountID
-			return r
-		}
-		// No refresh token — return auth_expired with identity.
 		r := quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code)
 		r.Email = acct.Email
 		r.AccountID = acct.AccountID

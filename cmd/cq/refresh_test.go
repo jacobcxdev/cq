@@ -15,8 +15,8 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
-	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 // testDoer is an httputil.Doer stub for refresh tests.
@@ -324,7 +324,7 @@ func TestInvalidateProviderCacheRemovesCodexFile(t *testing.T) {
 	}
 }
 
-func TestRunRefreshDoesCodexPassWithoutClaudeAccounts(t *testing.T) {
+func TestRunRefreshSkipsCodexRefreshPass(t *testing.T) {
 	origDiscover := discoverClaudeAccountsFn
 	origNewClient := newHTTPClientFn
 	origRefreshCodex := refreshCodexAccountsFn
@@ -337,9 +337,11 @@ func TestRunRefreshDoesCodexPassWithoutClaudeAccounts(t *testing.T) {
 	}()
 
 	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth { return nil }
-	newHTTPClientFn = func(timeout time.Duration, version string) httputil.Doer { return testDoer(func(req *http.Request) (*http.Response, error) {
-		return nil, nil
-	}) }
+	newHTTPClientFn = func(timeout time.Duration, version string) httputil.Doer {
+		return testDoer(func(req *http.Request) (*http.Response, error) {
+			return nil, nil
+		})
+	}
 
 	codexCalled := false
 	cacheInvalidated := false
@@ -356,15 +358,16 @@ func TestRunRefreshDoesCodexPassWithoutClaudeAccounts(t *testing.T) {
 	if err := runRefresh(); err != nil {
 		t.Fatalf("runRefresh returned error: %v", err)
 	}
-	if !codexCalled {
-		t.Fatal("expected Codex refresh pass to run without Claude accounts")
+	if codexCalled {
+		t.Fatal("Codex refresh pass ran")
 	}
-	if !cacheInvalidated {
-		t.Fatal("expected Codex cache invalidation after Codex refresh change")
+	if cacheInvalidated {
+		t.Fatal("Codex cache invalidated without a brokered credential change")
 	}
 }
 
 func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	now := time.Now()
 	expiredIDToken := fakeRefreshCodexJWT("refresh@example.com", "acct-1", "user-1", now.Add(-time.Hour))
 	accountPath := "/fake/home/.codex/accounts/user-1::acct-1.auth.json"
@@ -412,6 +415,7 @@ func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing
 }
 
 func TestRefreshCodexAccountsWithIDTokenMissingExpFallsBackToExpiresIn(t *testing.T) {
+	t.Skip("direct shared-credential refresh removed; coordinator broker arrives in Stage 5")
 	now := time.Now()
 	expiredIDToken := fakeRefreshCodexJWT("refresh@example.com", "acct-1", "user-1", now.Add(-time.Hour))
 	refreshedBody, _ := json.Marshal(map[string]any{
@@ -483,14 +487,14 @@ func (f *refreshCodexFS) Stat(name string) (os.FileInfo, error) {
 // refreshFileInfo is a minimal os.FileInfo implementation for refreshCodexFS.
 type refreshFileInfo struct{ name string }
 
-func (fi refreshFileInfo) Name() string      { return fi.name }
-func (fi refreshFileInfo) Size() int64       { return 0 }
-func (fi refreshFileInfo) Mode() os.FileMode { return 0o600 }
-func (fi refreshFileInfo) ModTime() time.Time { return time.Time{} }
-func (fi refreshFileInfo) IsDir() bool       { return false }
-func (fi refreshFileInfo) Sys() any          { return nil }
-func (f *refreshCodexFS) MkdirAll(path string, perm os.FileMode) error          { return nil }
-func (f *refreshCodexFS) UserHomeDir() (string, error)                          { return f.home, nil }
+func (fi refreshFileInfo) Name() string                                { return fi.name }
+func (fi refreshFileInfo) Size() int64                                 { return 0 }
+func (fi refreshFileInfo) Mode() os.FileMode                           { return 0o600 }
+func (fi refreshFileInfo) ModTime() time.Time                          { return time.Time{} }
+func (fi refreshFileInfo) IsDir() bool                                 { return false }
+func (fi refreshFileInfo) Sys() any                                    { return nil }
+func (f *refreshCodexFS) MkdirAll(path string, perm os.FileMode) error { return nil }
+func (f *refreshCodexFS) UserHomeDir() (string, error)                 { return f.home, nil }
 func (f *refreshCodexFS) ReadDir(name string) ([]os.DirEntry, error) {
 	entries, ok := f.dirEntries[name]
 	if !ok {
@@ -555,4 +559,3 @@ func TestRefreshCodexFSStatIsHermetic(t *testing.T) {
 		t.Fatalf("Stat absent file: got %v, want ErrNotExist", err)
 	}
 }
-

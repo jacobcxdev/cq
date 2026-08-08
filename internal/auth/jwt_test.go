@@ -49,6 +49,18 @@ func TestDecodeCodexClaimsRecordKey(t *testing.T) {
 	}
 }
 
+func TestCodexClaimsRecordKeyRequiresBothIdentityParts(t *testing.T) {
+	for _, claims := range []CodexClaims{
+		{},
+		{UserID: "user-abc"},
+		{AccountID: "acct-def"},
+	} {
+		if got := claims.RecordKey(); got != "" {
+			t.Errorf("%+v.RecordKey() = %q, want empty", claims, got)
+		}
+	}
+}
+
 func TestDecodeCodexClaimsMissingAuth(t *testing.T) {
 	token := fakeJWT(map[string]any{
 		"email": "user@test.com",

@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/app"
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
-	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 // refreshMarginMs is how far ahead of expiry we proactively refresh (30 min).
@@ -107,12 +105,6 @@ func runRefresh() error {
 		invalidateProviderCacheFn(provider.Claude)
 	}
 
-	// Codex refresh pass.
-	codexChanged := refreshCodexAccountsFn(ctx, httpClient, now)
-	if codexChanged {
-		invalidateProviderCacheFn(provider.Codex)
-	}
-
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -155,68 +147,11 @@ func runRefresh() error {
 	return nil
 }
 
-// refreshCodexAccounts iterates over all locally discovered Codex accounts and
-// proactively refreshes those whose tokens expire within refreshMarginMs.
-// Returns true if any credential was updated (caller should invalidate cache).
+// refreshCodexAccounts is retained as a compatibility seam until Stage 5
+// replaces it with a coordinator-owned broker. Direct Codex refresh is disabled.
 func refreshCodexAccounts(ctx context.Context, client httputil.Doer, nowMs int64) bool {
-	fs := codexRefreshFSFactory()
-	accounts := codexprov.DiscoverAccounts(fs)
-	if len(accounts) == 0 {
-		return false
-	}
-
-	home, err := fs.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: codex refresh: home dir: %v\n", err)
-		return false
-	}
-
-	threshold := nowMs + refreshMarginMs
-	changed := false
-
-	for _, acct := range accounts {
-		if acct.RefreshToken == "" {
-			continue
-		}
-		if acct.ExpiresAt == 0 || acct.ExpiresAt > threshold {
-			continue // unknown expiry or still fresh
-		}
-
-		label := acct.Email
-		if label == "" {
-			label = acct.AccountID
-		}
-
-		tokens, err := auth.RefreshCodexToken(ctx, client, acct.RefreshToken)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "cq: codex refresh %s: %v\n", label, err)
-			continue
-		}
-
-		acct.AccessToken = tokens.AccessToken
-		if tokens.RefreshToken != "" {
-			acct.RefreshToken = tokens.RefreshToken
-		}
-		if tokens.IDToken != "" {
-			acct.IDToken = tokens.IDToken
-		}
-		claims := auth.DecodeCodexClaims(tokens.IDToken)
-		if claims.ExpiresAt > 0 {
-			acct.ExpiresAt = claims.ExpiresAt * 1000
-		} else {
-			acct.ExpiresAt = nowMs + tokens.ExpiresIn*1000
-		}
-
-		if err := codexprov.PersistCodexAccount(fs, acct, home); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: codex persist %s: %v\n", label, err)
-			continue
-		}
-
-		changed = true
-		fmt.Fprintf(os.Stderr, "cq: refreshed codex %s\n", label)
-	}
-
-	return changed
+	_, _, _ = ctx, client, nowMs
+	return false
 }
 
 // syncAnonymousToIdentified resolves anonymous keychain entries via the

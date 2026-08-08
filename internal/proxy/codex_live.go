@@ -286,7 +286,6 @@ func (s *Server) roundTripCodexLive(req *http.Request) (*http.Response, *codex.C
 	}
 	var excluded []string
 	var fallbackResp *http.Response
-	persistSwitch := false
 	for {
 		acct, selectErr := transport.Selector.Select(req.Context(), excluded...)
 		if selectErr != nil {
@@ -308,23 +307,12 @@ func (s *Server) roundTripCodexLive(req *http.Request) (*http.Response, *codex.C
 				return nil, nil, readErr
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(responseBody))
-			if resp.StatusCode == http.StatusUnauthorized ||
-				isHardExhaustion(responseBody) ||
-				transport.isSnapshotExhausted(acct) {
-				persistSwitch = true
-			}
 			if fallbackResp != nil {
 				fallbackResp.Body.Close()
 			}
 			excluded = append(excluded, codexAcctExcludeKeys(acct)...)
 			fallbackResp = resp
 		default:
-			if resp.StatusCode < 400 {
-				if persistSwitch {
-					transport.persistSwitch(acct)
-				}
-				transport.clearFailoverSuppression()
-			}
 			return resp, acct, nil
 		}
 	}
