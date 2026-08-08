@@ -95,11 +95,14 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 	if !restored && !enforcer.EnforceNew {
 		return nil, RouteChoice{}, CandidateAttempt{}, ErrCodexNoAuthorityFence
 	}
-	if request.Metadata.Metadata.RequestKind == CodexRequestCompaction &&
-		request.Metadata.Metadata.CompactionPhase != CodexCompactionStandalone &&
-		request.Metadata.Metadata.CompactionPhase != CodexCompactionPreTurn &&
-		request.Metadata.Metadata.CompactionPhase != CodexCompactionMidTurn {
-		if _, found := enforcer.Leases.Get(key); !found {
+	if request.Metadata.Metadata.RequestKind == CodexRequestCompaction {
+		switch request.Metadata.Metadata.CompactionPhase {
+		case CodexCompactionStandalone, CodexCompactionPreTurn:
+		case CodexCompactionMidTurn:
+			if !restored {
+				return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("%w: mid-turn compaction requires an existing lease", ErrCodexContinuity)
+			}
+		default:
 			return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("%w: compaction phase cannot establish a new lease", ErrCodexContinuity)
 		}
 	}

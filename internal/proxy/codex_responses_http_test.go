@@ -230,6 +230,17 @@ func TestCodexHTTPEnforcerCompactUsesResponsesNamespace(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPEnforcerMidTurnCompactionRequiresExistingLease(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{}}
+	enforcer := testHTTPEnforcer(t, chooser, executor, fsutil.NewMemFS())
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestCompaction, CodexCompactionMidTurn)
+	_, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if !errors.Is(err, ErrCodexContinuity) || chooser.calls != 0 || len(executor.accounts) != 0 {
+		t.Fatalf("error=%v selector calls=%d attempts=%v", err, chooser.calls, executor.accounts)
+	}
+}
+
 func TestCodexHTTPEnforcerPreTurnCompactionRequiresBothCapacityBuckets(t *testing.T) {
 	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}
 	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{"one": {{status: http.StatusOK, body: `{}`}}}}
