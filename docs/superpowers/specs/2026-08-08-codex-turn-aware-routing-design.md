@@ -1,21 +1,22 @@
 # Codex Turn-Aware Account Routing Design
 
-- **Status:** Approved; implementation in progress (Stages 1–7 complete)
+- **Status:** Approved; implementation in progress; HTTP enforcement complete, WebSocket enforcement gated
 - **Date:** 2026-08-08
-- **Scope:** Codex credential authority, quota-aware selection, and native Responses HTTP/WebSocket routing
+- **Scope:** Codex credential authority, quota-aware selection, native Responses HTTP/WebSocket routing, and automatic backend-window priming
 - **Implementation plan:** [`../plans/2026-08-08-codex-turn-aware-routing.md`](../plans/2026-08-08-codex-turn-aware-routing.md)
 
 ## Outcome
 
 CQ becomes routing authority for Codex traffic without becoming global system-account authority.
 
-- CQ keeps one logical catalogue of accounts and preserves distinct system and managed credential candidates.
-- Codex Bar remains an independent usage observer. CQ does not read or write Codex Bar's private account store.
+- CQ keeps one logical catalogue of accounts and preserves distinct system, CQ-managed, and external read-only credential candidates.
+- Codex Bar remains an independent usage and account manager. CQ may consume its declared managed accounts as live read-only candidates, but never copies, refreshes, activates, removes, or rewrites them.
 - Automatic routing never writes `~/.codex/auth.json` or changes registry active state.
 - Explicit account-management commands use one isolated system-activation capability.
 - Each Codex agent turn receives an account lease. Parallel turns have independent leases.
 - Quota depletion after admission affects future turns only. It never moves an admitted turn to another account.
 - A different real turn ID on the same session/thread lane supersedes the previous turn and can choose a different account after any upstream-WebSocket continuation has been safely reset.
+- CQ discovers rate-limit windows from provider usage responses and can automatically start each newly reset window with the minimum coalesced set of account-pinned synthetic requests.
 
 This design fixes both current failure classes: stale managed credentials shadowing a fresh system credential, and request-level failover changing global auth while unrelated turns are active.
 
@@ -29,25 +30,29 @@ This design fixes both current failure classes: stale managed credentials shadow
 6. Route base and model-scoped quota independently, including Spark quota.
 7. Preserve context across account changes at verified turn boundaries.
 8. Make the migration staged, observable, race-tested, and reversible without restoring unsafe system-auth writes.
+9. Use current Codex Bar credentials without creating another independently rotating copy.
+10. Prime provider-declared quota windows automatically without hard-coded window durations or manual requests.
 
 ## Non-goals
 
-- Integrating with Codex Bar's private storage or asking Codex Bar to change its behaviour.
+- Writing Codex Bar state, depending on Codex Bar implementation internals beyond its versioned account manifest, or asking Codex Bar to change its behaviour.
 - Mirroring every CQ routing decision into the system account.
 - Moving a turn between account identities after upstream admission.
 - Treating `response.completed` as whole-agent-turn completion.
 - Implementing a full Codex app-server facade in this migration.
 - Making translated Anthropic or Live/realtime traffic turn-aware without an exact Codex turn identity.
 - Supporting multiple Codex credential writers. CQ's existing no-file-lock policy remains in force; one local coordinator serialises supported writes instead.
+- Implementing Anthropic window priming in this Codex migration. The resolver boundary remains provider-neutral so Sonnet-, Fable-, or later family-scoped windows can add a provider adapter without changing scheduler semantics.
 
 ## Current failure chain
 
-Current source has four independent decisions that must be unified:
+Current source has five independent decisions that must be unified:
 
 1. `DiscoverAccounts` reads live `~/.codex/auth.json`, then replaces a matching live candidate with the managed `~/.codex/accounts/*.auth.json` candidate. A stale managed token can therefore hide a fresh system token.
 2. Quota fetch, scheduled refresh, and model-registry lookup can each rotate and persist Codex credentials.
 3. `PersistCodexAccount` mirrors a managed refresh into system auth when a stale `IsActive` snapshot says the account is active.
 4. Proxy 401/429 paths call `Accounts.Switch` asynchronously, changing global system auth for every Codex process and every concurrent turn.
+5. Codex Bar and CQ keep separate per-account credential files. A Codex Bar login rotates only its managed home, while CQ continues probing an older `~/.codex/accounts` copy and reports `auth_expired` for the same logical identity.
 
 Current selection is request-scoped for HTTP and physical-connection-scoped for WebSocket. It has no turn key, admission boundary, or same-thread successor boundary. It also ranks all model requests with `MinRemainingPct`, which ignores a matching scoped quota whenever shared windows exist. An account with exhausted base quota and available Spark quota is consequently rejected for Spark.
 
@@ -147,6 +152,7 @@ These become mandatory as Stages 2–4 introduce their owners, then are never ro
 3. One logical account can own multiple credential candidates. UI and JSON still render one account row.
 4. A managed credential is automatically refreshed only when CQ owns a never-exported OAuth lineage.
 5. A second coordinator cannot start, and mutating commands never fall back to direct file writes when coordination is unavailable.
+6. External credential sources are read-only capabilities. Automatic code may resolve an exact declared candidate revision for dispatch, but cannot copy, refresh, activate, remove, or rewrite it.
 
 ### Target routing invariants
 
@@ -171,10 +177,11 @@ These become mandatory when their owning stage enables turn-aware routing.
 | Coordinator ownership | One supervised per-user coordinator instance | Broker RPC only | Mutation RPC only |
 | System-active identity and credential | `~/.codex/auth.json` | Read and reconcile only | Activate, replace, or remove through coordinator-scoped `SystemActivator` |
 | CQ-managed credentials | `~/.codex/accounts/*.auth.json` during compatibility period | Resolve; refresh eligible CQ-owned lineage through coordinator | Login, remove, import through coordinator |
+| Codex Bar managed credentials | Codex Bar versioned account manifest and declared managed homes | Validate, reconcile, and resolve exact read-only candidate revisions | None through CQ |
 | Credential provenance and revisions | Namespaced metadata in each managed record | Read; coordinator writes | Coordinator reads/writes |
 | Registry active key | Derived interoperability projection | Read only | Updated after successful explicit activation |
-| Codex Bar private accounts | Codex Bar | No access | No access |
 | Usage/capacity | Quota cache plus live response observations | Read/write | Read |
+| Window-primer schedule | CQ privacy-safe primer journal | Read/write when explicitly enabled | Enable, disable, inspect, and configure model overrides |
 | Per-turn routing | CQ lane/lease manager and journal | Read/write | Diagnostic inspection only |
 
 `Active` in existing account output continues to mean “matches current system identity.” It does not mean “used by every proxied turn.” Lease ownership stays out of ordinary account JSON.
@@ -194,13 +201,15 @@ flowchart LR
     Lease --> Inventory["Logical account inventory"]
     Inventory --> Managed["CQ-managed credential store"]
     Inventory --> System["System auth read model"]
+    CodexBarStore["Codex Bar managed homes"] -. "validated read-only candidates" .-> Inventory
     Coordinator --> Managed
     Coordinator --> System
     Relay --> Capacity
     Explicit["Explicit CQ account commands"] --> Coordinator
     Coordinator --> Activator["SystemActivator"]
     Activator --> System
-    CodexBar["Codex Bar"] -. "observes / may explicitly change" .-> System
+    CodexBar["Codex Bar"] --> CodexBarStore
+    CodexBar -. "may explicitly change" .-> System
 ```
 
 Automatic proxy wiring receives read-only inventory, secret resolver, selector, capacity, and lease capabilities. Only the attempt executor receives the secret resolver. Neither routing object receives `SystemActivator`; explicit mutation RPCs are dispatched to it by the coordinator. This makes accidental global switching impossible by construction.
@@ -226,7 +235,7 @@ type LogicalAccount struct {
 
 type CredentialCandidate struct {
     Ref              CandidateRef
-    Source           CredentialSource // system or managed
+    Source           CredentialSource // system, managed, or declared external
     Provenance       CredentialProvenance
     Lineage          LineageID
     AccessExpiresAt  time.Time
@@ -267,6 +276,25 @@ Credential material, `_cq` candidate ID, lineage ID, provenance, ownership state
 On first discovery of an unseen system identity, the read model reports an adoption intent. Only the credential coordinator may commit it as `system_borrowed`; discovery itself never writes. On later reconciliation the coordinator rolls that borrowed snapshot forward from a newer matching live system revision. It never overwrites `cq_oauth` or `legacy_unknown`. If a CQ-owned record already exists for that identity, CQ retains both live and managed candidates in memory.
 
 Existing files are read without destructive migration. Unknown JSON fields are preserved on every managed write and explicit activation.
+
+### External candidate federation
+
+External account managers remain authorities for their own credential copies. CQ consumes them through narrow source adapters rather than importing another snapshot:
+
+```go
+type ExternalCredentialSource interface {
+    List(context.Context) ([]ExternalCandidateDescriptor, error)
+    Resolve(context.Context, CandidateRef, Revision) (CredentialMaterial, error)
+}
+```
+
+The Codex Bar adapter reads only its versioned managed-account manifest and the exact managed-home `auth.json` paths declared there. It validates that each path is rooted under Codex Bar's managed-home directory, is a regular user-owned file with restrictive permissions, matches the manifest's strong provider identity and auth fingerprint, and still has the expected revision at secret resolution. It does not scan arbitrary application-support paths, databases, browser data, cookies, or keychain secrets.
+
+External candidates join logical accounts only through the same strong-identity reconciliation rules as system and managed candidates. Their `CandidateID` contains source namespace plus opaque manifest record ID; ordinary output never exposes the source path. A changed manifest fingerprint or credential revision creates a new candidate generation. If the file changes between planning and resolution, dispatch replans instead of using mismatched material.
+
+External candidates have no CQ provenance, lineage ownership, refresh eligibility, activation capability, removal capability, or adoption intent. A fresh external candidate can outrank or follow a stale CQ candidate under normal expiry ordering. Candidate-specific 401/403 rejection then advances to another same-identity candidate. Only after every same-identity source is exhausted may a provisional request choose another logical account.
+
+Copying an external credential into CQ is not automatic recovery: it would create another independently rotating refresh lineage and reproduce the divergence this adapter removes.
 
 ### Candidate ordering
 
@@ -368,6 +396,66 @@ New-lease eligibility order:
 Known remaining percentage ranks candidates. Active lease count is only a tie-break to avoid equal-capacity stampedes. System-active status is display metadata, not an automatic routing preference.
 
 Existing admitted leases bypass capacity eligibility. Mid-turn zero updates the ledger for future turns and leaves the current account unchanged.
+
+## Backend-discovered quota-window priming
+
+Window shape is provider authority. CQ never asks users to configure `5h`, `7d`, or later durations. Every usable usage response is normalised into descriptors that retain provider, raw limit name, canonical duration, scope, remaining percentage, and exact reset epoch:
+
+```go
+type WindowDescriptor struct {
+    Provider     provider.ID
+    RawLimitName string
+    WindowName   quota.WindowName
+    Period       time.Duration
+    Scope        WindowScope // shared or model-family
+    ResetAt      time.Time
+}
+```
+
+Shared primary/secondary windows have `ScopeShared`. Each `additional_rate_limits[].limit_name` produces a distinct model-family scope while preserving the raw backend name. The current Codex parser's canonical names such as `7d` and `7d:GPT-5.3-Codex-Spark` remain display and cache keys; scheduling never infers semantics from duration text alone.
+
+Priming is explicit opt-in at feature level, but window enumeration is automatic. User configuration contains only `enabled` and optional exact raw-scope-to-model overrides. Missing, added, removed, or resized backend windows require no config change.
+
+### Activation planning and model resolution
+
+The scheduler converts due descriptors into activation targets, then coalesces targets that one request can satisfy:
+
+- one general model request activates every simultaneously due shared window for that account;
+- one request for a scoped model family activates that family's due windows and any simultaneously due shared windows;
+- different model families remain separate activation targets;
+- different reset epochs remain separate schedules even when their periods match.
+
+Scoped-model resolution is deterministic:
+
+1. exact user override for provider plus raw backend scope;
+2. case-folded exact registry model ID, alias, or display-name match;
+3. unique token-boundary family match across visible provider models;
+4. explicit provider adapter for an exceptional backend name;
+5. otherwise unresolved and fail closed with a safe diagnostic naming only the backend scope.
+
+Arbitrary substring matching is forbidden because short names such as `pro` can collide with unrelated families. Token-boundary matching is accepted only when every match belongs to one inferred family and registry preference/version ordering yields one deterministic visible model. Current `GPT-5.3-Codex-Spark` resolves exactly to its registry slug. A future Anthropic adapter can resolve `Sonnet`, `Fable`, or later family names through the same contract.
+
+For a shared target, CQ first reuses a resolved scoped model according to provider policy; current Codex policy prefers Spark. If no scoped target exists, it selects the registry-preferred visible compatible provider model. Current registry has no price metadata, so CQ must not label that choice “cheapest”. If pricing metadata becomes authoritative later, provider policy may use it without changing scheduler state. An explicit model override always wins.
+
+### Scheduler, request, and verification
+
+One long-lived scheduler uses active per-account usage fetches through the candidate inventory. It never activates system auth. For each account/window generation:
+
+1. persist the observed reset epoch and activation target;
+2. wake at or after that epoch;
+3. refresh usage before sending model traffic;
+4. if the exact reset epoch already advanced, record `primed_externally` and send nothing;
+5. otherwise atomically claim one synthetic attempt and issue the coalesced account-pinned request;
+6. after admission/completion, poll usage only until every due descriptor's reset epoch advances;
+7. record verified advancement and schedule the new backend epoch.
+
+Synthetic traffic uses native Responses HTTP with `store:false`, no tools, no continuation, a minimal `ping` instruction, a bounded response, and a dedicated CQ synthetic metadata namespace. It never joins, creates, or mutates a user task lease. It uses one exact `AccountKey`; same-identity candidate fallback and one eligible coordinator refresh are allowed, but cross-account failover and automatic system activation are forbidden.
+
+A definitely rejected pre-admission request may retry under a bounded provider-lag policy. Once admission is observed, bytes may have reached upstream, or outcome is ambiguous, CQ never sends another synthetic request for that account/window generation. It performs verification polls only. Verification requires the exact backend reset epoch to advance; remaining percentage alone is insufficient because one minimal request can still round to `100%`. A scoped request records shared and scoped advancement separately.
+
+Primer state is a separate atomic `0o600` journal under a `0o700` CQ state directory. It stores HMAC account identity, provider, raw-scope hash, canonical period, observed reset epoch, selected model ID, attempt generation/state, next verification time, and typed result. It stores no credential material, email, provider account ID, prompt, response text, or external path. Restart resumes due schedules and verification without replaying an admitted or ambiguous generation.
+
+Initial live acceptance must use a naturally reset untouched window. Operators may read usage, install/restart the service, and enable automatic priming, but must not send a manual model request. Success requires scheduler-originated admission followed by observed reset-epoch advancement. Failure preserves the untouched generation for diagnosis whenever no request was admitted; admitted/ambiguous failure remains verification-only.
 
 ## Turn identity and lifecycle
 
@@ -615,6 +703,7 @@ Ordinary diagnostics never require payload logging. Existing payload diagnostics
 - `system_activator.go`: sole system-auth/registry writer for explicit commands.
 - `credential_coordinator.go`: single-writer operations, lineage state, and eligible refresh.
 - `credential_control.go`: fixed local endpoint plus restricted automatic and administrative RPC surfaces.
+- `codexbar_source.go`: validated read-only Codex Bar manifest and managed-home candidate adapter.
 - Compatibility wrappers keep existing account/provider interfaces while callers migrate.
 
 ### `internal/proxy`
@@ -629,6 +718,8 @@ Ordinary diagnostics never require payload logging. Existing payload diagnostics
 - `codex_responses_ws.go`: frame-aware WebSocket broker.
 - `codex_transport.go`: reduced explicit-account auth/model rewrite helper.
 - `codex_live.go`: retains separate call affinity; loses automatic global persistence.
+- `codex_window_primer.go`: backend-window activation planning, coalescing, scheduling, and verification.
+- `codex_primer_store.go`: privacy-safe attempt and reset-generation journal.
 - `server.go`: mux, route policy, and injected components only.
 
 ### `cmd/cq`
@@ -637,6 +728,8 @@ Ordinary diagnostics never require payload logging. Existing payload diagnostics
 - Do not wire `SystemActivator` into proxy objects.
 - Remove automatic Codex refresh from scheduled/standalone refresh and registry pipelines.
 - Preserve explicit activation commands through the isolated activator.
+- Inject external candidate sources into inventory and secret resolution without granting coordinator mutation capabilities.
+- Start primer only after inventory, model catalogue, active usage fetch, request router, and durable store are ready.
 - Enumerate and migrate translated Anthropic, count-token, compact, images/search, native Responses, and Live callers before reducing the shared transport.
 
 Core capability split:
@@ -681,9 +774,15 @@ Add additive proxy config:
 ```json
 {
   "codex_turn_routing": "off",
-  "codex_ws_turn_routing": "observe"
+  "codex_ws_turn_routing": "observe",
+  "codex_window_priming": {
+    "enabled": false,
+    "model_overrides": {}
+  }
 }
 ```
+
+`model_overrides` is optional and keyed by exact raw backend scope. Window names and durations are never configured. Omitted priming defaults to disabled. Enabling requires a proxy restart and never sends traffic until a fresh usage read identifies a due backend reset generation.
 
 Modes:
 
@@ -722,6 +821,8 @@ Each stage is a separate reviewable PR with failing tests first.
 | 13. WebSocket resync proof | Add rotation-intent/reconnect/full-request state machine to the already shadowed one-to-one broker; keep account changes shadow-only | For each explicitly supported CLI/Desktop build and retry budget, 100 reconnect/resync trials prove error → client invalidation → new WS generation or HTTP crossover → portable full request before any replacement upstream dispatch | Keep WS mode `observe`; whole-socket affinity remains authoritative |
 | 14. WebSocket enforcement | Permit WS `enforce` only after one atomic marker records successful completion of every blocking gate for the exact build/schema/retry-budget tuple | Installed listener proves same-turn sampling, parallel turns, quota exhaustion, 60-minute/restart reconnect, full-history account change, clean byte/error propagation, and zero late-generation mutations | Invalidate marker; set WS mode `observe` and restart/drain |
 | 15. Soak and default | Run installed-service canary; in a later release make enforcement the recommended post-validation choice only for installations with current readiness markers and explicit opt-in; never activate it by upgrade; remove dead selector/suppression/switch code after rollback window | Seven consecutive days and at least 100 admitted installed-service turns with zero account/lease mismatch, automatic auth write, secret leak, or unexplained lifecycle event; complete one rollback rehearsal | Keep explicit `off/observe` through next release window |
+| 16. External candidate federation | Add generic read-only source boundary plus validated Codex Bar manifest adapter; preserve source candidates under one logical account and resolve exact external revisions only inside attempts | Fresh Codex Bar/stale CQ inverse reproducer routes same identity successfully; manifest/path/fingerprint/revision attacks fail closed; all automatic activity leaves both stores byte-identical | Disable external source adapter; CQ/system candidates remain unchanged |
+| 17. Dynamic window priming | Add backend descriptor preservation, conservative model-family resolution, activation coalescing, durable scheduler, account-pinned synthetic Responses request, and reset-epoch verification behind explicit feature enablement | Fake-clock/race/crash suites pass; naturally reset untouched installed account receives no manual request, scheduler request advances exact reset epoch, and no credential/system/task state changes | Disable primer; retain journal for inspection; never replay admitted or ambiguous generations |
 
 Stage 1 intentionally trades automatic Codex refresh for credential safety until Stage 5 supplies a proven single owner. Compatibility epoch starts there and advances before any later irreversible persisted schema; startup refuses an older binary rather than silently restoring unsafe semantics. No lease stage begins before credential authority and rollback controls are complete.
 
@@ -774,6 +875,25 @@ Rollback rules:
 - concurrent coordinator startup and stale/unreachable endpoint fail closed without direct-write fallback;
 - switch racing inventory/refresh cannot be reverted by stale `IsActive` state;
 - every automatic path performs zero writes to system auth and registry.
+- Codex Bar fresh/CQ stale and CQ fresh/Codex Bar stale retain both candidates and use a successful same-identity revision without copying either store;
+- malformed manifest, path escape, symlink/non-regular file, permissive ownership/mode, identity mismatch, fingerprint mismatch, and revision race fail closed;
+- external candidates are never refreshed, activated, removed, adopted, or persisted by CQ.
+
+### Window-primer tests
+
+- every shared and additional backend window becomes one descriptor without hard-coded duration filtering;
+- backend duration/name addition, removal, and resize require no config change;
+- exact registry ID/alias/display match, unique token-family match, ambiguity, provider override, and unresolved scope;
+- shared `5h` plus `7d` coalesce into one request when due together;
+- scoped Spark request satisfies due Spark and shared descriptors, while independent reset epochs remain separately scheduled;
+- multiple scoped families create one activation target per family rather than one per raw window;
+- pre-send usage refresh skips an externally advanced epoch;
+- definite pre-admission rejection retries only within bounded policy; admission or ambiguity never replays;
+- same-identity candidate recovery allowed; cross-account failover and system activation forbidden;
+- verification requires reset-epoch advancement and does not rely on rounded remaining percentage;
+- restart, crash at every journal transition, clock rollback/advance, late telemetry, corrupt journal, and duplicate scheduler ownership;
+- primer journal contains no token, email, provider account ID, external path, prompt, response, or raw scope; ordinary diagnostics contain no personal identity or secret material;
+- disabled/default config performs zero usage polling beyond existing behaviour and zero synthetic requests.
 
 ### Lease/state tests
 
@@ -846,6 +966,10 @@ go test -race -count=1 ./...
 8. Run explicit `cq codex switch` and verify that action alone changes the system hash.
 9. Restart the installed proxy mid-quiescent turn and verify the same turn reattaches to the same account.
 10. Repeat against the installed listener/service, not only `httptest` or a temporary binary.
+11. With priming disabled, record a naturally reset untouched account/window generation using privacy-safe hashes only; send no manual model request.
+12. Install tested build, enable automatic priming, restart service, and prove scheduler alone emits the exact-account synthetic request.
+13. Verify the due backend reset epoch advances and begins counting down; verify user task/turn journals, system auth, CQ-managed auth, Codex Bar auth, and registry active state remain unchanged.
+14. If synthetic admission is ambiguous or observed, perform usage verification only; never manually trigger or replay that generation.
 
 ## Resolved decisions and remaining gates
 
@@ -862,6 +986,10 @@ Resolved:
 - Quiescent/orphan leases persist for seven days.
 - Current `/app-server` relay is retired.
 - Base and scoped model capacity are selected separately.
+- Codex Bar credentials are federated as read-only live candidates rather than copied into CQ.
+- Priming discovers every backend window; users configure feature enablement and optional model overrides, never durations.
+- Scoped model mapping uses exact/alias/display or unique token-family evidence; ambiguity fails closed.
+- Synthetic requests are coalesced by activation target and verified only by exact reset-epoch advancement.
 
 Blocking gates before WebSocket enforcement:
 
