@@ -28,12 +28,89 @@ type CodexRequestRouter struct {
 	observationSequence atomic.Uint64
 }
 
+type CodexPinnedFailure uint8
+
+const (
+	CodexPinnedAccepted CodexPinnedFailure = iota
+	CodexPinnedAuthFailure
+	CodexPinnedHardLimit
+)
+
 // Plan exposes secret-free route planning for WebSocket attempts.
 func (r *CodexRequestRouter) Plan(ctx context.Context, requirements CodexRouteRequirements, accepted codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
 	if r == nil || r.Scope == nil {
 		return CodexRequestPlan{}, fmt.Errorf("Codex request router unavailable")
 	}
 	return r.Scope.Plan(ctx, requirements, accepted, exclude...)
+}
+
+func (r *CodexRequestRouter) AccountKeys(ctx context.Context) ([]codex.AccountKey, error) {
+	scope, ok := r.Scope.(*CodexRequestScope)
+	if !ok {
+		return nil, fmt.Errorf("Codex request scope cannot enumerate accounts")
+	}
+	return scope.AccountKeys(ctx)
+}
+
+func (r *CodexRequestRouter) DoPinned(ctx context.Context, choice RouteChoice, req *http.Request) (*http.Response, CandidateAttempt, CodexPinnedFailure, error) {
+	if r == nil || r.Scope == nil || r.Executor == nil {
+		return nil, CandidateAttempt{}, CodexPinnedAccepted, fmt.Errorf("Codex request router unavailable")
+	}
+	scoper, ok := r.Scope.(codexChoiceScoper)
+	if !ok {
+		return nil, CandidateAttempt{}, CodexPinnedAccepted, fmt.Errorf("Codex request scope does not support fixed choices")
+	}
+	plan, err := scoper.PlanChoice(ctx, choice, "")
+	if err != nil {
+		return nil, CandidateAttempt{}, CodexPinnedAccepted, err
+	}
+	var last CandidateAttempt
+	try := func(attempt CandidateAttempt) (*http.Response, CodexPinnedFailure, error) {
+		last = attempt
+		observeCodexAttempt(ctx, choice, attempt)
+		response, err := r.Executor.Do(ctx, choice, attempt, req)
+		if err != nil {
+			return nil, CodexPinnedAccepted, err
+		}
+		switch response.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			closeResponse(response)
+			return nil, CodexPinnedAuthFailure, nil
+		case http.StatusTooManyRequests:
+			buffered, body, err := bufferAttemptResponse(response)
+			if err != nil {
+				return nil, CodexPinnedAccepted, err
+			}
+			if isHardExhaustion(body) {
+				r.observeHardLimit(choice, buffered)
+				return buffered, CodexPinnedHardLimit, nil
+			}
+			return buffered, CodexPinnedAccepted, nil
+		default:
+			return response, CodexPinnedAccepted, nil
+		}
+	}
+	for _, attempt := range plan.Attempts {
+		response, failure, err := try(attempt)
+		if err != nil || failure != CodexPinnedAuthFailure {
+			return response, last, failure, err
+		}
+	}
+	if plan.refreshAttempt != nil && r.Refresher != nil {
+		ref, revision, refreshErr := r.Refresher.RefreshReference(ctx, plan.refreshAttempt.Candidate, plan.refreshAttempt.Revision)
+		if refreshErr == nil {
+			attempt := *plan.refreshAttempt
+			attempt.Candidate = ref
+			attempt.Revision = revision
+			attempt.Ordinal = len(plan.Attempts) + 1
+			response, failure, err := try(attempt)
+			return response, last, failure, err
+		}
+		if !errors.Is(refreshErr, codex.ErrRefreshIneligible) && !errors.Is(refreshErr, codex.ErrRefreshUnavailable) && !errors.Is(refreshErr, codex.ErrStaleRevision) {
+			return nil, *plan.refreshAttempt, CodexPinnedAccepted, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
+		}
+	}
+	return nil, last, CodexPinnedAuthFailure, nil
 }
 
 // Do executes a request with same-identity 401 recovery, one eligible refresh,
@@ -71,7 +148,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 				return nil, plan.Choice, attempt, err
 			}
 			switch resp.StatusCode {
-			case http.StatusUnauthorized:
+			case http.StatusUnauthorized, http.StatusForbidden:
 				hadUnauthorized = true
 				closeResponse(resp)
 				continue
@@ -112,7 +189,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 					return nil, plan.Choice, refreshed, err
 				}
 				switch resp.StatusCode {
-				case http.StatusUnauthorized:
+				case http.StatusUnauthorized, http.StatusForbidden:
 					hadUnauthorized = true
 					closeResponse(resp)
 				case http.StatusTooManyRequests:

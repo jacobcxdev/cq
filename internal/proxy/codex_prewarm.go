@@ -176,6 +176,7 @@ func (manager *CodexTurnLeaseManager) adoptPrewarm(key LeaseKey, reservation Cod
 		Key:                      key,
 		State:                    LeaseBoundQuiescent,
 		AccountKey:               reservation.AccountKey,
+		Choice:                   RouteChoice{AccountKey: reservation.AccountKey},
 		Generation:               1,
 		ModeEpoch:                manager.modeEpoch,
 		Authoritative:            manager.authoritative,

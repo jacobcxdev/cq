@@ -430,7 +430,7 @@ func (observer *CodexTurnObserver) persist(leases []CodexTurnLease) error {
 	}
 	observer.storeMu.Lock()
 	defer observer.storeMu.Unlock()
-	return observer.Store.CommitLeases(leases, observer.Store.Generation())
+	return observer.Store.CommitCurrentLeases(leases)
 }
 
 func (observer *CodexTurnObserver) observeLeaseError(err error) {

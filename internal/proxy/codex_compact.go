@@ -96,8 +96,19 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	protocolRequest, enforce, err := s.parseCodexHTTPEnforcement(body, r.Header)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	model = extractModel(body)
-	observation := s.beginCodexHTTPObservation(ctx, body, r.Header, true)
+	if enforce && protocolRequest.Model != "" {
+		model = protocolRequest.Model
+	}
+	var observation *CodexTurnObservation
+	if !enforce {
+		observation = s.beginCodexHTTPObservation(ctx, body, r.Header, true)
+	}
 	if observation != nil {
 		ctx = withCodexObservation(ctx, observation)
 	}
@@ -143,7 +154,13 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, choice, _, err := s.doCodexRequest(ctx, model, upReq)
+	var resp *http.Response
+	var choice RouteChoice
+	if enforce {
+		resp, choice, _, err = s.CodexHTTPEnforcer.Do(ctx, CodexRouteRequirements{RequestedModel: model}, protocolRequest, upReq)
+	} else {
+		resp, choice, _, err = s.doCodexRequest(ctx, model, upReq)
+	}
 	if err != nil {
 		if observation != nil {
 			observation.Finish(err)

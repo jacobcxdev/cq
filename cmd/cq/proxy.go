@@ -288,6 +288,16 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Capacity:  codexQuotaCache.CodexCapacityLedger(),
 	}
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl)
+	var codexHTTPEnforcer *proxy.CodexHTTPEnforcer
+	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce {
+		if codexObserver == nil || codexObserver.Store == nil {
+			return fmt.Errorf("Codex HTTP enforcement: lease store unavailable")
+		}
+		codexHTTPEnforcer, err = proxy.NewCodexHTTPEnforcer(codexRequestRouter, codexRouting.HTTP.ModeEpoch, codexObserver.Store)
+		if err != nil {
+			return fmt.Errorf("Codex HTTP enforcement: %w", err)
+		}
+	}
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
@@ -411,6 +421,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		PayloadDiag:            payloadDiag,
 		CodexRouting:           codexRouting,
 		CodexObserver:          codexObserver,
+		CodexHTTPEnforcer:      codexHTTPEnforcer,
 		HeadroomMode:           resolvedMode,
 		Catalog:                catalog,
 		Refresher:              proxyRefresher,

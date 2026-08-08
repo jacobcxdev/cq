@@ -439,15 +439,15 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - Create: `internal/proxy/codex_responses_http_test.go`
 - Modify: `cmd/cq/proxy.go`
 
-- [ ] Add red strong-metadata HTTP tests: repeated sampling pins account; mid-turn zero only affects future turns; parallel/new turns select independently; exact changed turn supersedes lane; stale ID fails; compact shares namespace; pre-turn compact binds both buckets.
-- [ ] Implement replay using original encoded bytes. Select provisional account once; try same-identity candidates; refresh eligible lineage; only pre-admission 401/403/exact hard 429 may change account.
-- [ ] Admit on accepted 2xx headers. Bind in memory, journal synchronously, then forward headers. Journal failure fails closed and cannot replay elsewhere.
-- [ ] Observe SSE without changing bytes/order. Classify clean terminal, premature EOF, read error, early close, cancellation. Never treat `response.completed` as whole-turn completion.
-- [ ] Enforce continuation: turn state stays exact account/lease; `previous_response_id` and encrypted content require proven affinity or typed continuity failure. No account migration after admission or after client-visible bytes.
-- [ ] Add `-race -count=100` no-post-admission-migration tests including compressed request replay and rate-limit/error ordering.
-- [ ] Add explicit validation command/path that writes HTTP readiness marker only after Stage 11 corpus hash, installed build, parser/lease schema, and HTTP gate results match.
-- [ ] Run full HTTP gate; then opt in explicitly and verify `/health` effective HTTP `enforce`.
-- [ ] Commit `feat: enforced Codex HTTP turn leases`.
+- [x] Add red strong-metadata HTTP tests: repeated sampling pins account; mid-turn zero only affects future turns; parallel/new turns select independently; exact changed turn supersedes lane; stale ID fails; compact shares namespace; pre-turn compact binds both buckets.
+- [x] Implement replay using original encoded bytes. Select provisional account once; try same-identity candidates; refresh eligible lineage; only pre-admission 401/403/exact hard 429 may change account.
+- [x] Admit on accepted 2xx headers. Bind in memory, journal synchronously, then forward headers. Journal failure fails closed and cannot replay elsewhere.
+- [x] Observe SSE without changing bytes/order. Classify clean terminal, premature EOF, read error, early close, cancellation. Never treat `response.completed` as whole-turn completion.
+- [x] Enforce continuation: turn state stays exact account/lease; `previous_response_id` and encrypted content require proven affinity or typed continuity failure. No account migration after admission or after client-visible bytes.
+- [x] Add `-race -count=100` no-post-admission-migration tests including compressed request replay and rate-limit/error ordering.
+- [x] Add explicit validation command/path that writes HTTP readiness marker only after Stage 11 corpus hash, installed build, parser/lease schema, and HTTP gate results match.
+- [x] Run full HTTP gate; then opt in explicitly and verify `/health` effective HTTP `enforce`.
+- [x] Commit `feat: enforced Codex HTTP turn leases`.
 
 ## Stage 13: WebSocket resynchronisation proof
 

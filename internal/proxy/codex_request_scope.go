@@ -29,6 +29,25 @@ type CodexRequestScoper interface {
 	Plan(context.Context, CodexRouteRequirements, codex.Revision, ...codex.SelectionExclusion) (CodexRequestPlan, error)
 }
 
+type codexChoiceScoper interface {
+	PlanChoice(context.Context, RouteChoice, codex.Revision) (CodexRequestPlan, error)
+}
+
+func (s *CodexRequestScope) AccountKeys(ctx context.Context) ([]codex.AccountKey, error) {
+	if s == nil || s.Inventory == nil {
+		return nil, fmt.Errorf("Codex credential inventory unavailable")
+	}
+	inventory, err := s.Inventory.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]codex.AccountKey, 0, len(inventory.Accounts))
+	for _, account := range inventory.Accounts {
+		keys = append(keys, account.Key)
+	}
+	return keys, nil
+}
+
 // CodexRequestScope combines quota-aware account choice with secret-free inventory.
 type CodexRequestScope struct {
 	Chooser   CodexRouteChooser
@@ -44,6 +63,13 @@ func (s *CodexRequestScope) Plan(ctx context.Context, requirements CodexRouteReq
 	choice, err := s.Chooser.Choose(ctx, requirements, exclude...)
 	if err != nil {
 		return CodexRequestPlan{}, err
+	}
+	return s.PlanChoice(ctx, choice, accepted)
+}
+
+func (s *CodexRequestScope) PlanChoice(ctx context.Context, choice RouteChoice, accepted codex.Revision) (CodexRequestPlan, error) {
+	if s == nil || s.Inventory == nil || choice.AccountKey == "" {
+		return CodexRequestPlan{}, fmt.Errorf("Codex request choice unavailable")
 	}
 	inventory, err := s.Inventory.List(ctx)
 	if err != nil {

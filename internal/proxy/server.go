@@ -69,6 +69,8 @@ type Server struct {
 	CodexRouting *CodexRoutingRuntime
 	// CodexObserver mirrors Responses lifecycle without affecting Stage 8 routing.
 	CodexObserver *CodexTurnObserver
+	// CodexHTTPEnforcer owns strong-metadata HTTP turns only when readiness-gated.
+	CodexHTTPEnforcer *CodexHTTPEnforcer
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -647,6 +649,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.CodexObserver != nil {
 		resp["codex_turn_observation"] = s.CodexObserver.Health()
 	}
+	if s.CodexHTTPEnforcer != nil {
+		resp["codex_turn_enforcement"] = s.CodexHTTPEnforcer.Observer.Health()
+	}
 	if s.Headroom != nil {
 		switch s.HeadroomMode {
 		case HeadroomModeCache:
@@ -726,8 +731,19 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	protocolRequest, enforce, err := s.parseCodexHTTPEnforcement(body, r.Header)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	model = extractModel(body)
-	observation := s.beginCodexHTTPObservation(ctx, body, r.Header, false)
+	if enforce && protocolRequest.Model != "" {
+		model = protocolRequest.Model
+	}
+	var observation *CodexTurnObservation
+	if !enforce {
+		observation = s.beginCodexHTTPObservation(ctx, body, r.Header, false)
+	}
 	if observation != nil {
 		ctx = withCodexObservation(ctx, observation)
 	}
@@ -753,7 +769,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	// Compress Responses API input via headroom bridge if available.
 	// Fail-open: on error, log and continue with original body.
-	if s.Headroom != nil {
+	if s.Headroom != nil && !enforce {
 		var compressed []byte
 		var saved int
 		var err error
@@ -793,7 +809,13 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, choice, _, err := s.doCodexRequest(ctx, model, upReq)
+	var resp *http.Response
+	var choice RouteChoice
+	if enforce {
+		resp, choice, _, err = s.CodexHTTPEnforcer.Do(ctx, CodexRouteRequirements{RequestedModel: model}, protocolRequest, upReq)
+	} else {
+		resp, choice, _, err = s.doCodexRequest(ctx, model, upReq)
+	}
 	if err != nil {
 		if observation != nil {
 			observation.Finish(err)
@@ -814,6 +836,13 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	if err := relayCodexHTTPResponse(w, resp, true); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: codex native response copy: %v\n", err)
 	}
+}
+
+func (s *Server) parseCodexHTTPEnforcement(body []byte, header http.Header) (CodexProtocolRequest, bool, error) {
+	if s == nil || s.CodexHTTPEnforcer == nil || s.CodexRouting == nil || s.CodexRouting.HTTP.Effective != CodexRoutingEnforce {
+		return CodexProtocolRequest{}, false, nil
+	}
+	return s.CodexHTTPEnforcer.Parse(body, header)
 }
 
 // proxyCodexUpgrade handles WebSocket upgrade requests to /responses by

@@ -74,7 +74,7 @@ func TestCodexReadinessMarkerRejectsEveryStaleDimension(t *testing.T) {
 	}
 }
 
-func TestCodexEnforceInhibitedWithoutImplementationOrMarker(t *testing.T) {
+func TestCodexEnforceInhibitedWithoutMarker(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingOff}
 	httpReq, wsReq := DefaultCodexRoutingRequirements("build", "client")
@@ -82,17 +82,8 @@ func TestCodexEnforceInhibitedWithoutImplementationOrMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.HTTP.Configured != CodexRoutingEnforce || runtime.HTTP.Effective != CodexRoutingObserve || runtime.HTTP.InhibitionReason != "enforcement implementation unavailable" {
+	if runtime.HTTP.Configured != CodexRoutingEnforce || runtime.HTTP.Effective != CodexRoutingObserve || runtime.HTTP.InhibitionReason != "readiness marker missing" {
 		t.Fatalf("HTTP status = %+v", runtime.HTTP)
-	}
-
-	httpReq = testCodexRequirements(CodexRoutingHTTP)
-	runtime, err = openCodexRoutingRuntimeAt(dir, cfg, httpReq, wsReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.HTTP.Effective != CodexRoutingObserve || runtime.HTTP.InhibitionReason != "readiness marker missing" {
-		t.Fatalf("HTTP status with implementation = %+v", runtime.HTTP)
 	}
 }
 

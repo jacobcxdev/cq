@@ -136,6 +136,7 @@ type CodexTurnLease struct {
 	Key                      LeaseKey
 	State                    LeaseState
 	AccountKey               codex.AccountKey
+	Choice                   RouteChoice
 	Generation               uint64
 	ModeEpoch                uint64
 	Authoritative            bool
@@ -188,11 +189,21 @@ func NewCodexTurnLeaseManager(modeEpoch uint64, authoritative bool, now func() t
 }
 
 func (manager *CodexTurnLeaseManager) Acquire(ctx context.Context, key LeaseKey, selectAccount func(context.Context) (codex.AccountKey, error)) (CodexTurnLease, error) {
+	if selectAccount == nil {
+		return CodexTurnLease{}, errors.New("Codex account selector unavailable")
+	}
+	return manager.AcquireRoute(ctx, key, func(ctx context.Context) (RouteChoice, error) {
+		account, err := selectAccount(ctx)
+		return RouteChoice{AccountKey: account}, err
+	})
+}
+
+func (manager *CodexTurnLeaseManager) AcquireRoute(ctx context.Context, key LeaseKey, selectRoute func(context.Context) (RouteChoice, error)) (CodexTurnLease, error) {
 	if err := key.validate(); err != nil {
 		return CodexTurnLease{}, err
 	}
-	if selectAccount == nil {
-		return CodexTurnLease{}, errors.New("Codex account selector unavailable")
+	if selectRoute == nil {
+		return CodexTurnLease{}, errors.New("Codex route selector unavailable")
 	}
 	for {
 		manager.mu.Lock()
@@ -256,9 +267,9 @@ func (manager *CodexTurnLeaseManager) Acquire(ctx context.Context, key LeaseKey,
 		manager.current[key.Lane] = key
 		manager.mu.Unlock()
 
-		account, err := selectAccount(ctx)
+		choice, err := selectRoute(ctx)
 		manager.mu.Lock()
-		if err != nil || account == "" {
+		if err != nil || choice.AccountKey == "" {
 			managed.lease.State = LeaseFailedUnadmitted
 			managed.lease.RoutingRefs = 0
 			managed.lease.Generation++
@@ -270,7 +281,8 @@ func (manager *CodexTurnLeaseManager) Acquire(ctx context.Context, key LeaseKey,
 			}
 			return CodexTurnLease{}, err
 		}
-		managed.lease.AccountKey = account
+		managed.lease.AccountKey = choice.AccountKey
+		managed.lease.Choice = cloneRouteChoice(choice)
 		managed.lease.State = LeaseProvisional
 		managed.lease.Generation++
 		managed.lease.LastSeen = manager.now()
@@ -279,6 +291,25 @@ func (manager *CodexTurnLeaseManager) Acquire(ctx context.Context, key LeaseKey,
 		manager.mu.Unlock()
 		return result, nil
 	}
+}
+
+func cloneRouteChoice(choice RouteChoice) RouteChoice {
+	choice.RequiredBuckets = append([]CapacityBucket(nil), choice.RequiredBuckets...)
+	return choice
+}
+
+func (manager *CodexTurnLeaseManager) ReplaceProvisionalRoute(key LeaseKey, choice RouteChoice) (CodexTurnLease, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	managed := manager.leases[key]
+	if managed == nil || manager.current[key.Lane] != key || managed.lease.State != LeaseProvisional || choice.AccountKey == "" {
+		return CodexTurnLease{}, ErrCodexLeaseTransition
+	}
+	managed.lease.AccountKey = choice.AccountKey
+	managed.lease.Choice = cloneRouteChoice(choice)
+	managed.lease.Generation++
+	managed.lease.LastSeen = manager.now()
+	return managed.lease, nil
 }
 
 func (manager *CodexTurnLeaseManager) ReleaseRouting(key LeaseKey) error {

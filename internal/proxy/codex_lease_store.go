@@ -149,9 +149,35 @@ func (store *CodexLeaseStore) Generation() uint64 {
 func (store *CodexLeaseStore) CommitLeases(leases []CodexTurnLease, expectedGeneration uint64) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	return store.commitLeasesLocked(leases, expectedGeneration)
+}
+
+// CommitCurrentLeases serialises an in-process read-modify-write against the
+// current journal generation. Callers needing stale-writer detection use
+// CommitLeases with an explicit generation instead.
+func (store *CodexLeaseStore) CommitCurrentLeases(leases []CodexTurnLease) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.commitLeasesLocked(leases, store.generation)
+}
+
+func (store *CodexLeaseStore) commitLeasesLocked(leases []CodexTurnLease, expectedGeneration uint64) error {
 	records := make([]CodexJournalRecord, 0, len(leases))
+	type modeKey struct {
+		epoch         uint64
+		authoritative bool
+	}
+	modes := make(map[modeKey]bool)
 	for _, lease := range leases {
 		records = append(records, store.recordForLease(lease))
+		modes[modeKey{lease.ModeEpoch, lease.Authoritative}] = true
+	}
+	if len(modes) != 0 {
+		for _, existing := range store.records {
+			if !modes[modeKey{existing.ModeEpoch, existing.Authoritative}] {
+				records = append(records, existing)
+			}
+		}
 	}
 	sort.Slice(records, func(i, j int) bool {
 		left, right := records[i], records[j]
