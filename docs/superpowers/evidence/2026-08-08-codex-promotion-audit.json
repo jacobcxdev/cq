@@ -1,0 +1,35 @@
+{
+  "stage": "promotion-audit",
+  "status": "blocked",
+  "tested_code_head": "5cf81a5c80eb72408c070dc18d5970a46b25767b",
+  "toolchain": {
+    "go": "go1.26.5 darwin/arm64",
+    "codex_cli": "0.146.0"
+  },
+  "verification": {
+    "proxy_race_count_100": "passed",
+    "provider_race_count_100": "passed",
+    "full_race_suite": "passed",
+    "go_vet": "passed",
+    "go_build": "passed",
+    "git_diff_check": "passed",
+    "worktree_clean": true
+  },
+  "websocket_gate": {
+    "result": "blocked",
+    "reason": "model is absent before downstream WebSocket 101 for client build 0.146.0",
+    "effective_mode": "observe",
+    "readiness_marker_written": false
+  },
+  "installed_soak_gate": {
+    "result": "pending",
+    "observed_days": 1,
+    "required_days": 7,
+    "admitted_local_fake_turns": 1,
+    "required_installed_service_turns": 100
+  },
+  "publication": {
+    "pushed": false,
+    "pull_request_created": false
+  }
+}

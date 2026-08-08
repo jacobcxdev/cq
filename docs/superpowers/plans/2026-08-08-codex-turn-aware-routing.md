@@ -472,6 +472,8 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 
 ## Stage 14: WebSocket enforcement
 
+**Promotion blocker:** Codex CLI/Desktop 0.146.0 sends no model in the WebSocket HTTP handshake. Model first appears in `response.create` after downstream `101`, while approved account selection and stateful upstream `101` journalling must finish before downstream `101`. No WS readiness marker may be written without a client change or approved architecture revision.
+
 **Files:**
 
 - Modify: `internal/proxy/codex_responses_ws.go`
@@ -491,6 +493,8 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - [ ] Commit `feat: enforced Codex WebSocket leases`.
 
 ## Stage 15: Installed-service soak and default policy
+
+**Promotion blocker:** deterministic/local-fake acceptance has one admitted turn on one observed day. Promotion still requires seven consecutively observed UTC days, at least 100 admitted installed-service turns, and all zero-failure counters.
 
 **Files:**
 
