@@ -55,3 +55,36 @@ func TestCodexCanaryExplicitSwitchResetsHashBaseline(t *testing.T) {
 		t.Fatalf("state = %+v", recorder.State())
 	}
 }
+
+func TestCodexCanaryConsecutiveDaysResetAfterGap(t *testing.T) {
+	start := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	recorder, err := StartCodexCanary(fsutil.NewMemFS(), "/state/canary.json", nil, CodexCanaryTuple{CQBuild: "build", ClientBuild: "client", ParserSchema: 1, LeaseSchema: 1, FixtureHash: "fixture"}, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.RecordHeartbeat(start.Add(72 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.State().ConsecutiveCalendarDays; got != 1 {
+		t.Fatalf("days after gap = %d", got)
+	}
+	if err := recorder.RecordHeartbeat(start.Add(96 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.State().ConsecutiveCalendarDays; got != 2 {
+		t.Fatalf("days after next observation = %d", got)
+	}
+}
+
+func TestCodexCanaryRecordsSecretLeakCounter(t *testing.T) {
+	recorder, err := StartCodexCanary(fsutil.NewMemFS(), "/state/canary.json", nil, CodexCanaryTuple{CQBuild: "build", ClientBuild: "client", ParserSchema: 1, LeaseSchema: 1, FixtureHash: "fixture"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.RecordSecretLeak(); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.State().SecretLeaks != 1 {
+		t.Fatalf("state = %+v", recorder.State())
+	}
+}

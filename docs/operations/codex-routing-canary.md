@@ -20,6 +20,8 @@ Keep canary active for seven consecutive calendar days and at least 100 admitted
 - next-turn reselection and same-lane supersession;
 - restart while quiescent;
 - explicit account switch followed by `cq codex canary acknowledge-explicit-switch`;
+
+Run `cq codex canary status` at least once each UTC calendar day. Admitted turns also count as observations. Missing a calendar day resets consecutive-day counter.
 - Codex Bar observation without switching.
 
 `cq codex canary status` must finish with zero keyed mismatches, automatic auth/registry hash changes, secret leaks, and unexplained lifecycles. Explicit switch is sole permitted system-auth/registry change and must be acknowledged immediately.

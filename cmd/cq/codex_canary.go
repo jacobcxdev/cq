@@ -56,12 +56,17 @@ func runCodexCanary(args []string) error {
 			if err := recorder.AcknowledgeExplicitSwitch(); err != nil {
 				return err
 			}
+		} else if recorder.State().Active {
+			if err := recorder.RecordHeartbeat(time.Now()); err != nil {
+				return err
+			}
 		}
 		state := recorder.State()
 		return json.NewEncoder(os.Stdout).Encode(struct {
 			Active                  bool                   `json:"active"`
 			StartedAt               time.Time              `json:"started_at"`
 			EndedAt                 time.Time              `json:"ended_at,omitempty"`
+			LastObservedAt          time.Time              `json:"last_observed_at"`
 			Tuple                   proxy.CodexCanaryTuple `json:"tuple"`
 			AdmittedTurns           uint64                 `json:"admitted_turns"`
 			KeyedMismatches         uint64                 `json:"keyed_mismatches"`
@@ -69,7 +74,7 @@ func runCodexCanary(args []string) error {
 			SecretLeaks             uint64                 `json:"secret_leaks"`
 			UnexplainedLifecycles   uint64                 `json:"unexplained_lifecycles"`
 			ConsecutiveCalendarDays int                    `json:"consecutive_calendar_days"`
-		}{state.Active, state.StartedAt, state.EndedAt, state.Tuple, state.AdmittedTurns, state.KeyedMismatches, state.AutomaticHashChanges, state.SecretLeaks, state.UnexplainedLifecycles, state.ConsecutiveCalendarDays})
+		}{state.Active, state.StartedAt, state.EndedAt, state.LastObservedAt, state.Tuple, state.AdmittedTurns, state.KeyedMismatches, state.AutomaticHashChanges, state.SecretLeaks, state.UnexplainedLifecycles, state.ConsecutiveCalendarDays})
 	default:
 		return fmt.Errorf("unknown Codex canary command: %s", args[0])
 	}

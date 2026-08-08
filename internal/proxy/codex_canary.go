@@ -28,6 +28,7 @@ type CodexCanaryState struct {
 	Active                  bool             `json:"active"`
 	StartedAt               time.Time        `json:"started_at"`
 	EndedAt                 time.Time        `json:"ended_at,omitempty"`
+	LastObservedAt          time.Time        `json:"last_observed_at"`
 	Tuple                   CodexCanaryTuple `json:"tuple"`
 	AdmittedTurns           uint64           `json:"admitted_turns"`
 	KeyedMismatches         uint64           `json:"keyed_mismatches"`
@@ -55,7 +56,8 @@ func StartCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []st
 		return nil, errors.New("incomplete Codex canary configuration")
 	}
 	recorder := &CodexCanaryRecorder{fs: fsys, path: path, protected: append([]string(nil), protected...)}
-	recorder.state = CodexCanaryState{Version: CodexCanaryVersion, Active: true, StartedAt: now.UTC(), Tuple: tuple, ConsecutiveCalendarDays: 1}
+	observed := canaryCalendarDay(now)
+	recorder.state = CodexCanaryState{Version: CodexCanaryVersion, Active: true, StartedAt: now.UTC(), LastObservedAt: observed, Tuple: tuple, ConsecutiveCalendarDays: 1}
 	recorder.state.ProtectedDigests = recorder.digestsLocked()
 	if err := recorder.persistLocked(); err != nil {
 		return nil, err
@@ -75,6 +77,10 @@ func OpenCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []str
 	if state.Version != CodexCanaryVersion {
 		return nil, errors.New("unsupported Codex canary version")
 	}
+	if state.LastObservedAt.IsZero() {
+		state.LastObservedAt = canaryCalendarDay(state.StartedAt)
+		state.ConsecutiveCalendarDays = max(state.ConsecutiveCalendarDays, 1)
+	}
 	return &CodexCanaryRecorder{fs: fsys, path: path, protected: append([]string(nil), protected...), state: state}, nil
 }
 
@@ -91,7 +97,18 @@ func (recorder *CodexCanaryRecorder) RecordAdmitted(now time.Time) error {
 		return errors.New("Codex canary is not active")
 	}
 	recorder.state.AdmittedTurns++
-	recorder.updateDaysLocked(now)
+	recorder.observeDayLocked(now)
+	recorder.checkProtectedLocked()
+	return recorder.persistLocked()
+}
+
+func (recorder *CodexCanaryRecorder) RecordHeartbeat(now time.Time) error {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if !recorder.state.Active {
+		return errors.New("Codex canary is not active")
+	}
+	recorder.observeDayLocked(now)
 	recorder.checkProtectedLocked()
 	return recorder.persistLocked()
 }
@@ -104,6 +121,10 @@ func (recorder *CodexCanaryRecorder) RecordUnexplainedLifecycle() error {
 	return recorder.increment(func(state *CodexCanaryState) { state.UnexplainedLifecycles++ })
 }
 
+func (recorder *CodexCanaryRecorder) RecordSecretLeak() error {
+	return recorder.increment(func(state *CodexCanaryState) { state.SecretLeaks++ })
+}
+
 func (recorder *CodexCanaryRecorder) AcknowledgeExplicitSwitch() error {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
@@ -114,6 +135,7 @@ func (recorder *CodexCanaryRecorder) AcknowledgeExplicitSwitch() error {
 func (recorder *CodexCanaryRecorder) Stop(now time.Time) error {
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
+	recorder.observeDayLocked(now)
 	recorder.state.Active = false
 	recorder.state.EndedAt = now.UTC()
 	recorder.checkProtectedLocked()
@@ -127,11 +149,30 @@ func (recorder *CodexCanaryRecorder) increment(update func(*CodexCanaryState)) e
 	return recorder.persistLocked()
 }
 
-func (recorder *CodexCanaryRecorder) updateDaysLocked(now time.Time) {
-	days := int(now.UTC().Truncate(24*time.Hour).Sub(recorder.state.StartedAt.UTC().Truncate(24*time.Hour))/(24*time.Hour)) + 1
-	if days > recorder.state.ConsecutiveCalendarDays {
-		recorder.state.ConsecutiveCalendarDays = days
+func (recorder *CodexCanaryRecorder) observeDayLocked(now time.Time) {
+	day := canaryCalendarDay(now)
+	previous := canaryCalendarDay(recorder.state.LastObservedAt)
+	if previous.IsZero() {
+		previous = canaryCalendarDay(recorder.state.StartedAt)
 	}
+	delta := int(day.Sub(previous) / (24 * time.Hour))
+	switch {
+	case delta == 1:
+		recorder.state.ConsecutiveCalendarDays++
+	case delta > 1:
+		recorder.state.ConsecutiveCalendarDays = 1
+	case delta < 0:
+		return
+	}
+	recorder.state.LastObservedAt = day
+}
+
+func canaryCalendarDay(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	year, month, day := value.UTC().Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }
 
 func (recorder *CodexCanaryRecorder) checkProtectedLocked() {
