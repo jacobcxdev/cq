@@ -130,6 +130,7 @@ func TestCodexJournalRetentionAndLateResumeTombstone(t *testing.T) {
 	store := openTestCodexLeaseStore(t, fsys)
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	old := testJournalLease(now.Add(-8 * 24 * time.Hour))
+	old.State = LeaseOrphaned
 	old.RoutingRefs = 0
 	old.ActiveAttempts = 0
 	active := old
@@ -141,19 +142,12 @@ func TestCodexJournalRetentionAndLateResumeTombstone(t *testing.T) {
 	if err := store.Compact(now, DefaultCodexLeaseRetention); err != nil {
 		t.Fatal(err)
 	}
-	record, _, found := store.Lookup(old.Key, []codex.AccountKey{old.AccountKey})
-	if !found || record.State != LeaseExpired {
+	if record, _, found := store.Lookup(old.Key, []codex.AccountKey{old.AccountKey}); found {
 		t.Fatalf("expired record = %#v, found = %v", record, found)
 	}
 	activeRecord, _, found := store.Lookup(active.Key, []codex.AccountKey{active.AccountKey})
 	if !found || activeRecord.State == LeaseExpired {
 		t.Fatalf("active record = %#v, found = %v", activeRecord, found)
-	}
-	if err := store.Compact(now.Add(8*24*time.Hour), DefaultCodexLeaseRetention); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, found := store.Lookup(old.Key, []codex.AccountKey{old.AccountKey}); found {
-		t.Fatal("expired tombstone not compacted")
 	}
 }
 

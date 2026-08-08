@@ -135,6 +135,9 @@ func OpenCodexRuntimeObserver(runtime *CodexRoutingRuntime, fsys fsutil.DurableF
 	if err != nil {
 		return nil, err
 	}
+	if err := store.Compact(time.Now(), DefaultCodexLeaseRetention); err != nil {
+		return nil, fmt.Errorf("compact Codex lease journal: %w", err)
+	}
 	manager := NewCodexTurnLeaseManager(epoch, false, nil)
 	return NewCodexTurnObserver(manager, store)
 }
@@ -317,7 +320,7 @@ func (store *CodexLeaseStore) Compact(now time.Time, retention time.Duration) er
 			continue
 		}
 		switch record.State {
-		case LeaseSuperseded, LeaseExpired, LeaseFailedUnadmitted:
+		case LeaseBoundQuiescent, LeaseOrphaned, LeaseSuperseded, LeaseExpired, LeaseFailedUnadmitted:
 			continue
 		default:
 			record.State = LeaseExpired
