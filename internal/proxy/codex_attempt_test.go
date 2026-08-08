@@ -29,6 +29,7 @@ func (s *queuedRequestScope) Plan(_ context.Context, _ CodexRouteRequirements, _
 type attemptResult struct {
 	status int
 	body   string
+	header http.Header
 	err    error
 }
 
@@ -49,7 +50,11 @@ func (e *queuedAttemptExecutor) Do(_ context.Context, _ RouteChoice, attempt Can
 	if result.err != nil {
 		return nil, result.err
 	}
-	return &http.Response{StatusCode: result.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(result.body))}, nil
+	header := result.header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{StatusCode: result.status, Header: header, Body: io.NopCloser(strings.NewReader(result.body))}, nil
 }
 
 type fakeReferenceRefresher struct {

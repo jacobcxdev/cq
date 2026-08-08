@@ -16,6 +16,8 @@ type CodexProtocolRequest struct {
 	Model              string
 	PreviousResponseID string
 	Metadata           CodexTurnMetadataResult
+	TurnState          string
+	HasTurnState       bool
 	HasEncryptedState  bool
 }
 

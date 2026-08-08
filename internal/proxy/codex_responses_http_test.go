@@ -44,6 +44,7 @@ type enforcementExecutor struct {
 	results  map[codex.AccountKey][]attemptResult
 	accounts []codex.AccountKey
 	bodies   [][]byte
+	headers  []http.Header
 }
 
 func (executor *enforcementExecutor) Do(_ context.Context, choice RouteChoice, _ CandidateAttempt, request *http.Request) (*http.Response, error) {
@@ -60,6 +61,7 @@ func (executor *enforcementExecutor) Do(_ context.Context, choice RouteChoice, _
 	defer executor.mu.Unlock()
 	executor.accounts = append(executor.accounts, choice.AccountKey)
 	executor.bodies = append(executor.bodies, data)
+	executor.headers = append(executor.headers, request.Header.Clone())
 	queue := executor.results[choice.AccountKey]
 	if len(queue) == 0 {
 		return nil, errors.New("unexpected enforcement attempt")
@@ -69,7 +71,11 @@ func (executor *enforcementExecutor) Do(_ context.Context, choice RouteChoice, _
 	if result.err != nil {
 		return nil, result.err
 	}
-	return &http.Response{StatusCode: result.status, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(result.body))}, nil
+	header := result.header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{StatusCode: result.status, Header: header, Body: io.NopCloser(bytes.NewBufferString(result.body))}, nil
 }
 
 func TestCodexHTTPEnforcerPinsRepeatedSamplingAndSupersedesAtNextTurn(t *testing.T) {
@@ -263,6 +269,58 @@ func TestCodexHTTPEnforcerParsesCompressedStrongMetadataWithoutChangingReplay(t 
 	_ = response.Body.Close()
 	if len(executor.bodies) != 1 || !bytes.Equal(executor.bodies[0], encoded) {
 		t.Fatal("compressed request replay changed")
+	}
+}
+
+func TestCodexHTTPEnforcerRejectsHTTPPrewarmWithoutSocketLineage(t *testing.T) {
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{}, &enforcementExecutor{}, fsutil.NewMemFS())
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"","request_kind":"prewarm"}}}`)
+	_, enforce, err := enforcer.Parse(body, nil)
+	if !errors.Is(err, ErrCodexContinuity) || enforce {
+		t.Fatalf("enforce=%v error=%v", enforce, err)
+	}
+}
+
+func TestCodexHTTPEnforcerParsesRequestTurnState(t *testing.T) {
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{}, &enforcementExecutor{}, fsutil.NewMemFS())
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	header := make(http.Header)
+	header.Set("x-codex-turn-state", "state-one")
+	request, enforce, err := enforcer.Parse(body, header)
+	if err != nil || !enforce || !request.HasTurnState || request.TurnState != "state-one" {
+		t.Fatalf("request=%#v enforce=%v error=%v", request, enforce, err)
+	}
+}
+
+func TestCodexHTTPEnforcerPinsAndValidatesTurnState(t *testing.T) {
+	stateHeader := make(http.Header)
+	stateHeader.Set("x-codex-turn-state", "state-one")
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {
+			{status: http.StatusOK, header: stateHeader, body: completedSSE("response-one")},
+			{status: http.StatusOK, body: completedSSE("response-two")},
+		},
+	}}
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}, executor, fsutil.NewMemFS())
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+
+	for range 2 {
+		response, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+	}
+	if got := executor.headers[1].Get("x-codex-turn-state"); got != "state-one" {
+		t.Fatalf("forwarded turn state = %q", got)
+	}
+
+	request.HasTurnState = true
+	request.TurnState = "state-two"
+	_, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if !errors.Is(err, ErrCodexContinuity) || len(executor.accounts) != 2 {
+		t.Fatalf("error=%v attempts=%v", err, executor.accounts)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -112,6 +113,46 @@ func TestCodexObservePrewarmAdoptsMatchingRealTurn(t *testing.T) {
 	lease, found := observer.Leases.Get(testCodexLeaseKeyFor("session-p", "thread-p", "turn-real"))
 	if !found || lease.ResponseAnchor != "resp-prewarm" || lease.UpstreamSocketGeneration != 41 || lease.AccountKey != "account-a" {
 		t.Fatalf("adopted lease = %#v, found = %v", lease, found)
+	}
+}
+
+func TestCodexObservePersistsResponseContinuityMutations(t *testing.T) {
+	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
+	manager := NewCodexTurnLeaseManager(13, true, nil)
+	observer := newCodexTurnObserverWithKey(manager, store, []byte("01234567890123456789012345678901"))
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), body, "identity", "", false)
+	handle.Selected(RouteChoice{AccountKey: "account"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+	handle.ObserveBytes([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"response-one\",\"output\":[{\"encrypted_content\":\"opaque\"}]}}\n\n"))
+	handle.ObserveBytes([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-two\"}}\n\n"))
+	handle.Finish(nil)
+
+	key := testCodexLeaseKeyFor("session", "thread", "turn")
+	lease, found := manager.Get(key)
+	if !found || lease.ResponseAnchor != "response-two" || !lease.HasEncryptedState || lease.State != LeaseBoundQuiescent {
+		t.Fatalf("lease=%#v found=%v", lease, found)
+	}
+	record, account, found := store.LookupMode(key, []codex.AccountKey{"account"}, 13, true)
+	if !found || account != "account" || !record.HasResponseAnchor || !record.HasEncryptedState || record.State != LeaseBoundQuiescent {
+		t.Fatalf("record=%#v account=%q found=%v", record, account, found)
+	}
+}
+
+func TestCodexObservePersistsCompactEncryptedAffinity(t *testing.T) {
+	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
+	manager := NewCodexTurnLeaseManager(14, true, nil)
+	observer := newCodexTurnObserverWithKey(manager, store, []byte("01234567890123456789012345678901"))
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"compaction","compaction":"standalone"}}}`)
+	handle := observer.BeginHTTP(context.Background(), body, "identity", "", true)
+	handle.Selected(RouteChoice{AccountKey: "account"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+	handle.ObserveBytes([]byte(`{"id":"compact-response","output":[{"encrypted_content":"opaque"}]}`))
+	handle.Finish(nil)
+
+	lease, found := manager.Get(testCodexLeaseKeyFor("session", "thread", "turn"))
+	if !found || lease.ResponseAnchor != "compact-response" || !lease.HasEncryptedState || lease.State != LeaseBoundQuiescent {
+		t.Fatalf("lease=%#v found=%v", lease, found)
 	}
 }
 

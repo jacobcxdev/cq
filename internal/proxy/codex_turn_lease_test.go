@@ -198,6 +198,24 @@ func TestCodexTurnRestoreDoesNotPromoteShadowEpoch(t *testing.T) {
 	}
 }
 
+func TestCodexTurnLeaseEmptyAnchorPreservesKnownResponse(t *testing.T) {
+	manager := NewCodexTurnLeaseManager(1, true, nil)
+	key := testCodexLeaseKey("thread", "turn")
+	if _, err := manager.Acquire(context.Background(), key, fixedCodexAccount("account")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetResponseAnchor(key, "response", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetResponseAnchor(key, "", true); err != nil {
+		t.Fatal(err)
+	}
+	lease, _ := manager.Get(key)
+	if lease.ResponseAnchor != "response" || !lease.HasEncryptedState {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
 func fixedCodexAccount(account codex.AccountKey) func(context.Context) (codex.AccountKey, error) {
 	return func(context.Context) (codex.AccountKey, error) { return account, nil }
 }

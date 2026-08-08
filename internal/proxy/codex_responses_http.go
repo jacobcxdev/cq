@@ -54,6 +54,13 @@ func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (Codex
 		return request, false, nil
 	}
 	metadata := request.Metadata.Metadata
+	if metadata.RequestKind == CodexRequestPrewarm {
+		return CodexProtocolRequest{}, false, fmt.Errorf("%w: HTTP prewarm has no live WebSocket lineage", ErrCodexContinuity)
+	}
+	request.TurnState, request.HasTurnState, err = ParseCodexTurnStateHeader(header)
+	if err != nil {
+		return CodexProtocolRequest{}, false, err
+	}
 	return request, metadata.TurnID != "" && (metadata.RequestKind == CodexRequestTurn || metadata.RequestKind == CodexRequestCompaction), nil
 }
 
@@ -97,6 +104,16 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 	if lease.TurnStateUnavailable {
 		_ = enforcer.Leases.ReleaseRouting(key)
 		return nil, choice, CandidateAttempt{}, fmt.Errorf("%w: persisted turn state unavailable after restart", ErrCodexContinuity)
+	}
+	if lease.TurnState != "" {
+		if request.HasTurnState && request.TurnState != lease.TurnState {
+			_ = enforcer.Leases.ReleaseRouting(key)
+			return nil, choice, CandidateAttempt{}, fmt.Errorf("%w: request turn state mismatch", ErrCodexContinuity)
+		}
+		upstream.Header.Set("x-codex-turn-state", lease.TurnState)
+	} else if request.HasTurnState {
+		_ = enforcer.Leases.ReleaseRouting(key)
+		return nil, choice, CandidateAttempt{}, fmt.Errorf("%w: unexpected request turn state", ErrCodexContinuity)
 	}
 	if err := lease.CheckContinuation(choice.AccountKey, 0, request.PreviousResponseID, request.HasEncryptedState); err != nil {
 		_ = enforcer.Leases.ReleaseRouting(key)

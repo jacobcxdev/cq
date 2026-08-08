@@ -25,15 +25,16 @@ const (
 )
 
 type CodexSSEObservation struct {
-	Kind       CodexSSEEventKind
-	Type       string
-	Data       []byte
-	Admits     bool
-	EndTurn    *bool
-	TurnState  string
-	ResponseID string
-	Error      CodexWrappedError
-	ParseError error
+	Kind              CodexSSEEventKind
+	Type              string
+	Data              []byte
+	Admits            bool
+	EndTurn           *bool
+	TurnState         string
+	ResponseID        string
+	HasEncryptedState bool
+	Error             CodexWrappedError
+	ParseError        error
 }
 
 type CodexSSEParser struct {
@@ -135,7 +136,10 @@ func (p *CodexSSEParser) dispatch() (CodexSSEObservation, error) {
 }
 
 func classifyCodexSSEData(data []byte) CodexSSEObservation {
-	observation := CodexSSEObservation{Data: append([]byte(nil), data...)}
+	observation := CodexSSEObservation{
+		Data:              append([]byte(nil), data...),
+		HasEncryptedState: jsonContainsKey(data, "encrypted_content"),
+	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		observation.Kind = CodexSSEDone
 		return observation

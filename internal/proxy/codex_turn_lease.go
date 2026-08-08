@@ -438,6 +438,7 @@ func (manager *CodexTurnLeaseManager) SetTurnState(key LeaseKey, state string) e
 	if managed.lease.TurnState == "" && state != "" {
 		managed.lease.TurnState = state
 		managed.lease.Generation++
+		managed.lease.LastSeen = manager.now()
 	}
 	return nil
 }
@@ -449,9 +450,34 @@ func (manager *CodexTurnLeaseManager) SetResponseAnchor(key LeaseKey, anchor str
 	if managed == nil {
 		return ErrCodexStaleTurn
 	}
-	managed.lease.ResponseAnchor = anchor
-	managed.lease.HasEncryptedState = managed.lease.HasEncryptedState || encrypted
-	managed.lease.Generation++
+	changed := false
+	if anchor != "" && managed.lease.ResponseAnchor != anchor {
+		managed.lease.ResponseAnchor = anchor
+		changed = true
+	}
+	if encrypted && !managed.lease.HasEncryptedState {
+		managed.lease.HasEncryptedState = true
+		changed = true
+	}
+	if changed {
+		managed.lease.Generation++
+		managed.lease.LastSeen = manager.now()
+	}
+	return nil
+}
+
+func (manager *CodexTurnLeaseManager) MarkNonMigratable(key LeaseKey) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	managed := manager.leases[key]
+	if managed == nil {
+		return ErrCodexStaleTurn
+	}
+	if !managed.lease.NonMigratable {
+		managed.lease.NonMigratable = true
+		managed.lease.Generation++
+		managed.lease.LastSeen = manager.now()
+	}
 	return nil
 }
 

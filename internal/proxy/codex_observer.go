@@ -266,6 +266,8 @@ func (handle *CodexTurnObservation) ResponseHeaders(status int, header http.Head
 	} else if found {
 		if err := handle.observer.Leases.SetTurnState(handle.key, state); err != nil {
 			handle.observer.observeLeaseError(err)
+		} else {
+			handle.persistMutationLocked()
 		}
 	}
 }
@@ -325,10 +327,19 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 			return
 		}
 		handle.admitLocked()
+		if handle.admitted && (observation.ResponseID != "" || observation.HasEncryptedState) {
+			if err := handle.observer.Leases.SetResponseAnchor(handle.key, observation.ResponseID, observation.HasEncryptedState); err != nil {
+				handle.observer.observeLeaseError(err)
+			} else {
+				handle.persistMutationLocked()
+			}
+		}
 	case CodexSSEMetadata:
 		if handle.leaseAcquired && observation.TurnState != "" {
 			if err := handle.observer.Leases.SetTurnState(handle.key, observation.TurnState); err != nil {
 				handle.observer.observeLeaseError(err)
+			} else if handle.admitted {
+				handle.persistMutationLocked()
 			}
 		}
 	case CodexSSECompleted:
@@ -344,8 +355,16 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 			return
 		}
 		if handle.admitted && !handle.completed {
+			if observation.ResponseID != "" || observation.HasEncryptedState {
+				if err := handle.observer.Leases.SetResponseAnchor(handle.key, observation.ResponseID, observation.HasEncryptedState); err != nil {
+					handle.observer.observeLeaseError(err)
+				} else {
+					handle.persistMutationLocked()
+				}
+			}
 			if lease, err := handle.observer.Leases.ObserveCompleted(handle.key, observation.EndTurn); err == nil {
 				handle.completed = true
+				handle.persistMutationLocked()
 				noteCodexObservation(handle.ctx, codexObservationFields{TurnHint: handle.observer.turnHint(handle.key), LeasePhase: lease.State.String(), LeaseGeneration: lease.Generation, Decision: "shadow_sampling_complete"})
 			} else {
 				handle.observer.observeLeaseError(err)
@@ -355,6 +374,8 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 		if handle.admitted && !handle.failed && !handle.completed {
 			if _, err := handle.observer.Leases.ObserveProviderFailed(handle.key); err != nil {
 				handle.observer.observeLeaseError(err)
+			} else {
+				handle.persistMutationLocked()
 			}
 			handle.failed = true
 		}
@@ -386,9 +407,15 @@ func (handle *CodexTurnObservation) Finish(readErr error) {
 			}
 		}
 		if handle.compact && handle.admitted && !handle.completed && readErr == nil {
-			if _, err := ParseCodexCompactResponse(handle.body); err == nil {
+			if compact, err := ParseCodexCompactResponse(handle.body); err == nil {
+				if err := handle.observer.Leases.SetResponseAnchor(handle.key, compact.ResponseID, compact.HasEncryptedState); err != nil {
+					handle.observer.observeLeaseError(err)
+				} else {
+					handle.persistMutationLocked()
+				}
 				_, _ = handle.observer.Leases.ObserveCompleted(handle.key, nil)
 				handle.completed = true
+				handle.persistMutationLocked()
 			}
 		}
 		if !handle.compact && handle.admitted && !handle.completed && !handle.failed && readErr == nil && len(handle.body) != 0 {
@@ -398,15 +425,29 @@ func (handle *CodexTurnObservation) Finish(readErr error) {
 			if jsonUnmarshalObject(handle.body, &response) == nil && response.Status == "completed" {
 				_, _ = handle.observer.Leases.ObserveCompleted(handle.key, nil)
 				handle.completed = true
+				handle.persistMutationLocked()
 			}
 		}
 		if handle.admitted && !handle.completed && !handle.failed {
-			_, _ = handle.observer.Leases.ObserveIndeterminate(handle.key)
+			if _, err := handle.observer.Leases.ObserveIndeterminate(handle.key); err == nil {
+				handle.persistMutationLocked()
+			}
 		}
 		if !handle.admitted {
 			handle.failUnadmittedLocked("unadmitted_end")
 		}
 	})
+}
+
+func (handle *CodexTurnObservation) persistMutationLocked() {
+	if handle == nil || handle.observer == nil || handle.observer.Store == nil {
+		return
+	}
+	if err := handle.observer.persist(handle.observer.Leases.Snapshot()); err != nil {
+		_ = handle.observer.Leases.MarkNonMigratable(handle.key)
+		_ = handle.observer.persist(handle.observer.Leases.Snapshot())
+		handle.observer.observeLeaseError(err)
+	}
 }
 
 func (handle *CodexTurnObservation) failUnadmittedLocked(reason string) {
