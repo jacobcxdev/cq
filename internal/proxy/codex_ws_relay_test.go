@@ -69,10 +69,13 @@ func TestRelayWebSocketPairRecoversPumpPanicAndJoinsPeer(t *testing.T) {
 }
 
 func TestCodexWebSocketAttemptExecutorInjectsOnlySelectedCredential(t *testing.T) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }, EnableCompression: true, Subprotocols: []string{"responses"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer selected" || r.Header.Get("ChatGPT-Account-ID") != "account" || r.Header.Get("x-api-key") != "" {
 			t.Errorf("headers auth=%q account=%q api-key=%q", r.Header.Get("Authorization"), r.Header.Get("ChatGPT-Account-ID"), r.Header.Get("x-api-key"))
+		}
+		if r.Header.Get("OpenAI-Beta") != "responses_websockets=2026-02-06" || !strings.Contains(r.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+			t.Errorf("semantic headers beta=%q extensions=%q", r.Header.Get("OpenAI-Beta"), r.Header.Get("Sec-WebSocket-Extensions"))
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err == nil {
@@ -86,13 +89,16 @@ func TestCodexWebSocketAttemptExecutorInjectsOnlySelectedCredential(t *testing.T
 	executor := NewCodexWebSocketAttemptExecutor(resolver)
 	choice := RouteChoice{AccountKey: "identity"}
 	attempt := CandidateAttempt{AccountKey: "identity", Candidate: codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}}
-	headers := http.Header{"Authorization": []string{"Bearer caller"}, "x-api-key": []string{"caller-key"}}
+	headers := http.Header{"Authorization": []string{"Bearer caller"}, "x-api-key": []string{"caller-key"}, "OpenAI-Beta": []string{"responses_websockets=2026-02-06"}, "Sec-WebSocket-Protocol": []string{"responses"}}
 	conn, response, _, err := executor.Dial(context.Background(), choice, attempt, "ws"+strings.TrimPrefix(server.URL, "http"), headers)
 	if err != nil {
 		if response != nil && response.Body != nil {
 			response.Body.Close()
 		}
 		t.Fatal(err)
+	}
+	if conn.Subprotocol() != "responses" {
+		t.Fatalf("subprotocol = %q", conn.Subprotocol())
 	}
 	_ = conn.Close()
 }

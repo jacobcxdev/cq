@@ -460,15 +460,15 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - Create: `cmd/cq/codex_validate.go`
 - Create: `cmd/cq/codex_validate_test.go`
 
-- [ ] Implement shadow-only rotation intent keyed to exact turn, mode epoch, downstream generation, upstream generation, client build, and retry budget.
-- [ ] Require model-bearing handshake and first-frame model match before any model-aware prospective decision. Stale handshake metadata loses to current frame.
-- [ ] Preserve upstream 101 semantics, required beta/header/subprotocol values, and permessage-deflate across two legs. Pass pre-upgrade final 401/403/429/426 status/body/safe headers without downstream upgrade.
-- [ ] Add exact wrapped `previous_response_not_found` event. Do not require graceful close: client receives error, invalidates socket, then reconnects or crosses to HTTP with portable full request.
-- [ ] Never transparently replay incremental frame or open replacement upstream behind same downstream socket. Same-account reconnect also invalidates predecessor response ID.
+- [x] Implement shadow-only rotation intent keyed to exact turn, mode epoch, downstream generation, upstream generation, client build, and retry budget.
+- [x] Require model-bearing handshake and first-frame model match before any model-aware prospective decision. Stale handshake metadata loses to current frame.
+- [x] Preserve upstream 101 semantics, required beta/header/subprotocol values, and permessage-deflate across two legs. Pass pre-upgrade final 401/403/429/426 status/body/safe headers without downstream upgrade.
+- [x] Add exact wrapped `previous_response_not_found` event. Do not require graceful close: client receives error, invalidates socket, then reconnects or crosses to HTTP with portable full request.
+- [x] Never transparently replay incremental frame or open replacement upstream behind same downstream socket. Same-account reconnect also invalidates predecessor response ID.
 - [ ] Run 100 trials for each explicitly supported CLI/Desktop build and retry budget 0, 1, exhausted. Prove error -> client invalidation -> new WS generation or HTTP crossover -> full portable request before replacement dispatch.
-- [ ] Test full new-turn rotation trigger separately. Keep unsupported trigger account-affine/fail-closed until fixture proves signal.
-- [ ] Record proof result but keep WS `observe`; no WS readiness marker yet.
-- [ ] Commit `test: proved Codex WebSocket resync`.
+- [x] Test full new-turn rotation trigger separately. Keep unsupported trigger account-affine/fail-closed until fixture proves signal.
+- [x] Record proof result but keep WS `observe`; no WS readiness marker yet.
+- [x] Commit Stage 13 proof with unsupported-build blocker recorded.
 
 ## Stage 14: WebSocket enforcement
 

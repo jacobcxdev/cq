@@ -892,8 +892,9 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade) provider=codex (native)\n", r.Method)
 
 	upgrader := websocket.Upgrader{
-		CheckOrigin:  func(_ *http.Request) bool { return true },
-		Subprotocols: websocket.Subprotocols(r),
+		CheckOrigin:       func(_ *http.Request) bool { return true },
+		Subprotocols:      websocket.Subprotocols(r),
+		EnableCompression: true,
 	}
 	clientConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
