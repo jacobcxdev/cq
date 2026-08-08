@@ -804,6 +804,11 @@ Before adding either field, config save must preserve unknown JSON fields. Every
 
 Each stage is a separate reviewable PR with failing tests first.
 
+Executable addendum plans:
+
+- `docs/superpowers/plans/2026-08-08-codexbar-candidate-federation.md`
+- `docs/superpowers/plans/2026-08-08-codex-window-priming.md`
+
 | Stage | Change | Promotion gate | Rollback |
 |---|---|---|---|
 | 1. Containment | Remove token-derived identifiers and proxy/Live `Switcher`; stop automatic system/registry writes and all Codex refresh; preserve/prefer a matching live system candidate over stale managed duplicates; add monotonic compatibility-epoch refusal; make fake `/app-server` fail closed and replace messages directing clients to it; correct root/provider architecture docs | Fresh/expired cases across every automatic path make zero token-endpoint calls and leave system, registry, and managed credentials byte-identical; live-newer/stored-older passes; tests reject uncommitted refresh use; secret scan passes | Initial floor; never run below current recorded compatibility epoch |
