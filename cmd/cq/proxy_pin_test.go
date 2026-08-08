@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,5 +192,81 @@ func TestProxyPinFreshConfig(t *testing.T) {
 	// Verify the config file was created.
 	if _, err := os.Stat(filepath.Join(configHome, "cq", "proxy.json")); err != nil {
 		t.Errorf("proxy.json not created: %v", err)
+	}
+}
+
+func TestProxyPinPreservesFutureConfigFields(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	configDir := filepath.Join(dir, "cq")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "proxy.json")
+	if err := os.WriteFile(path, []byte(`{
+		"local_token":"token",
+		"codex_turn_routing":"observe",
+		"codex_ws_turn_routing":"enforce",
+		"future":{"nested":true}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProxyPin([]string{"person@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var future struct {
+		Nested bool `json:"nested"`
+	}
+	if err := json.Unmarshal(raw["future"], &future); err != nil || !future.Nested {
+		t.Fatalf("future field = %s, want preserved: %v", raw["future"], err)
+	}
+	if string(raw["codex_turn_routing"]) != `"observe"` || string(raw["codex_ws_turn_routing"]) != `"enforce"` {
+		t.Fatalf("routing modes changed: %s", data)
+	}
+}
+
+func TestProxyConfigReloadAppliesPinButNotRoutingModes(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	configDir := filepath.Join(dir, "cq")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "proxy.json")
+	if err := os.WriteFile(path, []byte(`{
+		"local_token":"token",
+		"pinned_claude_account":"person@example.test",
+		"codex_turn_routing":"observe",
+		"codex_ws_turn_routing":"enforce",
+		"future":{"keep":true}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selector := proxy.NewPinnedClaudeSelector(nil, nil, "", nil)
+	runtime := &proxy.CodexRoutingRuntime{
+		HTTP:      proxy.CodexModeStatus{Configured: proxy.CodexRoutingOff, Effective: proxy.CodexRoutingOff},
+		WebSocket: proxy.CodexModeStatus{Configured: proxy.CodexRoutingOff, Effective: proxy.CodexRoutingOff},
+	}
+	reloadProxyConfig(selector, runtime)
+	if selector.Pin() != "person@example.test" {
+		t.Fatalf("pin = %q, want reloaded pin", selector.Pin())
+	}
+	if runtime.HTTP.Configured != proxy.CodexRoutingOff || runtime.WebSocket.Configured != proxy.CodexRoutingOff {
+		t.Fatalf("routing modes hot-reloaded: %+v", runtime)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"future":{"keep":true}`) {
+		t.Fatalf("reload changed future config: %s", data)
 	}
 }

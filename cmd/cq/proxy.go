@@ -169,6 +169,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 	if opts.Port != 0 {
 		cfg.Port = opts.Port
 	}
+	codexClientBuild := defaultCodexClientVersion()
 	fsys := fsutil.OSFileSystem{}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
 	credentialControl, err := codexprov.OpenDefaultCredentialRefreshControl(context.Background(), fsys, refreshClient)
@@ -176,6 +177,10 @@ func runProxyStart(opts proxyCommandOptions) error {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
 	defer credentialControl.Close()
+	codexRouting, err := proxy.OpenCodexRoutingRuntime(cfg, version, codexClientBuild)
+	if err != nil {
+		return fmt.Errorf("Codex routing modes: %w", err)
+	}
 
 	fmt.Fprintf(os.Stderr, "cq: proxy token: %s\n", cfg.LocalToken)
 
@@ -205,7 +210,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 	proxyCtx, proxyCancel := context.WithCancel(context.Background())
 	defer proxyCancel()
-	startProxyConfigReload(proxyCtx, selector)
+	startProxyConfigReload(proxyCtx, selector, codexRouting)
 
 	accountsMgr := &claudeprov.Accounts{HTTP: refreshClient}
 	switcher := proxy.AccountSwitcher(func(ctx context.Context, email string) error {
@@ -299,7 +304,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 			ClaudeUpstream:     cfg.ClaudeUpstream,
 			CodexUpstream:      cfg.CodexUpstream,
 			HTTPClient:         refreshClient,
-			CodexClientVersion: defaultCodexClientVersion(),
+			CodexClientVersion: codexClientBuild,
 			ClaudeToken:        firstClaudeAccessToken,
 			CodexTokenContext: func(ctx context.Context) (string, error) {
 				return firstCodexAccessTokenFromInventory(ctx, codexprov.DiscoverInventory(fsys), credentialControl)
@@ -402,6 +407,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Headroom:              headroom,
 		Diag:                  diagnostics,
 		PayloadDiag:           payloadDiag,
+		CodexRouting:          codexRouting,
 		HeadroomMode:          resolvedMode,
 		Catalog:               catalog,
 		Refresher:             proxyRefresher,
@@ -431,7 +437,7 @@ func clearPersistedClaudePin(pin string) {
 	fmt.Fprintf(os.Stderr, "cq: cleared expired claude pin: %s\n", pin)
 }
 
-func startProxyConfigReload(ctx context.Context, selector *proxy.PinnedClaudeSelector) {
+func startProxyConfigReload(ctx context.Context, selector *proxy.PinnedClaudeSelector, routing *proxy.CodexRoutingRuntime) {
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -440,13 +446,13 @@ func startProxyConfigReload(ctx context.Context, selector *proxy.PinnedClaudeSel
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				reloadProxyConfig(selector)
+				reloadProxyConfig(selector, routing)
 			}
 		}
 	}()
 }
 
-func reloadProxyConfig(selector *proxy.PinnedClaudeSelector) {
+func reloadProxyConfig(selector *proxy.PinnedClaudeSelector, routing *proxy.CodexRoutingRuntime) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "cq: proxy config reload panic: %v\n", r)
@@ -459,6 +465,9 @@ func reloadProxyConfig(selector *proxy.PinnedClaudeSelector) {
 		return
 	}
 	selector.SetPin(cfg.PinnedClaudeAccount)
+	if routing.ConfiguredModesDiffer(cfg) {
+		fmt.Fprintln(os.Stderr, "cq: proxy config reload: Codex routing mode change requires restart")
+	}
 }
 
 func runProxyStatus(opts proxyCommandOptions) error {

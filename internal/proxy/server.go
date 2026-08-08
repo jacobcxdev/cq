@@ -63,6 +63,8 @@ type Server struct {
 	Headroom                  *HeadroomBridge
 	Diag                      *DiagnosticsWriter
 	PayloadDiag               *PayloadWriter
+	// CodexRouting is resolved once at startup. Config reload never mutates it.
+	CodexRouting *CodexRoutingRuntime
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -262,6 +264,30 @@ func (s *Server) handleRegistryRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) codexRoutingHealth() (CodexModeStatus, CodexModeStatus) {
+	if s.CodexRouting != nil {
+		return s.CodexRouting.HTTP, s.CodexRouting.WebSocket
+	}
+	httpConfigured := CodexRoutingOff
+	wsConfigured := CodexRoutingOff
+	if s.Config != nil {
+		if s.Config.CodexTurnRouting != "" {
+			httpConfigured = s.Config.CodexTurnRouting
+		}
+		if s.Config.CodexWSTurnRouting != "" {
+			wsConfigured = s.Config.CodexWSTurnRouting
+		}
+	}
+	status := func(configured CodexRoutingMode) CodexModeStatus {
+		result := CodexModeStatus{Configured: configured, Effective: CodexRoutingOff}
+		if configured != CodexRoutingOff {
+			result.InhibitionReason = "routing runtime unavailable"
+		}
+		return result
+	}
+	return status(httpConfigured), status(wsConfigured)
 }
 
 // refreshSourceErrors converts the SourceErrors map in RefreshDiagnostics to a
@@ -600,6 +626,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"payload": s.PayloadDiag != nil,
 		},
 	}
+	httpMode, wsMode := s.codexRoutingHealth()
+	resp["codex_turn_routing"] = httpMode
+	resp["codex_ws_turn_routing"] = wsMode
 	if s.Headroom != nil {
 		switch s.HeadroomMode {
 		case HeadroomModeCache:

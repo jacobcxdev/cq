@@ -1,6 +1,6 @@
 # Codex Turn-Aware Account Routing Design
 
-- **Status:** Approved; implementation in progress (Stages 1–6 complete)
+- **Status:** Approved; implementation in progress (Stages 1–7 complete)
 - **Date:** 2026-08-08
 - **Scope:** Codex credential authority, quota-aware selection, and native Responses HTTP/WebSocket routing
 - **Implementation plan:** [`../plans/2026-08-08-codex-turn-aware-routing.md`](../plans/2026-08-08-codex-turn-aware-routing.md)

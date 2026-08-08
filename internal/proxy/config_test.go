@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,90 @@ func TestConfigDiagnosticsLogJSONRoundTrip(t *testing.T) {
 	}
 	if roundTrip.DiagnosticsLog != cfg.DiagnosticsLog {
 		t.Fatalf("DiagnosticsLog = %q, want %q", roundTrip.DiagnosticsLog, cfg.DiagnosticsLog)
+	}
+}
+
+func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	configDir := filepath.Join(dir, "cq")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "proxy.json")
+	original := []byte(`{
+		"port": 19280,
+		"local_token": "token",
+		"codex_turn_routing": "observe",
+		"codex_ws_turn_routing": "off",
+		"future_scalar": 7,
+		"future_object": {"nested": [1, {"keep": true}]}
+	}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.PinnedClaudeAccount = "person@example.test"
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if string(raw["future_scalar"]) != "7" {
+		t.Fatalf("future_scalar = %s, want 7", raw["future_scalar"])
+	}
+	var futureObject struct {
+		Nested []any `json:"nested"`
+	}
+	if err := json.Unmarshal(raw["future_object"], &futureObject); err != nil || len(futureObject.Nested) != 2 {
+		t.Fatalf("future_object = %s, want preserved object: %v", raw["future_object"], err)
+	}
+	if string(raw["codex_turn_routing"]) != `"observe"` || string(raw["codex_ws_turn_routing"]) != `"off"` {
+		t.Fatalf("routing modes lost: %s", data)
+	}
+}
+
+func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodexTurnRouting != CodexRoutingOff || cfg.CodexWSTurnRouting != CodexRoutingOff {
+		t.Fatalf("modes = %q/%q, want off/off", cfg.CodexTurnRouting, cfg.CodexWSTurnRouting)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "cq", "proxy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"codex_turn_routing": "off"`) || !strings.Contains(string(data), `"codex_ws_turn_routing": "off"`) {
+		t.Fatalf("generated config missing explicit safe modes: %s", data)
+	}
+}
+
+func TestConfigRejectsInvalidCodexRoutingMode(t *testing.T) {
+	for _, field := range []string{"codex_turn_routing", "codex_ws_turn_routing"} {
+		t.Run(field, func(t *testing.T) {
+			var cfg Config
+			data := []byte(`{"local_token":"token","` + field + `":"automatic"}`)
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.setDefaults()
+			if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), field) {
+				t.Fatalf("validate error = %v, want %s error", err, field)
+			}
+		})
 	}
 }
 

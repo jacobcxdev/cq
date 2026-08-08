@@ -64,6 +64,40 @@ func TestServer_HealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestServerHealthReportsConfiguredEffectiveCodexModes(t *testing.T) {
+	srv := &Server{
+		CodexRouting: &CodexRoutingRuntime{
+			HTTP: CodexModeStatus{
+				Configured:       CodexRoutingEnforce,
+				Effective:        CodexRoutingObserve,
+				InhibitionReason: "readiness marker missing",
+				ModeEpoch:        7,
+				ShadowEpoch:      7,
+			},
+			WebSocket: CodexModeStatus{
+				Configured: CodexRoutingOff,
+				Effective:  CodexRoutingOff,
+				ModeEpoch:  8,
+			},
+		},
+	}
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var response struct {
+		HTTP CodexModeStatus `json:"codex_turn_routing"`
+		WS   CodexModeStatus `json:"codex_ws_turn_routing"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.HTTP.Configured != CodexRoutingEnforce || response.HTTP.Effective != CodexRoutingObserve || response.HTTP.InhibitionReason != "readiness marker missing" || response.HTTP.ModeEpoch != 7 {
+		t.Fatalf("HTTP health = %+v", response.HTTP)
+	}
+	if response.WS.Configured != CodexRoutingOff || response.WS.Effective != CodexRoutingOff {
+		t.Fatalf("WS health = %+v", response.WS)
+	}
+}
+
 type diagnosticsControllerTestWriter struct {
 	header        http.Header
 	statuses      []int

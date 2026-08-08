@@ -292,13 +292,13 @@ type RouteChoice struct {
 - Modify: `cmd/cq/proxy.go`
 - Modify: `cmd/cq/proxy_pin_test.go`
 
-- [ ] Add raw unknown-field storage to config load/save. Red N/N-1 round-trip tests cover `proxy pin`, reload, default generation, both new fields, and arbitrary future objects.
-- [ ] Add `off|observe|enforce` primary and WS modes, persistent mode epoch, shadow/authoritative epoch distinction, and restart-only application.
-- [ ] Add versioned readiness marker containing transport, CQ build, parser/lease schemas, exact client build, retry budget, fixture hash, installed result, and completed gates.
-- [ ] Add red validation tests: `enforce` rejected before implementation/marker; stale dimension invalidates marker; upgrade never creates marker; `observe -> enforce` starts fresh authoritative epoch; `enforce -> off -> enforce` preserves authoritative exact-turn fences and never promotes shadow state.
-- [ ] Extend `/health` with configured/effective mode and inhibition reason.
-- [ ] Run `go test -race -count=1 ./internal/proxy ./cmd/cq -run 'Config|Mode|Readiness|Health|Pin'`.
-- [ ] Commit `feat: added Codex routing modes`.
+- [x] Add raw unknown-field storage to config load/save. Red N/N-1 round-trip tests cover `proxy pin`, reload, default generation, both new fields, and arbitrary future objects.
+- [x] Add `off|observe|enforce` primary and WS modes, persistent mode epoch, shadow/authoritative epoch distinction, and restart-only application.
+- [x] Add versioned readiness marker containing transport, CQ build, parser/lease schemas, exact client build, retry budget, fixture hash, installed result, and completed gates.
+- [x] Add red validation tests: `enforce` rejected before implementation/marker; stale dimension invalidates marker; upgrade never creates marker; `observe -> enforce` starts fresh authoritative epoch; `enforce -> off -> enforce` preserves authoritative exact-turn fences and never promotes shadow state.
+- [x] Extend `/health` with configured/effective mode and inhibition reason.
+- [x] Run `go test -race -count=1 ./internal/proxy ./cmd/cq -run 'Config|Mode|Readiness|Health|Pin'`.
+- [x] Commit `feat: added Codex routing modes`.
 
 ## Stage 8: Explicit-account execution and relay decomposition
 
