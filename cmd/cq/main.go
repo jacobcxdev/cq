@@ -207,6 +207,13 @@ func main() {
 				}
 				return
 			}
+			if len(os.Args) > 2 && os.Args[2] == "canary" {
+				if err := runCodexCanary(os.Args[3:]); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
 		}
 	}
 

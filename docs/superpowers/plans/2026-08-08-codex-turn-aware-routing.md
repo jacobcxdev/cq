@@ -503,13 +503,13 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - Modify: `cmd/cq/proxy.go`
 - Modify related docs/help/tests.
 
-- [ ] Add privacy-safe canary recorder: admitted-turn count, keyed mismatch count, automatic auth/registry hash-change count, secret-leak count, unexplained lifecycle count, start/end time, build/schema/marker tuple. No raw identifiers or credentials.
+- [x] Add privacy-safe canary recorder: admitted-turn count, keyed mismatch count, automatic auth/registry hash-change count, secret-leak count, unexplained lifecycle count, start/end time, build/schema/marker tuple. No raw identifiers or credentials.
 - [ ] Run installed service for seven consecutive days and at least 100 admitted turns. Include long turn past quota depletion, parallel short turns, next-turn reselection, same-lane supersession, restart during quiescence, explicit switch, and Codex Bar observation.
 - [ ] Verify automatic activity leaves system-auth and registry hashes unchanged; explicit switch alone changes system hash.
 - [ ] Rehearse rollback: invalidate marker, set `observe`/`off`, restart/drain, prove exact authoritative turn fences remain and no shadow state promotes.
-- [ ] Only in later release, document enforcement as recommended after validation. Never default existing install to effective enforce and never synthesise readiness marker during upgrade.
+- [x] Only in later release, document enforcement as recommended after validation. Never default existing install to effective enforce and never synthesise readiness marker during upgrade.
 - [ ] After rollback window, delete dead request-scoped Codex selector failover/suppression/switch code proven unreachable. Keep `off/observe` executor path.
-- [ ] Run final gates:
+- [x] Run final gates:
 
 ```bash
 go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexResponses'
@@ -520,7 +520,7 @@ go test -race -count=1 ./...
 git diff --check
 ```
 
-- [ ] Audit current source for forbidden paths:
+- [x] Audit current source for forbidden paths:
 
 ```bash
 rg -n 'Accounts\.Switch|CodexAccountSwitcher|PersistCodexAccount|RefreshCodexToken|active_account_key|auth\.json' internal cmd

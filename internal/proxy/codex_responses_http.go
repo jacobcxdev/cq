@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -15,6 +16,7 @@ type CodexHTTPEnforcer struct {
 	Leases   *CodexTurnLeaseManager
 	Store    *CodexLeaseStore
 	Observer *CodexTurnObserver
+	Canary   *CodexCanaryRecorder
 }
 
 func NewCodexHTTPEnforcer(router *CodexRequestRouter, modeEpoch uint64, store *CodexLeaseStore) (*CodexHTTPEnforcer, error) {
@@ -166,6 +168,11 @@ func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseK
 	_ = enforcer.Leases.ReleaseRouting(key)
 	if err != nil {
 		return err
+	}
+	if enforcer.Canary != nil {
+		if err := enforcer.Canary.RecordAdmitted(time.Now()); err != nil {
+			return fmt.Errorf("record Codex canary admission: %w", err)
+		}
 	}
 	handle := &CodexTurnObservation{
 		observer:        enforcer.Observer,

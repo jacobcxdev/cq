@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -306,6 +307,21 @@ func runProxyStart(opts proxyCommandOptions) error {
 	homeDir, homeErr := fsys.UserHomeDir()
 	if homeErr != nil {
 		fmt.Fprintf(os.Stderr, "cq: registry: resolve home dir: %v (registry disabled)\n", homeErr)
+	}
+	if homeErr == nil && codexHTTPEnforcer != nil {
+		protected := []string{filepath.Join(homeDir, ".codex", "auth.json"), filepath.Join(homeDir, ".codex", "accounts", "registry.json")}
+		canary, canaryErr := proxy.OpenCodexCanary(fsys, proxy.DefaultCodexCanaryPath(), protected)
+		if canaryErr == nil {
+			state := canary.State()
+			if state.Active {
+				if state.Tuple.CQBuild != version || state.Tuple.ClientBuild != codexClientBuild || state.Tuple.ParserSchema != proxy.CurrentCodexParserSchema || state.Tuple.LeaseSchema != proxy.CurrentCodexLeaseSchema || state.Tuple.FixtureHash != proxy.CodexHTTPFixtureHash {
+					return fmt.Errorf("Codex canary tuple does not match running enforcement")
+				}
+				codexHTTPEnforcer.Canary = canary
+			}
+		} else if !os.IsNotExist(canaryErr) {
+			return fmt.Errorf("Codex canary: %w", canaryErr)
+		}
 	}
 
 	var pipeline *registryPipeline
