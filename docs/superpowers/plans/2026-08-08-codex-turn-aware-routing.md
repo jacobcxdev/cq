@@ -272,12 +272,12 @@ type RouteChoice struct {
 }
 ```
 
-- [ ] Add fake-clock red tests for source precedence, monotonic observation sequence, socket generation fence, reset epochs, hard-zero fence, newer positive live lift, stale facts, out-of-order updates, base/Spark scoped buckets, and no-scoped-data fallback.
-- [ ] Add red selection tests: known positive before unknown, known zero ineligible, all-zero returns typed cached limit, remaining percentage rank, active lease count tie-break, no system-active preference, Spark rewrite evaluates effective base bucket, pre-turn compaction requires both buckets.
-- [ ] Implement ledger keyed by opaque account key and canonical bucket. Keep bounded facts with source/generation/observed/reset/confidence.
-- [ ] Replace selector return with atomic `RouteChoice`; model rewrite consumes `EffectiveModel` and never reruns selection.
-- [ ] Run `go test -race -count=100 ./internal/proxy -run 'CodexCapacity|CodexSelector|RouteChoice'`.
-- [ ] Commit `feat: added Codex capacity choices`.
+- [x] Add fake-clock red tests for source precedence, monotonic observation sequence, socket generation fence, reset epochs, hard-zero fence, newer positive live lift, stale facts, out-of-order updates, base/Spark scoped buckets, and no-scoped-data fallback.
+- [x] Add red selection tests: known positive before unknown, known zero ineligible, all-zero returns typed cached limit, remaining percentage rank, active lease count tie-break, no system-active preference, Spark rewrite evaluates effective base bucket, pre-turn compaction requires both buckets.
+- [x] Implement ledger keyed by opaque account key and canonical bucket. Keep bounded facts with source/generation/observed/reset/confidence.
+- [x] Replace selector return with atomic `RouteChoice`; model rewrite consumes `EffectiveModel` and never reruns selection.
+- [x] Run `go test -race -count=100 ./internal/proxy -run 'CodexCapacity|CodexSelector|RouteChoice'`.
+- [x] Commit `feat: added Codex capacity choices`.
 
 ## Stage 7: Config modes, epochs, and readiness floor
 

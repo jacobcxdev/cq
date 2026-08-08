@@ -18,6 +18,18 @@ type multiCodexSelector struct {
 	accounts []codex.CodexAccount
 }
 
+type fixedRouteSelector struct {
+	choice RouteChoice
+}
+
+func (s *fixedRouteSelector) Select(context.Context, ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
+	panic("route choice must not rerun legacy selection")
+}
+
+func (s *fixedRouteSelector) Choose(context.Context, CodexRouteRequirements, ...codex.SelectionExclusion) (RouteChoice, error) {
+	return s.choice, nil
+}
+
 func (s *multiCodexSelector) Select(_ context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
 	excludedAccounts := make(map[codex.AccountKey]bool, len(exclude))
 	excludedCandidates := make(map[codex.CandidateID]bool, len(exclude))
@@ -96,6 +108,39 @@ func TestCodexTokenTransport_HappyPath(t *testing.T) {
 	}
 	if gotAcctID != "acct-1" {
 		t.Errorf("ChatGPT-Account-ID = %q, want %q", gotAcctID, "acct-1")
+	}
+}
+
+func TestCodexTokenTransportConsumesEffectiveModelFromRouteChoice(t *testing.T) {
+	selector := &fixedRouteSelector{choice: RouteChoice{
+		AccountKey:     "account-a",
+		RequestedModel: codexSparkModel,
+		EffectiveModel: codexFallbackModel,
+		account: codex.CodexAccount{
+			AccountKey:  "account-a",
+			AccessToken: "token-a",
+			PlanType:    "pro",
+		},
+	}}
+	var gotModel string
+	transport := &CodexTokenTransport{
+		Selector: selector,
+		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotModel = extractModel(body)
+			return makeResponse(http.StatusOK, `{}`), nil
+		}),
+	}
+	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotModel != codexFallbackModel {
+		t.Fatalf("model = %q, want chosen %q", gotModel, codexFallbackModel)
 	}
 }
 

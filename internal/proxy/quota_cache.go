@@ -44,6 +44,8 @@ type QuotaCache struct {
 	cooldowns  map[string]time.Time
 
 	fetchMu sync.Mutex // serialises API calls in Refresh
+
+	codexCapacity *CodexCapacityLedger
 }
 
 // NewQuotaCache creates a quota cache backed by the shared cq cache directory.
@@ -60,13 +62,28 @@ func NewQuotaCache(fetch UsageFetchFunc, cacheDir string) *QuotaCache {
 // NewCodexQuotaCache creates a read-only quota cache for Codex accounts,
 // backed by the codex.json file written by the cq CLI.
 func NewCodexQuotaCache(cacheDir string) *QuotaCache {
+	now := time.Now
 	return &QuotaCache{
-		cacheDir:  cacheDir,
-		cacheFile: "codex.json",
-		nowFunc:   time.Now,
-		snapshots: make(map[string]QuotaSnapshot),
-		cooldowns: make(map[string]time.Time),
+		cacheDir:      cacheDir,
+		cacheFile:     "codex.json",
+		nowFunc:       now,
+		snapshots:     make(map[string]QuotaSnapshot),
+		cooldowns:     make(map[string]time.Time),
+		codexCapacity: NewCodexCapacityLedger(now, quotaSnapshotMaxAge),
 	}
+}
+
+// CodexCapacityLedger returns the ledger shared by Codex cache and selector.
+func (q *QuotaCache) CodexCapacityLedger() *CodexCapacityLedger {
+	if q == nil {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.codexCapacity == nil {
+		q.codexCapacity = NewCodexCapacityLedger(q.nowFunc, quotaSnapshotMaxAge)
+	}
+	return q.codexCapacity
 }
 
 // Snapshot returns the current quota snapshot without making API calls.

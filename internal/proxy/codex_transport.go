@@ -35,13 +35,13 @@ func (t *CodexTokenTransport) inner() http.RoundTripper {
 // RoundTrip implements http.RoundTripper.
 func (t *CodexTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = withCodexModelContext(req)
-	acct, err := t.Selector.Select(req.Context())
+	acct, effectiveModel, err := t.selectRoute(req.Context())
 	if err != nil {
 		return nil, err
 	}
 	noteRouteAccount(req.Context(), codexAccountHint(acct), false)
 
-	resp, err := t.doRequest(req, acct)
+	resp, err := t.doRequestWithModel(req, acct, effectiveModel)
 	if err != nil {
 		return nil, err
 	}
@@ -63,8 +63,18 @@ const (
 )
 
 func (t *CodexTokenTransport) doRequest(req *http.Request, acct *codex.CodexAccount) (*http.Response, error) {
+	effectiveModel := codexRequestedModel(req.Context())
+	if !codexPlanSupportsModel(acct.PlanType, effectiveModel) {
+		if rewritten, ok := rewriteCodexModelName(effectiveModel); ok {
+			effectiveModel = rewritten
+		}
+	}
+	return t.doRequestWithModel(req, acct, effectiveModel)
+}
+
+func (t *CodexTokenTransport) doRequestWithModel(req *http.Request, acct *codex.CodexAccount, effectiveModel string) (*http.Response, error) {
 	out := shallowCloneRequest(req)
-	rewriteCodexModelForAccount(out, acct)
+	rewriteCodexModelTo(out, effectiveModel)
 	out.Header.Set("Authorization", "Bearer "+acct.AccessToken)
 	if acct.AccountID != "" {
 		out.Header.Set("ChatGPT-Account-ID", acct.AccountID)
@@ -74,7 +84,18 @@ func (t *CodexTokenTransport) doRequest(req *http.Request, acct *codex.CodexAcco
 }
 
 func rewriteCodexModelForAccount(req *http.Request, acct *codex.CodexAccount) {
-	if acct != nil && codexPlanSupportsModel(acct.PlanType, codexRequestedModel(req.Context())) {
+	effectiveModel := codexRequestedModel(req.Context())
+	if acct != nil && !codexPlanSupportsModel(acct.PlanType, effectiveModel) {
+		if rewritten, ok := rewriteCodexModelName(effectiveModel); ok {
+			effectiveModel = rewritten
+		}
+	}
+	rewriteCodexModelTo(req, effectiveModel)
+}
+
+func rewriteCodexModelTo(req *http.Request, effectiveModel string) {
+	requestedModel := codexRequestedModel(req.Context())
+	if effectiveModel == "" || strings.EqualFold(ParseModel(effectiveModel), ParseModel(requestedModel)) {
 		return
 	}
 	if req.GetBody == nil {
@@ -91,7 +112,7 @@ func rewriteCodexModelForAccount(req *http.Request, acct *codex.CodexAccount) {
 		return
 	}
 
-	rewritten, ok := rewriteCodexModelBody(data)
+	rewritten, ok := rewriteCodexModelBodyTo(data, effectiveModel)
 	if !ok {
 		return
 	}
@@ -101,6 +122,23 @@ func rewriteCodexModelForAccount(req *http.Request, acct *codex.CodexAccount) {
 	req.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(rewritten)), nil
 	}
+}
+
+func rewriteCodexModelBodyTo(body []byte, effectiveModel string) ([]byte, bool) {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(body, &payload) != nil {
+		return nil, false
+	}
+	if _, ok := payload["model"]; !ok {
+		return nil, false
+	}
+	rawModel, err := json.Marshal(effectiveModel)
+	if err != nil {
+		return nil, false
+	}
+	payload["model"] = rawModel
+	result, err := json.Marshal(payload)
+	return result, err == nil
 }
 
 func rewriteCodexModelBody(body []byte) ([]byte, bool) {
@@ -173,7 +211,7 @@ func withCodexModelContext(req *http.Request) *http.Request {
 
 func (t *CodexTokenTransport) handleUnauthorized(req *http.Request, failedAcct *codex.CodexAccount) (*http.Response, error) {
 	// No refresh possible — attempt failover to alternate.
-	alt, err := t.Selector.Select(req.Context(), codexAcctExcludeKeys(failedAcct)...)
+	alt, effectiveModel, err := t.selectRoute(req.Context(), codexAcctExcludeKeys(failedAcct)...)
 	if err != nil {
 		return nil, fmt.Errorf("codex token rejected and no alternate account available")
 	}
@@ -182,7 +220,7 @@ func (t *CodexTokenTransport) handleUnauthorized(req *http.Request, failedAcct *
 		codexAcctIdentifier(failedAcct), codexAcctIdentifier(alt))
 
 	noteRouteAccount(req.Context(), codexAccountHint(alt), true)
-	resp, err := t.doRequest(req, alt)
+	resp, err := t.doRequestWithModel(req, alt, effectiveModel)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +243,7 @@ func (t *CodexTokenTransport) handle429(req *http.Request, resp *http.Response, 
 	var fallbackResp *http.Response
 
 	for {
-		alt, err := t.Selector.Select(req.Context(), excluded...)
+		alt, effectiveModel, err := t.selectRoute(req.Context(), excluded...)
 		if err != nil {
 			if fallbackResp == nil {
 				return makeBufferedResponse(last429Resp, last429Body), nil
@@ -214,7 +252,7 @@ func (t *CodexTokenTransport) handle429(req *http.Request, resp *http.Response, 
 		}
 
 		noteRouteAccount(req.Context(), codexAccountHint(alt), true)
-		altResp, err := t.doRequest(req, alt)
+		altResp, err := t.doRequestWithModel(req, alt, effectiveModel)
 		if err != nil {
 			return nil, err
 		}
@@ -237,6 +275,27 @@ func (t *CodexTokenTransport) handle429(req *http.Request, resp *http.Response, 
 			excluded = append(excluded, codexAcctExcludeKeys(alt)...)
 		}
 	}
+}
+
+func (t *CodexTokenTransport) selectRoute(ctx context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, string, error) {
+	if chooser, ok := t.Selector.(codexRouteChooser); ok {
+		choice, err := chooser.Choose(ctx, CodexRouteRequirements{RequestedModel: codexRequestedModel(ctx)}, exclude...)
+		if err != nil {
+			return nil, "", err
+		}
+		return choice.selectedAccount(), choice.EffectiveModel, nil
+	}
+	account, err := t.Selector.Select(ctx, exclude...)
+	if err != nil {
+		return nil, "", err
+	}
+	effectiveModel := codexRequestedModel(ctx)
+	if !codexPlanSupportsModel(account.PlanType, effectiveModel) {
+		if rewritten, ok := rewriteCodexModelName(effectiveModel); ok {
+			effectiveModel = rewritten
+		}
+	}
+	return account, effectiveModel, nil
 }
 
 // isSnapshotExhausted returns true when a fresh quota snapshot positively

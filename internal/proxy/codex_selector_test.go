@@ -9,7 +9,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
-func TestCodexSelector_PrefersActive(t *testing.T) {
+func TestCodexSelector_DoesNotPreferSystemActive(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
 			{Email: "inactive@test.com", AccessToken: "tok-1", IsActive: false},
@@ -21,11 +21,11 @@ func TestCodexSelector_PrefersActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acct.Email != "active@test.com" {
-		t.Errorf("email = %q, want active@test.com", acct.Email)
+	if acct.Email != "inactive@test.com" {
+		t.Errorf("email = %q, want inactive@test.com", acct.Email)
 	}
-	if acct.AccessToken != "tok-2" {
-		t.Errorf("token = %q, want tok-2", acct.AccessToken)
+	if acct.AccessToken != "tok-1" {
+		t.Errorf("token = %q, want tok-1", acct.AccessToken)
 	}
 }
 
