@@ -216,6 +216,41 @@ func TestCodexTurnLeaseEmptyAnchorPreservesKnownResponse(t *testing.T) {
 	}
 }
 
+func TestCodexTurnLeaseCompactionKeepsActiveReferences(t *testing.T) {
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	manager := NewCodexTurnLeaseManager(1, true, func() time.Time { return now })
+	stale := testCodexLeaseKey("stale", "turn")
+	if _, err := manager.Acquire(context.Background(), stale, fixedCodexAccount("account")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.FailUnadmitted(stale); err != nil {
+		t.Fatal(err)
+	}
+	active := testCodexLeaseKey("active", "turn")
+	lease, err := manager.Acquire(context.Background(), active, fixedCodexAccount("account"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Admit(active, lease.AccountKey, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ReleaseRouting(active); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(8 * 24 * time.Hour)
+	manager.Compact(DefaultCodexLeaseRetention)
+	if _, found := manager.Get(stale); found {
+		t.Fatal("stale lease retained")
+	}
+	if _, found := manager.Get(active); !found {
+		t.Fatal("active attempt compacted")
+	}
+	if _, err := manager.Acquire(context.Background(), stale, fixedCodexAccount("account")); err != nil {
+		t.Fatalf("expired turn could not start fresh: %v", err)
+	}
+}
+
 func fixedCodexAccount(account codex.AccountKey) func(context.Context) (codex.AccountKey, error) {
 	return func(context.Context) (codex.AccountKey, error) { return account, nil }
 }

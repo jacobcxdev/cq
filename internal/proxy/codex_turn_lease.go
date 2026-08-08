@@ -498,6 +498,24 @@ func (manager *CodexTurnLeaseManager) Snapshot() []CodexTurnLease {
 	return manager.snapshotLocked()
 }
 
+func (manager *CodexTurnLeaseManager) Compact(retention time.Duration) {
+	if retention <= 0 {
+		retention = DefaultCodexLeaseRetention
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	now := manager.now()
+	for key, managed := range manager.leases {
+		if managed.lease.RoutingRefs != 0 || managed.lease.ActiveAttempts != 0 || now.Sub(managed.lease.LastSeen) <= retention {
+			continue
+		}
+		delete(manager.leases, key)
+		if manager.current[key.Lane] == key {
+			delete(manager.current, key.Lane)
+		}
+	}
+}
+
 func (manager *CodexTurnLeaseManager) Mode() (uint64, bool) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

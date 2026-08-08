@@ -246,7 +246,8 @@ func (s *Server) doCodexHTTPRoute(ctx context.Context, model string, request Cod
 }
 
 func (enforcer *CodexHTTPEnforcer) persist(leases []CodexTurnLease) error {
-	return enforcer.Store.CommitCurrentLeases(leases)
+	enforcer.Leases.Compact(DefaultCodexLeaseRetention)
+	return enforcer.Store.CommitCurrentLeases(enforcer.Leases.Snapshot())
 }
 
 func (enforcer *CodexHTTPEnforcer) restore(ctx context.Context, key LeaseKey) (bool, error) {

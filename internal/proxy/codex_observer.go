@@ -469,6 +469,8 @@ func (observer *CodexTurnObserver) persist(leases []CodexTurnLease) error {
 	if observer.Store == nil {
 		return nil
 	}
+	observer.Leases.Compact(DefaultCodexLeaseRetention)
+	leases = observer.Leases.Snapshot()
 	observer.storeMu.Lock()
 	defer observer.storeMu.Unlock()
 	return observer.Store.CommitCurrentLeases(leases)
