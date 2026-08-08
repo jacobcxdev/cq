@@ -284,7 +284,7 @@ func (s *Server) roundTripCodexLive(req *http.Request) (*http.Response, *codex.C
 	if err != nil {
 		return nil, nil, err
 	}
-	var excluded []string
+	var excluded []codex.SelectionExclusion
 	var fallbackResp *http.Response
 	for {
 		acct, selectErr := transport.Selector.Select(req.Context(), excluded...)

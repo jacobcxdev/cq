@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -16,6 +16,9 @@ import (
 
 // CodexAccount holds parsed credentials from a Codex auth.json file.
 type CodexAccount struct {
+	AccountKey   AccountKey
+	CandidateID  CandidateID
+	Revision     Revision
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
@@ -46,55 +49,17 @@ type codexAuthFile struct {
 // 1. ~/.codex/auth.json (active account)
 // 2. ~/.codex/accounts/*.auth.json (additional accounts, codex-auth interop)
 func DiscoverAccounts(fs fsutil.FileSystem) []CodexAccount {
-	home, err := fs.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-
-	var accounts []CodexAccount
-	seen := make(map[string]int) // recordKey -> index in accounts
-
-	// 1. Read active account from ~/.codex/auth.json
-	activeFile := filepath.Join(home, ".codex", "auth.json")
-	if acct, ok := parseAccountFile(fs, activeFile); ok {
-		acct.IsActive = true
-		if acct.RecordKey != "" {
-			seen[acct.RecordKey] = len(accounts)
-		}
-		accounts = append(accounts, acct)
-	}
-
-	// 2. Read additional accounts from ~/.codex/accounts/*.auth.json
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-	entries, err := fs.ReadDir(accountsDir)
-	if err != nil {
-		return accounts
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
+	inventory := DiscoverInventory(fs)
+	accounts := make([]CodexAccount, 0, len(inventory.Accounts))
+	for _, logical := range inventory.Accounts {
+		candidates := ResolveCandidate(logical, "", time.Now())
+		if len(candidates) == 0 {
 			continue
 		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".auth.json") {
-			continue
-		}
-		path := filepath.Join(accountsDir, name)
-		acct, ok := parseAccountFile(fs, path)
-		if !ok {
-			continue
-		}
-		if acct.RecordKey != "" {
-			if idx, exists := seen[acct.RecordKey]; exists {
-				// Keep the live system credential authoritative. A managed copy can
-				// be stale after Codex or another account tool rotates system auth.
-				_ = idx
-				continue
-			}
-			seen[acct.RecordKey] = len(accounts)
-		}
-		accounts = append(accounts, acct)
+		account := candidates[0].Credential
+		account.IsActive = logical.Active
+		accounts = append(accounts, account)
 	}
-
 	return accounts
 }
 

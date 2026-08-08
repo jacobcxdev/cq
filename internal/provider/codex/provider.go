@@ -27,16 +27,16 @@ func New(client httputil.Doer) *Provider {
 
 // Fetch discovers all Codex accounts and fetches quota for each in parallel.
 func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, error) {
-	accounts := DiscoverAccounts(p.fs)
-	if len(accounts) == 0 {
+	inventory := DiscoverInventory(p.fs)
+	if len(inventory.Accounts) == 0 {
 		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
 
-	results := make([]quota.Result, len(accounts))
+	results := make([]quota.Result, len(inventory.Accounts))
 	var wg sync.WaitGroup
-	for i, acct := range accounts {
+	for i, logical := range inventory.Accounts {
 		wg.Add(1)
-		go func(i int, acct CodexAccount) {
+		go func(i int, logical LogicalAccount) {
 			defer wg.Done()
 			defer func() {
 				if rv := recover(); rv != nil {
@@ -44,13 +44,31 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
 				}
 			}()
-			results[i] = p.fetchAccount(ctx, acct)
-			results[i].Active = acct.IsActive
-		}(i, acct)
+			results[i] = p.fetchLogicalAccount(ctx, logical)
+			results[i].Active = logical.Active
+		}(i, logical)
 	}
 	wg.Wait()
 
-	return dedup(results), nil
+	return results, nil
+}
+
+func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount) quota.Result {
+	candidates := ResolveCandidate(logical, "", time.Now())
+	if len(candidates) == 0 {
+		r := quota.ErrorResult("no_token", "no token", 0)
+		r.Email = logical.Identity.Email
+		r.AccountID = logical.Identity.AccountID
+		return r
+	}
+	var last quota.Result
+	for _, candidate := range candidates {
+		last = p.fetchAccount(ctx, candidate.Credential)
+		if last.Error == nil || last.Error.Code != "auth_expired" {
+			return last
+		}
+	}
+	return last
 }
 
 // DiscoverAccounts returns all locally known Codex accounts without making

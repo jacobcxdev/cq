@@ -14,7 +14,7 @@ type CodexDiscoverer func() []codex.CodexAccount
 
 // CodexSelector picks a Codex account for a request.
 type CodexSelector interface {
-	Select(ctx context.Context, exclude ...string) (*codex.CodexAccount, error)
+	Select(ctx context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error)
 }
 
 type codexQuotaReader interface {
@@ -33,37 +33,43 @@ func NewCodexSelector(discover CodexDiscoverer, quota codexQuotaReader) CodexSel
 	return &codexSelector{discover: discover, quota: quota}
 }
 
-func (s *codexSelector) Select(ctx context.Context, exclude ...string) (*codex.CodexAccount, error) {
+func (s *codexSelector) Select(ctx context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
 	accounts := s.discover()
 	if len(accounts) == 0 {
 		return nil, fmt.Errorf("no codex accounts available")
 	}
 
-	excludeSet := make(map[string]bool, len(exclude))
-	for _, e := range exclude {
-		excludeSet[e] = true
+	excludedAccounts := make(map[codex.AccountKey]bool, len(exclude))
+	excludedCandidates := make(map[codex.CandidateID]bool, len(exclude))
+	for _, exclusion := range exclude {
+		if exclusion.AccountKey != "" {
+			excludedAccounts[exclusion.AccountKey] = true
+		}
+		if exclusion.CandidateID != "" {
+			excludedCandidates[exclusion.CandidateID] = true
+		}
 	}
 
 	requestedModel := codexRequestedModel(ctx)
 	if codexModelRequiresPro(requestedModel) {
-		if acct := s.selectAccount(accounts, excludeSet, requestedModel, true); acct != nil {
+		if acct := s.selectAccount(accounts, excludedAccounts, excludedCandidates, requestedModel, true); acct != nil {
 			return acct, nil
 		}
 	}
-	if acct := s.selectAccount(accounts, excludeSet, requestedModel, false); acct != nil {
+	if acct := s.selectAccount(accounts, excludedAccounts, excludedCandidates, requestedModel, false); acct != nil {
 		return acct, nil
 	}
 
 	return nil, fmt.Errorf("no codex accounts with valid tokens and quota")
 }
 
-func (s *codexSelector) selectAccount(accounts []codex.CodexAccount, excludeSet map[string]bool, requestedModel string, requireCompatible bool) *codex.CodexAccount {
+func (s *codexSelector) selectAccount(accounts []codex.CodexAccount, excludedAccounts map[codex.AccountKey]bool, excludedCandidates map[codex.CandidateID]bool, requestedModel string, requireCompatible bool) *codex.CodexAccount {
 	var best *codex.CodexAccount
 	bestRemaining := -1
 
 	for i := range accounts {
 		a := &accounts[i]
-		if !s.isEligible(a, excludeSet, requestedModel, requireCompatible) {
+		if !s.isEligible(a, excludedAccounts, excludedCandidates, requestedModel, requireCompatible) {
 			continue
 		}
 		remaining := s.accountRemaining(a)
@@ -79,8 +85,8 @@ func (s *codexSelector) selectAccount(accounts []codex.CodexAccount, excludeSet 
 	return &result
 }
 
-func (s *codexSelector) isEligible(a *codex.CodexAccount, excludeSet map[string]bool, requestedModel string, requireCompatible bool) bool {
-	if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" || !s.hasQuota(a) {
+func (s *codexSelector) isEligible(a *codex.CodexAccount, excludedAccounts map[codex.AccountKey]bool, excludedCandidates map[codex.CandidateID]bool, requestedModel string, requireCompatible bool) bool {
+	if codexAcctExcluded(a, excludedAccounts, excludedCandidates) || a.AccessToken == "" || !s.hasQuota(a) {
 		return false
 	}
 	if requireCompatible && !codexPlanSupportsModel(a.PlanType, requestedModel) {
@@ -168,25 +174,42 @@ func (s *codexSelector) snapshot(a *codex.CodexAccount) (QuotaSnapshot, bool) {
 	return snap, ok
 }
 
-func codexAcctExcluded(a *codex.CodexAccount, excludeSet map[string]bool) bool {
-	return (a.Email != "" && excludeSet[a.Email]) ||
-		(a.AccountID != "" && excludeSet[a.AccountID]) ||
-		(a.RecordKey != "" && excludeSet[a.RecordKey])
+func codexAcctExcluded(a *codex.CodexAccount, excludedAccounts map[codex.AccountKey]bool, excludedCandidates map[codex.CandidateID]bool) bool {
+	return excludedAccounts[codexRoutingAccountKey(a)] || excludedCandidates[codexRoutingCandidateID(a)]
 }
 
 // codexAcctExcludeKeys returns keys that can be used to exclude this account from selection.
-func codexAcctExcludeKeys(a *codex.CodexAccount) []string {
-	var keys []string
-	if a.Email != "" {
-		keys = append(keys, a.Email)
+func codexAcctExcludeKeys(a *codex.CodexAccount) []codex.SelectionExclusion {
+	return []codex.SelectionExclusion{{AccountKey: codexRoutingAccountKey(a)}}
+}
+
+func codexRoutingAccountKey(a *codex.CodexAccount) codex.AccountKey {
+	if a == nil {
+		return ""
 	}
-	if a.AccountID != "" {
-		keys = append(keys, a.AccountID)
+	if a.AccountKey != "" {
+		return a.AccountKey
 	}
 	if a.RecordKey != "" {
-		keys = append(keys, a.RecordKey)
+		return codex.AccountKey("compat-record:" + a.RecordKey)
 	}
-	return keys
+	if a.AccountID != "" {
+		return codex.AccountKey("compat-account:" + a.AccountID)
+	}
+	return ""
+}
+
+func codexRoutingCandidateID(a *codex.CodexAccount) codex.CandidateID {
+	if a == nil {
+		return ""
+	}
+	if a.CandidateID != "" {
+		return a.CandidateID
+	}
+	if key := codexRoutingAccountKey(a); key != "" {
+		return codex.CandidateID("compat-candidate:" + string(key))
+	}
+	return ""
 }
 
 // codexAcctIdentifier returns a stable identifier for tracking per-account state.

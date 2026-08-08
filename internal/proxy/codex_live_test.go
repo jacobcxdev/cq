@@ -317,15 +317,17 @@ type rotatingCodexSelector struct {
 	calls    int
 }
 
-func (s *rotatingCodexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
+func (s *rotatingCodexSelector) Select(_ context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	excluded := make(map[string]bool, len(exclude))
-	for _, key := range exclude {
-		excluded[key] = true
+	excludedAccounts := make(map[codex.AccountKey]bool, len(exclude))
+	excludedCandidates := make(map[codex.CandidateID]bool, len(exclude))
+	for _, exclusion := range exclude {
+		excludedAccounts[exclusion.AccountKey] = true
+		excludedCandidates[exclusion.CandidateID] = true
 	}
 	for _, account := range s.accounts {
-		if !codexAcctExcluded(account, excluded) {
+		if !codexAcctExcluded(account, excludedAccounts, excludedCandidates) {
 			s.calls++
 			copy := *account
 			return &copy, nil

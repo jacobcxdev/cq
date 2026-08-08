@@ -18,14 +18,16 @@ type multiCodexSelector struct {
 	accounts []codex.CodexAccount
 }
 
-func (s *multiCodexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
-	excludeSet := make(map[string]bool, len(exclude))
-	for _, e := range exclude {
-		excludeSet[e] = true
+func (s *multiCodexSelector) Select(_ context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
+	excludedAccounts := make(map[codex.AccountKey]bool, len(exclude))
+	excludedCandidates := make(map[codex.CandidateID]bool, len(exclude))
+	for _, exclusion := range exclude {
+		excludedAccounts[exclusion.AccountKey] = true
+		excludedCandidates[exclusion.CandidateID] = true
 	}
 	for i := range s.accounts {
 		a := &s.accounts[i]
-		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" {
+		if codexAcctExcluded(a, excludedAccounts, excludedCandidates) || a.AccessToken == "" {
 			continue
 		}
 		result := *a

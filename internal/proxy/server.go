@@ -893,7 +893,7 @@ func (s *Server) dialCodexAppServer(ctx context.Context, transport *CodexTokenTr
 	if requestedModel != "" {
 		ctx = context.WithValue(ctx, codexModelContextKey{}, requestedModel)
 	}
-	var excluded []string
+	var excluded []codex.SelectionExclusion
 	for {
 		acct, err := transport.Selector.Select(ctx, excluded...)
 		if err != nil {

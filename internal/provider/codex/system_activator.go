@@ -15,10 +15,6 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
-type AccountKey string
-type CandidateID string
-type Revision string
-
 // CandidateRef is opaque outside this package. It identifies exact credential
 // source saved or selected by an explicit command.
 type CandidateRef struct {
@@ -193,11 +189,15 @@ func parseAccountData(data []byte, path string) (CodexAccount, bool) {
 	if accountID == "" {
 		accountID = claims.AccountID
 	}
+	expiresAt := claims.ExpiresAt * 1000
+	if af.CQExpiresAt > expiresAt {
+		expiresAt = af.CQExpiresAt
+	}
 	return CodexAccount{
 		AccessToken: af.Tokens.AccessToken, RefreshToken: af.Tokens.RefreshToken,
 		IDToken: af.Tokens.IDToken, AccountID: accountID, UserID: claims.UserID,
 		Email: claims.Email, PlanType: claims.PlanType, RecordKey: claims.RecordKey(),
-		FilePath: path,
+		FilePath: path, ExpiresAt: expiresAt,
 	}, true
 }
 

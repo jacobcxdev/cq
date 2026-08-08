@@ -347,6 +347,45 @@ func TestFetch401ReturnsAuthExpiredNoRefreshToken(t *testing.T) {
 	}
 }
 
+func TestFetchTriesSecondCandidateWithinLogicalAccountAfter401(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Authorization") == "Bearer system-stale" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(happyUsageBody))
+	}))
+	defer srv.Close()
+
+	idToken := fakeJWT(map[string]any{
+		"email": "user@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_user_id": "user-1", "chatgpt_account_id": "acct-1",
+		},
+	})
+	fs := newFakeFS()
+	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON("system-stale", "", idToken, "acct-1")
+	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = validAuthJSON("managed-fresh", "", idToken, "acct-1")
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "user-1::acct-1.auth.json"}},
+	}
+	p := &Provider{client: &urlRewriter{client: srv.Client(), baseURL: srv.URL}, fs: fs}
+
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != quota.StatusOK {
+		t.Fatalf("results = %+v, want one usable logical row", results)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("calls = %d, want two same-identity candidates", got)
+	}
+}
+
 func TestFetch401WithRefreshTokenNeverCallsOAuthOrWritesCredentials(t *testing.T) {
 	var usageCalls atomic.Int32
 	var refreshCalls atomic.Int32
