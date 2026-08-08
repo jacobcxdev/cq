@@ -160,91 +160,90 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 	return out, nil
 }
 
-// Switch sets the active Codex account by copying the matching account's
-// auth file to ~/.codex/auth.json and updating codex-auth's registry.
-// Before overwriting, it adopts the current auth.json into ~/.codex/accounts/
-// if it's not already stored there (preserves accounts created by codex login).
-func (a *Accounts) Switch(_ context.Context, identifier string) (provider.Account, error) {
+// Switch is an explicit-only compatibility adapter around SystemActivator.
+func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Account, error) {
 	accts := DiscoverAccounts(a.FS)
-
-	home, err := a.FS.UserHomeDir()
-	if err != nil {
-		return provider.Account{}, fmt.Errorf("home dir: %w", err)
-	}
-
-	// Adopt the current active account into accounts/ before overwriting.
-	adoptActiveAccount(a.FS, home, accts)
-
+	var matches []CodexAccount
 	for _, acct := range accts {
-		if acct.Email != identifier {
-			continue
+		if acct.Email == identifier {
+			matches = append(matches, acct)
 		}
-		if acct.FilePath == "" {
-			return provider.Account{}, fmt.Errorf("no stored auth file for %q", identifier)
-		}
-
-		// Read the account file to copy it
-		data, err := a.FS.ReadFile(acct.FilePath)
-		if err != nil {
-			return provider.Account{}, fmt.Errorf("read account file: %w", err)
-		}
-
-		// Atomic write to ~/.codex/auth.json
-		dest := filepath.Join(home, ".codex", "auth.json")
-		tmp := dest + ".tmp"
-		if err := a.FS.WriteFile(tmp, data, 0o600); err != nil {
-			return provider.Account{}, fmt.Errorf("write tmp: %w", err)
-		}
-		if err := a.FS.Rename(tmp, dest); err != nil {
-			a.FS.Remove(tmp)
-			return provider.Account{}, fmt.Errorf("rename: %w", err)
-		}
-
-		// Update codex-auth registry if it exists
-		updateRegistryActiveKey(a.FS, home, acct.RecordKey)
-
-		return provider.Account{
-			AccountID: acct.AccountID,
-			Email:     acct.Email,
-			Label:     acct.PlanType,
-			Active:    true,
-			SwitchID:  acct.Email,
-		}, nil
 	}
-	return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
+	if len(matches) == 0 {
+		return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
+	}
+	if len(matches) != 1 {
+		return provider.Account{}, fmt.Errorf("email %q matches multiple Codex accounts", identifier)
+	}
+	acct := matches[0]
+	ref, revision, err := candidateRefFromFS(a.FS, acct)
+	if err != nil {
+		return provider.Account{}, err
+	}
+	activator, err := NewFileSystemActivator(a.FS)
+	if err != nil {
+		return provider.Account{}, err
+	}
+	result, err := activator.Activate(ctx, ref, revision)
+	if err != nil {
+		return provider.Account{}, err
+	}
+	if result.ProjectionError != nil {
+		fmt.Fprintf(os.Stderr, "cq: Codex active projection: %v\n", result.ProjectionError)
+	}
+	return provider.Account{
+		AccountID: acct.AccountID, Email: acct.Email, Label: acct.PlanType,
+		Active: true, SwitchID: acct.Email,
+	}, nil
 }
 
-func (a *Accounts) Remove(_ context.Context, identifier string) error {
+// Remove is an explicit-only compatibility adapter. Active system credentials
+// are deactivated through SystemActivator before managed candidates are removed.
+func (a *Accounts) Remove(ctx context.Context, identifier string) error {
 	accts := DiscoverAccounts(a.FS)
 	home, err := a.FS.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("home dir: %w", err)
 	}
-
-	authPath := filepath.Join(home, ".codex", "auth.json")
-	recordKeys := make(map[string]bool)
-	found := false
+	var matches []CodexAccount
 	for _, acct := range accts {
-		if acct.Email != identifier {
-			continue
-		}
-		found = true
-		if acct.RecordKey != "" {
-			recordKeys[acct.RecordKey] = true
-		}
-		if acct.FilePath != "" && acct.FilePath != authPath {
-			if err := a.FS.Remove(acct.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove stored auth file: %w", err)
-			}
-		}
-		if acct.IsActive {
-			if err := a.FS.Remove(authPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove active auth file: %w", err)
-			}
+		if acct.Email == identifier {
+			matches = append(matches, acct)
 		}
 	}
-	if !found {
+	if len(matches) == 0 {
 		return fmt.Errorf("no account found with email %q", identifier)
+	}
+	if len(matches) != 1 {
+		return fmt.Errorf("email %q matches multiple Codex accounts", identifier)
+	}
+	target := matches[0]
+	authPath := filepath.Join(home, ".codex", "auth.json")
+	recordKeys := make(map[string]bool)
+	if target.RecordKey != "" {
+		recordKeys[target.RecordKey] = true
+	}
+	if target.IsActive {
+		activator, err := NewFileSystemActivator(a.FS)
+		if err != nil {
+			return err
+		}
+		active, err := activator.Active(ctx)
+		if err != nil {
+			return err
+		}
+		result, err := activator.Deactivate(ctx, active.AccountKey, active.Revision)
+		if err != nil {
+			return err
+		}
+		if result.ProjectionError != nil {
+			fmt.Fprintf(os.Stderr, "cq: Codex inactive projection: %v\n", result.ProjectionError)
+		}
+	}
+	if target.FilePath != "" && target.FilePath != authPath {
+		if err := a.FS.Remove(target.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stored auth file: %w", err)
+		}
 	}
 	// Discovery deliberately keeps a matching live system credential instead of
 	// replacing it with a managed duplicate. Explicit removal still removes the
@@ -255,84 +254,10 @@ func (a *Accounts) Remove(_ context.Context, identifier string) error {
 			return fmt.Errorf("remove stored auth file: %w", err)
 		}
 	}
-	removeRegistryAccounts(a.FS, home, recordKeys)
+	if err := (Registry{FS: a.FS, Home: home}).RemoveAccounts(recordKeys); err != nil {
+		return err
+	}
 	return nil
-}
-
-// adoptActiveAccount saves the current ~/.codex/auth.json into
-// ~/.codex/accounts/{record_key}.auth.json if it isn't already stored there.
-// This preserves accounts originally created by `codex login` (Codex CLI)
-// so they aren't lost when Switch overwrites auth.json.
-func adoptActiveAccount(fs fsutil.FileSystem, home string, accts []CodexAccount) {
-	authPath := filepath.Join(home, ".codex", "auth.json")
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-
-	for _, acct := range accts {
-		if !acct.IsActive {
-			continue
-		}
-		if acct.RecordKey == "" {
-			break // can't adopt without a record key
-		}
-		// If FilePath already points into accounts/, it's already stored.
-		if acct.FilePath != authPath {
-			break
-		}
-		// Active account only lives in auth.json — adopt it.
-		data, err := fs.ReadFile(authPath)
-		if err != nil {
-			break
-		}
-		if err := fs.MkdirAll(accountsDir, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: adopt account: mkdir: %v\n", err)
-			break
-		}
-		dest := filepath.Join(accountsDir, acct.RecordKey+".auth.json")
-		tmp := dest + ".tmp"
-		if err := fs.WriteFile(tmp, data, 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: adopt account: write: %v\n", err)
-			break
-		}
-		if err := fs.Rename(tmp, dest); err != nil {
-			fs.Remove(tmp)
-			fmt.Fprintf(os.Stderr, "cq: adopt account: rename: %v\n", err)
-		}
-		break
-	}
-}
-
-// updateRegistryActiveKey updates active_account_key in codex-auth's registry.json.
-// Best-effort: errors are logged to stderr and swallowed.
-func updateRegistryActiveKey(fs fsutil.FileSystem, home, recordKey string) {
-	if recordKey == "" {
-		return
-	}
-	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
-	data, err := fs.ReadFile(regPath)
-	if err != nil {
-		return // registry doesn't exist, nothing to update
-	}
-
-	var reg map[string]any
-	if json.Unmarshal(data, &reg) != nil {
-		return
-	}
-
-	reg["active_account_key"] = recordKey
-	updated, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return
-	}
-
-	tmp := regPath + ".tmp"
-	if err := fs.WriteFile(tmp, updated, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: update registry: write: %v\n", err)
-		return
-	}
-	if err := fs.Rename(tmp, regPath); err != nil {
-		fs.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: update registry: rename: %v\n", err)
-	}
 }
 
 // PersistCodexAccount atomically rewrites one CQ-managed account file. Automatic
@@ -398,52 +323,4 @@ func atomicWrite(fs fsutil.FileSystem, path string, data []byte) error {
 		return err
 	}
 	return nil
-}
-
-func removeRegistryAccounts(fs fsutil.FileSystem, home string, recordKeys map[string]bool) {
-	if len(recordKeys) == 0 {
-		return
-	}
-	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
-	data, err := fs.ReadFile(regPath)
-	if err != nil {
-		return
-	}
-
-	var reg map[string]any
-	if json.Unmarshal(data, &reg) != nil {
-		return
-	}
-	if active, ok := reg["active_account_key"].(string); ok && recordKeys[active] {
-		reg["active_account_key"] = ""
-	}
-	if rawAccounts, ok := reg["accounts"].([]any); ok {
-		filtered := make([]any, 0, len(rawAccounts))
-		for _, raw := range rawAccounts {
-			acctMap, ok := raw.(map[string]any)
-			if !ok {
-				filtered = append(filtered, raw)
-				continue
-			}
-			key, _ := acctMap["account_key"].(string)
-			if recordKeys[key] {
-				continue
-			}
-			filtered = append(filtered, raw)
-		}
-		reg["accounts"] = filtered
-	}
-	updated, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := regPath + ".tmp"
-	if err := fs.WriteFile(tmp, updated, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: update registry: write: %v\n", err)
-		return
-	}
-	if err := fs.Rename(tmp, regPath); err != nil {
-		fs.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: update registry: rename: %v\n", err)
-	}
 }

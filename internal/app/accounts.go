@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +12,10 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
-	"github.com/jacobcxdev/cq/internal/fsutil"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -99,141 +100,52 @@ func RunLogin(ctx context.Context, client httputil.Doer, activate bool) error {
 // RunCodexLogin performs the Codex OAuth PKCE login flow via Auth0.
 // After login, it stores the account to ~/.codex/accounts/ for codex-auth interop.
 func RunCodexLogin(ctx context.Context, client httputil.Doer, activate bool) error {
-	tokens, claims, err := auth.CodexLogin(ctx, client)
+	return runCodexLogin(ctx, client, activate, fsutil.OSFileSystem{}, auth.CodexLogin, time.Now, os.Stdout)
+}
+
+type codexLoginFunc func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error)
+
+func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs fsutil.FileSystem, login codexLoginFunc, now func() time.Time, stdout io.Writer) error {
+	tokens, claims, err := login(ctx, client)
 	if err != nil {
 		return err
 	}
-
 	if claims.AccountID == "" || claims.UserID == "" {
 		return fmt.Errorf("login succeeded but JWT missing account or user ID")
 	}
-
-	// Build the standard auth.json format
-	authFile := map[string]any{
-		"auth_mode":    "chatgpt",
-		"OPENAI_API_KEY": nil,
-		"tokens": map[string]any{
-			"id_token":      tokens.IDToken,
-			"access_token":  tokens.AccessToken,
-			"refresh_token": tokens.RefreshToken,
-			"account_id":    claims.AccountID,
-		},
-		"last_refresh": time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	data, err := json.MarshalIndent(authFile, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal auth: %w", err)
-	}
-
-	home, err := os.UserHomeDir()
+	home, err := fs.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("home dir: %w", err)
 	}
-
-	// Ensure accounts directory exists
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-	if err := os.MkdirAll(accountsDir, 0o700); err != nil {
-		return fmt.Errorf("create accounts dir: %w", err)
+	ref, revision, err := codexprov.SaveLogin(fs, home, codexprov.LoginCredential{
+		Tokens: *tokens, Claims: *claims, CreatedAt: now().UTC(),
+	})
+	if err != nil {
+		return err
 	}
-
-	// Write to ~/.codex/accounts/{record_key}.auth.json
-	recordKey := claims.RecordKey()
-	accountPath := filepath.Join(accountsDir, recordKey+".auth.json")
-	tmp := accountPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write account file: %w", err)
-	}
-	if err := os.Rename(tmp, accountPath); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename account file: %w", err)
-	}
-
-	// Update codex-auth registry for interop
-	updateCodexRegistry(home, recordKey, claims)
-
 	if activate {
-		dest := filepath.Join(home, ".codex", "auth.json")
-		tmp := dest + ".tmp"
-		if err := os.WriteFile(tmp, data, 0o600); err != nil {
-			return fmt.Errorf("write active auth: %w", err)
+		activator, err := codexprov.NewFileSystemActivator(fs)
+		if err != nil {
+			return err
 		}
-		if err := os.Rename(tmp, dest); err != nil {
-			os.Remove(tmp)
-			return fmt.Errorf("rename active auth: %w", err)
+		result, err := activator.Activate(ctx, ref, revision)
+		if err != nil {
+			return err
+		}
+		if result.ProjectionError != nil {
+			return fmt.Errorf("system auth activated; registry projection failed: %w", result.ProjectionError)
 		}
 	}
-
 	if claims.Email != "" {
-		fmt.Printf("Logged in as %s", claims.Email)
+		fmt.Fprintf(stdout, "Logged in as %s", claims.Email)
 		if claims.PlanType != "" {
-			fmt.Printf(" (%s)", claims.PlanType)
+			fmt.Fprintf(stdout, " (%s)", claims.PlanType)
 		}
-		fmt.Println()
+		fmt.Fprintln(stdout)
 	} else {
-		fmt.Println("Login successful.")
+		fmt.Fprintln(stdout, "Login successful.")
 	}
 	return nil
-}
-
-// updateCodexRegistry upserts an account record in codex-auth's registry.json.
-// Best-effort: errors are logged to stderr and swallowed.
-func updateCodexRegistry(home, recordKey string, claims *auth.CodexClaims) {
-	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
-	var reg map[string]any
-
-	data, err := os.ReadFile(regPath)
-	if err != nil {
-		// No existing registry — create one
-		reg = map[string]any{
-			"schema_version": 3,
-		}
-	} else if json.Unmarshal(data, &reg) != nil {
-		return
-	}
-
-	// Build account record
-	record := map[string]any{
-		"account_key":         recordKey,
-		"chatgpt_account_id":  claims.AccountID,
-		"chatgpt_user_id":     claims.UserID,
-		"email":               claims.Email,
-		"alias":               "",
-		"plan":                claims.PlanType,
-		"auth_mode":           "chatgpt",
-		"created_at":          time.Now().Unix(),
-	}
-
-	// Upsert in accounts array
-	accounts, _ := reg["accounts"].([]any)
-	found := false
-	for i, a := range accounts {
-		if m, ok := a.(map[string]any); ok {
-			if m["account_key"] == recordKey {
-				accounts[i] = record
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		accounts = append(accounts, record)
-	}
-	reg["accounts"] = accounts
-	reg["active_account_key"] = recordKey
-
-	updated, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := regPath + ".tmp"
-	if err := os.WriteFile(tmp, updated, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: update codex registry: %v\n", err)
-		return
-	}
-	if err := os.Rename(tmp, regPath); err != nil {
-		os.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: update codex registry: %v\n", err)
-	}
 }
 
 // RunAccounts lists discovered accounts for the given provider.

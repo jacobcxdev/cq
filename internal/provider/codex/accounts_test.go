@@ -267,6 +267,28 @@ func TestAccountsSwitchNotFound(t *testing.T) {
 	}
 }
 
+func TestAccountsSwitchRefusesAmbiguousEmail(t *testing.T) {
+	fs := newFakeFS()
+	jwt1 := fakeCodexJWT("same@test.com", "acct-1", "user-1", "plus")
+	jwt2 := fakeCodexJWT("same@test.com", "acct-2", "user-2", "pro")
+	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = codexAuthJSON("tok-1", "acct-1", jwt1)
+	fs.files["/fake/home/.codex/accounts/user-2::acct-2.auth.json"] = codexAuthJSON("tok-2", "acct-2", jwt2)
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {
+			{name: "user-1::acct-1.auth.json"},
+			{name: "user-2::acct-2.auth.json"},
+		},
+	}
+
+	mgr := &Accounts{FS: fs}
+	if _, err := mgr.Switch(context.Background(), "same@test.com"); err == nil {
+		t.Fatal("Switch error = nil, want ambiguous email rejection")
+	}
+	if _, ok := fs.files["/fake/home/.codex/auth.json"]; ok {
+		t.Fatal("ambiguous switch wrote system auth")
+	}
+}
+
 func TestAccountsRemoveDeletesStoredStateAndPreventsRediscovery(t *testing.T) {
 	fs := newFakeFS()
 	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
@@ -327,6 +349,31 @@ func TestAccountsRemoveNotFound(t *testing.T) {
 	}
 	if got, want := err.Error(), `no account found with email "missing@test.com"`; got != want {
 		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestAccountsRemoveInactiveLeavesSystemAuthUntouched(t *testing.T) {
+	fs := newFakeFS()
+	activeJWT := fakeCodexJWT("active@test.com", "acct-1", "user-1", "plus")
+	inactiveJWT := fakeCodexJWT("inactive@test.com", "acct-2", "user-2", "pro")
+	systemPath := "/fake/home/.codex/auth.json"
+	inactivePath := "/fake/home/.codex/accounts/user-2::acct-2.auth.json"
+	before := codexAuthJSON("tok-active", "acct-1", activeJWT)
+	fs.files[systemPath] = before
+	fs.files[inactivePath] = codexAuthJSON("tok-inactive", "acct-2", inactiveJWT)
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "user-2::acct-2.auth.json"}},
+	}
+
+	mgr := &Accounts{FS: fs}
+	if err := mgr.Remove(context.Background(), "inactive@test.com"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if got := string(fs.files[systemPath]); got != string(before) {
+		t.Fatal("inactive removal changed system auth")
+	}
+	if _, ok := fs.files[inactivePath]; ok {
+		t.Fatal("inactive managed credential still present")
 	}
 }
 
