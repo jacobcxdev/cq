@@ -1,6 +1,6 @@
 # Codex Turn-Aware Account Routing Design
 
-- **Status:** Draft for review; event-driven lease direction approved
+- **Status:** Approved for implementation planning
 - **Date:** 2026-08-08
 - **Scope:** Codex credential authority, quota-aware selection, and native Responses HTTP/WebSocket routing
 
@@ -14,7 +14,7 @@ CQ becomes routing authority for Codex traffic without becoming global system-ac
 - Explicit account-management commands use one isolated system-activation capability.
 - Each Codex agent turn receives an account lease. Parallel turns have independent leases.
 - Quota depletion after admission affects future turns only. It never moves an admitted turn to another account.
-- A new turn can choose a different account after any upstream-WebSocket continuation has been safely reset.
+- A different real turn ID on the same session/thread lane supersedes the previous turn and can choose a different account after any upstream-WebSocket continuation has been safely reset.
 
 This design fixes both current failure classes: stale managed credentials shadowing a fresh system credential, and request-level failover changing global auth while unrelated turns are active.
 
@@ -48,7 +48,7 @@ Current source has four independent decisions that must be unified:
 3. `PersistCodexAccount` mirrors a managed refresh into system auth when a stale `IsActive` snapshot says the account is active.
 4. Proxy 401/429 paths call `Accounts.Switch` asynchronously, changing global system auth for every Codex process and every concurrent turn.
 
-Current selection is request-scoped for HTTP and physical-connection-scoped for WebSocket. It has no turn key, admission boundary, or release authority. It also ranks all model requests with `MinRemainingPct`, which ignores a matching scoped quota whenever shared windows exist. An account with exhausted base quota and available Spark quota is consequently rejected for Spark.
+Current selection is request-scoped for HTTP and physical-connection-scoped for WebSocket. It has no turn key, admission boundary, or same-thread successor boundary. It also ranks all model requests with `MinRemainingPct`, which ignores a matching scoped quota whenever shared windows exist. An account with exhausted base quota and available Spark quota is consequently rejected for Spark.
 
 Two containment defects are independent of the refactor:
 
@@ -73,15 +73,29 @@ Relevant fields are:
 
 `request_kind` can be `turn`, `prewarm`, `compaction`, or `memory`. Memory requests deliberately lack turn identity.
 
+These identifiers are execution identity, not credential identity:
+
+- `session_id` identifies one root multi-agent execution tree. A root thread and its spawned subagent threads share it. For a normal root without subagents it commonly equals the root thread ID.
+- `thread_id` identifies one conversation/task lane within that tree. Each root or subagent thread has its own ID and at most one active turn.
+- `turn_id` identifies one agent run inside that thread. Codex 0.146 currently generates UUIDv7 values, but CQ treats them as opaque and compares only equality or difference; it never depends on arithmetic increment or lexical ordering.
+
+The lane key is `(session_id, thread_id, "codex-responses")`. The full lease key adds `turn_id`. Turn IDs are compared only inside their lane; unrelated parallel threads can advance independently even when they share a session.
+
+User-message count is not a boundary. Input steered or delivered while a thread has an active turn joins that turn, and subsequent provider sampling retains its existing turn ID. Only provider traffic carrying a different real turn ID creates a routing successor on that thread lane.
+
 WebSocket handshake metadata is only a hint. Codex can cache one physical WebSocket across turns, so CQ must inspect every `response.create` frame and prefer frame metadata over handshake metadata.
 
-### Provider completion is not turn completion
+### Provider completion is not the routing boundary
 
 One agent turn can issue multiple Responses sampling requests around tool execution. `response.completed` ends one sampling request. It does not end the agent turn.
 
-At the Responses boundary CQ can observe sampling completion, failure, connection loss, and a new turn ID. It cannot observe authoritative whole-turn completion. Real app-server `turn/completed` supplies that signal, but CQ's current `/app-server` handler is not a real app-server bridge.
+At the Responses boundary CQ can observe sampling completion, failure, connection loss, and a new turn ID. It cannot distinguish exact whole-turn terminal reasons such as completed, interrupted, or failed. Routing does not require that distinction.
 
-Therefore this design keeps a lease after `response.completed`: quiescent for `end_turn=true` or absent, and continuation-pending for `end_turn=false`. A safely admitted different turn can supersede only a quiescent/orphaned predecessor with no active attempt. Disconnects and uncertain outcomes retain the mapping for a bounded period.
+Codex permits only one active turn per thread. Once no selection, retry, or provider attempt for the predecessor remains active, the first well-formed request carrying a previously unseen real `turn_id` on the same lane is the authoritative successor boundary. CQ atomically advances the lane and creates the new reserving lease. A nonterminal predecessor becomes `superseded`; an already terminal predecessor keeps its terminal tombstone state. This applies even when the predecessor is `continuation_pending`: the changed turn ID proves that Codex ended or interrupted that turn above the Responses boundary. Exact terminal reason remains unknown and unnecessary.
+
+Opaque inequality alone is insufficient because a delayed request for an older turn could arrive after its successor. CQ retains keyed seen-turn tombstones per lane for the lease-retention horizon. A non-current ID matching retained history is stale, never a successor: it fails closed and cannot move the lane pointer or current account. An unseen ID may advance the lane; CQ does not parse UUID timestamps to decide order.
+
+CQ keeps a lease after `response.completed`: quiescent for `end_turn=true` or absent, and continuation-pending for `end_turn=false`. If no successor arrives, the mapping remains available for later same-turn sampling and bounded restart recovery. If a successor arrives while earlier routing work remains active, CQ rejects it as a concurrency/protocol violation rather than moving either operation.
 
 ### Continuation can cross turns
 
@@ -109,7 +123,7 @@ Codex enables zstd request compression by default. CQ must perform bounded decod
 
 The current handler expects an initial `thread/start` frame, then forwards app-server JSON-RPC to backend `/responses`. A real app-server requires `initialize`, `initialized`, thread start/resume, and `turn/start`; backend Responses WebSocket expects `response.create`.
 
-Decision: retire CQ's current `/app-server` relay and fail closed with an explanatory response. Keep the actual Codex app-server local and route its outbound Responses traffic through CQ. A genuine app-server facade, if later needed for authoritative `turn/completed`, is separate work.
+Decision: retire CQ's current `/app-server` relay and fail closed with an explanatory response. Keep the actual Codex app-server local and route its outbound Responses traffic through CQ. A genuine app-server facade is unnecessary for account-routing correctness; it would add exact terminal-reason diagnostics only and remains separate work.
 
 ## Invariants
 
@@ -141,12 +155,13 @@ These become mandatory when their owning stage enables turn-aware routing.
 2. Same-identity credential replacement is allowed; different-account migration after admission is not.
 3. A pre-admission 401/403 or hard usage 429 may change the provisional candidate or account. Network errors, 5xx, and soft/unknown 429 do not justify account migration.
 4. `response.completed` makes a lease quiescent or continuation-pending, never released.
-5. Parallel turn keys never share mutable lease state or failover suppression.
-6. New-turn selection is model/quota-bucket aware and chooses account, effective model, and required buckets as one decision.
-7. Incremental input stays on its exact live upstream WebSocket generation; a lost generation requires full-request resynchronisation even when the account is unchanged.
-8. Raw credentials, emails, account IDs, paths, turn IDs, thread IDs, response IDs, and prompt bodies never enter ordinary route diagnostics or the lease journal.
-9. Credential commits and lease commits are atomic, serialised by their declared owner, revision/generation-fenced, and permissioned `0o600` under a `0o700` directory.
-10. Once admission is observed in memory, persistence failure can only fail closed; it can never make the attempt provisional or migratable again.
+5. Each `(session_id, thread_id, "codex-responses")` lane has at most one current real turn. The same turn ID reuses its lease; a different valid unseen turn ID advances the lane after predecessor selection, retry, and attempt work drains; a retained historical turn ID fails closed as stale. CQ never infers order from turn-ID value.
+6. Parallel turn keys never share mutable lease state or failover suppression.
+7. New-turn selection is model/quota-bucket aware and chooses account, effective model, and required buckets as one decision.
+8. Incremental input stays on its exact live upstream WebSocket generation; a lost generation requires full-request resynchronisation even when the account is unchanged.
+9. Raw credentials, emails, account IDs, paths, turn IDs, thread IDs, response IDs, and prompt bodies never enter ordinary route diagnostics or the lease journal.
+10. Credential commits and lease commits are atomic, serialised by their declared owner, revision/generation-fenced, and permissioned `0o600` under a `0o700` directory.
+11. Once admission is observed in memory, persistence failure can only fail closed; it can never make the attempt provisional or migratable again.
 
 ## Authority model
 
@@ -159,7 +174,7 @@ These become mandatory when their owning stage enables turn-aware routing.
 | Registry active key | Derived interoperability projection | Read only | Updated after successful explicit activation |
 | Codex Bar private accounts | Codex Bar | No access | No access |
 | Usage/capacity | Quota cache plus live response observations | Read/write | Read |
-| Per-turn routing | CQ lease manager and journal | Read/write | Diagnostic inspection only |
+| Per-turn routing | CQ lane/lease manager and journal | Read/write | Diagnostic inspection only |
 
 `Active` in existing account output continues to mean “matches current system identity.” It does not mean “used by every proxied turn.” Lease ownership stays out of ordinary account JSON.
 
@@ -169,7 +184,7 @@ These become mandatory when their owning stage enables turn-aware routing.
 flowchart LR
     Client["Codex client"] --> Relay["Responses HTTP / WebSocket relays"]
     Relay --> Metadata["Strict turn metadata parser"]
-    Metadata --> Lease["Turn lease manager"]
+    Metadata --> Lease["Lane and turn lease manager"]
     Lease --> Selector["Bucket-aware account selector"]
     Selector --> Capacity["Capacity ledger"]
     Lease --> Attempt["Explicit-account attempt executor"]
@@ -364,7 +379,17 @@ For HTTP, parse the bounded direct metadata header and request `client_metadata`
 3. flat compatibility `session_id`, `thread_id`, and `turn_id` fields;
 4. handshake metadata only until a frame supplies current metadata.
 
-The canonical key is `(session_id, thread_id, turn_id, "codex-responses")`. `codex-responses` is one transport-independent namespace shared by HTTP `/responses`, WebSocket `/responses`, and `/responses/compact`; transport fallback must not split a turn. Generic recursive fields, `previous_response_id`, window ID, user agent, and current diagnostic session heuristics are not turn identity.
+The canonical lane key is `(session_id, thread_id, "codex-responses")`; the canonical lease key is `(session_id, thread_id, turn_id, "codex-responses")`. `codex-responses` is one transport-independent namespace shared by HTTP `/responses`, WebSocket `/responses`, and `/responses/compact`; transport fallback must not split a turn. Generic recursive fields, `previous_response_id`, window ID, user agent, and current diagnostic session heuristics are not turn identity.
+
+CQ keeps one generation-fenced current-turn pointer per lane. Request handling compares opaque IDs:
+
+1. turn ID matches retained non-current history: fail closed as a stale request;
+2. no current real turn and ID is unseen: create its reserving lease;
+3. same real turn ID as current: reuse its existing account and attempt rules;
+4. different unseen real turn ID while predecessor selection, retry, or provider-attempt work is active: reject as a concurrency/protocol violation;
+5. different unseen real turn ID with no live predecessor routing work: atomically advance the lane generation, transition any nonterminal predecessor to `superseded`, retain any terminal predecessor tombstone, and create the successor's reserving lease before selection/dispatch.
+
+Step 5 does not wait for `turn/completed`, `response.completed`, or new-turn admission. A well-formed unseen successor request is enough because Codex serialises turns within one thread. If successor dispatch later fails before admission, the predecessor remains historical in its superseded or terminal state and the successor ends `failed_unadmitted`; CQ never reopens the old turn as current. Late predecessor requests fail against retained history. Late predecessor events retain their original attempt/account generation and cannot affect the lane pointer or successor.
 
 An empty `turn_id` is valid only for `request_kind=prewarm`, where it becomes a typed startup-prewarm sentinel scoped by session, thread, and live downstream socket generation. Empty IDs for ordinary turns and compaction are invalid.
 
@@ -399,12 +424,11 @@ Logical lease states:
 |---|---|---|
 | `reserving` | Same-key selection is singleflight | `provisional`, `failed_unadmitted` |
 | `provisional` | Account chosen; no upstream acceptance | another `provisional`, `bound_active`, `failed_unadmitted` |
-| `bound_active` | At least one attempt active; account immutable | `continuation_pending`, `bound_quiescent`, `orphaned`, `terminated` |
-| `continuation_pending` | `response.completed.end_turn=false`; same turn must sample again | `bound_active`, `orphaned`, `terminated`, `expired` |
-| `bound_quiescent` | Sampling ended; same turn may continue after tools | `bound_active`, `orphaned`, `superseded`, `terminated`, `expired` |
-| `orphaned` | Transport lost or journal restored without authoritative terminal | `bound_active`, `superseded`, `expired` |
-| `superseded` | New turn safely admitted | tombstone/GC |
-| `terminated` | Verified whole-turn completion/interruption/failure observer ended it | tombstone/GC |
+| `bound_active` | At least one attempt active; account immutable | `continuation_pending`, `bound_quiescent`, `orphaned` |
+| `continuation_pending` | `response.completed.end_turn=false`; same turn must sample again unless a different turn ID supersedes it | `bound_active`, `orphaned`, `superseded`, `expired` |
+| `bound_quiescent` | Sampling ended; same turn may continue after tools | `bound_active`, `orphaned`, `superseded`, `expired` |
+| `orphaned` | Transport lost, provider outcome uncertain, or journal restored without a live attempt | `bound_active`, `superseded`, `expired` |
+| `superseded` | Different unseen real turn ID became current on the same lane | retain as stale-ID tombstone after active attempt references drain, then GC at retention horizon |
 | `expired` | Operational cleanup only, never successful completion | tombstone/GC |
 | `failed_unadmitted` | No upstream admission occurred | tombstone/GC |
 
@@ -412,9 +436,9 @@ Sampling attempt states:
 
 `prepared -> dispatched -> streaming -> provider_completed | provider_failed | indeterminate`
 
-`provider_completed` with `end_turn=false` enters `continuation_pending`; with `true` or absent it enters `bound_quiescent`, never authoritative whole-turn completion. An admitted `provider_failed` remains quiescent, while an indeterminate close/read/parser outcome becomes orphaned. A pre-admission failure remains provisional or ends as `failed_unadmitted`.
+`provider_completed` with `end_turn=false` enters `continuation_pending`; with `true` or absent it enters `bound_quiescent`, never whole-turn completion. An admitted `provider_failed` remains quiescent, while an indeterminate close/read/parser outcome becomes orphaned. A pre-admission failure remains provisional or ends as `failed_unadmitted`.
 
-A different turn on the same downstream socket is rejected while its predecessor is active or continuation-pending. Supersession is allowed only with zero active attempts and a quiescent/orphaned predecessor. Phase one rejects rather than queues so cancellation and backpressure are deterministic.
+A different turn on the same downstream socket is rejected while its predecessor has active selection, retry, or provider-attempt work. With zero active broker work, changed turn identity supersedes a `continuation_pending`, `bound_quiescent`, or `orphaned` predecessor. CQ does not need exact terminal status and does not queue concurrent provider attempts; cancellation and backpressure remain deterministic.
 
 Startup prewarm uses a separate reservation lifecycle:
 
@@ -445,7 +469,7 @@ Lease creation and every provisional account change are journalled before dispat
 
 Persist a privacy-safe lease journal under CQ's existing cache/config boundary. A random per-installation HMAC key is generated once in a separate `0o600` file under the `0o700` state directory. Records contain only:
 
-- separate keyed hashes of session, thread, turn, stable account key, and any continuation/turn-state correlation value;
+- separate keyed hashes of session, thread, current and retained historical turns, stable account key, and any continuation/turn-state correlation value;
 - lease, predecessor, mode-epoch, downstream-socket, and upstream-socket generations;
 - state, request kind, compaction phase, protocol/schema version, and authoritative/shadow flag;
 - creation and last-observed timestamps.
@@ -457,8 +481,9 @@ Rules:
 - active stream references never expire;
 - restart restores dispatched/admitted leases as orphaned and resolves the same account from current inventory;
 - socket generations restored after restart are always marked extinct, so incremental input requires resynchronisation;
-- a safely admitted new turn for the same session/thread supersedes a quiescent/orphaned predecessor;
-- quiescent/orphaned records retain for seven days after last observation;
+- a different well-formed unseen real turn ID for the same session/thread atomically advances the lane after predecessor selection, retry, and attempt work drains; nonterminal predecessors become superseded and terminal predecessor tombstones remain historical;
+- quiescent, orphaned, and superseded stale-ID tombstones retain for seven days after last observation;
+- a request matching a retained non-current turn hash fails closed and never advances the lane generation;
 - seven days is an operational default, not a protocol guarantee;
 - a late request with continuation evidence but no retained lease fails closed instead of silently choosing another account;
 - key loss, unreadable/corrupt journal, permission failure, ENOSPC, or failed rename disables enforcement and fails closed for strong-turn or continuation-bearing traffic; it never silently starts a fresh authoritative journal;
@@ -533,13 +558,13 @@ Responsibilities:
 - fence upstream generations so late close/events cannot alter a newer turn;
 - keep a one-to-one downstream/upstream socket generation; never hide an upstream replacement behind an existing downstream socket;
 - treat the configured 60-minute upstream lifetime and every WebSocket reconnect as a new generation that requires downstream reconnect and a new handshake; HTTP fallback is a transport crossover consuming the same intent;
-- at a quiescent new-turn boundary, record rotation intent; account change becomes effective only after verified downstream reconnect.
+- at a changed-turn successor boundary after the predecessor attempt drains, record rotation intent; account change becomes effective only after verified downstream reconnect.
 
 For a later turn whose frame model changes, CQ may compute a new `RouteChoice` but cannot apply it behind the existing socket. It records intent and requires a new model-bearing handshake through the verified reconnect path. If the client cannot provide model before stateful 101 admission, WS account rotation stays disabled for that client build.
 
 Ordinary Codex application cancellation is not a Responses wire event. If the downstream socket remains open, CQ keeps the sole active broker-local attempt generation and drains upstream through terminal/error before accepting another `response.create`. Generations are local counters, never inferred from response IDs or headers.
 
-If a different turn arrives while an earlier sampling attempt is active or continuation-pending, phase one rejects it with a typed concurrency error. It does not queue or add multiplexing.
+If a different turn arrives while earlier selection, retry, or sampling-attempt work is active, phase one rejects it with a typed concurrency error. After that work drains, the changed turn ID supersedes the predecessor even when its logical state remains `continuation_pending`. CQ does not queue or add multiplexing.
 
 ### Cross-account continuation reset
 
@@ -561,7 +586,7 @@ Extend ordinary route diagnostics with safe fields:
 - keyed `turn_hint`;
 - request kind;
 - lease phase and generation;
-- decision: `new`, `reuse`, `candidate_retry`, `pre_admission_failover`, `resync`, `supersede`, `retain`, `expire`;
+- decision: `new`, `reuse`, `candidate_retry`, `pre_admission_failover`, `resync`, `supersede`, `stale_block`, `retain`, `expire`;
 - reason and capacity bucket;
 - existing hashed account hint;
 - continuity state.
@@ -575,6 +600,7 @@ Add aggregate `/health` data:
 - resync attempts, successes, fallbacks, and blocks;
 - unknown metadata/protocol events;
 - late-resume blocks;
+- stale historical-turn blocks;
 - refresh-suspended lineages.
 
 Ordinary diagnostics never require payload logging. Existing payload diagnostics remain optional and private because they contain prompts and tool data.
@@ -594,8 +620,8 @@ Ordinary diagnostics never require payload logging. Existing payload diagnostics
 
 - `codex_capacity.go`: model-bucket capacity ledger and account selection inputs.
 - `codex_turn_metadata.go`: strict bounded metadata parser.
-- `codex_turn_lease.go`: concurrent logical lease and attempt state machines.
-- `codex_lease_store.go`: privacy-safe durable journal.
+- `codex_turn_lease.go`: concurrent lane pointer, seen-turn tombstone, logical lease, and attempt state machines.
+- `codex_lease_store.go`: privacy-safe durable lane/lease journal.
 - `codex_attempt.go`: explicit-account attempts and pre-admission retry policy.
 - `codex_request_scope.go`: explicit-account execution for non-turn-aware routes.
 - `codex_responses_http.go`: HTTP/SSE relay.
@@ -689,8 +715,8 @@ Each stage is a separate reviewable PR with failing tests first.
 | 7. Config and mode floor | Add unknown-field-preserving config, primary/WS modes, mode epochs, authoritative/shadow records, and drain rules | Every config-writing command passes N/N-1 round trips; `observe -> enforce -> off -> enforce` restart fixtures never promote shadow state | Default both enforcement paths off |
 | 8. Route decomposition | Add explicit-account request executor; migrate translated Anthropic, count-token, compact, images/search, native Responses, and Live callers; split HTTP and one-to-one supervised WS relays without leases | Existing route/status/body/model/headroom behaviour passes; 1,000 connect/cancel/shutdown cycles have zero race-detector or leak-detector failures | Select legacy-safe executor through mode `off` |
 | 9. Protocol parsers | Add bounded zstd inspection, exact metadata/request-kind/compaction parsing, unary compact handling, SSE admission parser, and WS handshake/error/event parser | Audited 0.146 corpus plus captured installed-Desktop fixtures pass, including malformed/oversized/compressed cases | Parsers observe only; relays remain authoritative |
-| 10. Lease core | Add logical/attempt/prewarm state machines, continuation-pending rules, generation fencing, HMAC key, durable journal, retention, and crash recovery as isolated components | `-race -count=100` concurrency suite, every write crash point, corruption/key-loss, restart, prewarm adoption, expiry, and late-event fixture passes | Components remain unused by routes |
-| 11. Observe integration | Feed HTTP and WS traffic into shadow leases and safe metrics; never consume shadow decisions | Automated corpus of 1,000 turns plus 20 installed turns across simple, tool-loop, parallel, prewarm, compaction, and reconnect cases has zero strong-metadata key/account mismatches and zero raw-ID/secret leaks | Set primary mode `off`; discard shadow epoch |
+| 10. Lease core | Add lane/current-turn pointers, retained seen-turn tombstones, logical/attempt/prewarm state machines, changed-ID supersession, continuation-pending rules, generation fencing, HMAC key, durable journal, retention, and crash recovery as isolated components | `-race -count=100` concurrency suite, every write crash point, same-lane succession, stale-ID rejection, cross-thread independence, opaque-ID comparison, corruption/key-loss, restart, prewarm adoption, expiry, and late-event fixture passes | Components remain unused by routes |
+| 11. Observe integration | Feed HTTP and WS traffic into shadow lanes/leases and safe metrics; never consume shadow decisions | Automated corpus of 1,000 turns plus 20 installed turns across simple, tool-loop, same-thread succession, parallel threads, subagents, prewarm, compaction, and reconnect cases has zero strong-metadata key/account mismatches and zero raw-ID/secret leaks | Set primary mode `off`; discard shadow epoch |
 | 12. HTTP enforcement | Add HTTP enforcement implementation and readiness validation for strong-metadata `/responses` and `/responses/compact`; require predecessor affinity or fail closed on unsafe continuation | Explicit post-Stage-11 validation writes HTTP marker; repeated sampling pins; parallel/new turns select independently; compressed replay stays exact; no post-admission migration in `-race -count=100` | Invalidate marker; set primary mode `observe` or `off` |
 | 13. WebSocket resync proof | Add rotation-intent/reconnect/full-request state machine to the already shadowed one-to-one broker; keep account changes shadow-only | For each explicitly supported CLI/Desktop build and retry budget, 100 reconnect/resync trials prove error → client invalidation → new WS generation or HTTP crossover → portable full request before any replacement upstream dispatch | Keep WS mode `observe`; whole-socket affinity remains authoritative |
 | 14. WebSocket enforcement | Permit WS `enforce` only after one atomic marker records successful completion of every blocking gate for the exact build/schema/retry-budget tuple | Installed listener proves same-turn sampling, parallel turns, quota exhaustion, 60-minute/restart reconnect, full-history account change, clean byte/error propagation, and zero late-generation mutations | Invalidate marker; set WS mode `observe` and restart/drain |
@@ -751,15 +777,21 @@ Rollback rules:
 ### Lease/state tests
 
 - concurrent first acquisition for one turn selects once;
+- root and subagent threads may share one session ID but keep independent lane pointers and account choices;
+- same `(session_id, thread_id)` plus same opaque turn ID always reuses one lease;
+- a different opaque turn ID on one lane supersedes its predecessor without numeric, lexical, or UUID ordering;
+- a delayed retained predecessor turn ID cannot supersede or mutate its current successor;
+- a different turn ID is rejected while predecessor selection, retry, or provider-attempt work remains active, then advances the lane after that work drains;
 - hundreds of distinct turn IDs remain independent under `-race`;
 - quota zero after admission never moves account;
 - new turn reselects;
 - multiple `response.completed` events around tool work reuse one account;
-- `response.completed.end_turn=false` requires another same-turn sample and blocks supersession;
+- `response.completed.end_turn=false` requires another same-turn sample unless a different turn ID later supersedes it;
 - `response.completed.end_turn=true` or absent is quiescent, not authoritative turn completion;
 - provider failure and unknown disconnect retain lease;
 - restart restores same account and lease/predecessor generation, marks socket generations extinct, and requires resynchronisation for incremental input;
-- new-turn supersession, tombstone, seven-day expiry, and late-resume block;
+- changed-ID supersession from continuation-pending, quiescent, and orphaned predecessors; failed successor admission never resurrects predecessor;
+- successor lane generation, tombstone, seven-day expiry, and late-resume block;
 - terminal/expiry/late events cannot double-release or resurrect state.
 - admission/journal failure, ENOSPC, corrupt journal, and HMAC-key loss never restore provisional migration;
 - mode epochs never promote shadow leases or discard authoritative continuity fences.
@@ -786,7 +818,7 @@ Rollback rules:
 - `previous_response_id` never crosses upstream socket generation, including same-account reconnect;
 - exact retryable error makes client invalidate and retry portable full history on a new WS generation or HTTP before replacement upstream dispatch;
 - retry budgets 0, 1, and exhausted WS-to-HTTP fallback consume one CQ intent without double retry;
-- application cancellation with downstream WS still open drains upstream terminal before accepting the next request;
+- application cancellation with downstream WS still open drains upstream terminal before accepting a changed-turn request, which then supersedes the interrupted predecessor;
 - close propagation, cancellation, deadline, shutdown, panic recovery, and late-generation fencing;
 - fake `/app-server` contract beginning with `initialize` fails explicitly instead of relaying to Responses.
 - every legacy transport caller uses an explicit request-scoped executor after transport reduction.
@@ -808,7 +840,7 @@ go test -race -count=1 ./...
 3. Exhaust or mark that account unavailable while the turn remains active.
 4. Start parallel short turns and verify they select another healthy account.
 5. Verify the long turn keeps its original account through later sampling requests.
-6. Start the next turn in that task and verify full-context resync occurs before any account change.
+6. Start the next turn in that task; verify its changed `turn_id` supersedes only the previous lease on the same session/thread lane and full-context resync occurs before any account change.
 7. Verify automatic activity leaves system-auth and registry hashes unchanged and Codex Bar shows no CQ-driven system-account flip.
 8. Run explicit `cq codex switch` and verify that action alone changes the system hash.
 9. Restart the installed proxy mid-quiescent turn and verify the same turn reattaches to the same account.
@@ -823,6 +855,7 @@ Resolved:
 - Credentials are candidate-based, not stored-wins.
 - One local credential coordinator owns writes; refresh is suspended for borrowed, legacy, exported, or uncertain lineages.
 - Leases use exact turn metadata and survive sampling completion.
+- Session ID groups a root multi-agent tree, thread ID identifies one routing lane, and changed opaque turn ID is that lane's successor boundary; exact terminal reason is unnecessary.
 - Incremental continuation belongs to one live upstream WebSocket generation, even on the same account.
 - Startup prewarm has a typed one-shot hand-off; compaction phase controls attachment versus supersession.
 - Quiescent/orphan leases persist for seven days.
@@ -858,6 +891,9 @@ CQ source authority:
 
 Official Codex source at audited commit:
 
+- [Session grouping across root and subagent threads](https://github.com/openai/codex/blob/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/codex-rs/core/src/agent/control.rs)
+- [UUIDv7 public turn IDs](https://github.com/openai/codex/blob/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/codex-rs/core/src/session/mod.rs)
+- [Active-turn steering versus new-turn creation](https://github.com/openai/codex/blob/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/codex-rs/core/src/session/handlers.rs)
 - [Turn-scoped client sessions and cross-turn WebSocket reuse](https://github.com/openai/codex/blob/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/codex-rs/core/src/client.rs)
 - [Canonical Responses turn metadata](https://github.com/openai/codex/blob/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/codex-rs/core/src/responses_metadata.rs)
 - [Wrapped WebSocket errors and rate-limit events](https://github.com/openai/codex/blob/e363b08c9175ac1cbe5893615dd2cb9ddf95043b/codex-rs/codex-api/src/endpoint/responses_websocket.rs)
