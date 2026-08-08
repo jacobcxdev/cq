@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 )
 
 const defaultCodexPrimerPollInterval = 5 * time.Minute
+const defaultCodexPrimerDormantProbeInterval = 5 * time.Second
 
 type PrimerUsageReader interface {
 	Read(context.Context, codex.AccountKey) (codex.UsageObservation, error)
@@ -22,17 +25,25 @@ type PrimerRequester interface {
 }
 
 type CodexPrimer struct {
-	Accounts       func(context.Context) ([]codex.AccountKey, error)
-	Usage          PrimerUsageReader
-	Requester      PrimerRequester
-	Store          *CodexPrimerStore
-	Models         func() []modelregistry.Entry
-	ModelOverrides map[string]string
-	PollInterval   time.Duration
-	OnError        func(error)
+	Accounts             func(context.Context) ([]codex.AccountKey, error)
+	Usage                PrimerUsageReader
+	Requester            PrimerRequester
+	Store                *CodexPrimerStore
+	Models               func() []modelregistry.Entry
+	ModelOverrides       map[string]string
+	PollInterval         time.Duration
+	DormantProbeInterval time.Duration
+	OnError              func(error)
 
-	healthMu  sync.Mutex
-	lastError string
+	healthMu       sync.Mutex
+	lastError      string
+	dormantMu      sync.Mutex
+	dormantSamples map[string]primerDormantSample
+}
+
+type primerDormantSample struct {
+	ResetAt    time.Time
+	ObservedAt time.Time
 }
 
 type CodexPrimerHealth struct {
@@ -134,17 +145,37 @@ func (p *CodexPrimer) runAccount(ctx context.Context, account codex.AccountKey, 
 		return time.Time{}, err
 	}
 	next := time.Time{}
+	dormantNext, err := p.Store.ReconcileDormant(account, targets, now, now.Add(p.dormantProbeInterval()))
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !dormantNext.IsZero() {
+		next = dormantNext
+	}
 	for _, target := range targets {
 		if err := p.Store.Observe(account, target); err != nil {
 			return time.Time{}, err
 		}
+		dormant := false
 		if target.ResetAt.After(now) {
+			var probeAt time.Time
+			dormant, probeAt = p.dormantDue(account, target, now)
+			if !dormant && !probeAt.IsZero() && (next.IsZero() || probeAt.Before(next)) {
+				next = probeAt
+			}
+		}
+		if target.ResetAt.After(now) && !dormant {
 			if next.IsZero() || target.ResetAt.Before(next) {
 				next = target.ResetAt
 			}
 			continue
 		}
-		claimed, err := p.Store.Claim(account, target)
+		var claimed bool
+		if dormant {
+			claimed, err = p.Store.ClaimDormant(account, target, now)
+		} else {
+			claimed, err = p.Store.Claim(account, target)
+		}
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -153,33 +184,53 @@ func (p *CodexPrimer) runAccount(ctx context.Context, account codex.AccountKey, 
 		}
 		result, err := p.Requester.Send(ctx, account, target.ModelID)
 		if err != nil {
-			if markErr := p.Store.Mark(account, target, PrimerStateAmbiguous, "request_error"); markErr != nil {
+			code := "request_error"
+			if dormant {
+				code = "dormant_ambiguous"
+			}
+			if markErr := p.Store.Mark(account, target, PrimerStateAmbiguous, code); markErr != nil {
 				return time.Time{}, errors.Join(err, markErr)
 			}
 			return time.Time{}, err
 		}
 		switch result.State {
 		case PrimerRequestRejected:
-			if err := p.Store.Mark(account, target, PrimerStateRejected, fmt.Sprintf("http_%d", result.HTTPStatus)); err != nil {
+			code := fmt.Sprintf("http_%d", result.HTTPStatus)
+			if dormant {
+				code = "dormant_" + code
+			}
+			if err := p.Store.Mark(account, target, PrimerStateRejected, code); err != nil {
 				return time.Time{}, err
 			}
 		case PrimerRequestAdmitted:
-			if err := p.Store.Mark(account, target, PrimerStateAdmitted, "admitted"); err != nil {
+			code := "admitted"
+			if dormant {
+				code = "dormant_admitted"
+			}
+			if err := p.Store.Mark(account, target, PrimerStateAdmitted, code); err != nil {
 				return time.Time{}, err
 			}
 		case PrimerRequestAmbiguous:
-			if err := p.Store.Mark(account, target, PrimerStateAmbiguous, "ambiguous"); err != nil {
+			code := "ambiguous"
+			if dormant {
+				code = "dormant_ambiguous"
+			}
+			if err := p.Store.Mark(account, target, PrimerStateAmbiguous, code); err != nil {
 				return time.Time{}, err
 			}
 		default:
-			if err := p.Store.Mark(account, target, PrimerStateAmbiguous, "unknown_result"); err != nil {
+			code := "unknown_result"
+			if dormant {
+				code = "dormant_ambiguous"
+			}
+			if err := p.Store.Mark(account, target, PrimerStateAmbiguous, code); err != nil {
 				return time.Time{}, err
 			}
 		}
 		verified, err := p.Usage.Read(ctx, account)
 		if err != nil {
 			record, found := p.Store.Lookup(account, target)
-			if found && (record.State == PrimerStateAdmitted || record.State == PrimerStateAmbiguous) {
+			if found && !dormant && (record.State == PrimerStateAdmitted || record.State == PrimerStateAmbiguous) {
 				if markErr := p.Store.Mark(account, target, PrimerStateVerifying, "usage_unavailable"); markErr != nil {
 					return time.Time{}, errors.Join(err, markErr)
 				}
@@ -191,7 +242,18 @@ func (p *CodexPrimer) runAccount(ctx context.Context, account codex.AccountKey, 
 		if err := p.Store.ReconcileAdvanced(account, primerResetEpochs(verified.Windows), now); err != nil {
 			return time.Time{}, err
 		}
-		if record, found := p.Store.Lookup(account, target); found && (record.State == PrimerStateAdmitted || record.State == PrimerStateAmbiguous) {
+		if dormant {
+			record, recordFound := p.Store.Lookup(account, target)
+			if expected, found := matchingPrimerTarget(target, verifiedTargets); found && recordFound && (record.State == PrimerStateAdmitted || record.State == PrimerStateAmbiguous || record.State == PrimerStateVerifying) {
+				if err := p.Store.MarkDormantVerifying(account, target, expected, now.Add(p.dormantProbeInterval())); err != nil {
+					return time.Time{}, err
+				}
+				p.rememberDormantSample(account, expected, now)
+				if next.IsZero() || now.Add(p.dormantProbeInterval()).Before(next) {
+					next = now.Add(p.dormantProbeInterval())
+				}
+			}
+		} else if record, found := p.Store.Lookup(account, target); found && (record.State == PrimerStateAdmitted || record.State == PrimerStateAmbiguous) {
 			if err := p.Store.Mark(account, target, PrimerStateVerifying, "epoch_unchanged"); err != nil {
 				return time.Time{}, err
 			}
@@ -209,6 +271,94 @@ func (p *CodexPrimer) runAccount(ctx context.Context, account codex.AccountKey, 
 		return next, fmt.Errorf("%d Codex primer windows unresolved", len(unresolved))
 	}
 	return next, nil
+}
+
+func (p *CodexPrimer) dormantDue(account codex.AccountKey, target CodexPrimerTarget, now time.Time) (bool, time.Time) {
+	probe := p.dormantProbeInterval()
+	tolerance := 2 * time.Second
+	if len(target.Windows) == 0 {
+		return false, time.Time{}
+	}
+	for _, window := range target.Windows {
+		if window.RemainingPct != 100 || window.Period <= 0 || absDuration(target.ResetAt.Sub(now)-window.Period) > tolerance {
+			return false, time.Time{}
+		}
+	}
+	key := primerDormantKey(account, target)
+	p.dormantMu.Lock()
+	defer p.dormantMu.Unlock()
+	if p.dormantSamples == nil {
+		p.dormantSamples = make(map[string]primerDormantSample)
+	}
+	previous, found := p.dormantSamples[key]
+	p.dormantSamples[key] = primerDormantSample{ResetAt: target.ResetAt, ObservedAt: now}
+	if !found {
+		return false, now.Add(probe)
+	}
+	shift := target.ResetAt.Sub(previous.ResetAt)
+	elapsed := now.Sub(previous.ObservedAt)
+	if shift > 0 && elapsed > 0 && absDuration(shift-elapsed) <= tolerance {
+		delete(p.dormantSamples, key)
+		return true, time.Time{}
+	}
+	return false, time.Time{}
+}
+
+func (p *CodexPrimer) rememberDormantSample(account codex.AccountKey, target CodexPrimerTarget, now time.Time) {
+	p.dormantMu.Lock()
+	defer p.dormantMu.Unlock()
+	if p.dormantSamples == nil {
+		p.dormantSamples = make(map[string]primerDormantSample)
+	}
+	p.dormantSamples[primerDormantKey(account, target)] = primerDormantSample{ResetAt: target.ResetAt, ObservedAt: now}
+}
+
+func primerDormantKey(account codex.AccountKey, target CodexPrimerTarget) string {
+	return string(account) + "\x00" + strings.Join(primerWindowParts(target), ",")
+}
+
+func matchingPrimerTarget(dispatched CodexPrimerTarget, targets []CodexPrimerTarget) (CodexPrimerTarget, bool) {
+	want := primerWindowParts(dispatched)
+	best := -1
+	for index, target := range targets {
+		parts := primerWindowParts(target)
+		if stringSubset(want, parts) && (best < 0 || len(parts) < len(primerWindowParts(targets[best]))) {
+			best = index
+		}
+	}
+	if best < 0 {
+		return CodexPrimerTarget{}, false
+	}
+	return targets[best], true
+}
+
+func primerWindowParts(target CodexPrimerTarget) []string {
+	parts := make([]string, 0, len(target.Windows))
+	for _, window := range target.Windows {
+		parts = append(parts, window.RawLimitName+"|"+string(window.WindowName)+"|"+window.Period.String())
+	}
+	sort.Strings(parts)
+	return parts
+}
+
+func stringSubset(want, available []string) bool {
+	present := make(map[string]bool, len(available))
+	for _, value := range available {
+		present[value] = true
+	}
+	for _, value := range want {
+		if !present[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func primerResetEpochs(windows []codex.WindowDescriptor) []time.Time {
@@ -230,4 +380,11 @@ func (p *CodexPrimer) pollInterval() time.Duration {
 		return p.PollInterval
 	}
 	return defaultCodexPrimerPollInterval
+}
+
+func (p *CodexPrimer) dormantProbeInterval() time.Duration {
+	if p.DormantProbeInterval > 0 {
+		return p.DormantProbeInterval
+	}
+	return defaultCodexPrimerDormantProbeInterval
 }

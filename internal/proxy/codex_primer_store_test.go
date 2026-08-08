@@ -121,6 +121,44 @@ func TestCodexPrimerStoreGenerationIdentityIgnoresSelectedModel(t *testing.T) {
 	}
 }
 
+func TestCodexPrimerStoreRestoresDormantStabilityVerification(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	store, err := OpenCodexPrimerStore(fsys, "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched := testPrimerTarget()
+	expected := dispatched
+	expected.ResetAt = expected.ResetAt.Add(5 * time.Second)
+	for i := range expected.Windows {
+		expected.Windows[i].ResetAt = expected.ResetAt
+	}
+	if err := store.Observe("account-secret", dispatched); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.Claim("account-secret", dispatched); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if err := store.Mark("account-secret", dispatched, PrimerStateAdmitted, "dormant_admitted"); err != nil {
+		t.Fatal(err)
+	}
+	next := time.Unix(10000, 0)
+	if err := store.MarkDormantVerifying("account-secret", dispatched, expected, next); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenCodexPrimerStore(fsys, "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.ReconcileDormant("account-secret", []CodexPrimerTarget{expected}, next, next.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	record, found := restarted.Lookup("account-secret", dispatched)
+	if !found || record.State != PrimerStateVerified || record.ResultCode != "dormant_epoch_stable" {
+		t.Fatalf("restarted record = %+v, %v", record, found)
+	}
+}
+
 func TestCodexPrimerStoreUsesPrivateFiles(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenCodexPrimerStore(fsutil.OSFileSystem{}, dir+"/primer.json", dir+"/primer.key")

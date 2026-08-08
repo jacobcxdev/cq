@@ -49,6 +49,9 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 		pct := int(math.Round(100 - usedPercent))
 		return max(0, min(100, pct))
 	}
+	exactRemainingPct := func(usedPercent float64) float64 {
+		return math.Max(0, math.Min(100, 100-usedPercent))
+	}
 
 	windows := make(map[quota.WindowName]quota.Window)
 	var descriptors []WindowDescriptor
@@ -87,7 +90,7 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 					RawLimitName: rawLimitName, WindowName: name,
 					Period:    time.Duration(entry.window.LimitWindowSeconds) * time.Second,
 					ScopeKind: scopeKind, Scope: bucket,
-					ResetAt: time.Unix(resetAtUnix, 0), RemainingPct: float64(remaining),
+					ResetAt: time.Unix(resetAtUnix, 0), RemainingPct: exactRemainingPct(entry.window.UsedPercent),
 				})
 			}
 		}

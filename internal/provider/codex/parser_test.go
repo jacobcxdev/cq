@@ -84,6 +84,21 @@ func TestParseUsageObservationPreservesBackendWindowDescriptors(t *testing.T) {
 	}
 }
 
+func TestParseUsageObservationPreservesExactDescriptorPercentage(t *testing.T) {
+	observation := ParseUsageObservation([]byte(`{
+		"rate_limit":{"primary_window":{"used_percent":0.4,"limit_window_seconds":604800,"reset_at":1774051200}}
+	}`), "", "")
+	if len(observation.Windows) != 1 {
+		t.Fatalf("descriptors = %+v", observation.Windows)
+	}
+	if observation.Windows[0].RemainingPct != 99.6 {
+		t.Fatalf("descriptor remaining = %v", observation.Windows[0].RemainingPct)
+	}
+	if observation.Result.Windows[quota.Window7Day].RemainingPct != 100 {
+		t.Fatalf("display remaining = %v", observation.Result.Windows[quota.Window7Day].RemainingPct)
+	}
+}
+
 func TestParseUsageObservationExcludesDescriptorWithoutResetEpoch(t *testing.T) {
 	body := []byte(`{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800}}}`)
 

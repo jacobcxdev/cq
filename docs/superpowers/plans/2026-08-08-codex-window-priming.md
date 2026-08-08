@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Automatically start each backend-reported Codex quota window after reset with one account-pinned synthetic request, then verify exact reset-epoch advancement without manual traffic or duplicate admission.
+**Goal:** Automatically start each backend-reported Codex quota window after reset with one account-pinned synthetic request, then verify active-epoch advancement or untouched-epoch stability without manual traffic or duplicate admission.
 
 **Architecture:** Preserve backend window descriptors, resolve each scoped window to a safe registry model, coalesce compatible due windows into activation targets, and run one durable scheduler owned by the proxy. Scheduler refreshes usage before dispatch, claims each account/window generation atomically, sends a minimal native Responses request through existing pinned candidate routing, and verifies advancement by polling usage only.
 
@@ -83,7 +83,7 @@ go test -race -count=1 ./internal/provider/codex -run 'WindowDescriptor|ParseUsa
 - [ ] Resolve in strict order: exact configured raw-scope override, exact case-folded ID/alias/display, unique token-boundary family, explicit provider adapter, typed unresolved result.
 - [ ] Reject arbitrary substring matching and ambiguous families.
 - [ ] Use registry priority/version ordering only as deterministic preference. Do not describe selection as cheapest because registry has no price authority.
-- [ ] Key activation groups by exact reset epoch plus selected model family. Record every descriptor expected to advance.
+- [ ] Group request targets by exact reset epoch plus selected model family. Key untouched attempt safety by stable window lineage without reset timestamp. Record every descriptor expected to verify.
 - [ ] Run:
 
 ```bash
@@ -187,19 +187,20 @@ go test -race -count=1 ./internal/proxy -run 'PrimerRequest'
 - Create: `internal/proxy/codex_primer.go`
 - Create: `internal/proxy/codex_primer_test.go`
 
-- [ ] Add fake-clock failing tests for future reset wake, already-due untouched generation, external priming before wake, coalesced dispatch, restart before claim, restart after admission, ambiguous outcome, verification lag, exact epoch advance, percentage-only change, account removal, model disappearance, source auth rotation, graceful shutdown, and two scheduler instances.
+- [ ] Add fake-clock failing tests for future reset wake, two-sample sliding untouched detection, stable fresh no-op, external priming before wake, coalesced dispatch, restart before claim, restart after admission, ambiguous outcome, verification lag, exact epoch advance, post-activation epoch stability, percentage-only change, account removal, model disappearance, source auth rotation, graceful shutdown, and two scheduler instances.
 - [ ] Scheduler flow:
   1. list routable logical accounts;
   2. read each account's usage;
   3. persist observed descriptors/plans;
-  4. wake at earliest due epoch;
-  5. reread exact account usage;
-  6. record `primed_externally` when epoch advanced;
-  7. claim generation atomically;
-  8. dispatch once;
-  9. transition admitted/ambiguous to verification-only;
-  10. poll usage with bounded backoff until every target descriptor advances.
-- [ ] Allow bounded retry only for typed definite pre-admission rejection. Record attempt count and deadline in generation state.
+  4. probe exact-`100%`, full-period candidates and classify untouched only when epoch shifts with elapsed time;
+  5. wake at earliest active due epoch or untouched probe;
+  6. reread exact account usage;
+  7. record `primed_externally` when active epoch advanced;
+  8. claim stable window lineage atomically;
+  9. dispatch once;
+  10. transition admitted/ambiguous to verification-only;
+  11. poll usage with bounded backoff until active epochs advance or untouched epochs remain stable.
+- [ ] Allow bounded retry only for typed definite pre-admission rejection. Apply attempt count to window lineage across sliding reset timestamps.
 - [ ] Start scheduler only in credential-coordinator owner process. Delegates and second proxy instances remain read-only observers.
 - [ ] Recover journal before observing current usage. Never let a stale usage response regress epoch or state.
 - [ ] Emit privacy-safe metrics/status: counts, state, model ID, reset time, typed error. No account/scope identifiers.
@@ -269,12 +270,12 @@ git diff --check
 
 - No repository changes required unless a diagnosed failure needs a test-first fix.
 
-- [ ] Read untouched account usage through usage endpoint only. Record privacy-safe exact reset-epoch hash/state; do not issue Responses traffic.
+- [ ] Preserve untouched account without manual usage or Responses traffic once installed acceptance begins. Let scheduler perform both detection samples.
 - [ ] Install tested CQ build and restart owned proxy service with priming still disabled.
 - [ ] Enable priming through CQ config command and restart service. Do not call primer request executor directly and do not send any manual Codex message on target account.
 - [ ] Observe journal/status until scheduler itself claims target generation.
 - [ ] If scheduler fails before dispatch, preserve untouched generation, add failing regression test, fix, reinstall, and let scheduler retry under tested pre-admission policy.
 - [ ] If admission or ambiguity occurs, never replay. Diagnose with journal/status and continue verification polling only.
-- [ ] Prove exact backend reset epoch advances and countdown starts for scheduler-originated generation.
+- [ ] Prove sliding backend reset epoch becomes stable and countdown starts for scheduler-originated generation.
 - [ ] Re-snapshot credential/system/registry/CodexBar files and prove byte identity.
-- [ ] Record build SHA, scheduler state transitions, exact-epoch advancement result, and no-manual-request attestation in privacy-safe local evidence.
+- [ ] Record build SHA, scheduler state transitions, exact-epoch stability result, and no-manual-request attestation in privacy-safe local evidence.

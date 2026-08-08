@@ -340,3 +340,112 @@ func TestCodexPrimerModelDisappearanceDoesNotMarkGenerationExternallyPrimed(t *t
 		t.Fatalf("record/request = %+v, %v, %d", record, found, requester.calls)
 	}
 }
+
+func TestCodexPrimerDetectsSlidingUntouchedWindowAndVerifiesStableEpoch(t *testing.T) {
+	t0 := time.Unix(8000, 0)
+	probe := 5 * time.Second
+	firstReset := t0.Add(7 * 24 * time.Hour)
+	secondReset := t0.Add(probe).Add(7 * 24 * time.Hour)
+	usage := &queuedPrimerUsage{observations: []codex.UsageObservation{
+		primerObservation(firstReset),
+		primerObservation(secondReset),
+		primerObservation(secondReset),
+		primerObservation(secondReset),
+	}}
+	requester := &recordingPrimerRequester{result: PrimerRequestResult{State: PrimerRequestAdmitted}}
+	primer, store := testPrimerScheduler(t, usage, requester)
+	primer.DormantProbeInterval = probe
+
+	next, err := primer.RunOnce(context.Background(), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requester.calls != 0 || !next.Equal(t0.Add(probe)) {
+		t.Fatalf("first sample request/next = %d/%v", requester.calls, next)
+	}
+	if _, err := primer.RunOnce(context.Background(), t0.Add(probe)); err != nil {
+		t.Fatal(err)
+	}
+	if requester.calls != 1 {
+		t.Fatalf("sliding window requests = %d", requester.calls)
+	}
+	if _, err := primer.RunOnce(context.Background(), t0.Add(2*probe)); err != nil {
+		t.Fatal(err)
+	}
+	verified := 0
+	for _, record := range store.Records() {
+		if record.State == PrimerStateVerified {
+			verified++
+		}
+	}
+	if verified != 1 || requester.calls != 1 {
+		t.Fatalf("stable verification/requests = %d/%d records=%+v", verified, requester.calls, store.Records())
+	}
+}
+
+func TestCodexPrimerDoesNotPrimeStableFreshWindow(t *testing.T) {
+	t0 := time.Unix(9000, 0)
+	probe := 5 * time.Second
+	reset := t0.Add(7 * 24 * time.Hour)
+	usage := &queuedPrimerUsage{observations: []codex.UsageObservation{primerObservation(reset), primerObservation(reset)}}
+	requester := &recordingPrimerRequester{result: PrimerRequestResult{State: PrimerRequestAdmitted}}
+	primer, _ := testPrimerScheduler(t, usage, requester)
+	primer.DormantProbeInterval = probe
+
+	if _, err := primer.RunOnce(context.Background(), t0); err != nil {
+		t.Fatal(err)
+	}
+	next, err := primer.RunOnce(context.Background(), t0.Add(probe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requester.calls != 0 || !next.Equal(reset) {
+		t.Fatalf("stable fresh window request/next = %d/%v", requester.calls, next)
+	}
+}
+
+func TestCodexPrimerNeverReplaysAdmittedDormantWindowWhileEpochStillSlides(t *testing.T) {
+	t0 := time.Unix(10000, 0)
+	probe := 5 * time.Second
+	observations := make([]codex.UsageObservation, 0, 5)
+	for _, offset := range []int{0, 1, 1, 2, 3} {
+		observedAt := t0.Add(time.Duration(offset) * probe)
+		observations = append(observations, primerObservation(observedAt.Add(7*24*time.Hour)))
+	}
+	usage := &queuedPrimerUsage{observations: observations}
+	requester := &recordingPrimerRequester{result: PrimerRequestResult{State: PrimerRequestAdmitted}}
+	primer, _ := testPrimerScheduler(t, usage, requester)
+	primer.DormantProbeInterval = probe
+
+	for i := 0; i < 4; i++ {
+		if _, err := primer.RunOnce(context.Background(), t0.Add(time.Duration(i)*probe)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requester.calls != 1 {
+		t.Fatalf("admitted dormant window replayed %d times", requester.calls)
+	}
+}
+
+func TestCodexPrimerBoundsRejectedDormantAttemptsAcrossSlidingEpochs(t *testing.T) {
+	t0 := time.Unix(11000, 0)
+	probe := 5 * time.Second
+	observations := make([]codex.UsageObservation, 0, 10)
+	for _, offset := range []int{0, 1, 1, 2, 3, 3, 4, 5, 6, 7} {
+		observedAt := t0.Add(time.Duration(offset) * probe)
+		observations = append(observations, primerObservation(observedAt.Add(7*24*time.Hour)))
+	}
+	usage := &queuedPrimerUsage{observations: observations}
+	requester := &recordingPrimerRequester{result: PrimerRequestResult{State: PrimerRequestRejected, HTTPStatus: http.StatusBadRequest}}
+	primer, _ := testPrimerScheduler(t, usage, requester)
+	primer.DormantProbeInterval = probe
+
+	for i := 0; i < 8; i++ {
+		if _, err := primer.RunOnce(context.Background(), t0.Add(time.Duration(i)*probe)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requester.calls != codexPrimerMaxRejectedAttempts {
+		t.Fatalf("rejected dormant request calls = %d", requester.calls)
+	}
+}

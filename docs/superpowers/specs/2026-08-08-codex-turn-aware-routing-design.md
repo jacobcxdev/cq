@@ -409,6 +409,7 @@ type WindowDescriptor struct {
     Period       time.Duration
     Scope        WindowScope // shared or model-family
     ResetAt      time.Time
+    RemainingPct float64     // exact backend percentage, not display-rounded
 }
 ```
 
@@ -439,23 +440,26 @@ For a shared target, CQ first reuses a resolved scoped model according to provid
 
 ### Scheduler, request, and verification
 
-One long-lived scheduler uses active per-account usage fetches through the candidate inventory. It never activates system auth. For each account/window generation:
+One long-lived scheduler uses active per-account usage fetches through the candidate inventory. It never activates system auth. Codex currently reports an untouched window as exact `100%` remaining with `reset_at` approximately one full backend period after each observation. That epoch slides forward with observation time until first admitted model traffic starts the countdown. CQ therefore distinguishes two activation paths for each account/window generation:
 
 1. persist the observed reset epoch and activation target;
-2. wake at or after that epoch;
-3. refresh usage before sending model traffic;
-4. if the exact reset epoch already advanced, record `primed_externally` and send nothing;
-5. otherwise atomically claim one synthetic attempt and issue the coalesced account-pinned request;
-6. after admission/completion, poll usage only until every due descriptor's reset epoch advances;
-7. record verified advancement and schedule the new backend epoch.
+2. for an active countdown, wake at or after its stable epoch;
+3. for an exact-`100%` candidate whose horizon approximately equals its backend period, sample again after a short probe interval and classify it as untouched only when its epoch shifts by approximately the elapsed observation time;
+4. refresh usage before sending model traffic;
+5. if a due active epoch already advanced, record `primed_externally` and send nothing;
+6. otherwise atomically claim one window-lineage attempt and issue the coalesced account-pinned request;
+7. after admission/completion, poll usage only: active-reset verification requires epoch advancement, while untouched-window verification requires the post-request epoch to remain exactly stable across a later probe;
+8. record verified activation and schedule the stable backend epoch.
+
+A stable fresh epoch is already counting down and receives no synthetic request. Percentage must be the exact backend value: display rounding to `100%` cannot establish untouched state. Sliding detection requires two observations and never treats one future epoch as proof. Window-lineage identity excludes the sliding epoch, so a shifted record cannot bypass admission safety or retry limits.
 
 Synthetic traffic uses native Responses HTTP with `store:false`, no tools, no continuation, a minimal `ping` instruction, a bounded response, and a dedicated CQ synthetic metadata namespace. It never joins, creates, or mutates a user task lease. It uses one exact `AccountKey`; same-identity candidate fallback and one eligible coordinator refresh are allowed, but cross-account failover and automatic system activation are forbidden.
 
-A definitely rejected pre-admission request may retry under a bounded provider-lag policy. Once admission is observed, bytes may have reached upstream, or outcome is ambiguous, CQ never sends another synthetic request for that account/window generation. It performs verification polls only. Verification requires the exact backend reset epoch to advance; remaining percentage alone is insufficient because one minimal request can still round to `100%`. A scoped request records shared and scoped advancement separately.
+A definitely rejected pre-admission request may retry under a bounded provider-lag policy. The attempt bound applies to stable window-lineage identity across changing untouched epochs, not to each reset timestamp. Once admission is observed, bytes may have reached upstream, or outcome is ambiguous, CQ never sends another synthetic request for that account/window generation. It performs verification polls only. Remaining percentage alone is never verification because one minimal request can still display as `100%`. A scoped request records shared and scoped verification separately.
 
 Primer state is a separate atomic `0o600` journal under a `0o700` CQ state directory. It stores HMAC account identity, provider, raw-scope hash, canonical period, observed reset epoch, selected model ID, attempt generation/state, next verification time, and typed result. It stores no credential material, email, provider account ID, prompt, response text, or external path. Restart resumes due schedules and verification without replaying an admitted or ambiguous generation.
 
-Initial live acceptance must use a naturally reset untouched window. Operators may read usage, install/restart the service, and enable automatic priming, but must not send a manual model request. Success requires scheduler-originated admission followed by observed reset-epoch advancement. Failure preserves the untouched generation for diagnosis whenever no request was admitted; admitted/ambiguous failure remains verification-only.
+Initial live acceptance must use a naturally reset untouched window. Operators may install/restart the service, enable automatic priming, and inspect privacy-safe journal/status output, but must not manually call usage or send a model request after acceptance begins. Success requires scheduler-only two-sample sliding detection, scheduler-originated admission, and a later scheduler poll proving the epoch stopped sliding. Failure preserves the untouched generation for diagnosis whenever no request was admitted; admitted/ambiguous failure remains verification-only.
 
 ## Turn identity and lifecycle
 
@@ -827,7 +831,7 @@ Executable addendum plans:
 | 14. WebSocket enforcement | Permit WS `enforce` only after one atomic marker records successful completion of every blocking gate for the exact build/schema/retry-budget tuple | Installed listener proves same-turn sampling, parallel turns, quota exhaustion, 60-minute/restart reconnect, full-history account change, clean byte/error propagation, and zero late-generation mutations | Invalidate marker; set WS mode `observe` and restart/drain |
 | 15. Soak and default | Run installed-service canary; in a later release make enforcement the recommended post-validation choice only for installations with current readiness markers and explicit opt-in; never activate it by upgrade; remove dead selector/suppression/switch code after rollback window | Seven consecutive days and at least 100 admitted installed-service turns with zero account/lease mismatch, automatic auth write, secret leak, or unexplained lifecycle event; complete one rollback rehearsal | Keep explicit `off/observe` through next release window |
 | 16. External candidate federation | Add generic read-only source boundary plus validated Codex Bar manifest adapter; preserve source candidates under one logical account and resolve exact external revisions only inside attempts | Fresh Codex Bar/stale CQ inverse reproducer routes same identity successfully; manifest/path/fingerprint/revision attacks fail closed; all automatic activity leaves both stores byte-identical | Disable external source adapter; CQ/system candidates remain unchanged |
-| 17. Dynamic window priming | Add backend descriptor preservation, conservative model-family resolution, activation coalescing, durable scheduler, account-pinned synthetic Responses request, and reset-epoch verification behind explicit feature enablement | Fake-clock/race/crash suites pass; naturally reset untouched installed account receives no manual request, scheduler request advances exact reset epoch, and no credential/system/task state changes | Disable primer; retain journal for inspection; never replay admitted or ambiguous generations |
+| 17. Dynamic window priming | Add backend descriptor preservation, conservative model-family resolution, activation coalescing, durable scheduler, account-pinned synthetic Responses request, and reset-epoch verification behind explicit feature enablement | Fake-clock/race/crash suites pass; naturally reset untouched installed account receives no manual request, scheduler detects sliding then proves stable epoch, and no credential/system/task state changes | Disable primer; retain journal for inspection; never replay admitted or ambiguous generations |
 
 Stage 1 intentionally trades automatic Codex refresh for credential safety until Stage 5 supplies a proven single owner. Compatibility epoch starts there and advances before any later irreversible persisted schema; startup refuses an older binary rather than silently restoring unsafe semantics. No lease stage begins before credential authority and rollback controls are complete.
 
@@ -895,7 +899,8 @@ Rollback rules:
 - pre-send usage refresh skips an externally advanced epoch;
 - definite pre-admission rejection retries only within bounded policy; admission or ambiguity never replays;
 - same-identity candidate recovery allowed; cross-account failover and system activation forbidden;
-- verification requires reset-epoch advancement and does not rely on rounded remaining percentage;
+- untouched detection requires exact `100%`, full-period horizon, and two-sample epoch sliding; stable fresh epochs receive no traffic;
+- verification requires active-epoch advancement or untouched-epoch stability, never rounded remaining percentage;
 - restart, crash at every journal transition, clock rollback/advance, late telemetry, corrupt journal, and duplicate scheduler ownership;
 - primer journal contains no token, email, provider account ID, external path, prompt, response, or raw scope; ordinary diagnostics contain no personal identity or secret material;
 - disabled/default config performs zero usage polling beyond existing behaviour and zero synthetic requests.
@@ -972,8 +977,8 @@ go test -race -count=1 ./...
 9. Restart the installed proxy mid-quiescent turn and verify the same turn reattaches to the same account.
 10. Repeat against the installed listener/service, not only `httptest` or a temporary binary.
 11. With priming disabled, record a naturally reset untouched account/window generation using privacy-safe hashes only; send no manual model request.
-12. Install tested build, enable automatic priming, restart service, and prove scheduler alone emits the exact-account synthetic request.
-13. Verify the due backend reset epoch advances and begins counting down; verify user task/turn journals, system auth, CQ-managed auth, Codex Bar auth, and registry active state remain unchanged.
+12. Install tested build, enable automatic priming, restart service, and prove scheduler alone detects the sliding untouched epoch and emits the exact-account synthetic request.
+13. Verify the backend reset epoch stops sliding and begins counting down; verify user task/turn journals, system auth, CQ-managed auth, Codex Bar auth, and registry active state remain unchanged.
 14. If synthetic admission is ambiguous or observed, perform usage verification only; never manually trigger or replay that generation.
 
 ## Resolved decisions and remaining gates
@@ -994,7 +999,7 @@ Resolved:
 - Codex Bar credentials are federated as read-only live candidates rather than copied into CQ.
 - Priming discovers every backend window; users configure feature enablement and optional model overrides, never durations.
 - Scoped model mapping uses exact/alias/display or unique token-family evidence; ambiguity fails closed.
-- Synthetic requests are coalesced by activation target and verified only by exact reset-epoch advancement.
+- Synthetic requests are coalesced by activation target and verified only by exact active-epoch advancement or post-activation stability of a previously sliding untouched epoch.
 
 Blocking gates before WebSocket enforcement:
 

@@ -37,15 +37,17 @@ const (
 )
 
 type PrimerRecord struct {
-	AccountHash string      `json:"account_hash"`
-	ScopeHash   string      `json:"scope_hash"`
-	ResetAt     time.Time   `json:"reset_at"`
-	ModelID     string      `json:"model_id"`
-	State       PrimerState `json:"state"`
-	Generation  uint64      `json:"generation"`
-	NextCheckAt time.Time   `json:"next_check_at,omitempty"`
-	ResultCode  string      `json:"result_code,omitempty"`
-	Attempts    int         `json:"attempts,omitempty"`
+	AccountHash       string      `json:"account_hash"`
+	ScopeHash         string      `json:"scope_hash"`
+	WindowHash        string      `json:"window_hash,omitempty"`
+	ResetAt           time.Time   `json:"reset_at"`
+	ModelID           string      `json:"model_id"`
+	State             PrimerState `json:"state"`
+	Generation        uint64      `json:"generation"`
+	NextCheckAt       time.Time   `json:"next_check_at,omitempty"`
+	ResultCode        string      `json:"result_code,omitempty"`
+	Attempts          int         `json:"attempts,omitempty"`
+	ExpectedScopeHash string      `json:"expected_scope_hash,omitempty"`
 }
 
 type codexPrimerEnvelope struct {
@@ -120,17 +122,19 @@ func (s *CodexPrimerStore) Observe(account codex.AccountKey, target CodexPrimerT
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	accountHash, scopeHash := s.identity(account, target)
+	windowHash := s.windowIdentity(target)
 	if index := s.index(accountHash, scopeHash); index >= 0 {
-		if s.records[index].ModelID == target.ModelID {
+		if s.records[index].ModelID == target.ModelID && s.records[index].WindowHash == windowHash {
 			return nil
 		}
 		records := append([]PrimerRecord(nil), s.records...)
 		records[index].ModelID = target.ModelID
+		records[index].WindowHash = windowHash
 		return s.commitLocked(records)
 	}
 	records := append([]PrimerRecord(nil), s.records...)
 	records = append(records, PrimerRecord{
-		AccountHash: accountHash, ScopeHash: scopeHash, ResetAt: target.ResetAt.UTC(),
+		AccountHash: accountHash, ScopeHash: scopeHash, WindowHash: windowHash, ResetAt: target.ResetAt.UTC(),
 		ModelID: target.ModelID, State: PrimerStateObserved,
 	})
 	return s.commitLocked(records)
@@ -147,6 +151,41 @@ func (s *CodexPrimerStore) Claim(account codex.AccountKey, target CodexPrimerTar
 	records := append([]PrimerRecord(nil), s.records...)
 	records[index].State = PrimerStateClaimed
 	records[index].Attempts++
+	if err := s.commitLocked(records); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *CodexPrimerStore) ClaimDormant(account codex.AccountKey, target CodexPrimerTarget, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accountHash, scopeHash := s.identity(account, target)
+	windowHash := s.windowIdentity(target)
+	index := s.index(accountHash, scopeHash)
+	if index < 0 || (s.records[index].State != PrimerStateObserved && s.records[index].State != PrimerStateRejected) {
+		return false, nil
+	}
+	priorAttempts := 0
+	for i := range s.records {
+		record := s.records[i]
+		if record.AccountHash != accountHash || record.WindowHash != windowHash || !record.ResetAt.After(now) || !strings.HasPrefix(record.ResultCode, "dormant_") {
+			continue
+		}
+		switch record.State {
+		case PrimerStateClaimed, PrimerStateAdmitted, PrimerStateAmbiguous, PrimerStateVerifying, PrimerStateVerified:
+			return false, nil
+		case PrimerStateRejected:
+			priorAttempts = max(priorAttempts, record.Attempts)
+		}
+	}
+	if priorAttempts >= codexPrimerMaxRejectedAttempts {
+		return false, nil
+	}
+	records := append([]PrimerRecord(nil), s.records...)
+	records[index].State = PrimerStateClaimed
+	records[index].ResultCode = "dormant_claimed"
+	records[index].Attempts = priorAttempts + 1
 	if err := s.commitLocked(records); err != nil {
 		return false, err
 	}
@@ -193,7 +232,7 @@ func (s *CodexPrimerStore) ReconcileAdvanced(account codex.AccountKey, resetEpoc
 	records := append([]PrimerRecord(nil), s.records...)
 	changed := false
 	for i := range records {
-		if records[i].AccountHash != accountHash || records[i].ResetAt.After(now) {
+		if records[i].AccountHash != accountHash {
 			continue
 		}
 		if _, current := currentEpochs[records[i].ResetAt.UTC().UnixNano()]; current {
@@ -201,10 +240,16 @@ func (s *CodexPrimerStore) ReconcileAdvanced(account codex.AccountKey, resetEpoc
 		}
 		switch records[i].State {
 		case PrimerStateObserved, PrimerStateRejected:
+			if records[i].ResetAt.After(now) {
+				continue
+			}
 			records[i].State = PrimerStatePrimedExternally
 			records[i].ResultCode = "reset_advanced"
 			changed = true
 		case PrimerStateClaimed, PrimerStateAdmitted, PrimerStateAmbiguous, PrimerStateVerifying:
+			if strings.HasPrefix(records[i].ResultCode, "dormant_") {
+				continue
+			}
 			records[i].State = PrimerStateVerified
 			records[i].ResultCode = "reset_advanced"
 			changed = true
@@ -216,6 +261,76 @@ func (s *CodexPrimerStore) ReconcileAdvanced(account codex.AccountKey, resetEpoc
 	return s.commitLocked(records)
 }
 
+func (s *CodexPrimerStore) MarkDormantVerifying(account codex.AccountKey, dispatched, expected CodexPrimerTarget, nextCheck time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accountHash, scopeHash := s.identity(account, dispatched)
+	index := s.index(accountHash, scopeHash)
+	if index < 0 {
+		return errors.New("Codex primer generation not observed")
+	}
+	records := append([]PrimerRecord(nil), s.records...)
+	records[index].State = PrimerStateVerifying
+	records[index].ResultCode = "dormant_epoch_stability"
+	records[index].WindowHash = s.windowIdentity(expected)
+	records[index].ExpectedScopeHash = s.scopeIdentity(expected)
+	records[index].NextCheckAt = nextCheck.UTC()
+	return s.commitLocked(records)
+}
+
+func (s *CodexPrimerStore) ReconcileDormant(account codex.AccountKey, targets []CodexPrimerTarget, now, nextCheck time.Time) (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accountHash := s.hash("account", string(account))
+	type currentTarget struct{ scopeHash string }
+	current := make(map[string]currentTarget, len(targets))
+	for _, target := range targets {
+		current[s.windowIdentity(target)] = currentTarget{scopeHash: s.scopeIdentity(target)}
+	}
+	records := append([]PrimerRecord(nil), s.records...)
+	changed := false
+	var earliest time.Time
+	for i := range records {
+		if records[i].AccountHash != accountHash || records[i].WindowHash == "" {
+			continue
+		}
+		observed, ok := current[records[i].WindowHash]
+		if !ok {
+			continue
+		}
+		if (records[i].State == PrimerStateAdmitted || records[i].State == PrimerStateAmbiguous) && strings.HasPrefix(records[i].ResultCode, "dormant_") {
+			records[i].State = PrimerStateVerifying
+			records[i].ResultCode = "dormant_epoch_stability"
+			records[i].ExpectedScopeHash = observed.scopeHash
+			records[i].NextCheckAt = nextCheck.UTC()
+			changed = true
+		}
+		if records[i].State != PrimerStateVerifying || records[i].ResultCode != "dormant_epoch_stability" {
+			continue
+		}
+		if records[i].ExpectedScopeHash != observed.scopeHash {
+			records[i].ExpectedScopeHash = observed.scopeHash
+			records[i].NextCheckAt = nextCheck.UTC()
+			changed = true
+		}
+		if !records[i].NextCheckAt.After(now) && records[i].ExpectedScopeHash == observed.scopeHash {
+			records[i].State = PrimerStateVerified
+			records[i].ResultCode = "dormant_epoch_stable"
+			records[i].ExpectedScopeHash = ""
+			records[i].NextCheckAt = time.Time{}
+			changed = true
+			continue
+		}
+		if earliest.IsZero() || records[i].NextCheckAt.Before(earliest) {
+			earliest = records[i].NextCheckAt
+		}
+	}
+	if !changed {
+		return earliest, nil
+	}
+	return earliest, s.commitLocked(records)
+}
+
 func (s *CodexPrimerStore) Records() []PrimerRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -223,12 +338,24 @@ func (s *CodexPrimerStore) Records() []PrimerRecord {
 }
 
 func (s *CodexPrimerStore) identity(account codex.AccountKey, target CodexPrimerTarget) (string, string) {
+	return s.hash("account", string(account)), s.scopeIdentity(target)
+}
+
+func (s *CodexPrimerStore) scopeIdentity(target CodexPrimerTarget) string {
+	return s.hash("scope", target.ResetAt.UTC().Format(time.RFC3339Nano)+"|"+s.windowIdentityMaterial(target))
+}
+
+func (s *CodexPrimerStore) windowIdentity(target CodexPrimerTarget) string {
+	return s.hash("window", s.windowIdentityMaterial(target))
+}
+
+func (s *CodexPrimerStore) windowIdentityMaterial(target CodexPrimerTarget) string {
 	windowIDs := make([]string, 0, len(target.Windows))
 	for _, window := range target.Windows {
 		windowIDs = append(windowIDs, window.RawLimitName+"|"+string(window.WindowName)+"|"+window.Period.String())
 	}
 	sort.Strings(windowIDs)
-	return s.hash("account", string(account)), s.hash("scope", target.ResetAt.UTC().Format(time.RFC3339Nano)+"|"+strings.Join(windowIDs, ","))
+	return strings.Join(windowIDs, ",")
 }
 
 func (s *CodexPrimerStore) index(accountHash, scopeHash string) int {
