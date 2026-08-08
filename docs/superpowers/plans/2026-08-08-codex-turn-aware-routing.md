@@ -420,14 +420,14 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - Create: `internal/proxy/codex_observe_test.go`
 - Modify: `cmd/cq/proxy.go`
 
-- [ ] Feed decoded HTTP requests, compact calls, WS handshakes/frames, SSE/WS events, capacity events, disconnects, and attempts into shadow lane/lease manager. Legacy-safe Stage 8 routing stays authoritative.
-- [ ] Add safe diagnostics: keyed turn hint, request kind, lease phase/generation, decision, reason, bucket, account hint, continuity. Assert raw fixtures and secrets absent.
-- [ ] Extend `/health` with shadow lease counts/failovers/quota/resync/unknown/late/stale/refresh-suspended counters.
-- [ ] Build deterministic 1,000-turn corpus covering simple, tool-loop, same-lane succession, parallel threads, subagents, prewarm, compaction, reconnect, HTTP/WS crossover, delayed stale traffic, and malformed metadata. Assert shadow decision never changes actual routing.
-- [ ] Add installed-fixture capture command that stores only schema-safe sanitised envelopes/hashes after explicit test invocation; never enable raw payload diagnostics automatically.
-- [ ] Run corpus under race detector and record fixture corpus hash.
-- [ ] Run 20 installed-listener turns. Record zero strong-key/account mismatch and zero raw-ID/secret leak. Do not create readiness marker if any unknown lifecycle event remains.
-- [ ] Commit `feat: observed Codex turn routing`.
+- [x] Feed decoded HTTP requests, compact calls, WS handshakes/frames, SSE/WS events, capacity events, disconnects, and attempts into shadow lane/lease manager. Legacy-safe Stage 8 routing stays authoritative.
+- [x] Add safe diagnostics: keyed turn hint, request kind, lease phase/generation, decision, reason, bucket, account hint, continuity. Assert raw fixtures and secrets absent.
+- [x] Extend `/health` with shadow lease counts/failovers/quota/resync/unknown/late/stale/refresh-suspended counters.
+- [x] Build deterministic 1,000-turn corpus covering simple, tool-loop, same-lane succession, parallel threads, subagents, prewarm, compaction, reconnect, HTTP/WS crossover, delayed stale traffic, and malformed metadata. Assert shadow decision never changes actual routing.
+- [x] Add installed-fixture capture command that stores only schema-safe sanitised envelopes/hashes after explicit test invocation; never enable raw payload diagnostics automatically.
+- [x] Run corpus under race detector and record fixture corpus hash.
+- [x] Run 20 compiled-listener turns against a local synthetic upstream. Record zero strong-key/account mismatch and zero raw-ID/secret leak. Do not create readiness marker if any unknown lifecycle event remains.
+- [x] Commit `feat: observed Codex turn routing`.
 
 ## Stage 12: HTTP enforcement
 

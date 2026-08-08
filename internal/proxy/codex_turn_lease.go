@@ -144,6 +144,7 @@ type CodexTurnLease struct {
 	UpstreamSocketGeneration uint64
 	ResponseAnchor           string
 	TurnState                string
+	TurnStateUnavailable     bool
 	HasEncryptedState        bool
 	NonMigratable            bool
 	LastSeen                 time.Time
@@ -362,6 +363,37 @@ func (manager *CodexTurnLeaseManager) ObserveIndeterminate(key LeaseKey) (CodexT
 	return managed.lease, nil
 }
 
+func (manager *CodexTurnLeaseManager) ObserveProviderFailed(key LeaseKey) (CodexTurnLease, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	managed := manager.leases[key]
+	if managed == nil || managed.lease.State != LeaseBoundActive || managed.lease.ActiveAttempts == 0 {
+		return CodexTurnLease{}, ErrCodexLeaseTransition
+	}
+	managed.lease.State = LeaseBoundQuiescent
+	managed.lease.ActiveAttempts--
+	managed.lease.Generation++
+	managed.lease.LastSeen = manager.now()
+	return managed.lease, nil
+}
+
+func (manager *CodexTurnLeaseManager) FailUnadmitted(key LeaseKey) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	managed := manager.leases[key]
+	if managed == nil {
+		return ErrCodexStaleTurn
+	}
+	if managed.lease.State != LeaseProvisional && managed.lease.State != LeaseReserving {
+		return nil
+	}
+	managed.lease.State = LeaseFailedUnadmitted
+	managed.lease.RoutingRefs = 0
+	managed.lease.Generation++
+	managed.lease.LastSeen = manager.now()
+	return nil
+}
+
 func (manager *CodexTurnLeaseManager) SetTurnState(key LeaseKey, state string) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -406,6 +438,12 @@ func (manager *CodexTurnLeaseManager) Snapshot() []CodexTurnLease {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	return manager.snapshotLocked()
+}
+
+func (manager *CodexTurnLeaseManager) Mode() (uint64, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return manager.modeEpoch, manager.authoritative
 }
 
 func (manager *CodexTurnLeaseManager) snapshotLocked() []CodexTurnLease {

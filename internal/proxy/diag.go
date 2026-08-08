@@ -14,20 +14,28 @@ import (
 )
 
 type RouteEvent struct {
-	Time          time.Time `json:"time"`
-	Method        string    `json:"method"`
-	Path          string    `json:"path"`
-	Provider      string    `json:"provider"`
-	RouteKind     string    `json:"route_kind,omitempty"`
-	Model         string    `json:"model,omitempty"`
-	AccountHint   string    `json:"account_hint,omitempty"`
-	PinActive     bool      `json:"pin_active,omitempty"`
-	Failover      bool      `json:"failover,omitempty"`
-	StatusCode    int       `json:"status_code,omitempty"`
-	LatencyMS     int64     `json:"latency_ms,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	SessionKey    string    `json:"session_key,omitempty"`
-	SessionSource string    `json:"session_source,omitempty"`
+	Time            time.Time `json:"time"`
+	Method          string    `json:"method"`
+	Path            string    `json:"path"`
+	Provider        string    `json:"provider"`
+	RouteKind       string    `json:"route_kind,omitempty"`
+	Model           string    `json:"model,omitempty"`
+	AccountHint     string    `json:"account_hint,omitempty"`
+	PinActive       bool      `json:"pin_active,omitempty"`
+	Failover        bool      `json:"failover,omitempty"`
+	StatusCode      int       `json:"status_code,omitempty"`
+	LatencyMS       int64     `json:"latency_ms,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	SessionKey      string    `json:"session_key,omitempty"`
+	SessionSource   string    `json:"session_source,omitempty"`
+	TurnHint        string    `json:"turn_hint,omitempty"`
+	RequestKind     string    `json:"request_kind,omitempty"`
+	LeasePhase      string    `json:"lease_phase,omitempty"`
+	LeaseGeneration uint64    `json:"lease_generation,omitempty"`
+	Decision        string    `json:"decision,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	Bucket          string    `json:"bucket,omitempty"`
+	Continuity      string    `json:"continuity,omitempty"`
 }
 
 type routeDiagnosticsContextKey struct{}
@@ -36,11 +44,63 @@ type routeDiagnostics struct {
 	mu          sync.Mutex
 	accountHint string
 	failover    bool
+	codex       codexObservationFields
+}
+
+type codexObservationFields struct {
+	TurnHint        string
+	RequestKind     string
+	LeasePhase      string
+	LeaseGeneration uint64
+	Decision        string
+	Reason          string
+	Bucket          string
+	AccountHint     string
+	Continuity      string
 }
 
 func withRouteDiagnostics(ctx context.Context) (context.Context, *routeDiagnostics) {
 	diag := &routeDiagnostics{}
 	return context.WithValue(ctx, routeDiagnosticsContextKey{}, diag), diag
+}
+
+func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
+	if ctx == nil {
+		return
+	}
+	diag, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics)
+	if diag == nil {
+		return
+	}
+	diag.mu.Lock()
+	defer diag.mu.Unlock()
+	if fields.TurnHint != "" {
+		diag.codex.TurnHint = fields.TurnHint
+	}
+	if fields.RequestKind != "" {
+		diag.codex.RequestKind = fields.RequestKind
+	}
+	if fields.LeasePhase != "" {
+		diag.codex.LeasePhase = fields.LeasePhase
+	}
+	if fields.LeaseGeneration != 0 {
+		diag.codex.LeaseGeneration = fields.LeaseGeneration
+	}
+	if fields.Decision != "" {
+		diag.codex.Decision = fields.Decision
+	}
+	if fields.Reason != "" {
+		diag.codex.Reason = fields.Reason
+	}
+	if fields.Bucket != "" {
+		diag.codex.Bucket = fields.Bucket
+	}
+	if fields.AccountHint != "" {
+		diag.accountHint = fields.AccountHint
+	}
+	if fields.Continuity != "" {
+		diag.codex.Continuity = fields.Continuity
+	}
 }
 
 func noteRouteAccount(ctx context.Context, accountHint string, failover bool) {
@@ -79,6 +139,20 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 	if failover {
 		event.Failover = true
 	}
+	if diag == nil {
+		return
+	}
+	diag.mu.Lock()
+	codex := diag.codex
+	diag.mu.Unlock()
+	event.TurnHint = codex.TurnHint
+	event.RequestKind = codex.RequestKind
+	event.LeasePhase = codex.LeasePhase
+	event.LeaseGeneration = codex.LeaseGeneration
+	event.Decision = codex.Decision
+	event.Reason = codex.Reason
+	event.Bucket = codex.Bucket
+	event.Continuity = codex.Continuity
 }
 
 func (event *RouteEvent) applySessionCorrelation(headers http.Header) {

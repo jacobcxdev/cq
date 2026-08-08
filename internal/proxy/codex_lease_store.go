@@ -117,6 +117,24 @@ func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*
 	return store, nil
 }
 
+func OpenDefaultCodexLeaseStore(fsys fsutil.DurableFileSystem) (*CodexLeaseStore, error) {
+	dir := configDir()
+	return OpenCodexLeaseStore(fsys, filepath.Join(dir, "codex-turn-leases.json"), filepath.Join(dir, "codex-turn-leases.key"))
+}
+
+func OpenCodexRuntimeObserver(runtime *CodexRoutingRuntime, fsys fsutil.DurableFileSystem) (*CodexTurnObserver, error) {
+	if runtime == nil || runtime.HTTP.Effective == CodexRoutingOff && runtime.WebSocket.Effective == CodexRoutingOff {
+		return nil, nil
+	}
+	epoch := max(runtime.HTTP.ModeEpoch, runtime.WebSocket.ModeEpoch)
+	store, err := OpenDefaultCodexLeaseStore(fsys)
+	if err != nil {
+		return nil, err
+	}
+	manager := NewCodexTurnLeaseManager(epoch, false, nil)
+	return NewCodexTurnObserver(manager, store)
+}
+
 func fileExists(fsys fsutil.FileSystem, path string) bool {
 	_, err := fsys.Stat(path)
 	return err == nil

@@ -85,13 +85,17 @@ type websocketRelayGeneration struct {
 
 // relayWebSocketPair supervises both pumps, fences late writes, and joins exit.
 func relayWebSocketPair(ctx context.Context, left, right websocketRelayConn) error {
+	return relayWebSocketPairObserved(ctx, left, right, nil)
+}
+
+func relayWebSocketPairObserved(ctx context.Context, left, right websocketRelayConn, observe func(fromClient bool, messageType int, message []byte)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	var generation websocketRelayGeneration
 	active := generation.value.Add(1)
 	errCh := make(chan error, 2)
-	pump := func(src, dst websocketRelayConn) {
+	pump := func(src, dst websocketRelayConn, fromClient bool) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errCh <- fmt.Errorf("Codex WebSocket relay panic")
@@ -107,14 +111,20 @@ func relayWebSocketPair(ctx context.Context, left, right websocketRelayConn) err
 				errCh <- context.Canceled
 				return
 			}
+			if observe != nil {
+				func() {
+					defer func() { _ = recover() }()
+					observe(fromClient, messageType, message)
+				}()
+			}
 			if err := dst.WriteMessage(messageType, message); err != nil {
 				errCh <- err
 				return
 			}
 		}
 	}
-	go pump(left, right)
-	go pump(right, left)
+	go pump(left, right, true)
+	go pump(right, left, false)
 
 	var first error
 	select {

@@ -97,6 +97,10 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	}
 
 	model = extractModel(body)
+	observation := s.beginCodexHTTPObservation(ctx, body, r.Header, true)
+	if observation != nil {
+		ctx = withCodexObservation(ctx, observation)
+	}
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=codex (native compact)\n", requestPath, model)
 
 	// Emit payload diagnostics before forwarding.
@@ -139,10 +143,19 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, _, _, err := s.doCodexRequest(ctx, model, upReq)
+	resp, choice, _, err := s.doCodexRequest(ctx, model, upReq)
 	if err != nil {
+		if observation != nil {
+			observation.Finish(err)
+		}
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
+	}
+	if observation != nil {
+		_, failover := routeDiag.fields()
+		observation.Selected(choice, failover)
+		observation.ResponseHeaders(resp.StatusCode, resp.Header)
+		observeCodexResponseBody(resp, observation)
 	}
 	defer resp.Body.Close()
 

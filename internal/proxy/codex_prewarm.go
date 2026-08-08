@@ -99,6 +99,19 @@ func (manager *CodexPrewarmManager) Ready(lane LaneKey, responseAnchor, turnStat
 	return *reservation, nil
 }
 
+func (manager *CodexPrewarmManager) ReplaceCorrelation(lane LaneKey, expected, replacement string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	reservation := manager.reservations[lane]
+	if reservation == nil || reservation.Correlation != expected || replacement == "" || reservation.State != CodexPrewarmBoundActive {
+		return errors.New("prewarm correlation cannot change")
+	}
+	reservation.Correlation = replacement
+	reservation.Generation++
+	reservation.LastSeen = manager.now()
+	return nil
+}
+
 func (manager *CodexPrewarmManager) Disconnect(lane LaneKey) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

@@ -67,6 +67,8 @@ type Server struct {
 	PayloadDiag               *PayloadWriter
 	// CodexRouting is resolved once at startup. Config reload never mutates it.
 	CodexRouting *CodexRoutingRuntime
+	// CodexObserver mirrors Responses lifecycle without affecting Stage 8 routing.
+	CodexObserver *CodexTurnObserver
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -642,6 +644,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	httpMode, wsMode := s.codexRoutingHealth()
 	resp["codex_turn_routing"] = httpMode
 	resp["codex_ws_turn_routing"] = wsMode
+	if s.CodexObserver != nil {
+		resp["codex_turn_observation"] = s.CodexObserver.Health()
+	}
 	if s.Headroom != nil {
 		switch s.HeadroomMode {
 		case HeadroomModeCache:
@@ -722,6 +727,10 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model = extractModel(body)
+	observation := s.beginCodexHTTPObservation(ctx, body, r.Header, false)
+	if observation != nil {
+		ctx = withCodexObservation(ctx, observation)
+	}
 	fmt.Fprintf(os.Stderr, "cq: route POST /responses model=%q provider=codex (native)\n", model)
 
 	// Emit payload diagnostics before any body rewrite.
@@ -784,10 +793,19 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, _, _, err := s.doCodexRequest(ctx, model, upReq)
+	resp, choice, _, err := s.doCodexRequest(ctx, model, upReq)
 	if err != nil {
+		if observation != nil {
+			observation.Finish(err)
+		}
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
+	}
+	if observation != nil {
+		_, failover := routeDiag.fields()
+		observation.Selected(choice, failover)
+		observation.ResponseHeaders(resp.StatusCode, resp.Header)
+		observeCodexResponseBody(resp, observation)
 	}
 	defer resp.Body.Close()
 
@@ -865,17 +883,39 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		requestedModel = extractCodexWebSocketFrameModel(message)
 		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, message, 1)
 	}
-	upstreamConn, _, _, err := s.dialCodexWebSocket(r.Context(), upstreamURL, r.Header, requestedModel)
+	if s.CodexObserver != nil {
+		r = r.WithContext(withCodexObservation(r.Context(), s.CodexObserver))
+	}
+	upstreamConn, choice, _, err := s.dialCodexWebSocket(r.Context(), upstreamURL, r.Header, requestedModel)
 	if err != nil {
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
 	}
 	defer upstreamConn.Close()
 	upstreamConn.SetReadLimit(maxRequestBody)
+	observation := newCodexWSObservationSession(s.CodexObserver, r.Context(), choice)
+	if observation != nil && messageType == websocket.TextMessage {
+		observation.ObserveClient(message)
+	}
 	if err := upstreamConn.WriteMessage(messageType, message); err != nil {
+		if observation != nil {
+			observation.Close(err)
+		}
 		return
 	}
-	_ = relayWebSocketPair(r.Context(), clientConn, upstreamConn)
+	relayErr := relayWebSocketPairObserved(r.Context(), clientConn, upstreamConn, func(fromClient bool, messageType int, message []byte) {
+		if observation == nil || messageType != websocket.TextMessage {
+			return
+		}
+		if fromClient {
+			observation.ObserveClient(message)
+		} else {
+			observation.ObserveUpstream(message)
+		}
+	})
+	if observation != nil {
+		observation.Close(relayErr)
+	}
 }
 
 func codexAppServerWebSocketURL(raw string) (string, error) {
@@ -912,6 +952,7 @@ func (s *Server) dialCodexWebSocket(ctx context.Context, upstreamURL string, inc
 		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > 0)
 		hardLimited := false
 		for _, attempt := range plan.Attempts {
+			observeCodexAttempt(ctx, plan.Choice, attempt)
 			conn, resp, body, dialErr := executor.Dial(ctx, plan.Choice, attempt, upstreamURL, incomingHeaders)
 			if dialErr == nil {
 				return conn, plan.Choice, attempt, nil

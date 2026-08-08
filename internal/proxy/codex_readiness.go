@@ -41,9 +41,8 @@ const (
 const (
 	CodexReadinessMarkerVersion = 1
 	CodexRoutingJournalVersion  = 1
-	// Parser and lease schemas advance in Stages 9 and 10. Zero cannot enable enforcement.
-	CurrentCodexParserSchema = 0
-	CurrentCodexLeaseSchema  = 0
+	CurrentCodexParserSchema    = 1
+	CurrentCodexLeaseSchema     = 1
 )
 
 // CodexReadinessMarker is explicit, versioned proof for one enforcement tuple.
@@ -107,10 +106,11 @@ type codexModeTrack struct {
 // DefaultCodexRoutingRequirements returns the current binary's safe capability floor.
 func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTransportRequirements, CodexTransportRequirements) {
 	common := CodexTransportRequirements{
-		CQBuild:      cqBuild,
-		ParserSchema: CurrentCodexParserSchema,
-		LeaseSchema:  CurrentCodexLeaseSchema,
-		ClientBuild:  clientBuild,
+		CQBuild:            cqBuild,
+		ParserSchema:       CurrentCodexParserSchema,
+		LeaseSchema:        CurrentCodexLeaseSchema,
+		ClientBuild:        clientBuild,
+		ObserveImplemented: true,
 	}
 	httpReq := common
 	httpReq.Transport = CodexRoutingHTTP

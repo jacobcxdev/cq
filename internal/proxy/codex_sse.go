@@ -31,6 +31,7 @@ type CodexSSEObservation struct {
 	Admits     bool
 	EndTurn    *bool
 	TurnState  string
+	ResponseID string
 	Error      CodexWrappedError
 	ParseError error
 }
@@ -169,6 +170,9 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		}
 		observation.Kind = CodexSSECreated
 		observation.Admits = true
+		if rawID, ok := response["id"]; ok {
+			_ = json.Unmarshal(rawID, &observation.ResponseID)
+		}
 	case strings.HasSuffix(envelope.Type, ".delta"):
 		observation.Kind = CodexSSEDelta
 	case envelope.Type == "response.completed":
@@ -181,6 +185,11 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 			return observation
 		}
 		observation.Kind = CodexSSECompleted
+		var responseID struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(envelope.Response, &responseID)
+		observation.ResponseID = responseID.ID
 		endTurn := response.EndTurn
 		if len(endTurn) == 0 {
 			endTurn = envelope.EndTurn

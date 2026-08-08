@@ -65,6 +65,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 		accountHardLimited := false
 		for _, attempt := range plan.Attempts {
 			lastAttempt = attempt
+			observeCodexAttempt(ctx, plan.Choice, attempt)
 			resp, err := r.Executor.Do(ctx, plan.Choice, attempt, req)
 			if err != nil {
 				return nil, plan.Choice, attempt, err
@@ -105,6 +106,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 				refreshed.Revision = refreshedRevision
 				refreshed.Ordinal = len(plan.Attempts) + 1
 				lastAttempt = refreshed
+				observeCodexAttempt(ctx, plan.Choice, refreshed)
 				resp, err := r.Executor.Do(ctx, plan.Choice, refreshed, req)
 				if err != nil {
 					return nil, plan.Choice, refreshed, err

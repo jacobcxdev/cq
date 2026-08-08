@@ -82,7 +82,7 @@ func TestCodexEnforceInhibitedWithoutImplementationOrMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.HTTP.Configured != CodexRoutingEnforce || runtime.HTTP.Effective != CodexRoutingOff || runtime.HTTP.InhibitionReason != "enforcement implementation unavailable" {
+	if runtime.HTTP.Configured != CodexRoutingEnforce || runtime.HTTP.Effective != CodexRoutingObserve || runtime.HTTP.InhibitionReason != "enforcement implementation unavailable" {
 		t.Fatalf("HTTP status = %+v", runtime.HTTP)
 	}
 
@@ -161,8 +161,8 @@ func TestCodexRoutingRuntimeDoesNotCreateReadinessMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.HTTP.Effective != CodexRoutingOff || runtime.WebSocket.Effective != CodexRoutingOff {
-		t.Fatalf("runtime = %+v, want inhibited", runtime)
+	if runtime.HTTP.Effective != CodexRoutingObserve || runtime.WebSocket.Effective != CodexRoutingObserve {
+		t.Fatalf("runtime = %+v, want observe fallback", runtime)
 	}
 	for _, transport := range []CodexRoutingTransport{CodexRoutingHTTP, CodexRoutingWebSocket} {
 		if _, err := os.Stat(codexReadinessPath(dir, transport)); !os.IsNotExist(err) {

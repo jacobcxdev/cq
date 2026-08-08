@@ -180,6 +180,10 @@ func runProxyStart(opts proxyCommandOptions) error {
 	if err != nil {
 		return fmt.Errorf("Codex routing modes: %w", err)
 	}
+	codexObserver, err := proxy.OpenCodexRuntimeObserver(codexRouting, fsys)
+	if err != nil {
+		return fmt.Errorf("Codex turn observer: %w", err)
+	}
 
 	fmt.Fprintf(os.Stderr, "cq: proxy token: %s\n", cfg.LocalToken)
 
@@ -406,6 +410,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Diag:                   diagnostics,
 		PayloadDiag:            payloadDiag,
 		CodexRouting:           codexRouting,
+		CodexObserver:          codexObserver,
 		HeadroomMode:           resolvedMode,
 		Catalog:                catalog,
 		Refresher:              proxyRefresher,
