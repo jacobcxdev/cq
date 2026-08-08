@@ -506,7 +506,7 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - [x] Add privacy-safe canary recorder: admitted-turn count, keyed mismatch count, automatic auth/registry hash-change count, secret-leak count, unexplained lifecycle count, start/end time, build/schema/marker tuple. No raw identifiers or credentials.
 - [ ] Run installed service for seven consecutive days and at least 100 admitted turns. Include long turn past quota depletion, parallel short turns, next-turn reselection, same-lane supersession, restart during quiescence, explicit switch, and Codex Bar observation.
 - [ ] Verify automatic activity leaves system-auth and registry hashes unchanged; explicit switch alone changes system hash.
-- [ ] Rehearse rollback: invalidate marker, set `observe`/`off`, restart/drain, prove exact authoritative turn fences remain and no shadow state promotes.
+- [x] Rehearse rollback in deterministic restart tests: transition `enforce -> off`, retain exact authoritative account fence, route unseen turns through legacy path, and prove shadow epochs never promote. Installed-service drain remains part of soak acceptance.
 - [x] Only in later release, document enforcement as recommended after validation. Never default existing install to effective enforce and never synthesise readiness marker during upgrade.
 - [ ] After rollback window, delete dead request-scoped Codex selector failover/suppression/switch code proven unreachable. Keep `off/observe` executor path.
 - [x] Run final gates:

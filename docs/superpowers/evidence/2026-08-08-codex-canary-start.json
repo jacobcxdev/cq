@@ -20,6 +20,7 @@
   },
   "promotion_gate": {
     "required_days": 7,
+    "day_observation_policy": "one admitted turn or status heartbeat per UTC day; gaps reset streak",
     "required_admitted_turns": 100,
     "passed": false
   }

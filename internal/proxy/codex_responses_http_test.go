@@ -359,6 +359,57 @@ func TestCodexHTTPFenceOnlyRestoresRetainedAuthority(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRollbackKeepsExactAuthorityFence(t *testing.T) {
+	dir := t.TempDir()
+	httpRequirements := testCodexRequirements(CodexRoutingHTTP)
+	wsRequirements := testCodexRequirements(CodexRoutingWebSocket)
+	if err := SaveCodexReadinessMarker(dir, testCodexMarker(httpRequirements)); err != nil {
+		t.Fatal(err)
+	}
+	config := &Config{CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingOff}
+	enforced, err := openCodexRoutingRuntimeAt(dir, config, httpRequirements, wsRequirements)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	if err := store.CommitCurrentLeases([]CodexTurnLease{{
+		Key:           NewCodexLeaseKey(request.Metadata.Metadata),
+		State:         LeaseBoundQuiescent,
+		AccountKey:    "one",
+		Generation:    4,
+		ModeEpoch:     enforced.HTTP.AuthoritativeEpoch,
+		Authoritative: true,
+		LastSeen:      time.Now(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	config.CodexTurnRouting = CodexRoutingOff
+	rolledBack, err := openCodexRoutingRuntimeAt(dir, config, httpRequirements, wsRequirements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "two"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusOK, body: completedSSE("response")}},
+	}}
+	enforcer, err := NewCodexHTTPEnforcerWithRetainedEpochs(testHTTPRouter(chooser, executor), rolledBack.HTTP.ModeEpoch, false, rolledBack.HTTP.RetainedAuthoritativeEpochs, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, choice, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if choice.AccountKey != "one" || chooser.calls != 0 {
+		t.Fatalf("choice=%q selector calls=%d runtime=%+v", choice.AccountKey, chooser.calls, rolledBack.HTTP)
+	}
+}
+
 func TestCodexHTTPFenceOnlyLeavesUnseenTurnToLegacyRoute(t *testing.T) {
 	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "two"}}}
 	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{}}
