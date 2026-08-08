@@ -21,6 +21,12 @@ type RefreshResult struct {
 	Material CredentialMaterial
 }
 
+// CredentialReferenceRefresher refreshes credentials without exposing material
+// outside the credential authority boundary.
+type CredentialReferenceRefresher interface {
+	RefreshReference(context.Context, CandidateRef, Revision) (CandidateRef, Revision, error)
+}
+
 var (
 	ErrRefreshUnavailable = errors.New("Codex managed refresh unavailable")
 	ErrRefreshIneligible  = errors.New("Codex credential lineage is not refresh eligible")

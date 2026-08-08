@@ -72,6 +72,15 @@ func (c *CredentialControl) Refresh(ctx context.Context, ref CandidateRef, revis
 	return reply.Result, err
 }
 
+// RefreshReference discards refreshed secret material inside credential control.
+func (c *CredentialControl) RefreshReference(ctx context.Context, ref CandidateRef, revision Revision) (CandidateRef, Revision, error) {
+	result, err := c.Refresh(ctx, ref, revision)
+	if err != nil {
+		return CandidateRef{}, "", err
+	}
+	return result.Ref, result.Revision, nil
+}
+
 func (c *CredentialControl) Owner() bool { return c != nil && c.owner }
 
 func (c *CredentialControl) Close() error {

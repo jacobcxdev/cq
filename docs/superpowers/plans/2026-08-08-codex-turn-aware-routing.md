@@ -308,6 +308,9 @@ type RouteChoice struct {
 - Create: `internal/proxy/codex_request_scope_test.go`
 - Create: `internal/proxy/codex_attempt.go`
 - Create: `internal/proxy/codex_attempt_test.go`
+- Create: `internal/proxy/codex_http_relay.go`
+- Create: `internal/proxy/codex_ws_relay.go`
+- Create: `internal/proxy/codex_ws_relay_test.go`
 - Modify: `internal/proxy/codex_transport.go`
 - Modify: `internal/proxy/codex_transport_test.go`
 - Modify: `internal/proxy/codex_handler.go`
@@ -322,13 +325,13 @@ type ExplicitAccountExecutor interface {
 }
 ```
 
-- [ ] Add red call-site inventory tests proving translated Anthropic, count tokens, compact, images/search, native Responses, Live call, and Live sideband use explicit account choice. Each returned attempt contains typed account/candidate refs only.
-- [ ] Reduce `CodexTokenTransport` to request cloning, explicit credential injection, and selected model rewrite. Delete selection, account failover, suppression, persistence, and goroutines.
-- [ ] Implement request-scoped executor for non-turn-aware routes with bounded same-identity candidate recovery and pre-admission hard failure policy. Preserve Live call-ID affinity.
-- [ ] Split HTTP relay and one-to-one supervised WS relay shells from `server.go`; no leases yet. Add panic recovery, joined pumps, cancellation/deadline/close propagation, and generation fencing.
-- [ ] Add 1,000 connect/cancel/shutdown leak/race test. Preserve route status/body/model/headroom behaviour.
-- [ ] Run `go test -race -count=1 ./internal/proxy` and focused lifecycle test with `-count=100`.
-- [ ] Commit `refactor: decomposed Codex request routing`.
+- [x] Add red call-site inventory tests proving translated Anthropic, count tokens, compact, images/search, native Responses, Live call, and Live sideband use explicit account choice. Each returned attempt contains typed account/candidate refs only.
+- [x] Reduce `CodexTokenTransport` to request cloning, explicit credential injection, and selected model rewrite. Delete selection, account failover, suppression, persistence, and goroutines.
+- [x] Implement request-scoped executor for non-turn-aware routes with bounded same-identity candidate recovery and pre-admission hard failure policy. Preserve Live call-ID affinity.
+- [x] Split HTTP relay and one-to-one supervised WS relay shells from `server.go`; no leases yet. Add panic recovery, joined pumps, cancellation/deadline/close propagation, and generation fencing.
+- [x] Add 1,000 connect/cancel/shutdown leak/race test. Preserve route status/body/model/headroom behaviour.
+- [x] Run `go test -race -count=1 ./internal/proxy` and focused lifecycle test with `-count=100`.
+- [x] Commit `refactor: decomposed Codex request routing`.
 
 ## Stage 9: Strict Responses protocol parsers
 

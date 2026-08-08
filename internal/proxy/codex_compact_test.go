@@ -43,13 +43,10 @@ func TestServer_CodexCompactPaths_ForwardToCompactEndpointWithCodexAuth(t *testi
 					CodexUpstream: "https://chatgpt.com",
 					LocalToken:    "tok",
 				},
-				CodexTransport: &CodexTokenTransport{
-					Selector: &fakeCodexSelector{account: &codex.CodexAccount{
-						AccessToken: "codex-tok",
-						AccountID:   "acct-1",
-					}},
-					Inner: inner,
-				},
+				CodexRequests: testCodexRequestRouter(&fakeCodexSelector{account: &codex.CodexAccount{
+					AccessToken: "codex-tok",
+					AccountID:   "acct-1",
+				}}, inner),
 			}
 
 			handler, err := srv.handler()
@@ -90,7 +87,7 @@ func TestServer_CodexCompact_NoTransport(t *testing.T) {
 			CodexUpstream: "https://chatgpt.com",
 			LocalToken:    "tok",
 		},
-		CodexTransport: nil,
+		CodexRequests: nil,
 	}
 
 	handler, err := srv.handler()
@@ -253,10 +250,10 @@ func TestServer_CodexCompact_DoesNotUseHeadroom(t *testing.T) {
 			CodexUpstream: "https://chatgpt.com/backend-api/codex",
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
-			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
-			Inner:    inner,
-		},
+		CodexRequests: testCodexRequestRouter(
+			&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			inner,
+		),
 		Headroom: bridge,
 	}
 

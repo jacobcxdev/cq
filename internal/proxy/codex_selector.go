@@ -30,16 +30,10 @@ type RouteChoice struct {
 	RequestedModel  string
 	EffectiveModel  string
 	RequiredBuckets []CapacityBucket
-
-	account codex.CodexAccount
 }
 
-func (c RouteChoice) selectedAccount() *codex.CodexAccount {
-	result := c.account
-	return &result
-}
-
-type codexRouteChooser interface {
+// CodexRouteChooser returns an account/model/bucket decision without credentials.
+type CodexRouteChooser interface {
 	Choose(ctx context.Context, requirements CodexRouteRequirements, exclude ...codex.SelectionExclusion) (RouteChoice, error)
 }
 
@@ -51,25 +45,81 @@ type codexCapacityProvider interface {
 	CodexCapacityLedger() *CodexCapacityLedger
 }
 
+type codexRouteAccount struct {
+	key         codex.AccountKey
+	candidateID codex.CandidateID
+	accountID   string
+	email       string
+	planType    string
+	routable    bool
+}
+
 type codexSelector struct {
-	discover CodexDiscoverer
-	quota    codexQuotaReader
-	capacity *CodexCapacityLedger
-	mu       sync.Mutex
+	discover          CodexDiscoverer
+	discoverInventory func(context.Context) ([]codexRouteAccount, error)
+	quota             codexQuotaReader
+	capacity          *CodexCapacityLedger
+	mu                sync.Mutex
+}
+
+// NewCodexInventorySelector creates a secret-free route chooser. Credential
+// material remains behind CredentialInventory and SecretResolver boundaries.
+func NewCodexInventorySelector(inventory codex.CredentialInventory, quota codexQuotaReader) CodexRouteChooser {
+	selector := newCodexSelectorWithCapacity(nil, quota, codexCapacityForQuota(quota))
+	selector.discoverInventory = func(ctx context.Context) ([]codexRouteAccount, error) {
+		if inventory == nil {
+			return nil, fmt.Errorf("Codex credential inventory unavailable")
+		}
+		view, err := inventory.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		accounts := make([]codexRouteAccount, 0, len(view.Accounts))
+		for _, logical := range view.Accounts {
+			if !logical.Routable {
+				continue
+			}
+			var candidateID codex.CandidateID
+			for _, candidate := range logical.Candidates {
+				if !candidate.DispatchBlocked {
+					candidateID = candidate.Ref.CandidateID
+					break
+				}
+			}
+			if candidateID == "" {
+				continue
+			}
+			accounts = append(accounts, codexRouteAccount{
+				key:         logical.Key,
+				candidateID: candidateID,
+				accountID:   logical.Identity.AccountID,
+				email:       logical.Identity.Email,
+				planType:    logical.Identity.PlanType,
+				routable:    true,
+			})
+		}
+		return accounts, nil
+	}
+	return selector
 }
 
 type codexModelContextKey struct{}
 
 // NewCodexSelector creates a CodexSelector backed by the given discovery function.
-func NewCodexSelector(discover CodexDiscoverer, quota codexQuotaReader) CodexSelector {
-	var capacity *CodexCapacityLedger
+func NewCodexSelector(discover CodexDiscoverer, quota codexQuotaReader) interface {
+	CodexSelector
+	CodexRouteChooser
+} {
+	return newCodexSelectorWithCapacity(discover, quota, codexCapacityForQuota(quota))
+}
+
+func codexCapacityForQuota(quota codexQuotaReader) *CodexCapacityLedger {
 	if provider, ok := quota.(codexCapacityProvider); ok {
-		capacity = provider.CodexCapacityLedger()
+		if capacity := provider.CodexCapacityLedger(); capacity != nil {
+			return capacity
+		}
 	}
-	if capacity == nil {
-		capacity = NewCodexCapacityLedger(time.Now, transientQuotaMaxAge)
-	}
-	return newCodexSelectorWithCapacity(discover, quota, capacity)
+	return NewCodexCapacityLedger(time.Now, transientQuotaMaxAge)
 }
 
 func newCodexSelectorWithCapacity(discover CodexDiscoverer, quota codexQuotaReader, capacity *CodexCapacityLedger) *codexSelector {
@@ -77,11 +127,20 @@ func newCodexSelectorWithCapacity(discover CodexDiscoverer, quota codexQuotaRead
 }
 
 func (s *codexSelector) Select(ctx context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
+	if s.discover == nil {
+		return nil, fmt.Errorf("legacy Codex account selection unavailable")
+	}
 	choice, err := s.Choose(ctx, CodexRouteRequirements{RequestedModel: codexRequestedModel(ctx)}, exclude...)
 	if err != nil {
 		return nil, err
 	}
-	return choice.selectedAccount(), nil
+	for _, account := range s.discover() {
+		if codexRoutingAccountKey(&account) == choice.AccountKey {
+			result := account
+			return &result, nil
+		}
+	}
+	return nil, fmt.Errorf("selected Codex account disappeared")
 }
 
 // Choose returns one indivisible account, model rewrite, and bucket decision.
@@ -89,7 +148,10 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	accounts := s.discover()
+	accounts, err := s.routeAccounts(ctx)
+	if err != nil {
+		return RouteChoice{}, fmt.Errorf("list Codex route inventory: %w", err)
+	}
 	if len(accounts) == 0 {
 		return RouteChoice{}, fmt.Errorf("no codex accounts available")
 	}
@@ -115,18 +177,18 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 
 	for i := range accounts {
 		account := accounts[i]
-		if codexAcctExcluded(&account, excludedAccounts, excludedCandidates) || account.AccessToken == "" {
+		if excludedAccounts[account.key] || excludedCandidates[account.candidateID] || !account.routable {
 			continue
 		}
 		validTokens++
-		key := codexRoutingAccountKey(&account)
+		key := account.key
 		if key == "" {
 			continue
 		}
 		s.observeSnapshot(key, &account)
 
 		effectiveModel := requestedModel
-		native := codexPlanSupportsModel(account.PlanType, requestedModel)
+		native := codexPlanSupportsModel(account.planType, requestedModel)
 		if !native {
 			if rewritten, ok := rewriteCodexModelName(requestedModel); ok {
 				effectiveModel = rewritten
@@ -134,7 +196,7 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 				continue
 			}
 		}
-		buckets := routeBuckets(effectiveModel, requirements.RequiredModels, account.PlanType)
+		buckets := routeBuckets(effectiveModel, requirements.RequiredModels, account.planType)
 		state, remaining, resetAt := s.routeCapacity(key, buckets)
 		if state == CapacityZero {
 			hadZero = true
@@ -149,7 +211,6 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 				RequestedModel:  requestedModel,
 				EffectiveModel:  effectiveModel,
 				RequiredBuckets: buckets,
-				account:         account,
 			},
 			state:     state,
 			remaining: remaining,
@@ -177,6 +238,29 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 		return RouteChoice{}, fmt.Errorf("no codex accounts with valid tokens")
 	}
 	return RouteChoice{}, fmt.Errorf("no codex accounts compatible with requested model")
+}
+
+func (s *codexSelector) routeAccounts(ctx context.Context) ([]codexRouteAccount, error) {
+	if s.discoverInventory != nil {
+		return s.discoverInventory(ctx)
+	}
+	if s.discover == nil {
+		return nil, nil
+	}
+	discovered := s.discover()
+	accounts := make([]codexRouteAccount, 0, len(discovered))
+	for index := range discovered {
+		account := &discovered[index]
+		accounts = append(accounts, codexRouteAccount{
+			key:         codexRoutingAccountKey(account),
+			candidateID: codexRoutingCandidateID(account),
+			accountID:   account.AccountID,
+			email:       account.Email,
+			planType:    account.PlanType,
+			routable:    account.AccessToken != "",
+		})
+	}
+	return accounts, nil
 }
 
 func betterRoute(candidate, current struct {
@@ -229,7 +313,7 @@ func (s *codexSelector) routeCapacity(account codex.AccountKey, buckets []Capaci
 	return state, remaining, resetAt
 }
 
-func (s *codexSelector) observeSnapshot(key codex.AccountKey, account *codex.CodexAccount) {
+func (s *codexSelector) observeSnapshot(key codex.AccountKey, account *codexRouteAccount) {
 	if s.quota == nil {
 		return
 	}
@@ -293,10 +377,10 @@ func codexPlanSupportsModel(plan, model string) bool {
 	return strings.EqualFold(plan, "pro")
 }
 
-func (s *codexSelector) snapshot(a *codex.CodexAccount) (QuotaSnapshot, bool) {
-	snap, ok := s.quota.Snapshot(a.AccountID)
+func (s *codexSelector) snapshot(a *codexRouteAccount) (QuotaSnapshot, bool) {
+	snap, ok := s.quota.Snapshot(a.accountID)
 	if !ok {
-		snap, ok = s.quota.Snapshot(a.Email)
+		snap, ok = s.quota.Snapshot(a.email)
 	}
 	return snap, ok
 }

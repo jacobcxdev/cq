@@ -73,7 +73,16 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 }
 
 func (c *CredentialCoordinator) List(context.Context) (Inventory, error) {
-	return DiscoverInventory(c.Store.FS), nil
+	return sanitiseCredentialInventory(DiscoverInventory(c.Store.FS)), nil
+}
+
+func sanitiseCredentialInventory(inventory Inventory) Inventory {
+	for i := range inventory.Accounts {
+		for j := range inventory.Accounts[i].Candidates {
+			inventory.Accounts[i].Candidates[j].Credential = CodexAccount{}
+		}
+	}
+	return inventory
 }
 
 func (c *CredentialCoordinator) SaveLogin(ctx context.Context, credential LoginCredential) (CandidateRef, Revision, error) {
@@ -141,6 +150,25 @@ func (c *CredentialCoordinator) upsertLoginRegistry(accountKey AccountKey, crede
 func (c *CredentialCoordinator) Resolve(_ context.Context, ref CandidateRef) (CredentialMaterial, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for _, logical := range DiscoverInventory(c.Store.FS).Accounts {
+		for _, candidate := range logical.Candidates {
+			if candidate.Ref.AccountKey != ref.AccountKey || candidate.Ref.CandidateID != ref.CandidateID {
+				continue
+			}
+			if candidate.DispatchBlocked {
+				return CredentialMaterial{}, errors.New("credential candidate dispatch blocked")
+			}
+			if candidate.Source == SourceSystem {
+				return CredentialMaterial{
+					AccessToken:  candidate.Credential.AccessToken,
+					RefreshToken: candidate.Credential.RefreshToken,
+					IDToken:      candidate.Credential.IDToken,
+					AccountID:    candidate.Credential.AccountID,
+				}, nil
+			}
+			break
+		}
+	}
 	record, err := c.loadRef(ref)
 	if err != nil {
 		return CredentialMaterial{}, err

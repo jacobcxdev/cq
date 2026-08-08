@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -254,7 +253,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		}
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
-	codexSelector := proxy.NewCodexSelector(codexDiscover, codexQuotaCache)
+	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
 	codexAccounts := codexDiscover()
 	var codexEmails []string
@@ -269,23 +268,22 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	codexTransport := &proxy.CodexTokenTransport{
-		Selector: codexSelector,
-		Quota:    codexQuotaCache,
-		Inner:    http.DefaultTransport,
+	codexRequestScope := &proxy.CodexRequestScope{
+		Chooser:   codexSelector,
+		Inventory: credentialControl,
 	}
-
-	// WebSocket upgrades require HTTP/1.1. http.DefaultTransport may negotiate
-	// HTTP/2 via ALPN TLS, which does not support the 101 Switching Protocols
-	// response needed for WebSocket. Use a dedicated HTTP/1.1-only transport.
-	http11Transport := http.DefaultTransport.(*http.Transport).Clone()
-	http11Transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
-	http11Transport.ForceAttemptHTTP2 = false
-	codexUpgradeTransport := &proxy.CodexTokenTransport{
-		Selector: codexSelector,
-		Quota:    codexQuotaCache,
-		Inner:    http11Transport,
+	codexRequestRouter := &proxy.CodexRequestRouter{
+		Scope: codexRequestScope,
+		Executor: &proxy.CodexAttemptExecutor{
+			Secrets: credentialControl,
+			Transport: &proxy.CodexTokenTransport{
+				Inner: http.DefaultTransport,
+			},
+		},
+		Refresher: credentialControl,
+		Capacity:  codexQuotaCache.CodexCapacityLedger(),
 	}
+	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl)
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
@@ -397,20 +395,20 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 
 	srv := &proxy.Server{
-		Config:                cfg,
-		Selector:              selector,
-		Discover:              discover,
-		Transport:             transport,
-		CodexDiscover:         codexDiscover,
-		CodexTransport:        codexTransport,
-		CodexUpgradeTransport: codexUpgradeTransport,
-		Headroom:              headroom,
-		Diag:                  diagnostics,
-		PayloadDiag:           payloadDiag,
-		CodexRouting:          codexRouting,
-		HeadroomMode:          resolvedMode,
-		Catalog:               catalog,
-		Refresher:             proxyRefresher,
+		Config:                 cfg,
+		Selector:               selector,
+		Discover:               discover,
+		Transport:              transport,
+		CodexDiscover:          codexDiscover,
+		CodexRequests:          codexRequestRouter,
+		CodexWebSocketExecutor: codexWebSocketExecutor,
+		Headroom:               headroom,
+		Diag:                   diagnostics,
+		PayloadDiag:            payloadDiag,
+		CodexRouting:           codexRouting,
+		HeadroomMode:           resolvedMode,
+		Catalog:                catalog,
+		Refresher:              proxyRefresher,
 	}
 
 	err = srv.ListenAndServe(proxyCtx)

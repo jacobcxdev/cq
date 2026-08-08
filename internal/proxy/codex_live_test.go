@@ -170,7 +170,7 @@ func TestServer_CodexLiveCall_RejectsMissingSDP(t *testing.T) {
 		return nil, nil
 	})
 	srv := newCodexLiveTestServer("https://chatgpt.com/backend-api/codex")
-	srv.CodexTransport.(*CodexTokenTransport).Inner = transport
+	setTestCodexInner(srv.CodexRequests, transport)
 	handler, err := srv.handler()
 	if err != nil {
 		t.Fatalf("handler() error = %v", err)
@@ -197,22 +197,13 @@ func TestServer_CodexLiveCall_UsesHTTPTransport(t *testing.T) {
 			ClaudeUpstream: "https://api.anthropic.com",
 			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
 		},
-		CodexTransport: &CodexTokenTransport{
-			Selector: selector,
-			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusCreated,
-					Header:     http.Header{"Location": []string{"/v1/live/rtc_http"}},
-					Body:       io.NopCloser(strings.NewReader("answer-sdp")),
-				}, nil
-			}),
-		},
-		CodexUpgradeTransport: &CodexTokenTransport{
-			Selector: selector,
-			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-				return nil, fmt.Errorf("websocket transport used for HTTP call")
-			}),
-		},
+		CodexRequests: testCodexRequestRouter(selector, roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Header:     http.Header{"Location": []string{"/v1/live/rtc_http"}},
+				Body:       io.NopCloser(strings.NewReader("answer-sdp")),
+			}, nil
+		})),
 	}
 	handler, err := srv.handler()
 	if err != nil {
@@ -257,12 +248,14 @@ func TestServer_CodexLiveSideband_UsesCallAccountAffinity(t *testing.T) {
 		{AccessToken: "token-one", AccountID: "account-one"},
 		{AccessToken: "token-two", AccountID: "account-two"},
 	}}
+	router := testCodexRequestRouter(selector, http.DefaultTransport)
 	srv := &Server{
 		Config: &Config{
 			ClaudeUpstream: "https://api.anthropic.com",
 			CodexUpstream:  upstream.URL + "/backend-api/codex",
 		},
-		CodexTransport: &CodexTokenTransport{Selector: selector, Inner: http.DefaultTransport},
+		CodexRequests:          router,
+		CodexWebSocketExecutor: testCodexWebSocketExecutor(router),
 	}
 	srv.codexLiveSidebandUpstream = upstream.URL + "/v1"
 	handler, err := srv.handler()
@@ -343,20 +336,19 @@ func (s *rotatingCodexSelector) callCount() int {
 }
 
 func newCodexLiveTestServer(codexUpstream string) *Server {
+	router := testCodexRequestRouter(&fakeCodexSelector{account: &codex.CodexAccount{
+		AccessToken: "codex-tok",
+		AccountID:   "acct-123",
+		Email:       "user@example.com",
+	}}, http.DefaultTransport)
 	return &Server{
 		Config: &Config{
 			ClaudeUpstream: "https://api.anthropic.com",
 			CodexUpstream:  codexUpstream,
 			LocalToken:     "local-tok",
 		},
-		CodexTransport: &CodexTokenTransport{
-			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
-				AccessToken: "codex-tok",
-				AccountID:   "acct-123",
-				Email:       "user@example.com",
-			}},
-			Inner: http.DefaultTransport,
-		},
+		CodexRequests:          router,
+		CodexWebSocketExecutor: testCodexWebSocketExecutor(router),
 	}
 }
 

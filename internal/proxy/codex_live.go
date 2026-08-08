@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 const (
@@ -32,7 +31,8 @@ var codexLiveProtocolHeaders = []string{
 }
 
 type codexLiveCall struct {
-	account   *codex.CodexAccount
+	choice    RouteChoice
+	attempt   CandidateAttempt
 	expiresAt time.Time
 }
 
@@ -97,7 +97,7 @@ func (s *Server) handleCodexLiveCall(w http.ResponseWriter, r *http.Request) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
 
-	resp, acct, err := s.roundTripCodexLive(upReq)
+	resp, choice, attempt, err := s.doCodexRequest(r.Context(), "", upReq)
 	if err != nil {
 		statusCode = http.StatusBadGateway
 		diagError = diagnosticsErrorCode("api_error", "codex live upstream error")
@@ -115,7 +115,7 @@ func (s *Server) handleCodexLiveCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if callID := codexLiveCallID(resp.Header.Get("Location")); callID != "" && resp.StatusCode < 400 {
-		s.codexLive.remember(callID, acct)
+		s.codexLive.remember(callID, choice, attempt)
 	}
 	copyCodexLiveResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -152,39 +152,29 @@ func (s *Server) handleCodexLiveSideband(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	transport, err := s.codexLiveTransport()
-	if err != nil {
+	router, executor := s.codexWebSocketRouting()
+	if router == nil || executor == nil {
 		statusCode = http.StatusServiceUnavailable
-		diagError = diagnosticsErrorCode("api_error", err.Error())
-		writeError(w, statusCode, "api_error", err.Error())
+		diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
+		writeError(w, statusCode, "api_error", "no codex accounts configured")
 		return
 	}
-	acct := s.codexLive.account(target.callID)
-	if acct == nil {
-		acct, err = transport.Selector.Select(r.Context())
-		if err != nil {
-			statusCode = http.StatusServiceUnavailable
-			diagError = diagnosticsErrorCode("api_error", err.Error())
-			writeError(w, statusCode, "api_error", err.Error())
-			return
-		}
-	}
-	noteRouteAccount(r.Context(), codexAccountHint(acct), false)
 
 	upstreamURL := s.codexLiveSidebandURL(target)
 	headers := http.Header{}
 	copyCodexLiveProtocolHeaders(headers, r.Header)
-	headers.Set("Authorization", "Bearer "+acct.AccessToken)
-	if acct.AccountID != "" {
-		headers.Set("ChatGPT-Account-ID", acct.AccountID)
+	for _, subprotocol := range websocket.Subprotocols(r) {
+		headers.Add("Sec-WebSocket-Protocol", subprotocol)
 	}
-	dialer := websocket.Dialer{
-		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  30 * time.Second,
-		EnableCompression: true,
-		Subprotocols:      websocket.Subprotocols(r),
+	var upstreamConn *websocket.Conn
+	var resp *http.Response
+	var err error
+	if choice, attempt, ok := s.codexLive.affinity(target.callID); ok {
+		noteRouteAccount(r.Context(), redactedAccountHint("codex", string(choice.AccountKey)), false)
+		upstreamConn, resp, _, err = executor.Dial(r.Context(), choice, attempt, upstreamURL, headers)
+	} else {
+		upstreamConn, _, _, err = s.dialCodexWebSocket(r.Context(), upstreamURL, headers, "")
 	}
-	upstreamConn, resp, err := dialer.DialContext(r.Context(), upstreamURL, headers)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
@@ -213,10 +203,7 @@ func (s *Server) handleCodexLiveSideband(w http.ResponseWriter, r *http.Request)
 	defer clientConn.Close()
 	clientConn.SetReadLimit(maxRequestBody)
 
-	errCh := make(chan error, 2)
-	go relayCodexLiveMessages(errCh, clientConn, upstreamConn)
-	go relayCodexLiveMessages(errCh, upstreamConn, clientConn)
-	<-errCh
+	_ = relayWebSocketPair(r.Context(), clientConn, upstreamConn)
 }
 
 func codexLiveBackendBody(r *http.Request) ([]byte, error) {
@@ -277,59 +264,6 @@ func codexLiveBackendBody(r *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("codex live request is missing sdp")
 	}
 	return json.Marshal(request)
-}
-
-func (s *Server) roundTripCodexLive(req *http.Request) (*http.Response, *codex.CodexAccount, error) {
-	transport, err := s.codexLiveTransport()
-	if err != nil {
-		return nil, nil, err
-	}
-	var excluded []codex.SelectionExclusion
-	var fallbackResp *http.Response
-	for {
-		acct, selectErr := transport.Selector.Select(req.Context(), excluded...)
-		if selectErr != nil {
-			if fallbackResp != nil {
-				return fallbackResp, nil, nil
-			}
-			return nil, nil, selectErr
-		}
-		noteRouteAccount(req.Context(), codexAccountHint(acct), len(excluded) > 0)
-		resp, requestErr := transport.doRequest(req, acct)
-		if requestErr != nil {
-			return nil, nil, requestErr
-		}
-		switch resp.StatusCode {
-		case http.StatusUnauthorized, http.StatusTooManyRequests:
-			responseBody, readErr := readCodexLiveBody(resp.Body)
-			resp.Body.Close()
-			if readErr != nil {
-				return nil, nil, readErr
-			}
-			resp.Body = io.NopCloser(bytes.NewReader(responseBody))
-			if fallbackResp != nil {
-				fallbackResp.Body.Close()
-			}
-			excluded = append(excluded, codexAcctExcludeKeys(acct)...)
-			fallbackResp = resp
-		default:
-			return resp, acct, nil
-		}
-	}
-}
-
-func (s *Server) codexLiveTransport() (*CodexTokenTransport, error) {
-	if transport, ok := s.CodexTransport.(*CodexTokenTransport); ok &&
-		transport != nil &&
-		transport.Selector != nil {
-		return transport, nil
-	}
-	if transport, ok := s.CodexUpgradeTransport.(*CodexTokenTransport); ok &&
-		transport != nil &&
-		transport.Selector != nil {
-		return transport, nil
-	}
-	return nil, fmt.Errorf("no codex accounts configured")
 }
 
 func readCodexLiveBody(body io.Reader) ([]byte, error) {
@@ -432,11 +366,10 @@ func (s *Server) codexLiveSidebandURL(target codexLiveSidebandTarget) string {
 	}
 }
 
-func (s *codexLiveState) remember(callID string, acct *codex.CodexAccount) {
-	if acct == nil {
+func (s *codexLiveState) remember(callID string, choice RouteChoice, attempt CandidateAttempt) {
+	if choice.AccountKey == "" || attempt.Candidate.CandidateID == "" {
 		return
 	}
-	copy := *acct
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -448,27 +381,17 @@ func (s *codexLiveState) remember(callID string, acct *codex.CodexAccount) {
 			delete(s.calls, id)
 		}
 	}
-	s.calls[callID] = codexLiveCall{account: &copy, expiresAt: now.Add(codexLiveCallTTL)}
+	s.calls[callID] = codexLiveCall{choice: choice, attempt: attempt, expiresAt: now.Add(codexLiveCallTTL)}
 }
 
-func (s *codexLiveState) account(callID string) *codex.CodexAccount {
+func (s *codexLiveState) affinity(callID string) (RouteChoice, CandidateAttempt, bool) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	call, ok := s.calls[callID]
 	if !ok || call.expiresAt.Before(now) {
 		delete(s.calls, callID)
-		return nil
+		return RouteChoice{}, CandidateAttempt{}, false
 	}
-	copy := *call.account
-	return &copy
-}
-
-func relayCodexLiveMessages(errCh chan<- error, src, dst *websocket.Conn) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			errCh <- fmt.Errorf("codex live relay panic")
-		}
-	}()
-	errCh <- relayWebSocketMessages(src, dst)
+	return call.choice, call.attempt, true
 }

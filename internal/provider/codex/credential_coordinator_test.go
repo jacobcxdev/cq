@@ -34,6 +34,54 @@ func TestCredentialCoordinatorSaveLoginCreatesOwnedManagedRecord(t *testing.T) {
 	}
 }
 
+func TestCredentialCoordinatorListNeverReturnsCredentialMaterial(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	ref, _, err := coordinator.SaveLogin(context.Background(), testLoginCredential())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
+	}
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
+		t.Fatalf("inventory = %+v", inventory)
+	}
+	credential := inventory.Accounts[0].Candidates[0].Credential
+	if credential.AccessToken != "" || credential.RefreshToken != "" || credential.IDToken != "" || credential.AccountID != "" {
+		t.Fatalf("inventory exposed credential material: %+v", credential)
+	}
+}
+
+func TestCredentialCoordinatorResolveReadsSystemCandidateWithoutWriting(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	jwt := fakeCodexJWT("system@test.com", "acct-system", "user-system", "plus")
+	systemPath := "/fake/home/.codex/auth.json"
+	before := codexAuthJSON("system-access", "acct-system", jwt)
+	fs.files[systemPath] = append([]byte(nil), before...)
+	fs.modes[systemPath] = 0o600
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
+		t.Fatalf("inventory = %+v", inventory)
+	}
+	material, err := coordinator.Resolve(context.Background(), inventory.Accounts[0].Candidates[0].Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if material.AccessToken != "system-access" || material.AccountID != "acct-system" {
+		t.Fatalf("material = %+v", material)
+	}
+	if string(fs.files[systemPath]) != string(before) {
+		t.Fatal("Resolve mutated system credential")
+	}
+}
+
 func TestCredentialCoordinatorRepeatedLoginRotatesSameCandidateAndPreservesUnknownFields(t *testing.T) {
 	coordinator, fs := testCoordinator(t)
 	credential := testLoginCredential()

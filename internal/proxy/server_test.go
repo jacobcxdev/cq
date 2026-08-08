@@ -520,7 +520,7 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
 			LocalToken:     "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codexAccount},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -565,8 +565,9 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	if ev.StatusCode != http.StatusAccepted {
 		t.Fatalf("StatusCode = %d, want 202", ev.StatusCode)
 	}
-	if ev.AccountHint != codexAccountHint(&codexAccount) {
-		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, codexAccountHint(&codexAccount))
+	wantHint := redactedAccountHint("codex", string(codexRoutingAccountKey(&codexAccount)))
+	if ev.AccountHint != wantHint {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, wantHint)
 	}
 	if ev.Failover {
 		t.Fatal("Failover = true, want false")
@@ -594,12 +595,12 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
 			LocalToken:     "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &multiCodexSelector{accounts: accounts},
 			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				switch req.Header.Get("Authorization") {
 				case "Bearer primary-codex-token":
-					return makeResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+					return makeResponse(http.StatusTooManyRequests, `{"error":{"type":"insufficient_quota"}}`), nil
 				case "Bearer fallback-codex-token":
 					return &http.Response{
 						StatusCode: http.StatusOK,
@@ -635,8 +636,9 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
 	ev := events[0]
-	if ev.AccountHint != codexAccountHint(&accounts[1]) {
-		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, codexAccountHint(&accounts[1]))
+	wantHint := redactedAccountHint("codex", string(codexRoutingAccountKey(&accounts[1])))
+	if ev.AccountHint != wantHint {
+		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, wantHint)
 	}
 	if !ev.Failover {
 		t.Fatal("Failover = false, want true")
@@ -713,7 +715,7 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 			}
 			defer diag.Close()
 
-			codexTransport := &CodexTokenTransport{
+			codexTransport := &legacyCodexTokenTransport{
 				Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
 				Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					if tc.wantProvider != "codex" {
@@ -807,7 +809,7 @@ func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
 			CodexUpstream:  "https://chatgpt.com",
 			LocalToken:     localToken,
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				gotPath = r.URL.Path
@@ -902,7 +904,7 @@ func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "local-tok",
 		},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -986,7 +988,7 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-codex"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1072,7 +1074,7 @@ func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testi
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-codex"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1154,7 +1156,7 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 					CodexUpstream:  "https://chatgpt.com",
 					LocalToken:     "tok",
 				},
-				CodexTransport: &CodexTokenTransport{
+				CodexTransport: &legacyCodexTokenTransport{
 					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 					Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 						gotPath = r.URL.Path
@@ -1273,7 +1275,7 @@ func TestServerDiagnosticsCodexAppServerRetirementIgnoresUpstream(t *testing.T) 
 			CodexUpstream:  "ftp://chatgpt.example",
 			LocalToken:     "local-token-secret",
 		},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{Email: "codex@test.com", AccountID: "codex-account", AccessToken: "codex-token"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1654,7 +1656,7 @@ func TestServer_HeadroomPreservesOriginalModelRouting(t *testing.T) {
 				TokensSaved: 123,
 			}
 		}),
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1841,7 +1843,7 @@ func TestServer_NativeCodex_ForwardsWithAuth(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-1",
@@ -1890,7 +1892,7 @@ func TestServer_Handler_CodexResponsesPath_ForwardsWithAuth(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-1"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1958,7 +1960,7 @@ func TestServer_Handler_CodexImagesPath_ForwardsWithoutProxyToken(t *testing.T) 
 
 			srv := &Server{
 				Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-				CodexTransport: &CodexTokenTransport{
+				CodexTransport: &legacyCodexTokenTransport{
 					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-1"}},
 					Inner:    http.DefaultTransport,
 				},
@@ -2078,7 +2080,7 @@ func TestServer_Handler_LegacyCodexResponsesPost_Compatibility(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2184,7 +2186,7 @@ func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2255,7 +2257,7 @@ func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2327,7 +2329,7 @@ func TestServer_AppServerPrefersProAccountForSpark(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: NewCodexSelector(func() []codex.CodexAccount {
 				return []codex.CodexAccount{
 					{Email: "plus@test.com", AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
@@ -2624,7 +2626,7 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-1",
@@ -2690,7 +2692,7 @@ func TestServer_NativeCodex_NoProxyTokenRequired(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "secret-proxy-token",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 			}},
@@ -2757,7 +2759,7 @@ func TestServer_NativeCodex_HeadroomCompressesBody(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2809,7 +2811,7 @@ func TestServer_NativeCodex_HeadroomBridgeError_FallsBackToOriginal(t *testing.T
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2861,7 +2863,7 @@ func TestServer_NativeCodex_HeadroomSkipsPreviousResponseID(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2903,7 +2905,7 @@ func TestServer_NativeCodex_HeadroomCanonicalAndLegacyPathBehaveTheSame(t *testi
 					CodexUpstream: upstream.URL,
 					LocalToken:    "tok",
 				},
-				CodexTransport: &CodexTokenTransport{
+				CodexTransport: &legacyCodexTokenTransport{
 					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 					Inner:    http.DefaultTransport,
 				},
@@ -2995,7 +2997,7 @@ func TestServer_NativeCodex_CacheModeUsesCacheSemantics(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -3079,7 +3081,7 @@ func TestServer_NativeCodex_TokenModeUsesTokenSemantics(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -3418,7 +3420,7 @@ func TestServerPayloadDiagnosticsNativeCodexEmitsEvent(t *testing.T) {
 			CodexUpstream: "https://chatgpt.com/backend-api/codex",
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -3477,7 +3479,7 @@ func TestServerPayloadDiagnosticsCompactEmitsEvent(t *testing.T) {
 			CodexUpstream: "https://chatgpt.com/backend-api/codex",
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -3547,7 +3549,7 @@ func TestServerPayloadDiagnosticsNoEventForBinaryWebSocketFrame(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "local-tok",
 		},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -3821,7 +3823,7 @@ func TestServer_NativeCodex_HeadroomNil_NoCompression(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},

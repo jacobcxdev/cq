@@ -57,6 +57,34 @@ func TestCodexSelector_NoAccounts(t *testing.T) {
 	}
 }
 
+func TestCodexInventorySelectorDoesNotReceiveCredentialMaterial(t *testing.T) {
+	accountKey := codex.AccountKey("logical-account")
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key:      accountKey,
+		Identity: codex.AccountIdentity{AccountID: "account", Email: "user@test.com", PlanType: "pro"},
+		Routable: true,
+		Candidates: []codex.CredentialCandidate{{
+			Ref:        codex.CandidateRef{AccountKey: accountKey, CandidateID: "candidate"},
+			Credential: codex.CodexAccount{AccessToken: "must-not-cross-boundary"},
+		}},
+	}}}}
+	chooser := NewCodexInventorySelector(inventory, nil)
+	choice, err := chooser.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != accountKey {
+		t.Fatalf("choice = %+v", choice)
+	}
+	routeAccounts, err := chooser.(*codexSelector).routeAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routeAccounts) != 1 || routeAccounts[0].accountID != "account" {
+		t.Fatalf("route inventory received credential material: %+v", routeAccounts)
+	}
+}
+
 func TestCodexSelector_NoValidTokens(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{

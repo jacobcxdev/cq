@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	internalhttputil "github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -51,11 +50,14 @@ func (f RegistryRefresherFunc) Refresh(ctx context.Context) (modelregistry.Refre
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	Config                    *Config
-	Selector                  ClaudeSelector
-	Discover                  ClaudeDiscoverer
-	Transport                 http.RoundTripper
-	CodexDiscover             CodexDiscoverer
+	Config                 *Config
+	Selector               ClaudeSelector
+	Discover               ClaudeDiscoverer
+	Transport              http.RoundTripper
+	CodexDiscover          CodexDiscoverer
+	CodexRequests          *CodexRequestRouter
+	CodexWebSocketExecutor ExplicitWebSocketExecutor
+	// Deprecated compatibility seams. Production routing never sets these.
 	CodexTransport            http.RoundTripper
 	CodexUpgradeTransport     http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
 	codexLiveSidebandUpstream string
@@ -74,6 +76,23 @@ type Server struct {
 	// Refresher is the optional registry refresher. When non-nil, it backs
 	// the /v1/registry/refresh endpoint.
 	Refresher RegistryRefresher
+}
+
+type codexWebSocketRoutingProvider interface {
+	codexWebSocketRouting() (*CodexRequestRouter, ExplicitWebSocketExecutor)
+}
+
+func (s *Server) codexWebSocketRouting() (*CodexRequestRouter, ExplicitWebSocketExecutor) {
+	if s == nil {
+		return nil, nil
+	}
+	if s.CodexRequests != nil && s.CodexWebSocketExecutor != nil {
+		return s.CodexRequests, s.CodexWebSocketExecutor
+	}
+	if provider, ok := s.CodexUpgradeTransport.(codexWebSocketRoutingProvider); ok {
+		return provider.codexWebSocketRouting()
+	}
+	return nil, nil
 }
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
@@ -439,7 +458,7 @@ func (s *Server) handleCodexHTTPRoute(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 
-	if s.CodexTransport == nil {
+	if !s.codexHTTPAvailable() {
 		statusCode = http.StatusServiceUnavailable
 		diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
@@ -487,7 +506,7 @@ func (s *Server) handleCodexHTTPRoute(w http.ResponseWriter, r *http.Request, ro
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: route %s %s provider=codex (%s)\n", r.Method, r.URL.Path, logKind)
-	resp, err := s.CodexTransport.RoundTrip(upReq)
+	resp, _, _, err := s.doCodexRequest(r.Context(), extractModel(body), upReq)
 	if err != nil {
 		statusCode = http.StatusBadGateway
 		diagError = diagnosticsErrorCode("api_error", fmt.Sprintf("codex upstream error: %v", err))
@@ -497,14 +516,8 @@ func (s *Server) handleCodexHTTPRoute(w http.ResponseWriter, r *http.Request, ro
 	defer resp.Body.Close()
 
 	fmt.Fprintf(os.Stderr, "cq: proxy %s %s → %d (codex %s)\n", r.Method, r.URL.Path, resp.StatusCode, logKind)
-	for key, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(key, v)
-		}
-	}
 	statusCode = resp.StatusCode
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	if err := relayCodexHTTPResponse(w, resp, false); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: codex %s response copy: %v\n", logKind, err)
 	}
 }
@@ -662,7 +675,7 @@ func (s *Server) isValidToken(token string) bool {
 
 // handleNativeCodex handles requests from Codex CLI in native OpenAI Responses
 // API format. No Anthropic↔OpenAI translation is performed — the request is
-// forwarded as-is with auth injected by CodexTransport.
+// forwarded as-is through explicit-account execution.
 //
 // Security: no proxy token auth is required. The proxy binds to 127.0.0.1 only,
 // so only local processes can reach this endpoint. Codex CLI in ChatGPT auth
@@ -691,7 +704,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	if s.CodexTransport == nil {
+	if !s.codexHTTPAvailable() {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
 	}
@@ -771,8 +784,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	// Transport handles auth injection and account rotation.
-	resp, err := s.CodexTransport.RoundTrip(upReq)
+	resp, _, _, err := s.doCodexRequest(ctx, model, upReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
@@ -781,35 +793,14 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(os.Stderr, "cq: proxy POST %s → %d (codex native)\n", upstreamURL, resp.StatusCode)
 
-	// Forward response as-is — headers, status code, body.
-	for key, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(key, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	// Stream the body through (supports SSE).
-	if f, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				f.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(w, resp.Body)
+	if err := relayCodexHTTPResponse(w, resp, true); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: codex native response copy: %v\n", err)
 	}
 }
 
 // proxyCodexUpgrade handles WebSocket upgrade requests to /responses by
-// reverse-proxying to the Codex upstream. The CodexTokenTransport injects
-// auth on the initial HTTP upgrade request; after the upgrade the raw TCP
+// reverse-proxying to the Codex upstream. Explicit-account execution injects
+// auth on the initial HTTP upgrade request; after upgrade, supervised pumps
 // connection is relayed without further intervention.
 //
 // Note: native Codex WebSocket traffic is intentionally out of scope for
@@ -837,11 +828,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.emitDiagnostics(event)
 	}()
 
-	transport, err := s.codexAppServerTransport()
-	if err != nil {
+	if router, executor := s.codexWebSocketRouting(); router == nil || executor == nil {
 		statusCode = http.StatusServiceUnavailable
-		diagError = diagnosticsErrorCode("api_error", err.Error())
-		writeError(w, http.StatusServiceUnavailable, "api_error", err.Error())
+		diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
+		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
 	}
 	upstreamURL, err := codexAppServerWebSocketURL(s.Config.CodexUpstream)
@@ -875,7 +865,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		requestedModel = extractCodexWebSocketFrameModel(message)
 		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, message, 1)
 	}
-	upstreamConn, _, err := s.dialCodexAppServer(r.Context(), transport, upstreamURL, r.Header, requestedModel)
+	upstreamConn, _, _, err := s.dialCodexWebSocket(r.Context(), upstreamURL, r.Header, requestedModel)
 	if err != nil {
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
@@ -885,20 +875,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	if err := upstreamConn.WriteMessage(messageType, message); err != nil {
 		return
 	}
-	errCh := make(chan error, 2)
-	go func() { errCh <- relayWebSocketMessages(clientConn, upstreamConn) }()
-	go func() { errCh <- relayWebSocketMessages(upstreamConn, clientConn) }()
-	<-errCh
-}
-
-func (s *Server) codexAppServerTransport() (*CodexTokenTransport, error) {
-	if t, ok := s.CodexUpgradeTransport.(*CodexTokenTransport); ok && t != nil && t.Selector != nil {
-		return t, nil
-	}
-	if t, ok := s.CodexTransport.(*CodexTokenTransport); ok && t != nil && t.Selector != nil {
-		return t, nil
-	}
-	return nil, fmt.Errorf("no codex accounts configured")
+	_ = relayWebSocketPair(r.Context(), clientConn, upstreamConn)
 }
 
 func codexAppServerWebSocketURL(raw string) (string, error) {
@@ -918,60 +895,48 @@ func codexAppServerWebSocketURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func (s *Server) dialCodexAppServer(ctx context.Context, transport *CodexTokenTransport, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, *codex.CodexAccount, error) {
-	if requestedModel != "" {
-		ctx = context.WithValue(ctx, codexModelContextKey{}, requestedModel)
+func (s *Server) dialCodexWebSocket(ctx context.Context, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, RouteChoice, CandidateAttempt, error) {
+	router, executor := s.codexWebSocketRouting()
+	if router == nil || executor == nil {
+		return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("no Codex accounts configured")
 	}
 	var excluded []codex.SelectionExclusion
 	for {
-		acct, err := transport.Selector.Select(ctx, excluded...)
+		plan, err := router.Plan(ctx, CodexRouteRequirements{RequestedModel: requestedModel}, "", excluded...)
 		if err != nil {
 			if len(excluded) == 0 {
-				return nil, nil, err
+				return nil, RouteChoice{}, CandidateAttempt{}, err
 			}
-			return nil, nil, fmt.Errorf("no alternate codex account available for app-server websocket")
+			return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("no alternate codex account available for WebSocket")
 		}
-		noteRouteAccount(ctx, codexAccountHint(acct), len(excluded) > 0)
-		conn, resp, body, err := dialCodexAppServerWithAccount(ctx, upstreamURL, incomingHeaders, acct)
-		if err == nil {
-			return conn, acct, nil
+		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > 0)
+		hardLimited := false
+		for _, attempt := range plan.Attempts {
+			conn, resp, body, dialErr := executor.Dial(ctx, plan.Choice, attempt, upstreamURL, incomingHeaders)
+			if dialErr == nil {
+				return conn, plan.Choice, attempt, nil
+			}
+			if resp == nil {
+				return nil, plan.Choice, attempt, dialErr
+			}
+			switch resp.StatusCode {
+			case http.StatusUnauthorized:
+				continue
+			case http.StatusTooManyRequests:
+				if isHardExhaustion(body) {
+					hardLimited = true
+					break
+				}
+				return nil, plan.Choice, attempt, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
+			default:
+				return nil, plan.Choice, attempt, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
+			}
+			if hardLimited {
+				break
+			}
 		}
-		if resp == nil {
-			return nil, nil, err
-		}
-		switch resp.StatusCode {
-		case http.StatusUnauthorized:
-		case http.StatusTooManyRequests:
-			_ = isHardExhaustion(body) || transport.isSnapshotExhausted(acct)
-		default:
-			return nil, nil, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
-		}
-		excluded = append(excluded, codexAcctExcludeKeys(acct)...)
+		excluded = append(excluded, codex.SelectionExclusion{AccountKey: plan.Choice.AccountKey})
 	}
-}
-
-func dialCodexAppServerWithAccount(ctx context.Context, upstreamURL string, incomingHeaders http.Header, acct *codex.CodexAccount) (*websocket.Conn, *http.Response, []byte, error) {
-	headers := cloneCodexAppServerHeaders(incomingHeaders)
-	headers.Set("Authorization", "Bearer "+acct.AccessToken)
-	headers.Del("x-api-key")
-	if acct.AccountID != "" {
-		headers.Set("ChatGPT-Account-ID", acct.AccountID)
-	}
-	dialer := websocket.Dialer{
-		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  30 * time.Second,
-		EnableCompression: true,
-	}
-	conn, resp, err := dialer.DialContext(ctx, upstreamURL, headers)
-	if err == nil {
-		return conn, resp, nil, nil
-	}
-	var body []byte
-	if resp != nil && resp.Body != nil {
-		body, _ = internalhttputil.ReadBody(resp.Body)
-		resp.Body.Close()
-	}
-	return nil, resp, body, err
 }
 
 func cloneCodexAppServerHeaders(incoming http.Header) http.Header {
@@ -1002,18 +967,6 @@ func extractCodexWebSocketFrameModel(message []byte) string {
 		return payload.Model
 	}
 	return payload.Params.Model
-}
-
-func relayWebSocketMessages(src, dst *websocket.Conn) error {
-	for {
-		messageType, message, err := src.ReadMessage()
-		if err != nil {
-			return err
-		}
-		if err := dst.WriteMessage(messageType, message); err != nil {
-			return err
-		}
-	}
 }
 
 func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {

@@ -52,7 +52,7 @@ func rejectCodexCompactWebSocket(w http.ResponseWriter, requestPath string) {
 }
 
 // handleNativeCodexCompact forwards a compact request to the upstream
-// /responses/compact endpoint using CodexTransport for auth injection.
+// /responses/compact endpoint using explicit-account execution.
 // No headroom compression is applied — compact requests already represent
 // a summarisation boundary; compressing them further is counterproductive.
 func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request, requestPath string) {
@@ -79,7 +79,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		}()
 	}
 
-	if s.CodexTransport == nil {
+	if !s.codexHTTPAvailable() {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
 	}
@@ -139,8 +139,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	// Transport handles auth injection and account rotation.
-	resp, err := s.CodexTransport.RoundTrip(upReq)
+	resp, _, _, err := s.doCodexRequest(ctx, model, upReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
@@ -149,27 +148,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 
 	fmt.Fprintf(os.Stderr, "cq: proxy POST %s → %d (codex native compact)\n", upstreamURL, resp.StatusCode)
 
-	// Forward response headers, status, and body.
-	for key, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(key, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	if f, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				f.Flush()
-			}
-			if readErr != nil {
-				break
-			}
-		}
-	} else {
-		io.Copy(w, resp.Body)
+	if err := relayCodexHTTPResponse(w, resp, true); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: codex compact response copy: %v\n", err)
 	}
 }
