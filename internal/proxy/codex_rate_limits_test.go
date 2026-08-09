@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func TestParseCodexRateLimitHeadersProducesExactBucketObservations(t *testing.T) {
@@ -859,7 +861,7 @@ func TestServerCodexWebSocketObservesHandshakeHeadersAndEventsOnOneConnection(t 
 	}
 }
 
-func TestServerCodexWebSocketObservesRejectedHeadersAndHardLimitInOrder(t *testing.T) {
+func TestServerCodexWebSocketPost101ObservesRejectedHeadersAndHardLimitInOrder(t *testing.T) {
 	now := time.Unix(1_704_067_000, 0)
 	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
 	first := requestPlan("account-a", "candidate-a")
@@ -867,10 +869,9 @@ func TestServerCodexWebSocketObservesRejectedHeadersAndHardLimitInOrder(t *testi
 	first.Choice.RequestedModel = codexSparkModel
 	first.Choice.EffectiveModel = codexSparkModel
 	first.Choice.RequiredBuckets = []CapacityBucket{CapacityBucketForModel(codexSparkModel)}
+	var calls []codex.AccountKey
 	executor := codexWebSocketExecutorFunc(func(_ context.Context, choice RouteChoice, _ CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
-		if choice.AccountKey == "account-b" {
-			return new(websocket.Conn), nil, nil, nil
-		}
+		calls = append(calls, choice.AccountKey)
 		return nil, &http.Response{
 			Status:     "429 Too Many Requests",
 			StatusCode: http.StatusTooManyRequests,
@@ -881,13 +882,17 @@ func TestServerCodexWebSocketObservesRejectedHeadersAndHardLimitInOrder(t *testi
 			Body: http.NoBody,
 		}, []byte(codexLiveUsageLimitBody), errors.New("websocket: bad handshake")
 	})
+	scope := &queuedRequestScope{plans: []CodexRequestPlan{first, second}}
 	server := &Server{
-		CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{first, second}}, Capacity: ledger, Now: func() time.Time { return now }},
+		CodexRequests:          &CodexRequestRouter{Scope: scope, Capacity: ledger, Now: func() time.Time { return now }},
 		CodexWebSocketExecutor: executor,
 	}
-	connection, choice, _, err := server.dialCodexWebSocket(context.Background(), "wss://upstream.test/responses", nil, codexSparkModel)
-	if err != nil || connection == nil || choice.AccountKey != "account-b" {
+	connection, choice, _, _, err := server.dialCodexWebSocketWithCapacity(context.Background(), "wss://upstream.test/responses", nil, codexSparkModel)
+	if err == nil || connection != nil || choice.AccountKey != "account-a" {
 		t.Fatalf("connection=%p choice=%q error=%v", connection, choice.AccountKey, err)
+	}
+	if scope.calls != 1 || !slices.Equal(calls, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("scope calls=%d accounts=%v", scope.calls, calls)
 	}
 	ledger.mu.RLock()
 	headerFact, haveHeader := ledger.facts[capacityFactKey{account: "account-a", bucket: CapacityBucketBase, source: CapacitySourceHTTPHeaders}]

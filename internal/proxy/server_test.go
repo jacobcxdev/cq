@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2173,7 +2174,7 @@ func TestServer_Handler_CodexResponsesRejectsWebsocket(t *testing.T) {
 	}
 }
 
-func TestServerCodexWebSocketHard429FailoverAuthority(t *testing.T) {
+func TestServerCodexWebSocketBeforeDownstreamUpgradeHard429FailoverAuthority(t *testing.T) {
 	legacyBody := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
 	tests := []struct {
 		name         string
@@ -2248,7 +2249,122 @@ func TestServerCodexWebSocketHard429FailoverAuthority(t *testing.T) {
 	}
 }
 
-func TestServerCodexWebSocketReturnsActualRelistedRevision(t *testing.T) {
+func TestServerCodexWebSocketPost101PinsFirstCandidateAcrossDialFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "network error"},
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "hard usage limit", status: http.StatusTooManyRequests, body: codexLiveUsageLimitBody},
+		{name: "server error", status: http.StatusInternalServerError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := requestPlan("one", "first", "same-identity-second")
+			second := requestPlan("two", "other-account")
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{first, second}}
+			var calls []codex.CandidateID
+			executor := codexWebSocketExecutorFunc(func(_ context.Context, _ RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+				calls = append(calls, attempt.Candidate.CandidateID)
+				if attempt.Candidate.CandidateID != "first" {
+					return new(websocket.Conn), nil, nil, nil
+				}
+				if test.status == 0 {
+					return nil, nil, nil, errors.New("dial failed")
+				}
+				return nil, &http.Response{
+					Status:     fmt.Sprintf("%d %s", test.status, http.StatusText(test.status)),
+					StatusCode: test.status,
+					Header:     make(http.Header),
+					Body:       http.NoBody,
+				}, []byte(test.body), errors.New("websocket: bad handshake")
+			})
+			server := &Server{
+				CodexRequests:          &CodexRequestRouter{Scope: scope},
+				CodexWebSocketExecutor: executor,
+			}
+
+			connection, choice, attempt, _, err := server.dialCodexWebSocketWithCapacity(
+				context.Background(), "wss://upstream.test/responses", nil, "gpt-5.4",
+			)
+			if connection != nil || err == nil {
+				t.Fatalf("connection=%p error=%v", connection, err)
+			}
+			if choice.AccountKey != "one" || attempt.Candidate.CandidateID != "first" {
+				t.Fatalf("choice=%q attempt=%q", choice.AccountKey, attempt.Candidate.CandidateID)
+			}
+			if scope.calls != 1 || !slices.Equal(calls, []codex.CandidateID{"first"}) {
+				t.Fatalf("scope calls=%d attempts=%v", scope.calls, calls)
+			}
+		})
+	}
+}
+
+func TestServerCodexWebSocketPost101HandlerPinsFirstCandidate(t *testing.T) {
+	first := requestPlan("one", "first", "same-identity-second")
+	second := requestPlan("two", "other-account")
+	type dispatch struct {
+		account   codex.AccountKey
+		candidate codex.CandidateID
+	}
+	dispatches := make(chan dispatch, 4)
+	executor := codexWebSocketExecutorFunc(func(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+		dispatches <- dispatch{account: choice.AccountKey, candidate: attempt.Candidate.CandidateID}
+		return nil, &http.Response{
+			Status:     "429 Too Many Requests",
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}, []byte(codexLiveUsageLimitBody), errors.New("websocket: bad handshake")
+	})
+	server := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://claude.test",
+			CodexUpstream:  "https://codex.test",
+			LocalToken:     "local-token",
+		},
+		CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{first, second}}},
+		CodexWebSocketExecutor: executor,
+	}
+	handler, err := server.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	client, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxy.URL, "http")+legacyCodexResponsesPath, nil)
+	if err != nil {
+		t.Fatalf("downstream WebSocket upgrade: %v", err)
+	}
+	defer client.Close()
+	if response == nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("downstream upgrade response = %v, want 101", response)
+	}
+	if err := client.WriteMessage(websocket.TextMessage, []byte(`{"method":"response.create","params":{"model":"gpt-5.4"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseInternalServerErr) {
+		t.Fatalf("downstream read error = %v, want close 1011", err)
+	}
+
+	var got []dispatch
+	for {
+		select {
+		case attempt := <-dispatches:
+			got = append(got, attempt)
+		default:
+			if !slices.Equal(got, []dispatch{{account: "one", candidate: "first"}}) {
+				t.Fatalf("upstream dispatches = %+v", got)
+			}
+			return
+		}
+	}
+}
+
+func TestServerCodexWebSocketPost101ReturnsActualRelistedRevision(t *testing.T) {
 	plan := requestPlan("one", "candidate")
 	actual := plan.Attempts[0]
 	actual.Revision = "revision-new"
@@ -2264,7 +2380,7 @@ func TestServerCodexWebSocketReturnsActualRelistedRevision(t *testing.T) {
 		CodexWebSocketExecutor: executor,
 	}
 
-	connection, choice, returned, err := server.dialCodexWebSocket(
+	connection, choice, returned, _, err := server.dialCodexWebSocketWithCapacity(
 		withCodexObservation(context.Background(), observer),
 		"wss://upstream.test/responses", nil, "gpt-5.4",
 	)

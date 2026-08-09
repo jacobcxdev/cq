@@ -1026,11 +1026,54 @@ func codexAppServerWebSocketURL(raw string) (string, error) {
 }
 
 func (s *Server) dialCodexWebSocket(ctx context.Context, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, RouteChoice, CandidateAttempt, error) {
-	connection, choice, attempt, _, err := s.dialCodexWebSocketWithCapacity(ctx, upstreamURL, incomingHeaders, requestedModel)
+	connection, choice, attempt, _, err := s.dialCodexWebSocketBeforeDownstreamUpgrade(ctx, upstreamURL, incomingHeaders, requestedModel)
 	return connection, choice, attempt, err
 }
 
+// dialCodexWebSocketWithCapacity runs after the downstream WebSocket upgrade.
+// At that point the selected logical account and credential candidate are
+// immutable for this connection. Exact resolution may update only that same
+// candidate's revision before the single upstream dispatch.
 func (s *Server) dialCodexWebSocketWithCapacity(ctx context.Context, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, RouteChoice, CandidateAttempt, *codexRateLimitProducer, error) {
+	router, executor := s.codexWebSocketRouting()
+	if router == nil || executor == nil {
+		return nil, RouteChoice{}, CandidateAttempt{}, nil, fmt.Errorf("no Codex accounts configured")
+	}
+	plan, err := router.Plan(ctx, CodexRouteRequirements{RequestedModel: requestedModel}, "")
+	if err != nil {
+		return nil, RouteChoice{}, CandidateAttempt{}, nil, err
+	}
+	noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), false)
+	if len(plan.Attempts) == 0 {
+		return nil, plan.Choice, CandidateAttempt{}, nil, fmt.Errorf("no Codex credential candidate available for WebSocket")
+	}
+	attempt := plan.Attempts[0]
+	conn, resp, body, actual, dialErr := executeCodexWebSocketAttempt(
+		executor, ctx, plan.Choice, attempt, upstreamURL, incomingHeaders,
+		func(actual CandidateAttempt) { observeCodexAttempt(ctx, plan.Choice, actual) },
+	)
+	capacity := router.newRateLimitProducer(plan.Choice, true)
+	if capacity != nil && resp != nil {
+		_ = capacity.ObserveHeaders(resp.Header)
+	}
+	if dialErr == nil {
+		return conn, plan.Choice, actual, capacity, nil
+	}
+	if resp == nil {
+		return nil, plan.Choice, actual, nil, dialErr
+	}
+	if resp.StatusCode == http.StatusTooManyRequests && !resp.Uncompressed && codexAttemptResponseHasIdentityEncoding(resp.Header) {
+		wrapped, parseErr := parseCodexHTTPError(body, resp.StatusCode)
+		if parseErr == nil && wrapped.HardUsageLimit {
+			router.observeHardLimit(plan.Choice, resp, capacity)
+		}
+	}
+	return nil, plan.Choice, actual, nil, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
+}
+
+// dialCodexWebSocketBeforeDownstreamUpgrade may try bounded alternate
+// candidates and accounts because no downstream WebSocket has been admitted.
+func (s *Server) dialCodexWebSocketBeforeDownstreamUpgrade(ctx context.Context, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, RouteChoice, CandidateAttempt, *codexRateLimitProducer, error) {
 	router, executor := s.codexWebSocketRouting()
 	if router == nil || executor == nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, nil, fmt.Errorf("no Codex accounts configured")
