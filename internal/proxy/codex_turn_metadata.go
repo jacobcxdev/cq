@@ -109,6 +109,10 @@ type CodexTurnMetadataResult struct {
 }
 
 func ParseCodexTurnMetadata(body []byte, directHeader string, handshake *CodexTurnMetadata) (CodexTurnMetadataResult, error) {
+	return parseCodexTurnMetadataWithNestedLimit(body, directHeader, handshake, codexProtocolMaxBytes)
+}
+
+func parseCodexTurnMetadataWithNestedLimit(body []byte, directHeader string, handshake *CodexTurnMetadata, nestedLimit int) (CodexTurnMetadataResult, error) {
 	var envelope struct {
 		ClientMetadata json.RawMessage `json:"client_metadata"`
 	}
@@ -124,7 +128,7 @@ func ParseCodexTurnMetadata(body []byte, directHeader string, handshake *CodexTu
 			return CodexTurnMetadataResult{}, fmt.Errorf("decode Codex client metadata: %w", err)
 		}
 		if raw, ok := client[codexTurnMetadataKey]; ok {
-			metadata, err := decodeCodexTurnMetadataWithLimit(raw, codexProtocolMaxBytes)
+			metadata, err := decodeCodexTurnMetadataWithLimit(raw, nestedLimit)
 			return codexTurnMetadataResult(metadata, CodexTurnMetadataNested, true, err)
 		}
 	}

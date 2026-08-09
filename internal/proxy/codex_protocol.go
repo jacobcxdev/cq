@@ -10,7 +10,10 @@ import (
 	"strings"
 )
 
-const codexProtocolMaxBytes = 8 << 20
+const (
+	codexProtocolMaxBytes        = 8 << 20
+	codexProtocolRequestMaxBytes = maxRequestBody
+)
 
 type CodexProtocolRequest struct {
 	Type               string
@@ -23,10 +26,10 @@ type CodexProtocolRequest struct {
 }
 
 func ParseCodexProtocolRequest(body []byte, directMetadata string, handshake *CodexTurnMetadata) (CodexProtocolRequest, error) {
-	if len(body) > codexProtocolMaxBytes {
+	if len(body) > codexProtocolRequestMaxBytes {
 		return CodexProtocolRequest{}, errors.New("Codex protocol request exceeds limit")
 	}
-	metadata, err := ParseCodexTurnMetadata(body, directMetadata, handshake)
+	metadata, err := parseCodexTurnMetadataWithNestedLimit(body, directMetadata, handshake, codexProtocolRequestMaxBytes)
 	if err != nil {
 		return CodexProtocolRequest{}, err
 	}

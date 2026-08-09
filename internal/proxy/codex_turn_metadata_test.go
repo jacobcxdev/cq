@@ -126,6 +126,13 @@ func TestTurnMetadataAcceptsLargeCanonicalMetadata(t *testing.T) {
 	}
 }
 
+func TestTurnMetadataRetainsLegacyNestedLimit(t *testing.T) {
+	body := codexProtocolRequestBodyAtSize(t, codexProtocolMaxBytes+1024)
+	if _, err := ParseCodexTurnMetadata(body, "", nil); err == nil || err.Error() != "Codex turn metadata exceeds limit" {
+		t.Fatalf("legacy nested metadata limit error = %v", err)
+	}
+}
+
 func TestTurnMetadataRejectsMalformedHigherPriority(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{","session_id":"flat","thread_id":"t","turn_id":"u","request_kind":"turn"}}`)

@@ -18,6 +18,36 @@ func TestCodexProtocolRequest(t *testing.T) {
 	}
 }
 
+func TestCodexProtocolRequestMatchesNativeBodyLimit(t *testing.T) {
+	exact := codexProtocolRequestBodyAtSize(t, maxRequestBody)
+	got, err := ParseCodexProtocolRequest(exact, "", nil)
+	if err != nil {
+		t.Fatalf("exact native body limit rejected: %v", err)
+	}
+	if got.Model != "gpt-5" || !got.Metadata.Strong || got.Metadata.Metadata.TurnID != "u" {
+		t.Fatalf("request = %#v", got)
+	}
+
+	over := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	if _, err := ParseCodexProtocolRequest(over, "", nil); err == nil || err.Error() != "Codex protocol request exceeds limit" {
+		t.Fatalf("native body limit plus one byte error = %v", err)
+	}
+}
+
+func codexProtocolRequestBodyAtSize(t *testing.T, size int) []byte {
+	t.Helper()
+	prefix := []byte(`{"type":"response.create","model":"gpt-5","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"`)
+	suffix := []byte(`}}}`)
+	if size < len(prefix)+len(suffix) {
+		t.Fatalf("body size %d is below fixture minimum %d", size, len(prefix)+len(suffix))
+	}
+	body := make([]byte, 0, size)
+	body = append(body, prefix...)
+	body = append(body, bytes.Repeat([]byte{' '}, size-len(prefix)-len(suffix))...)
+	body = append(body, suffix...)
+	return body
+}
+
 func TestCodexProtocolWrappedErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
