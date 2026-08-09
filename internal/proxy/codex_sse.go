@@ -180,7 +180,9 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		}
 	case strings.HasSuffix(envelope.Type, ".delta"):
 		observation.Kind = CodexSSEDelta
-	case envelope.Type == "response.output_item.added" ||
+	case envelope.Type == "response.custom_tool_call_input.done" ||
+		envelope.Type == "response.function_call_arguments.done" ||
+		envelope.Type == "response.output_item.added" ||
 		envelope.Type == "response.output_item.done" ||
 		envelope.Type == "response.reasoning_summary_part.added" ||
 		envelope.Type == "response.reasoning_summary_text.done":

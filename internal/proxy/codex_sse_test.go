@@ -72,6 +72,8 @@ func TestCodexSSEMalformedUnknownErrorAndRateLimits(t *testing.T) {
 func TestCodexSSEClassifiesCurrentNonLifecycleEvents(t *testing.T) {
 	t.Parallel()
 	eventTypes := []string{
+		"response.custom_tool_call_input.done",
+		"response.function_call_arguments.done",
 		"response.output_item.added",
 		"response.output_item.done",
 		"response.reasoning_summary_part.added",
