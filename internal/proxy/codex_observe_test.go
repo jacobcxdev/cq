@@ -116,6 +116,26 @@ func TestCodexObserveIgnoresKnownTrafficAndEndsFailedAttempt(t *testing.T) {
 	}
 }
 
+func TestCodexObserveRecordsValidatedUnknownEventType(t *testing.T) {
+	t.Parallel()
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
+	ctx, diag := withRouteDiagnostics(context.Background())
+	handle := observer.BeginHTTP(ctx, body, "identity", "", false)
+	handle.ObserveBytes([]byte("data: {\"type\":\"response.output_text.done\"}\n\n"))
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diag)
+	if event.Reason != "response_event_response_output_text_done" {
+		t.Fatalf("reason = %q", event.Reason)
+	}
+
+	handle.ObserveBytes([]byte("data: {\"type\":\"secret@example.com\\nraw\"}\n\n"))
+	event.applyRouteDiagnostics(diag)
+	if event.Reason != "response_event_invalid" {
+		t.Fatalf("reason = %q", event.Reason)
+	}
+}
+
 func TestCodexObserveClassifiesRequestInputs(t *testing.T) {
 	t.Parallel()
 	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))

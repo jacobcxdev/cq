@@ -400,9 +400,25 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 		}
 	case CodexSSERateLimits:
 		handle.observer.quotaEvents.Add(1)
-	case CodexSSEUnknown, CodexSSEMalformed:
+	case CodexSSEUnknown:
 		handle.observer.unknown.Add(1)
+		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: safeCodexEventReason(observation.Type)})
+	case CodexSSEMalformed:
+		handle.observer.unknown.Add(1)
+		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "response_event_malformed"})
 	}
+}
+
+func safeCodexEventReason(eventType string) string {
+	if eventType == "" || len(eventType) > 128 {
+		return "response_event_invalid"
+	}
+	for _, char := range eventType {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '.' && char != '_' && char != '-' {
+			return "response_event_invalid"
+		}
+	}
+	return "response_event_" + strings.ReplaceAll(eventType, ".", "_")
 }
 
 func (handle *CodexTurnObservation) prewarmCorrelation() string {
