@@ -62,7 +62,11 @@ func (e *inventoryAttemptExecutor) Do(_ context.Context, choice RouteChoice, att
 }
 
 func TestCodexHTTPCallSitesUseExplicitAccountExecutor(t *testing.T) {
-	attempt := CandidateAttempt{AccountKey: "identity", Candidate: codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}, Ordinal: 1}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"},
+		Revision: "revision", Source: codex.SourceSystem,
+		Identity: codex.AccountIdentity{AccountID: "strong-account", UserID: "strong-user"}, Ordinal: 1,
+	}
 	scope := &queuedRequestScope{plans: []CodexRequestPlan{{
 		Choice:   RouteChoice{AccountKey: "identity", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
 		Attempts: []CandidateAttempt{attempt},

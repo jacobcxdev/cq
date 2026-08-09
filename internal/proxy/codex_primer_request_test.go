@@ -86,10 +86,10 @@ func (b *primerTrackingBody) Close() error {
 func primerTestRouter(executor ExplicitAccountExecutor) *CodexRequestRouter {
 	account := codex.AccountKey("account-1")
 	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{{
-		Key: account, Routable: true,
+		Key: account, Identity: codex.AccountIdentity{AccountID: "strong-account-1", UserID: "strong-user-1"}, Routable: true,
 		Candidates: []codex.CredentialCandidate{{
 			Ref:      codex.CandidateRef{AccountKey: account, CandidateID: "candidate-1"},
-			Revision: "revision-1", Source: codex.SourceExternal, AccessExpiresAt: time.Now().Add(time.Hour),
+			Revision: "revision-1", Source: codex.SourceExternal, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
 		}},
 	}}}
 	return &CodexRequestRouter{

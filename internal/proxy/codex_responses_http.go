@@ -46,6 +46,7 @@ func NewCodexHTTPEnforcerWithSharedLeases(router *CodexRequestRouter, modeEpoch 
 	if err != nil {
 		return nil, err
 	}
+	observer.BindCapacity(router.Capacity)
 	return &CodexHTTPEnforcer{
 		Router:                      router,
 		Leases:                      leases,
@@ -285,7 +286,7 @@ func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseK
 		admitted:        true,
 		parser:          NewCodexSSEParser(codexSSEDefaultMaxEventBytes),
 	}
-	handle.ResponseHeaders(response.StatusCode, response.Header)
+	handle.Response(response)
 	observeCodexResponseBody(response, handle)
 	return nil
 }

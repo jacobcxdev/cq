@@ -40,6 +40,17 @@ func (f codexWebSocketExecutorFunc) Dial(ctx context.Context, choice RouteChoice
 	return f(ctx, choice, attempt, upstreamURL, header)
 }
 
+type codexWebSocketDispatchExecutorFunc func(context.Context, RouteChoice, CandidateAttempt, string, http.Header, func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error)
+
+func (f codexWebSocketDispatchExecutorFunc) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+	conn, response, body, _, err := f(ctx, choice, attempt, upstreamURL, header, nil)
+	return conn, response, body, err
+}
+
+func (f codexWebSocketDispatchExecutorFunc) dialOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
+	return f(ctx, choice, attempt, upstreamURL, header, onDispatch)
+}
+
 func TestServer_HealthEndpoint(t *testing.T) {
 	srv := &Server{
 		Config: &Config{
@@ -2234,6 +2245,37 @@ func TestServerCodexWebSocketHard429FailoverAuthority(t *testing.T) {
 				t.Fatalf("choice=%q attempt=%q scope calls=%d attempts=%v", choice.AccountKey, attempt.Candidate.CandidateID, scope.calls, calls)
 			}
 		})
+	}
+}
+
+func TestServerCodexWebSocketReturnsActualRelistedRevision(t *testing.T) {
+	plan := requestPlan("one", "candidate")
+	actual := plan.Attempts[0]
+	actual.Revision = "revision-new"
+	executor := codexWebSocketDispatchExecutorFunc(func(_ context.Context, _ RouteChoice, _ CandidateAttempt, _ string, _ http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
+		if onDispatch != nil {
+			onDispatch(actual)
+		}
+		return new(websocket.Conn), nil, nil, actual, nil
+	})
+	observer := &CodexTurnObserver{}
+	server := &Server{
+		CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}},
+		CodexWebSocketExecutor: executor,
+	}
+
+	connection, choice, returned, err := server.dialCodexWebSocket(
+		withCodexObservation(context.Background(), observer),
+		"wss://upstream.test/responses", nil, "gpt-5.4",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection == nil || choice.AccountKey != plan.Choice.AccountKey || returned != actual {
+		t.Fatalf("connection = %p, choice = %+v, returned = %+v", connection, choice, returned)
+	}
+	if observer.attempts.Load() != 1 {
+		t.Fatalf("observed attempts = %d, want 1", observer.attempts.Load())
 	}
 }
 

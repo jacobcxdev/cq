@@ -61,11 +61,12 @@ func TestCodexInventorySelectorDoesNotReceiveCredentialMaterial(t *testing.T) {
 	accountKey := codex.AccountKey("logical-account")
 	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
 		Key:      accountKey,
-		Identity: codex.AccountIdentity{AccountID: "account", Email: "user@test.com", PlanType: "pro"},
+		Identity: codex.AccountIdentity{AccountID: "account", UserID: "user", Email: "user@test.com", PlanType: "pro"},
 		Routable: true,
 		Candidates: []codex.CredentialCandidate{{
 			Ref:        codex.CandidateRef{AccountKey: accountKey, CandidateID: "candidate"},
 			Credential: codex.CodexAccount{AccessToken: "must-not-cross-boundary"},
+			Routable:   true,
 		}},
 	}}}}
 	chooser := NewCodexInventorySelector(inventory, nil)
@@ -82,6 +83,52 @@ func TestCodexInventorySelectorDoesNotReceiveCredentialMaterial(t *testing.T) {
 	}
 	if len(routeAccounts) != 1 || routeAccounts[0].accountID != "account" {
 		t.Fatalf("route inventory received credential material: %+v", routeAccounts)
+	}
+}
+
+func TestCodexInventorySelectorSkipsIncompleteStrongIdentity(t *testing.T) {
+	weakKey := codex.AccountKey("weak-account")
+	strongKey := codex.AccountKey("strong-account")
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+		{
+			Key: weakKey, Identity: codex.AccountIdentity{AccountID: "weak"}, Routable: true,
+			Candidates: []codex.CredentialCandidate{{
+				Ref: codex.CandidateRef{AccountKey: weakKey, CandidateID: "weak-candidate"}, Routable: true,
+			}},
+		},
+		{
+			Key: strongKey, Identity: codex.AccountIdentity{AccountID: "strong", UserID: "user"}, Routable: true,
+			Candidates: []codex.CredentialCandidate{{
+				Ref: codex.CandidateRef{AccountKey: strongKey, CandidateID: "strong-candidate"}, Routable: true,
+			}},
+		},
+	}}}
+	chooser := NewCodexInventorySelector(inventory, nil)
+	choice, err := chooser.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != strongKey {
+		t.Fatalf("selected account = %q, want complete strong identity %q", choice.AccountKey, strongKey)
+	}
+}
+
+func TestCodexInventorySelectorSkipsUnroutableCandidate(t *testing.T) {
+	accountKey := codex.AccountKey("logical-account")
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key: accountKey, Identity: codex.AccountIdentity{AccountID: "account", UserID: "user"}, Routable: true,
+		Candidates: []codex.CredentialCandidate{
+			{Ref: codex.CandidateRef{AccountKey: accountKey, CandidateID: "unroutable"}},
+			{Ref: codex.CandidateRef{AccountKey: accountKey, CandidateID: "ready"}, Routable: true},
+		},
+	}}}}
+	chooser := NewCodexInventorySelector(inventory, nil)
+	accounts, err := chooser.(*codexSelector).routeAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].candidateID != "ready" {
+		t.Fatalf("route accounts = %+v", accounts)
 	}
 }
 

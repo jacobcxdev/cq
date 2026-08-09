@@ -14,6 +14,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -70,6 +71,8 @@ func runProxy(args []string) error {
 		return runProxyPin(args[1:])
 	case "prime":
 		return runProxyPrime(args[1:])
+	case "endpoint":
+		return runProxyEndpoint(args[1:])
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
@@ -181,6 +184,34 @@ type proxyCommandOptions struct {
 	Port int
 }
 
+type proxyRegistryDependencies struct {
+	FS                  fsutil.FileSystem
+	HomeDir             string
+	HTTPClient          httputil.Doer
+	CodexClientVersion  string
+	ClaudeToken         func() (string, error)
+	CredentialAuthority codexRegistryCredentialAuthority
+	Env                 func(string) string
+	Stderr              io.Writer
+}
+
+func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies) (*registryPipeline, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("registry pipeline: missing proxy config")
+	}
+	return newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
+		FS:                 deps.FS,
+		HomeDir:            deps.HomeDir,
+		ClaudeUpstream:     cfg.ClaudeUpstream,
+		CodexUpstream:      cfg.CodexUpstream,
+		HTTPClient:         deps.HTTPClient,
+		CodexClientVersion: deps.CodexClientVersion,
+		ClaudeToken:        deps.ClaudeToken,
+		Env:                deps.Env,
+		Stderr:             deps.Stderr,
+	}, deps.CredentialAuthority)
+}
+
 func codexHealthFromInventory(inventory codexprov.Inventory) proxy.CodexHealth {
 	health := proxy.CodexHealth{
 		AccountCount:      len(inventory.Accounts),
@@ -254,7 +285,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
-	credentialControl, err := codexprov.OpenDefaultCredentialRefreshControl(context.Background(), fsys, refreshClient)
+	credentialControl, err := codexprov.OpenDefaultRecoveringCredentialRefreshControl(context.Background(), fsys, refreshClient)
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
@@ -339,6 +370,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 		break
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
+	codexCapacity := codexQuotaCache.CodexCapacityLedger()
+	codexObserver.BindCapacity(codexCapacity)
 	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
@@ -351,15 +384,16 @@ func runProxyStart(opts proxyCommandOptions) error {
 	codexRequestRouter := &proxy.CodexRequestRouter{
 		Scope: codexRequestScope,
 		Executor: &proxy.CodexAttemptExecutor{
-			Secrets: credentialControl,
+			Inventory: credentialControl,
+			Secrets:   credentialControl,
 			Transport: &proxy.CodexTokenTransport{
 				Inner: http.DefaultTransport,
 			},
 		},
 		Refresher: credentialControl,
-		Capacity:  codexQuotaCache.CodexCapacityLedger(),
+		Capacity:  codexCapacity,
 	}
-	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl)
+	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
 	var codexHTTPEnforcer *proxy.CodexHTTPEnforcer
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce || len(codexRouting.HTTP.RetainedAuthoritativeEpochs) != 0 {
 		if codexObserver == nil || codexObserver.Store == nil {
@@ -404,19 +438,15 @@ func runProxyStart(opts proxyCommandOptions) error {
 
 	var pipeline *registryPipeline
 	if homeErr == nil {
-		pipeline, err = newRegistryPipeline(registryPipelineOptions{
-			FS:                 fsys,
-			HomeDir:            homeDir,
-			ClaudeUpstream:     cfg.ClaudeUpstream,
-			CodexUpstream:      cfg.CodexUpstream,
-			HTTPClient:         refreshClient,
-			CodexClientVersion: codexClientBuild,
-			ClaudeToken:        firstClaudeAccessToken,
-			CodexTokenContext: func(ctx context.Context) (string, error) {
-				return firstCodexAccessTokenFromInventory(ctx, codexprov.DiscoverInventory(fsys), credentialControl)
-			},
-			Env:    os.Getenv,
-			Stderr: os.Stderr,
+		pipeline, err = newProxyRegistryPipeline(cfg, proxyRegistryDependencies{
+			FS:                  fsys,
+			HomeDir:             homeDir,
+			HTTPClient:          refreshClient,
+			CodexClientVersion:  codexClientBuild,
+			ClaudeToken:         firstClaudeAccessToken,
+			CredentialAuthority: newCodexRegistryControlAdapter(credentialControl),
+			Env:                 os.Getenv,
+			Stderr:              os.Stderr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: registry: configure: %v (registry disabled)\n", err)

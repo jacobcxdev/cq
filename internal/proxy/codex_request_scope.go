@@ -13,7 +13,27 @@ type CandidateAttempt struct {
 	AccountKey codex.AccountKey
 	Candidate  codex.CandidateRef
 	Revision   codex.Revision
+	Source     codex.CredentialSource
+	Identity   codex.AccountIdentity
 	Ordinal    int
+}
+
+func candidateAttemptFromPlan(planned codex.PlannedCandidate, ordinal int) CandidateAttempt {
+	return CandidateAttempt{
+		AccountKey: planned.Ref.AccountKey,
+		Candidate:  planned.Ref,
+		Revision:   planned.Revision,
+		Source:     planned.Source,
+		Identity:   planned.Identity,
+		Ordinal:    ordinal,
+	}
+}
+
+func (attempt CandidateAttempt) plannedCandidate() codex.PlannedCandidate {
+	return codex.PlannedCandidate{
+		Ref: attempt.Candidate, Revision: attempt.Revision,
+		Source: attempt.Source, Identity: attempt.Identity,
+	}
 }
 
 // CodexRequestPlan binds one route choice to bounded same-identity candidates.
@@ -83,15 +103,16 @@ func (s *CodexRequestScope) PlanChoice(ctx context.Context, choice RouteChoice, 
 		if logical.Key != choice.AccountKey {
 			continue
 		}
+		if !logical.Routable || logical.Identity.AccountID == "" || logical.Identity.UserID == "" {
+			return CodexRequestPlan{}, fmt.Errorf("selected Codex account is unavailable for dispatch")
+		}
 		candidates := codex.ResolveCandidate(logical, accepted, now)
 		plan := CodexRequestPlan{Choice: choice, Attempts: make([]CandidateAttempt, 0, len(candidates))}
 		for _, candidate := range candidates {
-			attempt := CandidateAttempt{
-				AccountKey: logical.Key,
-				Candidate:  candidate.Ref,
-				Revision:   candidate.Revision,
-				Ordinal:    len(plan.Attempts) + 1,
+			if !candidate.Routable {
+				continue
 			}
+			attempt := candidateAttemptFromPlan(codex.PlanCandidate(logical, candidate), len(plan.Attempts)+1)
 			plan.Attempts = append(plan.Attempts, attempt)
 			if plan.refreshAttempt == nil && candidate.Source == codex.SourceManaged && candidate.CQAuthored {
 				copy := attempt

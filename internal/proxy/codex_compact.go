@@ -173,7 +173,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	if observation != nil {
 		_, failover := routeDiag.fields()
 		observation.Selected(choice, failover)
-		observation.ResponseHeaders(resp.StatusCode, resp.Header)
+		observation.Response(resp)
 		observeCodexResponseBody(resp, observation)
 	}
 	defer resp.Body.Close()

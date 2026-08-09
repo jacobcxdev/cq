@@ -18,15 +18,21 @@ type ExplicitWebSocketExecutor interface {
 	Dial(context.Context, RouteChoice, CandidateAttempt, string, http.Header) (*websocket.Conn, *http.Response, []byte, error)
 }
 
-// CodexWebSocketAttemptExecutor resolves secrets only for one upstream dial.
-type CodexWebSocketAttemptExecutor struct {
-	Secrets codex.SecretResolver
-	Dialer  websocket.Dialer
+type explicitWebSocketDispatchExecutor interface {
+	dialOnDispatch(context.Context, RouteChoice, CandidateAttempt, string, http.Header, func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error)
 }
 
-func NewCodexWebSocketAttemptExecutor(secrets codex.SecretResolver) *CodexWebSocketAttemptExecutor {
+// CodexWebSocketAttemptExecutor resolves secrets only for one upstream dial.
+type CodexWebSocketAttemptExecutor struct {
+	Inventory codex.CredentialInventory
+	Secrets   codex.ExactSecretResolver
+	Dialer    websocket.Dialer
+}
+
+func NewCodexWebSocketAttemptExecutor(inventory codex.CredentialInventory, secrets codex.ExactSecretResolver) *CodexWebSocketAttemptExecutor {
 	return &CodexWebSocketAttemptExecutor{
-		Secrets: secrets,
+		Inventory: inventory,
+		Secrets:   secrets,
 		Dialer: websocket.Dialer{
 			Proxy:             http.ProxyFromEnvironment,
 			HandshakeTimeout:  30 * time.Second,
@@ -37,18 +43,24 @@ func NewCodexWebSocketAttemptExecutor(secrets codex.SecretResolver) *CodexWebSoc
 
 // Dial performs one explicit upstream handshake without selection or retry.
 func (e *CodexWebSocketAttemptExecutor) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, incoming http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+	conn, response, body, _, err := e.dialOnDispatch(ctx, choice, attempt, upstreamURL, incoming, nil)
+	return conn, response, body, err
+}
+
+func (e *CodexWebSocketAttemptExecutor) dialOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, incoming http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
 	if e == nil || e.Secrets == nil {
-		return nil, nil, nil, fmt.Errorf("Codex WebSocket executor unavailable")
+		return nil, nil, nil, attempt, fmt.Errorf("Codex WebSocket executor unavailable")
 	}
 	if attempt.AccountKey == "" || attempt.Candidate.AccountKey != attempt.AccountKey || choice.AccountKey != attempt.AccountKey {
-		return nil, nil, nil, fmt.Errorf("Codex WebSocket attempt identity mismatch")
+		return nil, nil, nil, attempt, fmt.Errorf("Codex WebSocket attempt identity mismatch")
 	}
-	material, err := e.Secrets.Resolve(ctx, attempt.Candidate)
+	material, resolved, err := codex.ResolvePlannedCandidate(ctx, e.Inventory, e.Secrets, attempt.plannedCandidate())
+	actual := candidateAttemptFromPlan(resolved, attempt.Ordinal)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("resolve Codex WebSocket credential candidate: %w", err)
+		return nil, nil, nil, actual, fmt.Errorf("resolve Codex WebSocket credential candidate: %w", err)
 	}
 	if material.AccessToken == "" {
-		return nil, nil, nil, fmt.Errorf("resolved Codex WebSocket credential has no access token")
+		return nil, nil, nil, actual, fmt.Errorf("resolved Codex WebSocket credential has no access token")
 	}
 	headers := cloneCodexAppServerHeaders(incoming)
 	headers.Set("Authorization", "Bearer "+material.AccessToken)
@@ -59,16 +71,30 @@ func (e *CodexWebSocketAttemptExecutor) Dial(ctx context.Context, choice RouteCh
 		headers.Del("ChatGPT-Account-ID")
 	}
 	dialer := e.Dialer
+	if onDispatch != nil {
+		onDispatch(actual)
+	}
 	conn, response, err := dialer.DialContext(ctx, upstreamURL, headers)
 	if err == nil {
-		return conn, response, nil, nil
+		return conn, response, nil, actual, nil
 	}
 	var body []byte
 	if response != nil && response.Body != nil {
 		body, _ = ioReadBounded(response.Body, codexAttemptResponseLimit)
 		response.Body.Close()
 	}
-	return nil, response, body, err
+	return nil, response, body, actual, err
+}
+
+func executeCodexWebSocketAttempt(executor ExplicitWebSocketExecutor, ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, incoming http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
+	if aware, ok := executor.(explicitWebSocketDispatchExecutor); ok {
+		return aware.dialOnDispatch(ctx, choice, attempt, upstreamURL, incoming, onDispatch)
+	}
+	if onDispatch != nil {
+		onDispatch(attempt)
+	}
+	conn, response, body, err := executor.Dial(ctx, choice, attempt, upstreamURL, incoming)
+	return conn, response, body, attempt, err
 }
 
 type websocketRelayConn interface {

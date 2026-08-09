@@ -68,6 +68,7 @@ type CodexTurnObserver struct {
 	canaryErrors     atomic.Uint64
 	socketGeneration atomic.Uint64
 	canary           atomic.Pointer[CodexCanaryRecorder]
+	capacity         atomic.Pointer[CodexCapacityLedger]
 }
 
 func NewCodexTurnObserver(leases *CodexTurnLeaseManager, store *CodexLeaseStore) (*CodexTurnObserver, error) {
@@ -88,6 +89,14 @@ func newCodexTurnObserverWithKey(leases *CodexTurnLeaseManager, store *CodexLeas
 func (observer *CodexTurnObserver) SetCanary(canary *CodexCanaryRecorder) {
 	if observer != nil {
 		observer.canary.Store(canary)
+	}
+}
+
+// BindCapacity connects response observation to the same capacity ledger used
+// by selection. Passing nil disables capacity fact production.
+func (observer *CodexTurnObserver) BindCapacity(capacity *CodexCapacityLedger) {
+	if observer != nil {
+		observer.capacity.Store(capacity)
 	}
 }
 
@@ -148,6 +157,7 @@ type CodexTurnObservation struct {
 	parserFailed    bool
 	body            []byte
 	bodyOverflow    bool
+	capacity        *codexRateLimitProducer
 	finishOnce      sync.Once
 }
 
@@ -339,15 +349,26 @@ func (observer *CodexTurnObserver) restoreJournalLease(key LeaseKey, selected co
 	observer.Leases.Restore([]CodexTurnLease{lease})
 }
 
+// Response observes an upstream response with transport decoding provenance.
+func (handle *CodexTurnObservation) Response(response *http.Response) {
+	if response == nil {
+		return
+	}
+	handle.responseHeaders(response.StatusCode, response.Header, !response.Uncompressed && codexAttemptResponseHasIdentityEncoding(response.Header))
+}
+
 func (handle *CodexTurnObservation) ResponseHeaders(status int, header http.Header) {
+	handle.responseHeaders(status, header, codexAttemptResponseHasIdentityEncoding(header))
+}
+
+func (handle *CodexTurnObservation) responseHeaders(status int, header http.Header, liveEventsAuthoritative bool) {
 	if handle == nil || handle.observer == nil {
 		return
 	}
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
 	for name := range header {
-		canonical := http.CanonicalHeaderKey(name)
-		if strings.HasPrefix(canonical, "X-Ratelimit-") || strings.HasPrefix(canonical, "X-Codex-Rate-Limit-") {
+		if _, relevant := codexRateLimitHeaderFamily(strings.ToLower(name)); relevant {
 			handle.observer.quotaEvents.Add(1)
 			break
 		}
@@ -356,6 +377,20 @@ func (handle *CodexTurnObservation) ResponseHeaders(status int, header http.Head
 	if !accepted {
 		handle.failUnadmittedLocked("upstream_rejected")
 		return
+	}
+	if capacity := handle.observer.capacity.Load(); capacity != nil {
+		handle.capacity = newCodexRateLimitProducer(
+			capacity,
+			capacity.NewObservationStream(),
+			handle.choice.AccountKey,
+			capacity.now,
+			liveEventsAuthoritative,
+		)
+		if handle.capacity != nil {
+			if err := handle.capacity.ObserveHeaders(header); err != nil {
+				handle.observer.unknown.Add(1)
+			}
+		}
 	}
 	contentType := header.Get("Content-Type")
 	if separator := strings.IndexByte(contentType, ';'); separator >= 0 {
@@ -566,6 +601,11 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 		}
 	case CodexSSERateLimits:
 		handle.observer.quotaEvents.Add(1)
+		if handle.capacity != nil {
+			if err := handle.capacity.ObserveEvent(observation.Data); err != nil {
+				handle.observer.unknown.Add(1)
+			}
+		}
 	case CodexSSEUnknown:
 		handle.observer.unknown.Add(1)
 		handle.observer.recordCanaryUnexplained()
@@ -780,20 +820,25 @@ type codexWSObservationSession struct {
 	ctx      context.Context
 	choice   RouteChoice
 	socket   uint64
+	capacity *codexRateLimitProducer
 
 	mu      sync.Mutex
 	current *CodexTurnObservation
 }
 
-func newCodexWSObservationSession(observer *CodexTurnObserver, ctx context.Context, choice RouteChoice) *codexWSObservationSession {
-	if observer == nil {
+func newCodexWSObservationSession(observer *CodexTurnObserver, ctx context.Context, choice RouteChoice, capacity *codexRateLimitProducer) *codexWSObservationSession {
+	if observer == nil && capacity == nil {
 		return nil
 	}
-	return &codexWSObservationSession{observer: observer, ctx: ctx, choice: choice, socket: observer.NextSocketGeneration()}
+	var socket uint64
+	if observer != nil {
+		socket = observer.NextSocketGeneration()
+	}
+	return &codexWSObservationSession{observer: observer, ctx: ctx, choice: choice, socket: socket, capacity: capacity}
 }
 
 func (session *codexWSObservationSession) ObserveClient(frame []byte) {
-	if session == nil {
+	if session == nil || session.observer == nil {
 		return
 	}
 	handle := session.observer.BeginWebSocket(session.ctx, frame, nil, session.socket)
@@ -809,6 +854,16 @@ func (session *codexWSObservationSession) ObserveClient(frame []byte) {
 
 func (session *codexWSObservationSession) ObserveUpstream(frame []byte) {
 	if session == nil {
+		return
+	}
+	if session.capacity != nil {
+		if err := session.capacity.ObserveEvent(frame); err != nil {
+			if session.observer != nil {
+				session.observer.unknown.Add(1)
+			}
+		}
+	}
+	if session.observer == nil {
 		return
 	}
 	session.mu.Lock()

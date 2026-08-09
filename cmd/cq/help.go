@@ -45,6 +45,7 @@ Commands:
   proxy restart       Restart proxy launch agent
   proxy pin           Pin Claude proxy routing
   proxy prime         Manage Codex quota-window priming
+  proxy endpoint      Explicitly inspect or transition the credential endpoint
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT]
 
@@ -102,6 +103,31 @@ Enable automatic Codex window priming. Restart proxy to apply.
 	"proxy prime disable": `Usage: cq proxy prime disable
 
 Disable automatic Codex window priming. Restart proxy to apply.
+`,
+	"proxy endpoint": `Usage: cq proxy endpoint <command>
+
+Explicitly inspect or transition the fixed default Codex credential endpoint.
+Ordinary cq and proxy startup never invoke legacy endpoint maintenance.
+
+Commands:
+  endpoint inspect-legacy      Read a refused legacy socket or pending transition
+  endpoint transition-legacy   Run an explicit stopped-and-drained transition
+`,
+	"proxy endpoint inspect-legacy": `Usage: cq proxy endpoint inspect-legacy
+
+Read the fixed default Codex credential endpoint without creating or changing
+any endpoint, compatibility, authentication, or account state. Output is JSON.
+`,
+	"proxy endpoint transition-legacy": `Usage: cq proxy endpoint transition-legacy <prepare|resume|commit|rollback> [options]
+
+Explicitly transition the fixed default legacy credential endpoint. The proxy
+must remain stopped and all clients drained for the complete command.
+
+Options:
+  --snapshot-file FILE              Strict 0600 snapshot input for prepare
+  --ticket-file FILE                Strict 0600 ticket input for other actions
+  --confirm-stopped-and-drained      Required operator authority
+  --non-interactive                  Skip the TTY phrase prompt
 `,
 	"models": `Usage: cq models <command>
 

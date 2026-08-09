@@ -85,6 +85,7 @@ type ProxyCmd struct {
 	Status    ProxyStatusCmd    `cmd:"" help:"Show proxy health"`
 	Pin       ProxyPinCmd       `cmd:"" help:"Pin Claude proxy routing"`
 	Prime     ProxyPrimeCmd     `cmd:"" help:"Manage Codex quota-window priming"`
+	Endpoint  ProxyEndpointCmd  `cmd:"" help:"Inspect or transition the credential endpoint"`
 }
 
 type ProxyStartCmd struct {
@@ -113,6 +114,8 @@ type ProxyPrimeCmd struct {
 type ProxyPrimeStatusCmd struct{}
 type ProxyPrimeEnableCmd struct{}
 type ProxyPrimeDisableCmd struct{}
+
+type ProxyEndpointCmd struct{}
 
 // ModelsCmd groups local model registry commands.
 type ModelsCmd struct {
@@ -177,6 +180,15 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	// Legacy endpoint inspection is deliberately read-only. It must bypass
+	// compatibility initialisation because that path may create or update files.
+	if isReadOnlyLegacyEndpointInspectCommand(os.Args[1:]) {
+		if err := runProxy(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := ensureCompatibilityEpoch(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: compatibility: %v\n", err)
 		os.Exit(1)

@@ -106,18 +106,51 @@ func (r *failingReadCloser) Close() error {
 }
 
 type fakeReferenceRefresher struct {
-	ref      codex.CandidateRef
-	revision codex.Revision
-	err      error
-	calls    int
+	ref              codex.CandidateRef
+	revision         codex.Revision
+	err              error
+	calls            int
+	acceptedRef      codex.CandidateRef
+	acceptedRevision codex.Revision
 }
 
-func (r *fakeReferenceRefresher) RefreshReference(context.Context, codex.CandidateRef, codex.Revision) (codex.CandidateRef, codex.Revision, error) {
+func (r *fakeReferenceRefresher) RefreshReference(_ context.Context, acceptedRef codex.CandidateRef, acceptedRevision codex.Revision) (codex.CandidateRef, codex.Revision, error) {
 	r.calls++
+	r.acceptedRef = acceptedRef
+	r.acceptedRevision = acceptedRevision
 	return r.ref, r.revision, r.err
 }
 
+type resolvedAttemptExecutor struct {
+	actual CandidateAttempt
+	result attemptResult
+}
+
+func (e *resolvedAttemptExecutor) Do(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request) (*http.Response, error) {
+	response, _, err := e.doOnDispatch(ctx, choice, attempt, req, nil)
+	return response, err
+}
+
+func (e *resolvedAttemptExecutor) doOnDispatch(_ context.Context, _ RouteChoice, _ CandidateAttempt, _ *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+	if e.result.err != nil {
+		return nil, e.actual, e.result.err
+	}
+	if onDispatch != nil {
+		onDispatch(e.actual)
+	}
+	header := e.result.header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{
+		StatusCode: e.result.status,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(e.result.body)),
+	}, e.actual, nil
+}
+
 func requestPlan(account codex.AccountKey, ids ...codex.CandidateID) CodexRequestPlan {
+	identity := codex.AccountIdentity{AccountID: "test-account:" + string(account), UserID: "test-user:" + string(account)}
 	plan := CodexRequestPlan{Choice: RouteChoice{
 		AccountKey: account, RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4",
 		RequiredBuckets: []CapacityBucket{CapacityBucketForModel("gpt-5.4")},
@@ -127,6 +160,8 @@ func requestPlan(account codex.AccountKey, ids ...codex.CandidateID) CodexReques
 			AccountKey: account,
 			Candidate:  codex.CandidateRef{AccountKey: account, CandidateID: id},
 			Revision:   codex.Revision("revision-" + id),
+			Source:     codex.SourceSystem,
+			Identity:   identity,
 			Ordinal:    index + 1,
 		})
 	}
@@ -157,10 +192,9 @@ func TestCodexRequestRouterRefreshesOnceAfterCandidate401s(t *testing.T) {
 	refreshAttempt := plan.Attempts[0]
 	plan.refreshAttempt = &refreshAttempt
 	scope := &queuedRequestScope{plans: []CodexRequestPlan{plan}}
-	refresher := &fakeReferenceRefresher{ref: codex.CandidateRef{AccountKey: "one", CandidateID: "refreshed"}, revision: "new"}
+	refresher := &fakeReferenceRefresher{ref: refreshAttempt.Candidate, revision: "new"}
 	executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
-		"managed":   {{status: http.StatusUnauthorized}},
-		"refreshed": {{status: http.StatusOK}},
+		"managed": {{status: http.StatusUnauthorized}, {status: http.StatusOK}},
 	}}
 	router := &CodexRequestRouter{Scope: scope, Executor: executor, Refresher: refresher}
 	response, _, attempt, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
@@ -168,8 +202,148 @@ func TestCodexRequestRouterRefreshesOnceAfterCandidate401s(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if refresher.calls != 1 || attempt.Candidate.CandidateID != "refreshed" {
+	if refresher.calls != 1 || attempt.Candidate != refreshAttempt.Candidate || attempt.Revision != "new" {
 		t.Fatalf("refresh calls=%d attempt=%+v", refresher.calls, attempt)
+	}
+}
+
+func TestCodexRequestRouterRejectsInvalidRefreshReferenceBeforeDispatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		ref      codex.CandidateRef
+		revision codex.Revision
+	}{
+		{name: "different candidate", ref: codex.CandidateRef{AccountKey: "one", CandidateID: "replacement"}, revision: "revision-new"},
+		{name: "empty revision", ref: codex.CandidateRef{AccountKey: "one", CandidateID: "managed"}},
+		{name: "unchanged revision", ref: codex.CandidateRef{AccountKey: "one", CandidateID: "managed"}, revision: "revision-managed"},
+	}
+	for _, test := range tests {
+		for _, pinned := range []bool{false, true} {
+			name := test.name + "/routed"
+			if pinned {
+				name = test.name + "/pinned"
+			}
+			t.Run(name, func(t *testing.T) {
+				plan := requestPlan("one", "managed")
+				refreshAttempt := plan.Attempts[0]
+				plan.refreshAttempt = &refreshAttempt
+				executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+					"managed": {{status: http.StatusUnauthorized}},
+				}}
+				router := &CodexRequestRouter{
+					Scope:     &queuedRequestScope{plans: []CodexRequestPlan{plan}},
+					Executor:  executor,
+					Refresher: &fakeReferenceRefresher{ref: test.ref, revision: test.revision},
+				}
+
+				var response *http.Response
+				var err error
+				if pinned {
+					response, _, _, err = router.DoPinned(context.Background(), plan.Choice, makeCodexRequest(`{"model":"gpt-5.4"}`))
+				} else {
+					response, _, _, err = router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				if response.StatusCode != http.StatusUnauthorized || !slices.Equal(executor.calls, []codex.CandidateID{"managed"}) {
+					t.Fatalf("status = %d, calls = %v", response.StatusCode, executor.calls)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexRequestRouterReturnsActualRelistedRevision(t *testing.T) {
+	plan := requestPlan("one", "candidate")
+	actual := plan.Attempts[0]
+	actual.Revision = "revision-new"
+	executor := &resolvedAttemptExecutor{actual: actual, result: attemptResult{status: http.StatusOK}}
+	router := &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}, Executor: executor}
+
+	response, choice, returned, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if choice.AccountKey != plan.Choice.AccountKey || choice.RequestedModel != plan.Choice.RequestedModel ||
+		choice.EffectiveModel != plan.Choice.EffectiveModel || returned != actual {
+		t.Fatalf("choice = %+v, returned = %+v, want %+v / %+v", choice, returned, plan.Choice, actual)
+	}
+}
+
+func TestCodexRequestRouterDoPinnedReturnsActualRelistedRevision(t *testing.T) {
+	plan := requestPlan("one", "candidate")
+	actual := plan.Attempts[0]
+	actual.Revision = "revision-new"
+	router := &CodexRequestRouter{
+		Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}},
+		Executor: &resolvedAttemptExecutor{
+			actual: actual, result: attemptResult{status: http.StatusOK},
+		},
+	}
+
+	response, returned, failure, err := router.DoPinned(context.Background(), plan.Choice, makeCodexRequest(`{"model":"gpt-5.4"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if returned != actual || failure != CodexPinnedAccepted {
+		t.Fatalf("returned = %+v, failure = %v", returned, failure)
+	}
+}
+
+func TestCodexRequestRouterRefreshesActualRelistedRevision(t *testing.T) {
+	plan := requestPlan("one", "managed")
+	refreshAttempt := plan.Attempts[0]
+	refreshAttempt.Source = codex.SourceManaged
+	plan.Attempts[0] = refreshAttempt
+	plan.refreshAttempt = &refreshAttempt
+	actual := refreshAttempt
+	actual.Revision = "revision-new"
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key: actual.AccountKey, Identity: actual.Identity, Routable: true,
+		Candidates: []codex.CredentialCandidate{{
+			Ref: actual.Candidate, Revision: actual.Revision, Source: actual.Source, Routable: true,
+		}},
+	}}}}
+	resolver := &testExactSecretResolver{
+		errors: map[codex.Revision]error{refreshAttempt.Revision: codex.ErrStaleRevision},
+		materials: map[codex.Revision]codex.CredentialMaterial{
+			actual.Revision: testExactCredentialMaterial(actual.Identity, "rotated-secret"),
+		},
+	}
+	refresher := &fakeReferenceRefresher{err: codex.ErrRefreshUnavailable}
+	executor := &CodexAttemptExecutor{
+		Inventory: inventory,
+		Secrets:   resolver,
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if got := request.Header.Get("Authorization"); got != "Bearer rotated-secret" {
+				t.Fatalf("authorization = %q", got)
+			}
+			return &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: http.NoBody}, nil
+		})},
+	}
+	router := &CodexRequestRouter{
+		Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}, Executor: executor, Refresher: refresher,
+	}
+
+	response, _, returned, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized || returned != actual {
+		t.Fatalf("status = %d, returned = %+v, want %+v", response.StatusCode, returned, actual)
+	}
+	if refresher.calls != 1 || refresher.acceptedRef != actual.Candidate || refresher.acceptedRevision != actual.Revision {
+		t.Fatalf("refresh calls = %d, accepted ref = %+v, accepted revision = %q", refresher.calls, refresher.acceptedRef, refresher.acceptedRevision)
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	if len(resolver.plans) != 2 || resolver.plans[0].Revision != refreshAttempt.Revision || resolver.plans[1].Revision != actual.Revision {
+		t.Fatalf("resolved plans = %+v", resolver.plans)
 	}
 }
 

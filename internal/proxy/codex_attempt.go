@@ -71,16 +71,21 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 		return nil, CandidateAttempt{}, CodexPinnedAccepted, false, err
 	}
 	var last CandidateAttempt
+	refreshAttempt := cloneCandidateAttempt(plan.refreshAttempt)
 	try := func(attempt CandidateAttempt) (*http.Response, CodexPinnedFailure, bool, error) {
-		response, dispatched, err := executeCodexAttempt(r.Executor, ctx, choice, attempt, req, func() {
+		response, actual, dispatched, err := executeCodexAttempt(r.Executor, ctx, choice, attempt, req, func(actual CandidateAttempt) {
 			closeResponse(rejected)
 			rejected = nil
-			last = attempt
-			observeCodexAttempt(ctx, choice, attempt)
+			last = actual
+			updateCandidateAttempt(refreshAttempt, actual)
+			observeCodexAttempt(ctx, choice, actual)
 		})
 		if err != nil {
 			if !dispatched && rejected != nil {
 				return rejected, CodexPinnedAuthFailure, true, nil
+			}
+			if !dispatched {
+				last = actual
 			}
 			return nil, CodexPinnedAccepted, false, err
 		}
@@ -107,12 +112,13 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 		closeResponse(rejected)
 		rejected = response
 	}
-	if plan.refreshAttempt != nil && r.Refresher != nil {
-		ref, revision, refreshErr := r.Refresher.RefreshReference(ctx, plan.refreshAttempt.Candidate, plan.refreshAttempt.Revision)
+	if refreshAttempt != nil && r.Refresher != nil {
+		ref, revision, refreshErr := r.Refresher.RefreshReference(ctx, refreshAttempt.Candidate, refreshAttempt.Revision)
+		var attempt CandidateAttempt
 		if refreshErr == nil {
-			attempt := *plan.refreshAttempt
-			attempt.Candidate = ref
-			attempt.Revision = revision
+			attempt, refreshErr = candidateAttemptWithRefreshedRevision(*refreshAttempt, ref, revision)
+		}
+		if refreshErr == nil {
 			attempt.Ordinal = len(plan.Attempts) + 1
 			response, failure, terminal, err := try(attempt)
 			if err != nil {
@@ -125,7 +131,7 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 			if rejected != nil {
 				return rejected, last, CodexPinnedAuthFailure, true, nil
 			}
-			return nil, *plan.refreshAttempt, CodexPinnedAccepted, false, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
+			return nil, *refreshAttempt, CodexPinnedAccepted, false, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
 		}
 	}
 	return rejected, last, CodexPinnedAuthFailure, false, nil
@@ -159,76 +165,79 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > 0)
 
 		accountHardLimited := false
+		refreshAttempt := cloneCandidateAttempt(plan.refreshAttempt)
 		for _, attempt := range plan.Attempts {
-			resp, dispatched, err := executeCodexAttempt(r.Executor, ctx, plan.Choice, attempt, req, func() {
+			resp, actual, dispatched, err := executeCodexAttempt(r.Executor, ctx, plan.Choice, attempt, req, func(actual CandidateAttempt) {
 				closeResponse(rejected)
 				rejected = nil
-				observeCodexAttempt(ctx, plan.Choice, attempt)
+				updateCandidateAttempt(refreshAttempt, actual)
+				observeCodexAttempt(ctx, plan.Choice, actual)
 			})
 			if err != nil {
 				if !dispatched && rejected != nil {
 					return rejected, rejectedChoice, rejectedAttempt, nil
 				}
 				closeResponse(rejected)
-				return nil, plan.Choice, attempt, err
+				return nil, plan.Choice, actual, err
 			}
 			failure, err := r.classifyAttemptResponse(plan.Choice, resp)
 			if err != nil {
 				closeResponse(resp)
 				closeResponse(rejected)
-				return nil, plan.Choice, attempt, err
+				return nil, plan.Choice, actual, err
 			}
 			switch failure {
 			case CodexPinnedAuthFailure:
-				replaceRejected(resp, plan.Choice, attempt)
+				replaceRejected(resp, plan.Choice, actual)
 				continue
 			case CodexPinnedHardLimit:
-				replaceRejected(resp, plan.Choice, attempt)
+				replaceRejected(resp, plan.Choice, actual)
 				accountHardLimited = true
 			case CodexPinnedAccepted:
 				closeResponse(rejected)
-				return resp, plan.Choice, attempt, nil
+				return resp, plan.Choice, actual, nil
 			}
 			if accountHardLimited {
 				break
 			}
 		}
 
-		if !accountHardLimited && plan.refreshAttempt != nil && r.Refresher != nil {
-			refreshedRef, refreshedRevision, refreshErr := r.Refresher.RefreshReference(ctx, plan.refreshAttempt.Candidate, plan.refreshAttempt.Revision)
+		if !accountHardLimited && refreshAttempt != nil && r.Refresher != nil {
+			refreshedRef, refreshedRevision, refreshErr := r.Refresher.RefreshReference(ctx, refreshAttempt.Candidate, refreshAttempt.Revision)
+			var refreshed CandidateAttempt
+			if refreshErr == nil {
+				refreshed, refreshErr = candidateAttemptWithRefreshedRevision(*refreshAttempt, refreshedRef, refreshedRevision)
+			}
 			switch {
 			case refreshErr == nil:
-				refreshed := *plan.refreshAttempt
-				refreshed.Candidate = refreshedRef
-				refreshed.Revision = refreshedRevision
 				refreshed.Ordinal = len(plan.Attempts) + 1
-				resp, dispatched, err := executeCodexAttempt(r.Executor, ctx, plan.Choice, refreshed, req, func() {
+				resp, actual, dispatched, err := executeCodexAttempt(r.Executor, ctx, plan.Choice, refreshed, req, func(actual CandidateAttempt) {
 					closeResponse(rejected)
 					rejected = nil
-					observeCodexAttempt(ctx, plan.Choice, refreshed)
+					observeCodexAttempt(ctx, plan.Choice, actual)
 				})
 				if err != nil {
 					if !dispatched && rejected != nil {
 						return rejected, rejectedChoice, rejectedAttempt, nil
 					}
 					closeResponse(rejected)
-					return nil, plan.Choice, refreshed, err
+					return nil, plan.Choice, actual, err
 				}
 				failure, err := r.classifyAttemptResponse(plan.Choice, resp)
 				if err != nil {
 					closeResponse(resp)
 					closeResponse(rejected)
-					return nil, plan.Choice, refreshed, err
+					return nil, plan.Choice, actual, err
 				}
 				switch failure {
 				case CodexPinnedAuthFailure:
-					replaceRejected(resp, plan.Choice, refreshed)
+					replaceRejected(resp, plan.Choice, actual)
 				case CodexPinnedHardLimit:
-					replaceRejected(resp, plan.Choice, refreshed)
+					replaceRejected(resp, plan.Choice, actual)
 					accountHardLimited = true
 				case CodexPinnedAccepted:
 					closeResponse(rejected)
-					return resp, plan.Choice, refreshed, nil
+					return resp, plan.Choice, actual, nil
 				}
 			case errors.Is(refreshErr, codex.ErrRefreshIneligible), errors.Is(refreshErr, codex.ErrRefreshUnavailable), errors.Is(refreshErr, codex.ErrStaleRevision):
 				// Another candidate or identity remains safe to try.
@@ -236,7 +245,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 				if rejected != nil {
 					return rejected, rejectedChoice, rejectedAttempt, nil
 				}
-				return nil, plan.Choice, *plan.refreshAttempt, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
+				return nil, plan.Choice, *refreshAttempt, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
 			}
 		}
 
@@ -244,9 +253,24 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 	}
 }
 
+func candidateAttemptWithRefreshedRevision(accepted CandidateAttempt, ref codex.CandidateRef, revision codex.Revision) (CandidateAttempt, error) {
+	if ref != accepted.Candidate || revision == "" || revision == accepted.Revision {
+		return CandidateAttempt{}, codex.ErrStaleRevision
+	}
+	accepted.Revision = revision
+	return accepted, nil
+}
+
 func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, response *http.Response) (CodexPinnedFailure, error) {
 	if response == nil || response.Body == nil {
 		return CodexPinnedAccepted, fmt.Errorf("Codex attempt returned an invalid response")
+	}
+	var capacity *codexRateLimitProducer
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		capacity = r.newRateLimitProducer(choice, true)
+		if capacity != nil {
+			_ = capacity.ObserveHeaders(response.Header)
+		}
 	}
 	switch response.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -266,31 +290,54 @@ func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, respons
 		if err != nil || !wrapped.HardUsageLimit {
 			return CodexPinnedAccepted, nil
 		}
-		r.observeHardLimit(choice, response)
+		r.observeHardLimit(choice, response, capacity)
 		return CodexPinnedHardLimit, nil
 	default:
 		return CodexPinnedAccepted, nil
 	}
 }
 
-func executeCodexAttempt(executor ExplicitAccountExecutor, ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func()) (*http.Response, bool, error) {
+func cloneCandidateAttempt(attempt *CandidateAttempt) *CandidateAttempt {
+	if attempt == nil {
+		return nil
+	}
+	copy := *attempt
+	return &copy
+}
+
+func updateCandidateAttempt(planned *CandidateAttempt, actual CandidateAttempt) {
+	if planned == nil || planned.AccountKey != actual.AccountKey ||
+		planned.Candidate.AccountKey != actual.Candidate.AccountKey ||
+		planned.Candidate.CandidateID != actual.Candidate.CandidateID ||
+		planned.Source != actual.Source || planned.Identity != actual.Identity {
+		return
+	}
+	*planned = actual
+}
+
+func executeCodexAttempt(executor ExplicitAccountExecutor, ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, bool, error) {
 	dispatched := false
-	markDispatched := func() {
+	actual := attempt
+	markDispatched := func(resolved CandidateAttempt) {
 		if dispatched {
 			return
 		}
+		actual = resolved
 		dispatched = true
 		if onDispatch != nil {
-			onDispatch()
+			onDispatch(resolved)
 		}
 	}
 	if aware, ok := executor.(explicitAccountDispatchExecutor); ok {
-		response, err := aware.doOnDispatch(ctx, choice, attempt, req, markDispatched)
-		return response, dispatched, err
+		response, resolved, err := aware.doOnDispatch(ctx, choice, attempt, req, markDispatched)
+		if !dispatched {
+			actual = resolved
+		}
+		return response, actual, dispatched, err
 	}
-	markDispatched()
+	markDispatched(attempt)
 	response, err := executor.Do(ctx, choice, attempt, req)
-	return response, dispatched, err
+	return response, actual, dispatched, err
 }
 
 func codexAttemptResponseHasIdentityEncoding(header http.Header) bool {
@@ -309,29 +356,40 @@ func codexAttemptResponseHasIdentityEncoding(header http.Header) bool {
 	return len(values) == 1 && strings.EqualFold(strings.TrimSpace(values[0]), "identity")
 }
 
-func (r *CodexRequestRouter) observeHardLimit(choice RouteChoice, response *http.Response) {
-	if r.Capacity == nil {
+func (r *CodexRequestRouter) newRateLimitProducer(choice RouteChoice, liveEventsAuthoritative bool) *codexRateLimitProducer {
+	if r == nil || r.Capacity == nil {
+		return nil
+	}
+	now := r.Now
+	if now == nil {
+		now = r.Capacity.now
+	}
+	return newCodexRateLimitProducer(
+		r.Capacity,
+		r.Capacity.NewObservationStream(),
+		choice.AccountKey,
+		now,
+		liveEventsAuthoritative,
+	)
+}
+
+func (r *CodexRequestRouter) observeHardLimit(choice RouteChoice, response *http.Response, producer *codexRateLimitProducer) {
+	if r == nil || response == nil {
 		return
 	}
 	attemptedModel := choice.EffectiveModel
 	if attemptedModel == "" {
 		attemptedModel = choice.RequestedModel
 	}
-	now := time.Now()
-	if r.Now != nil {
-		now = r.Now()
+	if producer == nil {
+		producer = r.newRateLimitProducer(choice, true)
 	}
+	if producer == nil {
+		return
+	}
+	now := producer.now()
 	resetAt := retryAfterReset(now, response.Header.Get("Retry-After"))
-	stream := r.Capacity.NewObservationStream()
-	r.Capacity.Observe(stream.Stamp(CapacityFact{
-		AccountKey:   choice.AccountKey,
-		Bucket:       CapacityBucketForModel(attemptedModel),
-		RemainingPct: 0,
-		Source:       CapacitySourceHardLimit,
-		ObservedAt:   now,
-		ResetAt:      resetAt,
-		Confidence:   CapacityConfidenceAuthoritative,
-	}))
+	producer.ObserveHardLimit(CapacityBucketForModel(attemptedModel), resetAt)
 }
 
 func retryAfterReset(now time.Time, value string) time.Time {

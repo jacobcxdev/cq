@@ -171,7 +171,10 @@ func (s *Server) handleCodexLiveSideband(w http.ResponseWriter, r *http.Request)
 	var err error
 	if choice, attempt, ok := s.codexLive.affinity(target.callID); ok {
 		noteRouteAccount(r.Context(), redactedAccountHint("codex", string(choice.AccountKey)), false)
-		upstreamConn, resp, _, err = executor.Dial(r.Context(), choice, attempt, upstreamURL, headers)
+		upstreamConn, resp, _, _, err = executeCodexWebSocketAttempt(
+			executor, r.Context(), choice, attempt, upstreamURL, headers,
+			func(actual CandidateAttempt) { s.codexLive.remember(target.callID, choice, actual) },
+		)
 	} else {
 		upstreamConn, _, _, err = s.dialCodexWebSocket(r.Context(), upstreamURL, headers, "")
 	}

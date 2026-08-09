@@ -76,12 +76,12 @@ func NewCodexInventorySelector(inventory codex.CredentialInventory, quota codexQ
 		}
 		accounts := make([]codexRouteAccount, 0, len(view.Accounts))
 		for _, logical := range view.Accounts {
-			if !logical.Routable {
+			if !logical.Routable || logical.Identity.AccountID == "" || logical.Identity.UserID == "" {
 				continue
 			}
 			var candidateID codex.CandidateID
 			for _, candidate := range logical.Candidates {
-				if !candidate.DispatchBlocked {
+				if candidate.Routable && !candidate.DispatchBlocked {
 					candidateID = candidate.Ref.CandidateID
 					break
 				}

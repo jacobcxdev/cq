@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,14 +24,53 @@ import (
 const (
 	codexAcceptanceTurns      = 20
 	codexAcceptanceLocalToken = "cq-acceptance-local"
+	codexAcceptanceExecutable = "/opt/homebrew/bin/codex"
+	codexAcceptanceVersion    = "codex-cli 0.146.0"
 )
 
 type CodexHTTPAcceptanceResult struct {
-	Turns            int
-	Requests         int
-	SelectorCalls    int
-	ContinuityErrors uint64
-	UnknownEvents    uint64
+	Turns                     int
+	Requests                  int
+	SelectorCalls             int
+	ContinuityErrors          uint64
+	UnknownEvents             uint64
+	InstalledVersion          string
+	InstalledRequests         uint64
+	InstalledModelRequests    uint64
+	InstalledAttempts         uint64
+	InstalledSelectorCalls    int
+	InstalledStrongKeys       uint64
+	InstalledZstdRequests     uint64
+	InstalledUnknownEvents    uint64
+	InstalledContinuityErrors uint64
+	InstalledQuiescentLeases  int
+	HeadroomRequests          uint64
+	HeadroomParseErrors       uint64
+	UnexpectedRoutes          uint64
+	EgressAttempts            uint64
+	InstalledResolutions      uint64
+	PongVerified              bool
+}
+
+type codexAcceptanceCommand struct {
+	executable     string
+	args           []string
+	env            []string
+	dir            string
+	endpoint       string
+	outputPath     string
+	egressProxyURL string
+	captureOutput  bool
+	loopbackOnly   bool
+}
+
+type codexAcceptanceRunner interface {
+	Run(context.Context, codexAcceptanceCommand) ([]byte, error)
+}
+
+type codexAcceptanceDependencies struct {
+	executable string
+	runner     codexAcceptanceRunner
 }
 
 type codexAcceptanceChooser struct {
@@ -70,21 +111,24 @@ func (chooser *codexAcceptanceChooser) Calls() int {
 
 type codexAcceptanceCredentials struct {
 	inventory codex.Inventory
+	resolved  atomic.Uint64
 }
 
 func newCodexAcceptanceCredentials() *codexAcceptanceCredentials {
 	accounts := make([]codex.LogicalAccount, 0, 2)
 	for _, key := range []codex.AccountKey{"acceptance-one", "acceptance-two"} {
 		candidateID := codex.CandidateID(key + "-candidate")
+		userID := "acceptance-user-" + string(key)
 		accounts = append(accounts, codex.LogicalAccount{
 			Key:      key,
 			Routable: true,
-			Identity: codex.AccountIdentity{AccountID: string(key), PlanType: "pro"},
+			Identity: codex.AccountIdentity{AccountID: string(key), UserID: userID, PlanType: "pro"},
 			Candidates: []codex.CredentialCandidate{{
 				Ref:             codex.CandidateRef{AccountKey: key, CandidateID: candidateID},
 				Revision:        "acceptance-revision",
 				Source:          codex.SourceManaged,
 				AccessExpiresAt: time.Now().Add(time.Hour),
+				Routable:        true,
 			}},
 		})
 	}
@@ -100,6 +144,37 @@ func (credentials *codexAcceptanceCredentials) Resolve(_ context.Context, ref co
 		return codex.CredentialMaterial{}, errors.New("unknown acceptance credential")
 	}
 	return codex.CredentialMaterial{AccessToken: "cq-token-" + string(ref.AccountKey), AccountID: string(ref.AccountKey)}, nil
+}
+
+func (credentials *codexAcceptanceCredentials) ResolveExact(_ context.Context, planned codex.PlannedCandidate) (codex.CredentialMaterial, error) {
+	key := planned.Ref.AccountKey
+	userID := "acceptance-user-" + string(key)
+	if (key != "acceptance-one" && key != "acceptance-two") ||
+		planned.Ref.CandidateID != codex.CandidateID(key+"-candidate") ||
+		planned.Revision != "acceptance-revision" || planned.Source != codex.SourceManaged ||
+		planned.Identity.AccountID != string(key) || planned.Identity.UserID != userID {
+		return codex.CredentialMaterial{}, errors.New("unknown acceptance credential generation")
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": string(key),
+			"chatgpt_user_id":    userID,
+		},
+	})
+	material := codex.CredentialMaterial{
+		AccessToken: "cq-token-" + string(key),
+		AccountID:   string(key),
+		IDToken:     "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".signature",
+	}
+	credentials.resolved.Add(1)
+	return material, nil
+}
+
+func (credentials *codexAcceptanceCredentials) Resolutions() uint64 {
+	if credentials == nil {
+		return 0
+	}
+	return credentials.resolved.Load()
 }
 
 type codexAcceptanceUpstream struct {
@@ -127,9 +202,7 @@ func (upstream *codexAcceptanceUpstream) Tokens() []string {
 	return append([]string(nil), upstream.tokens...)
 }
 
-// RunCodexHTTPInstalledAcceptance exercises the compiled HTTP listener with
-// synthetic credentials and a loopback upstream. It never reads user auth.
-func RunCodexHTTPInstalledAcceptance(ctx context.Context) (CodexHTTPAcceptanceResult, error) {
+func runCodexHTTPEnforcedAcceptance(ctx context.Context) (CodexHTTPAcceptanceResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -150,7 +223,8 @@ func RunCodexHTTPInstalledAcceptance(ctx context.Context) (CodexHTTPAcceptanceRe
 	router := &CodexRequestRouter{
 		Scope: &CodexRequestScope{Chooser: chooser, Inventory: credentials},
 		Executor: &CodexAttemptExecutor{
-			Secrets: credentials,
+			Inventory: credentials,
+			Secrets:   credentials,
 			Transport: &CodexTokenTransport{Inner: &http.Transport{
 				Proxy:             http.ProxyFromEnvironment,
 				ForceAttemptHTTP2: false,

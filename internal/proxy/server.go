@@ -879,7 +879,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	if observation != nil {
 		_, failover := routeDiag.fields()
 		observation.Selected(choice, failover)
-		observation.ResponseHeaders(resp.StatusCode, resp.Header)
+		observation.Response(resp)
 		observeCodexResponseBody(resp, observation)
 	}
 	defer resp.Body.Close()
@@ -976,14 +976,14 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	if s.CodexObserver != nil {
 		r = r.WithContext(withCodexObservation(r.Context(), s.CodexObserver))
 	}
-	upstreamConn, choice, _, err := s.dialCodexWebSocket(r.Context(), upstreamURL, r.Header, requestedModel)
+	upstreamConn, choice, _, capacity, err := s.dialCodexWebSocketWithCapacity(r.Context(), upstreamURL, r.Header, requestedModel)
 	if err != nil {
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
 	}
 	defer upstreamConn.Close()
 	upstreamConn.SetReadLimit(maxRequestBody)
-	observation := newCodexWSObservationSession(s.CodexObserver, r.Context(), choice)
+	observation := newCodexWSObservationSession(s.CodexObserver, r.Context(), choice, capacity)
 	if observation != nil && messageType == websocket.TextMessage {
 		observation.ObserveClient(message)
 	}
@@ -1026,29 +1026,40 @@ func codexAppServerWebSocketURL(raw string) (string, error) {
 }
 
 func (s *Server) dialCodexWebSocket(ctx context.Context, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, RouteChoice, CandidateAttempt, error) {
+	connection, choice, attempt, _, err := s.dialCodexWebSocketWithCapacity(ctx, upstreamURL, incomingHeaders, requestedModel)
+	return connection, choice, attempt, err
+}
+
+func (s *Server) dialCodexWebSocketWithCapacity(ctx context.Context, upstreamURL string, incomingHeaders http.Header, requestedModel string) (*websocket.Conn, RouteChoice, CandidateAttempt, *codexRateLimitProducer, error) {
 	router, executor := s.codexWebSocketRouting()
 	if router == nil || executor == nil {
-		return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("no Codex accounts configured")
+		return nil, RouteChoice{}, CandidateAttempt{}, nil, fmt.Errorf("no Codex accounts configured")
 	}
 	var excluded []codex.SelectionExclusion
 	for {
 		plan, err := router.Plan(ctx, CodexRouteRequirements{RequestedModel: requestedModel}, "", excluded...)
 		if err != nil {
 			if len(excluded) == 0 {
-				return nil, RouteChoice{}, CandidateAttempt{}, err
+				return nil, RouteChoice{}, CandidateAttempt{}, nil, err
 			}
-			return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("no alternate codex account available for WebSocket")
+			return nil, RouteChoice{}, CandidateAttempt{}, nil, fmt.Errorf("no alternate codex account available for WebSocket")
 		}
 		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > 0)
 		hardLimited := false
 		for _, attempt := range plan.Attempts {
-			observeCodexAttempt(ctx, plan.Choice, attempt)
-			conn, resp, body, dialErr := executor.Dial(ctx, plan.Choice, attempt, upstreamURL, incomingHeaders)
+			conn, resp, body, actual, dialErr := executeCodexWebSocketAttempt(
+				executor, ctx, plan.Choice, attempt, upstreamURL, incomingHeaders,
+				func(actual CandidateAttempt) { observeCodexAttempt(ctx, plan.Choice, actual) },
+			)
+			capacity := router.newRateLimitProducer(plan.Choice, true)
+			if capacity != nil && resp != nil {
+				_ = capacity.ObserveHeaders(resp.Header)
+			}
 			if dialErr == nil {
-				return conn, plan.Choice, attempt, nil
+				return conn, plan.Choice, actual, capacity, nil
 			}
 			if resp == nil {
-				return nil, plan.Choice, attempt, dialErr
+				return nil, plan.Choice, actual, nil, dialErr
 			}
 			switch resp.StatusCode {
 			case http.StatusUnauthorized:
@@ -1057,13 +1068,14 @@ func (s *Server) dialCodexWebSocket(ctx context.Context, upstreamURL string, inc
 				if !resp.Uncompressed && codexAttemptResponseHasIdentityEncoding(resp.Header) {
 					wrapped, parseErr := parseCodexHTTPError(body, resp.StatusCode)
 					if parseErr == nil && wrapped.HardUsageLimit {
+						router.observeHardLimit(plan.Choice, resp, capacity)
 						hardLimited = true
 						break
 					}
 				}
-				return nil, plan.Choice, attempt, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
+				return nil, plan.Choice, actual, nil, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
 			default:
-				return nil, plan.Choice, attempt, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
+				return nil, plan.Choice, actual, nil, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
 			}
 			if hardLimited {
 				break

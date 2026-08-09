@@ -997,7 +997,13 @@ func testCodexCanary(t *testing.T, fsys fsutil.DurableFileSystem) *CodexCanaryRe
 func testHTTPRouter(chooser CodexRouteChooser, executor ExplicitAccountExecutor) *CodexRequestRouter {
 	accounts := []codex.LogicalAccount{}
 	for _, key := range []codex.AccountKey{"one", "two"} {
-		accounts = append(accounts, codex.LogicalAccount{Key: key, Routable: true, Candidates: []codex.CredentialCandidate{{Ref: codex.CandidateRef{AccountKey: key, CandidateID: codex.CandidateID(key + "-candidate")}, Revision: "revision", Source: codex.SourceManaged, CQAuthored: true, AccessExpiresAt: time.Now().Add(time.Hour)}}})
+		accounts = append(accounts, codex.LogicalAccount{
+			Key: key, Identity: codex.AccountIdentity{AccountID: "strong-account-" + string(key), UserID: "strong-user-" + string(key)}, Routable: true,
+			Candidates: []codex.CredentialCandidate{{
+				Ref: codex.CandidateRef{AccountKey: key, CandidateID: codex.CandidateID(key + "-candidate")}, Revision: "revision",
+				Source: codex.SourceManaged, CQAuthored: true, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+			}},
+		})
 	}
 	return &CodexRequestRouter{Scope: &CodexRequestScope{Chooser: chooser, Inventory: staticCredentialInventory{inventory: codex.Inventory{Accounts: accounts}}}, Executor: executor}
 }

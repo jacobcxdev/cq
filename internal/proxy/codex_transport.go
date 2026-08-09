@@ -25,35 +25,44 @@ type ExplicitAccountExecutor interface {
 }
 
 type explicitAccountDispatchExecutor interface {
-	doOnDispatch(context.Context, RouteChoice, CandidateAttempt, *http.Request, func()) (*http.Response, error)
+	doOnDispatch(context.Context, RouteChoice, CandidateAttempt, *http.Request, func(CandidateAttempt)) (*http.Response, CandidateAttempt, error)
 }
 
 // CodexAttemptExecutor resolves secrets only inside attempt execution.
 type CodexAttemptExecutor struct {
-	Secrets   codex.SecretResolver
+	Inventory codex.CredentialInventory
+	Secrets   codex.ExactSecretResolver
 	Transport *CodexTokenTransport
 }
 
 // Do resolves exact candidate material and performs one request. It never selects or retries.
 func (e *CodexAttemptExecutor) Do(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request) (*http.Response, error) {
-	return e.doOnDispatch(ctx, choice, attempt, req, nil)
+	response, _, err := e.doOnDispatch(ctx, choice, attempt, req, nil)
+	return response, err
 }
 
-func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func()) (*http.Response, error) {
+func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
 	if e == nil || e.Secrets == nil || e.Transport == nil {
-		return nil, fmt.Errorf("Codex attempt executor unavailable")
+		return nil, attempt, fmt.Errorf("Codex attempt executor unavailable")
 	}
 	if attempt.AccountKey == "" || attempt.Candidate.AccountKey != attempt.AccountKey || choice.AccountKey != attempt.AccountKey {
-		return nil, fmt.Errorf("Codex attempt identity mismatch")
+		return nil, attempt, fmt.Errorf("Codex attempt identity mismatch")
 	}
-	material, err := e.Secrets.Resolve(ctx, attempt.Candidate)
+	material, resolved, err := codex.ResolvePlannedCandidate(ctx, e.Inventory, e.Secrets, attempt.plannedCandidate())
+	actual := candidateAttemptFromPlan(resolved, attempt.Ordinal)
 	if err != nil {
-		return nil, fmt.Errorf("resolve Codex credential candidate: %w", err)
+		return nil, actual, fmt.Errorf("resolve Codex credential candidate: %w", err)
 	}
 	if material.AccessToken == "" {
-		return nil, fmt.Errorf("resolved Codex credential has no access token")
+		return nil, actual, fmt.Errorf("resolved Codex credential has no access token")
 	}
-	return e.Transport.doOnDispatch(req, choice, material, onDispatch)
+	dispatch := func() {
+		if onDispatch != nil {
+			onDispatch(actual)
+		}
+	}
+	response, err := e.Transport.doOnDispatch(req, choice, material, dispatch)
+	return response, actual, err
 }
 
 // CodexTokenTransport only clones requests, injects explicit credentials, and

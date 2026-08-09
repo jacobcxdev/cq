@@ -502,6 +502,99 @@ func TestCodexAttemptExecutorRejectsIdentityMismatchBeforeSecretResolution(t *te
 	}
 }
 
+func TestCodexAttemptExecutorRelistsSameIdentityRevisionBeforeDispatch(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key: "identity", Identity: identity, Routable: true,
+		Candidates: []codex.CredentialCandidate{{
+			Ref: ref, Revision: "revision-new", Source: codex.SourceSystem, Routable: true,
+		}},
+	}}}}
+	resolver := &testExactSecretResolver{
+		errors: map[codex.Revision]error{"revision-old": codex.ErrStaleRevision},
+		materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision-new": testExactCredentialMaterial(identity, "rotated-secret"),
+		},
+	}
+	var authorization string
+	executor := &CodexAttemptExecutor{
+		Inventory: inventory,
+		Secrets:   resolver,
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			authorization = request.Header.Get("Authorization")
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		})},
+	}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision-old",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	var dispatched CandidateAttempt
+	response, actual, err := executor.doOnDispatch(
+		context.Background(), RouteChoice{AccountKey: "identity"}, attempt,
+		makeCodexRequest(`{"model":"gpt-5.4"}`),
+		func(resolved CandidateAttempt) { dispatched = resolved },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if authorization != "Bearer rotated-secret" {
+		t.Fatalf("authorization = %q", authorization)
+	}
+	if actual.Revision != "revision-new" || dispatched.Revision != "revision-new" {
+		t.Fatalf("actual revision = %q, dispatched revision = %q", actual.Revision, dispatched.Revision)
+	}
+	if actual.Candidate != ref || actual.Source != codex.SourceSystem || actual.Identity != identity || actual.Ordinal != attempt.Ordinal {
+		t.Fatalf("actual attempt = %+v", actual)
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	if len(resolver.plans) != 2 || resolver.plans[0].Revision != "revision-old" || resolver.plans[1].Revision != "revision-new" {
+		t.Fatalf("resolved plans = %+v", resolver.plans)
+	}
+}
+
+func TestCodexAttemptExecutorRejectsUnsafeRelistBeforeDispatch(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision-old",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	for name, inventory := range testRejectedReplanInventories(ref, identity) {
+		t.Run(name, func(t *testing.T) {
+			resolver := &testExactSecretResolver{
+				errors:    map[codex.Revision]error{"revision-old": codex.ErrStaleRevision},
+				materials: make(map[codex.Revision]codex.CredentialMaterial),
+			}
+			upstreamCalls := 0
+			executor := &CodexAttemptExecutor{
+				Inventory: staticCredentialInventory{inventory: inventory},
+				Secrets:   resolver,
+				Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					upstreamCalls++
+					return nil, errors.New("unexpected upstream dispatch")
+				})},
+			}
+			_, err := executor.Do(context.Background(), RouteChoice{AccountKey: "identity"}, attempt, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			if !errors.Is(err, codex.ErrStaleRevision) {
+				t.Fatalf("error = %v, want ErrStaleRevision", err)
+			}
+			if upstreamCalls != 0 {
+				t.Fatalf("upstream calls = %d", upstreamCalls)
+			}
+			resolver.mu.Lock()
+			plans := len(resolver.plans)
+			resolver.mu.Unlock()
+			if plans != 1 {
+				t.Fatalf("exact resolutions = %d, want 1", plans)
+			}
+		})
+	}
+}
+
 func TestRewriteCodexModelNamePreservesSuffix(t *testing.T) {
 	got, ok := rewriteCodexModelName("gpt-5.3-codex-spark-high")
 	if !ok || got != "gpt-5.3-codex-high" {
