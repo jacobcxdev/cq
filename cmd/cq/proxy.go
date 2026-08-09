@@ -376,7 +376,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
-	codexHealthTracker := newCodexHealthTracker(credentialControl, codexHealthFromInventory(codexInventory))
+	codexHealthTracker := newCodexHealthTracker(credentialControl, cfg.CodexRoutingDefaultAccountKey, codexHealthFromInventory(codexInventory))
 
 	codexRequestScope := &proxy.CodexRequestScope{
 		Chooser:   codexSelector,

@@ -143,7 +143,7 @@ func TestCodexHealthTrackerDegradesSafelyOnCoordinatorListFailure(t *testing.T) 
 	})
 	tracker := newCodexHealthTracker(failingCodexHealthInventory{err: errors.New(
 		"open /private/managed-home for private@example.test: token-secret",
-	)}, last)
+	)}, "", last)
 
 	health := tracker.Health(context.Background())
 	if health.AccountCount != 2 || !health.AccountCountKnown {
@@ -172,7 +172,7 @@ func TestCodexHealthTrackerDegradesSafelyOnCoordinatorListFailure(t *testing.T) 
 
 func TestCodexHealthTrackerBoundsCoordinatorList(t *testing.T) {
 	inventory := &deadlineCodexHealthInventory{}
-	tracker := newCodexHealthTracker(inventory, codexHealthFromInventory(codexprov.Inventory{}))
+	tracker := newCodexHealthTracker(inventory, "", codexHealthFromInventory(codexprov.Inventory{}))
 
 	_ = tracker.Health(context.Background())
 
@@ -186,7 +186,7 @@ func TestCodexHealthTrackerPreservesEmptySourceSnapshotOnFailure(t *testing.T) {
 	if last.ExternalSources == nil {
 		t.Fatal("test fixture external sources are nil")
 	}
-	tracker := newCodexHealthTracker(failingCodexHealthInventory{err: errors.New("unavailable")}, last)
+	tracker := newCodexHealthTracker(failingCodexHealthInventory{err: errors.New("unavailable")}, "", last)
 
 	health := tracker.Health(context.Background())
 	encoded, err := json.Marshal(health)
