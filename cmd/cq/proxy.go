@@ -213,7 +213,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 	if opts.Port != 0 {
 		cfg.Port = opts.Port
 	}
-	codexClientBuild := defaultCodexClientVersion()
+	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
 	credentialControl, err := codexprov.OpenDefaultCredentialRefreshControl(context.Background(), fsys, refreshClient)

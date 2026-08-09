@@ -28,7 +28,7 @@ func runCodexCanary(args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("Codex canary start takes no arguments")
 		}
-		clientBuild := defaultCodexClientVersion()
+		clientBuild := defaultCodexRoutingClientBuild()
 		required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
 		marker, err := proxy.LoadCodexReadinessMarker(filepath.Dir(path), proxy.CodexRoutingHTTP)
 		if err != nil {

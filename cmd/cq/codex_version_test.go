@@ -75,3 +75,16 @@ func TestCodexVersionResolver_PinnedFallbackWhenAllMissing(t *testing.T) {
 		t.Errorf("Resolve = %q, want 0.124.0 (pinned fallback)", got)
 	}
 }
+
+func TestCodexRoutingBuildResolverPrefersDesktopBuild(t *testing.T) {
+	resolver := codexRoutingBuildResolver{
+		DesktopVersion:    func() (string, bool) { return "0.147.0-alpha.6.5", true },
+		CachedVersion:     func() string { return "0.147.0" },
+		SubprocessVersion: func() (string, bool) { return "0.146.0", true },
+		Fallback:          "0.124.0",
+	}
+
+	if got := resolver.Resolve(); got != "0.147.0-alpha.6.5" {
+		t.Fatalf("Resolve = %q, want exact Desktop build", got)
+	}
+}

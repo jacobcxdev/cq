@@ -28,6 +28,32 @@ type codexVersionResolver struct {
 	Fallback          string
 }
 
+type codexRoutingBuildResolver struct {
+	DesktopVersion    func() (string, bool)
+	CachedVersion     func() string
+	SubprocessVersion func() (string, bool)
+	Fallback          string
+}
+
+func (r codexRoutingBuildResolver) Resolve() string {
+	if r.DesktopVersion != nil {
+		if version, ok := r.DesktopVersion(); ok {
+			return version
+		}
+	}
+	if r.SubprocessVersion != nil {
+		if version, ok := r.SubprocessVersion(); ok {
+			return version
+		}
+	}
+	if r.CachedVersion != nil {
+		if version := r.CachedVersion(); version != "" {
+			return version
+		}
+	}
+	return r.Fallback
+}
+
 func (r codexVersionResolver) Resolve() string {
 	if r.FS != nil && r.CachePath != "" {
 		if v := modelregistry.DiscoverCodexClientVersion(r.FS, r.CachePath); v != "" {
@@ -64,13 +90,55 @@ func defaultCodexClientVersion() string {
 	}.Resolve()
 }
 
+// defaultCodexRoutingClientBuild resolves the exact client binary build used
+// for readiness gates. The model cache intentionally remains lower authority:
+// its client_version may omit a Desktop prerelease suffix.
+func defaultCodexRoutingClientBuild() string {
+	return codexRoutingBuildResolver{
+		DesktopVersion:    probeCodexDesktopVersion,
+		CachedVersion:     cachedCodexClientVersion,
+		SubprocessVersion: probeCodexBinaryVersion,
+		Fallback:          fallbackCodexClientVersion,
+	}.Resolve()
+}
+
+func cachedCodexClientVersion() string {
+	fsys := fsutil.OSFileSystem{}
+	home, err := fsys.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	return modelregistry.DiscoverCodexClientVersion(fsys, filepath.Join(codexHome, "models_cache.json"))
+}
+
+func probeCodexDesktopVersion() (string, bool) {
+	paths := []string{
+		"/Applications/ChatGPT.app/Contents/Resources/codex",
+		"/Applications/Codex.app/Contents/Resources/codex",
+	}
+	for _, path := range paths {
+		if version, ok := probeCodexVersionCommand(path); ok {
+			return version, true
+		}
+	}
+	return "", false
+}
+
 // probeCodexBinaryVersion runs `codex --version` with a short timeout and
 // returns the parsed semver. Any failure path returns ("", false) so the
 // resolver can continue to its next tier.
 func probeCodexBinaryVersion() (string, bool) {
+	return probeCodexVersionCommand("codex")
+}
+
+func probeCodexVersionCommand(path string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "codex", "--version").Output()
+	out, err := exec.CommandContext(ctx, path, "--version").Output()
 	if err != nil {
 		return "", false
 	}
