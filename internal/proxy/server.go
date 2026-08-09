@@ -819,7 +819,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	// Fail-open: on error, log and continue with original body.
 	forwardBody := decodedRequest.Replay()
 	bodyRewritten := false
-	if s.Headroom != nil && !enforce {
+	if s.Headroom != nil {
 		var compressed []byte
 		var saved int
 		var err error

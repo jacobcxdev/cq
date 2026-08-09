@@ -3116,6 +3116,90 @@ func TestServer_NativeCodex_ZstdHeadroomCompressesDecodedBody(t *testing.T) {
 	}
 }
 
+func TestServer_NativeCodex_EnforcementPreparesHeadroomBodyOncePerRequest(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":"short"}]`)
+	bridgeRequests := make(chan headroomResponsesRequest, 2)
+	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
+		var request headroomResponsesRequest
+		if err := json.Unmarshal(requestBody, &request); err != nil {
+			t.Errorf("decode Headroom request: %v", err)
+			return []byte(`{"ok":false}`)
+		}
+		bridgeRequests <- request
+		response, _ := json.Marshal(headroomResponsesResponse{
+			OK:          true,
+			Input:       compressedInput,
+			TokensSaved: 42,
+		})
+		return response
+	})
+
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{
+		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+		{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+	}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusTooManyRequests, body: codexLiveUsageLimitBody}},
+		"two": {{status: http.StatusOK, body: completedSSE("response-two")}},
+	}}
+	srv := &Server{
+		Config:            &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexRequests:     &CodexRequestRouter{},
+		CodexHTTPEnforcer: testHTTPEnforcer(t, chooser, executor, fsutil.NewMemFS()),
+		Headroom:          bridge,
+	}
+
+	originalInput := json.RawMessage(`[{"role":"user","content":"long input"}]`)
+	originalJSON := []byte(`{"type":"response.create","model":"gpt-5.4","input":` + string(originalInput) + `,"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread-headroom","turn_id":"turn-headroom","request_kind":"turn"}}}`)
+	encoded := encodeCodexZstd(t, originalJSON)
+	request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(encoded))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if calls := len(bridgeRequests); calls != 1 {
+		t.Fatalf("Headroom calls = %d, want 1", calls)
+	}
+	bridgeRequest := <-bridgeRequests
+	if bridgeRequest.Model != "gpt-5.4" || string(bridgeRequest.Input) != string(originalInput) {
+		t.Fatalf("Headroom request model/input = %q/%s, want original decoded %q/%s", bridgeRequest.Model, bridgeRequest.Input, "gpt-5.4", originalInput)
+	}
+	if chooser.lastRequirements.RequestedModel != "gpt-5.4" {
+		t.Fatalf("routing model = %q, want original model gpt-5.4", chooser.lastRequirements.RequestedModel)
+	}
+	if !slices.Equal(executor.accounts, []codex.AccountKey{"one", "two"}) {
+		t.Fatalf("attempt accounts = %v, want [one two]", executor.accounts)
+	}
+	if len(executor.bodies) != 2 || !bytes.Equal(executor.bodies[0], executor.bodies[1]) {
+		t.Fatalf("attempt body count/equality = %d/%v, want 2/true", len(executor.bodies), len(executor.bodies) == 2 && bytes.Equal(executor.bodies[0], executor.bodies[1]))
+	}
+	for index, header := range executor.headers {
+		if header.Get("Content-Encoding") != "zstd" {
+			t.Fatalf("attempt %d Content-Encoding = %q, want zstd", index+1, header.Get("Content-Encoding"))
+		}
+		if header.Get("Content-Length") != fmt.Sprint(len(executor.bodies[index])) {
+			t.Fatalf("attempt %d Content-Length = %q, want %d", index+1, header.Get("Content-Length"), len(executor.bodies[index]))
+		}
+	}
+	decoded, err := DecodeCodexRequest(executor.bodies[0], "zstd", DefaultCodexZstdLimits)
+	if err != nil {
+		t.Fatalf("decode prepared body: %v", err)
+	}
+	var prepared map[string]json.RawMessage
+	if err := json.Unmarshal(decoded.Decoded(), &prepared); err != nil {
+		t.Fatalf("decode prepared JSON: %v", err)
+	}
+	if string(prepared["input"]) != string(compressedInput) {
+		t.Fatalf("prepared input = %s, want %s", prepared["input"], compressedInput)
+	}
+}
+
 func TestServer_NativeCodex_ZstdHeadroomNoRewritePreservesFrame(t *testing.T) {
 	bridgeCalled := false
 	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
