@@ -40,9 +40,10 @@ func (e *RefreshPersistenceError) Error() string {
 func (e *RefreshPersistenceError) Unwrap() error { return e.Err }
 
 type refreshFlight struct {
-	done   chan struct{}
-	result RefreshResult
-	err    error
+	done    chan struct{}
+	result  RefreshResult
+	err     error
+	waiters int
 }
 
 type retainedRefresh struct {
@@ -76,6 +77,7 @@ func (c *CredentialCoordinator) Refresh(ctx context.Context, ref CandidateRef, e
 		c.refreshFlights = make(map[string]*refreshFlight)
 	}
 	if existing := c.refreshFlights[key]; existing != nil {
+		existing.waiters++
 		c.refreshMu.Unlock()
 		select {
 		case <-ctx.Done():

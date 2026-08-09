@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,6 +155,7 @@ func TestRefreshConcurrentRequestsExchangeOnce(t *testing.T) {
 		result, err := coordinator.Refresh(context.Background(), ref, revision)
 		outcomes <- outcome{result: result, err: err}
 	}()
+	waitForRefreshWaiter(t, coordinator, ref, revision)
 	close(release)
 	first, second := <-outcomes, <-outcomes
 	if first.err != nil || second.err != nil {
@@ -164,6 +166,25 @@ func TestRefreshConcurrentRequestsExchangeOnce(t *testing.T) {
 	}
 	if first.result.Revision != second.result.Revision {
 		t.Fatalf("revisions = %q, %q", first.result.Revision, second.result.Revision)
+	}
+}
+
+func waitForRefreshWaiter(t *testing.T, coordinator *CredentialCoordinator, ref CandidateRef, revision Revision) {
+	t.Helper()
+	key := string(ref.CandidateID) + ":" + string(revision)
+	deadline := time.Now().Add(time.Second)
+	for {
+		coordinator.refreshMu.Lock()
+		flight := coordinator.refreshFlights[key]
+		joined := flight != nil && flight.waiters > 0
+		coordinator.refreshMu.Unlock()
+		if joined {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second refresh did not join in-flight exchange")
+		}
+		runtime.Gosched()
 	}
 }
 
