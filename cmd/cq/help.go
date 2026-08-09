@@ -118,15 +118,18 @@ Commands:
 Read the fixed default Codex credential endpoint without creating or changing
 any endpoint, compatibility, authentication, or account state. Output is JSON.
 `,
-	"proxy endpoint transition-legacy": `Usage: cq proxy endpoint transition-legacy <prepare|resume|commit|rollback> [options]
+	"proxy endpoint transition-legacy": `Usage: cq proxy endpoint transition-legacy <prepare|resume|activate|finalise|rollback> [options]
 
-Explicitly transition the fixed default legacy credential endpoint. The proxy
-must remain stopped and all clients drained for the complete command.
+Explicitly transition the fixed default legacy credential endpoint. Prepare,
+resume, activate, and rollback require the proxy to remain stopped and drained.
+Finalise requires the exact live candidate to pass its in-owner runtime verifier.
+The deprecated commit action is unavailable and never removes rollback state.
 
 Options:
   --snapshot-file FILE              Strict 0600 snapshot input for prepare
   --ticket-file FILE                Strict 0600 ticket input for other actions
-  --confirm-stopped-and-drained      Required operator authority
+  --confirm-stopped-and-drained      Required for prepare/resume/activate/rollback
+  --confirm-candidate-healthy        Required for finalise
   --non-interactive                  Skip the TTY phrase prompt
 `,
 	"models": `Usage: cq models <command>

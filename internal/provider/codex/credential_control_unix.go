@@ -23,7 +23,10 @@ type CredentialEndpointPingReply struct {
 }
 
 type credentialEndpointRPC struct {
-	generation string
+	generation       string
+	control          *CredentialControl
+	endpoint         *credentialEndpoint
+	finaliseVerifier LegacyMaintenanceFinaliseVerifier
 }
 
 func (r *credentialEndpointRPC) Ping(args CredentialEndpointPingArgs, reply *CredentialEndpointPingReply) error {
@@ -46,6 +49,13 @@ func OpenCredentialControlPrepared(ctx context.Context, path string, coordinator
 	return openCredentialControlPrepared(ctx, path, coordinator, false, nil, initializer, nil)
 }
 
+// OpenCredentialControlPreparedWithLegacyMaintenanceVerifier injects the
+// runtime-specific verifier used only by an explicitly requested maintenance
+// finalise RPC. Ordinary credential operations never invoke it.
+func OpenCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx context.Context, path string, coordinator *CredentialCoordinator, initializer CredentialOwnerInitializer, verifier LegacyMaintenanceFinaliseVerifier) (*CredentialControl, error) {
+	return openCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, coordinator, false, nil, initializer, nil, verifier)
+}
+
 // OpenRecoveringCredentialControl is reserved for supervised owner startup.
 // Ordinary request and command paths must use OpenCredentialControl so they
 // never mutate an existing endpoint while trying to connect.
@@ -60,11 +70,21 @@ func OpenRecoveringCredentialControlPrepared(ctx context.Context, path string, c
 	return openCredentialControlPrepared(ctx, path, coordinator, true, nil, initializer, nil)
 }
 
+// OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifier is the
+// supervised recovery variant of OpenCredentialControlPreparedWithLegacyMaintenanceVerifier.
+func OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx context.Context, path string, coordinator *CredentialCoordinator, initializer CredentialOwnerInitializer, verifier LegacyMaintenanceFinaliseVerifier) (*CredentialControl, error) {
+	return openCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, coordinator, true, nil, initializer, nil, verifier)
+}
+
 func openCredentialControl(path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook) (*CredentialControl, error) {
 	return openCredentialControlPrepared(context.Background(), path, coordinator, allowRecovery, phaseHook, nil, nil)
 }
 
 func openCredentialControlPrepared(ctx context.Context, path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook, initializer CredentialOwnerInitializer, beforeAccept func()) (*CredentialControl, error) {
+	return openCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, coordinator, allowRecovery, phaseHook, initializer, beforeAccept, nil)
+}
+
+func openCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx context.Context, path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook, initializer CredentialOwnerInitializer, beforeAccept func(), verifier LegacyMaintenanceFinaliseVerifier) (*CredentialControl, error) {
 	endpoint, client, err := openCredentialEndpoint(path, allowRecovery, phaseHook)
 	if err != nil {
 		return nil, err
@@ -123,7 +143,9 @@ func openCredentialControlPrepared(ctx context.Context, path string, coordinator
 	if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: coordinator, Control: control}); err != nil {
 		return nil, errors.Join(err, control.Close())
 	}
-	if err := server.RegisterName("CredentialEndpoint", &credentialEndpointRPC{generation: endpoint.generation}); err != nil {
+	if err := server.RegisterName("CredentialEndpoint", &credentialEndpointRPC{
+		generation: endpoint.generation, control: control, endpoint: endpoint, finaliseVerifier: verifier,
+	}); err != nil {
 		return nil, errors.Join(err, control.Close())
 	}
 	if beforeAccept != nil {

@@ -98,6 +98,18 @@ func OpenDefaultRecoveringCredentialControl(ctx context.Context, fs fsutil.Durab
 	return OpenRecoveringCredentialControlPrepared(ctx, path, coordinator, initialiseCredentialOwner)
 }
 
+// OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifier is the
+// supervised default-endpoint opener with the explicit owner-only legacy
+// maintenance finalise verifier. Ordinary credential operations never invoke
+// the verifier.
+func OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifier(ctx context.Context, fs fsutil.DurableFileSystem, verifier LegacyMaintenanceFinaliseVerifier, exchanges ...RefreshExchange) (*CredentialControl, error) {
+	coordinator, path, err := newDefaultCredentialCoordinator(fs, exchanges...)
+	if err != nil {
+		return nil, err
+	}
+	return OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, coordinator, initialiseCredentialOwner, verifier)
+}
+
 func newDefaultCredentialCoordinator(fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialCoordinator, string, error) {
 	store, err := NewManagedStore(fs)
 	if err != nil {

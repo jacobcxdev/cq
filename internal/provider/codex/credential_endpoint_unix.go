@@ -73,15 +73,23 @@ var (
 type credentialEndpointPhase string
 type credentialEndpointPhaseHook func(credentialEndpointPhase)
 
+type credentialEndpointSidecarCAS struct {
+	identity fsutil.SecureFileIdentity
+	digest   string
+}
+
 const (
-	credentialEndpointPhaseNamespacePinned  credentialEndpointPhase = "namespace_pinned"
-	credentialEndpointPhasePrepared         credentialEndpointPhase = "prepared_sidecar_durable"
-	credentialEndpointPhaseLinked           credentialEndpointPhase = "final_link_created"
-	credentialEndpointPhaseTemporaryRemoved credentialEndpointPhase = "temporary_link_removed"
-	credentialEndpointPhasePublished        credentialEndpointPhase = "published_sidecar_durable"
-	credentialEndpointPhaseClosing          credentialEndpointPhase = "closing_sidecar_durable"
-	credentialEndpointPhaseFinalRemoved     credentialEndpointPhase = "closing_final_removed"
-	credentialEndpointPhaseSidecarRemoved   credentialEndpointPhase = "closing_sidecar_removed"
+	credentialEndpointPhaseNamespacePinned                       credentialEndpointPhase = "namespace_pinned"
+	credentialEndpointPhaseMaintenanceAdmitted                   credentialEndpointPhase = "maintenance_admitted"
+	credentialEndpointPhaseMaintenanceRollbackCandidateValidated credentialEndpointPhase = "maintenance_rollback_candidate_validated"
+	credentialEndpointPhaseLifetimeLockAcquired                  credentialEndpointPhase = "lifetime_lock_acquired"
+	credentialEndpointPhasePrepared                              credentialEndpointPhase = "prepared_sidecar_durable"
+	credentialEndpointPhaseLinked                                credentialEndpointPhase = "final_link_created"
+	credentialEndpointPhaseTemporaryRemoved                      credentialEndpointPhase = "temporary_link_removed"
+	credentialEndpointPhasePublished                             credentialEndpointPhase = "published_sidecar_durable"
+	credentialEndpointPhaseClosing                               credentialEndpointPhase = "closing_sidecar_durable"
+	credentialEndpointPhaseFinalRemoved                          credentialEndpointPhase = "closing_final_removed"
+	credentialEndpointPhaseSidecarRemoved                        credentialEndpointPhase = "closing_sidecar_removed"
 )
 
 type credentialOwnerProtocol uint8
@@ -106,8 +114,11 @@ type credentialEndpoint struct {
 	identity        credentialEndpointIdentity
 	lockIdentity    fsutil.SecureFileIdentity
 	sidecar         credentialEndpointSidecar
+	sidecarCAS      *credentialEndpointSidecarCAS
 	hook            credentialEndpointPhaseHook
 	writeHook       func(credentialEndpointSidecar) error
+	maintenanceMu   sync.Mutex
+	maintenanceGate credentialEndpointMaintenanceOpenGate
 	closeOnce       sync.Once
 	closeErr        error
 	releaseOnce     sync.Once
@@ -522,7 +533,28 @@ func (e *credentialEndpoint) writeSidecar(sidecar credentialEndpointSidecar) err
 	if err := e.validateDirectoryNamespace(); err != nil {
 		return errors.Join(ErrCredentialEndpointDurability, &fsutil.CommitError{Outcome: fsutil.CommitNotCommitted, Op: "validate endpoint namespace", Err: err})
 	}
-	err = fsutil.SecureAtomicWriteInDirectoryChecked(e.fs, e.secureDirectory, filepath.Base(credentialEndpointSidecarPath(e.path)), data, e.validateDirectoryNamespace)
+	beforeReplace := e.validateDirectoryNamespace
+	var expectedCAS credentialEndpointSidecarCAS
+	if e.sidecarCAS != nil {
+		expectedCAS = *e.sidecarCAS
+		beforeReplace = func() error {
+			if err := e.validateDirectoryNamespace(); err != nil {
+				return err
+			}
+			return e.validateSidecarCAS(expectedCAS)
+		}
+	}
+	err = fsutil.SecureAtomicWriteInDirectoryChecked(
+		e.fs, e.secureDirectory, filepath.Base(credentialEndpointSidecarPath(e.path)), data, beforeReplace,
+	)
+	if err == nil && e.sidecarCAS != nil {
+		identity, digest, proofErr := e.inspectSidecarCAS()
+		if proofErr != nil || digest != digestMaintenanceBytes(data) {
+			err = errors.Join(ErrCredentialEndpointIdentityChanged, proofErr)
+		} else {
+			e.sidecarCAS = &credentialEndpointSidecarCAS{identity: identity, digest: digest}
+		}
+	}
 	if err == nil && e.writeHook != nil {
 		err = e.writeHook(sidecar)
 	}
@@ -531,6 +563,24 @@ func (e *credentialEndpoint) writeSidecar(sidecar credentialEndpointSidecar) err
 	}
 	if err := e.validateDirectoryNamespace(); err != nil {
 		return errors.Join(ErrCredentialEndpointDurability, &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "revalidate endpoint namespace", Err: err})
+	}
+	return nil
+}
+
+func (e *credentialEndpoint) inspectSidecarCAS() (fsutil.SecureFileIdentity, string, error) {
+	data, identity, err := fsutil.ReadSecureFileInDirectoryWithIdentity(
+		e.fs, e.secureDirectory, filepath.Base(credentialEndpointSidecarPath(e.path)), credentialEndpointSidecarMaxBytes,
+	)
+	if err != nil {
+		return fsutil.SecureFileIdentity{}, "", err
+	}
+	return identity, digestMaintenanceBytes(data), nil
+}
+
+func (e *credentialEndpoint) validateSidecarCAS(expected credentialEndpointSidecarCAS) error {
+	identity, digest, err := e.inspectSidecarCAS()
+	if err != nil || identity != expected.identity || digest != expected.digest {
+		return errors.Join(ErrCredentialEndpointIdentityChanged, err)
 	}
 	return nil
 }
@@ -588,6 +638,11 @@ func (e *credentialEndpoint) removeExactSocket(name string, expected credentialE
 }
 
 func (e *credentialEndpoint) removeExpectedSidecar(expected credentialEndpointSidecar, allowMissing bool) error {
+	if e.sidecarCAS != nil {
+		if err := e.validateSidecarCAS(*e.sidecarCAS); err != nil {
+			return err
+		}
+	}
 	actual, exists, err := e.readSidecar()
 	if err != nil {
 		return err
@@ -607,6 +662,11 @@ func (e *credentialEndpoint) removeExpectedSidecar(expected credentialEndpointSi
 	}
 	if err := e.validateDirectoryNamespace(); err != nil {
 		return err
+	}
+	if e.sidecarCAS != nil {
+		if err := e.validateSidecarCAS(*e.sidecarCAS); err != nil {
+			return err
+		}
 	}
 	if err := unix.Unlinkat(e.directoryFD, filepath.Base(credentialEndpointSidecarPath(e.path)), 0); err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -855,6 +915,11 @@ func (e *credentialEndpoint) recover(sidecar credentialEndpointSidecar, finalIde
 }
 
 func (e *credentialEndpoint) cleanInterruptedPublication(sidecar credentialEndpointSidecar, finalIdentity credentialEndpointIdentity, finalExists bool) error {
+	if e.sidecarCAS != nil {
+		if err := e.validateSidecarCAS(*e.sidecarCAS); err != nil {
+			return err
+		}
+	}
 	if finalExists {
 		allowed := finalIdentity == sidecar.credentialEndpointIdentity
 		if sidecar.State == credentialEndpointPrepared && sidecar.Previous != nil {
@@ -900,10 +965,26 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 	}
 	sidecar, sidecarExists, err := e.readSidecar()
 	if err != nil {
+		if e.hasUnboundActivatedMaintenanceGate() {
+			if pendingErr := e.rejectMaintenanceJournal(); pendingErr != nil {
+				return nil, pendingErr
+			}
+			if e.hasUnboundActivatedMaintenanceGate() {
+				return nil, errors.Join(ErrCredentialEndpointMaintenancePending, err)
+			}
+		}
 		return nil, err
 	}
+	if sidecarExists && e.hasUnboundActivatedMaintenanceGate() {
+		if pendingErr := e.rejectMaintenanceJournal(); pendingErr != nil {
+			return nil, pendingErr
+		}
+		if e.hasUnboundActivatedMaintenanceGate() {
+			return nil, ErrCredentialEndpointMaintenancePending
+		}
+	}
 	if !sidecarExists {
-		if finalExists {
+		if finalExists && !e.hasUnboundActivatedMaintenanceGate() {
 			return nil, ErrCredentialOwnerStale
 		}
 		if err := e.acquireLifetimeLock(nil); errors.Is(err, fsutil.ErrExclusiveLockHeld) {
@@ -914,23 +995,26 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 		} else if err != nil {
 			return nil, err
 		}
-		current, exists, err := e.readSidecar()
+		_, exists, err := e.readSidecar()
 		if err != nil {
 			return nil, err
 		}
 		if exists {
-			return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointIdentityChanged, fmt.Errorf("unexpected sidecar %s", current.Generation))
+			return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointIdentityChanged)
+		}
+		if err := e.rejectMaintenanceJournal(); err != nil {
+			return nil, err
 		}
 		if _, exists, err := statCredentialEndpointSocketAt(e.directoryFD, e.finalName, true); err != nil {
 			return nil, err
 		} else if exists {
 			return nil, ErrCredentialEndpointOccupied
 		}
-		if err := e.rejectMaintenanceJournal(); err != nil {
-			return nil, err
-		}
 		if err := e.publish(nil); err != nil {
 			return nil, err
+		}
+		if err := e.bindActivatedMaintenanceOwner(); err != nil {
+			return nil, e.preserveUnboundMaintenancePublication(err)
 		}
 		return nil, nil
 	}
@@ -951,6 +1035,9 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 		// recovery below.
 	default:
 		return nil, errors.Join(ErrCredentialOwnerStale, heldErr)
+	}
+	if e.hasBoundActivatedMaintenanceGate() {
+		return nil, ErrCredentialEndpointMaintenancePending
 	}
 	if !allowRecovery {
 		return nil, ErrCredentialOwnerStale
@@ -991,7 +1078,19 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 	if err := e.recover(sidecar, finalIdentity, finalExists); err != nil {
 		return nil, err
 	}
+	if err := e.bindActivatedMaintenanceOwner(); err != nil {
+		return nil, e.preserveUnboundMaintenancePublication(err)
+	}
 	return nil, nil
+}
+
+func (e *credentialEndpoint) preserveUnboundMaintenancePublication(cause error) error {
+	var listenerErr error
+	if e != nil && e.listener != nil {
+		listenerErr = e.listener.Close()
+		e.listener = nil
+	}
+	return errors.Join(ErrCredentialEndpointMaintenancePending, cause, listenerErr)
 }
 
 func (e *credentialEndpoint) acquireLifetimeLock(expected *fsutil.SecureFileIdentity) error {
@@ -1018,6 +1117,7 @@ func (e *credentialEndpoint) acquireLifetimeLock(expected *fsutil.SecureFileIden
 	}
 	e.lock = lock
 	e.lockIdentity = identity
+	e.invokePhase(credentialEndpointPhaseLifetimeLockAcquired)
 	return nil
 }
 
@@ -1091,6 +1191,11 @@ func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Clien
 						lastErr = ErrCredentialEndpointIdentityChanged
 						continue
 					}
+					if err := e.validateMaintenanceDelegation(current, generation); err != nil {
+						_ = client.Close()
+						lastErr = err
+						continue
+					}
 					return client, nil
 				}
 				if protocol != credentialOwnerRefused && protocol != credentialOwnerUnavailable {
@@ -1106,16 +1211,7 @@ func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Clien
 }
 
 func (e *credentialEndpoint) rejectMaintenanceJournal() error {
-	name := filepath.Base(credentialEndpointMaintenanceJournalPath(e.path))
-	var stat unix.Stat_t
-	err := unix.Fstatat(e.directoryFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-	if errors.Is(err, unix.ENOENT) {
-		return nil
-	}
-	if err != nil {
-		return errors.Join(ErrCredentialEndpointMaintenancePending, err)
-	}
-	return ErrCredentialEndpointMaintenancePending
+	return e.validateMaintenanceOpenGate()
 }
 
 func validateCredentialEndpointCrashState(sidecar credentialEndpointSidecar, finalIdentity credentialEndpointIdentity, finalExists bool, temporaryIdentity credentialEndpointIdentity, temporaryExists bool) error {

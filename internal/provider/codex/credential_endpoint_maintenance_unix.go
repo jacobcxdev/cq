@@ -17,6 +17,10 @@ import (
 
 func credentialEndpointMaintenanceJournalPath(path string) string { return path + ".maintenance.json" }
 
+func credentialEndpointMaintenanceRollbackPath(path string) string {
+	return path + ".maintenance.rollback.json"
+}
+
 func legacyCredentialEndpointIdentityOwnerIsCurrent(uid uint64) bool {
 	return uid == uint64(os.Geteuid())
 }
@@ -52,6 +56,7 @@ func InspectLegacyCredentialEndpoint(ctx context.Context, path string) (LegacyCr
 		filepath.Base(credentialEndpointLockPath(path)),
 		filepath.Base(credentialEndpointSidecarPath(path)),
 		filepath.Base(credentialEndpointMaintenanceJournalPath(path)),
+		filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
 	}
 	if err := requireLegacyCredentialArtifactsAbsent(directoryFD, artifactNames); err != nil {
 		return LegacyCredentialEndpointSnapshot{}, err

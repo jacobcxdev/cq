@@ -285,7 +285,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
-	credentialControl, err := codexprov.OpenDefaultRecoveringCredentialRefreshControl(context.Background(), fsys, refreshClient)
+	legacyFinaliseVerifier := newProxyLegacyMaintenanceFinaliseVerifier(version, codexClientBuild, cfg.Port)
+	credentialControl, err := codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifier(context.Background(), fsys, refreshClient, legacyFinaliseVerifier)
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
@@ -577,6 +578,9 @@ func runProxyStart(opts proxyCommandOptions) error {
 		HeadroomMode:           resolvedMode,
 		Catalog:                catalog,
 		Refresher:              proxyRefresher,
+	}
+	if err := legacyFinaliseVerifier.bind(codexRouting, headroom != nil, resolvedMode); err != nil {
+		return fmt.Errorf("legacy credential endpoint finalise verifier: %w", err)
 	}
 
 	err = srv.ListenAndServe(proxyCtx)

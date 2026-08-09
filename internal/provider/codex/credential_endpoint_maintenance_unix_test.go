@@ -240,7 +240,7 @@ func TestOpenCredentialEndpointRejectsUnsafeMaintenanceJournalEntry(t *testing.T
 	}
 }
 
-func TestLegacyCredentialEndpointTransitionCommitRemovesTransactionButRetainsLock(t *testing.T) {
+func TestLegacyCredentialEndpointTransitionCommitIsDeprecatedAndMakesNoChanges(t *testing.T) {
 	t.Parallel()
 	path := createRefusedLegacyCredentialSocket(t)
 	snapshot, err := InspectLegacyCredentialEndpoint(context.Background(), path)
@@ -252,30 +252,21 @@ func TestLegacyCredentialEndpointTransitionCommitRemovesTransactionButRetainsLoc
 	if err != nil {
 		t.Fatal(err)
 	}
-	ticket := transition.Ticket()
-	if err := transition.Commit(context.Background()); err != nil {
+	before := maintenanceDirectoryInventory(t, filepath.Dir(path))
+	if err := transition.Commit(context.Background()); !errors.Is(err, ErrCredentialEndpointMaintenanceCommitDeprecated) {
 		_ = transition.Close()
-		t.Fatal(err)
+		t.Fatalf("Commit error = %v, want deprecated", err)
 	}
-	if transition.State() != CredentialEndpointMaintenanceCommitted {
-		t.Fatalf("state = %q, want committed", transition.State())
+	if after := maintenanceDirectoryInventory(t, filepath.Dir(path)); !reflect.DeepEqual(after, before) {
+		_ = transition.Close()
+		t.Fatalf("deprecated Commit changed namespace: before=%v after=%v", before, after)
 	}
-	for _, absent := range []string{path, filepath.Join(filepath.Dir(path), ticket.QuarantineName), credentialEndpointMaintenanceJournalPath(path)} {
-		if _, statErr := os.Lstat(absent); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("committed path %s error = %v, want absent", absent, statErr)
-		}
-	}
-	if _, err := os.Lstat(credentialEndpointLockPath(path)); err != nil {
-		t.Fatalf("permanent lock error = %v", err)
+	if transition.State() != CredentialEndpointMaintenanceQuarantined {
+		t.Fatalf("state = %q, want quarantined", transition.State())
 	}
 	if err := transition.Close(); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, credentialEndpointLockPath(path))
-	if err != nil {
-		t.Fatalf("acquire retained lock: %v", err)
-	}
-	_ = lock.Close()
 }
 
 func TestLegacyCredentialEndpointTransitionRollbackRestoresExactSocketAndParksJournal(t *testing.T) {
@@ -463,8 +454,6 @@ func TestResumeLegacyCredentialEndpointTransitionAcceptsOnlyAttributedCrashShape
 		{name: "prepared final only", state: CredentialEndpointMaintenancePrepared, shape: "final", wantState: CredentialEndpointMaintenanceQuarantined},
 		{name: "prepared dual", state: CredentialEndpointMaintenancePrepared, shape: "dual", wantState: CredentialEndpointMaintenanceQuarantined},
 		{name: "prepared quarantine only", state: CredentialEndpointMaintenancePrepared, shape: "quarantine", wantState: CredentialEndpointMaintenanceQuarantined},
-		{name: "committing quarantine only", state: CredentialEndpointMaintenanceCommitting, shape: "quarantine", wantState: CredentialEndpointMaintenanceCommitted},
-		{name: "committing neither", state: CredentialEndpointMaintenanceCommitting, shape: "neither", wantState: CredentialEndpointMaintenanceCommitted},
 		{name: "rolling back quarantine only", state: CredentialEndpointMaintenanceRollingBack, shape: "quarantine", wantState: CredentialEndpointMaintenanceRolledBack},
 		{name: "rolling back dual", state: CredentialEndpointMaintenanceRollingBack, shape: "dual", wantState: CredentialEndpointMaintenanceRolledBack},
 		{name: "rolling back final only", state: CredentialEndpointMaintenanceRollingBack, shape: "final", wantState: CredentialEndpointMaintenanceRolledBack},

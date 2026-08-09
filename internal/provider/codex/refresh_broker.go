@@ -71,6 +71,16 @@ func OpenDefaultRecoveringCredentialRefreshControl(ctx context.Context, fs fsuti
 	return openDefaultCredentialRefreshControl(ctx, fs, client, OpenDefaultRecoveringCredentialControl)
 }
 
+// OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifier
+// is the supervised proxy-owner opener with explicit online-finalise runtime
+// verification. Automatic refresh and ordinary credential paths never invoke
+// the verifier.
+func OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifier(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer, verifier LegacyMaintenanceFinaliseVerifier) (*CredentialControl, error) {
+	return openDefaultCredentialRefreshControl(ctx, fs, client, func(ctx context.Context, fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialControl, error) {
+		return OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifier(ctx, fs, verifier, exchanges...)
+	})
+}
+
 type defaultCredentialControlOpener func(context.Context, fsutil.DurableFileSystem, ...RefreshExchange) (*CredentialControl, error)
 
 func openDefaultCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer, open defaultCredentialControlOpener) (*CredentialControl, error) {

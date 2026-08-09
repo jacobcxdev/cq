@@ -14,14 +14,17 @@ const legacyCredentialEndpointSnapshotVersion = 1
 const legacyCredentialEndpointProofMaxBytes = 16 << 10
 
 var (
-	ErrLegacyCredentialEndpointNotRefused           = errors.New("legacy credential endpoint is not an exact refused socket")
-	ErrLegacyCredentialEndpointArtifacts            = errors.New("legacy credential endpoint has coordination artifacts")
-	ErrCredentialEndpointMaintenancePending         = errors.New("credential endpoint maintenance is pending")
-	ErrCredentialEndpointMaintenanceUnsupported     = errors.New("credential endpoint maintenance unsupported")
-	ErrCredentialEndpointMaintenanceDrainRequired   = errors.New("credential endpoint stopped-and-drained authority required")
-	ErrCredentialEndpointMaintenanceSnapshotChanged = errors.New("legacy credential endpoint snapshot changed")
-	ErrCredentialEndpointMaintenanceTicketMismatch  = errors.New("credential endpoint maintenance ticket mismatch")
-	ErrCredentialEndpointMaintenanceConflict        = errors.New("credential endpoint maintenance conflict")
+	ErrLegacyCredentialEndpointNotRefused            = errors.New("legacy credential endpoint is not an exact refused socket")
+	ErrLegacyCredentialEndpointArtifacts             = errors.New("legacy credential endpoint has coordination artifacts")
+	ErrCredentialEndpointMaintenancePending          = errors.New("credential endpoint maintenance is pending")
+	ErrCredentialEndpointMaintenanceUnsupported      = errors.New("credential endpoint maintenance unsupported")
+	ErrCredentialEndpointMaintenanceDrainRequired    = errors.New("credential endpoint stopped-and-drained authority required")
+	ErrCredentialEndpointMaintenanceSnapshotChanged  = errors.New("legacy credential endpoint snapshot changed")
+	ErrCredentialEndpointMaintenanceTicketMismatch   = errors.New("credential endpoint maintenance ticket mismatch")
+	ErrCredentialEndpointMaintenanceConflict         = errors.New("credential endpoint maintenance conflict")
+	ErrCredentialEndpointMaintenanceCommitDeprecated = errors.New("credential endpoint maintenance commit is unavailable; activate then finalise")
+	ErrCredentialEndpointMaintenanceVerifierRequired = errors.New("credential endpoint maintenance finalise verifier required")
+	ErrCredentialEndpointMaintenanceVerification     = errors.New("credential endpoint maintenance finalise verification failed")
 )
 
 type LegacyCredentialEndpointState string
@@ -58,11 +61,39 @@ func (assert DrainAuthorityFunc) AssertStoppedAndDrained(ctx context.Context, pa
 	return assert(ctx, path)
 }
 
+// LegacyMaintenanceFinaliseVerification binds a runtime verification to the
+// exact activated receipt and current credential owner without exposing the
+// opaque maintenance ticket to verifier logs or status surfaces.
+type LegacyMaintenanceFinaliseVerification struct {
+	TicketHash      string
+	OwnerGeneration string
+}
+
+// LegacyMaintenanceFinaliseVerifier proves the current candidate/runtime
+// health tuple from inside the exact live owner operation immediately before
+// finalise becomes irreversible. Implementations remain outside the provider
+// and may inspect runtime-specific readiness without coupling it here.
+type LegacyMaintenanceFinaliseVerifier interface {
+	VerifyLegacyMaintenanceFinalise(context.Context, LegacyMaintenanceFinaliseVerification) error
+}
+
+type LegacyMaintenanceFinaliseVerifierFunc func(context.Context, LegacyMaintenanceFinaliseVerification) error
+
+func (verify LegacyMaintenanceFinaliseVerifierFunc) VerifyLegacyMaintenanceFinalise(ctx context.Context, proof LegacyMaintenanceFinaliseVerification) error {
+	if verify == nil {
+		return ErrCredentialEndpointMaintenanceVerifierRequired
+	}
+	return verify(ctx, proof)
+}
+
 type CredentialEndpointMaintenanceState string
 
 const (
 	CredentialEndpointMaintenancePrepared    CredentialEndpointMaintenanceState = "prepared"
 	CredentialEndpointMaintenanceQuarantined CredentialEndpointMaintenanceState = "quarantined"
+	CredentialEndpointMaintenanceActivating  CredentialEndpointMaintenanceState = "activating"
+	CredentialEndpointMaintenanceActivated   CredentialEndpointMaintenanceState = "activated"
+	CredentialEndpointMaintenanceFinalising  CredentialEndpointMaintenanceState = "finalising"
 	CredentialEndpointMaintenanceCommitting  CredentialEndpointMaintenanceState = "committing"
 	CredentialEndpointMaintenanceRollingBack CredentialEndpointMaintenanceState = "rolling_back"
 	CredentialEndpointMaintenanceRolledBack  CredentialEndpointMaintenanceState = "rolled_back"
@@ -87,6 +118,7 @@ type LegacyCredentialEndpointTransitionStatus struct {
 type legacyCredentialEndpointTransitionImplementation interface {
 	Ticket() LegacyCredentialEndpointTransitionTicket
 	State() CredentialEndpointMaintenanceState
+	Activate(context.Context) error
 	Commit(context.Context) error
 	Rollback(context.Context) error
 	Close() error
@@ -108,6 +140,15 @@ func (transition *LegacyCredentialEndpointTransition) State() CredentialEndpoint
 		return ""
 	}
 	return transition.implementation.State()
+}
+
+// Activate opens the reversible candidate smoke window while retaining the
+// exact quarantined legacy endpoint for rollback.
+func (transition *LegacyCredentialEndpointTransition) Activate(ctx context.Context) error {
+	if transition == nil || transition.implementation == nil {
+		return ErrCredentialEndpointMaintenanceUnsupported
+	}
+	return transition.implementation.Activate(ctx)
 }
 
 func (transition *LegacyCredentialEndpointTransition) Commit(ctx context.Context) error {

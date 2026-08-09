@@ -90,6 +90,7 @@ type legacyEndpointTransitionOptions struct {
 	snapshotFile             string
 	ticketFile               string
 	confirmStoppedAndDrained bool
+	confirmCandidateHealthy  bool
 	nonInteractive           bool
 }
 
@@ -98,8 +99,14 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 	if err != nil {
 		return err
 	}
-	if err := confirmLegacyEndpointStoppedAndDrained(opts, deps); err != nil {
-		return err
+	if opts.action == "finalise" {
+		if err := confirmLegacyEndpointCandidateHealthy(opts, deps); err != nil {
+			return err
+		}
+	} else {
+		if err := confirmLegacyEndpointStoppedAndDrained(opts, deps); err != nil {
+			return err
+		}
 	}
 	authority := codexprov.DrainAuthorityFunc(func(assertCtx context.Context, assertedPath string) error {
 		if assertedPath != path {
@@ -125,7 +132,7 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 		if err != nil {
 			return err
 		}
-	case "resume", "commit", "rollback":
+	case "resume", "activate", "rollback", "finalise":
 		data, err := fsutil.ReadSecureFile(fsutil.OSFileSystem{}, opts.ticketFile, legacyEndpointProofMaxBytes)
 		if err != nil {
 			return fmt.Errorf("read ticket file: %w", err)
@@ -137,6 +144,14 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 		if ticket.Path != path {
 			return codexprov.ErrCredentialEndpointMaintenanceTicketMismatch
 		}
+		if opts.action == "finalise" {
+			if err := codexprov.FinaliseLegacyCredentialEndpointTransition(ctx, path, ticket); err != nil {
+				return err
+			}
+			return encodeLegacyEndpointCommandResult(deps.stdout, codexprov.LegacyCredentialEndpointTransitionStatus{
+				State: codexprov.CredentialEndpointMaintenanceCommitted, Ticket: ticket,
+			})
+		}
 		transition, err = codexprov.ResumeLegacyCredentialEndpointTransition(ctx, path, ticket, authority)
 		if err != nil {
 			return err
@@ -146,8 +161,8 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 	}
 	defer func() { resultErr = errors.Join(resultErr, transition.Close()) }()
 	switch opts.action {
-	case "commit":
-		if err := transition.Commit(ctx); err != nil {
+	case "activate":
+		if err := transition.Activate(ctx); err != nil {
 			return err
 		}
 	case "rollback":
@@ -163,7 +178,7 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 func parseLegacyEndpointTransitionOptions(args []string) (legacyEndpointTransitionOptions, error) {
 	var opts legacyEndpointTransitionOptions
 	if len(args) == 0 {
-		return opts, fmt.Errorf("usage: cq proxy endpoint transition-legacy <prepare|resume|commit|rollback>")
+		return opts, fmt.Errorf("usage: cq proxy endpoint transition-legacy <prepare|resume|activate|finalise|rollback>")
 	}
 	opts.action = args[0]
 	for index := 1; index < len(args); index++ {
@@ -185,6 +200,11 @@ func parseLegacyEndpointTransitionOptions(args []string) (legacyEndpointTransiti
 				return opts, fmt.Errorf("transition-legacy: duplicate --confirm-stopped-and-drained")
 			}
 			opts.confirmStoppedAndDrained = true
+		case "--confirm-candidate-healthy":
+			if opts.confirmCandidateHealthy {
+				return opts, fmt.Errorf("transition-legacy: duplicate --confirm-candidate-healthy")
+			}
+			opts.confirmCandidateHealthy = true
 		case "--non-interactive":
 			if opts.nonInteractive {
 				return opts, fmt.Errorf("transition-legacy: duplicate --non-interactive")
@@ -202,7 +222,7 @@ func parseLegacyEndpointTransitionOptions(args []string) (legacyEndpointTransiti
 		if !filepath.IsAbs(opts.snapshotFile) || filepath.Clean(opts.snapshotFile) != opts.snapshotFile {
 			return opts, fmt.Errorf("transition-legacy requires an absolute clean snapshot file path")
 		}
-	case "resume", "commit", "rollback":
+	case "resume", "activate", "rollback", "finalise":
 		if opts.ticketFile == "" || opts.snapshotFile != "" {
 			return opts, fmt.Errorf("transition-legacy %s requires --ticket-file only", opts.action)
 		}
@@ -212,8 +232,20 @@ func parseLegacyEndpointTransitionOptions(args []string) (legacyEndpointTransiti
 	default:
 		return opts, fmt.Errorf("unknown transition action: %s", opts.action)
 	}
-	if !opts.confirmStoppedAndDrained {
-		return opts, fmt.Errorf("transition-legacy requires --confirm-stopped-and-drained")
+	if opts.action == "finalise" {
+		if opts.confirmStoppedAndDrained {
+			return opts, fmt.Errorf("transition-legacy finalise does not accept --confirm-stopped-and-drained")
+		}
+		if !opts.confirmCandidateHealthy {
+			return opts, fmt.Errorf("transition-legacy finalise requires --confirm-candidate-healthy")
+		}
+	} else {
+		if opts.confirmCandidateHealthy {
+			return opts, fmt.Errorf("transition-legacy %s does not accept --confirm-candidate-healthy", opts.action)
+		}
+		if !opts.confirmStoppedAndDrained {
+			return opts, fmt.Errorf("transition-legacy requires --confirm-stopped-and-drained")
+		}
 	}
 	return opts, nil
 }
@@ -234,6 +266,26 @@ func confirmLegacyEndpointStoppedAndDrained(opts legacyEndpointTransitionOptions
 	}
 	if strings.TrimSpace(line) != "stopped-and-drained" {
 		return fmt.Errorf("stopped-and-drained confirmation declined")
+	}
+	return nil
+}
+
+func confirmLegacyEndpointCandidateHealthy(opts legacyEndpointTransitionOptions, deps proxyEndpointMaintenanceDependencies) error {
+	if opts.nonInteractive {
+		return nil
+	}
+	if !deps.stdinIsTTY() {
+		return fmt.Errorf("transition-legacy finalise requires --non-interactive when stdin is not a TTY")
+	}
+	if _, err := fmt.Fprint(deps.stderr, "Type candidate-healthy to confirm the exact live candidate passed health verification: "); err != nil {
+		return err
+	}
+	line, err := bufio.NewReader(io.LimitReader(deps.stdin, 256)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if strings.TrimSpace(line) != "candidate-healthy" {
+		return fmt.Errorf("candidate-healthy confirmation declined")
 	}
 	return nil
 }

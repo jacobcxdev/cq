@@ -56,7 +56,7 @@ func TestProxyEndpointInspectLegacyDoesNotChangeDirectoryInventory(t *testing.T)
 	}
 }
 
-func TestProxyEndpointTransitionRequiresConfirmationAndCommitsWithStrictFiles(t *testing.T) {
+func TestProxyEndpointTransitionRequiresConfirmationAndKeepsRollbackUntilFinalise(t *testing.T) {
 	t.Parallel()
 	home, path := createCLIRefusedLegacyEndpoint(t)
 	snapshot, err := codexprov.InspectLegacyCredentialEndpoint(context.Background(), path)
@@ -110,28 +110,94 @@ func TestProxyEndpointTransitionRequiresConfirmationAndCommitsWithStrictFiles(t 
 	if err := os.WriteFile(ticketFile, ticketData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var commitOutput bytes.Buffer
-	deps.stdout = &commitOutput
+	var activateOutput bytes.Buffer
+	deps.stdout = &activateOutput
 	if err := runProxyEndpointWithDependencies(context.Background(), []string{
-		"transition-legacy", "commit", "--ticket-file", ticketFile,
+		"transition-legacy", "activate", "--ticket-file", ticketFile,
 		"--confirm-stopped-and-drained", "--non-interactive",
 	}, deps); err != nil {
 		t.Fatal(err)
 	}
-	var committed codexprov.LegacyCredentialEndpointTransitionStatus
-	if err := json.Unmarshal(commitOutput.Bytes(), &committed); err != nil {
+	var activated codexprov.LegacyCredentialEndpointTransitionStatus
+	if err := json.Unmarshal(activateOutput.Bytes(), &activated); err != nil {
 		t.Fatal(err)
 	}
-	if committed.State != codexprov.CredentialEndpointMaintenanceCommitted {
-		t.Fatalf("commit state = %q", committed.State)
+	if activated.State != codexprov.CredentialEndpointMaintenanceActivated {
+		t.Fatalf("activate state = %q", activated.State)
 	}
 	if _, err := os.Lstat(path + ".lock"); err != nil {
 		t.Fatalf("permanent lock missing: %v", err)
 	}
-	for _, absent := range []string{path, path + ".maintenance.json", filepath.Join(filepath.Dir(path), prepared.Ticket.QuarantineName)} {
+	for _, absent := range []string{path, path + ".maintenance.json"} {
 		if _, err := os.Lstat(absent); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("committed path %s error = %v, want absent", absent, err)
+			t.Fatalf("activated path %s error = %v, want absent", absent, err)
 		}
+	}
+	for _, present := range []string{path + ".maintenance.rollback.json", filepath.Join(filepath.Dir(path), prepared.Ticket.QuarantineName)} {
+		if _, err := os.Lstat(present); err != nil {
+			t.Fatalf("activated rollback artifact %s missing: %v", present, err)
+		}
+	}
+
+	beforeCommit := readDirectoryInventory(t, filepath.Dir(path))
+	if err := runProxyEndpointWithDependencies(context.Background(), []string{
+		"transition-legacy", "commit", "--ticket-file", ticketFile,
+		"--confirm-stopped-and-drained", "--non-interactive",
+	}, deps); err == nil {
+		t.Fatal("deprecated commit action succeeded")
+	}
+	afterCommit := readDirectoryInventory(t, filepath.Dir(path))
+	if !reflect.DeepEqual(beforeCommit, afterCommit) {
+		t.Fatalf("deprecated commit changed namespace: before=%v after=%v", beforeCommit, afterCommit)
+	}
+
+	var rollbackOutput bytes.Buffer
+	deps.stdout = &rollbackOutput
+	if err := runProxyEndpointWithDependencies(context.Background(), []string{
+		"transition-legacy", "rollback", "--ticket-file", ticketFile,
+		"--confirm-stopped-and-drained", "--non-interactive",
+	}, deps); err != nil {
+		t.Fatal(err)
+	}
+	var rolledBack codexprov.LegacyCredentialEndpointTransitionStatus
+	if err := json.Unmarshal(rollbackOutput.Bytes(), &rolledBack); err != nil {
+		t.Fatal(err)
+	}
+	if rolledBack.State != codexprov.CredentialEndpointMaintenanceRolledBack {
+		t.Fatalf("rollback state = %q", rolledBack.State)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("legacy socket was not restored: %v", err)
+	}
+	if _, err := os.Lstat(path + ".maintenance.rollback.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback receipt remains: %v", err)
+	}
+}
+
+func TestProxyEndpointFinaliseRequiresHealthAuthorityNotDrainAuthority(t *testing.T) {
+	t.Parallel()
+	ticketFile := filepath.Join(t.TempDir(), "ticket.json")
+	if err := os.WriteFile(ticketFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"finalise", "--ticket-file", ticketFile, "--non-interactive"},
+		{"finalise", "--ticket-file", ticketFile, "--confirm-stopped-and-drained", "--non-interactive"},
+		{"activate", "--ticket-file", ticketFile, "--confirm-candidate-healthy", "--non-interactive"},
+		{"commit", "--ticket-file", ticketFile, "--confirm-stopped-and-drained", "--non-interactive"},
+	} {
+		if _, err := parseLegacyEndpointTransitionOptions(args); err == nil {
+			t.Fatalf("unsafe options accepted: %v", args)
+		}
+	}
+	opts, err := parseLegacyEndpointTransitionOptions([]string{
+		"finalise", "--ticket-file", ticketFile, "--confirm-candidate-healthy", "--non-interactive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.confirmCandidateHealthy || opts.confirmStoppedAndDrained {
+		t.Fatalf("finalise options = %#v", opts)
 	}
 }
 
