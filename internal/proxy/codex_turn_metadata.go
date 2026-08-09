@@ -124,7 +124,7 @@ func ParseCodexTurnMetadata(body []byte, directHeader string, handshake *CodexTu
 			return CodexTurnMetadataResult{}, fmt.Errorf("decode Codex client metadata: %w", err)
 		}
 		if raw, ok := client[codexTurnMetadataKey]; ok {
-			metadata, err := decodeCodexTurnMetadata(raw)
+			metadata, err := decodeCodexTurnMetadataWithLimit(raw, codexProtocolMaxBytes)
 			return codexTurnMetadataResult(metadata, CodexTurnMetadataNested, true, err)
 		}
 	}
@@ -154,7 +154,11 @@ func ParseCodexTurnMetadata(body []byte, directHeader string, handshake *CodexTu
 }
 
 func decodeCodexTurnMetadata(raw []byte) (CodexTurnMetadata, error) {
-	if len(raw) > codexTurnMetadataMaxBytes {
+	return decodeCodexTurnMetadataWithLimit(raw, codexTurnMetadataMaxBytes)
+}
+
+func decodeCodexTurnMetadataWithLimit(raw []byte, limit int) (CodexTurnMetadata, error) {
+	if limit <= 0 || len(raw) > limit {
 		return CodexTurnMetadata{}, errors.New("Codex turn metadata exceeds limit")
 	}
 	var encoded string
@@ -163,7 +167,7 @@ func decodeCodexTurnMetadata(raw []byte) (CodexTurnMetadata, error) {
 			return CodexTurnMetadata{}, fmt.Errorf("decode Codex turn metadata string: %w", err)
 		}
 		raw = []byte(encoded)
-		if len(raw) > codexTurnMetadataMaxBytes {
+		if len(raw) > limit {
 			return CodexTurnMetadata{}, errors.New("Codex turn metadata exceeds limit")
 		}
 	}

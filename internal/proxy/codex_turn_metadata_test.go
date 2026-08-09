@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,31 @@ func TestTurnMetadataAcceptsCurrentCompactionObject(t *testing.T) {
 	}
 	if got.Metadata.CompactionPhase != CodexCompactionMidTurn {
 		t.Fatalf("metadata = %#v", got.Metadata)
+	}
+}
+
+func TestTurnMetadataAcceptsLargeCanonicalMetadata(t *testing.T) {
+	t.Parallel()
+	metadata, err := json.Marshal(map[string]any{
+		"session_id":   "session",
+		"thread_id":    "thread",
+		"turn_id":      "turn",
+		"request_kind": "turn",
+		"code_mode_tool_names": map[string]string{
+			"large": strings.Repeat("x", codexTurnMetadataMaxBytes),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append([]byte(`{"client_metadata":{"x-codex-turn-metadata":`), metadata...)
+	body = append(body, []byte(`}}`)...)
+	got, err := ParseCodexTurnMetadata(body, `{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata.TurnID != "turn" || got.Source != CodexTurnMetadataNested {
+		t.Fatalf("metadata = %#v", got)
 	}
 }
 
