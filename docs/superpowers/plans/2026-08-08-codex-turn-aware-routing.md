@@ -547,10 +547,12 @@ Installed binary `0.20.3+6c03ebe` (SHA-256 `f63be75789e5b49f5998ad50afffa921d9fb
 - [ ] Read complete diff from Stage 1 base to Stage 15 head.
 - [ ] Trace every system-auth/registry/managed writer to coordinator capability. Trace every native/translated/Live route to explicit account executor.
 - [x] Prove HTTP and WS share one lease manager and namespace; prove journal restart resolves account by opaque `AccountKey` and never token/path/email.
-- [ ] Prove `response.completed` only changes sampling state; changed unseen turn ID after drained work is successor boundary; retained history blocks stale traffic.
-- [ ] Prove no account identity migrates after admission and no incremental input crosses upstream generation.
+- [x] Prove `response.completed` only changes sampling state; changed unseen turn ID after drained work is successor boundary; retained history blocks stale traffic.
+- [x] Prove no account identity migrates after admission and no incremental input crosses upstream generation.
 - [ ] Confirm worktree contains no credential snapshots, raw installed fixtures, payload logs, canary raw IDs, or temp journals.
 - [ ] Run full commands once more on clean tree. Record exact commit, Go version, Codex client/Desktop build, fixture hash, and installed-service marker in final report.
 - [ ] Do not push or open PR without explicit user approval.
 
 Final audit found HTTP enforcement and WebSocket observation initially shared only a journal and namespace, not live lease state. Mode-specific views now share one synchronised lease-map core, while retaining independent mode epochs and authority flags. A 100-run race test proves WS-observed exact-turn state remains on its first account when traffic crosses to HTTP enforcement. Existing restart tests resolve freshly discovered opaque `AccountKey` values from HMAC journal fields and assert raw session, thread, turn, account, response, and turn-state values never persist.
+
+Lifecycle and migration invariants passed 100 race-detector trials: `response.completed.end_turn=false` enters continuation-pending while true or absent only enters quiescence; successor IDs remain blocked until routing and active-attempt references drain; superseded IDs never resurrect; failover ends at admission; and resynchronisation accepts only a portable full request on new downstream/upstream generations, never an incremental frame or same socket.
