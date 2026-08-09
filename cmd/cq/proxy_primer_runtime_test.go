@@ -10,9 +10,10 @@ import (
 
 func TestBuildCodexPrimerRequiresEnabledOwner(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/config")
-	catalog := modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{{
-		Provider: modelregistry.ProviderCodex, ID: "gpt-5.3-codex-spark", Visibility: "list",
-	}}})
+	catalog := modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{
+		{Provider: modelregistry.ProviderCodex, ID: "gpt-5.3-codex-spark", Visibility: "list"},
+		{Provider: modelregistry.ProviderCodex, ID: "gpt-5.4", Visibility: "list"},
+	}})
 	fsys := fsutil.NewMemFS()
 	cfg := &proxy.Config{CodexUpstream: "https://chatgpt.example/backend-api/codex"}
 	primer, err := buildCodexPrimer(cfg, true, nil, catalog, fsys)

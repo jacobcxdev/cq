@@ -51,20 +51,22 @@ func PlanCodexPrimerTargets(descriptors []codex.WindowDescriptor, overrides map[
 			target.Windows = append(target.Windows, window)
 		}
 		if len(shared) != 0 {
-			target := preferredScopedTarget(byModel)
-			if target == nil {
-				entry, err := preferredSharedCodexPrimerModel(entries)
+			sharedByModel := make(map[string]*CodexPrimerTarget)
+			for _, window := range shared {
+				entry, err := resolveSharedCodexPrimerModel(window.RawLimitName, overrides, entries)
 				if err != nil {
-					for _, window := range shared {
-						unresolved = append(unresolved, CodexPrimerUnresolved{RawLimitName: window.RawLimitName, Code: "model_unresolved"})
-					}
-				} else {
-					target = &CodexPrimerTarget{ResetAt: time.Unix(epoch, 0), ModelID: entry.ID}
-					byModel[entry.ID] = target
+					unresolved = append(unresolved, CodexPrimerUnresolved{RawLimitName: window.RawLimitName, Code: "model_unresolved"})
+					continue
 				}
+				target := sharedByModel[entry.ID]
+				if target == nil {
+					target = &CodexPrimerTarget{ResetAt: time.Unix(epoch, 0), ModelID: entry.ID}
+					sharedByModel[entry.ID] = target
+				}
+				target.Windows = append(target.Windows, window)
 			}
-			if target != nil {
-				target.Windows = append(target.Windows, shared...)
+			for _, target := range sharedByModel {
+				targets = append(targets, *target)
 			}
 		}
 		for _, target := range byModel {
@@ -81,42 +83,34 @@ func PlanCodexPrimerTargets(descriptors []codex.WindowDescriptor, overrides map[
 	return targets, unresolved
 }
 
-func preferredScopedTarget(targets map[string]*CodexPrimerTarget) *CodexPrimerTarget {
-	var ordered []*CodexPrimerTarget
-	for _, target := range targets {
-		ordered = append(ordered, target)
-	}
-	sort.Slice(ordered, func(i, j int) bool {
-		iSpark := containsPrimerTokens(primerTokens(ordered[i].ModelID), []string{"spark"})
-		jSpark := containsPrimerTokens(primerTokens(ordered[j].ModelID), []string{"spark"})
-		if iSpark != jSpark {
-			return iSpark
+func resolveSharedCodexPrimerModel(scope string, overrides map[string]string, entries []modelregistry.Entry) (modelregistry.Entry, error) {
+	if override, ok := overrides[scope]; ok {
+		entry, found := exactPrimerModel(override, visibleCodexModels(entries))
+		if !found || isSparkPrimerModel(entry) {
+			return modelregistry.Entry{}, &primerModelError{}
 		}
-		return ordered[i].ModelID < ordered[j].ModelID
-	})
-	if len(ordered) == 0 {
-		return nil
+		return entry, nil
 	}
-	return ordered[0]
+	return preferredSharedCodexPrimerModel(entries)
 }
 
 func preferredSharedCodexPrimerModel(entries []modelregistry.Entry) (modelregistry.Entry, error) {
 	visible := visibleCodexModels(entries)
-	var spark []modelregistry.Entry
+	var general []modelregistry.Entry
 	for _, entry := range visible {
-		if containsPrimerTokens(primerTokens(entry.ID+" "+entry.DisplayName+" "+strings.Join(entry.Aliases, " ")), []string{"spark"}) {
-			spark = append(spark, entry)
+		if !isSparkPrimerModel(entry) {
+			general = append(general, entry)
 		}
 	}
-	if len(spark) != 0 {
-		sortPrimerModels(spark)
-		return spark[0], nil
-	}
-	if len(visible) == 0 {
+	if len(general) == 0 {
 		return modelregistry.Entry{}, &primerModelError{}
 	}
-	sortPrimerModels(visible)
-	return visible[0], nil
+	sortPrimerModels(general)
+	return general[0], nil
+}
+
+func isSparkPrimerModel(entry modelregistry.Entry) bool {
+	return containsPrimerTokens(primerTokens(entry.ID+" "+entry.DisplayName+" "+strings.Join(entry.Aliases, " ")), []string{"spark"})
 }
 
 type primerModelError struct{}

@@ -422,7 +422,8 @@ Priming is explicit opt-in at feature level, but window enumeration is automatic
 The scheduler converts due descriptors into activation targets, then coalesces targets that one request can satisfy:
 
 - one general model request activates every simultaneously due shared window for that account;
-- one request for a scoped model family activates that family's due windows and any simultaneously due shared windows;
+- one request for a scoped model family activates only that family's due windows unless installed acceptance proves an additional capability;
+- shared and scoped windows stay separate even at one epoch when provider capability is unproven;
 - different model families remain separate activation targets;
 - different reset epochs remain separate schedules even when their periods match.
 
@@ -436,7 +437,7 @@ Scoped-model resolution is deterministic:
 
 Arbitrary substring matching is forbidden because short names such as `pro` can collide with unrelated families. Token-boundary matching is accepted only when every match belongs to one inferred family and registry preference/version ordering yields one deterministic visible model. Current `GPT-5.3-Codex-Spark` resolves exactly to its registry slug. A future Anthropic adapter can resolve `Sonnet`, `Fable`, or later family names through the same contract.
 
-For a shared target, CQ first reuses a resolved scoped model according to provider policy; current Codex policy prefers Spark. If no scoped target exists, it selects the registry-preferred visible compatible provider model. Current registry has no price metadata, so CQ must not label that choice “cheapest”. If pricing metadata becomes authoritative later, provider policy may use it without changing scheduler state. An explicit model override always wins.
+For a shared target, CQ selects the registry-preferred visible non-Spark Codex model. Installed acceptance proved Spark traffic starts the Spark-specific window but does not start the shared window, so Spark is not a compatible shared capability and CQ never coalesces these targets. Current registry has no price metadata, so CQ must not label the general choice “cheapest”. If pricing or explicit capability metadata becomes authoritative later, provider policy may use it without changing scheduler state. An explicit model override always wins only when it names a model compatible with that scope.
 
 ### Scheduler, request, and verification
 
@@ -455,7 +456,7 @@ A stable fresh epoch is already counting down and receives no synthetic request.
 
 Synthetic traffic uses native Responses HTTP with `store:false`, no tools, no continuation, a minimal `ping` instruction, a bounded response, and a dedicated CQ synthetic metadata namespace. It never joins, creates, or mutates a user task lease. It uses one exact `AccountKey`; same-identity candidate fallback and one eligible coordinator refresh are allowed, but cross-account failover and automatic system activation are forbidden.
 
-A definitely rejected pre-admission request may retry under a bounded provider-lag policy. The attempt bound applies to stable window-lineage identity across changing untouched epochs, not to each reset timestamp. Once admission is observed, bytes may have reached upstream, or outcome is ambiguous, CQ never sends another synthetic request for that account/window generation. It performs verification polls only. Remaining percentage alone is never verification because one minimal request can still display as `100%`. A scoped request records shared and scoped verification separately.
+A definitely rejected pre-admission request may retry under a bounded provider-lag policy. The attempt bound applies to stable window-lineage identity across changing untouched epochs, not to each reset timestamp. Once admission is observed, bytes may have reached upstream, or outcome is ambiguous, CQ never repeats that account/window/model-capability attempt. It performs verification polls only. If the epoch keeps sliding and later installed evidence removes that model from the window's compatible capability set, CQ durably retires the old attempt as `model_incapable`; one separately claimed compatible capability may then run. This is a model-capability correction, never replay of the admitted capability. Remaining percentage alone is never verification because one minimal request can still display as `100%`. Scoped and shared verification remain separate.
 
 Primer state is a separate atomic `0o600` journal under a `0o700` CQ state directory. It stores HMAC account identity, provider, raw-scope hash, canonical period, observed reset epoch, selected model ID, attempt generation/state, next verification time, and typed result. It stores no credential material, email, provider account ID, prompt, response text, or external path. Restart resumes due schedules and verification without replaying an admitted or ambiguous generation.
 
@@ -831,7 +832,7 @@ Executable addendum plans:
 | 14. WebSocket enforcement | Permit WS `enforce` only after one atomic marker records successful completion of every blocking gate for the exact build/schema/retry-budget tuple | Installed listener proves same-turn sampling, parallel turns, quota exhaustion, 60-minute/restart reconnect, full-history account change, clean byte/error propagation, and zero late-generation mutations | Invalidate marker; set WS mode `observe` and restart/drain |
 | 15. Soak and default | Run installed-service canary; in a later release make enforcement the recommended post-validation choice only for installations with current readiness markers and explicit opt-in; never activate it by upgrade; remove dead selector/suppression/switch code after rollback window | Seven consecutive days and at least 100 admitted installed-service turns with zero account/lease mismatch, automatic auth write, secret leak, or unexplained lifecycle event; complete one rollback rehearsal | Keep explicit `off/observe` through next release window |
 | 16. External candidate federation | Add generic read-only source boundary plus validated Codex Bar manifest adapter; preserve source candidates under one logical account and resolve exact external revisions only inside attempts | Fresh Codex Bar/stale CQ inverse reproducer routes same identity successfully; manifest/path/fingerprint/revision attacks fail closed; all automatic activity leaves both stores byte-identical | Disable external source adapter; CQ/system candidates remain unchanged |
-| 17. Dynamic window priming | Add backend descriptor preservation, conservative model-family resolution, activation coalescing, durable scheduler, account-pinned synthetic Responses request, and reset-epoch verification behind explicit feature enablement | Fake-clock/race/crash suites pass; naturally reset untouched installed account receives no manual request, scheduler detects sliding then proves stable epoch, and no credential/system/task state changes | Disable primer; retain journal for inspection; never replay admitted or ambiguous generations |
+| 17. Dynamic window priming | Add backend descriptor preservation, conservative model-family resolution, capability-safe coalescing, durable scheduler, account-pinned synthetic Responses request, and reset-epoch verification behind explicit feature enablement | Fake-clock/race/crash suites pass; naturally reset untouched installed account receives no manual request, scheduler detects sliding then proves stable epoch, and no credential/system/task state changes | Disable primer; retain journal for inspection; never replay an admitted or ambiguous model capability |
 
 Stage 1 intentionally trades automatic Codex refresh for credential safety until Stage 5 supplies a proven single owner. Compatibility epoch starts there and advances before any later irreversible persisted schema; startup refuses an older binary rather than silently restoring unsafe semantics. No lease stage begins before credential authority and rollback controls are complete.
 
@@ -894,10 +895,10 @@ Rollback rules:
 - backend duration/name addition, removal, and resize require no config change;
 - exact registry ID/alias/display match, unique token-family match, ambiguity, provider override, and unresolved scope;
 - shared `5h` plus `7d` coalesce into one request when due together;
-- scoped Spark request satisfies due Spark and shared descriptors, while independent reset epochs remain separately scheduled;
+- scoped Spark and shared descriptors remain separate capability targets even at one epoch; shared target uses registry-preferred non-Spark model;
 - multiple scoped families create one activation target per family rather than one per raw window;
 - pre-send usage refresh skips an externally advanced epoch;
-- definite pre-admission rejection retries only within bounded policy; admission or ambiguity never replays;
+- definite pre-admission rejection retries only within bounded policy; admission or ambiguity never replays one capability; evidence-backed `model_incapable` retirement permits one distinct compatible capability;
 - same-identity candidate recovery allowed; cross-account failover and system activation forbidden;
 - untouched detection requires exact `100%`, full-period horizon, and two-sample epoch sliding; stable fresh epochs receive no traffic;
 - verification requires active-epoch advancement or untouched-epoch stability, never rounded remaining percentage;

@@ -99,7 +99,7 @@ func TestCodexPrimerDispatchesDueGenerationAndVerifiesEpochAdvance(t *testing.T)
 	}
 	oldTarget, _ := PlanCodexPrimerTargets(primerObservation(due).Windows, nil, primerRegistryEntries())
 	record, found := store.Lookup("account-1", oldTarget[0])
-	if requester.calls != 1 || requester.model != "gpt-5.3-codex-spark" || !found || record.State != PrimerStateVerified {
+	if requester.calls != 1 || requester.model != "gpt-5.4" || !found || record.State != PrimerStateVerified {
 		t.Fatalf("request/record = calls:%d model:%q found:%v record:%+v", requester.calls, requester.model, found, record)
 	}
 	if claimed, err := store.Claim("account-1", oldTarget[0]); err != nil || claimed {
@@ -447,5 +447,68 @@ func TestCodexPrimerBoundsRejectedDormantAttemptsAcrossSlidingEpochs(t *testing.
 	}
 	if requester.calls != codexPrimerMaxRejectedAttempts {
 		t.Fatalf("rejected dormant request calls = %d", requester.calls)
+	}
+}
+
+func TestCodexPrimerAutomaticallyCorrectsDormantSharedModelCapability(t *testing.T) {
+	t0 := time.Unix(12000, 0)
+	probe := 5 * time.Second
+	oldReset := t0.Add(7*24*time.Hour - probe)
+	oldTargets, unresolved := PlanCodexPrimerTargets(primerObservation(oldReset).Windows, nil, []modelregistry.Entry{{
+		Provider: modelregistry.ProviderCodex, ID: "gpt-5.3-codex-spark",
+		DisplayName: "GPT-5.3-Codex-Spark", Visibility: "list", Priority: 1,
+	}})
+	if len(oldTargets) != 0 || len(unresolved) != 1 {
+		t.Fatalf("old planner prerequisite = %+v/%+v", oldTargets, unresolved)
+	}
+	oldTarget := CodexPrimerTarget{
+		ResetAt: oldReset, ModelID: "gpt-5.3-codex-spark",
+		Windows: primerObservation(oldReset).Windows,
+	}
+	firstReset := t0.Add(7 * 24 * time.Hour)
+	secondReset := t0.Add(probe).Add(7 * 24 * time.Hour)
+	usage := &queuedPrimerUsage{observations: []codex.UsageObservation{
+		primerObservation(firstReset),
+		primerObservation(secondReset),
+		primerObservation(secondReset),
+		primerObservation(secondReset),
+	}}
+	requester := &recordingPrimerRequester{result: PrimerRequestResult{State: PrimerRequestAdmitted}}
+	primer, store := testPrimerScheduler(t, usage, requester)
+	primer.DormantProbeInterval = probe
+	if err := store.Observe("account-1", oldTarget); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.ClaimDormant("account-1", oldTarget, t0); err != nil || !claimed {
+		t.Fatalf("old claim = %v, %v", claimed, err)
+	}
+	if err := store.Mark("account-1", oldTarget, PrimerStateAdmitted, "dormant_admitted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDormantVerifying("account-1", oldTarget, oldTarget, t0); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := primer.RunOnce(context.Background(), t0); err != nil {
+		t.Fatal(err)
+	}
+	if requester.calls != 0 {
+		t.Fatalf("corrected request dispatched before two samples: %d", requester.calls)
+	}
+	if _, err := primer.RunOnce(context.Background(), t0.Add(probe)); err != nil {
+		t.Fatal(err)
+	}
+	if requester.calls != 1 || requester.model != "gpt-5.4" {
+		t.Fatalf("corrected request = calls:%d model:%q", requester.calls, requester.model)
+	}
+	if _, err := primer.RunOnce(context.Background(), t0.Add(2*probe)); err != nil {
+		t.Fatal(err)
+	}
+	verified := false
+	for _, record := range store.Records() {
+		verified = verified || (record.ModelID == "gpt-5.4" && record.State == PrimerStateVerified)
+	}
+	if !verified {
+		t.Fatalf("corrected lineage not verified: %+v", store.Records())
 	}
 }

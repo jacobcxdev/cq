@@ -282,10 +282,21 @@ func (s *CodexPrimerStore) ReconcileDormant(account codex.AccountKey, targets []
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	accountHash := s.hash("account", string(account))
-	type currentTarget struct{ scopeHash string }
+	type currentTarget struct {
+		scopeHash string
+		modelID   string
+	}
 	current := make(map[string]currentTarget, len(targets))
 	for _, target := range targets {
-		current[s.windowIdentity(target)] = currentTarget{scopeHash: s.scopeIdentity(target)}
+		current[s.windowIdentity(target)] = currentTarget{scopeHash: s.scopeIdentity(target), modelID: target.ModelID}
+	}
+	combinedWindowHash := ""
+	if len(targets) > 1 {
+		combined := CodexPrimerTarget{}
+		for _, target := range targets {
+			combined.Windows = append(combined.Windows, target.Windows...)
+		}
+		combinedWindowHash = s.windowIdentity(combined)
 	}
 	records := append([]PrimerRecord(nil), s.records...)
 	changed := false
@@ -296,6 +307,15 @@ func (s *CodexPrimerStore) ReconcileDormant(account codex.AccountKey, targets []
 		}
 		observed, ok := current[records[i].WindowHash]
 		if !ok {
+			if combinedWindowHash == records[i].WindowHash &&
+				((records[i].State == PrimerStateAdmitted || records[i].State == PrimerStateAmbiguous) && strings.HasPrefix(records[i].ResultCode, "dormant_") ||
+					records[i].State == PrimerStateVerifying && records[i].ResultCode == "dormant_epoch_stability") {
+				records[i].State = PrimerStateFailed
+				records[i].ResultCode = "dormant_target_split"
+				records[i].ExpectedScopeHash = ""
+				records[i].NextCheckAt = time.Time{}
+				changed = true
+			}
 			continue
 		}
 		if (records[i].State == PrimerStateAdmitted || records[i].State == PrimerStateAmbiguous) && strings.HasPrefix(records[i].ResultCode, "dormant_") {
@@ -308,18 +328,26 @@ func (s *CodexPrimerStore) ReconcileDormant(account codex.AccountKey, targets []
 		if records[i].State != PrimerStateVerifying || records[i].ResultCode != "dormant_epoch_stability" {
 			continue
 		}
-		if records[i].ExpectedScopeHash != observed.scopeHash {
-			records[i].ExpectedScopeHash = observed.scopeHash
-			records[i].NextCheckAt = nextCheck.UTC()
-			changed = true
-		}
-		if !records[i].NextCheckAt.After(now) && records[i].ExpectedScopeHash == observed.scopeHash {
+		if records[i].ExpectedScopeHash == observed.scopeHash && !records[i].NextCheckAt.After(now) {
 			records[i].State = PrimerStateVerified
 			records[i].ResultCode = "dormant_epoch_stable"
 			records[i].ExpectedScopeHash = ""
 			records[i].NextCheckAt = time.Time{}
 			changed = true
 			continue
+		}
+		if records[i].ExpectedScopeHash != observed.scopeHash && records[i].ModelID != observed.modelID {
+			records[i].State = PrimerStateFailed
+			records[i].ResultCode = "dormant_model_incapable"
+			records[i].ExpectedScopeHash = ""
+			records[i].NextCheckAt = time.Time{}
+			changed = true
+			continue
+		}
+		if records[i].ExpectedScopeHash != observed.scopeHash {
+			records[i].ExpectedScopeHash = observed.scopeHash
+			records[i].NextCheckAt = nextCheck.UTC()
+			changed = true
 		}
 		if earliest.IsZero() || records[i].NextCheckAt.Before(earliest) {
 			earliest = records[i].NextCheckAt

@@ -159,6 +159,87 @@ func TestCodexPrimerStoreRestoresDormantStabilityVerification(t *testing.T) {
 	}
 }
 
+func TestCodexPrimerStoreRetiresSlidingDormantModelCapability(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(12000, 0)
+	dispatched := testPrimerTarget()
+	dispatched.ModelID = "gpt-5.3-codex-spark"
+	dispatched.ResetAt = now.Add(7 * 24 * time.Hour)
+	for i := range dispatched.Windows {
+		dispatched.Windows[i].ResetAt = dispatched.ResetAt
+	}
+	if err := store.Observe("account-secret", dispatched); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.ClaimDormant("account-secret", dispatched, now); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if err := store.Mark("account-secret", dispatched, PrimerStateAdmitted, "dormant_admitted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDormantVerifying("account-secret", dispatched, dispatched, now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	corrected := dispatched
+	corrected.ModelID = "gpt-5.4"
+	corrected.ResetAt = dispatched.ResetAt.Add(5 * time.Second)
+	for i := range corrected.Windows {
+		corrected.Windows[i].ResetAt = corrected.ResetAt
+	}
+	if _, err := store.ReconcileDormant("account-secret", []CodexPrimerTarget{corrected}, now.Add(5*time.Second), now.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	record, found := store.Lookup("account-secret", dispatched)
+	if !found || record.State != PrimerStateFailed || record.ResultCode != "dormant_model_incapable" {
+		t.Fatalf("retired record = %+v, %v", record, found)
+	}
+	if err := store.Observe("account-secret", corrected); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.ClaimDormant("account-secret", corrected, now.Add(5*time.Second)); err != nil || !claimed {
+		t.Fatalf("corrected claim = %v, %v", claimed, err)
+	}
+}
+
+func TestCodexPrimerStoreRetiresLegacyCoalescedDormantTarget(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(13000, 0)
+	shared := testPrimerTarget()
+	shared.Windows[0].RawLimitName = "primary_window"
+	shared.Windows[0].WindowName = quota.Window7Day
+	shared.Windows[0].ScopeKind = codex.WindowScopeShared
+	shared.Windows[0].Scope = ""
+	spark := testPrimerTarget()
+	combined := shared
+	combined.Windows = append(append([]codex.WindowDescriptor(nil), shared.Windows...), spark.Windows...)
+	if err := store.Observe("account-secret", combined); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.ClaimDormant("account-secret", combined, now); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if err := store.Mark("account-secret", combined, PrimerStateAdmitted, "dormant_admitted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDormantVerifying("account-secret", combined, combined, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileDormant("account-secret", []CodexPrimerTarget{shared, spark}, now, now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	record, found := store.Lookup("account-secret", combined)
+	if !found || record.State != PrimerStateFailed || record.ResultCode != "dormant_target_split" {
+		t.Fatalf("split record = %+v, %v", record, found)
+	}
+}
+
 func TestCodexPrimerStoreUsesPrivateFiles(t *testing.T) {
 	dir := t.TempDir()
 	store, err := OpenCodexPrimerStore(fsutil.OSFileSystem{}, dir+"/primer.json", dir+"/primer.key")

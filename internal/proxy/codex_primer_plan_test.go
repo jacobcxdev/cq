@@ -56,7 +56,7 @@ func TestValidateCodexPrimerOverridesRequiresVisibleRegistryModels(t *testing.T)
 	}
 }
 
-func TestPlanCodexPrimerTargetsCoalescesScopedAndSharedWindows(t *testing.T) {
+func TestPlanCodexPrimerTargetsSeparatesScopedAndSharedCapabilities(t *testing.T) {
 	reset := time.Unix(1774569600, 0)
 	descriptors := []codex.WindowDescriptor{
 		{RawLimitName: "primary_window", WindowName: quota.Window5Hour, Period: 5 * time.Hour, ScopeKind: codex.WindowScopeShared, ResetAt: reset},
@@ -65,11 +65,52 @@ func TestPlanCodexPrimerTargetsCoalescesScopedAndSharedWindows(t *testing.T) {
 	}
 
 	targets, unresolved := PlanCodexPrimerTargets(descriptors, nil, primerRegistryEntries())
-	if len(unresolved) != 0 || len(targets) != 1 {
+	if len(unresolved) != 0 || len(targets) != 2 {
 		t.Fatalf("targets/unresolved = %+v/%+v", targets, unresolved)
 	}
-	if targets[0].ModelID != "gpt-5.3-codex-spark" || len(targets[0].Windows) != 3 || !targets[0].ResetAt.Equal(reset) {
-		t.Fatalf("target = %+v", targets[0])
+	byModel := make(map[string]CodexPrimerTarget)
+	for _, target := range targets {
+		byModel[target.ModelID] = target
+	}
+	if len(byModel["gpt-5.3-codex-spark"].Windows) != 1 || len(byModel["gpt-5.4"].Windows) != 2 {
+		t.Fatalf("targets = %+v", targets)
+	}
+}
+
+func TestPlanCodexPrimerSharedWindowFailsClosedWithOnlySparkModel(t *testing.T) {
+	reset := time.Unix(1774569600, 0)
+	descriptors := []codex.WindowDescriptor{{
+		RawLimitName: "primary_window", WindowName: quota.Window7Day,
+		Period: 7 * 24 * time.Hour, ScopeKind: codex.WindowScopeShared, ResetAt: reset,
+	}}
+	entries := []modelregistry.Entry{{
+		Provider: modelregistry.ProviderCodex, ID: "gpt-5.3-codex-spark",
+		DisplayName: "GPT-5.3-Codex-Spark", Visibility: "list", Priority: 1,
+	}}
+
+	targets, unresolved := PlanCodexPrimerTargets(descriptors, nil, entries)
+	if len(targets) != 0 || len(unresolved) != 1 || unresolved[0].Code != "model_unresolved" {
+		t.Fatalf("targets/unresolved = %+v/%+v", targets, unresolved)
+	}
+}
+
+func TestPlanCodexPrimerSharedOverrideRequiresNonSparkCapability(t *testing.T) {
+	reset := time.Unix(1774569600, 0)
+	descriptors := []codex.WindowDescriptor{{
+		RawLimitName: "primary_window", WindowName: quota.Window7Day,
+		Period: 7 * 24 * time.Hour, ScopeKind: codex.WindowScopeShared, ResetAt: reset,
+	}}
+	entries := append(primerRegistryEntries(), modelregistry.Entry{
+		Provider: modelregistry.ProviderCodex, ID: "gpt-5.4-mini", Visibility: "list", Priority: 2,
+	})
+
+	targets, unresolved := PlanCodexPrimerTargets(descriptors, map[string]string{"primary_window": "gpt-5.4-mini"}, entries)
+	if len(unresolved) != 0 || len(targets) != 1 || targets[0].ModelID != "gpt-5.4-mini" {
+		t.Fatalf("general override = %+v/%+v", targets, unresolved)
+	}
+	targets, unresolved = PlanCodexPrimerTargets(descriptors, map[string]string{"primary_window": "gpt-5.3-codex-spark"}, entries)
+	if len(targets) != 0 || len(unresolved) != 1 {
+		t.Fatalf("Spark shared override = %+v/%+v", targets, unresolved)
 	}
 }
 

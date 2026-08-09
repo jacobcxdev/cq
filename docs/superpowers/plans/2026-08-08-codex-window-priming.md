@@ -4,7 +4,7 @@
 
 **Goal:** Automatically start each backend-reported Codex quota window after reset with one account-pinned synthetic request, then verify active-epoch advancement or untouched-epoch stability without manual traffic or duplicate admission.
 
-**Architecture:** Preserve backend window descriptors, resolve each scoped window to a safe registry model, coalesce compatible due windows into activation targets, and run one durable scheduler owned by the proxy. Scheduler refreshes usage before dispatch, claims each account/window generation atomically, sends a minimal native Responses request through existing pinned candidate routing, and verifies advancement by polling usage only.
+**Architecture:** Preserve backend window descriptors, resolve each window to a proven-safe registry model capability, coalesce only compatible due windows into activation targets, and run one durable scheduler owned by the proxy. Scheduler refreshes usage before dispatch, claims each account/window/model-capability generation atomically, sends a minimal native Responses request through existing pinned candidate routing, and verifies activation by polling usage only.
 
 **Tech Stack:** Go 1.26.1, standard library HTTP/JSON/time/filesystem packages, existing Codex parser, model registry, proxy request router, credential coordinator, atomic journal patterns, and Go race detector.
 
@@ -74,7 +74,8 @@ go test -race -count=1 ./internal/provider/codex -run 'WindowDescriptor|ParseUsa
 - [ ] Add failing resolver tests for exact ID, alias, display name, case folding, unique token-boundary family match, ambiguous family, invisible model, explicit override, invalid override, and unresolved scope.
 - [ ] Add failing planner tests proving:
   - shared 5h plus shared 7d at same reset epoch becomes one target;
-  - due Spark plus shared windows at same epoch becomes one Spark target;
+  - due Spark and shared windows at same epoch remain separate targets because installed evidence proves Spark does not start shared countdown;
+  - shared windows use registry-preferred visible non-Spark model;
   - Spark and another family become separate targets;
   - equal duration with different reset epochs stays separate;
   - current Codex shared-only policy prefers visible registry Spark;
@@ -200,7 +201,7 @@ go test -race -count=1 ./internal/proxy -run 'PrimerRequest'
   9. dispatch once;
   10. transition admitted/ambiguous to verification-only;
   11. poll usage with bounded backoff until active epochs advance or untouched epochs remain stable.
-- [ ] Allow bounded retry only for typed definite pre-admission rejection. Apply attempt count to window lineage across sliding reset timestamps.
+- [ ] Allow bounded retry only for typed definite pre-admission rejection. Apply attempt count to window lineage across sliding reset timestamps. Never replay one admitted/ambiguous capability; allow one new capability only after durable `model_incapable` retirement caused by verified compatibility-policy change.
 - [ ] Start scheduler only in credential-coordinator owner process. Delegates and second proxy instances remain read-only observers.
 - [ ] Recover journal before observing current usage. Never let a stale usage response regress epoch or state.
 - [ ] Emit privacy-safe metrics/status: counts, state, model ID, reset time, typed error. No account/scope identifiers.
@@ -275,7 +276,7 @@ git diff --check
 - [ ] Enable priming through CQ config command and restart service. Do not call primer request executor directly and do not send any manual Codex message on target account.
 - [ ] Observe journal/status until scheduler itself claims target generation.
 - [ ] If scheduler fails before dispatch, preserve untouched generation, add failing regression test, fix, reinstall, and let scheduler retry under tested pre-admission policy.
-- [ ] If admission or ambiguity occurs, never replay. Diagnose with journal/status and continue verification polling only.
+- [ ] If admission or ambiguity occurs, never replay that model capability. Diagnose with journal/status and continue verification polling; a corrected capability requires durable `model_incapable` retirement and a separately claimed target.
 - [ ] Prove sliding backend reset epoch becomes stable and countdown starts for scheduler-originated generation.
 - [ ] Re-snapshot credential/system/registry/CodexBar files and prove byte identity.
 - [ ] Record build SHA, scheduler state transitions, exact-epoch stability result, and no-manual-request attestation in privacy-safe local evidence.
