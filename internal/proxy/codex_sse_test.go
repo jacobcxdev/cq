@@ -69,6 +69,38 @@ func TestCodexSSEMalformedUnknownErrorAndRateLimits(t *testing.T) {
 	}
 }
 
+func TestCodexSSEClassifiesCurrentNonLifecycleEvents(t *testing.T) {
+	t.Parallel()
+	eventTypes := []string{
+		"response.output_item.added",
+		"response.output_item.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.done",
+	}
+	for _, eventType := range eventTypes {
+		t.Run(eventType, func(t *testing.T) {
+			t.Parallel()
+			got := classifyCodexSSEData([]byte(`{"type":"` + eventType + `"}`))
+			if got.Kind != CodexSSEIgnored {
+				t.Fatalf("kind = %q, want %q", got.Kind, CodexSSEIgnored)
+			}
+		})
+	}
+}
+
+func TestCodexSSEClassifiesTerminalFailureEvents(t *testing.T) {
+	t.Parallel()
+	for _, eventType := range []string{"response.failed", "response.incomplete"} {
+		t.Run(eventType, func(t *testing.T) {
+			t.Parallel()
+			got := classifyCodexSSEData([]byte(`{"type":"` + eventType + `","response":{}}`))
+			if got.Kind != CodexSSEError {
+				t.Fatalf("kind = %q, want %q", got.Kind, CodexSSEError)
+			}
+		})
+	}
+}
+
 func TestCodexSSEOversized(t *testing.T) {
 	t.Parallel()
 	parser := NewCodexSSEParser(32)

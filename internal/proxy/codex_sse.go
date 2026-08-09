@@ -16,6 +16,7 @@ const (
 	CodexSSEMetadata   CodexSSEEventKind = "metadata"
 	CodexSSECreated    CodexSSEEventKind = "created"
 	CodexSSEDelta      CodexSSEEventKind = "delta"
+	CodexSSEIgnored    CodexSSEEventKind = "ignored"
 	CodexSSECompleted  CodexSSEEventKind = "completed"
 	CodexSSEError      CodexSSEEventKind = "error"
 	CodexSSERateLimits CodexSSEEventKind = "rate_limits"
@@ -179,6 +180,11 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		}
 	case strings.HasSuffix(envelope.Type, ".delta"):
 		observation.Kind = CodexSSEDelta
+	case envelope.Type == "response.output_item.added" ||
+		envelope.Type == "response.output_item.done" ||
+		envelope.Type == "response.reasoning_summary_part.added" ||
+		envelope.Type == "response.reasoning_summary_text.done":
+		observation.Kind = CodexSSEIgnored
 	case envelope.Type == "response.completed":
 		var response struct {
 			EndTurn json.RawMessage `json:"end_turn"`
@@ -216,6 +222,8 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		} else {
 			observation.Error = wrapped
 		}
+	case envelope.Type == "response.failed" || envelope.Type == "response.incomplete":
+		observation.Kind = CodexSSEError
 	case envelope.Type == "codex.rate_limits":
 		observation.Kind = CodexSSERateLimits
 	default:

@@ -96,6 +96,26 @@ func TestCodexObserveMalformedAndRateLimitCounters(t *testing.T) {
 	}
 }
 
+func TestCodexObserveIgnoresKnownTrafficAndEndsFailedAttempt(t *testing.T) {
+	t.Parallel()
+	manager := NewCodexTurnLeaseManager(1, false, nil)
+	observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), body, "identity", "", false)
+	handle.Selected(RouteChoice{AccountKey: "account"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+	handle.ObserveBytes([]byte("data: {\"type\":\"response.created\",\"response\":{}}\n\ndata: {\"type\":\"response.output_item.done\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{}}\n\n"))
+	handle.Finish(nil)
+
+	lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "u"))
+	if !found || lease.State != LeaseBoundQuiescent || lease.ActiveAttempts != 0 {
+		t.Fatalf("lease = %#v, found = %v", lease, found)
+	}
+	if health := observer.Health(); health.Unknown != 0 {
+		t.Fatalf("health = %#v", health)
+	}
+}
+
 func TestCodexObserveClassifiesRequestInputs(t *testing.T) {
 	t.Parallel()
 	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
