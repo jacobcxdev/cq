@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -275,5 +278,236 @@ func TestServer_CodexCompact_DoesNotUseHeadroom(t *testing.T) {
 	}
 	if string(gotBody) != originalBody {
 		t.Errorf("upstream body = %s, want original %s", gotBody, originalBody)
+	}
+}
+
+func TestServer_CodexCompact_ZstdUsesDecodedDiagnosticsAndPreservesFrame(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(payloadPath)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	var upstreamBody []byte
+	var upstreamHeader http.Header
+	inner := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		upstreamHeader = request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"object":"response.compact"}`)),
+		}, nil
+	})
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexRequests: testCodexRequestRouter(
+			&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			inner,
+		),
+		CodexObserver: observer,
+		PayloadDiag:   payloadDiag,
+	}
+
+	original := []byte(`{"model":"gpt-5.4","conversation_id":"conversation-compact-zstd","input":"ping"}`)
+	encoded := encodeCodexZstd(t, original)
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, legacyCodexCompactResponsesPath, bytes.NewReader(encoded))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if !bytes.Equal(upstreamBody, encoded) {
+		t.Fatal("compact request did not preserve the original zstd frame")
+	}
+	if upstreamHeader.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("upstream Content-Encoding = %q, want zstd", upstreamHeader.Get("Content-Encoding"))
+	}
+	if upstreamHeader.Get("Content-Length") != fmt.Sprint(len(encoded)) {
+		t.Fatalf("upstream Content-Length = %q, want %d", upstreamHeader.Get("Content-Length"), len(encoded))
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("close payload diagnostics: %v", err)
+	}
+	events := readPayloadEvents(t, payloadPath)
+	if len(events) != 1 {
+		t.Fatalf("payload events = %d, want 1", len(events))
+	}
+	if events[0].Model != "gpt-5.4" {
+		t.Fatalf("payload model = %q, want gpt-5.4", events[0].Model)
+	}
+	if events[0].SessionSource != "body:conversation_id" || events[0].SessionKey == "" {
+		t.Fatalf("payload session = %q/%q, want body conversation identity", events[0].SessionSource, events[0].SessionKey)
+	}
+	if events[0].BodyBytes != len(encoded) {
+		t.Fatalf("payload body bytes = %d, want original encoded length %d", events[0].BodyBytes, len(encoded))
+	}
+	wantCapturedBody, err := json.Marshal(string(encoded))
+	if err != nil {
+		t.Fatalf("encode expected payload body: %v", err)
+	}
+	if !bytes.Equal(events[0].Body, wantCapturedBody) {
+		t.Fatal("payload diagnostics did not retain existing encoded-body semantics")
+	}
+	health := observer.Health()
+	if health.Requests != 1 || health.ZstdRequests != 1 || health.RequestDecodeErrors != 0 {
+		t.Fatalf("observer requests=%d zstd=%d decode_errors=%d, want 1/1/0", health.Requests, health.ZstdRequests, health.RequestDecodeErrors)
+	}
+}
+
+func TestServer_CodexCompact_ObserverUsesAcceptedDecodedView(t *testing.T) {
+	noise := make([]byte, 3<<20)
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	state := uint64(0x9e3779b97f4a7c15)
+	for index := range noise {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		noise[index] = alphabet[state&63]
+	}
+	original := append([]byte(`{"model":"gpt-5.4","conversation_id":"conversation-large-compact","input":"`), noise...)
+	original = append(original, []byte(`"}`)...)
+	encoded := encodeCodexZstd(t, original)
+	if len(encoded) <= DefaultCodexZstdLimits.MaxEncodedBytes {
+		t.Fatalf("fixture encoded bytes = %d, want over observer default %d", len(encoded), DefaultCodexZstdLimits.MaxEncodedBytes)
+	}
+	if len(encoded) > maxRequestBody {
+		t.Fatalf("fixture encoded bytes = %d, want within native limit %d", len(encoded), maxRequestBody)
+	}
+
+	var upstreamBody []byte
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexRequests: testCodexRequestRouter(
+			&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				upstreamBody, _ = io.ReadAll(request.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"object":"response.compact"}`)),
+				}, nil
+			}),
+		),
+		CodexObserver: observer,
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, legacyCodexCompactResponsesPath, bytes.NewReader(encoded))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if !bytes.Equal(upstreamBody, encoded) {
+		t.Fatal("large compact request did not preserve the original zstd frame")
+	}
+	health := observer.Health()
+	if health.Requests != 1 || health.ZstdRequests != 1 || health.RequestDecodeErrors != 0 || health.MetadataParseErrors != 0 {
+		t.Fatalf("observer requests=%d zstd=%d decode_errors=%d metadata_errors=%d, want 1/1/0/0", health.Requests, health.ZstdRequests, health.RequestDecodeErrors, health.MetadataParseErrors)
+	}
+}
+
+func TestServer_CodexCompact_RewritesHandlerAcceptedLargeBodies(t *testing.T) {
+	identityBody, zstdBody := handlerAcceptedRewriteFixtures(t)
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+	}{
+		{name: "identity", body: identityBody, encoding: "identity"},
+		{name: "zstd", body: zstdBody, encoding: "zstd"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var upstreamBody []byte
+			var upstreamEncoding string
+			router := testCodexRequestRouter(
+				&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+				roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					upstreamBody, _ = io.ReadAll(request.Body)
+					upstreamEncoding = request.Header.Get("Content-Encoding")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"object":"response.compact"}`)),
+					}, nil
+				}),
+			)
+			router.Scope.(*legacySelectorScope).effective = codexFallbackModel
+			srv := &Server{
+				Config:        &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+				CodexRequests: router,
+			}
+			request := httptest.NewRequest(http.MethodPost, legacyCodexCompactResponsesPath, bytes.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Content-Encoding", test.encoding)
+			request.Header.Set("Content-Length", fmt.Sprint(len(test.body)))
+			response := httptest.NewRecorder()
+
+			srv.handleNativeCodexCompact(response, request, legacyCodexCompactResponsesPath)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+			}
+			limits := DefaultCodexZstdLimits
+			limits.MaxEncodedBytes = maxRequestBody
+			limits.MaxDecodedBytes = maxRequestBody
+			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, limits)
+			if err != nil {
+				t.Fatalf("decode upstream request: %v", err)
+			}
+			if model := extractModel(decoded.Decoded()); model != codexFallbackModel {
+				t.Fatalf("upstream model = %q, want %q", model, codexFallbackModel)
+			}
+		})
+	}
+}
+
+func TestServer_CodexCompact_MalformedZstdFailsBeforeDispatch(t *testing.T) {
+	upstreamCalled := false
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexRequests: testCodexRequestRouter(
+			&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				upstreamCalled = true
+				return nil, fmt.Errorf("unexpected upstream request")
+			}),
+		),
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatalf("handler() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, legacyCodexCompactResponsesPath, strings.NewReader("not-zstd"))
+	request.Header.Set("Content-Encoding", "zstd")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", response.Code, response.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("malformed zstd compact request reached upstream")
 	}
 }

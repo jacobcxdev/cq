@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +32,12 @@ func mustParseURL(s string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+type codexWebSocketExecutorFunc func(context.Context, RouteChoice, CandidateAttempt, string, http.Header) (*websocket.Conn, *http.Response, []byte, error)
+
+func (f codexWebSocketExecutorFunc) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+	return f(ctx, choice, attempt, upstreamURL, header)
 }
 
 func TestServer_HealthEndpoint(t *testing.T) {
@@ -629,7 +637,7 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				switch req.Header.Get("Authorization") {
 				case "Bearer primary-codex-token":
-					return makeResponse(http.StatusTooManyRequests, `{"error":{"type":"insufficient_quota"}}`), nil
+					return makeResponse(http.StatusTooManyRequests, `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`), nil
 				case "Bearer fallback-codex-token":
 					return &http.Response{
 						StatusCode: http.StatusOK,
@@ -2154,6 +2162,81 @@ func TestServer_Handler_CodexResponsesRejectsWebsocket(t *testing.T) {
 	}
 }
 
+func TestServerCodexWebSocketHard429FailoverAuthority(t *testing.T) {
+	legacyBody := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
+	tests := []struct {
+		name         string
+		encodings    []string
+		body         string
+		uncompressed bool
+		wantFailover bool
+	}{
+		{name: "zstd", encodings: []string{"zstd"}, body: legacyBody},
+		{name: "duplicate identity", encodings: []string{"identity", "identity"}, body: legacyBody},
+		{name: "conflicting encoding", encodings: []string{"identity", "zstd"}, body: legacyBody},
+		{name: "transparent decompression", body: codexLiveUsageLimitBody, uncompressed: true},
+		{name: "live transport-authorised", body: codexLiveUsageLimitBody, wantFailover: true},
+		{name: "legacy status", encodings: []string{"identity"}, body: legacyBody, wantFailover: true},
+		{name: "legacy status alias", encodings: []string{"identity"}, body: `{"type":"error","status_code":429,"error":{"type":"usage_limit_reached"}}`, wantFailover: true},
+		{name: "zero status", body: `{"type":"error","status":0,"status_code":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "null status", body: `{"type":"error","status":null,"status_code":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "conflicting status", body: `{"type":"error","status":400,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate status", body: `{"type":"error","status":400,"status":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate status alias", body: `{"type":"error","status_code":400,"status_code":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate top-level type", body: `{"type":"response.failed","type":"error","status":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate nested type", body: `{"type":"error","status":429,"error":{"type":"rate_limit_exceeded","type":"usage_limit_reached"}}`},
+		{name: "duplicate nested code", body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"first","code":"second"}}`},
+		{name: "wrong nested type", body: `{"error":{"type":"rate_limit_exceeded"}}`},
+		{name: "malformed", body: `{`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := requestPlan("one", "first")
+			second := requestPlan("two", "second")
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{first, second}}
+			var calls []codex.CandidateID
+			executor := codexWebSocketExecutorFunc(func(_ context.Context, _ RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+				calls = append(calls, attempt.Candidate.CandidateID)
+				if attempt.Candidate.CandidateID == "second" {
+					return new(websocket.Conn), nil, nil, nil
+				}
+				header := make(http.Header)
+				for _, value := range test.encodings {
+					header.Add("Content-Encoding", value)
+				}
+				return nil, &http.Response{
+					Status:       "429 Too Many Requests",
+					StatusCode:   http.StatusTooManyRequests,
+					Header:       header,
+					Body:         http.NoBody,
+					Uncompressed: test.uncompressed,
+				}, []byte(test.body), fmt.Errorf("websocket: bad handshake")
+			})
+			server := &Server{
+				CodexRequests:          &CodexRequestRouter{Scope: scope},
+				CodexWebSocketExecutor: executor,
+			}
+
+			connection, choice, attempt, err := server.dialCodexWebSocket(context.Background(), "wss://upstream.test/responses", nil, "gpt-5.4")
+			if test.wantFailover {
+				if connection == nil || err != nil || choice.AccountKey != "two" || attempt.Candidate.CandidateID != "second" {
+					t.Fatalf("connection=%p choice=%q attempt=%q error=%v", connection, choice.AccountKey, attempt.Candidate.CandidateID, err)
+				}
+				if scope.calls != 2 || !slices.Equal(calls, []codex.CandidateID{"first", "second"}) {
+					t.Fatalf("scope calls=%d attempts=%v", scope.calls, calls)
+				}
+				return
+			}
+			if connection != nil || err == nil || !strings.Contains(err.Error(), "429 Too Many Requests") {
+				t.Fatalf("connection=%p error=%v", connection, err)
+			}
+			if choice.AccountKey != "one" || attempt.Candidate.CandidateID != "first" || scope.calls != 1 || !slices.Equal(calls, []codex.CandidateID{"first"}) {
+				t.Fatalf("choice=%q attempt=%q scope calls=%d attempts=%v", choice.AccountKey, attempt.Candidate.CandidateID, scope.calls, calls)
+			}
+		})
+	}
+}
+
 func TestServer_Handler_AppServerIsRetired(t *testing.T) {
 	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
 	handler, err := srv.handler()
@@ -2691,6 +2774,72 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 	}
 }
 
+func TestServer_NativeCodex_ExhaustedResponsePassthrough(t *testing.T) {
+	hard429Prefix := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
+	oversized429 := hard429Prefix + strings.Repeat(" ", codexAttemptResponseLimit+1) + "\nopaque-429-suffix"
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		headerVals []string
+	}{
+		{name: "terminal 401", status: http.StatusUnauthorized, body: "upstream-401-sentinel: exact bytes\n", headerVals: []string{"auth-401-a", "auth-401-b"}},
+		{name: "terminal 403", status: http.StatusForbidden, body: "upstream-403-sentinel: exact bytes\n", headerVals: []string{"auth-403-a", "auth-403-b"}},
+		{name: "oversized unknown 429", status: http.StatusTooManyRequests, body: oversized429, headerVals: []string{"quota-429-a", "quota-429-b"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackingReadCloser{Reader: strings.NewReader(test.body)}
+			upstream := &http.Response{
+				Status:     fmt.Sprintf("%d exact upstream terminal", test.status),
+				StatusCode: test.status,
+				Header: http.Header{
+					"Content-Type":  {"application/x-cq-sentinel"},
+					"X-Cq-Upstream": test.headerVals,
+				},
+				Body:          body,
+				ContentLength: int64(len(test.body)),
+			}
+			executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"one-candidate": {{resp: upstream}},
+			}}
+			enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{
+				AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4",
+			}}}, executor, fsutil.NewMemFS())
+			srv := &Server{
+				Config:            &Config{CodexUpstream: "https://upstream.invalid"},
+				CodexRequests:     &CodexRequestRouter{}, // Any enforcement bypass must fail.
+				CodexHTTPEnforcer: enforcer,
+			}
+			requestBody := fmt.Sprintf(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread-%d","turn_id":"turn-%d","request_kind":"turn"}}}`, test.status, test.status)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(requestBody))
+			request.Header.Set("Content-Type", "application/json")
+
+			srv.handleNativeCodex(recorder, request)
+
+			if recorder.Code != test.status {
+				t.Fatalf("status = %d, want %d; body = %q", recorder.Code, test.status, recorder.Body.String())
+			}
+			if values := recorder.Header().Values("X-Cq-Upstream"); !slices.Equal(values, test.headerVals) {
+				t.Fatalf("X-Cq-Upstream = %v, want %v", values, test.headerVals)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/x-cq-sentinel" {
+				t.Fatalf("Content-Type = %q, want application/x-cq-sentinel", got)
+			}
+			if got := recorder.Body.String(); got != test.body {
+				t.Fatalf("body length = %d, want %d; suffix present = %v", len(got), len(test.body), strings.HasSuffix(got, "opaque-429-suffix"))
+			}
+			if body.closeCalls != 1 {
+				t.Fatalf("body close calls = %d, want 1", body.closeCalls)
+			}
+			if !slices.Equal(executor.calls, []codex.CandidateID{"one-candidate"}) {
+				t.Fatalf("attempts = %v, want [one-candidate]", executor.calls)
+			}
+		})
+	}
+}
+
 func TestServer_NativeCodex_NoTransport(t *testing.T) {
 	srv := &Server{
 		Config: &Config{
@@ -2814,6 +2963,344 @@ func TestServer_NativeCodex_HeadroomCompressesBody(t *testing.T) {
 	}
 	if string(upstreamBody["input"]) != string(compressedInput) {
 		t.Errorf("upstream input = %s, want compressed %s", upstreamBody["input"], compressedInput)
+	}
+}
+
+func TestServer_NativeCodex_ZstdHeadroomCompressesDecodedBody(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":"short"}]`)
+	bridgeRequests := make(chan headroomResponsesRequest, 1)
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(payloadPath)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
+		var request headroomResponsesRequest
+		if err := json.Unmarshal(requestBody, &request); err != nil {
+			return []byte(`{"ok":false}`)
+		}
+		bridgeRequests <- request
+		response, _ := json.Marshal(headroomResponsesResponse{
+			OK:          true,
+			Input:       compressedInput,
+			TokensSaved: 42,
+		})
+		return response
+	})
+
+	var upstreamBody []byte
+	var upstreamHeader http.Header
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		upstreamHeader = request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compressed"}`)),
+		}, nil
+	})
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    transport,
+		},
+		Headroom:    bridge,
+		PayloadDiag: payloadDiag,
+	}
+
+	originalJSON := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"long input"}],"conversation_id":"conversation-zstd"}`)
+	encoded := encodeCodexZstd(t, originalJSON)
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(encoded)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	request.Header.Set("X-Codex-Test", "preserved")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	select {
+	case got := <-bridgeRequests:
+		if got.Model != "gpt-5.4" {
+			t.Fatalf("bridge model = %q, want gpt-5.4", got.Model)
+		}
+	default:
+		t.Fatal("headroom bridge was not called with decoded request")
+	}
+	if upstreamHeader.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("upstream Content-Encoding = %q, want zstd", upstreamHeader.Get("Content-Encoding"))
+	}
+	if upstreamHeader.Get("Content-Length") != fmt.Sprint(len(upstreamBody)) {
+		t.Fatalf("upstream Content-Length = %q, want %d", upstreamHeader.Get("Content-Length"), len(upstreamBody))
+	}
+	if upstreamHeader.Get("X-Codex-Test") != "preserved" {
+		t.Fatalf("upstream X-Codex-Test = %q, want preserved", upstreamHeader.Get("X-Codex-Test"))
+	}
+	decoded, err := DecodeCodexRequest(upstreamBody, upstreamHeader.Get("Content-Encoding"), DefaultCodexZstdLimits)
+	if err != nil {
+		t.Fatalf("decode upstream request: %v", err)
+	}
+	var upstreamPayload map[string]json.RawMessage
+	if err := json.Unmarshal(decoded.Decoded(), &upstreamPayload); err != nil {
+		t.Fatalf("decode upstream JSON: %v", err)
+	}
+	if string(upstreamPayload["model"]) != `"gpt-5.4"` {
+		t.Fatalf("upstream model = %s, want gpt-5.4", upstreamPayload["model"])
+	}
+	if string(upstreamPayload["input"]) != string(compressedInput) {
+		t.Fatalf("upstream input = %s, want %s", upstreamPayload["input"], compressedInput)
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("close payload diagnostics: %v", err)
+	}
+	events := readPayloadEvents(t, payloadPath)
+	if len(events) != 1 {
+		t.Fatalf("payload events = %d, want 1", len(events))
+	}
+	if events[0].Model != "gpt-5.4" {
+		t.Fatalf("payload model = %q, want gpt-5.4", events[0].Model)
+	}
+	if events[0].SessionSource != "body:conversation_id" || events[0].SessionKey == "" {
+		t.Fatalf("payload session = %q/%q, want body conversation identity", events[0].SessionSource, events[0].SessionKey)
+	}
+	if events[0].BodyBytes != len(encoded) {
+		t.Fatalf("payload body bytes = %d, want original encoded length %d", events[0].BodyBytes, len(encoded))
+	}
+}
+
+func TestServer_NativeCodex_ZstdHeadroomNoRewritePreservesFrame(t *testing.T) {
+	bridgeCalled := false
+	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
+		bridgeCalled = true
+		var request headroomResponsesRequest
+		if err := json.Unmarshal(requestBody, &request); err != nil {
+			return []byte(`{"ok":false}`)
+		}
+		response, _ := json.Marshal(headroomResponsesResponse{OK: false})
+		return response
+	})
+
+	var upstreamBody []byte
+	var upstreamHeader http.Header
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		upstreamHeader = request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_unchanged"}`)),
+		}, nil
+	})
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    transport,
+		},
+		Headroom: bridge,
+	}
+
+	encoded := encodeCodexZstd(t, []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"unchanged"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(encoded)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if !bridgeCalled {
+		t.Fatal("headroom bridge was not called with decoded request")
+	}
+	if string(upstreamBody) != string(encoded) {
+		t.Fatal("no-op headroom request did not preserve original zstd frame")
+	}
+	if upstreamHeader.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("upstream Content-Encoding = %q, want zstd", upstreamHeader.Get("Content-Encoding"))
+	}
+	if upstreamHeader.Get("Content-Length") != fmt.Sprint(len(encoded)) {
+		t.Fatalf("upstream Content-Length = %q, want %d", upstreamHeader.Get("Content-Length"), len(encoded))
+	}
+}
+
+func TestServer_NativeCodex_MalformedZstdFailsClosed(t *testing.T) {
+	upstreamCalled := false
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				upstreamCalled = true
+				return nil, fmt.Errorf("unexpected upstream request")
+			}),
+		},
+		Headroom: fakeBridgeRaw(t, func(_ []byte) []byte {
+			t.Error("headroom bridge must not receive malformed encoded request")
+			return nil
+		}),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader("not-zstd"))
+	request.Header.Set("Content-Encoding", "zstd")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", response.Code, response.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("malformed zstd request reached upstream")
+	}
+}
+
+func TestServer_NativeCodex_ZstdHeadroomEncodeFailureFailsBeforeDispatch(t *testing.T) {
+	upstreamCalled := false
+	expandedInput, err := json.Marshal([]map[string]string{{"role": "user", "content": strings.Repeat("a", 32<<10)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				upstreamCalled = true
+				return nil, fmt.Errorf("unexpected upstream request")
+			}),
+		},
+		Headroom: fakeBridgeRaw(t, func(_ []byte) []byte {
+			response, _ := json.Marshal(headroomResponsesResponse{
+				OK:          true,
+				Input:       expandedInput,
+				TokensSaved: 1,
+			})
+			return response
+		}),
+	}
+	original := encodeCodexZstd(t, []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"compress me"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(original)))
+	request.Header.Set("Content-Encoding", "zstd")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body: %s", response.Code, response.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("failed zstd re-encoding reached upstream")
+	}
+	var payload struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Type != "api_error" {
+		t.Fatalf("error type = %q, want api_error", payload.Error.Type)
+	}
+}
+
+func TestServer_NativeCodex_PlainBodyOverProtocolEncodingLimitStillForwards(t *testing.T) {
+	originalBody := []byte(`{"model":"gpt-5.4","input":"` + strings.Repeat("x", DefaultCodexZstdLimits.MaxEncodedBytes) + `"}`)
+	var upstreamBody []byte
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				upstreamBody, _ = io.ReadAll(request.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"resp_large"}`)),
+				}, nil
+			}),
+		},
+		CodexObserver: observer,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(originalBody)))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if string(upstreamBody) != string(originalBody) {
+		t.Fatal("plain request within native body limit changed before upstream")
+	}
+	if health := observer.Health(); health.RequestDecodeErrors != 0 {
+		t.Fatalf("observer request decode errors = %d, want 0 for shared decoded view", health.RequestDecodeErrors)
+	}
+}
+
+func TestServer_NativeCodex_RewritesHandlerAcceptedLargeBodies(t *testing.T) {
+	identityBody, zstdBody := handlerAcceptedRewriteFixtures(t)
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+	}{
+		{name: "identity", body: identityBody, encoding: "identity"},
+		{name: "zstd", body: zstdBody, encoding: "zstd"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var upstreamBody []byte
+			var upstreamEncoding string
+			router := testCodexRequestRouter(
+				&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+				roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					upstreamBody, _ = io.ReadAll(request.Body)
+					upstreamEncoding = request.Header.Get("Content-Encoding")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"id":"resp_large_rewritten"}`)),
+					}, nil
+				}),
+			)
+			router.Scope.(*legacySelectorScope).effective = codexFallbackModel
+			srv := &Server{
+				Config:        &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+				CodexRequests: router,
+			}
+			request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Content-Encoding", test.encoding)
+			request.Header.Set("Content-Length", fmt.Sprint(len(test.body)))
+			response := httptest.NewRecorder()
+
+			srv.handleNativeCodex(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+			}
+			limits := DefaultCodexZstdLimits
+			limits.MaxEncodedBytes = maxRequestBody
+			limits.MaxDecodedBytes = maxRequestBody
+			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, limits)
+			if err != nil {
+				t.Fatalf("decode upstream request: %v", err)
+			}
+			if model := extractModel(decoded.Decoded()); model != codexFallbackModel {
+				t.Fatalf("upstream model = %q, want %q", model, codexFallbackModel)
+			}
+		})
 	}
 }
 

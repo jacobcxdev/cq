@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -22,6 +24,10 @@ type ExplicitAccountExecutor interface {
 	Do(context.Context, RouteChoice, CandidateAttempt, *http.Request) (*http.Response, error)
 }
 
+type explicitAccountDispatchExecutor interface {
+	doOnDispatch(context.Context, RouteChoice, CandidateAttempt, *http.Request, func()) (*http.Response, error)
+}
+
 // CodexAttemptExecutor resolves secrets only inside attempt execution.
 type CodexAttemptExecutor struct {
 	Secrets   codex.SecretResolver
@@ -30,6 +36,10 @@ type CodexAttemptExecutor struct {
 
 // Do resolves exact candidate material and performs one request. It never selects or retries.
 func (e *CodexAttemptExecutor) Do(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request) (*http.Response, error) {
+	return e.doOnDispatch(ctx, choice, attempt, req, nil)
+}
+
+func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func()) (*http.Response, error) {
 	if e == nil || e.Secrets == nil || e.Transport == nil {
 		return nil, fmt.Errorf("Codex attempt executor unavailable")
 	}
@@ -43,7 +53,7 @@ func (e *CodexAttemptExecutor) Do(ctx context.Context, choice RouteChoice, attem
 	if material.AccessToken == "" {
 		return nil, fmt.Errorf("resolved Codex credential has no access token")
 	}
-	return e.Transport.Do(req, choice, material)
+	return e.Transport.doOnDispatch(req, choice, material, onDispatch)
 }
 
 // CodexTokenTransport only clones requests, injects explicit credentials, and
@@ -61,11 +71,20 @@ func (t *CodexTokenTransport) inner() http.RoundTripper {
 
 // Do performs one explicit request attempt.
 func (t *CodexTokenTransport) Do(req *http.Request, choice RouteChoice, material codex.CredentialMaterial) (*http.Response, error) {
+	return t.doOnDispatch(req, choice, material, nil)
+}
+
+func (t *CodexTokenTransport) doOnDispatch(req *http.Request, choice RouteChoice, material codex.CredentialMaterial, onDispatch func()) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("Codex request is nil")
 	}
-	out := shallowCloneRequest(req)
-	rewriteCodexModelTo(out, choice.RequestedModel, choice.EffectiveModel)
+	out, err := cloneCodexTransportRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := rewriteCodexModelTo(out, choice.RequestedModel, choice.EffectiveModel); err != nil {
+		return nil, err
+	}
 	out.Header.Set("Authorization", "Bearer "+material.AccessToken)
 	if material.AccountID != "" {
 		out.Header.Set("ChatGPT-Account-ID", material.AccountID)
@@ -73,31 +92,109 @@ func (t *CodexTokenTransport) Do(req *http.Request, choice RouteChoice, material
 		out.Header.Del("ChatGPT-Account-ID")
 	}
 	out.Header.Del("x-api-key")
-	return t.inner().RoundTrip(out)
+	inner := t.inner()
+	if onDispatch != nil {
+		onDispatch()
+	}
+	return inner.RoundTrip(out)
 }
 
-func rewriteCodexModelTo(req *http.Request, requestedModel, effectiveModel string) {
-	if effectiveModel == "" || strings.EqualFold(ParseModel(effectiveModel), ParseModel(requestedModel)) || req.GetBody == nil {
-		return
+func cloneCodexTransportRequest(req *http.Request) (*http.Request, error) {
+	out := new(http.Request)
+	*out = *req
+	out.Header = req.Header.Clone()
+	if out.Header == nil {
+		out.Header = make(http.Header)
 	}
-	body, err := req.GetBody()
+	if req.URL != nil {
+		u := *req.URL
+		out.URL = &u
+	}
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, fmt.Errorf("replay Codex request body: %w", err)
+		}
+		out.Body = body
+		return out, nil
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return out, nil
+	}
+	return nil, errors.New("Codex request body is not replayable")
+}
+
+func rewriteCodexModelTo(req *http.Request, requestedModel, effectiveModel string) error {
+	if effectiveModel == "" || strings.EqualFold(ParseModel(effectiveModel), ParseModel(requestedModel)) {
+		return nil
+	}
+	if req.Body == nil {
+		return errors.New("Codex request body is unavailable for model rewrite")
+	}
+	limits := codexTransportRewriteLimits()
+	data, err := readBoundedCodexRequestBody(req.Body, limits.MaxEncodedBytes)
 	if err != nil {
-		return
+		return err
 	}
-	defer body.Close()
-	data, err := io.ReadAll(body)
+	contentEncoding, err := parseCodexContentEncoding(req.Header)
 	if err != nil {
-		return
+		return fmt.Errorf("prepare Codex model rewrite: %w", err)
 	}
-	rewritten, ok := rewriteCodexModelBodyTo(data, effectiveModel)
+	decoded, err := DecodeCodexRequest(data, contentEncoding, limits)
+	if err != nil {
+		return fmt.Errorf("prepare Codex model rewrite: %w", err)
+	}
+	rewritten, ok := rewriteCodexModelBodyTo(decoded.Decoded(), effectiveModel)
 	if !ok {
-		return
+		return errors.New("prepare Codex model rewrite: request has no string model")
 	}
-	req.Body = io.NopCloser(bytes.NewReader(rewritten))
-	req.ContentLength = int64(len(rewritten))
+	prepared, err := EncodeCodexRequest(rewritten, decoded.Encoding(), limits)
+	if err != nil {
+		return fmt.Errorf("prepare Codex model rewrite: %w", err)
+	}
+	hadContentLength := false
+	if req.Header != nil {
+		_, hadContentLength = req.Header[http.CanonicalHeaderKey("Content-Length")]
+	}
+	prepared = bytes.Clone(prepared)
+	req.Body = io.NopCloser(bytes.NewReader(prepared))
+	req.ContentLength = int64(len(prepared))
 	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(rewritten)), nil
+		return io.NopCloser(bytes.NewReader(prepared)), nil
 	}
+	if hadContentLength {
+		req.Header.Set("Content-Length", strconv.Itoa(len(prepared)))
+	}
+	switch decoded.Encoding() {
+	case "":
+		req.Header.Del("Content-Encoding")
+	case "identity":
+		req.Header.Set("Content-Encoding", "identity")
+	case "zstd":
+		req.Header.Set("Content-Encoding", "zstd")
+	}
+	return nil
+}
+
+func codexTransportRewriteLimits() CodexZstdLimits {
+	// Native and compact handlers admit encoded and decoded bodies up to
+	// maxRequestBody. Model rewriting must preserve that accepted envelope.
+	limits := DefaultCodexZstdLimits
+	limits.MaxEncodedBytes = maxRequestBody
+	limits.MaxDecodedBytes = maxRequestBody
+	return limits
+}
+
+func readBoundedCodexRequestBody(body io.ReadCloser, limit int) ([]byte, error) {
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Codex request body for model rewrite: %w", err)
+	}
+	if len(data) > limit {
+		return nil, errors.New("Codex encoded request exceeds limit")
+	}
+	return data, nil
 }
 
 func rewriteCodexModelBodyTo(body []byte, effectiveModel string) ([]byte, bool) {
@@ -105,7 +202,12 @@ func rewriteCodexModelBodyTo(body []byte, effectiveModel string) ([]byte, bool) 
 	if json.Unmarshal(body, &payload) != nil {
 		return nil, false
 	}
-	if _, ok := payload["model"]; !ok {
+	rawCurrent, ok := payload["model"]
+	if !ok {
+		return nil, false
+	}
+	var current *string
+	if json.Unmarshal(rawCurrent, &current) != nil || current == nil {
 		return nil, false
 	}
 	rawModel, err := json.Marshal(effectiveModel)
@@ -126,11 +228,11 @@ func rewriteCodexModelBody(body []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	var model string
-	if json.Unmarshal(rawModel, &model) != nil {
+	var model *string
+	if json.Unmarshal(rawModel, &model) != nil || model == nil {
 		return nil, false
 	}
-	rewrittenModel, ok := rewriteCodexModelName(model)
+	rewrittenModel, ok := rewriteCodexModelName(*model)
 	if !ok {
 		return nil, false
 	}
@@ -169,30 +271,4 @@ func withCodexModelContext(req *http.Request) *http.Request {
 		return req
 	}
 	return req.WithContext(context.WithValue(req.Context(), codexModelContextKey{}, model))
-}
-
-func isHardExhaustion(body []byte) bool {
-	var parsed struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(body, &parsed) != nil {
-		return false
-	}
-	return parsed.Error.Type == "insufficient_quota"
-}
-
-func makeBufferedResponse(orig *http.Response, body []byte) *http.Response {
-	return &http.Response{
-		Status:        orig.Status,
-		StatusCode:    orig.StatusCode,
-		Proto:         orig.Proto,
-		ProtoMajor:    orig.ProtoMajor,
-		ProtoMinor:    orig.ProtoMinor,
-		Header:        orig.Header.Clone(),
-		Body:          io.NopCloser(bytes.NewReader(body)),
-		ContentLength: int64(len(body)),
-		Request:       orig.Request,
-	}
 }

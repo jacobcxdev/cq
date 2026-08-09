@@ -150,6 +150,252 @@ func TestCodexObservedBodyEarlyCloseDoesNotReportMalformedLifecycle(t *testing.T
 	}
 }
 
+func TestCodexObserverCountsSSEFailureOnceAndLeavesTurnIndeterminate(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	manager := NewCodexTurnLeaseManager(1, true, nil)
+	observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+	canary := testCodexCanary(t, fsys)
+	observer.SetCanary(canary)
+	requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+	handle.Selected(RouteChoice{AccountKey: "account", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+
+	first := []byte("data: " + strings.Repeat("x", codexSSEDefaultMaxEventBytes+1))
+	handle.ObserveBytes(first)
+	for range 8 {
+		handle.ObserveBytes([]byte(strings.Repeat("y", codexSSEDefaultMaxEventBytes)))
+	}
+	handle.Finish(nil)
+
+	if health := observer.Health(); health.Unknown != 1 {
+		t.Fatalf("health = %#v", health)
+	}
+	if state := canary.State(); state.UnexplainedLifecycles != 1 {
+		t.Fatalf("canary state = %+v", state)
+	}
+	if len(handle.body) != 0 {
+		t.Fatalf("retained response bytes = %d, want none after parser failure", len(handle.body))
+	}
+	lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "u"))
+	if !found || lease.State != LeaseOrphaned || lease.ActiveAttempts != 0 {
+		t.Fatalf("lease = %#v, found = %v", lease, found)
+	}
+}
+
+func TestCodexObserverTruncatedCompletionLeavesTurnIndeterminate(t *testing.T) {
+	manager := NewCodexTurnLeaseManager(1, false, nil)
+	observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+	requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+	handle.Selected(RouteChoice{AccountKey: "account", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+	handle.ObserveBytes([]byte(`data: {"type":"response.completed","response":{}}` + "\n"))
+	handle.Finish(nil)
+
+	lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "u"))
+	if !found || lease.State != LeaseOrphaned || lease.ActiveAttempts != 0 {
+		t.Fatalf("lease = %#v, found = %v", lease, found)
+	}
+	if health := observer.Health(); health.Unknown != 1 {
+		t.Fatalf("health = %#v", health)
+	}
+}
+
+func TestCodexObserverAppliesCompletedEventBeforeLaterSSEFailure(t *testing.T) {
+	requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
+	completed := []byte("data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
+	oversized := []byte("data: " + strings.Repeat("x", codexSSEDefaultMaxEventBytes+1))
+	tests := []struct {
+		name   string
+		chunks [][]byte
+	}{
+		{name: "same feed", chunks: [][]byte{append(append([]byte(nil), completed...), oversized...)}},
+		{name: "split feeds", chunks: [][]byte{completed, oversized}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewCodexTurnLeaseManager(1, false, nil)
+			observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+			handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+			handle.Selected(RouteChoice{AccountKey: "account"}, false)
+			handle.ResponseHeaders(http.StatusOK, nil)
+			for _, chunk := range tc.chunks {
+				handle.ObserveBytes(chunk)
+			}
+			handle.Finish(nil)
+
+			lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "u"))
+			if !found || lease.State != LeaseBoundQuiescent || lease.ActiveAttempts != 0 {
+				t.Fatalf("lease = %#v, found = %v", lease, found)
+			}
+			if health := observer.Health(); health.Unknown != 1 {
+				t.Fatalf("health = %#v", health)
+			}
+		})
+	}
+}
+
+func TestCodexObserverCompletesUnaryJSONWithoutSSETruncation(t *testing.T) {
+	manager := NewCodexTurnLeaseManager(1, false, nil)
+	observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+	requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"unary","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+	handle.Selected(RouteChoice{AccountKey: "account"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+	responseBody := []byte(`{"id":"response-unary","status":"completed","output":[]}`)
+	handle.ObserveBytes(responseBody[:17])
+	if !handle.jsonBody || handle.parser != nil {
+		t.Fatalf("JSON detection = %v, parser = %#v; want unary path without SSE parser", handle.jsonBody, handle.parser)
+	}
+	handle.ObserveBytes(responseBody[17:])
+	handle.Finish(nil)
+
+	lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "unary"))
+	if !found || lease.State != LeaseBoundQuiescent || lease.ActiveAttempts != 0 || !handle.completed {
+		t.Fatalf("lease = %#v, found = %v, completed = %v", lease, found, handle.completed)
+	}
+	if health := observer.Health(); health.Unknown != 0 {
+		t.Fatalf("health = %#v", health)
+	}
+}
+
+func TestCodexObserverRejectsDuplicateUnaryStatusAuthority(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "duplicate", body: `{"status":"failed","status":"completed"}`},
+		{name: "case variant", body: `{"Status":"failed","status":"completed"}`},
+		{name: "Unicode fold", body: `{"status":"failed","\u017ftatus":"completed"}`},
+		{name: "lone Unicode fold", body: `{"\u017ftatus":"completed"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewCodexTurnLeaseManager(1, false, nil)
+			observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+			requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"unary-duplicate","request_kind":"turn"}}}`)
+			handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+			handle.Selected(RouteChoice{AccountKey: "account"}, false)
+			handle.ResponseHeaders(http.StatusOK, nil)
+			handle.ObserveBytes([]byte(tc.body))
+			handle.Finish(nil)
+			handle.Finish(nil)
+
+			lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "unary-duplicate"))
+			if !found || lease.State != LeaseOrphaned || lease.ActiveAttempts != 0 || handle.completed {
+				t.Fatalf("lease = %#v, found = %v, completed = %v", lease, found, handle.completed)
+			}
+			if health := observer.Health(); health.Unknown != 1 {
+				t.Fatalf("health = %#v", health)
+			}
+			if !handle.parserFailed {
+				t.Fatal("parserFailed = false, want sticky parser failure")
+			}
+		})
+	}
+}
+
+func TestCodexObserverRejectsDuplicateSSELifecycleAuthority(t *testing.T) {
+	requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"sse-duplicate","request_kind":"turn"}}}`)
+	malformed := []byte("data: {\"type\":\"response.completed\",\"response\":{\"end_turn\":false,\"end_turn\":true}}\n\n")
+	valid := []byte("data: {\"type\":\"response.completed\",\"response\":{}}\n\n")
+	tests := []struct {
+		name   string
+		chunks [][]byte
+	}{
+		{name: "same feed", chunks: [][]byte{append(append(append([]byte(nil), malformed...), malformed...), valid...)}},
+		{name: "split feeds", chunks: [][]byte{malformed, malformed, valid}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewCodexTurnLeaseManager(1, false, nil)
+			observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+			handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+			handle.Selected(RouteChoice{AccountKey: "account"}, false)
+			handle.ResponseHeaders(http.StatusOK, nil)
+			for _, chunk := range tc.chunks {
+				handle.ObserveBytes(chunk)
+			}
+			handle.Finish(nil)
+
+			lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "sse-duplicate"))
+			if !found || lease.State != LeaseOrphaned || lease.ActiveAttempts != 0 || handle.completed {
+				t.Fatalf("lease = %#v, found = %v, completed = %v", lease, found, handle.completed)
+			}
+			if health := observer.Health(); health.Unknown != 1 {
+				t.Fatalf("health = %#v", health)
+			}
+			if !handle.parserFailed {
+				t.Fatal("parserFailed = false, want sticky parser failure")
+			}
+		})
+	}
+}
+
+func TestCodexObserverCountsCompactParseFailureOnce(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "malformed JSON", body: `{"id":`},
+		{name: "invalid response ID", body: `{"id":42,"output":[]}`},
+		{name: "null response ID", body: `{"id":null,"output":[]}`},
+		{name: "empty object", body: `{}`},
+		{name: "error object", body: `{"error":{"type":"usage_limit_reached"}}`},
+		{name: "error object with output", body: `{"error":{"type":"usage_limit_reached"},"output":[]}`},
+		{name: "missing output", body: `{"id":"response"}`},
+		{name: "null output", body: `{"id":"response","output":null}`},
+		{name: "wrong output type", body: `{"id":"response","output":{}}`},
+		{name: "duplicate output", body: `{"id":"response","output":{},"output":[]}`},
+		{name: "null output item", body: `{"id":"response","output":[null]}`},
+		{name: "missing output item type", body: `{"id":"response","output":[{}]}`},
+		{name: "known output item missing field", body: `{"id":"response","output":[{"type":"compaction"}]}`},
+		{name: "duplicate output item field", body: `{"id":"response","output":[{"type":"message","role":null,"role":"assistant","content":[]}]}`},
+		{name: "malformed optional output item field", body: `{"id":"response","output":[{"type":"message","role":"assistant","content":[],"phase":42}]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewCodexTurnLeaseManager(1, false, nil)
+			observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
+			requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"compact","request_kind":"compaction","compaction":"mid_turn"}}}`)
+			handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", true)
+			handle.Selected(RouteChoice{AccountKey: "account"}, false)
+			handle.ResponseHeaders(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}})
+			handle.ObserveBytes([]byte(tc.body))
+			handle.Finish(nil)
+			handle.Finish(nil)
+
+			lease, found := manager.Get(testCodexLeaseKeyFor("s", "t", "compact"))
+			if !found || lease.State != LeaseOrphaned || lease.ActiveAttempts != 0 || handle.completed {
+				t.Fatalf("lease = %#v, found = %v, completed = %v", lease, found, handle.completed)
+			}
+			if health := observer.Health(); health.Unknown != 1 {
+				t.Fatalf("health = %#v", health)
+			}
+			if !handle.parserFailed {
+				t.Fatal("parserFailed = false, want sticky parser failure")
+			}
+			if len(handle.body) != 0 {
+				t.Fatalf("retained compact bytes = %d, want none after parser failure", len(handle.body))
+			}
+		})
+	}
+}
+
+func TestCodexObserverRetainedBodyCapacityNeverExceedsLimit(t *testing.T) {
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	requestBody := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"capacity","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), requestBody, "identity", "", false)
+	chunk := []byte(strings.Repeat(": ping\n\n", 1024))
+	for total := 0; total+len(chunk) <= codexSSEDefaultMaxEventBytes; total += len(chunk) {
+		handle.ObserveBytes(chunk)
+		if retained := cap(handle.body); retained > codexSSEDefaultMaxEventBytes {
+			t.Fatalf("retained body capacity = %d, want <= %d", retained, codexSSEDefaultMaxEventBytes)
+		}
+	}
+}
+
 func TestCodexObserveIgnoresKnownTrafficAndEndsFailedAttempt(t *testing.T) {
 	t.Parallel()
 	manager := NewCodexTurnLeaseManager(1, false, nil)
@@ -258,7 +504,7 @@ func TestCodexObservePersistsCompactEncryptedAffinity(t *testing.T) {
 	handle := observer.BeginHTTP(context.Background(), body, "identity", "", true)
 	handle.Selected(RouteChoice{AccountKey: "account"}, false)
 	handle.ResponseHeaders(http.StatusOK, nil)
-	handle.ObserveBytes([]byte(`{"id":"compact-response","output":[{"encrypted_content":"opaque"}]}`))
+	handle.ObserveBytes([]byte(`{"id":"compact-response","output":[{"type":"compaction","encrypted_content":"opaque"}]}`))
 	handle.Finish(nil)
 
 	lease, found := manager.Get(testCodexLeaseKeyFor("session", "thread", "turn"))

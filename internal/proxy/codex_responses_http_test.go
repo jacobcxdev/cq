@@ -22,6 +22,25 @@ type sequenceRouteChooser struct {
 	lastRequirements CodexRouteRequirements
 }
 
+type failingReplacementScope struct {
+	initial     CodexRequestPlan
+	replacement CodexRequestPlan
+}
+
+func (scope *failingReplacementScope) Plan(_ context.Context, _ CodexRouteRequirements, _ codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
+	if len(exclude) == 0 {
+		return scope.initial, nil
+	}
+	return scope.replacement, nil
+}
+
+func (scope *failingReplacementScope) PlanChoice(_ context.Context, choice RouteChoice, _ codex.Revision) (CodexRequestPlan, error) {
+	if choice.AccountKey == scope.replacement.Choice.AccountKey {
+		return CodexRequestPlan{}, errors.New("replacement plan unavailable")
+	}
+	return scope.initial, nil
+}
+
 func (chooser *sequenceRouteChooser) Choose(_ context.Context, requirements CodexRouteRequirements, excluded ...codex.SelectionExclusion) (RouteChoice, error) {
 	chooser.mu.Lock()
 	defer chooser.mu.Unlock()
@@ -142,6 +161,53 @@ func TestCodexHTTPEnforcerFailoverEndsAtAdmission(t *testing.T) {
 	if got := executor.accounts; len(got) != 3 || got[0] != "one" || got[1] != "two" || got[2] != "two" {
 		t.Fatalf("attempt accounts = %v", got)
 	}
+}
+
+func TestCodexHTTPEnforcerReturnsRejectedResponseWhenReplacementCannotDispatch(t *testing.T) {
+	initial := requestPlan("one", "first")
+	replacement := requestPlan("two", "second")
+	header := make(http.Header)
+	header.Add("X-Upstream-Value", "one")
+	header.Add("X-Upstream-Value", "two")
+	body := &trackingReadCloser{Reader: bytes.NewBufferString("upstream auth body")}
+	want := &http.Response{StatusCode: http.StatusUnauthorized, Header: header, Body: body}
+	router := &CodexRequestRouter{
+		Scope: &failingReplacementScope{initial: initial, replacement: replacement},
+		Executor: &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+			"first": {{resp: want}},
+		}},
+	}
+	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
+	enforcer, err := NewCodexHTTPEnforcer(router, 7, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	key := NewCodexLeaseKey(request.Metadata.Metadata)
+	if _, err := enforcer.Leases.AcquireRoute(context.Background(), key, func(context.Context) (RouteChoice, error) {
+		return initial.Choice, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforcer.Leases.ReleaseRouting(key); err != nil {
+		t.Fatal(err)
+	}
+
+	response, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != want || body.closed {
+		t.Fatalf("response=%p want=%p closed=%v", response, want, body.closed)
+	}
+	if got := response.Header.Values("X-Upstream-Value"); !slices.Equal(got, []string{"one", "two"}) {
+		t.Fatalf("headers = %v", got)
+	}
+	data, readErr := io.ReadAll(response.Body)
+	if readErr != nil || string(data) != "upstream auth body" {
+		t.Fatalf("body=%q error=%v", data, readErr)
+	}
+	_ = response.Body.Close()
 }
 
 func TestCodexHTTPEnforcerKeepsParallelLanesIndependent(t *testing.T) {
@@ -379,6 +445,118 @@ func TestCodexHTTPEnforcerParsesCompressedStrongMetadataWithoutChangingReplay(t 
 	_ = response.Body.Close()
 	if len(executor.bodies) != 1 || !bytes.Equal(executor.bodies[0], encoded) {
 		t.Fatal("compressed request replay changed")
+	}
+}
+
+func TestCodexHTTPEnforcerFailsClosedWhenZstdInspectionFailsWithoutPlaintextSignal(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{}}
+	enforcer := testHTTPEnforcer(t, chooser, executor, fsutil.NewMemFS())
+	decodedOversize := encodeCodexZstd(t, bytes.Repeat([]byte("a"), DefaultCodexZstdLimits.MaxDecodedBytes+1))
+	excessiveExpansion := encodeCodexZstd(t, bytes.Repeat([]byte("b"), 1<<20))
+	malformedSignalled := encodeCodexZstd(t, []byte(`{"client_metadata":{"x-codex-turn-metadata":"{"}}`))
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+	}{
+		{name: "malformed frame", body: []byte("not-zstd"), encoding: "zstd"},
+		{name: "decoded oversize", body: decodedOversize, encoding: "zstd"},
+		{name: "excessive expansion", body: excessiveExpansion, encoding: "zstd"},
+		{name: "unsupported encoding", body: []byte(`{}`), encoding: "gzip"},
+		{name: "decoded malformed metadata", body: malformedSignalled, encoding: "zstd"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			header := make(http.Header)
+			header.Set("Content-Encoding", test.encoding)
+			_, enforce, err := enforcer.Parse(test.body, header)
+			if err == nil || enforce {
+				t.Fatalf("enforce=%v error=%v", enforce, err)
+			}
+		})
+	}
+	for name, values := range map[string][]string{
+		"duplicate identity":          {"identity", "identity"},
+		"conflicting identity zstd":   {"identity", "zstd"},
+		"conflicting comma separated": {"identity, zstd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			header := http.Header{"Content-Encoding": append([]string(nil), values...)}
+			_, enforce, err := enforcer.Parse([]byte(`{"type":"response.create","model":"gpt-5.4"}`), header)
+			if err == nil || enforce {
+				t.Fatalf("enforce=%v error=%v", enforce, err)
+			}
+		})
+	}
+
+	plain := encodeCodexZstd(t, []byte(`{"type":"response.create","model":"gpt-5.4"}`))
+	header := make(http.Header)
+	header.Set("Content-Encoding", "zstd")
+	if _, enforce, err := enforcer.Parse(plain, header); err != nil || enforce {
+		t.Fatalf("valid un-signalled request enforce=%v error=%v", enforce, err)
+	}
+	if chooser.calls != 0 || len(executor.accounts) != 0 {
+		t.Fatalf("selector calls=%d attempts=%v", chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPEnforcerStreamingZstdLimitsFailBeforeDispatch(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{}}
+	enforcer := testHTTPEnforcer(t, chooser, executor, fsutil.NewMemFS())
+	noise := deterministicCodexZstdNoise(128 << 10)
+	decodedOversizeBody := bytes.Repeat(noise, DefaultCodexZstdLimits.MaxDecodedBytes/len(noise)+1)
+	decodedOversizeBody = decodedOversizeBody[:DefaultCodexZstdLimits.MaxDecodedBytes+1]
+	decodedOversize := encodeCodexZstdStreamingWindow(t, decodedOversizeBody, 1<<20)
+	if len(decodedOversizeBody) > len(decodedOversize)*DefaultCodexZstdLimits.MaxExpansion {
+		t.Fatalf("decoded-size fixture ratio = %d/%d, want within %d", len(decodedOversizeBody), len(decodedOversize), DefaultCodexZstdLimits.MaxExpansion)
+	}
+	if len(decodedOversize) > DefaultCodexZstdLimits.MaxEncodedBytes {
+		t.Fatalf("decoded-size fixture encoded bytes = %d, want within %d", len(decodedOversize), DefaultCodexZstdLimits.MaxEncodedBytes)
+	}
+	excessiveExpansionBody := bytes.Repeat([]byte("b"), 1<<20)
+	excessiveExpansion := encodeCodexZstdStreamingWindow(t, excessiveExpansionBody, 128<<10)
+	if len(excessiveExpansionBody) <= len(excessiveExpansion)*DefaultCodexZstdLimits.MaxExpansion {
+		t.Fatalf("expansion fixture ratio = %d/%d, want over %d", len(excessiveExpansionBody), len(excessiveExpansion), DefaultCodexZstdLimits.MaxExpansion)
+	}
+	concatenatedExpansion := append(
+		encodeCodexZstd(t, bytes.Repeat([]byte("f"), 2<<10)),
+		excessiveExpansion...,
+	)
+	tests := []struct {
+		name    string
+		body    []byte
+		wantErr string
+	}{
+		{
+			name:    "decoded size",
+			body:    decodedOversize,
+			wantErr: "Codex decoded request exceeds limit",
+		},
+		{
+			name:    "expansion ratio",
+			body:    excessiveExpansion,
+			wantErr: "Codex zstd expansion ratio exceeds limit",
+		},
+		{
+			name:    "concatenated known-size expansion ratio",
+			body:    concatenatedExpansion,
+			wantErr: "Codex zstd expansion ratio exceeds limit",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			header := make(http.Header)
+			header.Set("Content-Encoding", "zstd")
+			_, enforce, err := enforcer.Parse(test.body, header)
+			if err == nil || err.Error() != test.wantErr || enforce {
+				t.Fatalf("enforce=%v error=%v, want %q", enforce, err, test.wantErr)
+			}
+		})
+	}
+	if chooser.calls != 0 || len(executor.accounts) != 0 {
+		t.Fatalf("selector calls=%d attempts=%v, want no dispatch", chooser.calls, executor.accounts)
 	}
 }
 
@@ -688,6 +866,75 @@ func TestCodexHTTPObserveDoesNotFailOverPinnedTurnOnHardLimit(t *testing.T) {
 	}
 	if chooser.calls != 1 || !slices.Equal(executor.accounts, []codex.AccountKey{"one", "one"}) {
 		t.Fatalf("selector calls=%d attempts=%v", chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPObserveReturnsPinnedAuthResponseUnchanged(t *testing.T) {
+	header := http.Header{"X-Upstream": {"one", "two"}}
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {
+			{status: http.StatusOK, body: completedSSE("response-one")},
+			{status: http.StatusForbidden, header: header, body: "exact rejection"},
+		},
+	}}
+	router := testHTTPRouter(chooser, executor)
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(9, false, nil), nil, []byte("01234567890123456789012345678901"))
+	server := &Server{CodexRequests: router, CodexObserver: observer}
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+
+	first, choice, observation, err := server.doCodexHTTPRoute(context.Background(), request.Model, request, protocolHTTPRequest(request), body, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.Selected(choice, false)
+	observation.ResponseHeaders(first.StatusCode, first.Header)
+	observeCodexResponseBody(first, observation)
+	_, _ = io.Copy(io.Discard, first.Body)
+	_ = first.Body.Close()
+
+	response, choice, _, err := server.doCodexHTTPRoute(context.Background(), request.Model, request, protocolHTTPRequest(request), body, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.StatusCode != http.StatusForbidden || choice.AccountKey != "one" || !slices.Equal(response.Header.Values("X-Upstream"), []string{"one", "two"}) {
+		t.Fatalf("response=%v choice=%q", response, choice.AccountKey)
+	}
+	defer response.Body.Close()
+	gotBody, readErr := io.ReadAll(response.Body)
+	if readErr != nil || string(gotBody) != "exact rejection" {
+		t.Fatalf("body=%q error=%v", gotBody, readErr)
+	}
+	if chooser.calls != 1 || !slices.Equal(executor.accounts, []codex.AccountKey{"one", "one"}) {
+		t.Fatalf("selector calls=%d attempts=%v", chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPEnforcerObservesUnaryCompactWithoutSSE(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusOK, body: `{"id":"compact-response","output":[{"type":"compaction","encrypted_content":"opaque"}]}`}},
+	}}
+	enforcer := testHTTPEnforcer(t, chooser, executor, fsutil.NewMemFS())
+	server := &Server{CodexHTTPEnforcer: enforcer}
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestCompaction, CodexCompactionStandalone)
+
+	response, _, observation, err := server.doCodexHTTPRoute(context.Background(), request.Model, request, protocolHTTPRequest(request), nil, nil, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation != nil {
+		t.Fatalf("unexpected fallback observation: %v", observation)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	lease, found := enforcer.Leases.Get(NewCodexLeaseKey(request.Metadata.Metadata))
+	if !found || lease.State != LeaseBoundQuiescent || lease.ResponseAnchor != "compact-response" || !lease.HasEncryptedState {
+		t.Fatalf("lease=%#v found=%v", lease, found)
+	}
+	if health := enforcer.Observer.Health(); health.Unknown != 0 {
+		t.Fatalf("health=%#v", health)
 	}
 }
 

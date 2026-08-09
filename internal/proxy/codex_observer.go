@@ -131,6 +131,7 @@ type CodexTurnObservation struct {
 	key      LeaseKey
 	choice   RouteChoice
 	compact  bool
+	jsonBody bool
 	ws       bool
 	socket   uint64
 
@@ -144,12 +145,18 @@ type CodexTurnObservation struct {
 	prewarm         bool
 	prewarmAnchor   string
 	parser          *CodexSSEParser
+	parserFailed    bool
 	body            []byte
+	bodyOverflow    bool
 	finishOnce      sync.Once
 }
 
 func (observer *CodexTurnObserver) BeginHTTP(ctx context.Context, body []byte, contentEncoding, directMetadata string, compact bool) *CodexTurnObservation {
 	return observer.begin(ctx, body, contentEncoding, directMetadata, nil, compact, false, 0)
+}
+
+func (observer *CodexTurnObserver) beginHTTPDecoded(ctx context.Context, body []byte, contentEncoding, directMetadata string, compact bool) *CodexTurnObservation {
+	return observer.beginDecoded(ctx, body, contentEncoding, directMetadata, nil, compact, false, 0)
 }
 
 type codexObservationContextKey struct{}
@@ -181,6 +188,29 @@ func (observer *CodexTurnObserver) BeginWebSocket(ctx context.Context, frame []b
 }
 
 func (observer *CodexTurnObserver) begin(ctx context.Context, body []byte, contentEncoding, directMetadata string, handshake *CodexTurnMetadata, compact, ws bool, socketGeneration uint64) *CodexTurnObservation {
+	handle := observer.newObservation(ctx, contentEncoding, directMetadata, compact, ws, socketGeneration)
+	if handle == nil {
+		return nil
+	}
+	decoded, err := DecodeCodexRequest(body, contentEncoding, DefaultCodexZstdLimits)
+	if err != nil {
+		observer.unknown.Add(1)
+		observer.requestDecodeErr.Add(1)
+		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "request_decode"})
+		return handle
+	}
+	return observer.parseObservation(handle, decoded.Decoded(), directMetadata, handshake)
+}
+
+func (observer *CodexTurnObserver) beginDecoded(ctx context.Context, body []byte, contentEncoding, directMetadata string, handshake *CodexTurnMetadata, compact, ws bool, socketGeneration uint64) *CodexTurnObservation {
+	handle := observer.newObservation(ctx, contentEncoding, directMetadata, compact, ws, socketGeneration)
+	if handle == nil {
+		return nil
+	}
+	return observer.parseObservation(handle, body, directMetadata, handshake)
+}
+
+func (observer *CodexTurnObserver) newObservation(ctx context.Context, contentEncoding, directMetadata string, compact, ws bool, socketGeneration uint64) *CodexTurnObservation {
 	if observer == nil {
 		return nil
 	}
@@ -191,19 +221,15 @@ func (observer *CodexTurnObserver) begin(ctx context.Context, body []byte, conte
 	if strings.EqualFold(strings.TrimSpace(contentEncoding), "zstd") {
 		observer.zstdRequests.Add(1)
 	}
-	handle := &CodexTurnObservation{observer: observer, ctx: ctx, compact: compact, ws: ws, socket: socketGeneration, parser: NewCodexSSEParser(codexSSEDefaultMaxEventBytes)}
-	decoded, err := DecodeCodexRequest(body, contentEncoding, DefaultCodexZstdLimits)
-	if err != nil {
-		observer.unknown.Add(1)
-		observer.requestDecodeErr.Add(1)
-		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "request_decode"})
-		return handle
-	}
-	request, err := ParseCodexProtocolRequest(decoded.Decoded(), directMetadata, handshake)
+	return &CodexTurnObservation{observer: observer, ctx: ctx, compact: compact, ws: ws, socket: socketGeneration, parser: NewCodexSSEParser(codexSSEDefaultMaxEventBytes)}
+}
+
+func (observer *CodexTurnObserver) parseObservation(handle *CodexTurnObservation, body []byte, directMetadata string, handshake *CodexTurnMetadata) *CodexTurnObservation {
+	request, err := ParseCodexProtocolRequest(body, directMetadata, handshake)
 	if err != nil {
 		observer.unknown.Add(1)
 		observer.metadataParseErr.Add(1)
-		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "metadata_parse"})
+		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "metadata_parse"})
 		return handle
 	}
 	handle.request = request
@@ -212,7 +238,7 @@ func (observer *CodexTurnObserver) begin(ctx context.Context, body []byte, conte
 		if request.Metadata.Strong {
 			observer.strongKeys.Add(1)
 		}
-		noteCodexObservation(ctx, codexObservationFields{
+		noteCodexObservation(handle.ctx, codexObservationFields{
 			TurnHint:    observer.turnHint(handle.key),
 			RequestKind: string(request.Metadata.Metadata.RequestKind),
 			Decision:    "shadow_parsed",
@@ -223,7 +249,7 @@ func (observer *CodexTurnObserver) begin(ctx context.Context, body []byte, conte
 	} else {
 		observer.unknown.Add(1)
 		observer.missingTurnID.Add(1)
-		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "turn_identity_missing"})
+		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "turn_identity_missing"})
 	}
 	return handle
 }
@@ -331,6 +357,14 @@ func (handle *CodexTurnObservation) ResponseHeaders(status int, header http.Head
 		handle.failUnadmittedLocked("upstream_rejected")
 		return
 	}
+	contentType := header.Get("Content-Type")
+	if separator := strings.IndexByte(contentType, ';'); separator >= 0 {
+		contentType = contentType[:separator]
+	}
+	if !handle.compact && strings.EqualFold(strings.TrimSpace(contentType), "application/json") {
+		handle.jsonBody = true
+		handle.parser = nil
+	}
 	handle.admitLocked()
 	if !handle.admitted {
 		return
@@ -373,18 +407,89 @@ func (handle *CodexTurnObservation) ObserveBytes(chunk []byte) {
 	}
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
-	if len(handle.body)+len(chunk) <= codexProtocolMaxBytes {
-		handle.body = append(handle.body, chunk...)
-	}
-	observations, err := handle.parser.Feed(chunk)
-	if err != nil {
-		handle.observer.unknown.Add(1)
-		handle.observer.recordCanaryUnexplained()
+	if handle.parserFailed {
 		return
 	}
+	if !handle.compact && !handle.jsonBody && len(bytes.TrimSpace(handle.body)) == 0 {
+		trimmed := bytes.TrimSpace(chunk)
+		if len(trimmed) != 0 && trimmed[0] == '{' {
+			handle.jsonBody = true
+			handle.parser = nil
+		}
+	}
+	if handle.compact || handle.jsonBody {
+		if handle.bodyOverflow {
+			return
+		}
+		var ok bool
+		handle.body, ok = appendCodexObservationBody(handle.body, chunk, codexProtocolMaxBytes)
+		if !ok {
+			handle.body = nil
+			handle.bodyOverflow = true
+			handle.recordParserFailureLocked()
+		}
+		return
+	}
+	observations, err := handle.parser.Feed(chunk)
 	for _, observation := range observations {
 		handle.observeEventLocked(observation)
+		if handle.parserFailed {
+			break
+		}
 	}
+	if handle.parserFailed {
+		return
+	}
+	if err != nil {
+		handle.recordParserFailureLocked()
+		return
+	}
+	if !handle.bodyOverflow {
+		bodyLimit := codexSSEDefaultMaxEventBytes
+		if handle.parser != nil && handle.parser.maxEvent > 0 {
+			bodyLimit = handle.parser.maxEvent
+		}
+		var ok bool
+		handle.body, ok = appendCodexObservationBody(handle.body, chunk, bodyLimit)
+		if !ok {
+			handle.body = nil
+			handle.bodyOverflow = true
+		}
+	}
+}
+
+func appendCodexObservationBody(body, chunk []byte, limit int) ([]byte, bool) {
+	if limit < 0 || len(chunk) > limit-len(body) {
+		return nil, false
+	}
+	needed := len(body) + len(chunk)
+	if needed <= cap(body) {
+		return append(body, chunk...), true
+	}
+	capacity := cap(body) * 2
+	if capacity < 64 {
+		capacity = 64
+	}
+	if capacity < needed {
+		capacity = needed
+	}
+	if capacity > limit {
+		capacity = limit
+	}
+	retained := make([]byte, len(body), capacity)
+	copy(retained, body)
+	return append(retained, chunk...), true
+}
+
+func (handle *CodexTurnObservation) recordParserFailureLocked() {
+	if handle.parserFailed {
+		return
+	}
+	handle.body = nil
+	handle.bodyOverflow = true
+	handle.parserFailed = true
+	handle.observer.unknown.Add(1)
+	handle.observer.recordCanaryUnexplained()
 }
 
 func (handle *CodexTurnObservation) ObserveWebSocketEvent(frame []byte) {
@@ -393,6 +498,9 @@ func (handle *CodexTurnObservation) ObserveWebSocketEvent(frame []byte) {
 	}
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
+	if handle.parserFailed {
+		return
+	}
 	handle.observeEventLocked(classifyCodexSSEData(frame))
 }
 
@@ -463,8 +571,7 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 		handle.observer.recordCanaryUnexplained()
 		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: safeCodexEventReason(observation.Type)})
 	case CodexSSEMalformed:
-		handle.observer.unknown.Add(1)
-		handle.observer.recordCanaryUnexplained()
+		handle.recordParserFailureLocked()
 		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "response_event_malformed"})
 	}
 }
@@ -496,17 +603,19 @@ func (handle *CodexTurnObservation) Finish(readErr error) {
 	handle.finishOnce.Do(func() {
 		handle.mu.Lock()
 		defer handle.mu.Unlock()
-		if readErr == nil {
+		if readErr == nil && !handle.compact && !handle.jsonBody && !handle.parserFailed {
 			if final, err := handle.parser.Finish(); err == nil {
 				for _, observation := range final {
 					handle.observeEventLocked(observation)
+					if handle.parserFailed {
+						break
+					}
 				}
 			} else {
-				handle.observer.unknown.Add(1)
-				handle.observer.recordCanaryUnexplained()
+				handle.recordParserFailureLocked()
 			}
 		}
-		if handle.compact && handle.admitted && !handle.completed && readErr == nil {
+		if handle.compact && handle.admitted && !handle.completed && !handle.parserFailed && readErr == nil {
 			if compact, err := ParseCodexCompactResponse(handle.body); err == nil {
 				if err := handle.observer.Leases.SetResponseAnchor(handle.key, compact.ResponseID, compact.HasEncryptedState); err != nil {
 					handle.observer.observeLeaseError(err)
@@ -516,16 +625,31 @@ func (handle *CodexTurnObservation) Finish(readErr error) {
 				_, _ = handle.observer.Leases.ObserveCompleted(handle.key, nil)
 				handle.completed = true
 				handle.persistMutationLocked()
+			} else {
+				handle.body = nil
+				handle.bodyOverflow = true
+				handle.recordParserFailureLocked()
 			}
 		}
-		if !handle.compact && handle.admitted && !handle.completed && !handle.failed && readErr == nil && len(handle.body) != 0 {
+		if handle.jsonBody && handle.admitted && !handle.completed && !handle.failed && !handle.parserFailed && readErr == nil && len(handle.body) != 0 {
 			var response struct {
 				Status string `json:"status"`
 			}
-			if jsonUnmarshalObject(handle.body, &response) == nil && response.Status == "completed" {
-				_, _ = handle.observer.Leases.ObserveCompleted(handle.key, nil)
-				handle.completed = true
-				handle.persistMutationLocked()
+			if err := validateCodexUnaryAuthority(handle.body); err != nil {
+				handle.body = nil
+				handle.bodyOverflow = true
+				handle.recordParserFailureLocked()
+			} else if err := jsonUnmarshalObject(handle.body, &response); err != nil {
+				handle.body = nil
+				handle.bodyOverflow = true
+				handle.recordParserFailureLocked()
+			} else if response.Status == "completed" {
+				if _, err := handle.observer.Leases.ObserveCompleted(handle.key, nil); err == nil {
+					handle.completed = true
+					handle.persistMutationLocked()
+				} else {
+					handle.observer.observeLeaseError(err)
+				}
 			}
 		}
 		if handle.admitted && !handle.completed && !handle.failed {
@@ -720,6 +844,13 @@ func (s *Server) beginCodexHTTPObservation(ctx context.Context, body []byte, hea
 		return nil
 	}
 	return s.CodexObserver.BeginHTTP(ctx, body, header.Get("Content-Encoding"), header.Get(codexTurnMetadataKey), compact)
+}
+
+func (s *Server) beginCodexHTTPObservationDecoded(ctx context.Context, body []byte, header http.Header, compact bool) *CodexTurnObservation {
+	if s == nil || s.CodexObserver == nil {
+		return nil
+	}
+	return s.CodexObserver.beginHTTPDecoded(ctx, body, header.Get("Content-Encoding"), header.Get(codexTurnMetadataKey), compact)
 }
 
 func observeCodexResponseBody(response *http.Response, handle *CodexTurnObservation) {

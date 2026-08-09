@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"sync/atomic"
+	"strings"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -24,8 +24,6 @@ type CodexRequestRouter struct {
 	Refresher codex.CredentialReferenceRefresher
 	Capacity  *CodexCapacityLedger
 	Now       func() time.Time
-
-	observationSequence atomic.Uint64
 }
 
 type CodexPinnedFailure uint8
@@ -53,48 +51,61 @@ func (r *CodexRequestRouter) AccountKeys(ctx context.Context) ([]codex.AccountKe
 }
 
 func (r *CodexRequestRouter) DoPinned(ctx context.Context, choice RouteChoice, req *http.Request) (*http.Response, CandidateAttempt, CodexPinnedFailure, error) {
+	response, attempt, failure, _, err := r.doPinned(ctx, choice, req, nil)
+	return response, attempt, failure, err
+}
+
+func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, req *http.Request, rejected *http.Response) (*http.Response, CandidateAttempt, CodexPinnedFailure, bool, error) {
 	if r == nil || r.Scope == nil || r.Executor == nil {
-		return nil, CandidateAttempt{}, CodexPinnedAccepted, fmt.Errorf("Codex request router unavailable")
+		return nil, CandidateAttempt{}, CodexPinnedAccepted, false, fmt.Errorf("Codex request router unavailable")
 	}
 	scoper, ok := r.Scope.(codexChoiceScoper)
 	if !ok {
-		return nil, CandidateAttempt{}, CodexPinnedAccepted, fmt.Errorf("Codex request scope does not support fixed choices")
+		return nil, CandidateAttempt{}, CodexPinnedAccepted, false, fmt.Errorf("Codex request scope does not support fixed choices")
 	}
 	plan, err := scoper.PlanChoice(ctx, choice, "")
 	if err != nil {
-		return nil, CandidateAttempt{}, CodexPinnedAccepted, err
+		if rejected != nil {
+			return rejected, CandidateAttempt{}, CodexPinnedAuthFailure, true, nil
+		}
+		return nil, CandidateAttempt{}, CodexPinnedAccepted, false, err
 	}
 	var last CandidateAttempt
-	try := func(attempt CandidateAttempt) (*http.Response, CodexPinnedFailure, error) {
-		last = attempt
-		observeCodexAttempt(ctx, choice, attempt)
-		response, err := r.Executor.Do(ctx, choice, attempt, req)
+	try := func(attempt CandidateAttempt) (*http.Response, CodexPinnedFailure, bool, error) {
+		response, dispatched, err := executeCodexAttempt(r.Executor, ctx, choice, attempt, req, func() {
+			closeResponse(rejected)
+			rejected = nil
+			last = attempt
+			observeCodexAttempt(ctx, choice, attempt)
+		})
 		if err != nil {
-			return nil, CodexPinnedAccepted, err
+			if !dispatched && rejected != nil {
+				return rejected, CodexPinnedAuthFailure, true, nil
+			}
+			return nil, CodexPinnedAccepted, false, err
 		}
-		switch response.StatusCode {
-		case http.StatusUnauthorized, http.StatusForbidden:
+		failure, err := r.classifyAttemptResponse(choice, response)
+		if err != nil {
 			closeResponse(response)
-			return nil, CodexPinnedAuthFailure, nil
-		case http.StatusTooManyRequests:
-			buffered, body, err := bufferAttemptResponse(response)
-			if err != nil {
-				return nil, CodexPinnedAccepted, err
-			}
-			if isHardExhaustion(body) {
-				r.observeHardLimit(choice, buffered)
-				return buffered, CodexPinnedHardLimit, nil
-			}
-			return buffered, CodexPinnedAccepted, nil
-		default:
-			return response, CodexPinnedAccepted, nil
+			return nil, CodexPinnedAccepted, false, err
 		}
+		return response, failure, false, nil
 	}
 	for _, attempt := range plan.Attempts {
-		response, failure, err := try(attempt)
-		if err != nil || failure != CodexPinnedAuthFailure {
-			return response, last, failure, err
+		response, failure, terminal, err := try(attempt)
+		if err != nil {
+			closeResponse(rejected)
+			return nil, last, failure, false, err
 		}
+		if terminal {
+			return response, last, failure, true, nil
+		}
+		if failure != CodexPinnedAuthFailure {
+			closeResponse(rejected)
+			return response, last, failure, false, err
+		}
+		closeResponse(rejected)
+		rejected = response
 	}
 	if plan.refreshAttempt != nil && r.Refresher != nil {
 		ref, revision, refreshErr := r.Refresher.RefreshReference(ctx, plan.refreshAttempt.Candidate, plan.refreshAttempt.Revision)
@@ -103,14 +114,21 @@ func (r *CodexRequestRouter) DoPinned(ctx context.Context, choice RouteChoice, r
 			attempt.Candidate = ref
 			attempt.Revision = revision
 			attempt.Ordinal = len(plan.Attempts) + 1
-			response, failure, err := try(attempt)
-			return response, last, failure, err
+			response, failure, terminal, err := try(attempt)
+			if err != nil {
+				closeResponse(rejected)
+				return nil, last, failure, false, err
+			}
+			return response, last, failure, terminal, nil
 		}
 		if !errors.Is(refreshErr, codex.ErrRefreshIneligible) && !errors.Is(refreshErr, codex.ErrRefreshUnavailable) && !errors.Is(refreshErr, codex.ErrStaleRevision) {
-			return nil, *plan.refreshAttempt, CodexPinnedAccepted, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
+			if rejected != nil {
+				return rejected, last, CodexPinnedAuthFailure, true, nil
+			}
+			return nil, *plan.refreshAttempt, CodexPinnedAccepted, false, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
 		}
 	}
-	return nil, last, CodexPinnedAuthFailure, nil
+	return rejected, last, CodexPinnedAuthFailure, false, nil
 }
 
 // Do executes a request with same-identity 401 recovery, one eligible refresh,
@@ -120,53 +138,55 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 		return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("Codex request router unavailable")
 	}
 	var excluded []codex.SelectionExclusion
-	var hardFallback *http.Response
-	var lastChoice RouteChoice
-	var lastAttempt CandidateAttempt
-	hadUnauthorized := false
+	var rejected *http.Response
+	var rejectedChoice RouteChoice
+	var rejectedAttempt CandidateAttempt
+	replaceRejected := func(response *http.Response, choice RouteChoice, attempt CandidateAttempt) {
+		closeResponse(rejected)
+		rejected = response
+		rejectedChoice = choice
+		rejectedAttempt = attempt
+	}
 
 	for {
 		plan, err := r.Scope.Plan(ctx, requirements, "", excluded...)
 		if err != nil {
-			if hardFallback != nil {
-				return hardFallback, lastChoice, lastAttempt, nil
-			}
-			if hadUnauthorized {
-				return nil, lastChoice, lastAttempt, fmt.Errorf("Codex token rejected and no alternate account available")
+			if rejected != nil {
+				return rejected, rejectedChoice, rejectedAttempt, nil
 			}
 			return nil, RouteChoice{}, CandidateAttempt{}, err
 		}
-		lastChoice = plan.Choice
 		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > 0)
 
 		accountHardLimited := false
 		for _, attempt := range plan.Attempts {
-			lastAttempt = attempt
-			observeCodexAttempt(ctx, plan.Choice, attempt)
-			resp, err := r.Executor.Do(ctx, plan.Choice, attempt, req)
+			resp, dispatched, err := executeCodexAttempt(r.Executor, ctx, plan.Choice, attempt, req, func() {
+				closeResponse(rejected)
+				rejected = nil
+				observeCodexAttempt(ctx, plan.Choice, attempt)
+			})
 			if err != nil {
+				if !dispatched && rejected != nil {
+					return rejected, rejectedChoice, rejectedAttempt, nil
+				}
+				closeResponse(rejected)
 				return nil, plan.Choice, attempt, err
 			}
-			switch resp.StatusCode {
-			case http.StatusUnauthorized, http.StatusForbidden:
-				hadUnauthorized = true
+			failure, err := r.classifyAttemptResponse(plan.Choice, resp)
+			if err != nil {
 				closeResponse(resp)
+				closeResponse(rejected)
+				return nil, plan.Choice, attempt, err
+			}
+			switch failure {
+			case CodexPinnedAuthFailure:
+				replaceRejected(resp, plan.Choice, attempt)
 				continue
-			case http.StatusTooManyRequests:
-				buffered, body, err := bufferAttemptResponse(resp)
-				if err != nil {
-					return nil, plan.Choice, attempt, err
-				}
-				if !isHardExhaustion(body) {
-					return buffered, plan.Choice, attempt, nil
-				}
-				r.observeHardLimit(plan.Choice, buffered)
-				if hardFallback != nil {
-					closeResponse(hardFallback)
-				}
-				hardFallback = buffered
+			case CodexPinnedHardLimit:
+				replaceRejected(resp, plan.Choice, attempt)
 				accountHardLimited = true
-			default:
+			case CodexPinnedAccepted:
+				closeResponse(rejected)
 				return resp, plan.Choice, attempt, nil
 			}
 			if accountHardLimited {
@@ -182,35 +202,40 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 				refreshed.Candidate = refreshedRef
 				refreshed.Revision = refreshedRevision
 				refreshed.Ordinal = len(plan.Attempts) + 1
-				lastAttempt = refreshed
-				observeCodexAttempt(ctx, plan.Choice, refreshed)
-				resp, err := r.Executor.Do(ctx, plan.Choice, refreshed, req)
+				resp, dispatched, err := executeCodexAttempt(r.Executor, ctx, plan.Choice, refreshed, req, func() {
+					closeResponse(rejected)
+					rejected = nil
+					observeCodexAttempt(ctx, plan.Choice, refreshed)
+				})
 				if err != nil {
+					if !dispatched && rejected != nil {
+						return rejected, rejectedChoice, rejectedAttempt, nil
+					}
+					closeResponse(rejected)
 					return nil, plan.Choice, refreshed, err
 				}
-				switch resp.StatusCode {
-				case http.StatusUnauthorized, http.StatusForbidden:
-					hadUnauthorized = true
+				failure, err := r.classifyAttemptResponse(plan.Choice, resp)
+				if err != nil {
 					closeResponse(resp)
-				case http.StatusTooManyRequests:
-					buffered, body, err := bufferAttemptResponse(resp)
-					if err != nil {
-						return nil, plan.Choice, refreshed, err
-					}
-					if !isHardExhaustion(body) {
-						return buffered, plan.Choice, refreshed, nil
-					}
-					r.observeHardLimit(plan.Choice, buffered)
-					if hardFallback != nil {
-						closeResponse(hardFallback)
-					}
-					hardFallback = buffered
-				default:
+					closeResponse(rejected)
+					return nil, plan.Choice, refreshed, err
+				}
+				switch failure {
+				case CodexPinnedAuthFailure:
+					replaceRejected(resp, plan.Choice, refreshed)
+				case CodexPinnedHardLimit:
+					replaceRejected(resp, plan.Choice, refreshed)
+					accountHardLimited = true
+				case CodexPinnedAccepted:
+					closeResponse(rejected)
 					return resp, plan.Choice, refreshed, nil
 				}
 			case errors.Is(refreshErr, codex.ErrRefreshIneligible), errors.Is(refreshErr, codex.ErrRefreshUnavailable), errors.Is(refreshErr, codex.ErrStaleRevision):
 				// Another candidate or identity remains safe to try.
 			default:
+				if rejected != nil {
+					return rejected, rejectedChoice, rejectedAttempt, nil
+				}
 				return nil, plan.Choice, *plan.refreshAttempt, fmt.Errorf("refresh Codex credential candidate: %w", refreshErr)
 			}
 		}
@@ -219,28 +244,94 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 	}
 }
 
+func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, response *http.Response) (CodexPinnedFailure, error) {
+	if response == nil || response.Body == nil {
+		return CodexPinnedAccepted, fmt.Errorf("Codex attempt returned an invalid response")
+	}
+	switch response.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return CodexPinnedAuthFailure, nil
+	case http.StatusTooManyRequests:
+		if response.Uncompressed || !codexAttemptResponseHasIdentityEncoding(response.Header) {
+			return CodexPinnedAccepted, nil
+		}
+		body, complete, err := inspectAttemptResponse(response)
+		if err != nil {
+			return CodexPinnedAccepted, err
+		}
+		if !complete {
+			return CodexPinnedAccepted, nil
+		}
+		wrapped, err := parseCodexHTTPError(body, response.StatusCode)
+		if err != nil || !wrapped.HardUsageLimit {
+			return CodexPinnedAccepted, nil
+		}
+		r.observeHardLimit(choice, response)
+		return CodexPinnedHardLimit, nil
+	default:
+		return CodexPinnedAccepted, nil
+	}
+}
+
+func executeCodexAttempt(executor ExplicitAccountExecutor, ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func()) (*http.Response, bool, error) {
+	dispatched := false
+	markDispatched := func() {
+		if dispatched {
+			return
+		}
+		dispatched = true
+		if onDispatch != nil {
+			onDispatch()
+		}
+	}
+	if aware, ok := executor.(explicitAccountDispatchExecutor); ok {
+		response, err := aware.doOnDispatch(ctx, choice, attempt, req, markDispatched)
+		return response, dispatched, err
+	}
+	markDispatched()
+	response, err := executor.Do(ctx, choice, attempt, req)
+	return response, dispatched, err
+}
+
+func codexAttemptResponseHasIdentityEncoding(header http.Header) bool {
+	found := false
+	var values []string
+	for name, headerValues := range header {
+		if !strings.EqualFold(name, "Content-Encoding") {
+			continue
+		}
+		found = true
+		values = append(values, headerValues...)
+	}
+	if !found {
+		return true
+	}
+	return len(values) == 1 && strings.EqualFold(strings.TrimSpace(values[0]), "identity")
+}
+
 func (r *CodexRequestRouter) observeHardLimit(choice RouteChoice, response *http.Response) {
 	if r.Capacity == nil {
 		return
+	}
+	attemptedModel := choice.EffectiveModel
+	if attemptedModel == "" {
+		attemptedModel = choice.RequestedModel
 	}
 	now := time.Now()
 	if r.Now != nil {
 		now = r.Now()
 	}
 	resetAt := retryAfterReset(now, response.Header.Get("Retry-After"))
-	sequence := r.observationSequence.Add(1)
-	for _, bucket := range choice.RequiredBuckets {
-		r.Capacity.Observe(CapacityFact{
-			AccountKey:   choice.AccountKey,
-			Bucket:       bucket,
-			RemainingPct: 0,
-			Source:       CapacitySourceHardLimit,
-			Sequence:     sequence,
-			ObservedAt:   now,
-			ResetAt:      resetAt,
-			Confidence:   CapacityConfidenceAuthoritative,
-		})
-	}
+	stream := r.Capacity.NewObservationStream()
+	r.Capacity.Observe(stream.Stamp(CapacityFact{
+		AccountKey:   choice.AccountKey,
+		Bucket:       CapacityBucketForModel(attemptedModel),
+		RemainingPct: 0,
+		Source:       CapacitySourceHardLimit,
+		ObservedAt:   now,
+		ResetAt:      resetAt,
+		Confidence:   CapacityConfidenceAuthoritative,
+	}))
 }
 
 func retryAfterReset(now time.Time, value string) time.Time {
@@ -253,21 +344,30 @@ func retryAfterReset(now time.Time, value string) time.Time {
 	return time.Time{}
 }
 
-func bufferAttemptResponse(response *http.Response) (*http.Response, []byte, error) {
+func inspectAttemptResponse(response *http.Response) ([]byte, bool, error) {
 	if response == nil || response.Body == nil {
-		return nil, nil, fmt.Errorf("Codex attempt returned an invalid response")
+		return nil, false, fmt.Errorf("Codex attempt returned an invalid response")
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, codexAttemptResponseLimit+1))
-	response.Body.Close()
+	original := response.Body
+	body, err := io.ReadAll(io.LimitReader(original, codexAttemptResponseLimit+1))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read Codex attempt response: %w", err)
+		return nil, false, fmt.Errorf("read Codex attempt response: %w", err)
 	}
 	if len(body) > codexAttemptResponseLimit {
-		return nil, nil, fmt.Errorf("Codex attempt response exceeds 1 MiB")
+		response.Body = &codexReplayBody{
+			Reader: io.MultiReader(bytes.NewReader(body), original),
+			Closer: original,
+		}
+		return nil, false, nil
 	}
-	buffered := makeBufferedResponse(response, body)
-	buffered.Body = io.NopCloser(bytes.NewReader(body))
-	return buffered, body, nil
+	_ = original.Close()
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	return body, true, nil
+}
+
+type codexReplayBody struct {
+	io.Reader
+	io.Closer
 }
 
 func closeResponse(response *http.Response) {

@@ -755,12 +755,26 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	protocolRequest, enforce, err := s.parseCodexHTTPEnforcement(body, r.Header)
+	contentEncoding, err := parseCodexContentEncoding(r.Header)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	model = extractModel(body)
+	inspectionLimits := DefaultCodexZstdLimits
+	inspectionLimits.MaxEncodedBytes = maxRequestBody
+	inspectionLimits.MaxDecodedBytes = maxRequestBody
+	decodedRequest, err := DecodeCodexRequest(body, contentEncoding, inspectionLimits)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	decodedBody := decodedRequest.Decoded()
+	protocolRequest, enforce, err := s.parseCodexHTTPEnforcementDecoded(decodedBody, r.Header)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	model = extractModel(decodedBody)
 	if enforce && protocolRequest.Model != "" {
 		model = protocolRequest.Model
 	}
@@ -768,7 +782,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	// Emit payload diagnostics before any body rewrite.
 	if s.PayloadDiag != nil {
-		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, body)
+		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, decodedBody)
 		s.emitPayloadDiagnostics(PayloadEvent{
 			Time:          time.Now().UTC(),
 			Method:        r.Method,
@@ -786,33 +800,41 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 
 	// Compress Responses API input via headroom bridge if available.
 	// Fail-open: on error, log and continue with original body.
+	forwardBody := decodedRequest.Replay()
+	bodyRewritten := false
 	if s.Headroom != nil && !enforce {
 		var compressed []byte
 		var saved int
 		var err error
 		if s.HeadroomMode == HeadroomModeCache {
-			compressed, saved, err = s.Headroom.CompressResponsesCache(body)
+			compressed, saved, err = s.Headroom.CompressResponsesCache(decodedBody)
 		} else {
-			compressed, saved, err = s.Headroom.CompressResponses(body, HeadroomModeToken)
+			compressed, saved, err = s.Headroom.CompressResponses(decodedBody, HeadroomModeToken)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: headroom: %v\n", err)
 		} else if saved > 0 {
+			prepared, encodeErr := EncodeCodexRequest(compressed, decodedRequest.Encoding(), inspectionLimits)
+			if encodeErr != nil {
+				writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("encode compressed Codex request: %v", encodeErr))
+				return
+			}
 			fmt.Fprintf(os.Stderr, "cq: headroom saved %d tokens\n", saved)
-			body = compressed
+			forwardBody = prepared
+			bodyRewritten = true
 		}
 	}
 
 	// Build upstream request — forward as-is, no translation.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
-	upReq, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
+	upReq, err := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
 		return
 	}
-	upReq.ContentLength = int64(len(body))
+	upReq.ContentLength = int64(len(forwardBody))
 	upReq.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(body)), nil
+		return io.NopCloser(bytes.NewReader(forwardBody)), nil
 	}
 
 	// Forward all original headers — the transport will override auth headers.
@@ -822,11 +844,14 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 			upReq.Header.Add(key, v)
 		}
 	}
+	if bodyRewritten {
+		upReq.Header.Set("Content-Length", fmt.Sprint(len(forwardBody)))
+	}
 	if upReq.Header.Get("Content-Type") == "" {
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, choice, observation, err := s.doCodexHTTPRoute(ctx, model, protocolRequest, upReq, body, r.Header, false, enforce)
+	resp, choice, observation, err := s.doCodexHTTPRouteDecoded(ctx, model, protocolRequest, upReq, body, decodedBody, r.Header, false, enforce)
 	if err != nil {
 		if observation != nil {
 			observation.Finish(err)
@@ -854,6 +879,13 @@ func (s *Server) parseCodexHTTPEnforcement(body []byte, header http.Header) (Cod
 		return CodexProtocolRequest{}, false, nil
 	}
 	return s.CodexHTTPEnforcer.Parse(body, header)
+}
+
+func (s *Server) parseCodexHTTPEnforcementDecoded(body []byte, header http.Header) (CodexProtocolRequest, bool, error) {
+	if s == nil || s.CodexHTTPEnforcer == nil {
+		return CodexProtocolRequest{}, false, nil
+	}
+	return s.CodexHTTPEnforcer.parseDecoded(body, header)
 }
 
 // proxyCodexUpgrade handles WebSocket upgrade requests to /responses by
@@ -1005,9 +1037,12 @@ func (s *Server) dialCodexWebSocket(ctx context.Context, upstreamURL string, inc
 			case http.StatusUnauthorized:
 				continue
 			case http.StatusTooManyRequests:
-				if isHardExhaustion(body) {
-					hardLimited = true
-					break
+				if !resp.Uncompressed && codexAttemptResponseHasIdentityEncoding(resp.Header) {
+					wrapped, parseErr := parseCodexHTTPError(body, resp.StatusCode)
+					if parseErr == nil && wrapped.HardUsageLimit {
+						hardLimited = true
+						break
+					}
 				}
 				return nil, plan.Choice, attempt, fmt.Errorf("codex websocket upgrade failed: %s", resp.Status)
 			default:

@@ -5,10 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
 const codexSSEDefaultMaxEventBytes = 256 << 10
+
+var (
+	ErrCodexSSETruncated   = fmt.Errorf("Codex SSE stream ended before blank-line termination: %w", io.ErrUnexpectedEOF)
+	errCodexSSEEventTooBig = errors.New("Codex SSE event exceeds limit")
+)
 
 type CodexSSEEventKind string
 
@@ -39,10 +45,12 @@ type CodexSSEObservation struct {
 }
 
 type CodexSSEParser struct {
-	maxEvent  int
-	buffer    []byte
-	dataLines [][]byte
-	eventSize int
+	maxEvent    int
+	buffer      []byte
+	data        []byte
+	hasData     bool
+	eventSize   int
+	terminalErr error
 }
 
 func NewCodexSSEParser(maxEvent int) *CodexSSEParser {
@@ -53,57 +61,117 @@ func NewCodexSSEParser(maxEvent int) *CodexSSEParser {
 }
 
 func (p *CodexSSEParser) Feed(chunk []byte) ([]CodexSSEObservation, error) {
-	p.buffer = append(p.buffer, chunk...)
+	if p.terminalErr != nil {
+		return nil, p.terminalErr
+	}
 	var observations []CodexSSEObservation
-	for {
-		index := bytes.IndexByte(p.buffer, '\n')
+	for len(chunk) != 0 {
+		index := bytes.IndexByte(chunk, '\n')
 		if index < 0 {
+			if err := p.appendBuffer(chunk); err != nil {
+				return observations, p.fail(err)
+			}
 			break
 		}
-		line := p.buffer[:index]
-		p.buffer = p.buffer[index+1:]
-		if len(line) > 0 && line[len(line)-1] == '\r' {
-			line = line[:len(line)-1]
+
+		fragment := chunk[:index]
+		bufferLen := len(p.buffer)
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\r' {
+			fragment = fragment[:len(fragment)-1]
+		} else if len(fragment) == 0 && bufferLen > 0 && p.buffer[bufferLen-1] == '\r' {
+			bufferLen--
+		}
+		lineLen := bufferLen + len(fragment)
+		additional := 0
+		if lineLen != 0 {
+			additional = lineLen + 1
+		}
+		if additional > p.maxEvent-p.eventSize {
+			return observations, p.fail(errCodexSSEEventTooBig)
+		}
+
+		var line []byte
+		if len(p.buffer) == 0 {
+			line = fragment
+		} else {
+			p.buffer = p.buffer[:bufferLen]
+			if err := p.appendBuffer(fragment); err != nil {
+				return observations, p.fail(err)
+			}
+			line = p.buffer
+			p.buffer = nil
 		}
 		observation, ready, err := p.consumeLine(line)
 		if err != nil {
-			return nil, err
+			return observations, p.fail(err)
 		}
 		if ready {
 			observations = append(observations, observation)
 		}
-	}
-	if len(p.buffer)+p.eventSize > p.maxEvent {
-		return nil, errors.New("Codex SSE event exceeds limit")
+		chunk = chunk[index+1:]
 	}
 	return observations, nil
 }
 
+func (p *CodexSSEParser) appendBuffer(fragment []byte) error {
+	needed := len(p.buffer) + len(fragment)
+	if needed > p.maxEvent-p.eventSize {
+		return errCodexSSEEventTooBig
+	}
+	if needed > cap(p.buffer) {
+		if cap(p.data)+needed > p.maxEvent {
+			data := make([]byte, len(p.data))
+			copy(data, p.data)
+			p.data = data
+		}
+		available := p.maxEvent - cap(p.data)
+		if needed > available {
+			return errCodexSSEEventTooBig
+		}
+		capacity := cap(p.buffer) * 2
+		if capacity < 64 {
+			capacity = 64
+		}
+		if capacity < needed {
+			capacity = needed
+		}
+		if capacity > available {
+			capacity = available
+		}
+		buffer := make([]byte, len(p.buffer), capacity)
+		copy(buffer, p.buffer)
+		p.buffer = buffer
+	}
+	p.buffer = append(p.buffer, fragment...)
+	return nil
+}
+
 func (p *CodexSSEParser) Finish() ([]CodexSSEObservation, error) {
-	var observations []CodexSSEObservation
-	if len(p.buffer) != 0 {
-		observation, ready, err := p.consumeLine(bytes.TrimSuffix(p.buffer, []byte{'\r'}))
-		if err != nil {
-			return nil, err
-		}
-		if ready {
-			observations = append(observations, observation)
-		}
-		p.buffer = nil
+	if p.terminalErr != nil {
+		return nil, p.terminalErr
 	}
-	if len(p.dataLines) != 0 {
-		observation, err := p.dispatch()
-		if err != nil {
-			return nil, err
-		}
-		observations = append(observations, observation)
+	if len(p.buffer) != 0 || p.hasData || p.eventSize != 0 {
+		return nil, p.fail(ErrCodexSSETruncated)
 	}
-	return observations, nil
+	return nil, nil
+}
+
+func (p *CodexSSEParser) fail(err error) error {
+	if p.terminalErr != nil {
+		return p.terminalErr
+	}
+	p.buffer = nil
+	p.data = nil
+	p.hasData = false
+	p.eventSize = 0
+	p.terminalErr = err
+	return err
 }
 
 func (p *CodexSSEParser) consumeLine(line []byte) (CodexSSEObservation, bool, error) {
 	if len(line) == 0 {
-		if len(p.dataLines) == 0 {
+		if !p.hasData {
+			p.eventSize = 0
 			return CodexSSEObservation{}, false, nil
 		}
 		observation, err := p.dispatch()
@@ -111,7 +179,7 @@ func (p *CodexSSEParser) consumeLine(line []byte) (CodexSSEObservation, bool, er
 	}
 	p.eventSize += len(line) + 1
 	if p.eventSize > p.maxEvent {
-		return CodexSSEObservation{}, false, errors.New("Codex SSE event exceeds limit")
+		return CodexSSEObservation{}, false, errCodexSSEEventTooBig
 	}
 	if line[0] == ':' {
 		return CodexSSEObservation{}, false, nil
@@ -124,27 +192,66 @@ func (p *CodexSSEParser) consumeLine(line []byte) (CodexSSEObservation, bool, er
 		value = value[1:]
 	}
 	if string(field) == "data" {
-		p.dataLines = append(p.dataLines, append([]byte(nil), value...))
+		if err := p.appendDataLine(value); err != nil {
+			return CodexSSEObservation{}, false, err
+		}
 	}
 	return CodexSSEObservation{}, false, nil
 }
 
+func (p *CodexSSEParser) appendDataLine(value []byte) error {
+	needed := len(p.data) + len(value)
+	if p.hasData {
+		needed++
+	}
+	if needed > p.maxEvent {
+		return errCodexSSEEventTooBig
+	}
+	if needed > cap(p.data) {
+		capacity := cap(p.data) * 2
+		if capacity < 64 {
+			capacity = 64
+		}
+		if capacity < needed {
+			capacity = needed
+		}
+		if capacity > p.maxEvent {
+			capacity = p.maxEvent
+		}
+		data := make([]byte, len(p.data), capacity)
+		copy(data, p.data)
+		p.data = data
+	}
+	if p.hasData {
+		p.data = append(p.data, '\n')
+	}
+	p.data = append(p.data, value...)
+	p.hasData = true
+	return nil
+}
+
 func (p *CodexSSEParser) dispatch() (CodexSSEObservation, error) {
-	data := bytes.Join(p.dataLines, []byte{'\n'})
-	p.dataLines = nil
+	data := p.data
+	p.data = nil
+	p.hasData = false
 	p.eventSize = 0
 	return classifyCodexSSEData(data), nil
 }
 
 func classifyCodexSSEData(data []byte) CodexSSEObservation {
 	observation := CodexSSEObservation{
-		Data:              append([]byte(nil), data...),
-		HasEncryptedState: jsonContainsKey(data, "encrypted_content"),
+		Data: append([]byte(nil), data...),
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 		observation.Kind = CodexSSEDone
 		return observation
 	}
+	if err := validateCodexLifecycleAuthority(data); err != nil {
+		observation.Kind = CodexSSEMalformed
+		observation.ParseError = err
+		return observation
+	}
+	observation.HasEncryptedState = jsonContainsKey(data, "encrypted_content")
 	var envelope struct {
 		Type     string          `json:"type"`
 		Response json.RawMessage `json:"response"`
@@ -175,8 +282,13 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		}
 		observation.Kind = CodexSSECreated
 		observation.Admits = true
-		if rawID, ok := response["id"]; ok {
-			_ = json.Unmarshal(rawID, &observation.ResponseID)
+		if rawID, ok := codexJSONRawField(response, "id"); ok {
+			if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) || json.Unmarshal(rawID, &observation.ResponseID) != nil {
+				observation.Kind = CodexSSEMalformed
+				observation.Admits = false
+				observation.ParseError = errors.New("response.created id must be a string")
+				return observation
+			}
 		}
 	case strings.HasSuffix(envelope.Type, ".delta"):
 		observation.Kind = CodexSSEDelta
@@ -195,27 +307,32 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		envelope.Type == "responsesapi.websocket_timing":
 		observation.Kind = CodexSSEIgnored
 	case envelope.Type == "response.completed":
-		var response struct {
-			EndTurn json.RawMessage `json:"end_turn"`
-		}
-		if len(envelope.Response) == 0 || json.Unmarshal(envelope.Response, &response) != nil {
+		var response map[string]json.RawMessage
+		if len(envelope.Response) == 0 || json.Unmarshal(envelope.Response, &response) != nil || response == nil {
 			observation.Kind = CodexSSEMalformed
 			observation.ParseError = errors.New("response.completed requires response object")
 			return observation
 		}
 		observation.Kind = CodexSSECompleted
-		var responseID struct {
-			ID string `json:"id"`
+		if rawID, ok := codexJSONRawField(response, "id"); ok {
+			if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) || json.Unmarshal(rawID, &observation.ResponseID) != nil {
+				observation.Kind = CodexSSEMalformed
+				observation.ParseError = errors.New("response.completed id must be a string")
+				return observation
+			}
 		}
-		_ = json.Unmarshal(envelope.Response, &responseID)
-		observation.ResponseID = responseID.ID
-		endTurn := response.EndTurn
-		if len(endTurn) == 0 {
+		endTurn, hasEndTurn := codexJSONRawField(response, "end_turn")
+		if hasEndTurn && len(envelope.EndTurn) != 0 {
+			observation.Kind = CodexSSEMalformed
+			observation.ParseError = errors.New("response.completed has conflicting end_turn authority")
+			return observation
+		}
+		if !hasEndTurn {
 			endTurn = envelope.EndTurn
 		}
-		if len(endTurn) != 0 && !bytes.Equal(endTurn, []byte("null")) {
+		if len(endTurn) != 0 {
 			var value bool
-			if err := json.Unmarshal(endTurn, &value); err != nil {
+			if bytes.Equal(bytes.TrimSpace(endTurn), []byte("null")) || json.Unmarshal(endTurn, &value) != nil {
 				observation.Kind = CodexSSEMalformed
 				observation.ParseError = errors.New("response.completed end_turn must be boolean")
 				return observation

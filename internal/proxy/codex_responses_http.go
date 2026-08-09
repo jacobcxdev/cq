@@ -60,16 +60,36 @@ func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (Codex
 	if enforcer == nil {
 		return CodexProtocolRequest{}, false, nil
 	}
-	signalled := header.Get(codexTurnMetadataKey) != "" || bytes.Contains(body, []byte(codexTurnMetadataKey))
-	decoded, err := DecodeCodexRequest(body, header.Get("Content-Encoding"), DefaultCodexZstdLimits)
+	directMetadata := header.Get(codexTurnMetadataKey)
+	contentEncoding, err := parseCodexContentEncoding(header)
 	if err != nil {
-		if signalled {
+		enforcer.Observer.recordCanaryUnexplained()
+		return CodexProtocolRequest{}, false, err
+	}
+	encoding := contentEncoding
+	nonIdentity := encoding != "" && encoding != "identity"
+	signalled := directMetadata != ""
+	if !nonIdentity {
+		signalled = signalled || bytes.Contains(body, []byte(codexTurnMetadataKey))
+	}
+	decoded, err := DecodeCodexRequest(body, contentEncoding, DefaultCodexZstdLimits)
+	if err != nil {
+		if signalled || nonIdentity {
 			enforcer.Observer.recordCanaryUnexplained()
 			return CodexProtocolRequest{}, false, err
 		}
 		return CodexProtocolRequest{}, false, nil
 	}
-	request, err := ParseCodexProtocolRequest(decoded.Decoded(), header.Get(codexTurnMetadataKey), nil)
+	return enforcer.parseDecoded(decoded.Decoded(), header)
+}
+
+func (enforcer *CodexHTTPEnforcer) parseDecoded(body []byte, header http.Header) (CodexProtocolRequest, bool, error) {
+	if enforcer == nil {
+		return CodexProtocolRequest{}, false, nil
+	}
+	directMetadata := header.Get(codexTurnMetadataKey)
+	signalled := directMetadata != "" || bytes.Contains(body, []byte(codexTurnMetadataKey))
+	request, err := ParseCodexProtocolRequest(body, directMetadata, nil)
 	if err != nil {
 		if signalled {
 			enforcer.Observer.recordCanaryUnexplained()
@@ -94,6 +114,10 @@ func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (Codex
 }
 
 func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRouteRequirements, request CodexProtocolRequest, upstream *http.Request) (response *http.Response, choice RouteChoice, attempt CandidateAttempt, returnErr error) {
+	return enforcer.do(ctx, requirements, request, upstream, false)
+}
+
+func (enforcer *CodexHTTPEnforcer) do(ctx context.Context, requirements CodexRouteRequirements, request CodexProtocolRequest, upstream *http.Request, compact bool) (response *http.Response, choice RouteChoice, attempt CandidateAttempt, returnErr error) {
 	if enforcer == nil || enforcer.Router == nil || enforcer.Leases == nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, errors.New("Codex HTTP enforcer unavailable")
 	}
@@ -161,15 +185,30 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 		return nil, choice, CandidateAttempt{}, err
 	}
 	mutable := lease.State == LeaseProvisional
+	var rejected *http.Response
+	var rejectedChoice RouteChoice
+	var rejectedAttempt CandidateAttempt
 	for {
-		response, attempt, failure, err := enforcer.Router.DoPinned(ctx, choice, upstream)
+		prior := rejected
+		response, attempt, failure, terminal, err := enforcer.Router.doPinned(ctx, choice, upstream, prior)
+		rejected = nil
 		if err != nil {
 			enforcer.finishUnadmitted(key)
+			if response != nil {
+				return response, choice, attempt, nil
+			}
 			return nil, choice, attempt, err
+		}
+		if terminal {
+			enforcer.finishUnadmitted(key)
+			if response == prior {
+				return response, rejectedChoice, rejectedAttempt, nil
+			}
+			return response, choice, attempt, nil
 		}
 		if failure == CodexPinnedAccepted {
 			firstAdmission := lease.State == LeaseProvisional
-			if err := enforcer.admitOrFinish(ctx, key, choice, response, request, firstAdmission); err != nil {
+			if err := enforcer.admitOrFinish(ctx, key, choice, response, request, compact, firstAdmission); err != nil {
 				closeResponse(response)
 				return nil, choice, attempt, err
 			}
@@ -191,21 +230,24 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 			}
 			return nil, choice, attempt, errors.New("Codex authentication failed and no alternate account is available")
 		}
-		if response != nil {
-			closeResponse(response)
-		}
 		lease, err = enforcer.Leases.ReplaceProvisionalRoute(key, plan.Choice)
 		if err != nil {
 			enforcer.finishUnadmitted(key)
+			if response != nil {
+				return response, choice, attempt, nil
+			}
 			return nil, choice, attempt, err
 		}
+		rejected = response
+		rejectedChoice = choice
+		rejectedAttempt = attempt
 		choice = lease.Choice
 		enforcer.Observer.failovers.Add(1)
 		noteRouteAccount(ctx, redactedAccountHint("codex", string(choice.AccountKey)), true)
 	}
 }
 
-func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseKey, choice RouteChoice, response *http.Response, request CodexProtocolRequest, firstAdmission bool) error {
+func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseKey, choice RouteChoice, response *http.Response, request CodexProtocolRequest, compact, firstAdmission bool) error {
 	if response == nil {
 		enforcer.finishUnadmitted(key)
 		return errors.New("Codex HTTP attempt returned no response")
@@ -237,6 +279,7 @@ func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseK
 		request:         request,
 		key:             key,
 		choice:          choice,
+		compact:         compact,
 		leaseAcquired:   true,
 		routingReleased: true,
 		admitted:        true,
@@ -253,13 +296,26 @@ func (enforcer *CodexHTTPEnforcer) finishUnadmitted(key LeaseKey) {
 }
 
 func (s *Server) doCodexHTTPRoute(ctx context.Context, model string, request CodexProtocolRequest, upstream *http.Request, body []byte, header http.Header, compact, enforce bool) (*http.Response, RouteChoice, *CodexTurnObservation, error) {
+	return s.doCodexHTTPRouteWithDecoded(ctx, model, request, upstream, body, nil, false, header, compact, enforce)
+}
+
+func (s *Server) doCodexHTTPRouteDecoded(ctx context.Context, model string, request CodexProtocolRequest, upstream *http.Request, body, decodedBody []byte, header http.Header, compact, enforce bool) (*http.Response, RouteChoice, *CodexTurnObservation, error) {
+	return s.doCodexHTTPRouteWithDecoded(ctx, model, request, upstream, body, decodedBody, true, header, compact, enforce)
+}
+
+func (s *Server) doCodexHTTPRouteWithDecoded(ctx context.Context, model string, request CodexProtocolRequest, upstream *http.Request, body, decodedBody []byte, hasDecodedBody bool, header http.Header, compact, enforce bool) (*http.Response, RouteChoice, *CodexTurnObservation, error) {
 	if enforce {
-		response, choice, _, err := s.CodexHTTPEnforcer.Do(ctx, CodexRouteRequirements{RequestedModel: model}, request, upstream)
+		response, choice, _, err := s.CodexHTTPEnforcer.do(ctx, CodexRouteRequirements{RequestedModel: model}, request, upstream, compact)
 		if !errors.Is(err, ErrCodexNoAuthorityFence) {
 			return response, choice, nil, err
 		}
 	}
-	observation := s.beginCodexHTTPObservation(ctx, body, header, compact)
+	var observation *CodexTurnObservation
+	if hasDecodedBody {
+		observation = s.beginCodexHTTPObservationDecoded(ctx, decodedBody, header, compact)
+	} else {
+		observation = s.beginCodexHTTPObservation(ctx, body, header, compact)
+	}
 	if observation != nil {
 		ctx = withCodexObservation(ctx, observation)
 		upstream = upstream.WithContext(ctx)
@@ -276,7 +332,7 @@ func (s *Server) doCodexHTTPRoute(ctx context.Context, model string, request Cod
 			if err != nil {
 				return nil, choice, observation, err
 			}
-			if failure == CodexPinnedAuthFailure {
+			if failure == CodexPinnedAuthFailure && response == nil {
 				return nil, choice, observation, errors.New("bound Codex account authentication failed")
 			}
 			return response, choice, observation, nil

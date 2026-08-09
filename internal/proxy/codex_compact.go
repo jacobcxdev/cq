@@ -96,12 +96,26 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	protocolRequest, enforce, err := s.parseCodexHTTPEnforcement(body, r.Header)
+	contentEncoding, err := parseCodexContentEncoding(r.Header)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	model = extractModel(body)
+	inspectionLimits := DefaultCodexZstdLimits
+	inspectionLimits.MaxEncodedBytes = maxRequestBody
+	inspectionLimits.MaxDecodedBytes = maxRequestBody
+	decodedRequest, err := DecodeCodexRequest(body, contentEncoding, inspectionLimits)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	decodedBody := decodedRequest.Decoded()
+	protocolRequest, enforce, err := s.parseCodexHTTPEnforcementDecoded(decodedBody, r.Header)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	model = extractModel(decodedBody)
 	if enforce && protocolRequest.Model != "" {
 		model = protocolRequest.Model
 	}
@@ -109,7 +123,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 
 	// Emit payload diagnostics before forwarding.
 	if s.PayloadDiag != nil {
-		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, body)
+		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, decodedBody)
 		s.emitPayloadDiagnostics(PayloadEvent{
 			Time:          time.Now().UTC(),
 			Method:        r.Method,
@@ -126,15 +140,16 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	}
 
 	// Build upstream request targeting /responses/compact (no headroom applied).
+	forwardBody := decodedRequest.Replay()
 	upstreamURL := s.Config.CodexUpstream + "/responses/compact"
-	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error", fmt.Sprintf("create upstream request: %v", err))
 		return
 	}
-	upReq.ContentLength = int64(len(body))
+	upReq.ContentLength = int64(len(forwardBody))
 	upReq.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(body)), nil
+		return io.NopCloser(bytes.NewReader(forwardBody)), nil
 	}
 
 	// Forward all original headers; transport will override auth.
@@ -147,7 +162,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		upReq.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, choice, observation, err := s.doCodexHTTPRoute(ctx, model, protocolRequest, upReq, body, r.Header, true, enforce)
+	resp, choice, observation, err := s.doCodexHTTPRouteDecoded(ctx, model, protocolRequest, upReq, body, decodedBody, r.Header, true, enforce)
 	if err != nil {
 		if observation != nil {
 			observation.Finish(err)
