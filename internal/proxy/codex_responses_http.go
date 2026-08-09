@@ -16,9 +16,14 @@ type CodexHTTPEnforcer struct {
 	Leases                      *CodexTurnLeaseManager
 	Store                       *CodexLeaseStore
 	Observer                    *CodexTurnObserver
-	Canary                      *CodexCanaryRecorder
 	EnforceNew                  bool
 	RetainedAuthoritativeEpochs []uint64
+}
+
+func (enforcer *CodexHTTPEnforcer) SetCanary(canary *CodexCanaryRecorder) {
+	if enforcer != nil && enforcer.Observer != nil {
+		enforcer.Observer.SetCanary(canary)
+	}
 }
 
 func NewCodexHTTPEnforcer(router *CodexRequestRouter, modeEpoch uint64, store *CodexLeaseStore) (*CodexHTTPEnforcer, error) {
@@ -52,6 +57,7 @@ func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (Codex
 	decoded, err := DecodeCodexRequest(body, header.Get("Content-Encoding"), DefaultCodexZstdLimits)
 	if err != nil {
 		if signalled {
+			enforcer.Observer.recordCanaryUnexplained()
 			return CodexProtocolRequest{}, false, err
 		}
 		return CodexProtocolRequest{}, false, nil
@@ -59,6 +65,7 @@ func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (Codex
 	request, err := ParseCodexProtocolRequest(decoded.Decoded(), header.Get(codexTurnMetadataKey), nil)
 	if err != nil {
 		if signalled {
+			enforcer.Observer.recordCanaryUnexplained()
 			return CodexProtocolRequest{}, false, err
 		}
 		return CodexProtocolRequest{}, false, nil
@@ -68,19 +75,26 @@ func (enforcer *CodexHTTPEnforcer) Parse(body []byte, header http.Header) (Codex
 	}
 	metadata := request.Metadata.Metadata
 	if metadata.RequestKind == CodexRequestPrewarm {
+		enforcer.Observer.recordCanaryMismatch()
 		return CodexProtocolRequest{}, false, fmt.Errorf("%w: HTTP prewarm has no live WebSocket lineage", ErrCodexContinuity)
 	}
 	request.TurnState, request.HasTurnState, err = ParseCodexTurnStateHeader(header)
 	if err != nil {
+		enforcer.Observer.recordCanaryUnexplained()
 		return CodexProtocolRequest{}, false, err
 	}
 	return request, metadata.TurnID != "" && (metadata.RequestKind == CodexRequestTurn || metadata.RequestKind == CodexRequestCompaction), nil
 }
 
-func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRouteRequirements, request CodexProtocolRequest, upstream *http.Request) (*http.Response, RouteChoice, CandidateAttempt, error) {
+func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRouteRequirements, request CodexProtocolRequest, upstream *http.Request) (response *http.Response, choice RouteChoice, attempt CandidateAttempt, returnErr error) {
 	if enforcer == nil || enforcer.Router == nil || enforcer.Leases == nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, errors.New("Codex HTTP enforcer unavailable")
 	}
+	defer func() {
+		if errors.Is(returnErr, ErrCodexContinuity) {
+			enforcer.Observer.recordCanaryMismatch()
+		}
+	}()
 	enforcer.Observer.requests.Add(1)
 	enforcer.Observer.strongKeys.Add(1)
 	ctx = withCodexObservation(ctx, enforcer.Observer)
@@ -114,7 +128,7 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 	if err != nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, err
 	}
-	choice := lease.Choice
+	choice = lease.Choice
 	if choice.AccountKey == "" {
 		choice = RouteChoice{AccountKey: lease.AccountKey, RequestedModel: requirements.RequestedModel, EffectiveModel: requirements.RequestedModel}
 	} else if choice.RequestedModel == "" {
@@ -147,7 +161,8 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 			return nil, choice, attempt, err
 		}
 		if failure == CodexPinnedAccepted {
-			if err := enforcer.admitOrFinish(ctx, key, choice, response, request); err != nil {
+			firstAdmission := lease.State == LeaseProvisional
+			if err := enforcer.admitOrFinish(ctx, key, choice, response, request, firstAdmission); err != nil {
 				closeResponse(response)
 				return nil, choice, attempt, err
 			}
@@ -183,7 +198,7 @@ func (enforcer *CodexHTTPEnforcer) Do(ctx context.Context, requirements CodexRou
 	}
 }
 
-func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseKey, choice RouteChoice, response *http.Response, request CodexProtocolRequest) error {
+func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseKey, choice RouteChoice, response *http.Response, request CodexProtocolRequest, firstAdmission bool) error {
 	if response == nil {
 		enforcer.finishUnadmitted(key)
 		return errors.New("Codex HTTP attempt returned no response")
@@ -206,10 +221,8 @@ func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseK
 	if err != nil {
 		return err
 	}
-	if enforcer.Canary != nil {
-		if err := enforcer.Canary.RecordAdmitted(time.Now()); err != nil {
-			return fmt.Errorf("record Codex canary admission: %w", err)
-		}
+	if firstAdmission {
+		enforcer.Observer.recordCanaryAdmitted(time.Now())
 	}
 	handle := &CodexTurnObservation{
 		observer:        enforcer.Observer,

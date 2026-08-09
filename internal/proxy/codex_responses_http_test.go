@@ -198,6 +198,104 @@ func TestCodexHTTPEnforcerRejectsUnprovenHTTPContinuation(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPEnforcerCanaryRecordsContinuityMismatch(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}, &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{}}, fsys)
+	canary := testCodexCanary(t, fsys)
+	enforcer.SetCanary(canary)
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	request.PreviousResponseID = "response-old"
+
+	_, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("continuity error = %v", err)
+	}
+	if state := canary.State(); state.KeyedMismatches != 1 {
+		t.Fatalf("canary state = %+v", state)
+	}
+}
+
+func TestCodexHTTPEnforcerCanaryRecordsUnknownLifecycleEvent(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	body := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"response\"}}\n\n" +
+		"data: {\"type\":\"response.future_event\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\"}}\n\n"
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{"one": {{status: http.StatusOK, body: body}}}}
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}, executor, fsys)
+	canary := testCodexCanary(t, fsys)
+	enforcer.SetCanary(canary)
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+
+	response, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if state := canary.State(); state.UnexplainedLifecycles != 1 {
+		t.Fatalf("canary state = %+v", state)
+	}
+}
+
+func TestCodexHTTPEnforcerCanaryWriteFailureDoesNotCutAdmittedStream(t *testing.T) {
+	canaryFS := &failingDurableFS{MemFS: fsutil.NewMemFS()}
+	canary := testCodexCanary(t, canaryFS)
+	canaryFS.failWrite = true
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusOK, body: completedSSE("response")}},
+	}}
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}, executor, fsutil.NewMemFS())
+	enforcer.SetCanary(canary)
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+
+	response, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil || !bytes.Contains(data, []byte(`response.completed`)) {
+		t.Fatalf("stream data=%q error=%v", data, err)
+	}
+	if health := enforcer.Observer.Health(); health.CanaryErrors != 1 {
+		t.Fatalf("health = %+v", health)
+	}
+}
+
+func TestCodexHTTPEnforcerCanaryCountsUniqueTurnsAcrossSamplingRequests(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {
+			{status: http.StatusOK, body: completedSSE("response-one")},
+			{status: http.StatusOK, body: completedSSE("response-two")},
+			{status: http.StatusOK, body: completedSSE("response-three")},
+		},
+	}}
+	enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one"}}}, executor, fsys)
+	canary := testCodexCanary(t, fsys)
+	enforcer.SetCanary(canary)
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+
+	for range 2 {
+		response, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+	}
+	next := strongHTTPProtocolRequest(t, "thread", "turn-two", CodexRequestTurn, "")
+	response, _, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: next.Model}, next, protocolHTTPRequest(next))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if state := canary.State(); state.AdmittedTurns != 2 {
+		t.Fatalf("canary state = %+v", state)
+	}
+}
+
 func TestCodexHTTPEnforcerRestartRehydratesAccountBinding(t *testing.T) {
 	fsys := fsutil.NewMemFS()
 	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
@@ -466,6 +564,21 @@ func testHTTPEnforcer(t *testing.T, chooser CodexRouteChooser, executor Explicit
 		t.Fatal(err)
 	}
 	return enforcer
+}
+
+func testCodexCanary(t *testing.T, fsys fsutil.DurableFileSystem) *CodexCanaryRecorder {
+	t.Helper()
+	canary, err := StartCodexCanary(fsys, "/state/canary.json", nil, CodexCanaryTuple{
+		CQBuild:      "build",
+		ClientBuild:  "client",
+		ParserSchema: 1,
+		LeaseSchema:  1,
+		FixtureHash:  "fixture",
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canary
 }
 
 func testHTTPRouter(chooser CodexRouteChooser, executor ExplicitAccountExecutor) *CodexRequestRouter {

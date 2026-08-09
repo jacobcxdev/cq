@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -37,6 +38,7 @@ type CodexObservationHealth struct {
 	Stale               uint64         `json:"stale"`
 	ContinuityErrors    uint64         `json:"continuity_errors"`
 	RefreshSuspended    uint64         `json:"refresh_suspended"`
+	CanaryErrors        uint64         `json:"canary_errors"`
 }
 
 type CodexTurnObserver struct {
@@ -63,7 +65,9 @@ type CodexTurnObserver struct {
 	stale            atomic.Uint64
 	continuityErrors atomic.Uint64
 	refreshSuspended atomic.Uint64
+	canaryErrors     atomic.Uint64
 	socketGeneration atomic.Uint64
+	canary           atomic.Pointer[CodexCanaryRecorder]
 }
 
 func NewCodexTurnObserver(leases *CodexTurnLeaseManager, store *CodexLeaseStore) (*CodexTurnObserver, error) {
@@ -79,6 +83,45 @@ func newCodexTurnObserverWithKey(leases *CodexTurnLeaseManager, store *CodexLeas
 		leases = NewCodexTurnLeaseManager(1, false, nil)
 	}
 	return &CodexTurnObserver{Leases: leases, Prewarm: NewCodexPrewarmManager(leases, nil), Store: store, hintKey: append([]byte(nil), key...)}
+}
+
+func (observer *CodexTurnObserver) SetCanary(canary *CodexCanaryRecorder) {
+	if observer != nil {
+		observer.canary.Store(canary)
+	}
+}
+
+func (observer *CodexTurnObserver) recordCanaryAdmitted(now time.Time) {
+	if observer == nil {
+		return
+	}
+	if canary := observer.canary.Load(); canary != nil {
+		if err := canary.RecordAdmitted(now); err != nil {
+			observer.canaryErrors.Add(1)
+		}
+	}
+}
+
+func (observer *CodexTurnObserver) recordCanaryMismatch() {
+	if observer == nil {
+		return
+	}
+	if canary := observer.canary.Load(); canary != nil {
+		if err := canary.RecordKeyedMismatch(); err != nil {
+			observer.canaryErrors.Add(1)
+		}
+	}
+}
+
+func (observer *CodexTurnObserver) recordCanaryUnexplained() {
+	if observer == nil {
+		return
+	}
+	if canary := observer.canary.Load(); canary != nil {
+		if err := canary.RecordUnexplainedLifecycle(); err != nil {
+			observer.canaryErrors.Add(1)
+		}
+	}
 }
 
 type CodexTurnObservation struct {
@@ -322,6 +365,7 @@ func (handle *CodexTurnObservation) ObserveBytes(chunk []byte) {
 	observations, err := handle.parser.Feed(chunk)
 	if err != nil {
 		handle.observer.unknown.Add(1)
+		handle.observer.recordCanaryUnexplained()
 		return
 	}
 	for _, observation := range observations {
@@ -402,9 +446,11 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 		handle.observer.quotaEvents.Add(1)
 	case CodexSSEUnknown:
 		handle.observer.unknown.Add(1)
+		handle.observer.recordCanaryUnexplained()
 		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: safeCodexEventReason(observation.Type)})
 	case CodexSSEMalformed:
 		handle.observer.unknown.Add(1)
+		handle.observer.recordCanaryUnexplained()
 		noteCodexObservation(handle.ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "response_event_malformed"})
 	}
 }
@@ -440,6 +486,9 @@ func (handle *CodexTurnObservation) Finish(readErr error) {
 			for _, observation := range final {
 				handle.observeEventLocked(observation)
 			}
+		} else {
+			handle.observer.unknown.Add(1)
+			handle.observer.recordCanaryUnexplained()
 		}
 		if handle.compact && handle.admitted && !handle.completed && readErr == nil {
 			if compact, err := ParseCodexCompactResponse(handle.body); err == nil {
@@ -517,10 +566,12 @@ func (observer *CodexTurnObserver) observeLeaseError(err error) {
 		observer.stale.Add(1)
 	case errors.Is(err, ErrCodexContinuity):
 		observer.continuityErrors.Add(1)
+		observer.recordCanaryMismatch()
 	case errors.Is(err, ErrCodexConcurrentTurn):
 		observer.late.Add(1)
 	default:
 		observer.unknown.Add(1)
+		observer.recordCanaryUnexplained()
 	}
 }
 
@@ -574,6 +625,7 @@ func (observer *CodexTurnObserver) Health() CodexObservationHealth {
 		Stale:               observer.stale.Load(),
 		ContinuityErrors:    observer.continuityErrors.Load(),
 		RefreshSuspended:    observer.refreshSuspended.Load(),
+		CanaryErrors:        observer.canaryErrors.Load(),
 	}
 	for _, lease := range observer.Leases.Snapshot() {
 		health.Leases[lease.State.String()]++

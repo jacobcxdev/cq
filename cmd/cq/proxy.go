@@ -367,7 +367,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 				if state.Tuple.CQBuild != version || state.Tuple.ClientBuild != codexClientBuild || state.Tuple.ParserSchema != proxy.CurrentCodexParserSchema || state.Tuple.LeaseSchema != proxy.CurrentCodexLeaseSchema || state.Tuple.FixtureHash != proxy.CodexHTTPFixtureHash {
 					return fmt.Errorf("Codex canary tuple does not match running enforcement")
 				}
-				codexHTTPEnforcer.Canary = canary
+				codexHTTPEnforcer.SetCanary(canary)
 			}
 		} else if !os.IsNotExist(canaryErr) {
 			return fmt.Errorf("Codex canary: %w", canaryErr)
