@@ -140,6 +140,7 @@ type CodexTurnObservation struct {
 	admitted        bool
 	completed       bool
 	failed          bool
+	diagnosticFinal bool
 	prewarm         bool
 	prewarmAnchor   string
 	parser          *CodexSSEParser
@@ -259,6 +260,7 @@ func (handle *CodexTurnObservation) Selected(choice RouteChoice, failover bool) 
 	})
 	if err != nil {
 		handle.observer.observeLeaseError(err)
+		handle.diagnosticFinal = true
 		noteCodexObservation(handle.ctx, codexObservationFields{TurnHint: handle.observer.turnHint(handle.key), RequestKind: string(metadata.RequestKind), Decision: "shadow_rejected", Reason: safeLeaseReason(err)})
 		return
 	}
@@ -338,12 +340,13 @@ func (handle *CodexTurnObservation) admitLocked() {
 	if handle.prewarm {
 		return
 	}
-	if handle.admitted || !handle.leaseAcquired {
+	if handle.admitted || handle.diagnosticFinal || !handle.leaseAcquired {
 		return
 	}
 	lease, err := handle.observer.Leases.Admit(handle.key, handle.choice.AccountKey, handle.socket, handle.observer.persist)
 	if err != nil {
 		handle.observer.observeLeaseError(err)
+		handle.diagnosticFinal = true
 		noteCodexObservation(handle.ctx, codexObservationFields{TurnHint: handle.observer.turnHint(handle.key), Decision: "shadow_continuity_error", Reason: safeLeaseReason(err), Continuity: "fail_closed_if_enforced"})
 		handle.releaseRoutingLocked()
 		return
@@ -539,7 +542,9 @@ func (handle *CodexTurnObservation) failUnadmittedLocked(reason string) {
 		_ = handle.observer.Leases.FailUnadmitted(handle.key)
 		handle.releaseRoutingLocked()
 	}
-	noteCodexObservation(handle.ctx, codexObservationFields{TurnHint: handle.observer.turnHint(handle.key), Decision: "shadow_unadmitted", Reason: reason})
+	if !handle.diagnosticFinal {
+		noteCodexObservation(handle.ctx, codexObservationFields{TurnHint: handle.observer.turnHint(handle.key), Decision: "shadow_unadmitted", Reason: reason})
+	}
 }
 
 func (handle *CodexTurnObservation) releaseRoutingLocked() {

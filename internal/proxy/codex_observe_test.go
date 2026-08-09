@@ -80,6 +80,32 @@ func TestCodexObserveDiagnosticsNeverLeakRawIdentity(t *testing.T) {
 	}
 }
 
+func TestCodexObservePreservesAccountDriftContinuityDiagnostic(t *testing.T) {
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	first := observer.BeginHTTP(context.Background(), body, "identity", "", false)
+	first.Selected(RouteChoice{AccountKey: "account-a"}, false)
+	first.ResponseHeaders(http.StatusOK, nil)
+	first.ObserveBytes([]byte("data: {\"type\":\"response.created\",\"response\":{}}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"))
+	first.Finish(nil)
+
+	ctx, diag := withRouteDiagnostics(context.Background())
+	drifted := observer.BeginHTTP(ctx, body, "identity", "", false)
+	drifted.Selected(RouteChoice{AccountKey: "account-b"}, false)
+	drifted.ResponseHeaders(http.StatusOK, nil)
+	drifted.ObserveBytes([]byte("data: {\"type\":\"response.created\",\"response\":{}}\n\n"))
+	drifted.Finish(nil)
+
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diag)
+	if event.Decision != "shadow_continuity_error" || event.Reason != "continuity" || event.Continuity != "fail_closed_if_enforced" {
+		t.Fatalf("diagnostics = %#v", event)
+	}
+	if health := observer.Health(); health.ContinuityErrors != 1 {
+		t.Fatalf("health = %#v", health)
+	}
+}
+
 func TestCodexObserveMalformedAndRateLimitCounters(t *testing.T) {
 	t.Parallel()
 	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
