@@ -3,12 +3,15 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,7 +119,15 @@ for line in sys.stdin:
         continue
     req = json.loads(line)
     op = req.get("operation", "compress_messages")
-    if op == "compress_responses":
+    if op == "probe":
+        result = {
+            "operation": "probe",
+            "request_id": req.get("request_id"),
+            "protocol": 1,
+            "ok": True,
+            "cache_mode": _HAS_RESPONSES_CONVERTER,
+        }
+    elif op == "compress_responses":
         result = handle_compress_responses(req)
     else:
         result = handle_compress_messages(req)
@@ -125,14 +136,109 @@ for line in sys.stdin:
 
 // HeadroomBridge manages a persistent Python subprocess that compresses
 // LLM messages via the headroom-ai library.
+type headroomProcess interface {
+	Wait() error
+	Kill() error
+}
+
+type execHeadroomProcess struct {
+	cmd *exec.Cmd
+}
+
+func (p *execHeadroomProcess) Wait() error {
+	return p.cmd.Wait()
+}
+
+func (p *execHeadroomProcess) Kill() error {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	return p.cmd.Process.Kill()
+}
+
 type HeadroomBridge struct {
-	cmd           *exec.Cmd
+	process       headroomProcess
 	stdin         io.WriteCloser
+	stdoutPipe    io.ReadCloser
 	stdout        *bufio.Scanner
-	mu            sync.Mutex
+	stderrPipe    io.ReadCloser
+	initOnce      sync.Once
+	operationGate chan struct{}
+	stopping      chan struct{}
+	processDone   chan struct{}
+	stderrDone    chan struct{}
+	shutdownOnce  sync.Once
+	stopOnce      sync.Once
+	stopDone      chan struct{}
 	Catalog       *modelregistry.Catalog
 	shuttingDown  atomic.Bool
-	stderrDrainWG sync.WaitGroup
+	probeSequence atomic.Uint64
+}
+
+var (
+	errHeadroomProbeUnavailable = errors.New("headroom bridge unavailable")
+	errHeadroomProbeInvalid     = errors.New("headroom bridge probe invalid response")
+	errHeadroomProbeUnbounded   = errors.New("headroom bridge probe requires a context deadline")
+)
+
+type headroomProbeRequest struct {
+	Operation string `json:"operation"`
+	RequestID string `json:"request_id"`
+}
+
+type headroomProbeResponse struct {
+	Operation string `json:"operation"`
+	RequestID string `json:"request_id"`
+	Protocol  int    `json:"protocol"`
+	OK        bool   `json:"ok"`
+	CacheMode bool   `json:"cache_mode"`
+}
+
+func newHeadroomBridge(
+	process headroomProcess,
+	stdin io.WriteCloser,
+	stdoutPipe io.ReadCloser,
+	stderrPipe io.ReadCloser,
+) *HeadroomBridge {
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
+
+	bridge := &HeadroomBridge{
+		process:    process,
+		stdin:      stdin,
+		stdoutPipe: stdoutPipe,
+		stdout:     scanner,
+		stderrPipe: stderrPipe,
+	}
+	bridge.ensureLifecycle()
+	return bridge
+}
+
+func (b *HeadroomBridge) ensureLifecycle() {
+	if b == nil {
+		return
+	}
+	b.initOnce.Do(func() {
+		b.operationGate = make(chan struct{}, 1)
+		b.operationGate <- struct{}{}
+		b.stopping = make(chan struct{})
+		b.stopDone = make(chan struct{})
+		b.processDone = make(chan struct{})
+		b.stderrDone = make(chan struct{})
+
+		if b.stderrPipe == nil {
+			close(b.stderrDone)
+		} else {
+			go func() {
+				defer close(b.stderrDone)
+				defer func() { _ = recover() }()
+				b.drainStderr(b.stderrPipe)
+			}()
+		}
+		if b.process == nil {
+			close(b.processDone)
+		}
+	})
 }
 
 // headroomRequest is the JSON line sent to the Python bridge for messages compression.
@@ -233,19 +339,7 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 		return nil, fmt.Errorf("start python3: %w", err)
 	}
 
-	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
-
-	b := &HeadroomBridge{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: scanner,
-	}
-	b.stderrDrainWG.Add(1)
-	go func() {
-		defer b.stderrDrainWG.Done()
-		b.drainStderr(stderrPipe)
-	}()
+	b := newHeadroomBridge(&execHeadroomProcess{cmd: cmd}, stdin, stdoutPipe, stderrPipe)
 
 	// Ping to verify headroom-ai is installed.
 	if err := b.ping(); err != nil {
@@ -256,23 +350,170 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 	return b, nil
 }
 
-// ping sends an empty messages array and expects a response within 30 seconds.
+// ping verifies core message compression within the startup deadline. Cache
+// capability is checked separately by Probe when cache-mode serving is needed.
 func (b *HeadroomBridge) ping() error {
-	type result struct {
-		err error
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	line, err := json.Marshal(headroomRequest{
+		Messages:   json.RawMessage(`[]`),
+		ModelLimit: ModelMaxInputTokensWithCatalog("", b.Catalog),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal bridge ping: %w", err)
 	}
-	ch := make(chan result, 1)
-	go func() {
-		_, _, err := b.compress([]byte(`[]`), "")
-		ch <- result{err: err}
-	}()
+	response, err := b.exchange(ctx, line, nil)
+	if err != nil {
+		return err
+	}
+	var parsed headroomResponse
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return fmt.Errorf("parse bridge ping: %w", err)
+	}
+	return nil
+}
+
+// Probe verifies that the live bridge supports the cache-mode protocol.
+func (b *HeadroomBridge) Probe(ctx context.Context) error {
+	if b == nil {
+		return errHeadroomProbeUnavailable
+	}
+	if ctx == nil {
+		return errHeadroomProbeUnbounded
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return errHeadroomProbeUnbounded
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	requestID := strconv.FormatUint(b.probeSequence.Add(1), 10)
+	line, err := json.Marshal(headroomProbeRequest{Operation: "probe", RequestID: requestID})
+	if err != nil {
+		return errHeadroomProbeUnavailable
+	}
+	_, err = b.exchange(ctx, line, func(responseBytes []byte) error {
+		decoder := json.NewDecoder(bytes.NewReader(responseBytes))
+		decoder.DisallowUnknownFields()
+		var response headroomProbeResponse
+		if err := decoder.Decode(&response); err != nil {
+			return errHeadroomProbeInvalid
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			return errHeadroomProbeInvalid
+		}
+		if response.Operation != "probe" || response.RequestID != requestID || response.Protocol != 1 || !response.OK || !response.CacheMode {
+			return errHeadroomProbeInvalid
+		}
+		return nil
+	})
+	if err == nil || errors.Is(err, errHeadroomProbeInvalid) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return errHeadroomProbeUnavailable
+}
+
+func (b *HeadroomBridge) acquireOperation(ctx context.Context) error {
+	if b == nil || b.stdin == nil || b.stdout == nil {
+		return errHeadroomProbeUnavailable
+	}
+	b.ensureLifecycle()
+	select {
+	case <-b.stopping:
+		return errHeadroomProbeUnavailable
+	default:
+	}
 
 	select {
-	case r := <-ch:
-		return r.err
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("timeout waiting for bridge response")
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.stopping:
+		return errHeadroomProbeUnavailable
+	case <-b.operationGate:
 	}
+
+	select {
+	case <-ctx.Done():
+		b.operationGate <- struct{}{}
+		return ctx.Err()
+	case <-b.stopping:
+		b.operationGate <- struct{}{}
+		return errHeadroomProbeUnavailable
+	default:
+		return nil
+	}
+}
+
+func (b *HeadroomBridge) exchange(ctx context.Context, request []byte, validate func([]byte) error) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := b.acquireOperation(ctx); err != nil {
+		return nil, err
+	}
+	defer func() { b.operationGate <- struct{}{} }()
+
+	cancelComplete := make(chan struct{})
+	stopCancellation := context.AfterFunc(ctx, func() {
+		b.shutdown()
+		close(cancelComplete)
+	})
+	finishCancellation := func() error {
+		if stopCancellation() {
+			if err := ctx.Err(); err != nil {
+				b.shutdown()
+				return err
+			}
+			return nil
+		}
+		<-cancelComplete
+		return ctx.Err()
+	}
+
+	line := append(bytes.Clone(request), '\n')
+	var operationErr error
+	if written, err := b.stdin.Write(line); err != nil {
+		operationErr = fmt.Errorf("write to bridge: %w", err)
+	} else if written != len(line) {
+		operationErr = io.ErrShortWrite
+	}
+
+	var response []byte
+	if operationErr == nil {
+		if !b.stdout.Scan() {
+			if err := b.stdout.Err(); err != nil {
+				operationErr = fmt.Errorf("read from bridge: %w", err)
+			} else {
+				operationErr = errors.New("bridge process exited unexpectedly")
+			}
+		} else {
+			response = bytes.Clone(b.stdout.Bytes())
+		}
+	}
+
+	var validationErr error
+	if operationErr == nil && !b.shuttingDown.Load() && validate != nil {
+		validationErr = validate(response)
+		if validationErr != nil {
+			b.shutdown()
+		}
+	}
+	if err := finishCancellation(); err != nil {
+		return nil, err
+	}
+	if operationErr != nil {
+		b.shutdown()
+		return nil, operationErr
+	}
+	if validationErr != nil {
+		return nil, validationErr
+	}
+	if b.shuttingDown.Load() {
+		return nil, errHeadroomProbeUnavailable
+	}
+	return response, nil
 }
 
 // Compress takes a full request body, extracts and compresses the messages,
@@ -310,9 +551,6 @@ func (b *HeadroomBridge) Compress(body []byte) ([]byte, int, error) {
 
 // compress sends messages to the bridge and returns compressed messages.
 func (b *HeadroomBridge) compress(messages json.RawMessage, model string) (json.RawMessage, int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	req := headroomRequest{
 		Messages:   messages,
 		Model:      model,
@@ -323,20 +561,13 @@ func (b *HeadroomBridge) compress(messages json.RawMessage, model string) (json.
 		return nil, 0, fmt.Errorf("marshal bridge request: %w", err)
 	}
 
-	line = append(line, '\n')
-	if _, err := b.stdin.Write(line); err != nil {
-		return nil, 0, fmt.Errorf("write to bridge: %w", err)
-	}
-
-	if !b.stdout.Scan() {
-		if err := b.stdout.Err(); err != nil {
-			return nil, 0, fmt.Errorf("read from bridge: %w", err)
-		}
-		return nil, 0, fmt.Errorf("bridge process exited unexpectedly")
+	response, err := b.exchange(context.Background(), line, nil)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var resp headroomResponse
-	if err := json.Unmarshal(b.stdout.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(response, &resp); err != nil {
 		return nil, 0, fmt.Errorf("parse bridge response: %w", err)
 	}
 
@@ -413,9 +644,6 @@ func (b *HeadroomBridge) compressResponses(
 	input json.RawMessage,
 	instructions *string,
 ) (json.RawMessage, *string, bool, int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	req := headroomResponsesRequest{
 		Operation:    "compress_responses",
 		Model:        model,
@@ -428,20 +656,13 @@ func (b *HeadroomBridge) compressResponses(
 		return nil, nil, false, 0, fmt.Errorf("marshal responses bridge request: %w", err)
 	}
 
-	line = append(line, '\n')
-	if _, err := b.stdin.Write(line); err != nil {
-		return nil, nil, false, 0, fmt.Errorf("write to bridge: %w", err)
-	}
-
-	if !b.stdout.Scan() {
-		if err := b.stdout.Err(); err != nil {
-			return nil, nil, false, 0, fmt.Errorf("read from bridge: %w", err)
-		}
-		return nil, nil, false, 0, fmt.Errorf("bridge process exited unexpectedly")
+	response, err := b.exchange(context.Background(), line, nil)
+	if err != nil {
+		return nil, nil, false, 0, err
 	}
 
 	var resp headroomResponsesResponse
-	if err := json.Unmarshal(b.stdout.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(response, &resp); err != nil {
 		return nil, nil, false, 0, fmt.Errorf("parse responses bridge response: %w", err)
 	}
 
@@ -773,36 +994,55 @@ func (b *HeadroomBridge) CompressResponsesCache(body []byte) ([]byte, int, error
 	return spliced, saved, nil
 }
 
-// Stop shuts down the Python subprocess gracefully, falling back to SIGKILL.
-//
-// stdin is closed before acquiring the mutex so that any goroutine blocked
-// inside compress() on b.stdout.Scan() receives EOF, exits the scan, and
-// releases the mutex. This prevents a deadlock when ping() times out and
-// the spawned goroutine is still holding b.mu while blocked on Scan().
-func (b *HeadroomBridge) Stop() {
-	b.shuttingDown.Store(true)
-
-	// Close stdin outside the lock so that any goroutine holding b.mu and
-	// blocked on b.stdout.Scan() gets an EOF (the Python process exits when
-	// its stdin closes) and can release the lock.
-	b.stdin.Close()
-
-	// Acquire the lock only to synchronise with any in-flight compress call
-	// that hasn't exited yet after the stdin close.
-	b.mu.Lock()
-	b.mu.Unlock() //nolint:gocritic // intentional: we just want to wait for the lock to be available
-
-	done := make(chan struct{})
-	go func() {
-		b.cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		b.cmd.Process.Kill()
-		<-done
+func (b *HeadroomBridge) shutdown() {
+	if b == nil {
+		return
 	}
-	b.stderrDrainWG.Wait()
+	b.shutdownOnce.Do(func() {
+		b.shuttingDown.Store(true)
+		if b.stopping != nil {
+			close(b.stopping)
+		}
+		if b.stdin != nil {
+			_ = b.stdin.Close()
+		}
+		if b.stdoutPipe != nil {
+			_ = b.stdoutPipe.Close()
+		}
+		if b.stderrPipe != nil {
+			_ = b.stderrPipe.Close()
+		}
+		if b.process != nil {
+			_ = b.process.Kill()
+			go func() {
+				defer close(b.processDone)
+				defer func() { _ = recover() }()
+				<-b.operationGate
+				b.operationGate <- struct{}{}
+				<-b.stderrDone
+				_ = b.process.Wait()
+			}()
+		}
+	})
+}
+
+// Stop shuts down the Python subprocess and synchronises with any in-flight
+// bridge operation without waiting on its serialisation gate before closing
+// the pipes that unblock writes and scans.
+func (b *HeadroomBridge) Stop() {
+	if b == nil {
+		return
+	}
+	b.ensureLifecycle()
+	b.shutdown()
+
+	b.stopOnce.Do(func() {
+		defer close(b.stopDone)
+
+		<-b.operationGate
+		b.operationGate <- struct{}{}
+		<-b.processDone
+		<-b.stderrDone
+	})
+	<-b.stopDone
 }
