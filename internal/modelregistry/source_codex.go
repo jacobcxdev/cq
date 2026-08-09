@@ -37,15 +37,22 @@ type CodexSource struct {
 	BaseURL string
 	// Token returns a bearer token for the request.
 	Token func(ctx context.Context) (string, error)
+	// AuthenticatedDo performs the request when authentication may require more
+	// than one bounded credential attempt. When set, Token is not called.
+	AuthenticatedDo func(ctx context.Context, req *http.Request) (*http.Response, error)
 	// ClientVersion is sent as the client_version query parameter.
 	ClientVersion string
 }
 
 // Fetch implements NativeSource.
 func (s *CodexSource) Fetch(ctx context.Context) (SourceResult, error) {
-	token, err := s.Token(ctx)
-	if err != nil {
-		return SourceResult{}, fmt.Errorf("codex source: get token: %w", err)
+	var token string
+	if s.AuthenticatedDo == nil {
+		var err error
+		token, err = s.Token(ctx)
+		if err != nil {
+			return SourceResult{}, fmt.Errorf("codex source: get token: %w", err)
+		}
 	}
 
 	baseURL := s.BaseURL
@@ -62,9 +69,13 @@ func (s *CodexSource) Fetch(ctx context.Context) (SourceResult, error) {
 	if err != nil {
 		return SourceResult{}, fmt.Errorf("codex source: build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := s.Client.Do(req)
+	var resp *http.Response
+	if s.AuthenticatedDo != nil {
+		resp, err = s.AuthenticatedDo(ctx, req)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err = s.Client.Do(req)
+	}
 	if err != nil {
 		return SourceResult{}, fmt.Errorf("codex source: request: %w", err)
 	}

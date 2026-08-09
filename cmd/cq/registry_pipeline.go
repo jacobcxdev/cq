@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
@@ -186,17 +187,18 @@ func firstClaudeAccessTokenFromAccounts(accounts []keyring.ClaudeOAuth) func() (
 }
 
 type registryPipelineOptions struct {
-	FS                 fsutil.FileSystem
-	HomeDir            string
-	ClaudeUpstream     string
-	CodexUpstream      string
-	HTTPClient         httputil.Doer
-	CodexClientVersion string
-	ClaudeToken        func() (string, error)
-	CodexToken         func() (string, error)
-	CodexTokenContext  func(context.Context) (string, error)
-	Env                func(string) string
-	Stderr             io.Writer
+	FS                   fsutil.FileSystem
+	HomeDir              string
+	ClaudeUpstream       string
+	CodexUpstream        string
+	HTTPClient           httputil.Doer
+	CodexClientVersion   string
+	ClaudeToken          func() (string, error)
+	CodexToken           func() (string, error)
+	CodexTokenContext    func(context.Context) (string, error)
+	CodexAuthenticatedDo func(context.Context, *http.Request) (*http.Response, error)
+	Env                  func(string) string
+	Stderr               io.Writer
 }
 
 func snapshotHasProvider(snap modelregistry.Snapshot, provider modelregistry.Provider) bool {
@@ -241,7 +243,7 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	if opts.ClaudeToken == nil {
 		return nil, fmt.Errorf("registry pipeline: missing Claude token provider")
 	}
-	if opts.CodexToken == nil && opts.CodexTokenContext == nil {
+	if opts.CodexToken == nil && opts.CodexTokenContext == nil && opts.CodexAuthenticatedDo == nil {
 		return nil, fmt.Errorf("registry pipeline: missing Codex token provider")
 	}
 	if opts.Env == nil {
@@ -272,7 +274,8 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 				}
 				return opts.CodexToken()
 			},
-			ClientVersion: opts.CodexClientVersion,
+			AuthenticatedDo: opts.CodexAuthenticatedDo,
+			ClientVersion:   opts.CodexClientVersion,
 		},
 		Overlays: modelregistry.FileOverlayStore{
 			FS:   opts.FS,
@@ -333,4 +336,16 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	}
 
 	return p, nil
+}
+
+func newRegistryPipelineWithCodexAuthority(opts registryPipelineOptions, authority codexRegistryCredentialAuthority) (*registryPipeline, error) {
+	if authority == nil {
+		return nil, fmt.Errorf("registry pipeline: %w", errCodexRegistryCredentialAuthorityUnavailable)
+	}
+	opts.CodexToken = nil
+	opts.CodexTokenContext = nil
+	opts.CodexAuthenticatedDo = func(ctx context.Context, req *http.Request) (*http.Response, error) {
+		return codexRegistryModelsRequest(ctx, authority, opts.HTTPClient, time.Now(), req)
+	}
+	return newRegistryPipeline(opts)
 }
