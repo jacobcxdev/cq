@@ -16,7 +16,7 @@ func TestServerHealthUsesCoordinatorCodexStatus(t *testing.T) {
 		},
 		CodexHealth: func() CodexHealth {
 			return CodexHealth{
-				AccountCount: 2,
+				AccountCount: 2, AccountCountKnown: true, HealthCode: "ok",
 				ExternalSources: []CodexSourceHealth{{
 					Name: "codexbar", CandidateCount: 1, HealthCode: "ok",
 				}},
@@ -48,5 +48,80 @@ func TestServerHealthUsesCoordinatorCodexStatus(t *testing.T) {
 		if strings.Contains(w.Body.String(), forbidden) {
 			t.Fatalf("health JSON exposed forbidden fixture %q: %s", forbidden, w.Body.String())
 		}
+	}
+}
+
+func TestServerHealthDegradesWithoutInventingCodexAccountCount(t *testing.T) {
+	srv := &Server{
+		CodexHealth: func() CodexHealth {
+			return CodexHealth{
+				HealthCode: "fetch_error",
+				ExternalSources: []CodexSourceHealth{{
+					Name: "codexbar", HealthCode: "unavailable",
+				}},
+			}
+		},
+	}
+
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest("GET", "/health", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var response struct {
+		Status   string `json:"status"`
+		Accounts struct {
+			Codex *int `json:"codex"`
+		} `json:"accounts"`
+		InventoryHealth string `json:"codex_inventory_health"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "degraded" {
+		t.Fatalf("status = %q, want degraded", response.Status)
+	}
+	if response.Accounts.Codex != nil {
+		t.Fatalf("Codex account count = %d, want null", *response.Accounts.Codex)
+	}
+	if response.InventoryHealth != "fetch_error" {
+		t.Fatalf("inventory health = %q, want fetch_error", response.InventoryHealth)
+	}
+	for _, forbidden := range []string{"private@example.test", "token-secret", "/private/managed-home"} {
+		if strings.Contains(w.Body.String(), forbidden) {
+			t.Fatalf("health JSON exposed forbidden fixture %q: %s", forbidden, w.Body.String())
+		}
+	}
+}
+
+func TestServerHealthDegradesForUnhealthyExternalSource(t *testing.T) {
+	srv := &Server{
+		CodexHealth: func() CodexHealth {
+			return CodexHealth{
+				AccountCount: 1, AccountCountKnown: true, HealthCode: "ok",
+				ExternalSources: []CodexSourceHealth{{
+					Name: "codexbar", HealthCode: "unavailable",
+				}},
+			}
+		},
+	}
+
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest("GET", "/health", nil))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var response struct {
+		Status          string `json:"status"`
+		InventoryHealth string `json:"codex_inventory_health"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "degraded" {
+		t.Fatalf("status = %q, want degraded", response.Status)
+	}
+	if response.InventoryHealth != "ok" {
+		t.Fatalf("inventory health = %q, want ok", response.InventoryHealth)
 	}
 }

@@ -183,8 +183,10 @@ type proxyCommandOptions struct {
 
 func codexHealthFromInventory(inventory codexprov.Inventory) proxy.CodexHealth {
 	health := proxy.CodexHealth{
-		AccountCount:    len(inventory.Accounts),
-		ExternalSources: make([]proxy.CodexSourceHealth, len(inventory.ExternalSources)),
+		AccountCount:      len(inventory.Accounts),
+		AccountCountKnown: true,
+		HealthCode:        "ok",
+		ExternalSources:   make([]proxy.CodexSourceHealth, len(inventory.ExternalSources)),
 	}
 	for i, source := range inventory.ExternalSources {
 		health.ExternalSources[i] = proxy.CodexSourceHealth{
@@ -206,7 +208,11 @@ func codexSourceHealthCode(code string) string {
 }
 
 func writeCodexHealthDiagnostics(w io.Writer, health proxy.CodexHealth) {
-	fmt.Fprintf(w, "cq: codex accounts: %d\n", health.AccountCount)
+	if health.AccountCountKnown {
+		fmt.Fprintf(w, "cq: codex accounts: %d\n", health.AccountCount)
+	} else {
+		fmt.Fprintf(w, "cq: codex accounts: unknown health=%s\n", health.HealthCode)
+	}
 	for _, source := range health.ExternalSources {
 		fmt.Fprintf(w, "cq: codex source: name=%s candidates=%d health=%s\n", source.Name, source.CandidateCount, source.HealthCode)
 	}
@@ -336,6 +342,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
+	codexHealthTracker := newCodexHealthTracker(credentialControl, codexHealthFromInventory(codexInventory))
 
 	codexRequestScope := &proxy.CodexRequestScope{
 		Chooser:   codexSelector,
@@ -526,11 +533,7 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Discover:  discover,
 		Transport: transport,
 		CodexHealth: func() proxy.CodexHealth {
-			inventory, err := credentialControl.List(context.Background())
-			if err != nil {
-				return proxy.CodexHealth{ExternalSources: []proxy.CodexSourceHealth{}}
-			}
-			return codexHealthFromInventory(inventory)
+			return codexHealthTracker.Health(context.Background())
 		},
 		CodexRequests:          codexRequestRouter,
 		CodexWebSocketExecutor: codexWebSocketExecutor,

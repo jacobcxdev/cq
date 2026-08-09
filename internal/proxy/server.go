@@ -55,8 +55,10 @@ type CodexSourceHealth struct {
 }
 
 type CodexHealth struct {
-	AccountCount    int                 `json:"account_count"`
-	ExternalSources []CodexSourceHealth `json:"external_sources"`
+	AccountCount      int                 `json:"account_count"`
+	AccountCountKnown bool                `json:"-"`
+	HealthCode        string              `json:"-"`
+	ExternalSources   []CodexSourceHealth `json:"external_sources"`
 }
 
 // Server is the reverse proxy HTTP server.
@@ -642,18 +644,32 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.Discover != nil {
 		claudeCount = len(s.Discover())
 	}
-	var codexCount int
+	var codexCount any = 0
 	var codexHealth CodexHealth
 	if s.CodexHealth != nil {
 		codexHealth = s.CodexHealth()
-		codexCount = codexHealth.AccountCount
+		if codexHealth.AccountCountKnown {
+			codexCount = codexHealth.AccountCount
+		} else {
+			codexCount = nil
+		}
 	} else if s.CodexDiscover != nil {
 		codexCount = len(s.CodexDiscover())
 	}
+	status := "ok"
+	if codexHealth.HealthCode != "" && codexHealth.HealthCode != "ok" {
+		status = "degraded"
+	}
+	for _, source := range codexHealth.ExternalSources {
+		if source.HealthCode != "ok" {
+			status = "degraded"
+			break
+		}
+	}
 	resp := map[string]any{
-		"status":   "ok",
+		"status":   status,
 		"headroom": s.Headroom != nil,
-		"accounts": map[string]int{
+		"accounts": map[string]any{
 			"claude": claudeCount,
 			"codex":  codexCount,
 		},
@@ -664,6 +680,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.CodexHealth != nil {
 		resp["codex_external_sources"] = codexHealth.ExternalSources
+		resp["codex_inventory_health"] = codexHealth.HealthCode
 	}
 	httpMode, wsMode := s.codexRoutingHealth()
 	resp["codex_turn_routing"] = httpMode

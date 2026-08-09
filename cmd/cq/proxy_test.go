@@ -2,12 +2,27 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+type failingCodexHealthInventory struct{ err error }
+
+func (i failingCodexHealthInventory) List(context.Context) (codexprov.Inventory, error) {
+	return codexprov.Inventory{}, i.err
+}
+
+type deadlineCodexHealthInventory struct{ sawDeadline bool }
+
+func (i *deadlineCodexHealthInventory) List(ctx context.Context) (codexprov.Inventory, error) {
+	_, i.sawDeadline = ctx.Deadline()
+	return codexprov.Inventory{}, errors.New("coordinator unavailable")
+}
 
 func TestCodexInventoryStatusDiagnosticsArePrivacySafe(t *testing.T) {
 	sensitiveIdentity := codexprov.AccountIdentity{
@@ -116,5 +131,69 @@ func TestCodexInventoryStatusDiagnosticsRejectUntypedHealth(t *testing.T) {
 		if strings.Contains(stderr.String(), forbidden) {
 			t.Fatalf("stderr exposed raw error fixture %q: %s", forbidden, stderr.String())
 		}
+	}
+}
+
+func TestCodexHealthTrackerDegradesSafelyOnCoordinatorListFailure(t *testing.T) {
+	last := codexHealthFromInventory(codexprov.Inventory{
+		Accounts: []codexprov.LogicalAccount{{}, {}},
+		ExternalSources: []codexprov.ExternalSourceStatus{{
+			Name: "codexbar", CandidateCount: 1,
+		}},
+	})
+	tracker := newCodexHealthTracker(failingCodexHealthInventory{err: errors.New(
+		"open /private/managed-home for private@example.test: token-secret",
+	)}, last)
+
+	health := tracker.Health(context.Background())
+	if health.AccountCount != 2 || !health.AccountCountKnown {
+		t.Fatalf("account count = %d known=%t, want last-known 2", health.AccountCount, health.AccountCountKnown)
+	}
+	if health.HealthCode != "fetch_error" {
+		t.Fatalf("health code = %q, want fetch_error", health.HealthCode)
+	}
+	if len(health.ExternalSources) != 1 || health.ExternalSources[0].Name != "codexbar" {
+		t.Fatalf("external source snapshot = %+v, want last-known source", health.ExternalSources)
+	}
+
+	encoded, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	writeCodexHealthDiagnostics(&stderr, health)
+	combined := string(encoded) + stderr.String()
+	for _, forbidden := range []string{"/private/managed-home", "private@example.test", "token-secret"} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("degraded diagnostics exposed raw error fixture %q: %s", forbidden, combined)
+		}
+	}
+}
+
+func TestCodexHealthTrackerBoundsCoordinatorList(t *testing.T) {
+	inventory := &deadlineCodexHealthInventory{}
+	tracker := newCodexHealthTracker(inventory, codexHealthFromInventory(codexprov.Inventory{}))
+
+	_ = tracker.Health(context.Background())
+
+	if !inventory.sawDeadline {
+		t.Fatal("coordinator List context has no deadline")
+	}
+}
+
+func TestCodexHealthTrackerPreservesEmptySourceSnapshotOnFailure(t *testing.T) {
+	last := codexHealthFromInventory(codexprov.Inventory{})
+	if last.ExternalSources == nil {
+		t.Fatal("test fixture external sources are nil")
+	}
+	tracker := newCodexHealthTracker(failingCodexHealthInventory{err: errors.New("unavailable")}, last)
+
+	health := tracker.Health(context.Background())
+	encoded, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"external_sources":[]`) {
+		t.Fatalf("health JSON = %s, want empty external_sources array", encoded)
 	}
 }
