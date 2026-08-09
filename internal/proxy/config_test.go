@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func TestConfigDiagnosticsLogJSONRoundTrip(t *testing.T) {
@@ -93,6 +95,7 @@ func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 		"local_token": "token",
 		"codex_turn_routing": "observe",
 		"codex_ws_turn_routing": "off",
+		"codex_routing_default_account_key": "gen:opaque-default",
 		"future_scalar": 7,
 		"future_object": {"nested": [1, {"keep": true}]}
 	}`)
@@ -102,6 +105,9 @@ func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.CodexRoutingDefaultAccountKey != codex.AccountKey("gen:opaque-default") {
+		t.Fatalf("routing default = %q, want opaque key", cfg.CodexRoutingDefaultAccountKey)
 	}
 	cfg.PinnedClaudeAccount = "person@example.test"
 	if err := SaveConfig(cfg); err != nil {
@@ -127,6 +133,9 @@ func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 	if string(raw["codex_turn_routing"]) != `"observe"` || string(raw["codex_ws_turn_routing"]) != `"off"` {
 		t.Fatalf("routing modes lost: %s", data)
 	}
+	if string(raw["codex_routing_default_account_key"]) != `"gen:opaque-default"` {
+		t.Fatalf("routing default lost: %s", data)
+	}
 }
 
 func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
@@ -142,12 +151,40 @@ func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
 	if cfg.CodexLeaseRetentionDays != 7 {
 		t.Fatalf("retention = %d, want 7", cfg.CodexLeaseRetentionDays)
 	}
+	if cfg.CodexRoutingDefaultAccountKey != "" {
+		t.Fatalf("routing default = %q, want unconfigured", cfg.CodexRoutingDefaultAccountKey)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "cq", "proxy.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), `"codex_turn_routing": "off"`) || !strings.Contains(string(data), `"codex_ws_turn_routing": "off"`) {
 		t.Fatalf("generated config missing explicit safe modes: %s", data)
+	}
+	if strings.Contains(string(data), "codex_routing_default_account_key") {
+		t.Fatalf("generated config persisted an unconfigured routing default: %s", data)
+	}
+}
+
+func TestConfigCodexRoutingDefaultAccountKeySaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	want := codex.AccountKey("acct_opaque_default")
+	if err := SaveConfig(&Config{
+		LocalToken:                    "token",
+		ClaudeUpstream:                DefaultUpstream,
+		CodexUpstream:                 DefaultCodexUpstream,
+		CodexLeaseRetentionDays:       7,
+		CodexRoutingDefaultAccountKey: want,
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	got, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got.CodexRoutingDefaultAccountKey != want {
+		t.Fatalf("routing default = %q, want %q", got.CodexRoutingDefaultAccountKey, want)
 	}
 }
 
