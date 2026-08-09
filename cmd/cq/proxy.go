@@ -230,8 +230,6 @@ func runProxyStart(opts proxyCommandOptions) error {
 		return fmt.Errorf("Codex turn observer: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "cq: proxy token: %s\n", cfg.LocalToken)
-
 	accounts := discoverClaudeAccountsFn()
 	var emails []string
 	for _, a := range accounts {

@@ -245,6 +245,15 @@ func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
 	}
 }
 
+func TestRunProxyStartDoesNotLogLocalToken(t *testing.T) {
+	file := parseGoFile(t, "proxy.go")
+	body := findFuncBody(t, file, "runProxyStart")
+
+	if hasQualifiedSelector(body, "cfg", "LocalToken") || hasStringLiteral(body, "cq: proxy token: %s\n") {
+		t.Fatal("runProxyStart must not print the local proxy token")
+	}
+}
+
 func parseGoFile(t *testing.T, path string) *ast.File {
 	t.Helper()
 	fset := token.NewFileSet()
