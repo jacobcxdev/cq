@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jacobcxdev/cq/internal/auth"
 )
 
 const codexBarSourceName = "codexbar"
@@ -207,10 +209,18 @@ func (s *CodexBarSource) readRecord(record codexBarManifestRecord, expected Revi
 	if !ok || account.AccountID == "" || account.RecordKey == "" {
 		return CodexAccount{}, "", fmt.Errorf("%w: credential identity", ErrExternalInvalid)
 	}
+	claims := auth.DecodeCodexClaims(account.IDToken)
+	claimRecordKey := claims.RecordKey()
+	if claims.AccountID == "" || claims.UserID == "" || claimRecordKey == "" {
+		return CodexAccount{}, "", fmt.Errorf("%w: credential claims", ErrExternalInvalid)
+	}
+	if account.AccountID != claims.AccountID || account.UserID != claims.UserID || account.RecordKey != claimRecordKey {
+		return CodexAccount{}, "", ErrExternalIdentityMismatch
+	}
 	if record.ProviderAccountID == "" || record.WorkspaceAccountID == "" {
 		return CodexAccount{}, "", fmt.Errorf("%w: manifest identity", ErrExternalInvalid)
 	}
-	if record.ProviderAccountID != account.AccountID || record.WorkspaceAccountID != account.UserID {
+	if record.ProviderAccountID != claims.AccountID || record.WorkspaceAccountID != claims.UserID {
 		return CodexAccount{}, "", ErrExternalIdentityMismatch
 	}
 	return account, revision, nil

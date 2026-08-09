@@ -433,6 +433,26 @@ func TestCodexBarSourceRejectsProviderIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestCodexBarSourceRejectsOuterAccountClaimMismatch(t *testing.T) {
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+	authData := inventoryAuth(
+		"synthetic-access",
+		"acct-1",
+		fakeCodexJWT("user@example.test", "acct-2", "user-1", "plus"),
+		time.Now().Add(time.Hour).UnixMilli(),
+	)
+	writeCodexBarAuthAndFingerprint(t, root, authData)
+
+	candidates, err := NewCodexBarSource(root).List(context.Background())
+	if !errors.Is(err, ErrExternalIdentityMismatch) {
+		t.Fatalf("List error = %v, want ErrExternalIdentityMismatch", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("List returned %d candidates for conflicting credential identities", len(candidates))
+	}
+}
+
 func TestCodexBarSourceRejectsWorkspaceIdentityMismatch(t *testing.T) {
 	root := t.TempDir()
 	writeCodexBarFixture(t, root, 0o600, func(record map[string]any) {
