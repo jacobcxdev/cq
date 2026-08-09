@@ -94,6 +94,11 @@ type rawCandidate struct {
 	metadata   *ManagedMetadata
 }
 
+type sourcedExternalCandidate struct {
+	sourceName string
+	candidate  ExternalCandidate
+}
+
 // DiscoverInventory builds one generation-local read model without writing.
 func DiscoverInventory(fs fsutil.FileSystem) Inventory {
 	return DiscoverInventoryWithSources(context.Background(), fs)
@@ -188,6 +193,7 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		logical.Active = logical.Active || candidate.source == SourceSystem
 		logical.Routable = logical.Routable || (credential.AccountID != "" && credential.AccessToken != "")
 	}
+	var externalCandidates []sourcedExternalCandidate
 	for _, source := range sources {
 		if source == nil {
 			continue
@@ -202,8 +208,33 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		status.CandidateCount = len(candidates)
 		inventory.ExternalSources = append(inventory.ExternalSources, status)
 		for _, candidate := range candidates {
-			appendExternalCandidate(&inventory, source.Name(), candidate)
+			externalCandidates = append(externalCandidates, sourcedExternalCandidate{
+				sourceName: source.Name(), candidate: candidate,
+			})
 		}
+	}
+	sort.Slice(inventory.ExternalSources, func(i, j int) bool {
+		a, b := inventory.ExternalSources[i], inventory.ExternalSources[j]
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.ErrorCode != b.ErrorCode {
+			return a.ErrorCode < b.ErrorCode
+		}
+		return a.CandidateCount < b.CandidateCount
+	})
+	sort.Slice(externalCandidates, func(i, j int) bool {
+		a, b := externalCandidates[i], externalCandidates[j]
+		if a.sourceName != b.sourceName {
+			return a.sourceName < b.sourceName
+		}
+		if a.candidate.Ref.RecordID != b.candidate.Ref.RecordID {
+			return a.candidate.Ref.RecordID < b.candidate.Ref.RecordID
+		}
+		return a.candidate.Ref.Revision < b.candidate.Ref.Revision
+	})
+	for _, candidate := range externalCandidates {
+		appendExternalCandidate(&inventory, candidate.sourceName, candidate.candidate)
 	}
 
 	for i := range inventory.Accounts {
@@ -369,14 +400,18 @@ func appendExternalCandidate(inventory *Inventory, sourceName string, candidate 
 	}
 	logical := &inventory.Accounts[index]
 	enrichIdentity(&logical.Identity, account)
-	candidateID := CandidateID(SourceExternal.String() + ":" + shortHash(sourceName+":"+candidate.Ref.RecordID+":"+string(candidate.Ref.Revision)))
+	candidateID := CandidateID(SourceExternal.String() + ":" + shortHash(sourceName+":"+candidate.Ref.RecordID))
 	ref := CandidateRef{AccountKey: logical.Key, CandidateID: candidateID}
 	externalRef := candidate.Ref
 	logical.Candidates = append(logical.Candidates, CredentialCandidate{
 		Ref: ref, Revision: candidate.Ref.Revision, Source: SourceExternal,
 		AccessExpiresAt: candidate.AccessExpiresAt, externalRef: &externalRef,
 	})
-	logical.Routable = logical.Routable || candidate.Routable
+	logical.Routable = logical.Routable || candidate.Routable && completeStrongIdentity(candidate.Identity)
+}
+
+func completeStrongIdentity(identity AccountIdentity) bool {
+	return identity.AccountID != "" && identity.UserID != ""
 }
 
 func externalSourceErrorCode(err error) string {
@@ -385,6 +420,12 @@ func externalSourceErrorCode(err error) string {
 		return "unavailable"
 	case errors.Is(err, ErrExternalUnsafePath):
 		return "unsafe_path"
+	case errors.Is(err, ErrStaleRevision):
+		return "stale_revision"
+	case errors.Is(err, ErrExternalIdentityMismatch):
+		return "identity_mismatch"
+	case errors.Is(err, ErrExternalFingerprintMismatch):
+		return "fingerprint_mismatch"
 	case errors.Is(err, ErrExternalInvalid):
 		return "invalid"
 	default:

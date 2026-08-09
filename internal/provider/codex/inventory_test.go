@@ -9,12 +9,18 @@ import (
 )
 
 type fakeExternalCredentialSource struct {
+	name       string
 	candidates []ExternalCandidate
 	material   CredentialMaterial
 	resolveRef ExternalCandidateRef
 }
 
-func (s *fakeExternalCredentialSource) Name() string { return "external-test" }
+func (s *fakeExternalCredentialSource) Name() string {
+	if s.name != "" {
+		return s.name
+	}
+	return "external-test"
+}
 func (s *fakeExternalCredentialSource) List(context.Context) ([]ExternalCandidate, error) {
 	return append([]ExternalCandidate(nil), s.candidates...), nil
 }
@@ -217,6 +223,88 @@ func TestInventoryFederatesFreshExternalCandidateIntoLogicalAccount(t *testing.T
 	}
 	if len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].CandidateCount != 1 || inventory.ExternalSources[0].ErrorCode != "" {
 		t.Fatalf("external source status = %+v", inventory.ExternalSources)
+	}
+}
+
+func TestInventoryKeepsCompleteExternalIdentityConflictsRoutable(t *testing.T) {
+	source := &fakeExternalCredentialSource{candidates: []ExternalCandidate{
+		{
+			Ref: ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity: AccountIdentity{
+				AccountID: "acct-1", UserID: "user-1", Email: "same@example.test",
+			},
+			Routable: true,
+		},
+		{
+			Ref: ExternalCandidateRef{Source: "external-test", RecordID: "record-2", Revision: "revision-2"},
+			Identity: AccountIdentity{
+				AccountID: "acct-2", UserID: "user-2", Email: "same@example.test",
+			},
+			Routable: true,
+		},
+	}}
+
+	inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+	if len(inventory.Accounts) != 2 {
+		t.Fatalf("len(accounts) = %d, want two strong identities", len(inventory.Accounts))
+	}
+	for _, logical := range inventory.Accounts {
+		if !logical.Routable {
+			t.Fatalf("complete strong identity was quarantined: %+v", logical.Identity)
+		}
+		if len(logical.Candidates) != 1 {
+			t.Fatalf("candidates = %+v, want one per strong identity", logical.Candidates)
+		}
+	}
+}
+
+func TestInventoryKeepsWeakExternalAmbiguityUnroutable(t *testing.T) {
+	source := &fakeExternalCredentialSource{candidates: []ExternalCandidate{
+		{
+			Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity: AccountIdentity{Email: "same@example.test"}, Routable: true,
+		},
+		{
+			Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-2", Revision: "revision-2"},
+			Identity: AccountIdentity{Email: "same@example.test"}, Routable: true,
+		},
+	}}
+
+	inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+	if len(inventory.Accounts) != 2 {
+		t.Fatalf("len(accounts) = %d, want separate weak candidates", len(inventory.Accounts))
+	}
+	for _, logical := range inventory.Accounts {
+		if logical.Routable {
+			t.Fatalf("weak-only external identity is routable: %+v", logical)
+		}
+	}
+}
+
+func TestInventoryExternalSourceOrderDoesNotChangeIdentity(t *testing.T) {
+	richIdentity := AccountIdentity{
+		AccountID: "acct-1", UserID: "user-1", Email: "user@example.test",
+		RecordKey: "user-1::acct-1",
+	}
+	sourceA := &fakeExternalCredentialSource{
+		name: "source-a",
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "source-a", RecordID: "record-a", Revision: "revision-a"},
+			Identity: AccountIdentity{AccountID: "acct-1", Email: "user@example.test"},
+		}},
+	}
+	sourceB := &fakeExternalCredentialSource{
+		name: "source-b",
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "source-b", RecordID: "record-b", Revision: "revision-b"},
+			Identity: richIdentity, Routable: true,
+		}},
+	}
+
+	forward := DiscoverInventoryWithSources(context.Background(), newFakeFS(), sourceA, sourceB)
+	reverse := DiscoverInventoryWithSources(context.Background(), newFakeFS(), sourceB, sourceA)
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("inventory changed with external source order:\nforward=%+v\nreverse=%+v", forward, reverse)
 	}
 }
 

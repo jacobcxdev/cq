@@ -7,9 +7,11 @@ import (
 )
 
 var (
-	ErrExternalUnavailable = errors.New("external credential source unavailable")
-	ErrExternalInvalid     = errors.New("external credential source invalid")
-	ErrExternalUnsafePath  = errors.New("external credential path unsafe")
+	ErrExternalUnavailable         = errors.New("external credential source unavailable")
+	ErrExternalInvalid             = errors.New("external credential source invalid")
+	ErrExternalUnsafePath          = errors.New("external credential path unsafe")
+	ErrExternalIdentityMismatch    = errors.New("external credential identity mismatch")
+	ErrExternalFingerprintMismatch = errors.New("external credential fingerprint mismatch")
 )
 
 type ExternalCandidateRef struct {
