@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/httputil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
-const codexPrimerResponseLimit = 1 << 20
 const defaultCodexPrimerRequestTimeout = time.Minute
 
 type PrimerRequestState string
@@ -23,8 +23,25 @@ const (
 	PrimerRequestAmbiguous PrimerRequestState = "ambiguous"
 )
 
+type PrimerRequestResultCode string
+
+const (
+	PrimerRequestCodeAuthRejected      PrimerRequestResultCode = "auth_rejected"
+	PrimerRequestCodeHardLimit         PrimerRequestResultCode = "hard_limit"
+	PrimerRequestCodeHTTPPreAdmission  PrimerRequestResultCode = "http_pre_admission"
+	PrimerRequestCodeLifecycleObserved PrimerRequestResultCode = "lifecycle_observed"
+	PrimerRequestCodeTransportError    PrimerRequestResultCode = "transport_error"
+	PrimerRequestCodeTimeout           PrimerRequestResultCode = "timeout"
+	PrimerRequestCodeResponseReadError PrimerRequestResultCode = "response_read_error"
+	PrimerRequestCodeHTTPAmbiguous     PrimerRequestResultCode = "http_ambiguous"
+	PrimerRequestCodeSSEMalformed      PrimerRequestResultCode = "sse_malformed"
+	PrimerRequestCodeSSETruncated      PrimerRequestResultCode = "sse_truncated"
+	PrimerRequestCodeLifecycleMissing  PrimerRequestResultCode = "lifecycle_missing"
+)
+
 type PrimerRequestResult struct {
 	State      PrimerRequestState
+	Code       PrimerRequestResultCode
 	HTTPStatus int
 }
 
@@ -73,45 +90,113 @@ func (r *CodexPrimerRequester) Send(ctx context.Context, account codex.AccountKe
 	}
 	response, _, failure, err := r.Router.DoPinned(ctx, choice, req)
 	if err != nil {
-		return PrimerRequestResult{State: PrimerRequestAmbiguous}, nil
+		code := PrimerRequestCodeTransportError
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			code = PrimerRequestCodeTimeout
+		}
+		return PrimerRequestResult{State: PrimerRequestAmbiguous, Code: code}, nil
 	}
 	if failure == CodexPinnedAuthFailure || failure == CodexPinnedHardLimit {
 		status := 0
 		if response != nil {
 			status = response.StatusCode
-			closeResponse(response)
+			_, _ = readCodexPrimerResponse(response)
 		}
-		return PrimerRequestResult{State: PrimerRequestRejected, HTTPStatus: status}, nil
+		code := PrimerRequestCodeAuthRejected
+		if failure == CodexPinnedHardLimit {
+			code = PrimerRequestCodeHardLimit
+		}
+		return PrimerRequestResult{State: PrimerRequestRejected, Code: code, HTTPStatus: status}, nil
 	}
 	if response == nil || response.Body == nil {
-		return PrimerRequestResult{State: PrimerRequestAmbiguous}, nil
+		closeResponse(response)
+		return PrimerRequestResult{State: PrimerRequestAmbiguous, Code: PrimerRequestCodeTransportError}, nil
+	}
+	status := response.StatusCode
+	data, readErr := readCodexPrimerResponse(response)
+	if readErr != nil {
+		return PrimerRequestResult{State: PrimerRequestAmbiguous, Code: PrimerRequestCodeResponseReadError, HTTPStatus: status}, nil
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if isCodexPrimerPreAdmissionStatus(response.StatusCode) {
+			return PrimerRequestResult{State: PrimerRequestRejected, Code: PrimerRequestCodeHTTPPreAdmission, HTTPStatus: status}, nil
+		}
+		return PrimerRequestResult{State: PrimerRequestAmbiguous, Code: PrimerRequestCodeHTTPAmbiguous, HTTPStatus: status}, nil
+	}
+	code := classifyCodexPrimerLifecycle(data)
+	if code == PrimerRequestCodeLifecycleObserved {
+		return PrimerRequestResult{State: PrimerRequestAdmitted, Code: code, HTTPStatus: status}, nil
+	}
+	return PrimerRequestResult{State: PrimerRequestAmbiguous, Code: code, HTTPStatus: status}, nil
+}
+
+func readCodexPrimerResponse(response *http.Response) ([]byte, error) {
+	if response == nil || response.Body == nil {
+		closeResponse(response)
+		return nil, fmt.Errorf("Codex primer response body unavailable")
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, codexPrimerResponseLimit))
-		return PrimerRequestResult{State: PrimerRequestRejected, HTTPStatus: response.StatusCode}, nil
+	return httputil.ReadBody(response.Body)
+}
+
+func isCodexPrimerPreAdmissionStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest,
+		http.StatusNotFound,
+		http.StatusMethodNotAllowed,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnsupportedMediaType,
+		http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
 	}
-	data, readErr := io.ReadAll(io.LimitReader(response.Body, codexPrimerResponseLimit+1))
-	if readErr != nil || len(data) > codexPrimerResponseLimit {
-		return PrimerRequestResult{State: PrimerRequestAmbiguous, HTTPStatus: response.StatusCode}, nil
-	}
+}
+
+func classifyCodexPrimerLifecycle(data []byte) PrimerRequestResultCode {
 	parser := NewCodexSSEParser(codexSSEDefaultMaxEventBytes)
-	observations, parseErr := parser.Feed(data)
-	if parseErr == nil {
-		finished, err := parser.Finish()
-		if err != nil {
-			parseErr = err
+	for len(data) != 0 {
+		chunkSize := bytes.IndexByte(data, '\n')
+		if chunkSize < 0 {
+			chunkSize = len(data)
 		} else {
-			observations = append(observations, finished...)
+			chunkSize++
 		}
+		observations, err := parser.Feed(data[:chunkSize])
+		for _, observation := range observations {
+			if codexPrimerLifecycleObserved(observation) {
+				return PrimerRequestCodeLifecycleObserved
+			}
+			if observation.ParseError != nil {
+				return PrimerRequestCodeSSEMalformed
+			}
+		}
+		if err != nil {
+			return PrimerRequestCodeSSEMalformed
+		}
+		data = data[chunkSize:]
 	}
-	if parseErr != nil {
-		return PrimerRequestResult{State: PrimerRequestAmbiguous, HTTPStatus: response.StatusCode}, nil
-	}
+	observations, err := parser.Finish()
 	for _, observation := range observations {
-		if observation.Admits {
-			return PrimerRequestResult{State: PrimerRequestAdmitted, HTTPStatus: response.StatusCode}, nil
+		if codexPrimerLifecycleObserved(observation) {
+			return PrimerRequestCodeLifecycleObserved
+		}
+		if observation.ParseError != nil {
+			return PrimerRequestCodeSSEMalformed
 		}
 	}
-	return PrimerRequestResult{State: PrimerRequestAmbiguous, HTTPStatus: response.StatusCode}, nil
+	if errors.Is(err, ErrCodexSSETruncated) {
+		return PrimerRequestCodeSSETruncated
+	}
+	if err != nil {
+		return PrimerRequestCodeSSEMalformed
+	}
+	return PrimerRequestCodeLifecycleMissing
+}
+
+func codexPrimerLifecycleObserved(observation CodexSSEObservation) bool {
+	if observation.Admits || observation.Kind == CodexSSECompleted {
+		return true
+	}
+	return observation.Kind == CodexSSEError && (observation.Type == "response.failed" || observation.Type == "response.incomplete")
 }
