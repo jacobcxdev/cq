@@ -86,6 +86,36 @@ func TestRestartProxyAgentRunsKickstart(t *testing.T) {
 	}
 }
 
+func TestRestartProxyAgentFallsBackToHomebrewLabel(t *testing.T) {
+	oldRunner := runProxyLaunchctl
+	defer func() { runProxyLaunchctl = oldRunner }()
+
+	var calls [][]string
+	runProxyLaunchctl = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		if strings.HasSuffix(args[len(args)-1], "/"+proxyAgentLabel) {
+			return launchctlTestExitError(113)
+		}
+		return nil
+	}
+
+	if err := restartProxyAgent(); err != nil {
+		t.Fatalf("restartProxyAgent: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("launchctl calls = %d, want 2", len(calls))
+	}
+	want := []string{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), homebrewProxyAgentLabel)}
+	if strings.Join(calls[1], "|") != strings.Join(want, "|") {
+		t.Fatalf("fallback launchctl args = %v, want %v", calls[1], want)
+	}
+}
+
+type launchctlTestExitError int
+
+func (e launchctlTestExitError) Error() string { return fmt.Sprintf("exit status %d", e) }
+func (e launchctlTestExitError) ExitCode() int { return int(e) }
+
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	oldStderr := os.Stderr
