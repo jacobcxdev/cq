@@ -496,13 +496,15 @@ func (handle *CodexTurnObservation) Finish(readErr error) {
 	handle.finishOnce.Do(func() {
 		handle.mu.Lock()
 		defer handle.mu.Unlock()
-		if final, err := handle.parser.Finish(); err == nil {
-			for _, observation := range final {
-				handle.observeEventLocked(observation)
+		if readErr == nil {
+			if final, err := handle.parser.Finish(); err == nil {
+				for _, observation := range final {
+					handle.observeEventLocked(observation)
+				}
+			} else {
+				handle.observer.unknown.Add(1)
+				handle.observer.recordCanaryUnexplained()
 			}
-		} else {
-			handle.observer.unknown.Add(1)
-			handle.observer.recordCanaryUnexplained()
 		}
 		if handle.compact && handle.admitted && !handle.completed && readErr == nil {
 			if compact, err := ParseCodexCompactResponse(handle.body); err == nil {
@@ -707,9 +709,10 @@ func (session *codexWSObservationSession) Close(err error) {
 }
 
 type codexObservedBody struct {
-	body   io.ReadCloser
-	handle *CodexTurnObservation
-	once   sync.Once
+	body     io.ReadCloser
+	handle   *CodexTurnObservation
+	once     sync.Once
+	terminal atomic.Bool
 }
 
 func (s *Server) beginCodexHTTPObservation(ctx context.Context, body []byte, header http.Header, compact bool) *CodexTurnObservation {
@@ -732,6 +735,7 @@ func (body *codexObservedBody) Read(buffer []byte) (int, error) {
 		body.handle.ObserveBytes(buffer[:read])
 	}
 	if err != nil {
+		body.terminal.Store(true)
 		body.finish(err)
 	}
 	return read, err
@@ -739,7 +743,11 @@ func (body *codexObservedBody) Read(buffer []byte) (int, error) {
 
 func (body *codexObservedBody) Close() error {
 	err := body.body.Close()
-	body.finish(err)
+	finishErr := err
+	if finishErr == nil && !body.terminal.Load() {
+		finishErr = context.Canceled
+	}
+	body.finish(finishErr)
 	return err
 }
 

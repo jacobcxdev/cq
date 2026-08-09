@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -119,6 +120,33 @@ func TestCodexObserveMalformedAndRateLimitCounters(t *testing.T) {
 	health := observer.Health()
 	if health.Unknown < 2 || health.QuotaEvents != 1 {
 		t.Fatalf("health = %#v", health)
+	}
+}
+
+func TestCodexObservedBodyEarlyCloseDoesNotReportMalformedLifecycle(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, true, nil), nil, []byte("01234567890123456789012345678901"))
+	canary := testCodexCanary(t, fsys)
+	observer.SetCanary(canary)
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
+	handle := observer.BeginHTTP(context.Background(), body, "identity", "", false)
+	handle.Selected(RouteChoice{AccountKey: "account"}, false)
+	handle.ResponseHeaders(http.StatusOK, nil)
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(`data: {"type":"response.completed"`))}
+	observeCodexResponseBody(response, handle)
+	buffer := make([]byte, 4096)
+	if read, err := response.Body.Read(buffer); read == 0 || err != nil {
+		t.Fatalf("partial read = %d, %v", read, err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if health := observer.Health(); health.Unknown != 0 {
+		t.Fatalf("health = %#v", health)
+	}
+	if state := canary.State(); state.UnexplainedLifecycles != 0 {
+		t.Fatalf("canary state = %+v", state)
 	}
 }
 
