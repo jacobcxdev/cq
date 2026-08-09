@@ -549,7 +549,7 @@ Installed binary `0.20.3+6c03ebe` (SHA-256 `f63be75789e5b49f5998ad50afffa921d9fb
 - [x] Prove HTTP and WS share one lease manager and namespace; prove journal restart resolves account by opaque `AccountKey` and never token/path/email.
 - [x] Prove `response.completed` only changes sampling state; changed unseen turn ID after drained work is successor boundary; retained history blocks stale traffic.
 - [x] Prove no account identity migrates after admission and no incremental input crosses upstream generation.
-- [ ] Confirm worktree contains no credential snapshots, raw installed fixtures, payload logs, canary raw IDs, or temp journals.
+- [x] Confirm worktree contains no credential snapshots, raw installed fixtures, payload logs, canary raw IDs, or temp journals.
 - [ ] Run full commands once more on clean tree. Record exact commit, Go version, Codex client/Desktop build, fixture hash, and installed-service marker in final report.
 - [ ] Do not push or open PR without explicit user approval.
 
@@ -558,3 +558,5 @@ Final audit found HTTP enforcement and WebSocket observation initially shared on
 Lifecycle and migration invariants passed 100 race-detector trials: `response.completed.end_turn=false` enters continuation-pending while true or absent only enters quiescence; successor IDs remain blocked until routing and active-attempt references drain; superseded IDs never resurrect; failover ends at admission; and resynchronisation accepts only a portable full request on new downstream/upstream generations, never an incremental frame or same socket.
 
 Writer/call-site audit traced runtime system activation and active projection through `CredentialControl` to the single `CredentialCoordinator`; managed refresh commits are coordinator methods protected by revision fences and per-candidate singleflight. Dead compatibility writers have no production callers and still reject the system-auth path. Native Responses, translated Messages/count-tokens, compact, images, search, Live call, and WebSocket sideband routes all reach an explicit `RouteChoice`/candidate executor. Selected writer and route tests passed 100 race-detector trials; refresh-overlap proof then passed 1,000 trials after removing scheduler-dependent test timing.
+
+Privacy audit scanned the complete branch diff and worktree. Every credential-shaped diff match is a schema key, synthetic test value, or runtime-only header construction; no user email, real bearer value, credential snapshot, raw installed fixture, payload log, lease key, canary raw identifier, temporary journal, or untracked file exists in the worktree.
