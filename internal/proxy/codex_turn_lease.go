@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -118,6 +119,7 @@ const (
 	CodexAttemptProviderCompleted
 	CodexAttemptProviderFailed
 	CodexAttemptIndeterminate
+	CodexAttemptAbandonedBeforeDispatch
 )
 
 func validCodexAttemptTransition(from, to CodexAttemptState) bool {
@@ -167,10 +169,17 @@ type codexManagedLease struct {
 	ready chan struct{}
 }
 
+type codexTurnLeaseManagerLifecycle struct {
+	closed      bool
+	persistence sync.Mutex
+}
+
 type CodexTurnLeaseManager struct {
 	mu            *sync.Mutex
 	current       map[LaneKey]LeaseKey
 	leases        map[LeaseKey]*codexManagedLease
+	accountGates  *codexAccountGateSet
+	lifecycle     *codexTurnLeaseManagerLifecycle
 	now           func() time.Time
 	modeEpoch     uint64
 	authoritative bool
@@ -180,10 +189,13 @@ func NewCodexTurnLeaseManager(modeEpoch uint64, authoritative bool, now func() t
 	if now == nil {
 		now = time.Now
 	}
+	mu := &sync.Mutex{}
 	return &CodexTurnLeaseManager{
-		mu:            &sync.Mutex{},
+		mu:            mu,
 		current:       make(map[LaneKey]LeaseKey),
 		leases:        make(map[LeaseKey]*codexManagedLease),
+		accountGates:  newCodexAccountGateSet(),
+		lifecycle:     &codexTurnLeaseManagerLifecycle{},
 		now:           now,
 		modeEpoch:     modeEpoch,
 		authoritative: authoritative,
@@ -194,20 +206,89 @@ func NewCodexTurnLeaseManager(modeEpoch uint64, authoritative bool, now func() t
 // HTTP and WebSocket routing must use views from the same core so an exact
 // Responses turn cannot acquire different accounts across transports.
 func (manager *CodexTurnLeaseManager) ForMode(modeEpoch uint64, authoritative bool) *CodexTurnLeaseManager {
-	if manager == nil {
-		return NewCodexTurnLeaseManager(modeEpoch, authoritative, nil)
+	if manager == nil || manager.mu == nil {
+		closed := NewCodexTurnLeaseManager(modeEpoch, authoritative, nil)
+		closed.revoke()
+		return closed
 	}
-	return &CodexTurnLeaseManager{
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	view := &CodexTurnLeaseManager{
 		mu:            manager.mu,
 		current:       manager.current,
 		leases:        manager.leases,
+		accountGates:  manager.accountGates,
+		lifecycle:     manager.lifecycle,
 		now:           manager.now,
 		modeEpoch:     modeEpoch,
 		authoritative: authoritative,
 	}
+	if manager.writerUnavailableLocked() {
+		view.modeEpoch = 0
+		view.authoritative = false
+	}
+	return view
+}
+
+// revoke permanently closes every mode view over this manager core and clears
+// the in-memory lease authority it owned. The continuity coordinator calls it
+// before closing the durable store.
+func (manager *CodexTurnLeaseManager) revoke() {
+	if manager == nil || manager.mu == nil {
+		return
+	}
+	if manager.lifecycle == nil {
+		return
+	}
+	manager.lifecycle.persistence.Lock()
+	defer manager.lifecycle.persistence.Unlock()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if !manager.lifecycle.closed {
+		manager.lifecycle.closed = true
+		if manager.accountGates != nil {
+			manager.accountGates.close()
+		}
+		for _, managed := range manager.leases {
+			if managed == nil {
+				continue
+			}
+			if managed.ready != nil {
+				select {
+				case <-managed.ready:
+				default:
+					close(managed.ready)
+				}
+			}
+			clear(managed.lease.Choice.RequiredBuckets)
+			managed.lease = CodexTurnLease{}
+			managed.ready = nil
+		}
+		clear(manager.current)
+		clear(manager.leases)
+	}
+}
+
+func (manager *CodexTurnLeaseManager) writerUnavailable() bool {
+	if manager == nil || manager.mu == nil {
+		return true
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return manager.writerUnavailableLocked()
+}
+
+// writerUnavailableLocked reports lifecycle liveness while manager.mu is held.
+// Receiver methods outside this file must use this guard before touching the
+// shared maps.
+func (manager *CodexTurnLeaseManager) writerUnavailableLocked() bool {
+	return manager == nil || manager.lifecycle == nil || manager.lifecycle.closed || manager.current == nil || manager.leases == nil
 }
 
 func (manager *CodexTurnLeaseManager) Acquire(ctx context.Context, key LeaseKey, selectAccount func(context.Context) (codex.AccountKey, error)) (CodexTurnLease, error) {
+	if manager.writerUnavailable() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	if selectAccount == nil {
 		return CodexTurnLease{}, errors.New("Codex account selector unavailable")
 	}
@@ -218,6 +299,9 @@ func (manager *CodexTurnLeaseManager) Acquire(ctx context.Context, key LeaseKey,
 }
 
 func (manager *CodexTurnLeaseManager) AcquireRoute(ctx context.Context, key LeaseKey, selectRoute func(context.Context) (RouteChoice, error)) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil || manager.writerUnavailable() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	if err := key.validate(); err != nil {
 		return CodexTurnLease{}, err
 	}
@@ -226,6 +310,10 @@ func (manager *CodexTurnLeaseManager) AcquireRoute(ctx context.Context, key Leas
 	}
 	for {
 		manager.mu.Lock()
+		if manager.writerUnavailableLocked() {
+			manager.mu.Unlock()
+			return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+		}
 		if existing := manager.leases[key]; existing != nil {
 			if manager.current[key.Lane] != key {
 				manager.mu.Unlock()
@@ -247,7 +335,7 @@ func (manager *CodexTurnLeaseManager) AcquireRoute(ctx context.Context, key Leas
 			}
 			existing.lease.RoutingRefs++
 			existing.lease.LastSeen = manager.now()
-			result := existing.lease
+			result := cloneCodexTurnLease(existing.lease)
 			manager.mu.Unlock()
 			return result, nil
 		}
@@ -288,6 +376,10 @@ func (manager *CodexTurnLeaseManager) AcquireRoute(ctx context.Context, key Leas
 
 		choice, err := selectRoute(ctx)
 		manager.mu.Lock()
+		if manager.writerUnavailableLocked() {
+			manager.mu.Unlock()
+			return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+		}
 		if err != nil || choice.AccountKey == "" {
 			managed.lease.State = LeaseFailedUnadmitted
 			managed.lease.RoutingRefs = 0
@@ -306,7 +398,7 @@ func (manager *CodexTurnLeaseManager) AcquireRoute(ctx context.Context, key Leas
 		managed.lease.Generation++
 		managed.lease.LastSeen = manager.now()
 		close(managed.ready)
-		result := managed.lease
+		result := cloneCodexTurnLease(managed.lease)
 		manager.mu.Unlock()
 		return result, nil
 	}
@@ -317,9 +409,20 @@ func cloneRouteChoice(choice RouteChoice) RouteChoice {
 	return choice
 }
 
+func cloneCodexTurnLease(lease CodexTurnLease) CodexTurnLease {
+	lease.Choice = cloneRouteChoice(lease.Choice)
+	return lease
+}
+
 func (manager *CodexTurnLeaseManager) ReplaceProvisionalRoute(key LeaseKey, choice RouteChoice) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil || manager.current[key.Lane] != key || managed.lease.State != LeaseProvisional || choice.AccountKey == "" {
 		return CodexTurnLease{}, ErrCodexLeaseTransition
@@ -328,12 +431,18 @@ func (manager *CodexTurnLeaseManager) ReplaceProvisionalRoute(key LeaseKey, choi
 	managed.lease.Choice = cloneRouteChoice(choice)
 	managed.lease.Generation++
 	managed.lease.LastSeen = manager.now()
-	return managed.lease, nil
+	return cloneCodexTurnLease(managed.lease), nil
 }
 
 func (manager *CodexTurnLeaseManager) ReleaseRouting(key LeaseKey) error {
+	if manager == nil || manager.mu == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil || managed.lease.RoutingRefs == 0 {
 		return errors.New("Codex routing reference unavailable")
@@ -344,7 +453,44 @@ func (manager *CodexTurnLeaseManager) ReleaseRouting(key LeaseKey) error {
 }
 
 func (manager *CodexTurnLeaseManager) Admit(key LeaseKey, account codex.AccountKey, socketGeneration uint64, persist func([]CodexTurnLease) error) (CodexTurnLease, error) {
+	return manager.AdmitContext(context.Background(), key, account, socketGeneration, nil, persist)
+}
+
+// AdmitContext serialises the provisional-to-bound transition with account
+// removal. When supplied, revalidate runs while the account gate is held and
+// before memory becomes bound; Task 16D uses it to reject durable-pending
+// removals that completed while this admission waited for the gate.
+func (manager *CodexTurnLeaseManager) AdmitContext(ctx context.Context, key LeaseKey, account codex.AccountKey, socketGeneration uint64, revalidate func(context.Context, codex.AccountKey) error, persist func([]CodexTurnLease) error) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil || manager.accountGates == nil || manager.writerUnavailable() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
+	guard, err := manager.accountGates.acquire(ctx, account)
+	if err != nil {
+		return CodexTurnLease{}, err
+	}
+	defer guard.Release()
+	if manager.writerUnavailable() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
+	var revalidateErr error
+	if revalidate != nil {
+		revalidateErr = revalidate(ctx, account)
+	}
+	if manager.writerUnavailable() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
+	if revalidateErr != nil {
+		return CodexTurnLease{}, fmt.Errorf("revalidate Codex account admission: %w", revalidateErr)
+	}
+
+	lifecycle := manager.lifecycle
+	lifecycle.persistence.Lock()
+	defer lifecycle.persistence.Unlock()
 	manager.mu.Lock()
+	if manager.writerUnavailableLocked() {
+		manager.mu.Unlock()
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil || manager.current[key.Lane] != key {
 		manager.mu.Unlock()
@@ -364,25 +510,54 @@ func (manager *CodexTurnLeaseManager) Admit(key LeaseKey, account codex.AccountK
 	managed.lease.Generation++
 	managed.lease.LastSeen = manager.now()
 	snapshot := manager.snapshotLocked()
-	result := managed.lease
-	manager.mu.Unlock()
+	result := cloneCodexTurnLease(managed.lease)
 
 	if persist != nil {
-		if err := persist(snapshot); err != nil {
-			manager.mu.Lock()
+		manager.mu.Unlock()
+		persistErr := runCodexAdmissionPersist(snapshot, persist)
+		manager.mu.Lock()
+		if manager.writerUnavailableLocked() {
+			manager.mu.Unlock()
+			return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+		}
+		if persistErr != nil {
 			managed.lease.NonMigratable = true
 			managed.lease.Generation++
-			result = managed.lease
+			result = cloneCodexTurnLease(managed.lease)
 			manager.mu.Unlock()
-			return result, fmt.Errorf("persist admitted Codex lease: %w", err)
+			return result, fmt.Errorf("persist admitted Codex lease: %w", persistErr)
 		}
 	}
+	if manager.writerUnavailableLocked() {
+		manager.mu.Unlock()
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
+	manager.mu.Unlock()
 	return result, nil
 }
 
+func runCodexAdmissionPersist(snapshot []CodexTurnLease, persist func([]CodexTurnLease) error) (err error) {
+	defer clearCodexTurnLeaseSnapshot(snapshot)
+	return persist(snapshot)
+}
+
+func clearCodexTurnLeaseSnapshot(snapshot []CodexTurnLease) {
+	for index := range snapshot {
+		clear(snapshot[index].Choice.RequiredBuckets)
+		snapshot[index] = CodexTurnLease{}
+	}
+	clear(snapshot)
+}
+
 func (manager *CodexTurnLeaseManager) ObserveCompleted(key LeaseKey, endTurn *bool) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil || managed.lease.State != LeaseBoundActive || managed.lease.ActiveAttempts == 0 {
 		return CodexTurnLease{}, ErrCodexLeaseTransition
@@ -395,12 +570,18 @@ func (manager *CodexTurnLeaseManager) ObserveCompleted(key LeaseKey, endTurn *bo
 	managed.lease.ActiveAttempts--
 	managed.lease.Generation++
 	managed.lease.LastSeen = manager.now()
-	return managed.lease, nil
+	return cloneCodexTurnLease(managed.lease), nil
 }
 
 func (manager *CodexTurnLeaseManager) ObserveIndeterminate(key LeaseKey) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil || managed.lease.State != LeaseBoundActive || managed.lease.ActiveAttempts == 0 {
 		return CodexTurnLease{}, ErrCodexLeaseTransition
@@ -410,12 +591,18 @@ func (manager *CodexTurnLeaseManager) ObserveIndeterminate(key LeaseKey) (CodexT
 	managed.lease.UpstreamSocketGeneration = 0
 	managed.lease.Generation++
 	managed.lease.LastSeen = manager.now()
-	return managed.lease, nil
+	return cloneCodexTurnLease(managed.lease), nil
 }
 
 func (manager *CodexTurnLeaseManager) ObserveProviderFailed(key LeaseKey) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil || managed.lease.State != LeaseBoundActive || managed.lease.ActiveAttempts == 0 {
 		return CodexTurnLease{}, ErrCodexLeaseTransition
@@ -424,12 +611,18 @@ func (manager *CodexTurnLeaseManager) ObserveProviderFailed(key LeaseKey) (Codex
 	managed.lease.ActiveAttempts--
 	managed.lease.Generation++
 	managed.lease.LastSeen = manager.now()
-	return managed.lease, nil
+	return cloneCodexTurnLease(managed.lease), nil
 }
 
 func (manager *CodexTurnLeaseManager) FailUnadmitted(key LeaseKey) error {
+	if manager == nil || manager.mu == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil {
 		return ErrCodexStaleTurn
@@ -445,8 +638,14 @@ func (manager *CodexTurnLeaseManager) FailUnadmitted(key LeaseKey) error {
 }
 
 func (manager *CodexTurnLeaseManager) SetTurnState(key LeaseKey, state string) error {
+	if manager == nil || manager.mu == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil {
 		return ErrCodexStaleTurn
@@ -463,8 +662,14 @@ func (manager *CodexTurnLeaseManager) SetTurnState(key LeaseKey, state string) e
 }
 
 func (manager *CodexTurnLeaseManager) SetResponseAnchor(key LeaseKey, anchor string, encrypted bool) error {
+	if manager == nil || manager.mu == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil {
 		return ErrCodexStaleTurn
@@ -486,8 +691,14 @@ func (manager *CodexTurnLeaseManager) SetResponseAnchor(key LeaseKey, anchor str
 }
 
 func (manager *CodexTurnLeaseManager) MarkNonMigratable(key LeaseKey) error {
+	if manager == nil || manager.mu == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil {
 		return ErrCodexStaleTurn
@@ -501,18 +712,30 @@ func (manager *CodexTurnLeaseManager) MarkNonMigratable(key LeaseKey) error {
 }
 
 func (manager *CodexTurnLeaseManager) Get(key LeaseKey) (CodexTurnLease, bool) {
+	if manager == nil || manager.mu == nil {
+		return CodexTurnLease{}, false
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return CodexTurnLease{}, false
+	}
 	managed := manager.leases[key]
 	if managed == nil {
 		return CodexTurnLease{}, false
 	}
-	return managed.lease, true
+	return cloneCodexTurnLease(managed.lease), true
 }
 
 func (manager *CodexTurnLeaseManager) ObservedRouteChoice(key LeaseKey) (RouteChoice, bool, error) {
+	if manager == nil || manager.mu == nil {
+		return RouteChoice{}, false, ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return RouteChoice{}, false, ErrCodexLeaseWriterUnavailable
+	}
 	managed := manager.leases[key]
 	if managed == nil {
 		if currentKey, found := manager.current[key.Lane]; found {
@@ -543,17 +766,29 @@ func (manager *CodexTurnLeaseManager) ObservedRouteChoice(key LeaseKey) (RouteCh
 }
 
 func (manager *CodexTurnLeaseManager) Snapshot() []CodexTurnLease {
+	if manager == nil || manager.mu == nil {
+		return nil
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return nil
+	}
 	return manager.snapshotLocked()
 }
 
 func (manager *CodexTurnLeaseManager) Compact(retention time.Duration) {
+	if manager == nil || manager.mu == nil {
+		return
+	}
 	if retention <= 0 {
 		retention = DefaultCodexLeaseRetention
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return
+	}
 	now := manager.now()
 	for key, managed := range manager.leases {
 		if managed.lease.RoutingRefs != 0 || managed.lease.ActiveAttempts != 0 || now.Sub(managed.lease.LastSeen) <= retention {
@@ -567,23 +802,64 @@ func (manager *CodexTurnLeaseManager) Compact(retention time.Duration) {
 }
 
 func (manager *CodexTurnLeaseManager) Mode() (uint64, bool) {
+	if manager == nil || manager.mu == nil {
+		return 0, false
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return 0, false
+	}
 	return manager.modeEpoch, manager.authoritative
 }
 
 func (manager *CodexTurnLeaseManager) snapshotLocked() []CodexTurnLease {
 	result := make([]CodexTurnLease, 0, len(manager.leases))
 	for _, managed := range manager.leases {
-		result = append(result, managed.lease)
+		result = append(result, cloneCodexTurnLease(managed.lease))
 	}
 	return result
 }
 
 func (manager *CodexTurnLeaseManager) Restore(leases []CodexTurnLease) {
+	if manager == nil || manager.mu == nil || manager.accountGates == nil || manager.writerUnavailable() {
+		return
+	}
+	accountSet := make(map[codex.AccountKey]struct{})
+	for _, lease := range leases {
+		if lease.Authoritative && lease.AccountKey != "" && codexLeaseRestoreCreatesBoundAuthority(lease.State) {
+			accountSet[lease.AccountKey] = struct{}{}
+		}
+	}
+	accounts := make([]codex.AccountKey, 0, len(accountSet))
+	for account := range accountSet {
+		accounts = append(accounts, account)
+	}
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i] < accounts[j] })
+	guards := make([]*codexAccountGateGuard, 0, len(accounts))
+	for _, account := range accounts {
+		guard, err := manager.accountGates.acquire(context.Background(), account)
+		if err != nil {
+			for index := len(guards) - 1; index >= 0; index-- {
+				guards[index].Release()
+			}
+			return
+		}
+		guards = append(guards, guard)
+	}
+	defer func() {
+		for index := len(guards) - 1; index >= 0; index-- {
+			guards[index].Release()
+		}
+	}()
+
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return
+	}
 	for _, lease := range leases {
+		lease = cloneCodexTurnLease(lease)
 		if lease.ModeEpoch != manager.modeEpoch || lease.Authoritative != manager.authoritative {
 			continue
 		}
@@ -600,5 +876,14 @@ func (manager *CodexTurnLeaseManager) Restore(leases []CodexTurnLease) {
 		if lease.State != LeaseSuperseded && lease.State != LeaseExpired && lease.State != LeaseFailedUnadmitted {
 			manager.current[lease.Key.Lane] = lease.Key
 		}
+	}
+}
+
+func codexLeaseRestoreCreatesBoundAuthority(state LeaseState) bool {
+	switch state {
+	case LeaseReserving, LeaseProvisional, LeaseBoundActive, LeaseContinuationPending, LeaseBoundQuiescent, LeaseOrphaned:
+		return true
+	default:
+		return false
 	}
 }

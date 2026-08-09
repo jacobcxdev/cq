@@ -42,7 +42,7 @@ const (
 	CodexReadinessMarkerVersion = 1
 	CodexRoutingJournalVersion  = 1
 	CurrentCodexParserSchema    = 1
-	CurrentCodexLeaseSchema     = 1
+	CurrentCodexLeaseSchema     = 2
 	CodexHTTPFixtureHash        = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
 )
 

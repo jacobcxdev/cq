@@ -164,8 +164,14 @@ func (manager *CodexPrewarmManager) Restore(reservations []CodexPrewarmReservati
 }
 
 func (manager *CodexTurnLeaseManager) adoptPrewarm(key LeaseKey, reservation CodexPrewarmReservation) (CodexTurnLease, error) {
+	if manager == nil || manager.mu == nil {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.writerUnavailableLocked() {
+		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	}
 	if _, exists := manager.leases[key]; exists {
 		return CodexTurnLease{}, ErrCodexStaleTurn
 	}
@@ -189,5 +195,5 @@ func (manager *CodexTurnLeaseManager) adoptPrewarm(key LeaseKey, reservation Cod
 	close(managed.ready)
 	manager.leases[key] = managed
 	manager.current[key.Lane] = key
-	return lease, nil
+	return cloneCodexTurnLease(lease), nil
 }

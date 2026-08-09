@@ -54,6 +54,7 @@ type codexLeaseJournalEnvelope struct {
 }
 
 type CodexLeaseStore struct {
+	lifecycle  sync.RWMutex
 	mu         sync.Mutex
 	fs         fsutil.DurableFileSystem
 	path       string
@@ -61,6 +62,25 @@ type CodexLeaseStore struct {
 	key        []byte
 	generation uint64
 	records    []CodexJournalRecord
+
+	owner              CodexLeaseWriterAuthority
+	inspector          fsutil.SecurePathInspector
+	directory          fsutil.SecureDirectory
+	directoryPath      string
+	directoryID        fsutil.SecureFileIdentity
+	journalName        string
+	keyName            string
+	keyID              fsutil.SecureFileIdentity
+	journalID          fsutil.SecureFileIdentity
+	journalBytes       []byte
+	v2                 *codexLeaseJournalEnvelopeV2
+	policy             CodexLeasePolicy
+	modes              CodexModeAuthoritySnapshot
+	legacyArchive      string
+	legacyArchiveID    fsutil.SecureFileIdentity
+	legacyArchiveBytes []byte
+	poisoned           error
+	closed             bool
 }
 
 func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*CodexLeaseStore, error) {
@@ -195,6 +215,12 @@ func (store *CodexLeaseStore) CommitCurrentLeases(leases []CodexTurnLease) error
 }
 
 func (store *CodexLeaseStore) commitLeasesLocked(leases []CodexTurnLease, expectedGeneration uint64) error {
+	if store.closed {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if store.v2 != nil {
+		return fmt.Errorf("%w: legacy snapshot writes cannot target schema v2", ErrCodexLeaseWriterUnavailable)
+	}
 	records := make([]CodexJournalRecord, 0, len(leases))
 	type modeKey struct {
 		epoch         uint64
@@ -232,6 +258,9 @@ func (store *CodexLeaseStore) commitRecordsLocked(records []CodexJournalRecord, 
 }
 
 func (store *CodexLeaseStore) commitRecordsLockedWithWriter(records []CodexJournalRecord, expectedGeneration uint64, write func([]byte) error) error {
+	if store.v2 != nil {
+		return fmt.Errorf("%w: legacy snapshot writes cannot target schema v2", ErrCodexLeaseWriterUnavailable)
+	}
 	if expectedGeneration != store.generation {
 		return fmt.Errorf("Codex lease journal generation changed: have %d, expected %d", store.generation, expectedGeneration)
 	}
@@ -294,6 +323,9 @@ func (store *CodexLeaseStore) LookupMode(key LeaseKey, accounts []codex.AccountK
 func (store *CodexLeaseStore) lookup(key LeaseKey, accounts []codex.AccountKey, modeEpoch uint64, authoritative, exactMode bool) (CodexJournalRecord, codex.AccountKey, bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.closed {
+		return CodexJournalRecord{}, "", false
+	}
 	sessionHash := store.hash("session", key.Lane.Session)
 	threadHash := store.hash("thread", key.Lane.Thread)
 	turnHash := store.hash("turn", key.Turn)
@@ -316,11 +348,19 @@ func (store *CodexLeaseStore) lookup(key LeaseKey, accounts []codex.AccountKey, 
 }
 
 func (store *CodexLeaseStore) Compact(now time.Time, retention time.Duration) error {
+	store.mu.Lock()
+	if store.closed {
+		store.mu.Unlock()
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if store.v2 != nil {
+		store.mu.Unlock()
+		return store.compactV2()
+	}
+	defer store.mu.Unlock()
 	if retention <= 0 {
 		retention = DefaultCodexLeaseRetention
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
 	records := make([]CodexJournalRecord, 0, len(store.records))
 	for _, record := range store.records {
 		if record.ActiveRefs > 0 || now.Sub(record.LastSeen) <= retention {
@@ -392,13 +432,12 @@ func (store *CodexLeaseStore) validEnvelopeMAC(envelope codexLeaseJournalEnvelop
 	if err != nil {
 		return false
 	}
-	wantBytes, err := base64.RawURLEncoding.DecodeString(want)
-	if err != nil {
-		return false
-	}
-	gotBytes, err := base64.RawURLEncoding.DecodeString(envelope.MAC)
-	if err != nil {
-		return false
-	}
-	return hmac.Equal(gotBytes, wantBytes)
+	wantBytes, wantOK := decodeCanonicalCodexLeaseMAC(want)
+	gotBytes, gotOK := decodeCanonicalCodexLeaseMAC(envelope.MAC)
+	return wantOK && gotOK && hmac.Equal(gotBytes, wantBytes)
+}
+
+func decodeCanonicalCodexLeaseMAC(value string) ([]byte, bool) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return decoded, err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == value
 }
