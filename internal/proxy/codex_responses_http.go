@@ -31,10 +31,17 @@ func NewCodexHTTPEnforcer(router *CodexRequestRouter, modeEpoch uint64, store *C
 }
 
 func NewCodexHTTPEnforcerWithRetainedEpochs(router *CodexRequestRouter, modeEpoch uint64, enforceNew bool, retained []uint64, store *CodexLeaseStore) (*CodexHTTPEnforcer, error) {
+	return NewCodexHTTPEnforcerWithSharedLeases(router, modeEpoch, enforceNew, retained, store, nil)
+}
+
+func NewCodexHTTPEnforcerWithSharedLeases(router *CodexRequestRouter, modeEpoch uint64, enforceNew bool, retained []uint64, store *CodexLeaseStore, shared *CodexTurnLeaseManager) (*CodexHTTPEnforcer, error) {
 	if router == nil || store == nil || modeEpoch == 0 {
 		return nil, errors.New("Codex HTTP enforcement dependencies unavailable")
 	}
 	leases := NewCodexTurnLeaseManager(modeEpoch, true, nil)
+	if shared != nil {
+		leases = shared.ForMode(modeEpoch, true)
+	}
 	observer, err := NewCodexTurnObserver(leases, store)
 	if err != nil {
 		return nil, err

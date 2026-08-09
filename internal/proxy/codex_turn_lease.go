@@ -168,7 +168,7 @@ type codexManagedLease struct {
 }
 
 type CodexTurnLeaseManager struct {
-	mu            sync.Mutex
+	mu            *sync.Mutex
 	current       map[LaneKey]LeaseKey
 	leases        map[LeaseKey]*codexManagedLease
 	now           func() time.Time
@@ -181,9 +181,27 @@ func NewCodexTurnLeaseManager(modeEpoch uint64, authoritative bool, now func() t
 		now = time.Now
 	}
 	return &CodexTurnLeaseManager{
+		mu:            &sync.Mutex{},
 		current:       make(map[LaneKey]LeaseKey),
 		leases:        make(map[LeaseKey]*codexManagedLease),
 		now:           now,
+		modeEpoch:     modeEpoch,
+		authoritative: authoritative,
+	}
+}
+
+// ForMode returns a mode-specific view over one shared turn-state core.
+// HTTP and WebSocket routing must use views from the same core so an exact
+// Responses turn cannot acquire different accounts across transports.
+func (manager *CodexTurnLeaseManager) ForMode(modeEpoch uint64, authoritative bool) *CodexTurnLeaseManager {
+	if manager == nil {
+		return NewCodexTurnLeaseManager(modeEpoch, authoritative, nil)
+	}
+	return &CodexTurnLeaseManager{
+		mu:            manager.mu,
+		current:       manager.current,
+		leases:        manager.leases,
+		now:           manager.now,
 		modeEpoch:     modeEpoch,
 		authoritative: authoritative,
 	}

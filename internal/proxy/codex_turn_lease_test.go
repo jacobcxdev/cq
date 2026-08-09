@@ -251,6 +251,37 @@ func TestCodexTurnLeaseCompactionKeepsActiveReferences(t *testing.T) {
 	}
 }
 
+func TestCodexTurnLeaseModeViewSharesExactTurnState(t *testing.T) {
+	observed := NewCodexTurnLeaseManager(8, false, nil)
+	authoritative := observed.ForMode(9, true)
+	key := testCodexLeaseKey("thread", "turn")
+
+	lease, err := observed.Acquire(context.Background(), key, fixedCodexAccount("account-one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observed.Admit(key, lease.AccountKey, 3, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observed.ObserveCompleted(key, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := observed.ReleaseRouting(key); err != nil {
+		t.Fatal(err)
+	}
+
+	shared, err := authoritative.Acquire(context.Background(), key, fixedCodexAccount("account-two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared.AccountKey != "account-one" || shared.UpstreamSocketGeneration != 3 {
+		t.Fatalf("shared lease = %#v", shared)
+	}
+	if modeEpoch, authoritativeMode := authoritative.Mode(); modeEpoch != 9 || !authoritativeMode {
+		t.Fatalf("mode = (%d, %t)", modeEpoch, authoritativeMode)
+	}
+}
+
 func fixedCodexAccount(account codex.AccountKey) func(context.Context) (codex.AccountKey, error) {
 	return func(context.Context) (codex.AccountKey, error) { return account, nil }
 }

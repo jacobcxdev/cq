@@ -336,12 +336,13 @@ func runProxyStart(opts proxyCommandOptions) error {
 		if codexObserver == nil || codexObserver.Store == nil {
 			return fmt.Errorf("Codex HTTP enforcement: lease store unavailable")
 		}
-		codexHTTPEnforcer, err = proxy.NewCodexHTTPEnforcerWithRetainedEpochs(
+		codexHTTPEnforcer, err = proxy.NewCodexHTTPEnforcerWithSharedLeases(
 			codexRequestRouter,
 			codexRouting.HTTP.ModeEpoch,
 			codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce,
 			codexRouting.HTTP.RetainedAuthoritativeEpochs,
 			codexObserver.Store,
+			codexObserver.Leases,
 		)
 		if err != nil {
 			return fmt.Errorf("Codex HTTP enforcement: %w", err)

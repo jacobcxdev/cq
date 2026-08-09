@@ -691,6 +691,37 @@ func TestCodexHTTPObserveDoesNotFailOverPinnedTurnOnHardLimit(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPEnforcementSharesObservedWebSocketLease(t *testing.T) {
+	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
+	shared := NewCodexTurnLeaseManager(8, false, nil)
+	observer := newCodexTurnObserverWithKey(shared, store, []byte("01234567890123456789012345678901"))
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+
+	webSocket := observer.BeginWebSocket(context.Background(), body, nil, 3)
+	webSocket.Selected(RouteChoice{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}, false)
+	webSocket.ResponseHeaders(http.StatusSwitchingProtocols, nil)
+	webSocket.ObserveWebSocketEvent([]byte(`{"type":"response.completed","response":{"id":"response-one"}}`))
+	webSocket.Finish(nil)
+
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusOK, body: completedSSE("response-two")}},
+	}}
+	enforcer, err := NewCodexHTTPEnforcerWithSharedLeases(testHTTPRouter(chooser, executor), 9, true, nil, store, shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, choice, _, err := enforcer.Do(context.Background(), CodexRouteRequirements{RequestedModel: request.Model}, request, protocolHTTPRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if choice.AccountKey != "one" || chooser.calls != 0 || !slices.Equal(executor.accounts, []codex.AccountKey{"one"}) {
+		t.Fatalf("choice=%q selector calls=%d attempts=%v", choice.AccountKey, chooser.calls, executor.accounts)
+	}
+}
+
 func testHTTPEnforcer(t *testing.T, chooser CodexRouteChooser, executor ExplicitAccountExecutor, fsys fsutil.DurableFileSystem) *CodexHTTPEnforcer {
 	t.Helper()
 	store := openTestCodexLeaseStore(t, fsys)
