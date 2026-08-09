@@ -182,7 +182,7 @@ func TestCodexSelector_ExcludeAll(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_SkipsExhaustedAccounts(t *testing.T) {
+func TestCodexSelector_PrefersPositiveOverAdvisoryZero(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
 		"dead": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
@@ -226,7 +226,7 @@ func TestCodexSelector_PrefersHigherQuotaOverActiveLowQuota(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
+func TestCodexSelector_KeepsAdvisoryZeroAccountsEligible(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
 		"dead-a": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
@@ -240,8 +240,11 @@ func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
 	}, quotaReader)
 
 	acct, err := sel.Select(context.Background())
-	if err == nil || acct != nil {
-		t.Fatalf("expected no eligible accounts, got acct=%v err=%v", acct, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct == nil || acct.Email != "a@test.com" {
+		t.Fatalf("account = %+v, want stable first advisory account", acct)
 	}
 }
 
@@ -405,7 +408,7 @@ func TestCodexSelector_FallsBackToNonProWhenNoProAvailableForSparkModel(t *testi
 	}
 }
 
-func TestCodexSelector_FallsBackToNonProWhenProHasNoQuotaForSparkModel(t *testing.T) {
+func TestCodexSelector_PrefersPositiveNonProOverAdvisoryZeroPro(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
 		"plus": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 42}}}, FetchedAt: now},
