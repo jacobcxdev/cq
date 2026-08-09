@@ -28,11 +28,11 @@
 - Create implementation branch/worktree from current blueprint commit.
 - Inspect: `go.mod`, `go.sum`, current `git status`.
 
-- [ ] Create branch `jacobcxdev/feat/codex-turn-routing` in isolated worktree.
-- [ ] Run `go mod download`.
-- [ ] Run `go test -race -count=1 ./...` and preserve baseline output outside Git.
-- [ ] Run `go build ./...` and `go vet ./...`.
-- [ ] Stop if baseline failure overlaps touched packages; diagnose before Stage 1.
+- [x] Create branch `jacobcxdev/feat/codex-turn-routing` in isolated worktree.
+- [x] Run `go mod download`.
+- [x] Run `go test -race -count=1 ./...` and preserve baseline output outside Git.
+- [x] Run `go build ./...` and `go vet ./...`.
+- [x] Stop if baseline failure overlaps touched packages; diagnose before Stage 1.
 
 ## Stage 1: Permanent containment floor
 
@@ -64,21 +64,21 @@
 - Modify: `internal/provider/codex/AGENTS.md`
 - Modify: `AGENTS.md`
 
-- [ ] Add red discovery tests: fresh matching system candidate beats stale managed candidate; managed candidate remains available; malformed claims never form `"::"`; directory order cannot change chosen live copy.
-- [ ] Add red automatic-path tests. Inject counting HTTP client and write-recording filesystem. Assert quota fetch, `cq refresh`, registry construction/refresh, HTTP 401/429, WS upgrade 401/429, and Live failover make zero OAuth token calls and leave system auth, registry, and managed files byte-identical.
-- [ ] Add red diagnostics tests proving no identifier or hint falls back to access token.
-- [ ] Add red `/app-server` tests: HTTP and WebSocket `initialize` attempt fail explicitly and never dial upstream. Update compact error message to direct callers to local Codex app-server with CQ Responses base URL.
-- [ ] Add red compatibility-epoch tests: missing epoch creates current floor atomically; equal/newer starts; older executable epoch refuses; corrupt/permission failure fails closed.
-- [ ] Change `DiscoverAccounts` duplicate handling so matching live candidate remains selected. Do not overwrite its token/path with managed copy.
-- [ ] Make `DecodeCodexClaims(...).RecordKey()` result usable only when real identity components exist; keep malformed candidates separate and non-routable.
-- [ ] Change `codexAcctIdentifier` and `codexAccountHint` to stable non-secret identity only. Return empty/typed unroutable state when none exists.
-- [ ] Remove `CodexAccountSwitcher`, `Switcher`, `persistSwitch`, failover suppression, and all proxy wiring to `Accounts.Switch`.
-- [ ] Remove Codex refresh/exchange/persistence from provider `fetchAccount`, `runRefresh`, registry token lookup, local registry, and proxy startup. A 401/403 becomes `auth_expired` or tries an already-present same-identity candidate only after Stage 3; Stage 1 does no refresh.
-- [ ] Make `PersistCodexAccount` managed-file-only during compatibility. Remove `IsActive` mirroring into system auth.
-- [ ] Retire `proxyCodexAppServer`, its fake JSON-RPC parser/rewriter, and `/app-server` upstream dial path. Handler returns stable explanatory error without upgrade.
-- [ ] Add compatibility epoch startup check before proxy/provider automatic work. Persist only non-secret integer schema/floor under `0o700` state directory and `0o600` file.
-- [ ] Update architecture docs: Codex is multi-account, read-only automatically, no refresh until coordinator broker.
-- [ ] Run:
+- [x] Add red discovery tests: fresh matching system candidate beats stale managed candidate; managed candidate remains available; malformed claims never form `"::"`; directory order cannot change chosen live copy.
+- [x] Add red automatic-path tests. Inject counting HTTP client and write-recording filesystem. Assert quota fetch, `cq refresh`, registry construction/refresh, HTTP 401/429, WS upgrade 401/429, and Live failover make zero OAuth token calls and leave system auth, registry, and managed files byte-identical.
+- [x] Add red diagnostics tests proving no identifier or hint falls back to access token.
+- [x] Add red `/app-server` tests: HTTP and WebSocket `initialize` attempt fail explicitly and never dial upstream. Update compact error message to direct callers to local Codex app-server with CQ Responses base URL.
+- [x] Add red compatibility-epoch tests: missing epoch creates current floor atomically; equal/newer starts; older executable epoch refuses; corrupt/permission failure fails closed.
+- [x] Change `DiscoverAccounts` duplicate handling so matching live candidate remains selected. Do not overwrite its token/path with managed copy.
+- [x] Make `DecodeCodexClaims(...).RecordKey()` result usable only when real identity components exist; keep malformed candidates separate and non-routable.
+- [x] Change `codexAcctIdentifier` and `codexAccountHint` to stable non-secret identity only. Return empty/typed unroutable state when none exists.
+- [x] Remove `CodexAccountSwitcher`, `Switcher`, `persistSwitch`, failover suppression, and all proxy wiring to `Accounts.Switch`.
+- [x] Remove Codex refresh/exchange/persistence from provider `fetchAccount`, `runRefresh`, registry token lookup, local registry, and proxy startup. A 401/403 becomes `auth_expired` or tries an already-present same-identity candidate only after Stage 3; Stage 1 does no refresh.
+- [x] Make `PersistCodexAccount` managed-file-only during compatibility. Remove `IsActive` mirroring into system auth.
+- [x] Retire `proxyCodexAppServer`, its fake JSON-RPC parser/rewriter, and `/app-server` upstream dial path. Handler returns stable explanatory error without upgrade.
+- [x] Add compatibility epoch startup check before proxy/provider automatic work. Persist only non-secret integer schema/floor under `0o700` state directory and `0o600` file.
+- [x] Update architecture docs: Codex is multi-account, read-only automatically, no refresh until coordinator broker.
+- [x] Run:
 
 ```bash
 go test -race -count=1 ./internal/provider/codex ./internal/proxy ./cmd/cq ./internal/compat
@@ -86,8 +86,8 @@ go test -race -count=1 ./...
 git diff --check
 ```
 
-- [ ] Secret-scan changed files with `rg -n '(access_token|refresh_token|Bearer )'` and inspect every match for schema-only/synthetic-safe use.
-- [ ] Commit `fix: contained Codex credential writes`.
+- [x] Secret-scan changed files with `rg -n '(access_token|refresh_token|Bearer )'` and inspect every match for schema-only/synthetic-safe use.
+- [x] Commit `fix: contained Codex credential writes`.
 
 ## Stage 2: Explicit system authority
 
@@ -122,13 +122,13 @@ type SystemActivator interface {
 }
 ```
 
-- [ ] Add red tests for non-activating login preserving system auth and `active_account_key`, repeated login preserving unknown managed/registry fields, exact-candidate activation, ambiguous email refusal, active removal, inactive removal, and registry projection failure after successful system commit.
-- [ ] Split registry operation into `UpsertAccount` and `ProjectActive`; account upsert never changes active projection.
-- [ ] Implement concrete filesystem `SystemActivator`. Preserve unknown system-auth fields by merging only auth/token fields; strip `_cq` before system write.
-- [ ] Route explicit Codex switch/remove/login `--activate` through injected activator. Pass exact candidate returned by login, never rediscover by email.
-- [ ] Keep compatibility `Accounts` methods as thin explicit-only adapters. No automatic package imports `SystemActivator`.
-- [ ] Run `go test -race -count=1 ./internal/provider/codex ./internal/app ./cmd/cq`.
-- [ ] Commit `refactor: isolated Codex activation`.
+- [x] Add red tests for non-activating login preserving system auth and `active_account_key`, repeated login preserving unknown managed/registry fields, exact-candidate activation, ambiguous email refusal, active removal, inactive removal, and registry projection failure after successful system commit.
+- [x] Split registry operation into `UpsertAccount` and `ProjectActive`; account upsert never changes active projection.
+- [x] Implement concrete filesystem `SystemActivator`. Preserve unknown system-auth fields by merging only auth/token fields; strip `_cq` before system write.
+- [x] Route explicit Codex switch/remove/login `--activate` through injected activator. Pass exact candidate returned by login, never rediscover by email.
+- [x] Keep compatibility `Accounts` methods as thin explicit-only adapters. No automatic package imports `SystemActivator`.
+- [x] Run `go test -race -count=1 ./internal/provider/codex ./internal/app ./cmd/cq`.
+- [x] Commit `refactor: isolated Codex activation`.
 
 ## Stage 3: Read-only logical inventory
 
@@ -167,14 +167,14 @@ type LogicalAccount struct {
 }
 ```
 
-- [ ] Add red table tests for live/managed inverse freshness, two retained candidates, partial-to-rich claims, conflicting strong claims, weak-only ambiguity, malformed claims, stable candidate ordering independent from `ReadDir`, and one-row compatibility output.
-- [ ] Compute `CandidateID` from source namespace plus stable record identity; compute secret `Revision` from exact credential material but never expose/log it.
-- [ ] Reconcile only ordered strong evidence. Emit typed association/adoption intents without writing. Do not persist `AccountKey` yet; use generation-local opaque keys and mark them unstable.
-- [ ] Add candidate resolver ordering: accepted revision, unexpired, unknown expiry, expired probe; CQ-authored/later expiry/stable ID tie-break.
-- [ ] Make `DiscoverAccounts` compatibility wrapper flatten one preferred candidate per logical account while preserving `Active` meaning. Make provider fetch one logical row and try candidate revisions within identity before `auth_expired`.
-- [ ] Change selector exclusions to typed `AccountKey`/`CandidateID` sets. Delete email/account/token string exclusion logic.
-- [ ] Run `go test -race -count=1 ./internal/provider/codex ./internal/proxy -run 'Inventory|Candidate|Discover|Selector'`.
-- [ ] Commit `refactor: added Codex account inventory`.
+- [x] Add red table tests for live/managed inverse freshness, two retained candidates, partial-to-rich claims, conflicting strong claims, weak-only ambiguity, malformed claims, stable candidate ordering independent from `ReadDir`, and one-row compatibility output.
+- [x] Compute `CandidateID` from source namespace plus stable record identity; compute secret `Revision` from exact credential material but never expose/log it.
+- [x] Reconcile only ordered strong evidence. Emit typed association/adoption intents without writing. Do not persist `AccountKey` yet; use generation-local opaque keys and mark them unstable.
+- [x] Add candidate resolver ordering: accepted revision, unexpired, unknown expiry, expired probe; CQ-authored/later expiry/stable ID tie-break.
+- [x] Make `DiscoverAccounts` compatibility wrapper flatten one preferred candidate per logical account while preserving `Active` meaning. Make provider fetch one logical row and try candidate revisions within identity before `auth_expired`.
+- [x] Change selector exclusions to typed `AccountKey`/`CandidateID` sets. Delete email/account/token string exclusion logic.
+- [x] Run `go test -race -count=1 ./internal/provider/codex ./internal/proxy -run 'Inventory|Candidate|Discover|Selector'`.
+- [x] Commit `refactor: added Codex account inventory`.
 
 ## Stage 4: Single credential coordinator
 
@@ -351,6 +351,7 @@ type ExplicitAccountExecutor interface {
 
 - [x] Add dependency `github.com/klauspost/compress/zstd` (or standard-library equivalent if available) only after red compressed fixtures require it.
 - [x] Add exact synthetic 0.146 fixture cases: canonical nested metadata JSON string/object; flat compatibility; request kinds; compaction phases; memory without turn; typed empty prewarm; malformed/incomplete/oversized metadata.
+- [x] Add exact installed 0.147.0-alpha.6.5 cases: object-shaped compaction metadata and canonical nested metadata larger than 64 KiB because of unbounded tool metadata. Bound nested metadata by protocol request size while retaining the 64 KiB direct-header and turn-state limits.
 - [x] Parser priority: nested client metadata, direct HTTP header, flat fields, handshake hint. Validate complete session/thread/turn tuple; compare IDs as opaque strings only.
 - [x] Add bounded zstd tests for decoded-size limit, expansion ratio, malformed streams, exact original-byte replay, and no decoder allocation before header bounds.
 - [x] Add SSE parser tests for split/coalesced chunks, CRLF, multiline data, malformed/unknown/oversized events, `response.metadata`, well-formed `response.created` with response object, deltas, `response.completed.end_turn` tri-state, errors, and `codex.rate_limits`.
@@ -399,7 +400,7 @@ const (
 - [x] Implement keyed HMAC journal with separate hashes for session/thread/turn/account/correlation and queryable lane components. Never hash whole composite into one unqueryable field.
 - [x] Add red journal crash/corruption tests: key generation, `0o600`/`0o700`, write/sync/rename/dir-sync, ENOSPC, corrupt record, HMAC key loss, generation fence, compaction, restart orphaning, socket extinction, seven-day retention, active-ref no expiry, late-resume block.
 - [x] Keep shadow and authoritative records distinct by mode epoch. Once in-memory admission occurs, journal failure leaves non-migratable fail-closed lease.
-- [ ] Run:
+- [x] Run:
 
 ```bash
 go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewarm|CodexJournal'
@@ -420,7 +421,7 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - Create: `internal/proxy/codex_observe_test.go`
 - Modify: `cmd/cq/proxy.go`
 
-- [x] Feed decoded HTTP requests, compact calls, WS handshakes/frames, SSE/WS events, capacity events, disconnects, and attempts into shadow lane/lease manager. Legacy-safe Stage 8 routing stays authoritative.
+- [x] Feed decoded HTTP requests, compact calls, WS handshakes/frames, SSE/WS events, capacity events, disconnects, and attempts into shadow lane/lease manager. Legacy selection stays authoritative for an unseen strong turn; its first actual admitted route becomes the same-turn continuity floor, while prospective shadow choices remain unused.
 - [x] Add safe diagnostics: keyed turn hint, request kind, lease phase/generation, decision, reason, bucket, account hint, continuity. Assert raw fixtures and secrets absent.
 - [x] Extend `/health` with shadow lease counts/failovers/quota/resync/unknown/late/stale/refresh-suspended counters.
 - [x] Build deterministic 1,000-turn corpus covering simple, tool-loop, same-lane succession, parallel threads, subagents, prewarm, compaction, reconnect, HTTP/WS crossover, delayed stale traffic, and malformed metadata. Assert shadow decision never changes actual routing.
@@ -428,6 +429,10 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 - [x] Run corpus under race detector and record fixture corpus hash.
 - [x] Run 20 compiled-listener turns against a local synthetic upstream. Record zero strong-key/account mismatch and zero raw-ID/secret leak. Do not create readiness marker if any unknown lifecycle event remains.
 - [x] Commit `feat: observed Codex turn routing`.
+
+Installed 0.147.0-alpha.6.5 observe acceptance on 2026-08-09 found and fixed two parser gaps without enabling payload diagnostics: current object-shaped compaction metadata and canonical nested metadata above 64 KiB. Build `d6a7d31` then observed 3/3 zstd requests with metadata headers as strong keys, zero request-decode errors, zero metadata-parse errors, and independent active/quiescent leases. This is live parser evidence, not the Stage 15 elapsed-time soak or an enforcement marker.
+
+Later live observe evidence found four continuity mismatches. A fresh quota-cache update changed the legacy selector's account while one exact turn ID continued sampling, proving that request-scoped legacy selection was not a safe observe authority. No readiness marker existed and enforcement remained disabled. Observe now reuses only the first actual route for an already-seen exact strong turn, blocks a successor until predecessor attempts drain, rejects retained stale IDs before upstream dispatch, and still lets the selector choose independently for an unseen successor or parallel lane. This safety floor does not promote or consume prospective shadow choices.
 
 ## Stage 12: HTTP enforcement
 
@@ -472,7 +477,7 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 
 ## Stage 14: WebSocket enforcement
 
-**Promotion blocker:** Codex CLI/Desktop 0.146.0 sends no model in the WebSocket HTTP handshake. Model first appears in `response.create` after downstream `101`, while approved account selection and stateful upstream `101` journalling must finish before downstream `101`. No WS readiness marker may be written without a client change or approved architecture revision.
+**Promotion blocker:** Codex CLI/Desktop 0.146.0 and installed Desktop `0.147.0-alpha.6.5` send turn metadata but no model in the WebSocket HTTP handshake. Exact `0.147.0-alpha.6.5` source at `618b8e9111da9f57fe380b09d0f6516e3f343536` builds handshake headers from Responses compatibility metadata, session headers, attestation, and beta headers; it defines no `x-codex-model` projection. Model first appears in `response.create` after downstream `101`, while approved model-aware account selection and stateful upstream `101` journalling must finish before downstream `101`. No WS readiness marker may be written without a client change or approved architecture revision.
 
 **Files:**
 

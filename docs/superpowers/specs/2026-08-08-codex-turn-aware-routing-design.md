@@ -63,7 +63,7 @@ Two containment defects are independent of the refactor:
 
 ## Protocol constraints
 
-Design is grounded in official Codex tag `rust-v0.146.0`, commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`, plus current CQ source.
+Design is grounded in official Codex tag `rust-v0.146.0`, commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`, installed Desktop tag `rust-v0.147.0-alpha.6.5`, commit `618b8e9111da9f57fe380b09d0f6516e3f343536`, plus current CQ source.
 
 ### Turn identity is available
 
@@ -122,6 +122,8 @@ This is a promotion gate, not an implementation detail. Silent removal of `previ
 ### Native request forms affect the relay
 
 Codex enables zstd request compression by default. CQ must perform bounded decoding for metadata and model inspection while retaining the original encoded bytes for an unchanged retry. Decoded-size and expansion-ratio limits apply before allocation.
+
+The canonical nested turn-metadata value can exceed 64 KiB because current Codex keeps unbounded Code Mode tool mappings in `client_metadata` while deliberately omitting them from the direct compatibility header. CQ therefore bounds nested metadata by the already bounded decoded protocol request size, ignores unrelated fields during typed extraction, and retains the stricter 64 KiB limit for the direct header and turn state. Installed observe acceptance must distinguish request-decode errors, metadata-parse errors, and missing turn identity without recording payloads or raw identifiers.
 
 `/responses/compact` and its `/v1` alias are unary JSON, not SSE. They share the same logical turn namespace and lease manager as HTTP and WebSocket `/responses`, but have their own response parser and admission rules.
 
@@ -468,7 +470,7 @@ Initial live acceptance must use a naturally reset untouched window. Operators m
 
 For HTTP, parse the bounded direct metadata header and request `client_metadata`. For WebSocket, inspect every bounded `response.create` text frame. Priority within the current request/frame is:
 
-1. `client_metadata["x-codex-turn-metadata"]` JSON string or object;
+1. `client_metadata["x-codex-turn-metadata"]` JSON string or object, bounded by decoded protocol request size;
 2. direct `x-codex-turn-metadata` header for HTTP;
 3. flat compatibility `session_id`, `thread_id`, and `turn_id` fields;
 4. handshake metadata only until a frame supplies current metadata.
@@ -792,7 +794,7 @@ Add additive proxy config:
 Modes:
 
 - `off`: safe request/connection-scoped routing with all automatic system writers already removed;
-- `observe`: legacy-safe routing remains authoritative while CQ records shadow lease decisions;
+- `observe`: legacy selection remains authoritative for each unseen strong turn, then its first actual admitted route becomes a continuity floor for that exact turn; CQ never consumes a prospective shadow account decision, never reselects an admitted turn, and fails stale/concurrent lane traffic before upstream dispatch;
 - `enforce`: strong-metadata requests use turn leases; unknown clients retain fallback scope only without continuation evidence, otherwise predecessor affinity or fail-closed handling applies.
 
 Configured `enforce` never becomes effective merely because a newer binary understands it. HTTP and WebSocket each require a versioned readiness marker plus explicit post-validation opt-in. Before its implementation stage, validation rejects/inhibits `enforce` and `/health` reports the reason.

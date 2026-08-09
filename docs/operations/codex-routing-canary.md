@@ -5,9 +5,11 @@ HTTP enforcement remains explicit opt-in. WebSocket enforcement remains unavaila
 ## Start
 
 1. Run HTTP validation against installed build and local test upstream.
-2. Set `codex_turn_routing` to `enforce`; keep `codex_ws_turn_routing` at `observe`.
-3. Restart CQ and confirm `/health` reports HTTP `effective: enforce` and WebSocket `effective: observe`.
-4. Run `cq codex canary start`.
+2. Run `cq codex canary start` to capture protected-file baselines before enforcement.
+3. Set `codex_turn_routing` to `enforce`; keep `codex_ws_turn_routing` at `observe`.
+4. Restart CQ once, after active streams drain, then confirm `/health` reports HTTP `effective: enforce`, WebSocket `effective: observe`, and `canary_errors: 0`.
+
+Starting canary after restart does not attach it to running process. Do not replace active canary; stop and archive completed evidence first.
 
 Canary state stores counters, timestamps, build/schema/fixture tuple, and SHA-256 digests only. It never stores account, session, thread, turn, response, path, prompt, or credential values.
 
