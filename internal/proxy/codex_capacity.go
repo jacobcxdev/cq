@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -73,6 +74,12 @@ type capacityFactKey struct {
 	source  CapacitySource
 }
 
+// CodexCapacityObservationStream orders facts from one upstream response or connection.
+type CodexCapacityObservationStream struct {
+	generation uint64
+	sequence   atomic.Uint64
+}
+
 // CodexCapacityLedger holds bounded capacity facts and active lease counts.
 type CodexCapacityLedger struct {
 	mu sync.RWMutex
@@ -82,6 +89,8 @@ type CodexCapacityLedger struct {
 	facts  map[capacityFactKey]CapacityFact
 	seq    uint64
 	leases map[codex.AccountKey]int
+
+	observationGeneration atomic.Uint64
 }
 
 // NewCodexCapacityLedger creates a ledger with a bounded cache horizon.
@@ -98,6 +107,25 @@ func NewCodexCapacityLedger(now func() time.Time, maxAge time.Duration) *CodexCa
 		facts:  make(map[capacityFactKey]CapacityFact),
 		leases: make(map[codex.AccountKey]int),
 	}
+}
+
+// NewObservationStream allocates one process-local generation for an upstream
+// response or connection.
+func (l *CodexCapacityLedger) NewObservationStream() *CodexCapacityObservationStream {
+	if l == nil {
+		return nil
+	}
+	return &CodexCapacityObservationStream{generation: l.observationGeneration.Add(1)}
+}
+
+// Stamp attaches this stream's generation and next sequence to a fact.
+func (s *CodexCapacityObservationStream) Stamp(fact CapacityFact) CapacityFact {
+	if s == nil {
+		return fact
+	}
+	fact.ConnectionGeneration = s.generation
+	fact.Sequence = s.sequence.Add(1)
+	return fact
 }
 
 // CapacityBucketForModel maps a requested model to its exact quota bucket.

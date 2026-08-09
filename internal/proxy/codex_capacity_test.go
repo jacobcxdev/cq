@@ -3,12 +3,94 @@ package proxy
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+func TestCodexCapacityObservationStreamOrdersFacts(t *testing.T) {
+	ledger := NewCodexCapacityLedger(nil, time.Hour)
+	firstStream := ledger.NewObservationStream()
+	first := firstStream.Stamp(CapacityFact{ConnectionGeneration: 99, Sequence: 99})
+	second := firstStream.Stamp(CapacityFact{})
+	secondStreamFirst := ledger.NewObservationStream().Stamp(CapacityFact{})
+
+	if first.ConnectionGeneration == 0 {
+		t.Fatal("first generation is zero")
+	}
+	if second.ConnectionGeneration != first.ConnectionGeneration {
+		t.Fatalf("second generation = %d, want %d", second.ConnectionGeneration, first.ConnectionGeneration)
+	}
+	if first.Sequence != 1 || second.Sequence != 2 {
+		t.Fatalf("first stream sequences = %d, %d, want 1, 2", first.Sequence, second.Sequence)
+	}
+	if secondStreamFirst.ConnectionGeneration <= first.ConnectionGeneration {
+		t.Fatalf("second stream generation = %d, want greater than %d", secondStreamFirst.ConnectionGeneration, first.ConnectionGeneration)
+	}
+	if secondStreamFirst.Sequence != 1 {
+		t.Fatalf("second stream sequence = %d, want 1", secondStreamFirst.Sequence)
+	}
+}
+
+func TestCodexCapacityObservationStreamsAreRaceSafe(t *testing.T) {
+	const (
+		streamCount    = 32
+		factsPerStream = 32
+	)
+	type cursor struct {
+		generation uint64
+		sequence   uint64
+	}
+
+	ledger := NewCodexCapacityLedger(nil, time.Hour)
+	cursors := make(chan cursor, streamCount*factsPerStream)
+	var wg sync.WaitGroup
+	for range streamCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stream := ledger.NewObservationStream()
+			for range factsPerStream {
+				fact := stream.Stamp(CapacityFact{})
+				cursors <- cursor{generation: fact.ConnectionGeneration, sequence: fact.Sequence}
+			}
+		}()
+	}
+	wg.Wait()
+	close(cursors)
+
+	seen := make(map[cursor]bool, streamCount*factsPerStream)
+	sequencesByGeneration := make(map[uint64]map[uint64]bool, streamCount)
+	for got := range cursors {
+		if got.generation == 0 || got.sequence == 0 {
+			t.Fatalf("zero cursor component: %+v", got)
+		}
+		if seen[got] {
+			t.Fatalf("duplicate cursor: %+v", got)
+		}
+		seen[got] = true
+		if sequencesByGeneration[got.generation] == nil {
+			sequencesByGeneration[got.generation] = make(map[uint64]bool, factsPerStream)
+		}
+		sequencesByGeneration[got.generation][got.sequence] = true
+	}
+	if len(sequencesByGeneration) != streamCount {
+		t.Fatalf("generation count = %d, want %d", len(sequencesByGeneration), streamCount)
+	}
+	for generation, sequences := range sequencesByGeneration {
+		if len(sequences) != factsPerStream {
+			t.Fatalf("generation %d sequence count = %d, want %d", generation, len(sequences), factsPerStream)
+		}
+		for sequence := uint64(1); sequence <= factsPerStream; sequence++ {
+			if !sequences[sequence] {
+				t.Fatalf("generation %d missing sequence %d", generation, sequence)
+			}
+		}
+	}
+}
 
 func TestCodexCapacityLedgerSourcePrecedence(t *testing.T) {
 	now := time.Unix(1_000, 0)
