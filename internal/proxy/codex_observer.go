@@ -255,8 +255,8 @@ func (handle *CodexTurnObservation) Selected(choice RouteChoice, failover bool) 
 			// Acquire below takes routing reference on adopted lease.
 		}
 	}
-	lease, err := handle.observer.Leases.Acquire(handle.ctx, handle.key, func(context.Context) (codex.AccountKey, error) {
-		return choice.AccountKey, nil
+	lease, err := handle.observer.Leases.AcquireRoute(handle.ctx, handle.key, func(context.Context) (RouteChoice, error) {
+		return choice, nil
 	})
 	if err != nil {
 		handle.observer.observeLeaseError(err)
@@ -273,6 +273,17 @@ func (handle *CodexTurnObservation) Selected(choice RouteChoice, failover bool) 
 		Decision:        "shadow_selected",
 		AccountHint:     redactedAccountHint("codex", string(choice.AccountKey)),
 	})
+}
+
+func (handle *CodexTurnObservation) pinnedChoice() (RouteChoice, bool, error) {
+	if handle == nil || handle.observer == nil || handle.prewarm || !handle.request.Metadata.Strong {
+		return RouteChoice{}, false, nil
+	}
+	metadata := handle.request.Metadata.Metadata
+	if metadata.TurnID == "" || (metadata.RequestKind != CodexRequestTurn && metadata.RequestKind != CodexRequestCompaction) {
+		return RouteChoice{}, false, nil
+	}
+	return handle.observer.Leases.ObservedRouteChoice(handle.key)
 }
 
 func (observer *CodexTurnObserver) restoreJournalLease(key LeaseKey, selected codex.AccountKey) {

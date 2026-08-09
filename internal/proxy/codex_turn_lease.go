@@ -492,6 +492,38 @@ func (manager *CodexTurnLeaseManager) Get(key LeaseKey) (CodexTurnLease, bool) {
 	return managed.lease, true
 }
 
+func (manager *CodexTurnLeaseManager) ObservedRouteChoice(key LeaseKey) (RouteChoice, bool, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	managed := manager.leases[key]
+	if managed == nil {
+		if currentKey, found := manager.current[key.Lane]; found {
+			current := manager.leases[currentKey]
+			if current != nil && (current.lease.RoutingRefs != 0 || current.lease.ActiveAttempts != 0 ||
+				current.lease.State == LeaseReserving || current.lease.State == LeaseProvisional || current.lease.State == LeaseBoundActive) {
+				return RouteChoice{}, false, ErrCodexConcurrentTurn
+			}
+		}
+		return RouteChoice{}, false, nil
+	}
+	if manager.current[key.Lane] != key {
+		return RouteChoice{}, false, ErrCodexStaleTurn
+	}
+	switch managed.lease.State {
+	case LeaseProvisional, LeaseBoundActive, LeaseContinuationPending, LeaseBoundQuiescent, LeaseOrphaned:
+	default:
+		return RouteChoice{}, false, ErrCodexStaleTurn
+	}
+	choice := cloneRouteChoice(managed.lease.Choice)
+	if choice.AccountKey == "" {
+		choice.AccountKey = managed.lease.AccountKey
+	}
+	if choice.AccountKey == "" || choice.RequestedModel == "" || choice.EffectiveModel == "" {
+		return RouteChoice{}, false, fmt.Errorf("%w: observed route choice unavailable", ErrCodexContinuity)
+	}
+	return choice, true, nil
+}
+
 func (manager *CodexTurnLeaseManager) Snapshot() []CodexTurnLease {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

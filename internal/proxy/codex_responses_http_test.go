@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -553,6 +554,140 @@ func TestCodexHTTPFenceOnlyServerFallbackUsesLegacyRoute(t *testing.T) {
 	defer response.Body.Close()
 	if choice.AccountKey != "two" || observation != nil || chooser.calls != 1 || len(executor.accounts) != 1 {
 		t.Fatalf("choice=%q observation=%v selector calls=%d attempts=%v", choice.AccountKey, observation, chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPObserveReusesFirstActualRouteForSameTurn(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{
+		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+		{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+	}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {
+			{status: http.StatusOK, body: completedSSE("response-one")},
+			{status: http.StatusOK, body: completedSSE("response-two")},
+		},
+		"two": {{status: http.StatusOK, body: completedSSE("response-drift")}},
+	}}
+	router := testHTTPRouter(chooser, executor)
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(9, false, nil), nil, []byte("01234567890123456789012345678901"))
+	server := &Server{CodexRequests: router, CodexObserver: observer}
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	route := func(request CodexProtocolRequest, body []byte) error {
+		response, choice, observation, err := server.doCodexHTTPRoute(context.Background(), request.Model, request, protocolHTTPRequest(request), body, nil, false, false)
+		if err != nil {
+			return err
+		}
+		observation.Selected(choice, false)
+		observation.ResponseHeaders(response.StatusCode, response.Header)
+		observeCodexResponseBody(response, observation)
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		return nil
+	}
+
+	for range 2 {
+		if err := route(request, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := strongHTTPProtocolRequest(t, "thread", "turn-next", CodexRequestTurn, "")
+	nextBody := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn-next","request_kind":"turn"}}}`)
+	if err := route(next, nextBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := route(request, body); !errors.Is(err, ErrCodexStaleTurn) {
+		t.Fatalf("stale route error = %v", err)
+	}
+
+	if chooser.calls != 2 || !slices.Equal(executor.accounts, []codex.AccountKey{"one", "one", "two"}) {
+		t.Fatalf("selector calls=%d attempts=%v", chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPObserveBlocksSuccessorUntilAttemptDrains(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{
+		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+		{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+	}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusOK, body: completedSSE("response-one")}},
+		"two": {{status: http.StatusOK, body: completedSSE("response-two")}},
+	}}
+	router := testHTTPRouter(chooser, executor)
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(9, false, nil), nil, []byte("01234567890123456789012345678901"))
+	server := &Server{CodexRequests: router, CodexObserver: observer}
+	first := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	firstBody := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	next := strongHTTPProtocolRequest(t, "thread", "turn-next", CodexRequestTurn, "")
+	nextBody := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn-next","request_kind":"turn"}}}`)
+
+	response, choice, observation, err := server.doCodexHTTPRoute(context.Background(), first.Model, first, protocolHTTPRequest(first), firstBody, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.Selected(choice, false)
+	observation.ResponseHeaders(response.StatusCode, response.Header)
+	observeCodexResponseBody(response, observation)
+
+	if _, _, _, err := server.doCodexHTTPRoute(context.Background(), next.Model, next, protocolHTTPRequest(next), nextBody, nil, false, false); !errors.Is(err, ErrCodexConcurrentTurn) {
+		t.Fatalf("successor error = %v", err)
+	}
+	if chooser.calls != 1 || !slices.Equal(executor.accounts, []codex.AccountKey{"one"}) {
+		t.Fatalf("before drain selector calls=%d attempts=%v", chooser.calls, executor.accounts)
+	}
+
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	response, choice, observation, err = server.doCodexHTTPRoute(context.Background(), next.Model, next, protocolHTTPRequest(next), nextBody, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.Selected(choice, false)
+	observation.ResponseHeaders(response.StatusCode, response.Header)
+	observeCodexResponseBody(response, observation)
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if chooser.calls != 2 || !slices.Equal(executor.accounts, []codex.AccountKey{"one", "two"}) {
+		t.Fatalf("after drain selector calls=%d attempts=%v", chooser.calls, executor.accounts)
+	}
+}
+
+func TestCodexHTTPObserveDoesNotFailOverPinnedTurnOnHardLimit(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{
+		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+		{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+	}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {
+			{status: http.StatusOK, body: completedSSE("response-one")},
+			{status: http.StatusTooManyRequests, body: `{"error":{"type":"insufficient_quota"}}`},
+		},
+		"two": {{status: http.StatusOK, body: completedSSE("response-two")}},
+	}}
+	router := testHTTPRouter(chooser, executor)
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(9, false, nil), nil, []byte("01234567890123456789012345678901"))
+	server := &Server{CodexRequests: router, CodexObserver: observer}
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+
+	for index, wantStatus := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		response, choice, observation, err := server.doCodexHTTPRoute(context.Background(), request.Model, request, protocolHTTPRequest(request), body, nil, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != wantStatus {
+			t.Fatalf("response %d status = %d", index, response.StatusCode)
+		}
+		observation.Selected(choice, false)
+		observation.ResponseHeaders(response.StatusCode, response.Header)
+		observeCodexResponseBody(response, observation)
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+	}
+	if chooser.calls != 1 || !slices.Equal(executor.accounts, []codex.AccountKey{"one", "one"}) {
+		t.Fatalf("selector calls=%d attempts=%v", chooser.calls, executor.accounts)
 	}
 }
 

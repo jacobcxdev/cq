@@ -67,7 +67,8 @@ type Server struct {
 	PayloadDiag               *PayloadWriter
 	// CodexRouting is resolved once at startup. Config reload never mutates it.
 	CodexRouting *CodexRoutingRuntime
-	// CodexObserver mirrors Responses lifecycle without affecting Stage 8 routing.
+	// CodexObserver mirrors Responses lifecycle and preserves an exact strong
+	// turn's first actual route without consuming prospective shadow choices.
 	CodexObserver *CodexTurnObserver
 	// CodexHTTPEnforcer owns readiness-gated turns and retained authority fences.
 	CodexHTTPEnforcer *CodexHTTPEnforcer

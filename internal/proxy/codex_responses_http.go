@@ -256,6 +256,24 @@ func (s *Server) doCodexHTTPRoute(ctx context.Context, model string, request Cod
 	if observation != nil {
 		ctx = withCodexObservation(ctx, observation)
 		upstream = upstream.WithContext(ctx)
+		choice, found, err := observation.pinnedChoice()
+		if err != nil {
+			return nil, RouteChoice{}, observation, err
+		}
+		if found {
+			if s.CodexRequests == nil {
+				return nil, choice, observation, errors.New("no Codex accounts configured")
+			}
+			noteRouteAccount(ctx, redactedAccountHint("codex", string(choice.AccountKey)), false)
+			response, _, failure, err := s.CodexRequests.DoPinned(ctx, choice, upstream)
+			if err != nil {
+				return nil, choice, observation, err
+			}
+			if failure == CodexPinnedAuthFailure {
+				return nil, choice, observation, errors.New("bound Codex account authentication failed")
+			}
+			return response, choice, observation, nil
+		}
 	}
 	response, choice, _, err := s.doCodexRequest(ctx, model, upstream)
 	return response, choice, observation, err
