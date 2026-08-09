@@ -54,11 +54,27 @@ type CodexSourceHealth struct {
 	HealthCode     string `json:"health_code"`
 }
 
+type CodexRoutingDefaultHealth struct {
+	Configured bool   `json:"configured"`
+	Resolved   bool   `json:"resolved"`
+	Routable   bool   `json:"routable"`
+	Status     string `json:"status"`
+}
+
+const (
+	CodexRoutingDefaultStatusUnconfigured = "unconfigured"
+	CodexRoutingDefaultStatusResolved     = "resolved"
+	CodexRoutingDefaultStatusUnroutable   = "unroutable"
+	CodexRoutingDefaultStatusUnresolved   = "unresolved"
+	CodexRoutingDefaultStatusUnknown      = "unknown"
+)
+
 type CodexHealth struct {
-	AccountCount      int                 `json:"account_count"`
-	AccountCountKnown bool                `json:"-"`
-	HealthCode        string              `json:"-"`
-	ExternalSources   []CodexSourceHealth `json:"external_sources"`
+	AccountCount      int                       `json:"account_count"`
+	AccountCountKnown bool                      `json:"-"`
+	HealthCode        string                    `json:"-"`
+	ExternalSources   []CodexSourceHealth       `json:"external_sources"`
+	RoutingDefault    CodexRoutingDefaultHealth `json:"-"`
 }
 
 // Server is the reverse proxy HTTP server.
@@ -648,6 +664,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	var codexHealth CodexHealth
 	if s.CodexHealth != nil {
 		codexHealth = s.CodexHealth()
+		codexHealth.RoutingDefault = normaliseCodexRoutingDefaultHealth(codexHealth.RoutingDefault)
 		if codexHealth.AccountCountKnown {
 			codexCount = codexHealth.AccountCount
 		} else {
@@ -666,6 +683,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	if codexHealth.RoutingDefault.Configured && codexHealth.RoutingDefault.Status != CodexRoutingDefaultStatusResolved {
+		status = "degraded"
+	}
 	resp := map[string]any{
 		"status":   status,
 		"headroom": s.Headroom != nil,
@@ -681,6 +701,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.CodexHealth != nil {
 		resp["codex_external_sources"] = codexHealth.ExternalSources
 		resp["codex_inventory_health"] = codexHealth.HealthCode
+		resp["codex_routing_default"] = codexHealth.RoutingDefault
 	}
 	httpMode, wsMode := s.codexRoutingHealth()
 	resp["codex_turn_routing"] = httpMode
@@ -703,6 +724,44 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func normaliseCodexRoutingDefaultHealth(health CodexRoutingDefaultHealth) CodexRoutingDefaultHealth {
+	unconfigured := CodexRoutingDefaultHealth{Status: CodexRoutingDefaultStatusUnconfigured}
+	resolved := CodexRoutingDefaultHealth{
+		Configured: true,
+		Resolved:   true,
+		Routable:   true,
+		Status:     CodexRoutingDefaultStatusResolved,
+	}
+	unroutable := CodexRoutingDefaultHealth{
+		Configured: true,
+		Resolved:   true,
+		Status:     CodexRoutingDefaultStatusUnroutable,
+	}
+	unresolved := CodexRoutingDefaultHealth{
+		Configured: true,
+		Status:     CodexRoutingDefaultStatusUnresolved,
+	}
+	unknown := CodexRoutingDefaultHealth{
+		Configured: true,
+		Status:     CodexRoutingDefaultStatusUnknown,
+	}
+
+	switch health {
+	case CodexRoutingDefaultHealth{}, unconfigured:
+		return unconfigured
+	case resolved:
+		return resolved
+	case unroutable:
+		return unroutable
+	case unresolved:
+		return unresolved
+	case unknown:
+		return unknown
+	default:
+		return unknown
+	}
 }
 
 // isValidToken returns true if token matches the local proxy token or the
