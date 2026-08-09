@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,6 +38,7 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 		"proxy status",
 		"proxy pin",
 		"proxy prime",
+		"proxy codex-default",
 		"models list",
 		"models refresh",
 		"models overlay add",
@@ -80,6 +83,17 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 			want: []string{"Usage: cq proxy prime <command>", "prime enable", "prime disable", "prime status"},
 		},
 		{
+			name: "proxy codex default",
+			path: []string{"proxy", "codex-default"},
+			want: []string{
+				"Usage: cq proxy codex-default [--clear | <account-reference>]",
+				"unique email, CQ alias, or opaque AccountKey",
+				"independent of Codex Desktop/system identity",
+				"never mutates Codex Bar or system authentication",
+				"Restart proxy to apply change.",
+			},
+		},
+		{
 			name: "models list",
 			path: []string{"models", "list"},
 			want: []string{"Usage: cq models list [--json] [--provider PROVIDER]", "List active registry models"},
@@ -106,6 +120,26 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunProxyCodexDefaultHelpDoesNotCreateConfig(t *testing.T) {
+	configHome := filepath.Join(t.TempDir(), "config")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	for _, args := range [][]string{
+		{"codex-default", "--help"},
+		{"codex-default", "-h"},
+		{"help", "codex-default"},
+	} {
+		if err := runProxy(args); err != nil {
+			t.Fatalf("runProxy(%v) error = %v", args, err)
+		}
+	}
+
+	path := filepath.Join(configHome, "cq", "proxy.json")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("help config stat error = %v, want not exist", err)
 	}
 }
 

@@ -44,6 +44,7 @@ Commands:
   proxy uninstall     Uninstall proxy launch agent
   proxy restart       Restart proxy launch agent
   proxy pin           Pin Claude proxy routing
+  proxy codex-default Configure Codex routing default
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
 `,
@@ -82,6 +83,19 @@ Examples:
   cq proxy pin user@example.com
   cq proxy pin 550e8400-e29b-41d4-a716-446655440000
   cq proxy pin --clear
+`,
+	"proxy codex-default": `Usage: cq proxy codex-default [--clear | <account-reference>]
+
+Show, set, or clear CQ-owned Codex routing default.
+An account reference may be a unique email, CQ alias, or opaque AccountKey.
+CQ resolves it once and stores only opaque AccountKey.
+
+The stored opaque account key is independent of Codex Desktop/system identity.
+This command changes only CQ proxy configuration and never mutates Codex Bar or system authentication.
+The running proxy keeps its startup value. Restart proxy to apply change.
+
+Options:
+  --clear            Clear the Codex routing default
 `,
 	"proxy prime": `Usage: cq proxy prime <command>
 

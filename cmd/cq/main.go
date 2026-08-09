@@ -78,14 +78,15 @@ type AgentUninstallCmd struct{}
 
 // ProxyCmd groups local proxy commands.
 type ProxyCmd struct {
-	Start     ProxyStartCmd     `cmd:"" help:"Start local Claude and Codex proxy"`
-	Install   ProxyInstallCmd   `cmd:"" help:"Install proxy launch agent"`
-	Uninstall ProxyUninstallCmd `cmd:"" help:"Uninstall proxy launch agent"`
-	Restart   ProxyRestartCmd   `cmd:"" help:"Restart proxy launch agent"`
-	Status    ProxyStatusCmd    `cmd:"" help:"Show proxy health"`
-	Pin       ProxyPinCmd       `cmd:"" help:"Pin Claude proxy routing"`
-	Prime     ProxyPrimeCmd     `cmd:"" help:"Manage Codex quota-window priming"`
-	Endpoint  ProxyEndpointCmd  `cmd:"" help:"Inspect or transition the credential endpoint"`
+	Start        ProxyStartCmd        `cmd:"" help:"Start local Claude and Codex proxy"`
+	Install      ProxyInstallCmd      `cmd:"" help:"Install proxy launch agent"`
+	Uninstall    ProxyUninstallCmd    `cmd:"" help:"Uninstall proxy launch agent"`
+	Restart      ProxyRestartCmd      `cmd:"" help:"Restart proxy launch agent"`
+	Status       ProxyStatusCmd       `cmd:"" help:"Show proxy health"`
+	Pin          ProxyPinCmd          `cmd:"" help:"Pin Claude proxy routing"`
+	CodexDefault ProxyCodexDefaultCmd `cmd:"" name:"codex-default" help:"Configure Codex routing default"`
+	Prime        ProxyPrimeCmd        `cmd:"" help:"Manage Codex quota-window priming"`
+	Endpoint     ProxyEndpointCmd     `cmd:"" help:"Inspect or transition the credential endpoint"`
 }
 
 type ProxyStartCmd struct {
@@ -103,6 +104,11 @@ type ProxyStatusCmd struct {
 type ProxyPinCmd struct {
 	Clear bool   `help:"Clear active Claude account pin"`
 	Value string `arg:"" optional:"" name:"email-or-account-uuid" help:"Claude account email or UUID to pin"`
+}
+
+type ProxyCodexDefaultCmd struct {
+	Clear     bool   `help:"Clear the Codex routing default"`
+	Reference string `arg:"" optional:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
 }
 
 type ProxyPrimeCmd struct {

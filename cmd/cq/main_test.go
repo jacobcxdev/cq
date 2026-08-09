@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,6 +213,47 @@ func TestCLIParsesRemoveCommands(t *testing.T) {
 			}
 			if got := parsed.Command(); got != tt.want {
 				t.Fatalf("Command() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCLIParsesProxyCodexDefault(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantClear     bool
+		wantReference string
+	}{
+		{name: "status", args: []string{"proxy", "codex-default"}},
+		{name: "clear", args: []string{"proxy", "codex-default", "--clear"}, wantClear: true},
+		{name: "reference", args: []string{"proxy", "codex-default", "person@example.test"}, wantReference: "person@example.test"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cli CLI
+			kctx, err := kong.New(&cli,
+				kong.Writers(io.Discard, io.Discard),
+				kong.Exit(func(int) {}),
+			)
+			if err != nil {
+				t.Fatalf("kong.New: %v", err)
+			}
+
+			parsed, err := kctx.Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse(%v): %v", tt.args, err)
+			}
+			if got := parsed.Command(); !strings.HasPrefix(got, "proxy codex-default") ||
+				(tt.wantReference != "" && !strings.Contains(got, "<account-reference>")) {
+				t.Fatalf("Command() = %q, want proxy codex-default command for %q", got, tt.wantReference)
+			}
+			if cli.Proxy.CodexDefault.Clear != tt.wantClear {
+				t.Fatalf("Clear = %t, want %t", cli.Proxy.CodexDefault.Clear, tt.wantClear)
+			}
+			if cli.Proxy.CodexDefault.Reference != tt.wantReference {
+				t.Fatalf("Reference = %q, want %q", cli.Proxy.CodexDefault.Reference, tt.wantReference)
 			}
 		})
 	}

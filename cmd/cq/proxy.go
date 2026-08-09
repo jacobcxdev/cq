@@ -69,6 +69,11 @@ func runProxy(args []string) error {
 		return runProxyStatus(opts)
 	case "pin":
 		return runProxyPin(args[1:])
+	case "codex-default":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "codex-default"})
+		}
+		return runProxyCodexDefault(args[1:])
 	case "prime":
 		return runProxyPrime(args[1:])
 	case "endpoint":
