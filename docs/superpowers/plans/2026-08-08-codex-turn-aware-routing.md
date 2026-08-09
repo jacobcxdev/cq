@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make CQ sole authority for automatic Codex account routing while preserving system auth for explicit user actions and pinning each admitted Codex agent turn to one account.
+**Goal:** Make CQ sole authority for automatic Codex account routing while keeping Desktop/system identity independent, preserving warm task affinity, and pinning each admitted Codex agent turn to one account.
 
-**Architecture:** Build permanent credential containment first, then one candidate inventory and single credential coordinator. Add bucket-aware capacity, explicit-account request execution, strict Responses protocol parsing, and a durable lane/lease core. Integrate leases in observe mode before separately enforcing HTTP and WebSocket routing behind versioned readiness markers. Keep one transport-independent `(session_id, thread_id, turn_id, "codex-responses")` namespace and bind WebSocket continuation to exact upstream socket generation.
+**Architecture:** Build permanent credential containment first, then one candidate inventory and single credential coordinator. Add bucket-aware capacity, explicit-account request execution, strict Responses protocol parsing, and a durable lane/lease core. A successor turn prefers its latest eligible admitted lane account; otherwise deterministic capacity fairness chooses an ordinary route, followed by one configured routing-default attempt. After route/effective-model choice, Headroom/model transformation and encoding run once; a bounded memory-only envelope freezes those bytes and permits exact HTTP replay only while the lease has never admitted and no downstream byte has been sent. Integrate leases in observe mode before separately enforcing HTTP and WebSocket routing behind versioned readiness markers. Keep one transport-independent `(session_id, thread_id, turn_id, "codex-responses")` namespace and bind WebSocket continuation to exact upstream socket generation.
 
 **Tech Stack:** Go 1.26, standard library HTTP/JSON/crypto/filesystem packages, Gorilla WebSocket, `compress/zstd`, Unix-domain sockets on supported platforms, existing `fsutil` dependency injection, Go race detector.
 
@@ -16,10 +16,16 @@
 - For every behaviour change: add smallest failing test, run named test and confirm expected failure, add minimum production code, rerun named test, then run stage package suite with `-race`.
 - Never print or fixture real tokens, emails, account IDs, paths, turn IDs, thread IDs, response IDs, or prompt bodies. Test values stay synthetic.
 - Never reintroduce automatic `~/.codex/auth.json` or registry active-state writes. `off` and rollback modes change routing only.
+- Treat Desktop/system identity and `codex_routing_default_account_key` as independent authorities. Automatic routing never derives, repairs, or synchronises either from the other and never invokes `SystemActivator`.
+- Never migrate a lease that has admitted any request. A later same-turn immediate hard 429 remains post-admission even before that later request forwards bytes. Exceptional Desktop resynchronisation and same-turn migration need a separately approved spec revision and installed proof.
+- Never persist, spill, or log a replay envelope. Retain bounded request material only until admission, final terminal handling, or cancellation, then release and best-effort overwrite owned buffers.
 - Preserve unknown JSON fields and file permissions. Managed credential and journal commits use unique temp file, file sync, atomic rename, and parent-directory sync.
 - Treat official Codex `rust-v0.146.0` fixtures as protocol authority. Copy only minimal synthetic protocol shapes into testdata and record source commit in fixture comments.
 - Do not enable HTTP or WebSocket enforcement until matching readiness marker exists. Upgrade never creates marker or activates enforcement.
 - Full Stage 15 promotion requires seven elapsed canary days and at least 100 admitted installed-service turns. Do not claim completion before both facts exist.
+- Coordinator inventory/control failure must remain typed. Provider fetch, registry construction, and health reporting must not silently fall back to a healthy filesystem-only or zero-account view.
+- Never blind-unlink `credential.sock` or repair/restart an installed proxy while an affected CLI/Desktop task is active. Snapshot ownership first. Legacy or unverifiable endpoints require stopped/drained explicit maintenance; after a compatibility-floor transition, owner startup may automatically recover only an exact sidecar-proven endpoint while holding the lifetime lock and after a final versioned Ping.
+- Checked Stage 6 and Stage 12 items, plus explicitly labelled pre-Stage-12A Stage 15/final-audit evidence, record the earlier baseline. They do not claim the unchecked Stage 12A routing reconciliation is implemented or validated; any affected HTTP readiness marker must be invalidated until Stage 12A passes.
 
 ## Stage 0: Baseline and isolation
 
@@ -176,6 +182,13 @@ type LogicalAccount struct {
 - [x] Run `go test -race -count=1 ./internal/provider/codex ./internal/proxy -run 'Inventory|Candidate|Discover|Selector'`.
 - [x] Commit `refactor: added Codex account inventory`.
 
+2026-08-09 provider-fetch regression addendum:
+
+- [ ] Add failing tests where coordinator `List` fails while CQ files remain readable. Assert `Provider.Fetch`, model-registry discovery, and health return a typed degraded/unavailable authority result instead of silently constructing a healthy filesystem-only inventory.
+- [ ] Add the fresh-Codex-Bar/stale-CQ same-identity reproducer. Assert candidate-specific 401 rejection resolves the exact fresh external revision before account-wide `auth_expired`, with both stores byte-identical.
+- [ ] Retain the last successful logical inventory only as explicitly stale/degraded state; when no successful snapshot exists, return typed unavailable state rather than false zero accounts.
+- [ ] Run `go test -race -count=100 ./internal/provider/codex ./cmd/cq -run 'Fetch|Inventory|External|Authority|Health|Registry'`.
+
 ## Stage 4: Single credential coordinator
 
 **Files:**
@@ -229,6 +242,13 @@ go test -race -count=1 ./internal/app ./cmd/cq
 
 - [x] Commit `feat: added Codex credential coordinator`.
 
+2026-08-09 stale-endpoint regression addendum:
+
+- [ ] Add failing process/socket tests for: pathname with no listener, live owner, delayed listener startup, two competing recovery processes, unverifiable owner state, replacement races, and crashes at every publication step. Assert no case unlinks from a request path or launchd retry loop.
+- [ ] Add a permanent lifetime recovery/owner lock, versioned Ping, `SetUnlinkOnClose(false)`, transactional unique-socket publication, and an atomic durable sidecar containing protocol version, generation, final socket device/inode/UID/type/mode. Commit the sidecar before a same-directory no-replace final publication proven on every supported platform; an unsupported publication primitive fails closed. A contender re-dials after acquiring the lock and may unlink only an exact sidecar match. Return typed authority failure for live, legacy, mismatched, ambiguous, or unverifiable state; never fall back to direct writes or filesystem-only inventory.
+- [ ] Keep recovery outside automatic request handling. Require one explicit stopped/drained transition for pre-sidecar endpoints, then allow supervised post-floor owner startup to recover only exact sidecar-proven crash remnants. Capture pre-repair ownership/session state and verify post-bind lock, sidecar, generation, and permissions.
+- [ ] Run `go test -race -count=100 ./internal/provider/codex ./cmd/cq -run 'CredentialControl|Coordinator|Stale|Owner|Authority'`.
+
 ## Stage 5: Managed refresh broker
 
 **Files:**
@@ -278,6 +298,8 @@ type RouteChoice struct {
 - [x] Replace selector return with atomic `RouteChoice`; model rewrite consumes `EffectiveModel` and never reruns selection.
 - [x] Run `go test -race -count=100 ./internal/proxy -run 'CodexCapacity|CodexSelector|RouteChoice'`.
 - [x] Commit `feat: added Codex capacity choices`.
+
+Historical baseline note: Stage 6 intentionally treated every known-zero route as ineligible and returned a cached limit when all routes were zero. The approved Stage 12A reconciliation supersedes that terminal behaviour with one configured routing-default attempt, but no checked Stage 6 item claims the replacement exists.
 
 ## Stage 7: Config modes, epochs, and readiness floor
 
@@ -361,6 +383,13 @@ type ExplicitAccountExecutor interface {
 - [x] Run `go test -race -count=100 ./internal/proxy -run 'TurnMetadata|CodexProtocol|CodexSSE|CodexZstd'`.
 - [x] Commit `feat: parsed Codex Responses lifecycle`.
 
+2026-08-09 encoded-consumer regression addendum:
+
+- [ ] Add a failing zstd `/responses` fixture containing model and turn metadata. Route it through the real server/headroom path and assert every JSON consumer receives one bounded decoded view, model is non-empty, and no `invalid character '('` diagnostic appears.
+- [ ] Assert inspection-only forwarding sends the exact original encoded bytes and headers. Add rewrite fixtures proving Headroom/model transformation runs once before envelope freeze, re-encodes once with the declared supported coding and corrected `Content-Length`, and every retry reuses those identical transformed bytes without recompression or another Headroom call; unsupported or failed re-encoding must return a typed protocol error before dispatch.
+- [ ] Remove direct JSON parsing of encoded request bodies from model, headroom, routing, metadata, and validation call sites. Keep decoding bounded by decoded-size and expansion-ratio limits.
+- [ ] Run `go test -race -count=100 ./internal/proxy ./cmd/cq -run 'CodexZstd|Headroom|Model|Responses|Encoded'`.
+
 ## Stage 10: Durable lane and lease core
 
 **Files:**
@@ -432,6 +461,8 @@ go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexPrewar
 
 Installed 0.147.0-alpha.6.5 observe acceptance on 2026-08-09 found and fixed two parser gaps without enabling payload diagnostics: current object-shaped compaction metadata and canonical nested metadata above 64 KiB. Build `d6a7d31` then observed 3/3 zstd requests with metadata headers as strong keys, zero request-decode errors, zero metadata-parse errors, and independent active/quiescent leases. This is live parser evidence, not the Stage 15 elapsed-time soak or an enforcement marker.
 
+Later 2026-08-09 traffic exposed a separate legacy-consumer gap despite parser acceptance: zstd native requests forwarded with 200 status, but headroom/model extraction parsed encoded bytes, emitted `invalid character '(' looking for beginning of value`, and logged `model=""`. Stage 9 and Stage 15 acceptance remain incomplete until the encoded-consumer addendum passes through the installed listener.
+
 Later live observe evidence found four continuity mismatches. A fresh quota-cache update changed the legacy selector's account while one exact turn ID continued sampling, proving that request-scoped legacy selection was not a safe observe authority. No readiness marker existed and enforcement remained disabled. Observe now reuses only the first actual route for an already-seen exact strong turn, blocks a successor until predecessor attempts drain, rejects retained stale IDs before upstream dispatch, and still lets the selector choose independently for an unseen successor or parallel lane. This safety floor does not promote or consume prospective shadow choices.
 
 ## Stage 12: HTTP enforcement
@@ -454,6 +485,90 @@ Later live observe evidence found four continuity mismatches. A fresh quota-cach
 - [x] Run full HTTP gate; then opt in explicitly and verify `/health` effective HTTP `enforce`.
 - [x] Commit `feat: enforced Codex HTTP turn leases`.
 
+Historical baseline note: Stage 12 proves immutable admission and bounded pre-admission HTTP handling for the earlier selector. It does not prove cross-turn warm affinity, deterministic fallback, a routing-default terminal attempt, or the replay-envelope lifecycle introduced below.
+
+## Stage 12A: Conservative routing-policy reconciliation
+
+**Status:** Proposed implementation stage for the approved conservative design; implementation and validation pending. Every item in this stage remains unchecked.
+
+**Promotion blocker:** Invalidate any earlier HTTP readiness marker affected by selection or replay semantics. Do not interpret this stage as approval for cross-account migration after a turn has admitted any request. Desktop/system identity remains read-only to automatic routing.
+
+**Files:**
+
+- Create: `internal/proxy/codex_route_policy.go`
+- Create: `internal/proxy/codex_route_policy_test.go`
+- Create: `internal/proxy/codex_request_envelope.go`
+- Create: `internal/proxy/codex_request_envelope_test.go`
+- Modify: `internal/proxy/config.go`
+- Modify: `internal/proxy/config_test.go`
+- Modify: `internal/proxy/codex_selector.go`
+- Modify: `internal/proxy/codex_selector_test.go`
+- Modify: `internal/proxy/codex_attempt.go`
+- Modify: `internal/proxy/codex_attempt_test.go`
+- Modify: `internal/proxy/codex_request_scope.go`
+- Modify: `internal/proxy/codex_request_scope_test.go`
+- Modify: `internal/proxy/codex_protocol.go`
+- Modify: `internal/proxy/codex_protocol_test.go`
+- Modify: `internal/proxy/codex_transport.go`
+- Modify: `internal/proxy/codex_transport_test.go`
+- Modify: `internal/proxy/headroom.go`
+- Modify: `internal/proxy/headroom_test.go`
+- Modify: `internal/proxy/codex_turn_lease.go`
+- Modify: `internal/proxy/codex_turn_lease_test.go`
+- Modify: `internal/proxy/codex_lease_store.go`
+- Modify: `internal/proxy/codex_lease_store_test.go`
+- Modify: `internal/proxy/codex_responses_http.go`
+- Modify: `internal/proxy/codex_responses_http_test.go`
+- Modify: `internal/proxy/codex_compact.go`
+- Modify: `internal/proxy/codex_compact_test.go`
+- Modify: `internal/proxy/codex_responses_ws.go`
+- Modify: `internal/proxy/codex_resync_test.go`
+- Modify: `internal/proxy/diag.go`
+- Modify: `internal/proxy/diag_test.go`
+- Modify: `internal/proxy/codex_readiness.go`
+- Modify: `internal/proxy/codex_readiness_test.go`
+- Modify: `internal/proxy/server.go`
+- Modify: `internal/proxy/server_test.go`
+- Create: `cmd/cq/proxy_codex_default.go`
+- Create: `cmd/cq/proxy_codex_default_test.go`
+- Modify: `cmd/cq/main.go`
+- Modify: `cmd/cq/main_test.go`
+- Modify: `cmd/cq/help.go`
+- Modify: `cmd/cq/help_test.go`
+- Modify: `cmd/cq/proxy.go`
+
+- [ ] Add `cq proxy codex-default [--clear | <alias-or-account-key>]` plus config red tests for opaque `codex_routing_default_account_key`, unknown-field/N-1 preservation, unique alias resolution, ambiguous/missing keys, and zero `SystemActivator` calls. Change Codex Bar/system `Active` between requests and assert the routing default and automatic route remain unchanged.
+- [ ] Add policy red tests. Admitted account A becomes the lane's soft successor affinity; eligible A beats higher-headroom B. Zero, incompatible, unavailable, or current-request-rejected A falls through. A provisional/failed-unadmitted choice establishes no affinity, including after restart.
+- [ ] Add deterministic-fallback red tests. Fully known-positive routes precede unknown/stale; maximise minimum remaining percentage across every required bucket; then prefer native model, fewer active provisional leases, and stable opaque `AccountKey`. Shuffle inventory repeatedly and assert identical choice. System `Active` is never a tie-break.
+- [ ] Add terminal-default red tests. All ordinary routes zero and exhausted-alternate cases dispatch the configured default exactly once even when its capacity is zero. An already attempted default is not repeated and its bounded terminal response is surfaced. Retain at most that one default body under a total 1 MiB per-request rejected-response cap; close/discard every other rejected body. Missing, incompatible, unroutable, and unresolved defaults return typed capacity/authority failure without mutation.
+- [ ] Persist only keyed latest-successfully-admitted lane affinity in the privacy-safe lease journal. Restore it across restart; never promote provisional, failed-unadmitted, or shadow-only choices. Add concurrent successor/CAS, stale-turn, cancellation, corruption, and key-loss tests under `-race`.
+- [ ] Implement one bounded memory-only replay envelope owning immutable post-Headroom encoded bytes, the matching decoded inspection view, and safe semantic headers without injected auth. Enforce independent 10 MiB encoded and 10 MiB decoded limits, the expansion-ratio gate, and a 1 MiB rejected-response bound. Make release nil-safe/idempotent; close/drain rejected responses, best-effort overwrite owned slices, clear references, and prove journal/config/log/temp output contains no request or header content.
+- [ ] Replace the stale 8 MiB protocol-parser ceiling on this accepted path with the shared 10 MiB encoded/10 MiB decoded transport bounds. Add boundary tests at exactly 10 MiB and one byte over so a request accepted by the handler cannot fail merely because metadata/model parsing retained the older limit.
+- [ ] Add enforced ordering tests: decode/inspect -> route/effective-model choice -> one Headroom/model transform -> one re-encode -> envelope freeze -> attempts. Count Headroom and encoder calls across A -> B -> routing-default recovery and assert one call each, fixed effective model/buckets, and byte-identical frozen bodies on every attempt.
+- [ ] Make the frozen native HTTP transport authorisation-only. Move any Headroom/model mutation into pre-envelope request preparation; keep legacy non-native adaptation separate from account attempts. Assert the transport cannot rewrite/recompress a frozen body and that each attempt changes only authorisation.
+- [ ] Add pre-admission 401/403 ordering tests: exhaust same-identity candidates and eligible refresh first; only a never-admitted/no-downstream-byte lease may then exclude that account and use the next compatible ordinary account. A previously admitted lease remains same-identity-only.
+- [ ] Add the exact HTTP fixture `status=429` plus nested `error.type=usage_limit_reached`. For a never-admitted lease with no downstream bytes, assert transparent replay A -> B with identical frozen encoded body and semantic headers; only attempt authorisation differs. Near-match/soft 429, network failure, timeout, 5xx, ambiguity, accepted headers, forwarded SSE, and cancellation must not migrate.
+
+Use the captured immediate-response shape; reset values may be replaced with fixed synthetic equivalents, but do not add a top-level body status that the real HTTP response lacks:
+
+```json
+{"error":{"eligible_promo":null,"message":"The usage limit has been reached","plan_type":"pro","resets_at":1786832019,"resets_in_seconds":539708,"type":"usage_limit_reached"}}
+```
+
+- [ ] Add the monotonic-admission regression: admit an earlier sampling request on A, return an immediate exact hard 429 on a later request with the same turn ID, assert no B/default dispatch, update future capacity, and surface A's provider response unchanged.
+- [ ] Keep the WebSocket boundary conservative. Same-identity recovery before downstream 101 is permitted. Cross-account recovery requires a verified model-bearing handshake; after downstream 101, store keyed generations/intent only and require a harness-resubmitted portable full request on a new WS generation or HTTP crossover. Never retain a frame body in the journal or replace upstream invisibly.
+- [ ] Add safe decisions/counters for `affinity_reuse`, `fairness_select`, and `terminal_default`, plus aggregate current/peak replay bytes. Assert no request, semantic header, raw identity, path, or credential content appears.
+- [ ] Invalidate the prior HTTP readiness marker, run focused tests with `-race -count=100`, then the full suite. Write a revised marker only after every Stage 12A gate passes for the exact build/schema/fixture tuple.
+
+```bash
+go test -race -count=100 ./internal/proxy -run 'CodexRoutePolicy|CodexRequestEnvelope|CodexSelector|CodexAttempt|CodexRequestScope|CodexTransport|CodexProtocol|CodexHeadroom|CodexTurn|CodexLease|CodexResponsesHTTP|CodexCompact|CodexResync|CodexReadiness|Config'
+go test -race -count=100 ./cmd/cq -run 'ProxyCodexDefault|ProxyConfig|CodexDefault'
+go test -race -count=1 ./internal/proxy ./cmd/cq
+go vet ./...
+go build ./...
+git diff --check
+```
+
 ## Stage 13: WebSocket resynchronisation proof
 
 **Files:**
@@ -472,12 +587,13 @@ Later live observe evidence found four continuity mismatches. A fresh quota-cach
 - [x] Never transparently replay incremental frame or open replacement upstream behind same downstream socket. Same-account reconnect also invalidates predecessor response ID.
 - [ ] Run 100 trials for each explicitly supported CLI/Desktop build and retry budget 0, 1, exhausted. Prove error -> client invalidation -> new WS generation or HTTP crossover -> full portable request before replacement dispatch.
 - [x] Test full new-turn rotation trigger separately. Keep unsupported trigger account-affine/fail-closed until fixture proves signal.
+- [ ] Keep later-request hard-429 migration disabled for every previously admitted turn. If the user separately approves it, add a distinct spec/plan stage and installed fixtures proving portable full-request recovery without lost context, duplicate output, repeated tool side effects, or retry amplification; do not fold it into the current resync proof.
 - [x] Record proof result but keep WS `observe`; no WS readiness marker yet.
 - [x] Commit Stage 13 proof with unsupported-build blocker recorded.
 
 ## Stage 14: WebSocket enforcement
 
-**Promotion blocker:** Codex CLI/Desktop 0.146.0 and installed Desktop `0.147.0-alpha.6.5` send turn metadata but no model in the WebSocket HTTP handshake. Exact `0.147.0-alpha.6.5` source at `618b8e9111da9f57fe380b09d0f6516e3f343536` builds handshake headers from Responses compatibility metadata, session headers, attestation, and beta headers; it defines no `x-codex-model` projection. Model first appears in `response.create` after downstream `101`, while approved model-aware account selection and stateful upstream `101` journalling must finish before downstream `101`. No WS readiness marker may be written without a client change or approved architecture revision.
+**Promotion blocker:** Codex CLI/Desktop 0.146.0 and installed Desktop `0.147.0-alpha.6.5` send turn metadata but no model in the WebSocket HTTP handshake. Exact `0.147.0-alpha.6.5` source at `618b8e9111da9f57fe380b09d0f6516e3f343536` builds handshake headers from Responses compatibility metadata, session headers, attestation, and beta headers; it defines no `x-codex-model` projection. Model first appears in `response.create` after downstream `101`, while approved model-aware account selection and stateful upstream `101` journalling must finish before downstream `101`. No WS readiness marker may be written without a client change or approved architecture revision. Even a future approval for exceptional same-turn migration would not remove this model-bearing-handshake and installed-resynchronisation proof gate.
 
 **Files:**
 
@@ -497,7 +613,7 @@ Later live observe evidence found four continuity mismatches. A fresh quota-cach
 - [ ] Run `go test -race -count=100 ./internal/proxy -run 'CodexResponsesWS|CodexResync|CodexTurn|CodexLease'` plus full suite.
 - [ ] Commit `feat: enforced Codex WebSocket leases`.
 
-## Stage 15: Installed-service soak and default policy
+## Stage 15: Installed-service soak and enforcement-default policy
 
 **Promotion blocker:** deterministic/local-fake acceptance has one admitted turn on one observed day. Promotion still requires seven consecutively observed UTC days, at least 100 admitted installed-service turns, and all zero-failure counters.
 
@@ -512,13 +628,18 @@ Later live observe evidence found four continuity mismatches. A fresh quota-cach
 - Modify: `cmd/cq/proxy.go`
 - Modify related docs/help/tests.
 
+- [ ] Before every installed mutation, capture privacy-safe listener PID/binary hash, launchd label/state, coordinator socket metadata and owner, and active proxy-session count. If an iTerm/CLI proxy is serving an affected task or ownership is ambiguous, stop without unlinking, restarting, installing, or changing credentials.
+- [ ] Validate stale-endpoint recovery only in isolated state first: recovery/owner lock acquired, no owner/listener proved, one process unlinks/binds, competitors delegate. Live-owner and unverifiable-owner cases must return typed authority failure with zero mutation.
+- [ ] Re-run installed acceptance for fresh-Codex-Bar/stale-CQ same-identity fetch and zstd model/headroom extraction before resuming elapsed canary credit.
 - [x] Add privacy-safe canary recorder: admitted-turn count, keyed mismatch count, automatic auth/registry hash-change count, secret-leak count, unexplained lifecycle count, start/end time, build/schema/marker tuple. No raw identifiers or credentials.
-- [ ] Run installed service for seven consecutive days and at least 100 admitted turns. Include long turn past quota depletion, parallel short turns, next-turn reselection, same-lane supersession, restart during quiescence, explicit switch, and Codex Bar observation.
+- [ ] Run installed service for seven consecutive days and at least 100 admitted turns. Include long turn past quota depletion, parallel short turns, next-turn warm-affinity reuse and necessary reselection, same-lane supersession, restart during quiescence, explicit switch, and Codex Bar observation.
+- [ ] Extend the canary after Stage 12A: eligible same-lane successors retain warm account affinity despite a higher-headroom alternate; depleted/ineligible affinity selects the deterministic fallback; every-ordinary-route-zero invokes the configured routing default once; a later same-turn hard 429 after prior admission never dispatches an alternate.
 - [ ] Verify automatic activity leaves system-auth and registry hashes unchanged; explicit switch alone changes system hash.
+- [ ] Verify explicit Codex Bar/system account switching changes only the Desktop/system identity projection. It does not rewrite `codex_routing_default_account_key`, lane affinity, or an admitted route; configuring the routing default changes no system-auth hash.
 - [x] Rehearse rollback in deterministic restart tests: transition `enforce -> off`, retain exact authoritative account fence, route unseen turns through legacy path, and prove shadow epochs never promote. Installed-service drain remains part of soak acceptance.
 - [x] Only in later release, document enforcement as recommended after validation. Never default existing install to effective enforce and never synthesise readiness marker during upgrade.
 - [ ] After rollback window, delete dead request-scoped Codex selector failover/suppression/switch code proven unreachable. Keep `off/observe` executor path.
-- [x] Run final gates:
+- [x] Run pre-Stage-12A gates for installed code commit `0cde1a8` on 2026-08-09. This is historical baseline evidence, not current completion:
 
 ```bash
 go test -race -count=100 ./internal/proxy -run 'CodexTurn|CodexLease|CodexResponses'
@@ -529,7 +650,7 @@ go test -race -count=1 ./...
 git diff --check
 ```
 
-- [x] Audit current source for forbidden paths:
+- [x] Audit pre-Stage-12A source for forbidden paths. Rerun after Stage 12A before completion:
 
 ```bash
 rg -n 'Accounts\.Switch|CodexAccountSwitcher|PersistCodexAccount|RefreshCodexToken|active_account_key|auth\.json' internal cmd
@@ -537,7 +658,7 @@ rg -n 'Accounts\.Switch|CodexAccountSwitcher|PersistCodexAccount|RefreshCodexTok
 
 Every remaining match must be explicit coordinator/activator code, auth protocol code, or synthetic test fixture.
 
-- [x] Run installed-listener acceptance from approved blueprint, save privacy-safe evidence, and verify current readiness marker dimensions.
+- [x] Run pre-Stage-12A installed-listener acceptance from the then-approved blueprint and save privacy-safe evidence. Later evidence below invalidated current acceptance; this check is historical only.
 - [ ] Commit `feat: completed Codex routing canary`.
 
 Installed code build `0.20.3+0cde1a8` (SHA-256 `f0e365722a938c5a51f0a3c58a8cec78c371e9a078de1565de2057f925563781`) passed self-verifying loopback acceptance on 2026-08-09 after the shared transport-lease, lifecycle, writer, and privacy audits: 20 strong-key turns, 40 upstream requests, 20 selector calls, same-account repeated sampling, mixed plain/zstd bodies, zero continuity errors, and zero unknown lifecycle events. It wrote a mode-`0600` temporary HTTP marker matching parser schema 1, lease schema 1, retry budget 1, exact Desktop build `0.147.0-alpha.6.5`, and fixture hash `618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1`. Synthetic credentials and a loopback upstream prevented user-auth or raw-identifier capture. Follow-up fixes separated exact Desktop routing-build discovery from the model-cache API version, restarted the Homebrew launchd label when the legacy CQ label is absent, and treated an early downstream HTTP close as an indeterminate admitted stream rather than a malformed terminal event.
@@ -546,6 +667,8 @@ Controlled live activation changed HTTP from `observe` to `enforce` while retain
 
 A pre-activation crash report at 2026-08-09 12:27:23 BST recorded `SIGKILL (Code Signature Invalid)` with `Launch Constraint Violation`. This came from replacing the mapped development binary in place, not an upstream routing failure. Future development rollouts must build a unique file in the destination directory, verify it, preserve a rollback, atomically rename it over the executable, and only then restart the service. `cp`, `install`, redirection, and cross-filesystem moves must never write over a running executable. Rollback binaries remain available for `1a57c14`, `5640e6e`, `38ec5b2`, and `489a7b7`.
 
+Read-only live evidence later on 2026-08-09 invalidated installed acceptance for credential authority and encoded inspection. Homebrew `0.20.3+0cde1a8` launchd was loaded but crash-looping because `credential.sock` existed with no listening owner, while an iTerm-launched proxy from blueprint checkout `9968b9b`—a source tree with no credential coordinator—kept the active task alive and continued forwarding native Responses with 200 status. `Provider.Fetch` silently used filesystem-only inventory and reported a stale CQ candidate's 401 as account-wide `auth_expired` despite a fresh manifest-declared Codex Bar revision for the same identity. Codex Bar's observed OAuth authority was its managed-home `auth.json`, not Keychain. Zstd requests also reached headroom/model extraction encoded, producing the leading-`(` JSON error and `model=""`. No socket removal, service restart, credential adoption, or auth refresh was authorised or performed; canary credit resumes only after the Stage 3, 4, and 9 regression addenda pass in isolation and through the installed listener.
+
 ## Final completion audit
 
 - [ ] Read complete diff from Stage 1 base to Stage 15 head.
@@ -553,8 +676,14 @@ A pre-activation crash report at 2026-08-09 12:27:23 BST recorded `SIGKILL (Code
 - [x] Prove HTTP and WS share one lease manager and namespace; prove journal restart resolves account by opaque `AccountKey` and never token/path/email.
 - [x] Prove `response.completed` only changes sampling state; changed unseen turn ID after drained work is successor boundary; retained history blocks stale traffic.
 - [x] Prove no account identity migrates after admission and no incremental input crosses upstream generation.
+- [ ] Prove Stage 12A warm affinity prevents turn-by-turn load balancing, deterministic max-min fallback ignores system `Active`, and the terminal routing default dispatches at most once after ordinary alternatives.
+- [ ] Prove exact HTTP hard-429 replay occurs only for a never-admitted lease before downstream bytes; a later same-turn hard 429 after any prior admission dispatches no alternate/default.
+- [ ] Prove replay envelopes remain bounded and memory-only, release on every admission/terminal/cancel path, and never enter journal, config, diagnostics, health, logs, panic text, or temporary files.
 - [x] Confirm worktree contains no credential snapshots, raw installed fixtures, payload logs, canary raw IDs, or temp journals.
-- [x] Run full commands once more on clean tree. Record exact commit, Go version, Codex client/Desktop build, fixture hash, and installed-service marker in final report.
+- [ ] Prove coordinator read failure stays typed across provider fetch, registry, and health; prove stale recovery uses the lifetime lock, a final versioned Ping, and exact durable endpoint identity rather than inferred no-owner evidence. Prove rollout never repairs an active-session path.
+- [ ] Prove one bounded decoded zstd view feeds metadata/model/Headroom/routing; inspection-only forwarding is byte-exact; permitted Headroom/model mutation runs and re-encodes once before envelope freeze; every retry reuses identical frozen bytes with correct framing and no later Headroom/encoder call.
+- [x] Run pre-Stage-12A full commands on the then-clean tree for commit `0cde1a8` with Go `go1.26.5 darwin/arm64` and Desktop `0.147.0-alpha.6.5`. This is historical evidence only.
+- [ ] After Stage 12A and every outstanding regression addendum, rerun all full/focused race gates on a clean tree and record exact commit, Go version, client/Desktop build, fixture hash, and revised installed-service marker.
 - [ ] Do not push or open PR without explicit user approval.
 
 Final audit found HTTP enforcement and WebSocket observation initially shared only a journal and namespace, not live lease state. Mode-specific views now share one synchronised lease-map core, while retaining independent mode epochs and authority flags. A 100-run race test proves WS-observed exact-turn state remains on its first account when traffic crosses to HTTP enforcement. Existing restart tests resolve freshly discovered opaque `AccountKey` values from HMAC journal fields and assert raw session, thread, turn, account, response, and turn-state values never persist.

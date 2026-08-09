@@ -1,6 +1,6 @@
 # Codex Turn-Aware Account Routing Design
 
-- **Status:** Approved; implementation in progress; HTTP enforcement complete, WebSocket enforcement gated
+- **Status:** Baseline approved and partially implemented; conservative routing-policy design approved with implementation proposed and pending; exceptional post-admission migration unresolved; WebSocket enforcement gated
 - **Date:** 2026-08-08
 - **Scope:** Codex credential authority, quota-aware selection, native Responses HTTP/WebSocket routing, and automatic backend-window priming
 - **Implementation plan:** [`../plans/2026-08-08-codex-turn-aware-routing.md`](../plans/2026-08-08-codex-turn-aware-routing.md)
@@ -12,10 +12,13 @@ CQ becomes routing authority for Codex traffic without becoming global system-ac
 - CQ keeps one logical catalogue of accounts and preserves distinct system, CQ-managed, and external read-only credential candidates.
 - Codex Bar remains an independent usage and account manager. CQ may consume its declared managed accounts as live read-only candidates, but never copies, refreshes, activates, removes, or rewrites them.
 - Automatic routing never writes `~/.codex/auth.json` or changes registry active state.
+- Codex Desktop's system identity remains a user-controlled sign-in and remote-pairing identity. CQ's routing default is a separate opaque `AccountKey` used only for a final request attempt; routing never makes one follow or rewrite the other.
 - Explicit account-management commands use one isolated system-activation capability.
 - Each Codex agent turn receives an account lease. Parallel turns have independent leases.
 - Quota depletion after admission affects future turns only. It never moves an admitted turn to another account.
-- A different real turn ID on the same session/thread lane supersedes the previous turn and can choose a different account after any upstream-WebSocket continuation has been safely reset.
+- A different real turn ID on the same session/thread lane supersedes the previous turn and first prefers the lane's latest eligible admitted account to preserve cache warmth. It chooses a different account only when affinity is unavailable or ineligible and after any upstream-WebSocket continuation has been safely reset.
+- Before a turn has ever been admitted, an exact hard-quota response can be handled transparently by replaying the retained full request against another account. After ordinary alternatives are exhausted, CQ attempts the configured routing default once even when its required quota is authoritatively zero.
+- Replay material is bounded, memory-only, never journalled, and released at admission or terminal handling.
 - CQ discovers rate-limit windows from provider usage responses and can automatically start each newly reset window with the minimum coalesced set of account-pinned synthetic requests.
 
 This design fixes both current failure classes: stale managed credentials shadowing a fresh system credential, and request-level failover changing global auth while unrelated turns are active.
@@ -23,7 +26,7 @@ This design fixes both current failure classes: stale managed credentials shadow
 ## Goals
 
 1. Keep a long-running admitted turn on its original account after that account reaches its usage limit.
-2. Let new turns, including turns in parallel tasks, immediately select another account with usable capacity.
+2. Let new turns, including turns in parallel tasks, immediately select another account with usable capacity when their warm lane account is unavailable or ineligible.
 3. Stop CQ and Codex Bar from fighting over the system account.
 4. Retain accounts discovered through either CQ or the system auth file instead of silently losing or collapsing them.
 5. Recover from stale credentials by trying another credential for the same identity before changing account identity.
@@ -32,12 +35,16 @@ This design fixes both current failure classes: stale managed credentials shadow
 8. Make the migration staged, observable, race-tested, and reversible without restoring unsafe system-auth writes.
 9. Use current Codex Bar credentials without creating another independently rotating copy.
 10. Prime provider-declared quota windows automatically without hard-coded window durations or manual requests.
+11. Preserve cross-turn server and prompt-cache affinity instead of round-robin or turn-by-turn load balancing.
+12. Retry an exact full request transparently only across a proven pre-admission boundary, then surface the final provider response when no safe retry remains.
 
 ## Non-goals
 
 - Writing Codex Bar state, depending on Codex Bar implementation internals beyond its versioned account manifest, or asking Codex Bar to change its behaviour.
 - Mirroring every CQ routing decision into the system account.
 - Moving a turn between account identities after upstream admission.
+- Automatically forcing Codex Desktop to launch under, repair, or switch to a particular system identity. That remains separate research and requires explicit authority.
+- Abandoning an already-admitted turn after a later sampling request reaches a hard quota and migrating that same turn through a synthetic Desktop resynchronisation. This remains an explicit approval and installed-fixture gate.
 - Treating `response.completed` as whole-agent-turn completion.
 - Implementing a full Codex app-server facade in this migration.
 - Making translated Anthropic or Live/realtime traffic turn-aware without an exact Codex turn identity.
@@ -60,6 +67,33 @@ Two containment defects are independent of the refactor:
 
 - Missing identity claims can produce the non-identity `RecordKey` value `"::"` and collapse unrelated malformed records.
 - Proxy diagnostics can fall back to an access token as an account identifier. That fallback must be removed before further routing work.
+
+Read-only live evidence on 2026-08-09 exposed three additional gaps. No endpoint, service, or credential repair was performed while the active task continued through an iTerm-launched CQ proxy:
+
+1. Homebrew `0.20.3+0cde1a8` launchd repeatedly failed startup because `credential.sock` existed without a listening owner. The active iTerm proxy came from blueprint checkout `9968b9b`, which predates credential coordination, and continued forwarding native Responses with 200 status. The processes used different startup paths; socket repair or service restart still would have risked the running task.
+2. `Provider.Fetch` treated coordinator inventory failure as optional and silently rebuilt a filesystem-only inventory. It then reported a stale CQ candidate's 401 as `auth_expired` even though Codex Bar held a fresh revision for the same strong identity.
+3. Zstd-compressed `/responses` bodies reached legacy headroom/model extraction still encoded. JSON parsing saw the leading zstd `(` byte, emitted `invalid character '(' looking for beginning of value`, and logged `model=""` while the untouched request still forwarded successfully.
+
+## Terminology and identity boundaries
+
+The following terms are normative throughout this design:
+
+- **Harness or client:** Codex Desktop, Codex CLI, or another process that sends Responses traffic through CQ and surfaces the final response or error to the user.
+- **Task or conversation:** the user-facing Codex unit represented at the protocol boundary by `thread_id`.
+- **Session:** one root multi-agent execution tree identified by `session_id`. It is not an OAuth, login, credential, HTTP, or WebSocket session.
+- **Thread:** one protocol task/conversation lane inside a session. Root and subagent threads can share a session but have distinct `thread_id` values.
+- **Lane:** CQ's transport-independent `(session_id, thread_id, "codex-responses")` routing scope.
+- **Turn:** one opaque agent run identified by `turn_id`. A turn can contain steering, tool loops, compaction, and multiple sampling requests.
+- **Request:** one Responses or compact call within a turn.
+- **Attempt:** one dispatch of a retained request to one logical account and credential candidate.
+- **Quota window:** a provider/account/bucket/reset interval discovered from backend usage data. It is unrelated to a session, thread, turn, request, or credential login.
+
+Codex Desktop/system identity and CQ request-routing identity are deliberately separate:
+
+- **Desktop/system identity** is the account represented by system auth and used by Desktop for sign-in, remote pairing, and other harness control-plane behaviour. The user or an explicit account-management command owns it. Automatic routing observes it read-only and never switches, repairs, or derives routing state from it.
+- **Routing default** is a stable opaque logical `AccountKey` stored in CQ proxy configuration. It is not the system `Active` projection and is used only for the terminal fallback attempt described below. It can refer to the same logical account as the Desktop identity, but neither value follows the other.
+
+Configuration and diagnostics use opaque `AccountKey` values. A CLI may accept an email or display alias only to resolve one unique account at explicit configuration time; it persists the resolved key, not the alias. Personal account names are illustrative installation data, never normative repository values.
 
 ## Protocol constraints
 
@@ -121,7 +155,7 @@ This is a promotion gate, not an implementation detail. Silent removal of `previ
 
 ### Native request forms affect the relay
 
-Codex enables zstd request compression by default. CQ must perform bounded decoding for metadata and model inspection while retaining the original encoded bytes for an unchanged retry. Decoded-size and expansion-ratio limits apply before allocation.
+Codex enables zstd request compression by default. CQ must perform bounded decoding once and give the same decoded view to every JSON consumer, including turn metadata, model extraction, Headroom, routing, and body validation. When no transformation is required, forwarding and retry retain the exact original encoded bytes. When policy permits Headroom/model transformation, CQ invokes it exactly once after route/effective-model choice and before freezing the replay envelope, re-encodes exactly once with the declared supported content coding, and recalculates framing headers. The resulting encoded bytes and decoded view then become immutable for every account/candidate retry: CQ never recompresses, reruns Headroom, or changes effective model inside that request's attempt set. A failed or unsupported transformation returns a typed protocol failure before dispatch. The transport accepts at most 10 MiB encoded and 10 MiB decoded; compressed input also passes the expansion-ratio gate before allocation.
 
 The canonical nested turn-metadata value can exceed 64 KiB because current Codex keeps unbounded Code Mode tool mappings in `client_metadata` while deliberately omitting them from the direct compatibility header. CQ therefore bounds nested metadata by the already bounded decoded protocol request size, ignores unrelated fields during typed extraction, and retains the stricter 64 KiB limit for the direct header and turn state. Installed observe acceptance must distinguish request-decode errors, metadata-parse errors, and missing turn identity without recording payloads or raw identifiers.
 
@@ -155,6 +189,9 @@ These become mandatory as Stages 2–4 introduce their owners, then are never ro
 4. A managed credential is automatically refreshed only when CQ owns a never-exported OAuth lineage.
 5. A second coordinator cannot start, and mutating commands never fall back to direct file writes when coordination is unavailable.
 6. External credential sources are read-only capabilities. Automatic code may resolve an exact declared candidate revision for dispatch, but cannot copy, refresh, activate, remove, or rewrite it.
+7. Coordinator inventory or control failure remains a typed authority failure. Provider fetch, registry construction, and health reporting never replace it with a healthy filesystem-only or zero-account result.
+8. A Unix-socket pathname, failed connection, PID lookup, or listener absence is not ownership proof. Stale-endpoint recovery may unlink only while holding the permanent lifetime coordinator recovery/owner lock, after a final versioned Ping, and when a durable sidecar exactly matches socket generation, device, inode, owner, type, and mode; ambiguous state fails closed. The lock serialises cooperating CQ processes but cannot make pathname comparison and unlink atomic against a same-UID non-cooperating replacer, which remains an explicit local trust boundary.
+9. Request handling never repairs an endpoint or restarts a proxy in place. A compatibility-floor owner startup may automatically recover only an exact sidecar-proven endpoint after acquiring the lock. Legacy, missing, malformed, or mismatched proof requires explicit maintenance authority after affected proxy sessions drain.
 
 ### Target routing invariants
 
@@ -162,22 +199,29 @@ These become mandatory when their owning stage enables turn-aware routing.
 
 1. A turn's account identity becomes immutable at admission.
 2. Same-identity credential replacement is allowed; different-account migration after admission is not.
-3. A pre-admission 401/403 or hard usage 429 may change the provisional candidate or account. Network errors, 5xx, and soft/unknown 429 do not justify account migration.
-4. `response.completed` makes a lease quiescent or continuation-pending, never released.
-5. Each `(session_id, thread_id, "codex-responses")` lane has at most one current real turn. The same turn ID reuses its lease; a different valid unseen turn ID advances the lane after predecessor selection, retry, and attempt work drains; a retained historical turn ID fails closed as stale. CQ never infers order from turn-ID value.
-6. Parallel turn keys never share mutable lease state or failover suppression.
-7. New-turn selection is model/quota-bucket aware and chooses account, effective model, and required buckets as one decision.
-8. Incremental input stays on its exact live upstream WebSocket generation; a lost generation requires full-request resynchronisation even when the account is unchanged.
-9. Raw credentials, emails, account IDs, paths, turn IDs, thread IDs, response IDs, and prompt bodies never enter ordinary route diagnostics or the lease journal.
-10. Credential commits and lease commits are atomic, serialised by their declared owner, revision/generation-fenced, and permissioned `0o600` under a `0o700` directory.
-11. Once admission is observed in memory, persistence failure can only fail closed; it can never make the attempt provisional or migratable again.
+3. A pre-admission 401/403 first exhausts same-identity candidates and eligible refresh; only then may it exclude that logical account and choose another ordinary account, and only while the lease has never been admitted and CQ has forwarded no downstream header, event, or body byte. An exact hard usage 429 may likewise change the provisional account only across that boundary. Network errors, 5xx, and soft/unknown 429 never justify account migration.
+4. Desktop/system identity and CQ's routing default are independent. Automatic routing neither invokes `SystemActivator` nor derives the routing default from the system `Active` projection.
+5. A successor turn first prefers the lane's latest successfully admitted account when it remains compatible, routable, and non-zero for every required bucket. A provisional failure never establishes affinity, and another account's greater headroom never displaces eligible warm affinity.
+6. Without eligible affinity, selection is deterministic and capacity-fair. CQ does not round-robin, alternate accounts each turn, or use system-active status as a routing preference.
+7. After ordinary alternatives are exhausted, CQ attempts the configured routing default at most once, even when its required capacity is known zero. The default never overrides an admitted lease and never causes a system-account mutation.
+8. `response.completed` makes a lease quiescent or continuation-pending, never released.
+9. Each `(session_id, thread_id, "codex-responses")` lane has at most one current real turn. The same turn ID reuses its lease; a different valid unseen turn ID advances the lane after predecessor selection, retry, and attempt work drains; a retained historical turn ID fails closed as stale. CQ never infers order from turn-ID value.
+10. Parallel turn keys never share mutable lease state or failover suppression.
+11. New-turn selection is model/quota-bucket aware and chooses account, effective model, and required buckets as one decision.
+12. Incremental input stays on its exact live upstream WebSocket generation; a lost generation requires full-request resynchronisation even when the account is unchanged.
+13. Raw credentials, emails, account IDs, paths, turn IDs, thread IDs, response IDs, prompt bodies, and replay envelopes never enter ordinary route diagnostics or the lease journal.
+14. Credential commits and lease commits are atomic, serialised by their declared owner, revision/generation-fenced, and permissioned `0o600` under a `0o700` directory.
+15. Once admission is observed in memory, persistence failure can only fail closed; it can never make the attempt provisional or migratable again.
+16. Replayable request material is bounded and memory-only. CQ releases it on admission, final terminal handling, or cancellation and performs best-effort overwrite of owned byte slices before dropping references.
+17. Headroom/model transformation and content re-encoding occur at most once, after route/effective-model choice and before replay-envelope freeze. Candidate/account retries reuse the frozen bytes and fixed effective model.
 
 ## Authority model
 
 | State | Authority | Automatic access | Explicit access |
 |---|---|---|---|
 | Coordinator ownership | One supervised per-user coordinator instance | Broker RPC only | Mutation RPC only |
-| System-active identity and credential | `~/.codex/auth.json` | Read and reconcile only | Activate, replace, or remove through coordinator-scoped `SystemActivator` |
+| Desktop/system identity and credential | `~/.codex/auth.json` | Read and reconcile only; never an automatic routing control | Activate, replace, or remove through coordinator-scoped `SystemActivator` |
+| CQ routing default | Opaque `AccountKey` in unknown-field-preserving proxy config | Read only for one terminal fallback attempt | Set or clear through an explicit CQ configuration action; alias must resolve uniquely before persistence |
 | CQ-managed credentials | `~/.codex/accounts/*.auth.json` during compatibility period | Resolve; refresh eligible CQ-owned lineage through coordinator | Login, remove, import through coordinator |
 | Codex Bar managed credentials | Codex Bar versioned account manifest and declared managed homes | Validate, reconcile, and resolve exact read-only candidate revisions | None through CQ |
 | Credential provenance and revisions | Namespaced metadata in each managed record | Read; coordinator writes | Coordinator reads/writes |
@@ -186,7 +230,7 @@ These become mandatory when their owning stage enables turn-aware routing.
 | Window-primer schedule | CQ privacy-safe primer journal | Read/write when explicitly enabled | Enable, disable, inspect, and configure model overrides |
 | Per-turn routing | CQ lane/lease manager and journal | Read/write | Diagnostic inspection only |
 
-`Active` in existing account output continues to mean “matches current system identity.” It does not mean “used by every proxied turn.” Lease ownership stays out of ordinary account JSON.
+`Active` in existing account output continues to mean “matches current Desktop/system identity.” It does not mean “used by every proxied turn” or “CQ routing default.” Lease ownership stays out of ordinary account JSON. Codex Bar or an explicit system switch may change `Active` without changing the routing default, and configuring the routing default never invokes `SystemActivator`.
 
 ## Target architecture
 
@@ -290,7 +334,7 @@ type ExternalCredentialSource interface {
 }
 ```
 
-The Codex Bar adapter reads only its versioned managed-account manifest and the exact managed-home `auth.json` paths declared there. It validates that each path is rooted under Codex Bar's managed-home directory, is a regular user-owned file with restrictive permissions, matches the manifest's strong provider identity and auth fingerprint, and still has the expected revision at secret resolution. It does not scan arbitrary application-support paths, databases, browser data, cookies, or keychain secrets.
+The Codex Bar adapter reads only its versioned managed-account manifest and the exact managed-home `auth.json` paths declared there. For the observed Codex Bar version, those manifest-declared files are its OAuth credential authority; Keychain is not an account source or fallback. The adapter validates that each path is rooted under Codex Bar's managed-home directory, is a regular user-owned file with restrictive permissions, matches the manifest's strong provider identity and auth fingerprint, and still has the expected revision at secret resolution. It does not scan arbitrary application-support paths, databases, browser data, cookies, or keychain secrets.
 
 External candidates join logical accounts only through the same strong-identity reconciliation rules as system and managed candidates. Their `CandidateID` contains source namespace plus opaque manifest record ID; ordinary output never exposes the source path. A changed manifest fingerprint or credential revision creates a new candidate generation. If the file changes between planning and resolution, dispatch replans instead of using mismatched material.
 
@@ -320,7 +364,7 @@ For a request whose account identity is still mutable:
 2. try each remaining distinct access candidate for the same `AccountKey`;
 3. if eligible, run one coalesced refresh of a CQ-owned managed lineage;
 4. durably commit the refresh, replace the lease's accepted revision, and retry the same account;
-5. only then select another account while the lease remains provisional.
+5. only then select another account while the lease has never admitted and no downstream byte has been forwarded.
 
 For an admitted turn, steps 1–4 remain allowed because account identity is unchanged. Step 5 is forbidden.
 
@@ -387,15 +431,16 @@ Workload buckets:
 - a model with exact scoped windows, such as Spark, uses those scoped windows instead of an exhausted base window;
 - if no exact scoped data exists, selection falls back to shared capacity as unknown/compatible policy permits.
 
-Selection returns one indivisible `RouteChoice { AccountKey, RequestedModel, EffectiveModel, RequiredBuckets }`. Ordinary requests carry one bucket; pre-turn compaction can require both compaction-attempt and target-turn buckets. This preserves current model-rewrite fallback: exhausted Spark capacity may select a compatible base model/account only when existing policy permits that rewrite, and capacity is then evaluated against the effective model's bucket.
+Selection returns one indivisible `RouteChoice { AccountKey, RequestedModel, EffectiveModel, RequiredBuckets }`. Ordinary requests carry one bucket; pre-turn compaction can require both compaction-attempt and target-turn buckets. This preserves current model-rewrite fallback: exhausted Spark capacity may select a compatible base model/account only when existing policy permits that rewrite, and capacity is then evaluated against the effective model's bucket. The first choice freezes `EffectiveModel` and the Headroom-transformed request before dispatch. Later account failover can re-rank only accounts compatible with that frozen effective model and required buckets; it cannot select a different rewrite or transform the request again.
 
-New-lease eligibility order:
+Selection distinguishes hard continuation affinity, soft lane affinity, ordinary capacity choice, and the terminal routing default:
 
-1. model/plan compatible and known positive capacity;
-2. compatible with unknown/stale capacity;
-3. known zero is ineligible. If every compatible route is authoritatively zero, return the cached typed usage-limit outcome; do not probe accounts merely to rediscover it.
+1. `previous_response_id`, turn state, encrypted provider state, and a live upstream-socket generation are hard affinity. They must resolve to the exact admitted account and required generation or fail closed; capacity cannot override them.
+2. A new successor turn has soft lane affinity to the latest successfully admitted account on that lane. CQ uses it when the route remains model/plan compatible, a credential candidate is routable, and no required bucket is authoritatively zero. Soft affinity survives restart through the privacy-safe journal. It is ignored only when the account is incompatible, unavailable, rejected for the current request, or authoritatively zero for a required bucket. A provisional failure creates no affinity.
+3. With no eligible affinity, filter ordinary routes by model/plan compatibility, routable credential authority, and absence of an authoritative zero in any required bucket. Rank routes with a fresh positive fact for every required bucket ahead of compatible unknown/stale routes. Within the fully known class, maximise the minimum remaining percentage across required buckets. Then prefer the requested/native model over a rewrite, fewer active provisional leases, and the stable opaque `AccountKey`. Unknown/stale routes share a capacity score of `-1`, so CQ does not invent precision from missing data; the remaining tie-breaks make their order deterministic.
+4. If no ordinary route remains, or every ordinary alternative has produced a migration-authorising rejection, attempt the configured routing default exactly once. This terminal attempt may bypass an authoritative capacity zero, but not model/plan incompatibility, missing credential authority, or an unresolved account key. If the default already appeared earlier in this request's attempt set, do not dispatch it again; retain and surface its bounded terminal response if all other safe attempts fail. A missing, incompatible, unroutable, or unresolvable default returns a typed no-capacity or authority failure.
 
-Known remaining percentage ranks candidates. Active lease count is only a tie-break to avoid equal-capacity stampedes. System-active status is display metadata, not an automatic routing preference.
+This ranking balances normalised capacity only for lanes without eligible warm affinity. It does not optimise price, reset urgency, or speculative future use. System-active status remains display metadata, not a routing preference.
 
 Existing admitted leases bypass capacity eligibility. Mid-turn zero updates the ledger for future turns and leaves the current account unchanged.
 
@@ -483,9 +528,9 @@ CQ keeps one generation-fenced current-turn pointer per lane. Request handling c
 2. no current real turn and ID is unseen: create its reserving lease;
 3. same real turn ID as current: reuse its existing account and attempt rules;
 4. different unseen real turn ID while predecessor selection, retry, or provider-attempt work is active: reject as a concurrency/protocol violation;
-5. different unseen real turn ID with no live predecessor routing work: atomically advance the lane generation, transition any nonterminal predecessor to `superseded`, retain any terminal predecessor tombstone, and create the successor's reserving lease before selection/dispatch.
+5. different unseen real turn ID with no live predecessor routing work: atomically advance the lane generation, transition any nonterminal predecessor to `superseded`, retain any terminal predecessor tombstone, and create the successor's reserving lease with the lane's latest admitted-account soft affinity before selection/dispatch.
 
-Step 5 does not wait for `turn/completed`, `response.completed`, or new-turn admission. A well-formed unseen successor request is enough because Codex serialises turns within one thread. If successor dispatch later fails before admission, the predecessor remains historical in its superseded or terminal state and the successor ends `failed_unadmitted`; CQ never reopens the old turn as current. Late predecessor requests fail against retained history. Late predecessor events retain their original attempt/account generation and cannot affect the lane pointer or successor.
+Step 5 does not wait for `turn/completed`, `response.completed`, or new-turn admission. A well-formed unseen successor request is enough because Codex serialises turns within one thread. Soft affinity comes only from the lane's latest successfully admitted lease; selecting or rejecting a provisional account never changes it. If successor dispatch later fails before admission, the predecessor remains historical in its superseded or terminal state and the successor ends `failed_unadmitted`; CQ never reopens the old turn as current. Late predecessor requests fail against retained history. Late predecessor events retain their original attempt/account generation and cannot affect the lane pointer, affinity, or successor.
 
 An empty `turn_id` is valid only for `request_kind=prewarm`, where it becomes a typed startup-prewarm sentinel scoped by session, thread, and live downstream socket generation. Empty IDs for ordinary turns and compaction are invalid.
 
@@ -546,6 +591,8 @@ Startup prewarm uses a separate reservation lifecycle:
 
 HTTP `/responses` and unary `/responses/compact` become admitted on accepted 2xx response headers. CQ captures response-header turn state and journals admission before forwarding headers.
 
+Admission is monotonic for the whole logical turn lease, not reset for each sampling request. After any request admits a lease, a later request in that same turn remains governed by the admitted account even if the later request itself receives an immediate hard 429 before its own response headers or body. That response updates future capacity and is surfaced; it does not make the turn provisional again.
+
 A non-empty upstream WebSocket 101 `x-codex-turn-state` is also stateful acceptance. Before sending downstream 101, CQ binds and journals the account/socket reservation, attaching strong handshake turn identity when available. Otherwise the first matching `response.create` promotes that socket-scoped reservation. Other handshake metadata is non-admitting.
 
 WebSocket admission occurs on the first of:
@@ -566,6 +613,7 @@ Lease creation and every provisional account change are journalled before dispat
 Persist a privacy-safe lease journal under CQ's existing cache/config boundary. A random per-installation HMAC key is generated once in a separate `0o600` file under the `0o700` state directory. Records contain only:
 
 - separate keyed hashes of session, thread, current and retained historical turns, stable account key, and any continuation/turn-state correlation value;
+- the lane's latest successfully admitted account as a keyed stable-account reference for soft successor affinity;
 - lease, predecessor, mode-epoch, downstream-socket, and upstream-socket generations;
 - state, request kind, compaction phase, protocol/schema version, and authoritative/shadow flag;
 - creation and last-observed timestamps.
@@ -576,6 +624,7 @@ Rules:
 
 - active stream references never expire;
 - restart restores dispatched/admitted leases as orphaned and resolves the same account from current inventory;
+- restart restores soft lane affinity only from a successfully admitted record; provisional, failed-unadmitted, and shadow-only selections never become affinity;
 - socket generations restored after restart are always marked extinct, so incremental input requires resynchronisation;
 - a different well-formed unseen real turn ID for the same session/thread atomically advances the lane after predecessor selection, retry, and attempt work drains; nonterminal predecessors become superseded and terminal predecessor tombstones remain historical;
 - quiescent, orphaned, and superseded stale-ID tombstones retain for seven days after last observation;
@@ -596,10 +645,12 @@ Resume cases stay distinct:
 
 ## Attempt and failover policy
 
-| Signal | Provisional turn | Admitted turn |
+In this table, “provisional” means the logical turn lease has never admitted any request. A later sampling request does not regain provisional status after an earlier request admitted the lease.
+
+| Signal | Never-admitted provisional turn | Previously admitted turn |
 |---|---|---|
-| Candidate 401/403 | Try same-identity candidate; refresh eligible CQ lineage; then another account | Try same identity only; otherwise surface error |
-| Hard usage 429 | Mark requested bucket unavailable; try another account | Update future capacity; surface error |
+| Candidate 401/403 before downstream bytes | Try same-identity candidates; refresh eligible CQ lineage; then another ordinary account compatible with the frozen effective model | Try same identity only; otherwise surface error |
+| Exact hard usage 429 before downstream bytes | Mark requested bucket unavailable; exclude the account; replay the exact full request on another ordinary account | Update future capacity; surface error without account migration |
 | Soft/unknown 429 | Surface unchanged | Surface unchanged |
 | Network error / timeout / 5xx | Surface without account migration | Surface without account migration |
 | `codex.rate_limits` | Update provisional ledger; buffer until attempt accepted/terminal | Update ledger and forward; never terminal |
@@ -607,11 +658,35 @@ Resume cases stay distinct:
 
 Attempts use a bounded set of `AccountKey` and `CandidateID` values. They never depend on exclusion strings that can be empty or token-derived.
 
-`hard usage 429` has one audited predicate for the bounded event/body: top-level `type == "error"`; `status` or `status_code == 429`; and nested `error.type == "usage_limit_reached"`. Missing, malformed, or near-match fields are soft/unknown and never authorise account migration.
+`hard usage 429` has one audited transport-specific predicate for the bounded event/body. HTTP requires transport status 429 and nested `error.type == "usage_limit_reached"`. A wrapped WebSocket error additionally requires top-level `type == "error"` and `status` or `status_code == 429`. Missing, malformed, or near-match fields are soft/unknown and never authorise account migration.
 
 Codex owns network/timeout/5xx retry budget, backoff, and WebSocket-to-HTTP fallback. CQ does not add a second retry loop. CQ's bounded attempts cover only same-identity credentials, pre-admission account selection, and one version-gated reconnect signal needed to realise a stored failover/resync intent. That intent survives downstream reconnect and WS-to-HTTP crossover, and is consumed only by the same turn's portable full request.
 
-Replayable HTTP may perform bounded credential/account attempts before accepted 2xx headers. An established WebSocket never swaps upstream invisibly: a pre-admission 401/403 or hard 429 records the next candidate/account intent and uses a fixture-proven client retry signal; if the client cannot safely retry, CQ surfaces the original error. After WS admission, any transport failure invalidates the socket pair and the same bound account must be used after full-request reconnect.
+The conservative request decision algorithm is:
+
+1. Bound and decode the source request once, parse strict metadata/request kind/requested model, and form lane and lease keys without upstream dispatch.
+2. Reject retained stale turn IDs and concurrent successors. Reuse an existing turn lease, or create a successor carrying only the lane's latest admitted-account soft affinity.
+3. If the lease has ever been admitted, keep its account immutable and resolve only same-identity credential replacements. Otherwise choose eligible soft affinity first, then the deterministic capacity-fair ordinary route. This choice fixes the effective model and required buckets for the whole request.
+4. Run permitted Headroom/model transformation once against the bounded decoded view, re-encode once, correct framing, and freeze the resulting encoded bytes, decoded view, and safe semantic headers in the replay envelope. No attempt can rerun Headroom, recompress, or change the effective model.
+5. Dispatch same-identity candidates. A definite candidate 401/403 before downstream bytes first advances candidate/eligible-refresh recovery; after same-identity exhaustion, and only for a never-admitted lease, exclude that account and choose the next ordinary account compatible with the frozen effective model.
+6. When and only when an exact hard 429 arrives before any admitting signal or downstream byte and the lease has never been admitted, update capacity, exclude that account, and replay the frozen full request transparently against the next ordinary account compatible with the fixed effective model.
+7. Do not migrate on a soft/unknown 429, network error, timeout, 5xx, ambiguous outcome, accepted 2xx, admitting WebSocket event, or forwarded downstream byte.
+8. After ordinary alternatives are absent or exhausted, dispatch the configured routing default once even when capacity says zero, but only if it is compatible with the frozen effective model. If it was already attempted, do not dispatch it again; surface its retained bounded terminal response. If it cannot be resolved compatibly, return the typed capacity/authority failure.
+9. On first admission, final surfaced response/error, or cancellation, release credential material, close/drain rejected responses as appropriate, and destroy the replay envelope.
+
+Replayable HTTP may therefore perform bounded credential/account attempts before accepted 2xx headers. An established downstream WebSocket never swaps upstream invisibly: before downstream 101, same-identity handshake recovery is safe, while cross-account recovery requires a verified model-bearing handshake. After downstream 101, a pre-admission 401/403 or hard-429 frame can record a resynchronisation intent but cannot cause hidden upstream replacement or frame replay. If the client cannot safely reconnect and resend a portable full request, CQ surfaces the original error. After WS admission, any transport failure invalidates the socket pair and the same bound account must be used after full-request reconnect.
+
+### Bounded replay envelope
+
+The HTTP relay owns one per-request envelope containing the immutable post-Headroom encoded request bytes, the matching immutable decoded inspection view, and only the semantic headers needed to reproduce the request. When Headroom makes no change these are the exact original client bytes; when it performs a permitted model rewrite they are the result of that single pre-freeze transform and re-encode. Injected authorisation, cookies, hop-by-hop headers, resolved secrets, and response stream data are never part of the envelope. Encoded and decoded representations each have a 10 MiB limit; compressed input also passes the expansion-ratio gate. Retained rejected-response material has a total per-request cap of 1 MiB: CQ may retain only the terminal routing default's bounded body when that default was attempted before later alternatives, and it closes/discards every other rejected body after classification.
+
+The envelope exists only in process memory. CQ never journals, spills, caches, or logs it. Its lifetime ends at the first admission, final terminal response/error, or cancellation. Release is idempotent: overwrite owned byte slices on a best-effort basis, clear decoded and header references, close/drain any rejected response, and drop credential material after each attempt. Go cannot promise forensic zeroisation after compiler/runtime copies, so this is a strict lifetime-minimisation and no-persistence guarantee rather than a claim of perfect memory erasure.
+
+### Unresolved same-turn post-admission migration
+
+This approved reconciliation does not authorise abandoning an already-admitted turn. The unresolved decision is: should CQ, after a later sampling request receives an immediate hard quota 429, force Codex Desktop to resynchronise with a portable full request and migrate that same turn to another account?
+
+The conservative default remains **no**. CQ keeps the admitted account immutable and surfaces the later hard-limit response until a new `turn_id` arrives. Any exception requires separate user approval and installed-client proof of no lost context, duplicate visible output, repeated tool side effects, or retry-loop amplification across retry budgets 0, 1, and exhausted fallback.
 
 ## HTTP relay
 
@@ -619,18 +694,19 @@ Move native Responses HTTP handling out of `server.go` into a protocol-aware rel
 
 Responsibilities:
 
-1. preserve the original encoded request and perform bounded zstd decoding for inspection, with decoded-size and expansion-ratio limits;
-2. extract exact turn metadata and model bucket;
-3. acquire/reuse lease;
-4. send with an explicit account/candidate;
-5. classify status, response headers, and bounded pre-admission SSE events;
-6. retry only under the policy table;
-7. stream all accepted bytes unchanged while observing lifecycle and capacity;
-8. classify clean terminal, premature EOF, read error, early close, and cancellation.
+1. bound and decode the source request once under the 10 MiB encoded/10 MiB decoded and expansion-ratio limits;
+2. extract exact turn metadata, request kind, and requested model/buckets;
+3. acquire/reuse the lease and choose the fixed route/effective model;
+4. run permitted Headroom/model transformation once, re-encode once, correct framing, and freeze the memory-only replay envelope and semantic headers;
+5. send with an explicit account/candidate by injecting attempt-specific authorisation only;
+6. classify status, response headers, and bounded pre-admission SSE events;
+7. retry the frozen full request only under the never-admitted/no-downstream-bytes policy, including one terminal routing-default attempt;
+8. stream all accepted bytes unchanged while observing lifecycle and capacity;
+9. classify clean terminal, premature EOF, read error, early close, and cancellation.
 
-Unchanged retry reuses the original compressed bytes. Any future body mutation must recompress and correct `Content-Encoding` and `Content-Length`; this migration does not mutate native request bodies. Unary `/responses/compact` has a separate bounded JSON response path but shares selection, lease, and admission machinery. Valid full-body EOF completes its attempt and leaves the lease quiescent; truncation, malformed body, read failure, or cancellation after accepted headers is indeterminate/orphaned.
+Every retry reuses the frozen encoded bytes and semantic headers, then injects only the selected attempt's current authorisation. It never recompresses or reinvokes Headroom. Accepted 2xx headers admit the lease before any downstream forwarding and immediately make cross-account replay illegal; the relay releases the request envelope after the admission journal commit. Unary `/responses/compact` has a separate bounded JSON response path but shares selection, lease, and admission machinery. Valid full-body EOF completes its attempt and leaves the lease quiescent; truncation, malformed body, read failure, or cancellation after accepted headers is indeterminate/orphaned and never replays.
 
-`CodexTokenTransport` becomes pure explicit-account auth injection plus existing model rewriting. Selection, failover, suppression, persistence, and global switching leave the transport.
+On the frozen native HTTP path, `CodexTokenTransport` becomes pure explicit-account authorisation injection and cannot inspect, rewrite, recompress, or replace the body. Request preparation owns the single Headroom/model transformation before envelope freeze. Any legacy non-native route that still needs model adaptation uses a separate pre-attempt preparation helper; it cannot call a body-mutating transport inside an account retry loop. Selection, failover, suppression, persistence, and global switching leave the transport.
 
 ## WebSocket relay
 
@@ -658,6 +734,8 @@ Responsibilities:
 
 For a later turn whose frame model changes, CQ may compute a new `RouteChoice` but cannot apply it behind the existing socket. It records intent and requires a new model-bearing handshake through the verified reconnect path. If the client cannot provide model before stateful 101 admission, WS account rotation stays disabled for that client build.
 
+The transport boundary is the downstream 101. Before CQ sends it, same-identity upstream handshake recovery can remain invisible; a cross-account choice is permitted only when a verified model-bearing handshake makes the full request route knowable. After CQ sends downstream 101, no upstream replacement is transparent even when an error frame precedes every WebSocket admitting event. CQ may persist only keyed intent identity, socket/mode generations, and bounded counters; it never persists a `response.create` body or frame. The harness must resend a portable full request on a new WebSocket generation or HTTP crossover, after which CQ destroys the old frame buffer. Current installed Desktop lacks the required model-bearing handshake, so this path remains observation/proof work rather than enforcement.
+
 Ordinary Codex application cancellation is not a Responses wire event. If the downstream socket remains open, CQ keeps the sole active broker-local attempt generation and drains upstream through terminal/error before accepting another `response.create`. Generations are local counters, never inferred from response IDs or headers.
 
 If a different turn arrives while earlier selection, retry, or sampling-attempt work is active, phase one rejects it with a typed concurrency error. After that work drains, the changed turn ID supersedes the predecessor even when its logical state remains `continuation_pending`. CQ does not queue or add multiplexing.
@@ -667,10 +745,10 @@ If a different turn arrives while earlier selection, retry, or sampling-attempt 
 When an exact live upstream generation cannot be reused, including same-account reconnect, connection lifetime expiry, or cross-account rotation:
 
 1. do not forward the triggering request to a replacement upstream;
-2. retain a provisional reconnect/rotation intent for the turn;
+2. retain a provisional reconnect/rotation intent containing keyed identity and generations only, never request/frame content;
 3. emit at most one version-gated reconnect signal for that intent: for incremental input, the exact wrapped `previous_response_not_found` error without upstream dispatch; full-request cross-account rotation on an existing downstream socket remains forbidden until a separate signal is fixture-proven;
 4. verify the client invalidates the old socket and sends the same turn's portable full request either on a new model-bearing WebSocket handshake/generation or over HTTP `/responses`; no graceful close handshake is required;
-5. consume the stored intent once and dispatch that full request to the lease's account, or to the selected new account only when this is a new provisional turn;
+5. consume the stored intent once and dispatch that full request to the lease's immutable account, or to the selected new account only when this is a never-admitted provisional turn;
 6. if resynchronisation fails, keep the same live upstream generation when still available or surface a typed continuity error. Never drop history or guess.
 
 Codex source maps the nested `previous_response_not_found` error to a retryable full-request path, but CQ must prove exact end-to-end behaviour for each supported client, including current Codex Desktop and `stream_max_retries` values 0, 1, and exhausted fallback. Error event, client invalidation, new WebSocket generation or HTTP crossover, and portable full request remain an acceptance test, not an assumed contract.
@@ -682,7 +760,7 @@ Extend ordinary route diagnostics with safe fields:
 - keyed `turn_hint`;
 - request kind;
 - lease phase and generation;
-- decision: `new`, `reuse`, `candidate_retry`, `pre_admission_failover`, `resync`, `supersede`, `stale_block`, `retain`, `expire`;
+- decision: `new`, `reuse`, `affinity_reuse`, `fairness_select`, `candidate_retry`, `pre_admission_failover`, `terminal_default`, `resync`, `supersede`, `stale_block`, `retain`, `expire`;
 - reason and capacity bucket;
 - existing hashed account hint;
 - continuity state.
@@ -693,6 +771,8 @@ Add aggregate `/health` data:
 - provisional, active, quiescent, and orphaned lease counts;
 - pre-admission auth and hard-429 failovers;
 - post-admission quota errors;
+- warm-affinity reuse, fairness fallback, and terminal-default attempt counts;
+- aggregate current/peak replay-envelope byte counts without request, header, or account content;
 - resync attempts, successes, fallbacks, and blocks;
 - unknown metadata/protocol events;
 - late-resume blocks;
@@ -716,6 +796,8 @@ Ordinary diagnostics never require payload logging. Existing payload diagnostics
 ### `internal/proxy`
 
 - `codex_capacity.go`: model-bucket capacity ledger and account selection inputs.
+- `codex_route_policy.go`: warm-affinity eligibility, deterministic capacity ranking, attempt-set exclusion, and one terminal routing-default decision.
+- `codex_request_envelope.go`: bounded memory-only post-Headroom request freeze, exact retry ownership, and idempotent release.
 - `codex_turn_metadata.go`: strict bounded metadata parser.
 - `codex_turn_lease.go`: concurrent lane pointer, seen-turn tombstone, logical lease, and attempt state machines.
 - `codex_lease_store.go`: privacy-safe durable lane/lease journal.
@@ -723,7 +805,7 @@ Ordinary diagnostics never require payload logging. Existing payload diagnostics
 - `codex_request_scope.go`: explicit-account execution for non-turn-aware routes.
 - `codex_responses_http.go`: HTTP/SSE relay.
 - `codex_responses_ws.go`: frame-aware WebSocket broker.
-- `codex_transport.go`: reduced explicit-account auth/model rewrite helper.
+- `codex_transport.go`: explicit-account authorisation helper; frozen native HTTP attempts permit no body/model mutation.
 - `codex_live.go`: retains separate call affinity; loses automatic global persistence.
 - `codex_window_primer.go`: backend-window activation planning, coalescing, scheduling, and verification.
 - `codex_primer_store.go`: privacy-safe attempt and reset-generation journal.
@@ -782,12 +864,15 @@ Add additive proxy config:
 {
   "codex_turn_routing": "off",
   "codex_ws_turn_routing": "observe",
+  "codex_routing_default_account_key": "",
   "codex_window_priming": {
     "enabled": false,
     "model_overrides": {}
   }
 }
 ```
+
+`codex_routing_default_account_key` is an opaque stable logical account key, not an email, display alias, credential candidate, or copy of system `Active`. Empty means no terminal default is configured, so exhausted ordinary routes return the typed no-capacity/authority result. `cq proxy codex-default [--clear | <alias-or-account-key>]` may resolve a unique human-facing alias but persists only the `AccountKey`. Automatic routing and configuration loading never call `SystemActivator`, adopt the current system account, or rewrite this field when Codex Bar changes `Active`.
 
 `model_overrides` is optional and keyed by exact raw backend scope. Window names and durations are never configured. Omitted priming defaults to disabled. Enabling requires a proxy restart and never sends traffic until a fresh usage read identifies a due backend reset generation.
 
@@ -821,19 +906,20 @@ Executable addendum plans:
 | 1. Containment | Remove token-derived identifiers and proxy/Live `Switcher`; stop automatic system/registry writes and all Codex refresh; preserve/prefer a matching live system candidate over stale managed duplicates; add monotonic compatibility-epoch refusal; make fake `/app-server` fail closed and replace messages directing clients to it; correct root/provider architecture docs | Fresh/expired cases across every automatic path make zero token-endpoint calls and leave system, registry, and managed credentials byte-identical; live-newer/stored-older passes; tests reject uncommitted refresh use; secret scan passes | Initial floor; never run below current recorded compatibility epoch |
 | 2. Explicit authority | Extract `SystemActivator`; split registry upsert from active projection; define typed activation/deactivation/remove outcomes | Non-activating and repeated login preserve unknown auth/registry fields and change neither system auth nor active registry key; switch/remove ambiguity and projection-failure tests pass | Keep explicit commands on isolated capability; no automatic writers return |
 | 3. Read-only candidate inventory | Add candidate equivalence/conflicts, revisions, deterministic ordering, and one-row compatibility output; discovery reports association/adoption intent but does not persist opaque account keys | Live/managed inverse, partial-to-rich claims, conflicts, and directory-order fixtures pass within one inventory generation | Roll back consumer shape only; Stage-1 candidate reconciliation remains |
-| 4. Credential coordinator | Add fixed local endpoint, single-owner startup, persisted opaque account keys, atomic namespaced managed records, adoption/roll-forward/removal journal, and route explicit mutations through it; advance compatibility epoch; keep refresh disabled | Two-process startup, restart identity stability, login/adopt/remove/activate races, and every crash point have one durable outcome; stale endpoint fails closed | Keep administrative RPC writes; disable automatic adoption; never run a pre-Stage-4 binary after epoch advance |
+| 4. Credential coordinator | Add fixed local endpoint, permanent lifetime owner lock, versioned Ping, transactional unique-socket publication, exact durable endpoint sidecar, persisted opaque account keys, atomic namespaced managed records, adoption/roll-forward/removal journal, and route explicit mutations through it; advance compatibility epoch; keep refresh disabled | Two-process startup, restart identity stability, login/adopt/remove/activate races, and every crash point have one durable outcome; sidecar commit precedes a supported-platform-proven no-replace final publication; a post-floor exact sidecar-proven orphan recovers automatically under the lock, while live, legacy, mismatched, ambiguous, or unsupported publication state returns a typed failure | Keep administrative RPC writes; disable automatic adoption; never blind-unlink the endpoint or run a pre-Stage-4 binary after epoch advance; require one stopped/drained maintenance transition from the legacy socket format |
 | 5. Managed refresh broker | Add lineage state machine, same-identity recovery, uncertain-rotation recovery, and eligible coordinator-only refresh | Exchange-vs-activation/removal races perform at most one exchange; commit failure prevents dispatch; exported/borrowed/unknown lineages never refresh | Disable managed refresh; fresh candidates remain routable |
 | 6. Capacity choice | Add monotonic ledger plus indivisible account/effective-model/bucket selection | Spark/base rewrite fixtures, hard-zero fences, stale/reset epochs, and out-of-order generations pass under fake clock | Use compatible unknown-capacity ordering without restoring global writes |
 | 7. Config and mode floor | Add unknown-field-preserving config, primary/WS modes, mode epochs, authoritative/shadow records, and drain rules | Every config-writing command passes N/N-1 round trips; `observe -> enforce -> off -> enforce` restart fixtures never promote shadow state | Default both enforcement paths off |
 | 8. Route decomposition | Add explicit-account request executor; migrate translated Anthropic, count-token, compact, images/search, native Responses, and Live callers; split HTTP and one-to-one supervised WS relays without leases | Existing route/status/body/model/headroom behaviour passes; 1,000 connect/cancel/shutdown cycles have zero race-detector or leak-detector failures | Select legacy-safe executor through mode `off` |
-| 9. Protocol parsers | Add bounded zstd inspection, exact metadata/request-kind/compaction parsing, unary compact handling, SSE admission parser, and WS handshake/error/event parser | Audited 0.146 corpus plus captured installed-Desktop fixtures pass, including malformed/oversized/compressed cases | Parsers observe only; relays remain authoritative |
+| 9. Protocol parsers | Add one bounded decoded request view for metadata, model, headroom, request-kind, and compaction inspection; add exact unary compact, SSE admission, and WS handshake/error/event parsers | Audited 0.146 corpus plus captured installed-Desktop fixtures pass, including malformed/oversized/compressed cases; zstd model/headroom extraction succeeds, unchanged forwarding is byte-exact, and any permitted rewrite re-encodes with correct headers | Parsers observe only; relays remain authoritative |
 | 10. Lease core | Add lane/current-turn pointers, retained seen-turn tombstones, logical/attempt/prewarm state machines, changed-ID supersession, continuation-pending rules, generation fencing, HMAC key, durable journal, retention, and crash recovery as isolated components | `-race -count=100` concurrency suite, every write crash point, same-lane succession, stale-ID rejection, cross-thread independence, opaque-ID comparison, corruption/key-loss, restart, prewarm adoption, expiry, and late-event fixture passes | Components remain unused by routes |
 | 11. Observe integration | Feed HTTP and WS traffic into shadow lanes/leases and safe metrics; never consume shadow decisions | Automated corpus of 1,000 turns plus 20 installed turns across simple, tool-loop, same-thread succession, parallel threads, subagents, prewarm, compaction, and reconnect cases has zero strong-metadata key/account mismatches and zero raw-ID/secret leaks | Set primary mode `off`; discard shadow epoch |
 | 12. HTTP enforcement | Add HTTP enforcement implementation and readiness validation for strong-metadata `/responses` and `/responses/compact`; require predecessor affinity or fail closed on unsafe continuation | Explicit post-Stage-11 validation writes HTTP marker; repeated sampling pins; parallel/new turns select independently; compressed replay stays exact; no post-admission migration in `-race -count=100` | Invalidate marker; set primary mode `observe` or `off` |
+| 12A. Conservative routing reconciliation | Separate Desktop identity from CQ routing default; add admitted-lane warm affinity, deterministic capacity fallback, one pre-freeze Headroom/model transform, bounded replay envelope, never-admitted exact-hard-429 HTTP replay, and one terminal-default attempt | New tests prove eligible warm lanes never load-balance, retries reuse one transformed/encoded body, all-zero/exhausted routes attempt default once, request material never persists, and a later same-turn 429 after prior admission never migrates; prior HTTP marker is invalidated until these gates pass | Disable terminal-default configuration; invalidate the revised marker; retain immutable admitted leases and automatic system-auth containment |
 | 13. WebSocket resync proof | Add rotation-intent/reconnect/full-request state machine to the already shadowed one-to-one broker; keep account changes shadow-only | For each explicitly supported CLI/Desktop build and retry budget, 100 reconnect/resync trials prove error → client invalidation → new WS generation or HTTP crossover → portable full request before any replacement upstream dispatch | Keep WS mode `observe`; whole-socket affinity remains authoritative |
 | 14. WebSocket enforcement | Permit WS `enforce` only after one atomic marker records successful completion of every blocking gate for the exact build/schema/retry-budget tuple | Installed listener proves same-turn sampling, parallel turns, quota exhaustion, 60-minute/restart reconnect, full-history account change, clean byte/error propagation, and zero late-generation mutations | Invalidate marker; set WS mode `observe` and restart/drain |
-| 15. Soak and default | Run installed-service canary; in a later release make enforcement the recommended post-validation choice only for installations with current readiness markers and explicit opt-in; never activate it by upgrade; remove dead selector/suppression/switch code after rollback window | Seven consecutive days and at least 100 admitted installed-service turns with zero account/lease mismatch, automatic auth write, secret leak, or unexplained lifecycle event; complete one rollback rehearsal | Keep explicit `off/observe` through next release window |
-| 16. External candidate federation | Add generic read-only source boundary plus validated Codex Bar manifest adapter; preserve source candidates under one logical account and resolve exact external revisions only inside attempts | Fresh Codex Bar/stale CQ inverse reproducer routes same identity successfully; manifest/path/fingerprint/revision attacks fail closed; all automatic activity leaves both stores byte-identical | Disable external source adapter; CQ/system candidates remain unchanged |
+| 15. Soak and enforcement default | Run installed-service canary; snapshot endpoint/listener/service ownership and drain affected sessions before any repair or restart; in a later release make enforcement the recommended post-validation choice only for installations with current readiness markers and explicit opt-in; never activate it by upgrade; remove dead selector/suppression/switch code after rollback window | Seven consecutive days and at least 100 admitted installed-service turns with zero account/lease mismatch, automatic auth write, secret leak, unexplained lifecycle event, or live-session repair; complete one rollback rehearsal | Keep explicit `off/observe` through next release window; leave an active external proxy untouched until explicit drain authority exists |
+| 16. External candidate federation | Add generic read-only source boundary plus validated Codex Bar manifest/managed-home adapter; preserve source candidates under one logical account and resolve exact external revisions only inside attempts | Fresh Codex Bar/stale CQ inverse reproducer makes `Provider.Fetch` use the fresh same-identity revision rather than returning filesystem-only `auth_expired`; source failure is typed; manifest/path/fingerprint/revision attacks fail closed; all automatic activity leaves both stores byte-identical | Disable external source adapter; CQ/system candidates remain unchanged |
 | 17. Dynamic window priming | Add backend descriptor preservation, conservative model-family resolution, capability-safe coalescing, durable scheduler, account-pinned synthetic Responses request, and reset-epoch verification behind explicit feature enablement | Fake-clock/race/crash suites pass; naturally reset untouched installed account receives no manual request, scheduler detects sliding then proves stable epoch, and no credential/system/task state changes | Disable primer; retain journal for inspection; never replay an admitted or ambiguous model capability |
 
 Stage 1 intentionally trades automatic Codex refresh for credential safety until Stage 5 supplies a proven single owner. Compatibility epoch starts there and advances before any later irreversible persisted schema; startup refuses an older binary rather than silently restoring unsafe semantics. No lease stage begins before credential authority and rollback controls are complete.
@@ -846,6 +932,7 @@ Preserve:
 - unknown JSON fields;
 - `0o600` credential files and `0o700` directories;
 - one account row and existing `Active` meaning;
+- independent Desktop/system identity and CQ routing-default `AccountKey`; neither follows the other automatically;
 - email CLI arguments when unique;
 - explicit login, switch, remove, and account listing;
 - current HTTP route/status behaviour except invalid `/app-server` relay;
@@ -861,8 +948,11 @@ Rollback rules:
 5. Restart drains old WebSockets and prevents detached legacy switch goroutines from surviving cutover.
 6. A missing bound account after restart produces a continuity error for an admitted/continuing turn; CQ does not choose a different identity.
 7. Shadow records never become authoritative across mode or release changes.
-8. Candidate reconciliation and live-system preference remain in the rollback floor; downgrade never restores managed-always-wins discovery.
-9. Before writing an irreversible schema, CQ atomically advances a compatibility epoch. Older binaries refuse startup; rollback uses a binary at or above the recorded floor.
+8. Clearing or disabling the routing default removes only its terminal fallback attempt. It never changes Desktop/system auth, admitted leases, or existing lane affinity.
+9. Candidate reconciliation and live-system preference remain in the rollback floor; downgrade never restores managed-always-wins discovery.
+10. Before writing an irreversible schema, CQ atomically advances a compatibility epoch. Older binaries refuse startup; rollback uses a binary at or above the recorded floor.
+11. Connect failure alone never authorises endpoint removal. Post-floor automatic recovery requires the lifetime coordinator lock, a final versioned Ping failure, and an exact durable sidecar match for the final socket identity. Legacy or unverifiable state remains manual and fail-closed.
+12. Installed maintenance never mutates a socket, binary, launchd job, or credential source while an affected proxy session remains active. Snapshot first; drain or obtain explicit maintenance authority; then perform the one-time legacy transition atomically. Later exact sidecar-proven crash recovery may run automatically at supervised owner startup.
 
 ## Verification matrix
 
@@ -885,9 +975,12 @@ Rollback rules:
 - explicit switch resolves uniquely, activates the exact login candidate, aborts on adoption failure, writes atomically, and preserves unknown fields;
 - active/inactive removal, deactivation, bound-lease refusal/force, and registry projection partial success;
 - concurrent coordinator startup and stale/unreachable endpoint fail closed without direct-write fallback;
+- exact post-floor stale socket with no listener recovers only after one process acquires the lifetime owner lock, fails a final versioned Ping, and matches the durable generation/device/inode/UID/type/mode sidecar; a live listener, legacy or mismatched record, competing recovery, unverifiable process state, or active-session maintenance path returns a typed authority failure without unlinking;
+- coordinator inventory failure never becomes a healthy zero-account or filesystem-only fetch; a last-known inventory remains explicitly stale/degraded, and no known inventory produces a typed unavailable result;
 - switch racing inventory/refresh cannot be reverted by stale `IsActive` state;
 - every automatic path performs zero writes to system auth and registry.
-- Codex Bar fresh/CQ stale and CQ fresh/Codex Bar stale retain both candidates and use a successful same-identity revision without copying either store;
+- Codex Bar fresh/CQ stale and CQ fresh/Codex Bar stale retain both candidates; `Provider.Fetch` and registry discovery use a successful same-identity revision without copying either store or mislabelling a stale-candidate 401 as account-wide `auth_expired`;
+- Codex Bar discovery reads only the versioned manifest and its declared managed-home `auth.json`; a keychain-only or undeclared credential is ignored;
 - malformed manifest, path escape, symlink/non-regular file, permissive ownership/mode, identity mismatch, fingerprint mismatch, and revision race fail closed;
 - external candidates are never refreshed, activated, removed, adopted, or persisted by CQ.
 
@@ -918,7 +1011,7 @@ Rollback rules:
 - a different turn ID is rejected while predecessor selection, retry, or provider-attempt work remains active, then advances the lane after that work drains;
 - hundreds of distinct turn IDs remain independent under `-race`;
 - quota zero after admission never moves account;
-- new turn reselects;
+- a successor turn reuses its latest eligible admitted lane account; it reselects only when affinity is unavailable or ineligible;
 - multiple `response.completed` events around tool work reuse one account;
 - `response.completed.end_turn=false` requires another same-turn sample unless a different turn ID later supersedes it;
 - `response.completed.end_turn=true` or absent is quiescent, not authoritative turn completion;
@@ -930,6 +1023,23 @@ Rollback rules:
 - admission/journal failure, ENOSPC, corrupt journal, and HMAC-key loss never restore provisional migration;
 - mode epochs never promote shadow leases or discard authoritative continuity fences.
 
+### Routing-policy reconciliation tests
+
+- changing Codex Bar or system `Active` leaves the configured routing-default `AccountKey`, lane affinity, and automatic request route unchanged; configuring or clearing the routing default never invokes `SystemActivator`;
+- a unique display alias persists only its resolved opaque `AccountKey`; ambiguous aliases fail and an omitted/unresolvable key produces a typed result without mutation;
+- admitted account A becomes soft affinity for the lane's successor; eligible A remains selected even when B has more headroom or fewer leases;
+- zero, incompatible, unavailable, or current-request-rejected affinity falls through to ordinary capacity choice; provisional and failed-unadmitted choices establish no affinity;
+- routes with all required buckets known positive rank ahead of unknown/stale; fully known routes maximise minimum required-bucket remaining percentage, then prefer native model, fewer active provisional leases, and stable `AccountKey`; inventory order cannot change the result;
+- a definite pre-admission 401/403 exhausts same-identity candidates and eligible refresh before excluding the logical account; cross-account recovery occurs only for a never-admitted/no-downstream-byte lease and keeps the frozen effective model/body;
+- exact immediate HTTP 429 plus nested `usage_limit_reached`, before admission or downstream bytes on a never-admitted lease, updates capacity and replays byte-identical encoded body and semantic headers against the next ordinary account without surfacing the first failure;
+- soft/near-match 429, network failure, timeout, 5xx, ambiguity, accepted headers, forwarded SSE bytes, and any previously admitted lease never migrate account;
+- all ordinary routes authoritatively zero, or all ordinary alternatives exhausted, dispatch the configured routing default once; an already attempted default is not dispatched twice and its retained bounded terminal response is surfaced; total retained rejected-response material never exceeds that one 1 MiB default body and every other rejected body is closed/discarded;
+- missing, incompatible, unroutable, and unresolvable defaults return the typed no-capacity/authority result and leave system auth untouched;
+- independent 10 MiB encoded and 10 MiB decoded request limits, the 1 MiB rejected-response bound, compressed expansion-ratio rejection, cancellation, admission, final failure, and repeated release all free the envelope safely under `-race`;
+- Headroom/model transformation and content re-encoding each run exactly once before envelope freeze; A-to-B-to-default attempts retain one effective model and send byte-identical frozen bodies without recompression or another Headroom call;
+- journal, config, diagnostics, panic text, temporary files, and health output contain no request body, semantic header value, raw identifier, or credential material; only aggregate replay-byte counts are observable;
+- one earlier accepted request followed by a later same-turn immediate hard 429 remains on its admitted account, dispatches no alternate/default attempt, and surfaces the provider response.
+
 ### Protocol/relay tests
 
 - exact 0.146 header, nested metadata string/object, flat compatibility, and transport-fallback fixtures;
@@ -938,6 +1048,8 @@ Rollback rules:
 - opaque remote-compaction content retains predecessor affinity until two-identity portability is proven;
 - current Desktop shadow fixtures before enforcement;
 - zstd compressed, malformed, oversized, expansion-ratio, and byte-preserving replay fixtures;
+- zstd `/responses` gives metadata, model, headroom, routing, and body validation one bounded decoded view; no consumer parses encoded bytes or degrades to `model=""`; inspection-only forwarding is byte-exact;
+- a permitted Headroom/model rewrite runs once before envelope freeze and re-encodes once with the declared supported coding and correct `Content-Length`; retries reuse identical transformed bytes, while unsupported or failed re-encoding returns a typed protocol error before dispatch;
 - split/coalesced SSE chunks, CRLF, multiline data, malformed/unknown/oversized events;
 - WS prewarm, repeated sampling, multiple turns on one socket, and stale handshake metadata;
 - upstream/downstream handshake headers, beta header, subprotocol, permessage-deflate, and lifetime reconnect;
@@ -946,6 +1058,7 @@ Rollback rules:
 - `response.metadata`, first turn state, well-formed `response.created`, and explicit non-admitting event fixtures;
 - wrapped 401/403/hard-429 before admission;
 - only the exact wrapped `usage_limit_reached` 429 predicate authorises provisional account change; near matches do not;
+- the exact HTTP predicate uses transport status 429 plus nested `usage_limit_reached`; a body-only near match does not authorise replay;
 - `rate_limits -> hard429`, `rate_limits -> 401`, and `rate_limits -> response.created` preserve candidate attribution and accepted event order;
 - no alternate account after admission or forwarded bytes;
 - `codex.rate_limits` updates capacity and passes through unchanged;
@@ -983,6 +1096,15 @@ go test -race -count=1 ./...
 12. Install tested build, enable automatic priming, restart service, and prove scheduler alone detects the sliding untouched epoch and emits the exact-account synthetic request.
 13. Verify the backend reset epoch stops sliding and begins counting down; verify user task/turn journals, system auth, CQ-managed auth, Codex Bar auth, and registry active state remain unchanged.
 14. If synthetic admission is ambiguous or observed, perform usage verification only; never manually trigger or replay that generation.
+15. Before any endpoint, binary, launchd, or credential mutation, snapshot the active listener, coordinator owner/path, service state, and affected proxy sessions. If an external CLI proxy is serving an active task or ownership is ambiguous, perform no live repair.
+16. In isolated state, prove an exact post-floor endpoint publishes transactionally, retains a lifetime owner lock, and auto-recovers after a crash only when its durable generation/device/inode/UID/type/mode sidecar matches and a final versioned Ping fails. Repeat with a live owner, legacy endpoint, malformed/mismatched sidecar, publication crash points, and competing starter; prove zero non-owned unlink/restart/write activity plus typed authority failure.
+17. Send zstd native Responses requests with model and turn metadata, one inspection-only and one permitted Headroom/model rewrite. Verify both use the single decoded view; inspection-only upstream receives the exact original bytes; rewrite invokes Headroom and the encoder once before envelope freeze; retries receive identical frozen bytes; and responses remain byte/order preserving.
+18. Present a fresh manifest-declared Codex Bar revision beside a stale CQ revision for one strong identity. Verify provider fetch and a provisional attempt use same-identity recovery without reporting account-wide `auth_expired` or changing either store.
+19. Record privacy-safe hashes for the Desktop/system identity and configured routing-default key. Change Codex Bar/system `Active`; verify the Desktop identity changes only through that explicit action while the routing default and automatic route remain unchanged.
+20. Admit two consecutive turns on one lane while its first account remains eligible and another account has greater headroom. Verify the successor remains on the warm account; separately exhaust the required bucket and verify the next successor uses the deterministic fallback account.
+21. With every ordinary account authoritatively zero, send one never-admitted HTTP request and verify CQ attempts the configured routing default exactly once, then surfaces its canonical provider limit response if it also fails. Do not manually reset or prime an account for this test.
+22. Admit one request in a turn, then produce an immediate hard quota 429 on a later request with the same turn ID. Verify no alternate/default dispatch occurs and the harness receives the provider response.
+23. Inspect the journal, config, health, diagnostics, and process temporary directory after success, terminal failure, and cancellation. Verify no replay envelope or request/header content persists.
 
 ## Resolved decisions and remaining gates
 
@@ -990,6 +1112,7 @@ Resolved:
 
 - CQ owns routing; Codex Bar remains independent observer.
 - Automatic routing never activates a system account.
+- Desktop/system identity and CQ routing default are separate authorities; the latter is a configured opaque `AccountKey` used only as terminal request fallback.
 - Credentials are candidate-based, not stored-wins.
 - One local credential coordinator owns writes; refresh is suspended for borrowed, legacy, exported, or uncertain lineages.
 - Leases use exact turn metadata and survive sampling completion.
@@ -999,10 +1122,20 @@ Resolved:
 - Quiescent/orphan leases persist for seven days.
 - Current `/app-server` relay is retired.
 - Base and scoped model capacity are selected separately.
+- Successor turns prefer the lane's latest eligible admitted account; ordinary capacity fairness applies only without warm affinity, so CQ never round-robins merely to balance accounts.
+- A never-admitted HTTP request may replay transparently after the exact hard-429 predicate and before downstream bytes; ordinary alternatives precede one terminal routing-default attempt even when its capacity is known zero.
+- Replay envelopes are bounded, memory-only, never journalled, and released at admission or terminal handling.
 - Codex Bar credentials are federated as read-only live candidates rather than copied into CQ.
+- Codex Bar OAuth authority is its versioned manifest plus declared managed-home `auth.json`, not Keychain.
+- Coordinator authority failure is typed; endpoint recovery requires the lifetime lock, a final versioned Ping, and exact durable sidecar identity, never inferred no-owner evidence, blind unlinking, or in-request repair.
 - Priming discovers every backend window; users configure feature enablement and optional model overrides, never durations.
 - Scoped model mapping uses exact/alias/display or unique token-family evidence; ambiguity fails closed.
 - Synthetic requests are coalesced by activation target and verified only by exact active-epoch advancement or post-activation stability of a previously sliding untouched epoch.
+
+Unresolved approval before exceptional same-turn migration:
+
+- CQ does not currently abandon an already-admitted turn after a later immediate hard 429. Allowing Desktop resynchronisation and migration of that same turn requires explicit user approval plus installed proof of portable full-request recovery with no lost context, duplicate output, repeated tool side effects, or retry amplification. Until then, CQ surfaces the hard limit on the admitted account and waits for a new `turn_id` before selecting another account.
+- Automatically forcing Codex Desktop to launch under a configured system identity remains separate research. This migration guarantees non-interference only; it does not add launch-time repair or activation.
 
 Blocking gates before WebSocket enforcement:
 
