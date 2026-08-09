@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -180,6 +181,37 @@ type proxyCommandOptions struct {
 	Port int
 }
 
+func codexHealthFromInventory(inventory codexprov.Inventory) proxy.CodexHealth {
+	health := proxy.CodexHealth{
+		AccountCount:    len(inventory.Accounts),
+		ExternalSources: make([]proxy.CodexSourceHealth, len(inventory.ExternalSources)),
+	}
+	for i, source := range inventory.ExternalSources {
+		health.ExternalSources[i] = proxy.CodexSourceHealth{
+			Name: source.Name, CandidateCount: source.CandidateCount, HealthCode: codexSourceHealthCode(source.ErrorCode),
+		}
+	}
+	return health
+}
+
+func codexSourceHealthCode(code string) string {
+	switch code {
+	case "":
+		return "ok"
+	case "unavailable", "invalid", "invalid_manifest", "unsafe_path", "stale_revision", "identity_mismatch", "fingerprint_mismatch", "fetch_error":
+		return code
+	default:
+		return "unknown"
+	}
+}
+
+func writeCodexHealthDiagnostics(w io.Writer, health proxy.CodexHealth) {
+	fmt.Fprintf(w, "cq: codex accounts: %d\n", health.AccountCount)
+	for _, source := range health.ExternalSources {
+		fmt.Fprintf(w, "cq: codex source: name=%s candidates=%d health=%s\n", source.Name, source.CandidateCount, source.HealthCode)
+	}
+}
+
 func parseProxyCommandOptions(args []string) (proxyCommandOptions, error) {
 	return parseProxyCommandOptionsFor("proxy start", args)
 }
@@ -274,46 +306,36 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Inner:       http.DefaultTransport,
 	}
 
-	// Codex account discovery (no refresh — tokens shared with Codex CLI).
-	codexDiscover := proxy.CodexDiscoverer(func() []codexprov.CodexAccount {
-		return codexprov.DiscoverAccounts(fsys)
-	})
-	if inventory, err := credentialControl.List(context.Background()); err != nil {
+	// Codex account discovery is owned by the credential coordinator.
+	codexInventory, err := credentialControl.List(context.Background())
+	if err != nil {
 		return fmt.Errorf("Codex credential inventory: %w", err)
-	} else {
-		for _, intent := range inventory.Intents {
-			if intent.Kind != codexprov.IntentAdopt {
-				continue
-			}
-			activator, err := codexprov.NewFileSystemActivator(fsys)
-			if err != nil {
-				return err
-			}
-			snapshot, err := activator.Active(context.Background())
-			if err != nil {
-				return fmt.Errorf("Codex system snapshot: %w", err)
-			}
-			if _, _, err := credentialControl.Adopt(context.Background(), snapshot); err != nil {
-				return fmt.Errorf("Codex credential adoption: %w", err)
-			}
-			break
+	}
+	for _, intent := range codexInventory.Intents {
+		if intent.Kind != codexprov.IntentAdopt {
+			continue
 		}
+		activator, err := codexprov.NewFileSystemActivator(fsys)
+		if err != nil {
+			return err
+		}
+		snapshot, err := activator.Active(context.Background())
+		if err != nil {
+			return fmt.Errorf("Codex system snapshot: %w", err)
+		}
+		if _, _, err := credentialControl.Adopt(context.Background(), snapshot); err != nil {
+			return fmt.Errorf("Codex credential adoption: %w", err)
+		}
+		codexInventory, err = credentialControl.List(context.Background())
+		if err != nil {
+			return fmt.Errorf("Codex credential inventory after adoption: %w", err)
+		}
+		break
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
-	codexAccounts := codexDiscover()
-	var codexEmails []string
-	for _, a := range codexAccounts {
-		if a.Email != "" {
-			codexEmails = append(codexEmails, a.Email)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "cq: codex accounts: %d", len(codexAccounts))
-	if len(codexEmails) > 0 {
-		fmt.Fprintf(os.Stderr, " (%s)", strings.Join(codexEmails, ", "))
-	}
-	fmt.Fprintln(os.Stderr)
+	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
 
 	codexRequestScope := &proxy.CodexRequestScope{
 		Chooser:   codexSelector,
@@ -499,11 +521,17 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 
 	srv := &proxy.Server{
-		Config:                 cfg,
-		Selector:               selector,
-		Discover:               discover,
-		Transport:              transport,
-		CodexDiscover:          codexDiscover,
+		Config:    cfg,
+		Selector:  selector,
+		Discover:  discover,
+		Transport: transport,
+		CodexHealth: func() proxy.CodexHealth {
+			inventory, err := credentialControl.List(context.Background())
+			if err != nil {
+				return proxy.CodexHealth{ExternalSources: []proxy.CodexSourceHealth{}}
+			}
+			return codexHealthFromInventory(inventory)
+		},
 		CodexRequests:          codexRequestRouter,
 		CodexWebSocketExecutor: codexWebSocketExecutor,
 		Headroom:               headroom,

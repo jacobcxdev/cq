@@ -48,6 +48,17 @@ func (f RegistryRefresherFunc) Refresh(ctx context.Context) (modelregistry.Refre
 	return f(ctx)
 }
 
+type CodexSourceHealth struct {
+	Name           string `json:"name"`
+	CandidateCount int    `json:"candidate_count"`
+	HealthCode     string `json:"health_code"`
+}
+
+type CodexHealth struct {
+	AccountCount    int                 `json:"account_count"`
+	ExternalSources []CodexSourceHealth `json:"external_sources"`
+}
+
 // Server is the reverse proxy HTTP server.
 type Server struct {
 	Config                 *Config
@@ -55,6 +66,7 @@ type Server struct {
 	Discover               ClaudeDiscoverer
 	Transport              http.RoundTripper
 	CodexDiscover          CodexDiscoverer
+	CodexHealth            func() CodexHealth
 	CodexRequests          *CodexRequestRouter
 	CodexWebSocketExecutor ExplicitWebSocketExecutor
 	// Deprecated compatibility seams. Production routing never sets these.
@@ -631,7 +643,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		claudeCount = len(s.Discover())
 	}
 	var codexCount int
-	if s.CodexDiscover != nil {
+	var codexHealth CodexHealth
+	if s.CodexHealth != nil {
+		codexHealth = s.CodexHealth()
+		codexCount = codexHealth.AccountCount
+	} else if s.CodexDiscover != nil {
 		codexCount = len(s.CodexDiscover())
 	}
 	resp := map[string]any{
@@ -645,6 +661,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"enabled": s.Diag != nil,
 			"payload": s.PayloadDiag != nil,
 		},
+	}
+	if s.CodexHealth != nil {
+		resp["codex_external_sources"] = codexHealth.ExternalSources
 	}
 	httpMode, wsMode := s.codexRoutingHealth()
 	resp["codex_turn_routing"] = httpMode

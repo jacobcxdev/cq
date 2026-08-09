@@ -142,18 +142,40 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 	return last
 }
 
-// DiscoverAccounts returns all locally known Codex accounts without making
-// network calls. It implements provider.Discoverer so the runner can
+// DiscoverAccounts returns the coordinator's Codex account inventory without
+// making network calls. It implements provider.Discoverer so the runner can
 // synthesise auth_expired rows for accounts absent from the cache.
-func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
-	accts := DiscoverAccounts(p.fs)
-	out := make([]provider.Account, len(accts))
-	for i, a := range accts {
+func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, error) {
+	inventoryReader := p.inventory
+	var control *CredentialControl
+	if inventoryReader == nil {
+		if durableFS, ok := p.fs.(fsutil.DurableFileSystem); ok {
+			var err error
+			control, err = OpenDefaultCredentialRefreshControl(ctx, durableFS, p.client)
+			if err != nil {
+				return nil, fmt.Errorf("open Codex credential inventory: %w", err)
+			}
+			defer control.Close()
+			inventoryReader = control
+		}
+	}
+	var inventory Inventory
+	if inventoryReader != nil {
+		listed, err := inventoryReader.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list Codex credential inventory: %w", err)
+		}
+		inventory = listed
+	} else {
+		inventory = DiscoverInventory(p.fs)
+	}
+	out := make([]provider.Account, len(inventory.Accounts))
+	for i, logical := range inventory.Accounts {
 		out[i] = provider.Account{
-			AccountID: a.AccountID,
-			Email:     a.Email,
-			Label:     a.PlanType,
-			Active:    a.IsActive,
+			AccountID: logical.Identity.AccountID,
+			Email:     logical.Identity.Email,
+			Label:     logical.Identity.PlanType,
+			Active:    logical.Active,
 		}
 	}
 	return out, nil

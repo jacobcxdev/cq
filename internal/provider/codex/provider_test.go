@@ -304,6 +304,69 @@ func TestNewCredentialCoordinatorIncludesDefaultCodexBarSource(t *testing.T) {
 	}
 }
 
+func TestDiscoverAccountsUsesCoordinatorInventoryForExternalSourceStates(t *testing.T) {
+	tests := []struct {
+		name      string
+		inventory Inventory
+		wantID    string
+	}{
+		{
+			name: "present",
+			inventory: Inventory{
+				Accounts: []LogicalAccount{{
+					Identity: AccountIdentity{AccountID: "external-account", Email: "external@example.test", PlanType: "plus"},
+				}},
+				ExternalSources: []ExternalSourceStatus{{Name: "codexbar", CandidateCount: 1}},
+			},
+			wantID: "external-account",
+		},
+		{
+			name: "absent",
+			inventory: Inventory{
+				Accounts: []LogicalAccount{{
+					Identity: AccountIdentity{AccountID: "system-account"},
+				}},
+				ExternalSources: []ExternalSourceStatus{{Name: "codexbar", ErrorCode: "unavailable"}},
+			},
+			wantID: "system-account",
+		},
+		{
+			name: "invalid",
+			inventory: Inventory{
+				Accounts: []LogicalAccount{{
+					Identity: AccountIdentity{AccountID: "managed-account"},
+				}},
+				ExternalSources: []ExternalSourceStatus{{Name: "codexbar", ErrorCode: "invalid"}},
+			},
+			wantID: "managed-account",
+		},
+		{
+			name: "zero sources",
+			inventory: Inventory{Accounts: []LogicalAccount{{
+				Identity: AccountIdentity{AccountID: "local-account"},
+			}}},
+			wantID: "local-account",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Provider{
+				fs:        newFakeFS(),
+				inventory: staticCredentialInventory{inventory: tt.inventory},
+			}
+
+			accounts, err := p.DiscoverAccounts(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(accounts) != 1 || accounts[0].AccountID != tt.wantID {
+				t.Fatalf("accounts = %+v, want coordinator account %q", accounts, tt.wantID)
+			}
+		})
+	}
+}
+
 func TestFetchMultiAccountActive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
