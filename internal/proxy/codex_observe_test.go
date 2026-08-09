@@ -96,6 +96,23 @@ func TestCodexObserveMalformedAndRateLimitCounters(t *testing.T) {
 	}
 }
 
+func TestCodexObserveClassifiesRequestInputs(t *testing.T) {
+	t.Parallel()
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	metadata := `{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}`
+	body := encodeCodexZstd(t, []byte(`{"type":"response.create","model":"gpt-5"}`))
+	observer.BeginHTTP(context.Background(), body, "zstd", metadata, false).Finish(nil)
+	observer.BeginHTTP(context.Background(), []byte("not-zstd"), "zstd", metadata, false).Finish(nil)
+	observer.BeginHTTP(context.Background(), []byte(`{"type":"response.create"}`), "identity", "", false).Finish(nil)
+	observer.BeginHTTP(context.Background(), []byte(`{"type":"response.create"}`), "identity", `{`, false).Finish(nil)
+
+	health := observer.Health()
+	if health.StrongKeys != 1 || health.MetadataHeaders != 3 || health.ZstdRequests != 2 ||
+		health.RequestDecodeErrors != 1 || health.MetadataParseErrors != 1 || health.MissingTurnIdentity != 1 {
+		t.Fatalf("health = %#v", health)
+	}
+}
+
 func TestCodexObservePrewarmAdoptsMatchingRealTurn(t *testing.T) {
 	t.Parallel()
 	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(3, false, nil), nil, []byte("01234567890123456789012345678901"))

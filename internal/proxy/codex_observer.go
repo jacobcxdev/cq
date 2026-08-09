@@ -20,18 +20,23 @@ import (
 )
 
 type CodexObservationHealth struct {
-	Leases           map[string]int `json:"leases"`
-	Requests         uint64         `json:"requests"`
-	Attempts         uint64         `json:"attempts"`
-	StrongKeys       uint64         `json:"strong_keys"`
-	Failovers        uint64         `json:"failovers"`
-	QuotaEvents      uint64         `json:"quota_events"`
-	Resyncs          uint64         `json:"resyncs"`
-	Unknown          uint64         `json:"unknown"`
-	Late             uint64         `json:"late"`
-	Stale            uint64         `json:"stale"`
-	ContinuityErrors uint64         `json:"continuity_errors"`
-	RefreshSuspended uint64         `json:"refresh_suspended"`
+	Leases              map[string]int `json:"leases"`
+	Requests            uint64         `json:"requests"`
+	Attempts            uint64         `json:"attempts"`
+	StrongKeys          uint64         `json:"strong_keys"`
+	MetadataHeaders     uint64         `json:"metadata_headers"`
+	ZstdRequests        uint64         `json:"zstd_requests"`
+	RequestDecodeErrors uint64         `json:"request_decode_errors"`
+	MetadataParseErrors uint64         `json:"metadata_parse_errors"`
+	MissingTurnIdentity uint64         `json:"missing_turn_identity"`
+	Failovers           uint64         `json:"failovers"`
+	QuotaEvents         uint64         `json:"quota_events"`
+	Resyncs             uint64         `json:"resyncs"`
+	Unknown             uint64         `json:"unknown"`
+	Late                uint64         `json:"late"`
+	Stale               uint64         `json:"stale"`
+	ContinuityErrors    uint64         `json:"continuity_errors"`
+	RefreshSuspended    uint64         `json:"refresh_suspended"`
 }
 
 type CodexTurnObserver struct {
@@ -45,6 +50,11 @@ type CodexTurnObserver struct {
 	requests         atomic.Uint64
 	attempts         atomic.Uint64
 	strongKeys       atomic.Uint64
+	metadataHeaders  atomic.Uint64
+	zstdRequests     atomic.Uint64
+	requestDecodeErr atomic.Uint64
+	metadataParseErr atomic.Uint64
+	missingTurnID    atomic.Uint64
 	failovers        atomic.Uint64
 	quotaEvents      atomic.Uint64
 	resyncs          atomic.Uint64
@@ -131,16 +141,24 @@ func (observer *CodexTurnObserver) begin(ctx context.Context, body []byte, conte
 		return nil
 	}
 	observer.requests.Add(1)
+	if directMetadata != "" {
+		observer.metadataHeaders.Add(1)
+	}
+	if strings.EqualFold(strings.TrimSpace(contentEncoding), "zstd") {
+		observer.zstdRequests.Add(1)
+	}
 	handle := &CodexTurnObservation{observer: observer, ctx: ctx, compact: compact, ws: ws, socket: socketGeneration, parser: NewCodexSSEParser(codexSSEDefaultMaxEventBytes)}
 	decoded, err := DecodeCodexRequest(body, contentEncoding, DefaultCodexZstdLimits)
 	if err != nil {
 		observer.unknown.Add(1)
+		observer.requestDecodeErr.Add(1)
 		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "request_decode"})
 		return handle
 	}
 	request, err := ParseCodexProtocolRequest(decoded.Decoded(), directMetadata, handshake)
 	if err != nil {
 		observer.unknown.Add(1)
+		observer.metadataParseErr.Add(1)
 		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "metadata_parse"})
 		return handle
 	}
@@ -160,6 +178,7 @@ func (observer *CodexTurnObserver) begin(ctx context.Context, body []byte, conte
 		}
 	} else {
 		observer.unknown.Add(1)
+		observer.missingTurnID.Add(1)
 		noteCodexObservation(ctx, codexObservationFields{Decision: "shadow_unknown", Reason: "turn_identity_missing"})
 	}
 	return handle
@@ -522,18 +541,23 @@ func (observer *CodexTurnObserver) NextSocketGeneration() uint64 {
 
 func (observer *CodexTurnObserver) Health() CodexObservationHealth {
 	health := CodexObservationHealth{
-		Leases:           make(map[string]int),
-		Requests:         observer.requests.Load(),
-		Attempts:         observer.attempts.Load(),
-		StrongKeys:       observer.strongKeys.Load(),
-		Failovers:        observer.failovers.Load(),
-		QuotaEvents:      observer.quotaEvents.Load(),
-		Resyncs:          observer.resyncs.Load(),
-		Unknown:          observer.unknown.Load(),
-		Late:             observer.late.Load(),
-		Stale:            observer.stale.Load(),
-		ContinuityErrors: observer.continuityErrors.Load(),
-		RefreshSuspended: observer.refreshSuspended.Load(),
+		Leases:              make(map[string]int),
+		Requests:            observer.requests.Load(),
+		Attempts:            observer.attempts.Load(),
+		StrongKeys:          observer.strongKeys.Load(),
+		MetadataHeaders:     observer.metadataHeaders.Load(),
+		ZstdRequests:        observer.zstdRequests.Load(),
+		RequestDecodeErrors: observer.requestDecodeErr.Load(),
+		MetadataParseErrors: observer.metadataParseErr.Load(),
+		MissingTurnIdentity: observer.missingTurnID.Load(),
+		Failovers:           observer.failovers.Load(),
+		QuotaEvents:         observer.quotaEvents.Load(),
+		Resyncs:             observer.resyncs.Load(),
+		Unknown:             observer.unknown.Load(),
+		Late:                observer.late.Load(),
+		Stale:               observer.stale.Load(),
+		ContinuityErrors:    observer.continuityErrors.Load(),
+		RefreshSuspended:    observer.refreshSuspended.Load(),
 	}
 	for _, lease := range observer.Leases.Snapshot() {
 		health.Leases[lease.State.String()]++
