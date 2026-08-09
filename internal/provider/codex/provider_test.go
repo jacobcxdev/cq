@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -157,6 +159,13 @@ func (s staticSecretResolver) Resolve(context.Context, CandidateRef) (Credential
 	return s.material, nil
 }
 
+type fixedHomeDurableFS struct {
+	fsutil.OSFileSystem
+	home string
+}
+
+func (f fixedHomeDurableFS) UserHomeDir() (string, error) { return f.home, nil }
+
 func (u *urlRewriter) Do(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.URL.Scheme = "http"
@@ -201,6 +210,59 @@ func TestFetchMissingAuthFile(t *testing.T) {
 	}
 	if results[0].Error.Code != "not_configured" {
 		t.Errorf("error code = %q, want not_configured", results[0].Error.Code)
+	}
+}
+
+func TestFetchStaleDefaultCredentialCoordinatorReturnsFetchErrorWithoutDispatch(t *testing.T) {
+	home := t.TempDir()
+	fs := fixedHomeDurableFS{home: home}
+	authDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(authDir, "auth.json")
+	original := validAuthJSON("stale-access", "", "", "stale-account")
+	if err := os.WriteFile(authPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controlPath := DefaultCredentialControlPath(home)
+	if err := os.MkdirAll(filepath.Dir(controlPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staleEndpoint := []byte("stale endpoint")
+	if err := os.WriteFile(controlPath, staleEndpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var usageCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		usageCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	p := &Provider{
+		client: &urlRewriter{client: srv.Client(), baseURL: srv.URL},
+		fs:     fs,
+	}
+
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "fetch_error" {
+		t.Fatalf("results = %+v, want one fetch_error result", results)
+	}
+	if got := results[0].Error.Message; !strings.Contains(got, "credential coordinator") || strings.Contains(got, home) {
+		t.Fatalf("message = %q, want privacy-safe coordinator failure", got)
+	}
+	if got := usageCalls.Load(); got != 0 {
+		t.Fatalf("usage calls = %d, want no stale credential dispatch", got)
+	}
+	if got, err := os.ReadFile(authPath); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("system auth changed: data equal = %v, error = %v", bytes.Equal(got, original), err)
+	}
+	if got, err := os.ReadFile(controlPath); err != nil || !bytes.Equal(got, staleEndpoint) {
+		t.Fatalf("stale endpoint changed: data equal = %v, error = %v", bytes.Equal(got, staleEndpoint), err)
 	}
 }
 

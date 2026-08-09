@@ -34,22 +34,17 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 	inventoryReader := p.inventory
 	secrets := p.secrets
 	var control *CredentialControl
-	if broker == nil || inventoryReader == nil || secrets == nil {
+	if broker == nil && inventoryReader == nil && secrets == nil {
 		if durableFS, ok := p.fs.(fsutil.DurableFileSystem); ok {
 			var err error
 			control, err = OpenDefaultCredentialRefreshControl(ctx, durableFS, p.client)
-			if err == nil {
-				defer control.Close()
-				if broker == nil {
-					broker = control
-				}
-				if inventoryReader == nil {
-					inventoryReader = control
-				}
-				if secrets == nil {
-					secrets = control
-				}
+			if err != nil {
+				return []quota.Result{quota.ErrorResult("fetch_error", "Codex credential coordinator unavailable", 0)}, nil
 			}
+			defer control.Close()
+			broker = control
+			inventoryReader = control
+			secrets = control
 		}
 	}
 	var inventory Inventory
