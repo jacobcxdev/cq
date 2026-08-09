@@ -101,6 +101,12 @@ type ExclusiveLocker interface {
 	OpenExclusiveLock(name string, perm os.FileMode) (ExclusiveLock, error)
 }
 
+// NewExclusiveLocker creates and locks a new file. Existing entries are never
+// opened, even when they are valid unlocked lock files.
+type NewExclusiveLocker interface {
+	OpenNewExclusiveLock(name string, perm os.FileMode) (ExclusiveLock, error)
+}
+
 // ExclusiveLockHeldProber checks an existing lock without creating it or
 // retaining ownership if it is currently unlocked.
 type ExclusiveLockHeldProber interface {

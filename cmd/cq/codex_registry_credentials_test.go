@@ -684,7 +684,8 @@ func TestCodexRegistryModelsKeeps403RetryWithinSameIdentity(t *testing.T) {
 		t.Fatalf("rejected response closes = %d, want 1", rejectClose)
 	}
 	_, plans, refreshes := authority.snapshot()
-	if len(plans) != 2 || plans[0].Identity != identityA || plans[1].Identity != identityA {
+	wantStrongIdentity := codexprov.AccountIdentity{AccountID: identityA.AccountID, UserID: identityA.UserID}
+	if len(plans) != 2 || plans[0].Identity != wantStrongIdentity || plans[1].Identity != wantStrongIdentity {
 		t.Fatalf("exact plans crossed identity before same-account exhaustion: %+v", plans)
 	}
 	if refreshes != 0 {
@@ -833,7 +834,8 @@ func TestCodexRegistryModelsRefreshesManagedOnceAfterSameIdentityCandidates(t *t
 		t.Fatalf("rejected response closes = %d, want 2", rejectClose)
 	}
 	_, plans, refreshes := authority.snapshot()
-	if len(plans) != 3 || plans[0].Identity != identityA || plans[1].Identity != identityA || plans[2].Identity != identityA {
+	wantStrongIdentity := codexprov.AccountIdentity{AccountID: identityA.AccountID, UserID: identityA.UserID}
+	if len(plans) != 3 || plans[0].Identity != wantStrongIdentity || plans[1].Identity != wantStrongIdentity || plans[2].Identity != wantStrongIdentity {
 		t.Fatalf("exact plans crossed identity before managed refresh: %+v", plans)
 	}
 	if plans[2].Ref != managedA.Ref || plans[2].Revision != "managed-a-refreshed" {

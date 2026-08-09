@@ -50,6 +50,43 @@ func (directory *unixSecureDirectory) OpenExclusiveLock(name string, perm os.Fil
 	return openExclusiveLockAt(int(directory.file.Fd()), name, name, perm)
 }
 
+func (directory *unixSecureDirectory) OpenNewExclusiveLock(name string, perm os.FileMode) (ExclusiveLock, error) {
+	if err := validateSecureEntryName(name); err != nil {
+		return nil, err
+	}
+	fd, err := unix.Openat(
+		int(directory.file.Fd()),
+		name,
+		unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+		uint32(perm.Perm()),
+	)
+	if err != nil {
+		return nil, err
+	}
+	closeFD := true
+	defer func() {
+		if closeFD {
+			_ = unix.Close(fd)
+		}
+	}()
+	if err := validateSecureFD(fd, perm); err != nil {
+		return nil, err
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return nil, fmt.Errorf("acquire new exclusive filesystem lock: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Flock(fd, unix.LOCK_UN)
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	closeFD = false
+	return &unixExclusiveLock{file: file}, nil
+}
+
 func (directory *unixSecureDirectory) ProbeExclusiveLockHeld(name string, perm os.FileMode) (os.FileInfo, error) {
 	if err := validateSecureEntryName(name); err != nil {
 		return nil, err

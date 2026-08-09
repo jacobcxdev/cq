@@ -38,7 +38,7 @@ type CredentialRefreshBroker interface {
 type CredentialCoordinator struct {
 	Store           *ManagedStore
 	Activator       *FileSystemActivator
-	Registry        Registry
+	Registry        AccountCatalogue
 	Journal         RemovalJournal
 	RefreshExchange RefreshExchange
 	Now             func() time.Time
@@ -128,7 +128,7 @@ func (c *CredentialCoordinator) SaveLogin(ctx context.Context, credential LoginC
 		if err := c.Store.Commit(&existing, expected); err != nil {
 			return CandidateRef{}, "", err
 		}
-		if err := c.upsertLoginRegistry(existing.Metadata.AccountKey, credential); err != nil {
+		if err := c.projectManagedRecordLocked(existing); err != nil {
 			return CandidateRef{}, "", err
 		}
 		return recordRef(existing), existing.Metadata.Revision, nil
@@ -137,18 +137,10 @@ func (c *CredentialCoordinator) SaveLogin(ctx context.Context, credential LoginC
 	if err != nil {
 		return CandidateRef{}, "", err
 	}
-	if err := c.upsertLoginRegistry(record.Metadata.AccountKey, credential); err != nil {
+	if err := c.projectManagedRecordLocked(record); err != nil {
 		return CandidateRef{}, "", err
 	}
 	return recordRef(record), record.Metadata.Revision, nil
-}
-
-func (c *CredentialCoordinator) upsertLoginRegistry(accountKey AccountKey, credential LoginCredential) error {
-	return c.Registry.UpsertAccount(RegistryAccount{
-		AccountKey: string(accountKey), AccountID: credential.Claims.AccountID,
-		UserID: credential.Claims.UserID, Email: credential.Claims.Email,
-		Plan: credential.Claims.PlanType, AuthMode: "chatgpt", CreatedAt: credential.CreatedAt.Unix(),
-	})
 }
 
 func (c *CredentialCoordinator) Resolve(ctx context.Context, ref CandidateRef) (CredentialMaterial, error) {
@@ -162,7 +154,7 @@ func (c *CredentialCoordinator) Resolve(ctx context.Context, ref CandidateRef) (
 			if candidate.DispatchBlocked {
 				return CredentialMaterial{}, errors.New("credential candidate dispatch blocked")
 			}
-			if candidate.Source == SourceSystem {
+			if candidate.Source == SourceSystem || candidate.Source == SourceManaged {
 				return CredentialMaterial{
 					AccessToken:  candidate.Credential.AccessToken,
 					RefreshToken: candidate.Credential.RefreshToken,
@@ -178,14 +170,9 @@ func (c *CredentialCoordinator) Resolve(ctx context.Context, ref CandidateRef) (
 				}
 				return CredentialMaterial{}, ErrStaleRevision
 			}
-			break
 		}
 	}
-	record, err := c.loadRef(ref)
-	if err != nil {
-		return CredentialMaterial{}, err
-	}
-	return record.Credential, nil
+	return CredentialMaterial{}, ErrStaleRevision
 }
 
 func (c *CredentialCoordinator) Adopt(ctx context.Context, snapshot SystemSnapshot) (CandidateRef, Revision, error) {
@@ -229,9 +216,15 @@ func (c *CredentialCoordinator) adoptLocked(snapshot SystemSnapshot) (CandidateR
 			if err := c.Store.Commit(&record, expected); err != nil {
 				return CandidateRef{}, "", err
 			}
+			if err := c.projectManagedRecordLocked(record); err != nil {
+				return CandidateRef{}, "", err
+			}
 			return recordRef(record), record.Metadata.Revision, nil
 		}
 		// Never overwrite CQ-owned or legacy material.
+		if err := c.projectManagedRecordLocked(record); err != nil {
+			return CandidateRef{}, "", err
+		}
 		return recordRef(record), record.Metadata.Revision, nil
 	}
 	claims := auth.DecodeCodexClaims(account.IDToken)
@@ -242,11 +235,7 @@ func (c *CredentialCoordinator) adoptLocked(snapshot SystemSnapshot) (CandidateR
 	if err != nil {
 		return CandidateRef{}, "", err
 	}
-	if err := c.Registry.UpsertAccount(RegistryAccount{
-		AccountKey: string(record.Metadata.AccountKey), AccountID: claims.AccountID,
-		UserID: claims.UserID, Email: claims.Email, Plan: claims.PlanType,
-		AuthMode: "chatgpt", CreatedAt: time.Now().Unix(),
-	}); err != nil {
+	if err := c.projectManagedRecordLocked(record); err != nil {
 		return CandidateRef{}, "", err
 	}
 	return recordRef(record), record.Metadata.Revision, nil

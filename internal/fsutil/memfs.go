@@ -577,6 +577,31 @@ func (directory *memSecureDirectory) OpenExclusiveLock(name string, mode os.File
 	return directory.fsys.openExclusiveLockLocked(filepath.Join(path, name), mode)
 }
 
+func (directory *memSecureDirectory) OpenNewExclusiveLock(name string, mode os.FileMode) (ExclusiveLock, error) {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	if err := validateSecureEntryName(name); err != nil {
+		return nil, err
+	}
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return nil, err
+	}
+	lockPath := filepath.Join(path, name)
+	if _, exists := directory.fsys.files[lockPath]; exists {
+		return nil, &os.PathError{Op: "open", Path: lockPath, Err: os.ErrExist}
+	}
+	if _, exists := directory.fsys.dirs[filepath.Clean(lockPath)]; exists {
+		return nil, &os.PathError{Op: "open", Path: lockPath, Err: os.ErrExist}
+	}
+	file := memFile{modTime: time.Now(), mode: mode.Perm(), owner: directory.fsys.euid, inode: directory.fsys.allocateInodeLocked()}
+	directory.fsys.files[lockPath] = file
+	token := directory.fsys.nextLock
+	directory.fsys.nextLock++
+	directory.fsys.locks[file.inode] = token
+	return &memExclusiveLock{fsys: directory.fsys, path: lockPath, opened: file, inode: file.inode, token: token}, nil
+}
+
 func (directory *memSecureDirectory) ProbeExclusiveLockHeld(name string, mode os.FileMode) (os.FileInfo, error) {
 	directory.fsys.mu.Lock()
 	defer directory.fsys.mu.Unlock()

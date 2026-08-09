@@ -186,3 +186,27 @@ func TestUnixValidateExclusiveLockHeldInDirectory(t *testing.T) {
 		t.Fatalf("released lock error = %v, want ErrExclusiveLockNotHeld", err)
 	}
 }
+
+func TestUnixAcquireNewExclusiveLockNeverOpensExistingFile(t *testing.T) {
+	t.Parallel()
+	state := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(state, "maintenance.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := (OSFileSystem{}).OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	lock, err := AcquireNewExclusiveLockInDirectory(OSFileSystem{}, directory, "maintenance.lock")
+	if lock != nil {
+		_ = lock.Close()
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("create error = %v, want already exists", err)
+	}
+}

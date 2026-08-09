@@ -128,7 +128,62 @@ type abaSymlinkReadFileSystem struct {
 	target string
 }
 
-func (f *symlinkingDirectoryReadFileSystem) OpenNoFollow(root, path string) (*os.File, error) {
+type growingCodexBarReader struct {
+	bytesRead int
+}
+
+type growingDuringReadCodexBarFileSystem struct {
+	osCodexBarReadFileSystem
+	target string
+	file   *growingDuringReadCodexBarFile
+}
+
+type growingDuringReadCodexBarFile struct {
+	codexBarReadFile
+	path      string
+	grown     bool
+	growthErr error
+}
+
+func (r *growingCodexBarReader) Read(data []byte) (int, error) {
+	for i := range data {
+		data[i] = 'x'
+	}
+	r.bytesRead += len(data)
+	return len(data), nil
+}
+
+func (f *growingDuringReadCodexBarFile) Stat() (os.FileInfo, error) {
+	info, err := f.codexBarReadFile.Stat()
+	if err != nil || f.grown {
+		return info, err
+	}
+	f.grown = true
+	writer, err := os.OpenFile(f.path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		f.growthErr = err
+		return info, nil
+	}
+	_, writeErr := writer.Write([]byte(strings.Repeat(" ", 1<<20)))
+	closeErr := writer.Close()
+	if writeErr != nil {
+		f.growthErr = writeErr
+	} else {
+		f.growthErr = closeErr
+	}
+	return info, nil
+}
+
+func (f *growingDuringReadCodexBarFileSystem) OpenNoFollow(root, path string) (codexBarReadFile, error) {
+	file, err := f.osCodexBarReadFileSystem.OpenNoFollow(root, path)
+	if err != nil || path != f.target {
+		return file, err
+	}
+	f.file = &growingDuringReadCodexBarFile{codexBarReadFile: file, path: path}
+	return f.file, nil
+}
+
+func (f *symlinkingDirectoryReadFileSystem) OpenNoFollow(root, path string) (codexBarReadFile, error) {
 	if path == f.triggerPath && !f.changed {
 		f.changed = true
 		target := f.directory + ".prior"
@@ -142,7 +197,7 @@ func (f *symlinkingDirectoryReadFileSystem) OpenNoFollow(root, path string) (*os
 	return f.osCodexBarReadFileSystem.OpenNoFollow(root, path)
 }
 
-func (f *abaSymlinkReadFileSystem) OpenNoFollow(root, path string) (*os.File, error) {
+func (f *abaSymlinkReadFileSystem) OpenNoFollow(root, path string) (codexBarReadFile, error) {
 	if path != f.target {
 		return f.osCodexBarReadFileSystem.OpenNoFollow(root, path)
 	}
@@ -185,7 +240,7 @@ func (f *replacingCodexBarReadFileSystem) replace(path string) error {
 	return os.WriteFile(path, f.replacement, info.Mode().Perm())
 }
 
-func (f *replacingCodexBarReadFileSystem) OpenNoFollow(root, path string) (*os.File, error) {
+func (f *replacingCodexBarReadFileSystem) OpenNoFollow(root, path string) (codexBarReadFile, error) {
 	if err := f.replace(path); err != nil {
 		return nil, err
 	}
@@ -333,6 +388,99 @@ func TestCodexBarSourceRejectsValidationReadRaces(t *testing.T) {
 				t.Fatalf("List error = %v, want ErrExternalUnsafePath", err)
 			}
 		})
+	}
+}
+
+func TestCodexBarSourceRejectsOversizedDeclaredFiles(t *testing.T) {
+	const maximumDeclaredFileSize = 1 << 20
+
+	for _, target := range []string{"manifest", "auth"} {
+		t.Run(target, func(t *testing.T) {
+			root := t.TempDir()
+			writeCodexBarFixture(t, root, 0o600, nil)
+			padding := strings.Repeat("x", maximumDeclaredFileSize)
+			switch target {
+			case "manifest":
+				rewriteCodexBarManifest(t, root, func(manifest map[string]any) {
+					manifest["padding"] = padding
+				})
+			case "auth":
+				path := codexBarAuthPath(root)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var document map[string]any
+				if err := json.Unmarshal(data, &document); err != nil {
+					t.Fatal(err)
+				}
+				document["padding"] = padding
+				data, err = json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeCodexBarAuthAndFingerprint(t, root, data)
+			}
+
+			_, err := NewCodexBarSource(root).List(context.Background())
+			if !errors.Is(err, ErrExternalInvalid) {
+				t.Fatalf("List error = %v, want ErrExternalInvalid", err)
+			}
+			if err != nil && strings.Contains(err.Error(), root) {
+				t.Fatalf("List error exposed external path: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadCodexBarFileBoundedStopsAtLimitAsFileGrows(t *testing.T) {
+	const maximumSize = int64(8)
+	reader := &growingCodexBarReader{}
+
+	data, err := readCodexBarFileBounded(reader, maximumSize)
+	if !errors.Is(err, ErrExternalInvalid) {
+		t.Fatalf("read error = %v, want ErrExternalInvalid", err)
+	}
+	if data != nil {
+		t.Fatalf("read returned %d bytes for oversized file", len(data))
+	}
+	if reader.bytesRead != int(maximumSize+1) {
+		t.Fatalf("read consumed %d bytes, want %d", reader.bytesRead, maximumSize+1)
+	}
+	if strings.Contains(err.Error(), "8") {
+		t.Fatalf("read error exposed configured size: %v", err)
+	}
+}
+
+func TestReadCodexBarFileBoundedAllowsExactLimit(t *testing.T) {
+	const maximumSize = int64(8)
+
+	data, err := readCodexBarFileBounded(strings.NewReader("12345678"), maximumSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "12345678" {
+		t.Fatalf("data = %q, want exact-limit payload", got)
+	}
+}
+
+func TestCodexBarSourceClassifiesConcurrentGrowthAsGenerationRace(t *testing.T) {
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+	manifestPath := filepath.Join(root, "managed-codex-accounts.json")
+	fileSystem := &growingDuringReadCodexBarFileSystem{target: manifestPath}
+	source := NewCodexBarSource(root)
+	source.fs = fileSystem
+
+	_, err := source.List(context.Background())
+	if !errors.Is(err, ErrExternalUnsafePath) {
+		t.Fatalf("List error = %v, want ErrExternalUnsafePath", err)
+	}
+	if fileSystem.file == nil || !fileSystem.file.grown {
+		t.Fatal("manifest did not grow during the validated read")
+	}
+	if fileSystem.file.growthErr != nil {
+		t.Fatalf("grow manifest: %v", fileSystem.file.growthErr)
 	}
 }
 

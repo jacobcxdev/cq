@@ -47,6 +47,7 @@ type CredentialCandidate struct {
 	Credential      CodexAccount
 	AccessExpiresAt time.Time
 	CQAuthored      bool
+	Routable        bool
 	DispatchBlocked bool
 	externalRef     *ExternalCandidateRef
 }
@@ -184,24 +185,48 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		credential.AccountKey = logical.Key
 		credential.CandidateID = candidateID
 		credential.Revision = revision
+		routable := credential.AccountID != "" && credential.UserID != "" && credential.AccessToken != ""
 		logical.Candidates = append(logical.Candidates, CredentialCandidate{
 			Ref: ref, Revision: credential.Revision, Source: candidate.source,
 			Credential: credential, AccessExpiresAt: unixMilliTime(credential.ExpiresAt),
 			CQAuthored:      candidate.cqAuthored,
+			Routable:        routable,
 			DispatchBlocked: candidate.metadata != nil && candidate.metadata.OperationState != OperationReady,
 		})
 		logical.Active = logical.Active || candidate.source == SourceSystem
-		logical.Routable = logical.Routable || (credential.AccountID != "" && credential.AccessToken != "")
+		logical.Routable = logical.Routable || routable
 	}
 	var externalCandidates []sourcedExternalCandidate
-	for _, source := range sources {
+	sourceNames, sourceNameCounts := snapshotExternalSourceNames(sources)
+	for index, source := range sources {
 		if source == nil {
 			continue
 		}
-		status := ExternalSourceStatus{Name: source.Name()}
+		sourceName := sourceNames[index]
+		status := ExternalSourceStatus{Name: sourceName}
+		if sourceName == "" || sourceNameCounts[sourceName] != 1 {
+			status.ErrorCode = externalSourceErrorCode(ErrExternalInvalid)
+			inventory.ExternalSources = append(inventory.ExternalSources, status)
+			continue
+		}
 		candidates, err := source.List(ctx)
 		if err != nil {
 			status.ErrorCode = externalSourceErrorCode(err)
+			inventory.ExternalSources = append(inventory.ExternalSources, status)
+			continue
+		}
+		validSource := true
+		records := make(map[string]struct{}, len(candidates))
+		for _, candidate := range candidates {
+			_, duplicate := records[candidate.Ref.RecordID]
+			if candidate.Ref.Source != sourceName || candidate.Ref.RecordID == "" || candidate.Ref.Revision == "" || duplicate {
+				validSource = false
+				break
+			}
+			records[candidate.Ref.RecordID] = struct{}{}
+		}
+		if !validSource {
+			status.ErrorCode = externalSourceErrorCode(ErrExternalInvalid)
 			inventory.ExternalSources = append(inventory.ExternalSources, status)
 			continue
 		}
@@ -209,7 +234,7 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		inventory.ExternalSources = append(inventory.ExternalSources, status)
 		for _, candidate := range candidates {
 			externalCandidates = append(externalCandidates, sourcedExternalCandidate{
-				sourceName: source.Name(), candidate: candidate,
+				sourceName: sourceName, candidate: candidate,
 			})
 		}
 	}
@@ -403,15 +428,29 @@ func appendExternalCandidate(inventory *Inventory, sourceName string, candidate 
 	candidateID := CandidateID(SourceExternal.String() + ":" + shortHash(sourceName+":"+candidate.Ref.RecordID))
 	ref := CandidateRef{AccountKey: logical.Key, CandidateID: candidateID}
 	externalRef := candidate.Ref
+	routable := candidate.Routable && completeStrongIdentity(candidate.Identity)
 	logical.Candidates = append(logical.Candidates, CredentialCandidate{
 		Ref: ref, Revision: candidate.Ref.Revision, Source: SourceExternal,
-		AccessExpiresAt: candidate.AccessExpiresAt, externalRef: &externalRef,
+		AccessExpiresAt: candidate.AccessExpiresAt, Routable: routable, externalRef: &externalRef,
 	})
-	logical.Routable = logical.Routable || candidate.Routable && completeStrongIdentity(candidate.Identity)
+	logical.Routable = logical.Routable || routable
 }
 
 func completeStrongIdentity(identity AccountIdentity) bool {
 	return identity.AccountID != "" && identity.UserID != ""
+}
+
+func snapshotExternalSourceNames(sources []ExternalCredentialSource) ([]string, map[string]int) {
+	names := make([]string, len(sources))
+	counts := make(map[string]int, len(sources))
+	for index, source := range sources {
+		if source == nil {
+			continue
+		}
+		names[index] = source.Name()
+		counts[names[index]]++
+	}
+	return names, counts
 }
 
 func externalSourceErrorCode(err error) string {

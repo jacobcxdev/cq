@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/compat"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 type durableFakeFS struct {
@@ -18,6 +21,13 @@ type durableFakeFS struct {
 	failRenameAt int
 	renameCount  int
 }
+
+type managedStoreSecureFS struct {
+	*fsutil.MemFS
+	home string
+}
+
+func (fs *managedStoreSecureFS) UserHomeDir() (string, error) { return fs.home, nil }
 
 func newDurableFakeFS() *durableFakeFS {
 	return &durableFakeFS{fakeFS: newFakeFS(), modes: make(map[string]os.FileMode)}
@@ -31,6 +41,47 @@ func (f *durableFakeFS) WriteFile(name string, data []byte, mode os.FileMode) er
 		return err
 	}
 	f.modes[name] = mode
+	return nil
+}
+
+func (f *durableFakeFS) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {
+	if _, exists := f.files[name]; exists {
+		return nil, os.ErrExist
+	}
+	f.files[name] = nil
+	f.modes[name] = mode
+	return &durableFakeFile{fs: f, path: name}, nil
+}
+
+type durableFakeFile struct {
+	fs     *durableFakeFS
+	path   string
+	closed bool
+}
+
+func (f *durableFakeFile) Write(data []byte) (int, error) {
+	if f.closed {
+		return 0, os.ErrClosed
+	}
+	if f.fs.failStep == "write" && bytes.Contains([]byte(f.path), []byte(".tmp_")) {
+		return 0, os.ErrPermission
+	}
+	f.fs.files[f.path] = append(f.fs.files[f.path], data...)
+	return len(data), nil
+}
+
+func (f *durableFakeFile) Sync() error {
+	if f.closed {
+		return os.ErrClosed
+	}
+	if f.fs.failStep == "file sync" {
+		return os.ErrPermission
+	}
+	return nil
+}
+
+func (f *durableFakeFile) Close() error {
+	f.closed = true
 	return nil
 }
 
@@ -257,7 +308,7 @@ func TestManagedStoreLoadsLegacyWithoutRewrite(t *testing.T) {
 }
 
 func TestManagedStoreAdvancesCompatibilityEpochBeforeCommit(t *testing.T) {
-	fs := newDurableFakeFS()
+	fs := &managedStoreSecureFS{MemFS: fsutil.NewMemFS(), home: "/fake/home"}
 	store, err := NewManagedStore(fs)
 	if err != nil {
 		t.Fatal(err)
@@ -270,8 +321,12 @@ func TestManagedStoreAdvancesCompatibilityEpochBeforeCommit(t *testing.T) {
 	if _, err := store.SaveNew(testLoginCredential()); err != nil {
 		t.Fatal(err)
 	}
-	data := fs.files["/fake/home/.config/cq/state/compatibility_epoch"]
-	if string(data) != "2\n" {
-		t.Fatalf("compatibility epoch = %q, want 2", data)
+	data, err := fs.ReadFile("/fake/home/.config/cq/state/compatibility_epoch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%d\n", compat.CurrentEpoch)
+	if string(data) != want {
+		t.Fatalf("compatibility epoch = %q, want %q", data, want)
 	}
 }

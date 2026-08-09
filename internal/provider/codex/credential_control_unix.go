@@ -3,59 +3,136 @@
 package codex
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/rpc"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
 
+const credentialEndpointProtocolVersion = 1
+
+type CredentialEndpointPingArgs struct {
+	ProtocolVersion int
+}
+
+type CredentialEndpointPingReply struct {
+	ProtocolVersion int
+	Generation      string
+}
+
+type credentialEndpointRPC struct {
+	generation string
+}
+
+func (r *credentialEndpointRPC) Ping(args CredentialEndpointPingArgs, reply *CredentialEndpointPingReply) error {
+	if args.ProtocolVersion != credentialEndpointProtocolVersion {
+		return ErrCredentialEndpointIncompatible
+	}
+	reply.ProtocolVersion = credentialEndpointProtocolVersion
+	reply.Generation = r.generation
+	return nil
+}
+
 func OpenCredentialControl(path string, coordinator *CredentialCoordinator) (*CredentialControl, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	listener, err := net.Listen("unix", path)
+	return OpenCredentialControlPrepared(context.Background(), path, coordinator, nil)
+}
+
+// OpenCredentialControlPrepared opens the ordinary fail-closed endpoint and
+// initializes a newly created owner before any coordinator RPC is accepted.
+// Delegates never run the initializer.
+func OpenCredentialControlPrepared(ctx context.Context, path string, coordinator *CredentialCoordinator, initializer CredentialOwnerInitializer) (*CredentialControl, error) {
+	return openCredentialControlPrepared(ctx, path, coordinator, false, nil, initializer, nil)
+}
+
+// OpenRecoveringCredentialControl is reserved for supervised owner startup.
+// Ordinary request and command paths must use OpenCredentialControl so they
+// never mutate an existing endpoint while trying to connect.
+func OpenRecoveringCredentialControl(path string, coordinator *CredentialCoordinator) (*CredentialControl, error) {
+	return OpenRecoveringCredentialControlPrepared(context.Background(), path, coordinator, nil)
+}
+
+// OpenRecoveringCredentialControlPrepared is reserved for supervised owner
+// startup. It may recover an exactly proved endpoint, then initializes the new
+// owner before accepting coordinator RPCs. Delegates skip the initializer.
+func OpenRecoveringCredentialControlPrepared(ctx context.Context, path string, coordinator *CredentialCoordinator, initializer CredentialOwnerInitializer) (*CredentialControl, error) {
+	return openCredentialControlPrepared(ctx, path, coordinator, true, nil, initializer, nil)
+}
+
+func openCredentialControl(path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook) (*CredentialControl, error) {
+	return openCredentialControlPrepared(context.Background(), path, coordinator, allowRecovery, phaseHook, nil, nil)
+}
+
+func openCredentialControlPrepared(ctx context.Context, path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook, initializer CredentialOwnerInitializer, beforeAccept func()) (*CredentialControl, error) {
+	endpoint, client, err := openCredentialEndpoint(path, allowRecovery, phaseHook)
 	if err != nil {
-		if _, statErr := os.Lstat(path); statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) {
-				return nil, err
-			}
-			return nil, statErr
-		}
-		client, dialErr := dialCredentialOwner(path, 100*time.Millisecond)
-		if dialErr != nil {
-			return nil, dialErr
-		}
+		return nil, err
+	}
+	if client != nil {
 		return &CredentialControl{client: client}, nil
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(path)
-		return nil, err
-	}
 	if coordinator == nil {
-		_ = listener.Close()
-		_ = os.Remove(path)
+		_ = endpoint.Close()
 		return nil, errors.New("credential coordinator unavailable")
 	}
-	server := rpc.NewServer()
-	if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: coordinator}); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(path)
-		return nil, err
-	}
+
+	listener := endpoint.listener
 	var once sync.Once
 	var connMu sync.Mutex
 	var connWG sync.WaitGroup
 	connections := make(map[net.Conn]struct{})
 	done := make(chan struct{})
+	acceptStarted := false
+	closeOwner := func() error {
+		var closeErr error
+		once.Do(func() {
+			closeErr = listener.Close()
+			if acceptStarted {
+				<-done
+				connMu.Lock()
+				for conn := range connections {
+					_ = conn.Close()
+				}
+				connMu.Unlock()
+				connWG.Wait()
+			}
+			if err := endpoint.CloseAfterListener(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		})
+		return closeErr
+	}
+	control := &CredentialControl{owner: true, coordinator: coordinator, close: closeOwner}
+	if initializer != nil {
+		initializerErr := func() error {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					_ = control.Close()
+					panic(recovered)
+				}
+			}()
+			return initializer(ctx, coordinator, control)
+		}()
+		if initializerErr != nil {
+			return nil, errors.Join(initializerErr, control.Close())
+		}
+	}
+
+	server := rpc.NewServer()
+	if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: coordinator, Control: control}); err != nil {
+		return nil, errors.Join(err, control.Close())
+	}
+	if err := server.RegisterName("CredentialEndpoint", &credentialEndpointRPC{generation: endpoint.generation}); err != nil {
+		return nil, errors.Join(err, control.Close())
+	}
+	if beforeAccept != nil {
+		beforeAccept()
+	}
+	acceptStarted = true
 	go func() {
 		defer close(done)
+		defer func() { _ = recover() }()
 		for {
 			conn, acceptErr := listener.Accept()
 			if acceptErr != nil {
@@ -66,33 +143,19 @@ func OpenCredentialControl(path string, coordinator *CredentialCoordinator) (*Cr
 			connWG.Add(1)
 			connMu.Unlock()
 			go func() {
-				defer connWG.Done()
+				defer func() {
+					_ = recover()
+					_ = conn.Close()
+					connMu.Lock()
+					delete(connections, conn)
+					connMu.Unlock()
+					connWG.Done()
+				}()
 				server.ServeConn(conn)
-				_ = conn.Close()
-				connMu.Lock()
-				delete(connections, conn)
-				connMu.Unlock()
 			}()
 		}
 	}()
-	closeOwner := func() error {
-		var closeErr error
-		once.Do(func() {
-			closeErr = listener.Close()
-			<-done
-			connMu.Lock()
-			for conn := range connections {
-				_ = conn.Close()
-			}
-			connMu.Unlock()
-			connWG.Wait()
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && closeErr == nil {
-				closeErr = err
-			}
-		})
-		return closeErr
-	}
-	return &CredentialControl{owner: true, coordinator: coordinator, close: closeOwner}, nil
+	return control, nil
 }
 
 func dialCredentialOwner(path string, timeout time.Duration) (*rpc.Client, error) {
@@ -106,7 +169,9 @@ func dialCredentialOwner(path string, timeout time.Duration) (*rpc.Client, error
 		if err == nil {
 			_ = conn.SetDeadline(deadline)
 			client := rpc.NewClient(conn)
-			if pingErr := client.Call("CredentialRPC.Ping", struct{}{}, &struct{}{}); pingErr == nil {
+			var reply CredentialEndpointPingReply
+			pingErr := client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &reply)
+			if pingErr == nil && reply.ProtocolVersion == credentialEndpointProtocolVersion && reply.Generation != "" {
 				_ = conn.SetDeadline(time.Time{})
 				return client, nil
 			}

@@ -62,10 +62,22 @@ func RefreshEligible(record ManagedRecord) bool {
 }
 
 func OpenDefaultCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer) (*CredentialControl, error) {
+	return openDefaultCredentialRefreshControl(ctx, fs, client, OpenDefaultCredentialControl)
+}
+
+// OpenDefaultRecoveringCredentialRefreshControl is reserved for supervised
+// owner startup that may replace an exactly proved stale endpoint.
+func OpenDefaultRecoveringCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer) (*CredentialControl, error) {
+	return openDefaultCredentialRefreshControl(ctx, fs, client, OpenDefaultRecoveringCredentialControl)
+}
+
+type defaultCredentialControlOpener func(context.Context, fsutil.DurableFileSystem, ...RefreshExchange) (*CredentialControl, error)
+
+func openDefaultCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer, open defaultCredentialControlOpener) (*CredentialControl, error) {
 	if client == nil {
 		return nil, errors.New("Codex refresh HTTP client unavailable")
 	}
-	return OpenDefaultCredentialControl(ctx, fs, func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error) {
+	return open(ctx, fs, func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error) {
 		return auth.RefreshCodexToken(ctx, client, refreshToken)
 	})
 }

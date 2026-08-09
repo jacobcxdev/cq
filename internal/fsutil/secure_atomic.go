@@ -711,6 +711,64 @@ func AcquireExclusiveLockInDirectory(inspector SecurePathInspector, directory Se
 	return acquireExclusiveLockInDirectory(inspector, directory, name, nil)
 }
 
+// AcquireNewExclusiveLockInDirectory creates one new lifetime lock relative to
+// a retained directory. It never opens an existing entry. The descriptor,
+// named path, file metadata, and parent-directory commit are verified before
+// ownership is returned.
+func AcquireNewExclusiveLockInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string) (ExclusiveLock, error) {
+	if inspector == nil || directory == nil {
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	if err := validateSecureEntryName(name); err != nil {
+		return nil, err
+	}
+	if err := validateSecureDirectoryDescriptor(inspector, directory); err != nil {
+		return nil, fmt.Errorf("validate opened lock directory: %w", err)
+	}
+	creator, ok := directory.(NewExclusiveLocker)
+	if !ok {
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	lock, err := creator.OpenNewExclusiveLock(name, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	closeWith := func(err error) (ExclusiveLock, error) {
+		return nil, errors.Join(err, lock.Close())
+	}
+	heldInfo, err := lock.Stat()
+	if err != nil {
+		return closeWith(fmt.Errorf("inspect new lock descriptor: %w", err))
+	}
+	if err := validateSecureRegularInfo(inspector, heldInfo); err != nil {
+		return closeWith(fmt.Errorf("validate new lock descriptor: %w", err))
+	}
+	pathInfo, err := secureRegularFileInfoInDirectory(inspector, directory, name)
+	if err != nil {
+		return closeWith(fmt.Errorf("inspect new lock path: %w", err))
+	}
+	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
+	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
+	if !heldOK || !pathOK || heldIdentity != pathIdentity {
+		return closeWith(fmt.Errorf("%w: new lock path identity", ErrUnsafeSecurePath))
+	}
+	if err := directory.Sync(); err != nil {
+		return closeWith(fmt.Errorf("sync new lock directory: %w", err))
+	}
+	pathInfo, err = secureRegularFileInfoInDirectory(inspector, directory, name)
+	if err != nil {
+		return closeWith(fmt.Errorf("revalidate new lock path: %w", err))
+	}
+	pathIdentity, pathOK = inspector.FileIdentity(pathInfo)
+	if !pathOK || pathIdentity != heldIdentity {
+		return closeWith(fmt.Errorf("%w: synced new lock path identity", ErrUnsafeSecurePath))
+	}
+	if err := validateSecureDirectoryDescriptor(inspector, directory); err != nil {
+		return closeWith(fmt.Errorf("revalidate new lock directory: %w", err))
+	}
+	return lock, nil
+}
+
 // ValidateExclusiveLockHeldInDirectory proves that the expected named lock is
 // still the strict single-link file in a retained directory and that another
 // descriptor currently holds its non-blocking exclusive lock. It never creates

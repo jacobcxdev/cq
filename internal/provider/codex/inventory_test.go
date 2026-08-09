@@ -13,6 +13,8 @@ type fakeExternalCredentialSource struct {
 	candidates []ExternalCandidate
 	material   CredentialMaterial
 	resolveRef ExternalCandidateRef
+	listCalls  int
+	resolves   int
 }
 
 func (s *fakeExternalCredentialSource) Name() string {
@@ -22,14 +24,79 @@ func (s *fakeExternalCredentialSource) Name() string {
 	return "external-test"
 }
 func (s *fakeExternalCredentialSource) List(context.Context) ([]ExternalCandidate, error) {
+	s.listCalls++
 	return append([]ExternalCandidate(nil), s.candidates...), nil
 }
 func (s *fakeExternalCredentialSource) Resolve(_ context.Context, ref ExternalCandidateRef) (CredentialMaterial, error) {
+	s.resolves++
 	s.resolveRef = ref
 	if ref != s.candidates[0].Ref {
 		return CredentialMaterial{}, ErrStaleRevision
 	}
 	return s.material, nil
+}
+
+func TestInventoryRejectsExternalCandidateSourceMismatch(t *testing.T) {
+	source := &fakeExternalCredentialSource{
+		name: "source-a",
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "source-b", RecordID: "record-1", Revision: "revision-1"},
+			Identity: AccountIdentity{AccountID: "account-1", UserID: "user-1"}, Routable: true,
+		}},
+	}
+	inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+	if len(inventory.Accounts) != 0 {
+		t.Fatalf("mismatched external source entered inventory: %+v", inventory.Accounts)
+	}
+	if len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "invalid" || inventory.ExternalSources[0].CandidateCount != 0 {
+		t.Fatalf("external source status = %+v, want invalid with zero candidates", inventory.ExternalSources)
+	}
+}
+
+func TestInventoryRejectsMalformedExternalCandidateSet(t *testing.T) {
+	valid := ExternalCandidate{
+		Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+		Identity: AccountIdentity{AccountID: "account-1", UserID: "user-1"}, Routable: true,
+	}
+	tests := []struct {
+		name       string
+		candidates []ExternalCandidate
+	}{
+		{
+			name: "empty record ID",
+			candidates: []ExternalCandidate{{
+				Ref: ExternalCandidateRef{Source: "external-test", Revision: "revision-1"},
+			}},
+		},
+		{
+			name: "empty revision",
+			candidates: []ExternalCandidate{{
+				Ref: ExternalCandidateRef{Source: "external-test", RecordID: "record-1"},
+			}},
+		},
+		{
+			name: "duplicate record ID",
+			candidates: []ExternalCandidate{
+				valid,
+				{
+					Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-2"},
+					Identity: AccountIdentity{AccountID: "account-2", UserID: "user-2"}, Routable: true,
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &fakeExternalCredentialSource{candidates: test.candidates}
+			inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+			if len(inventory.Accounts) != 0 {
+				t.Fatalf("malformed external source entered inventory: %+v", inventory.Accounts)
+			}
+			if len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "invalid" || inventory.ExternalSources[0].CandidateCount != 0 {
+				t.Fatalf("external source status = %+v, want invalid with zero candidates", inventory.ExternalSources)
+			}
+		})
+	}
 }
 
 func inventoryAuth(accessToken, accountID, idToken string, expiresAt int64) []byte {
@@ -103,6 +170,14 @@ func TestInventoryMergesPartialAccountIDIntoRicherIdentity(t *testing.T) {
 	identity := inventory.Accounts[0].Identity
 	if identity.AccountID != "acct-1" || identity.UserID != "user-1" || identity.Email != "user@test.com" {
 		t.Fatalf("identity = %+v, want enriched claims", identity)
+	}
+	for _, candidate := range inventory.Accounts[0].Candidates {
+		if candidate.Source == SourceSystem && candidate.Routable {
+			t.Fatal("partial system candidate without a strong user identity is routable")
+		}
+		if candidate.Source == SourceManaged && !candidate.Routable {
+			t.Fatal("managed candidate with a complete strong identity is not routable")
+		}
 	}
 }
 
@@ -183,12 +258,25 @@ func TestInventoryRestoresPersistedOpaqueAccountAndCandidateKeys(t *testing.T) {
 func TestResolveCandidateKeepsAcceptedRevisionFirst(t *testing.T) {
 	now := time.Now()
 	logical := LogicalAccount{Candidates: []CredentialCandidate{
-		{Revision: "fresh", AccessExpiresAt: now.Add(time.Hour), Ref: CandidateRef{CandidateID: "fresh"}},
-		{Revision: "accepted", AccessExpiresAt: now.Add(-time.Hour), Ref: CandidateRef{CandidateID: "accepted"}},
+		{Revision: "fresh", AccessExpiresAt: now.Add(time.Hour), Ref: CandidateRef{CandidateID: "fresh"}, Routable: true},
+		{Revision: "accepted", AccessExpiresAt: now.Add(-time.Hour), Ref: CandidateRef{CandidateID: "accepted"}, Routable: true},
 	}}
 	ordered := ResolveCandidate(logical, "accepted", now)
 	if ordered[0].Revision != "accepted" {
 		t.Fatalf("first revision = %q, want accepted", ordered[0].Revision)
+	}
+}
+
+func TestResolveCandidateSkipsDispatchBlockedButRetainsUnroutableForDiscovery(t *testing.T) {
+	now := time.Unix(100, 0)
+	logical := LogicalAccount{Candidates: []CredentialCandidate{
+		{Ref: CandidateRef{CandidateID: "unroutable"}, Revision: "unroutable", Routable: false},
+		{Ref: CandidateRef{CandidateID: "blocked"}, Revision: "blocked", Routable: true, DispatchBlocked: true},
+		{Ref: CandidateRef{CandidateID: "ready"}, Revision: "ready", Routable: true},
+	}}
+	ordered := ResolveCandidate(logical, "unroutable", now)
+	if len(ordered) != 2 || ordered[0].Ref.CandidateID != "unroutable" || ordered[1].Ref.CandidateID != "ready" {
+		t.Fatalf("resolved candidates = %+v", ordered)
 	}
 }
 
@@ -290,7 +378,7 @@ func TestInventoryExternalSourceOrderDoesNotChangeIdentity(t *testing.T) {
 		name: "source-a",
 		candidates: []ExternalCandidate{{
 			Ref:      ExternalCandidateRef{Source: "source-a", RecordID: "record-a", Revision: "revision-a"},
-			Identity: AccountIdentity{AccountID: "acct-1", Email: "user@example.test"},
+			Identity: AccountIdentity{AccountID: "acct-1", Email: "user@example.test"}, Routable: true,
 		}},
 	}
 	sourceB := &fakeExternalCredentialSource{
@@ -305,6 +393,24 @@ func TestInventoryExternalSourceOrderDoesNotChangeIdentity(t *testing.T) {
 	reverse := DiscoverInventoryWithSources(context.Background(), newFakeFS(), sourceB, sourceA)
 	if !reflect.DeepEqual(forward, reverse) {
 		t.Fatalf("inventory changed with external source order:\nforward=%+v\nreverse=%+v", forward, reverse)
+	}
+	if len(forward.Accounts) != 1 || len(forward.Accounts[0].Candidates) != 2 {
+		t.Fatalf("inventory = %+v, want one enriched account with two candidates", forward)
+	}
+	for _, candidate := range forward.Accounts[0].Candidates {
+		if candidate.externalRef == nil {
+			t.Fatalf("external candidate has no source reference: %+v", candidate)
+		}
+		switch candidate.externalRef.Source {
+		case "source-a":
+			if candidate.Routable {
+				t.Fatal("weak external candidate became routable after logical identity enrichment")
+			}
+		case "source-b":
+			if !candidate.Routable {
+				t.Fatal("strong external candidate is not routable")
+			}
+		}
 	}
 }
 

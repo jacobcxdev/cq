@@ -17,8 +17,11 @@ import (
 	"github.com/jacobcxdev/cq/internal/auth"
 )
 
-const codexBarSourceName = "codexbar"
-const codexBarManifestVersion = 3
+const (
+	codexBarSourceName          = "codexbar"
+	codexBarManifestVersion     = 3
+	codexBarMaximumDeclaredSize = int64(1 << 20)
+)
 
 type CodexBarSource struct {
 	root     string
@@ -28,14 +31,20 @@ type CodexBarSource struct {
 
 type codexBarReadFileSystem interface {
 	Lstat(string) (os.FileInfo, error)
-	OpenNoFollow(string, string) (*os.File, error)
+	OpenNoFollow(string, string) (codexBarReadFile, error)
 	EvalSymlinks(string) (string, error)
+}
+
+type codexBarReadFile interface {
+	io.Reader
+	Stat() (os.FileInfo, error)
+	Close() error
 }
 
 type osCodexBarReadFileSystem struct{}
 
 func (osCodexBarReadFileSystem) Lstat(path string) (os.FileInfo, error) { return os.Lstat(path) }
-func (osCodexBarReadFileSystem) OpenNoFollow(root, path string) (*os.File, error) {
+func (osCodexBarReadFileSystem) OpenNoFollow(root, path string) (codexBarReadFile, error) {
 	return openExternalFileNoFollow(root, path)
 }
 func (osCodexBarReadFileSystem) EvalSymlinks(path string) (string, error) {
@@ -364,8 +373,8 @@ func (s *CodexBarSource) readValidatedFile(path string, missingErr, changedErr e
 		return validatedExternalRead{}, changedErr
 	}
 
-	data, err := io.ReadAll(file)
-	if err != nil {
+	data, readErr := readCodexBarFileBounded(file, codexBarMaximumDeclaredSize)
+	if readErr != nil && !errors.Is(readErr, ErrExternalInvalid) {
 		return validatedExternalRead{}, changedErr
 	}
 	openedAfter, err := file.Stat()
@@ -390,7 +399,21 @@ func (s *CodexBarSource) readValidatedFile(path string, missingErr, changedErr e
 	if openedGeneration != openedAfterGeneration || openedGeneration != pathAfterGeneration {
 		return validatedExternalRead{}, changedErr
 	}
+	if readErr != nil {
+		return validatedExternalRead{}, readErr
+	}
 	return validatedExternalRead{data: data, generation: openedGeneration}, nil
+}
+
+func readCodexBarFileBounded(reader io.Reader, maximumSize int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maximumSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximumSize {
+		return nil, fmt.Errorf("%w: oversized file", ErrExternalInvalid)
+	}
+	return data, nil
 }
 
 func (s *CodexBarSource) confirmExternalFileGeneration(path string, expected externalFileGeneration, changedErr error) error {

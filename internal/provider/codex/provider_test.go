@@ -159,6 +159,10 @@ func (s staticSecretResolver) Resolve(context.Context, CandidateRef) (Credential
 	return s.material, nil
 }
 
+func (s staticSecretResolver) ResolveExact(context.Context, PlannedCandidate) (CredentialMaterial, error) {
+	return s.material, nil
+}
+
 type fixedHomeDurableFS struct {
 	fsutil.OSFileSystem
 	home string
@@ -299,7 +303,12 @@ func TestFetchHappyPath(t *testing.T) {
 	defer srv.Close()
 
 	fs := newFakeFS()
-	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON("tok-abc", "ref-abc", "", "")
+	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON(
+		"tok-abc",
+		"ref-abc",
+		fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"),
+		"acct-1",
+	)
 
 	p := &Provider{
 		client: &urlRewriter{client: srv.Client(), baseURL: srv.URL},
@@ -338,13 +347,16 @@ func TestFetchResolvesMetadataOnlyExternalCandidate(t *testing.T) {
 		client: &urlRewriter{client: srv.Client(), baseURL: srv.URL},
 		fs:     newFakeFS(),
 		inventory: staticCredentialInventory{inventory: Inventory{Accounts: []LogicalAccount{{
-			Key: "account-1", Identity: AccountIdentity{AccountID: "acct-1", Email: "user@example.test"}, Routable: true,
+			Key: "account-1", Identity: AccountIdentity{AccountID: "acct-1", UserID: "user-1", Email: "user@example.test"}, Routable: true,
 			Candidates: []CredentialCandidate{{
 				Ref: CandidateRef{AccountKey: "account-1", CandidateID: "external-1"}, Revision: "revision-1",
-				Source: SourceExternal, AccessExpiresAt: time.Now().Add(time.Hour),
+				Source: SourceExternal, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
 			}},
 		}}}},
-		secrets: staticSecretResolver{material: CredentialMaterial{AccessToken: "external-secret", AccountID: "acct-1"}},
+		secrets: staticSecretResolver{material: testCredentialMaterial(
+			AccountIdentity{AccountID: "acct-1", UserID: "user-1", Email: "user@example.test"},
+			"external-secret",
+		)},
 	}
 
 	results, err := p.Fetch(context.Background(), time.Now())
@@ -499,7 +511,12 @@ func TestFetch401ReturnsAuthExpiredNoRefreshToken(t *testing.T) {
 
 	fs := newFakeFS()
 	// Empty refresh token — no refresh should be attempted.
-	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON("old-tok", "", "", "")
+	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON(
+		"old-tok",
+		"",
+		fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"),
+		"acct-1",
+	)
 
 	p := &Provider{
 		client: &urlRewriter{client: srv.Client(), baseURL: srv.URL},

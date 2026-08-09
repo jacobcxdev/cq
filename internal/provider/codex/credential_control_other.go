@@ -2,6 +2,20 @@
 
 package codex
 
-func OpenCredentialControl(string, *CredentialCoordinator) (*CredentialControl, error) {
+import "context"
+
+func OpenCredentialControl(path string, coordinator *CredentialCoordinator) (*CredentialControl, error) {
+	return OpenCredentialControlPrepared(context.Background(), path, coordinator, nil)
+}
+
+func OpenCredentialControlPrepared(context.Context, string, *CredentialCoordinator, CredentialOwnerInitializer) (*CredentialControl, error) {
+	return nil, ErrCredentialControlDisabled
+}
+
+func OpenRecoveringCredentialControl(path string, coordinator *CredentialCoordinator) (*CredentialControl, error) {
+	return OpenRecoveringCredentialControlPrepared(context.Background(), path, coordinator, nil)
+}
+
+func OpenRecoveringCredentialControlPrepared(context.Context, string, *CredentialCoordinator, CredentialOwnerInitializer) (*CredentialControl, error) {
 	return nil, ErrCredentialControlDisabled
 }
