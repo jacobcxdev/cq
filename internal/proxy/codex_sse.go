@@ -188,7 +188,9 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		envelope.Type == "response.in_progress" ||
 		envelope.Type == "response.output_item.added" ||
 		envelope.Type == "response.output_item.done" ||
+		envelope.Type == "response.output_text.done" ||
 		envelope.Type == "response.reasoning_summary_part.added" ||
+		envelope.Type == "response.reasoning_summary_part.done" ||
 		envelope.Type == "response.reasoning_summary_text.done" ||
 		envelope.Type == "responsesapi.websocket_timing":
 		observation.Kind = CodexSSEIgnored

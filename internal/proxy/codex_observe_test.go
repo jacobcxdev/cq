@@ -122,10 +122,10 @@ func TestCodexObserveRecordsValidatedUnknownEventType(t *testing.T) {
 	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`)
 	ctx, diag := withRouteDiagnostics(context.Background())
 	handle := observer.BeginHTTP(ctx, body, "identity", "", false)
-	handle.ObserveBytes([]byte("data: {\"type\":\"response.output_text.done\"}\n\n"))
+	handle.ObserveBytes([]byte("data: {\"type\":\"future.event\"}\n\n"))
 	event := RouteEvent{}
 	event.applyRouteDiagnostics(diag)
-	if event.Reason != "response_event_response_output_text_done" {
+	if event.Reason != "response_event_future_event" {
 		t.Fatalf("reason = %q", event.Reason)
 	}
 

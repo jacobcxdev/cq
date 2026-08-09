@@ -80,7 +80,9 @@ func TestCodexSSEClassifiesCurrentNonLifecycleEvents(t *testing.T) {
 		"response.in_progress",
 		"response.output_item.added",
 		"response.output_item.done",
+		"response.output_text.done",
 		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
 		"response.reasoning_summary_text.done",
 		"responsesapi.websocket_timing",
 	}
