@@ -72,13 +72,17 @@ func TestCodexSSEMalformedUnknownErrorAndRateLimits(t *testing.T) {
 func TestCodexSSEClassifiesCurrentNonLifecycleEvents(t *testing.T) {
 	t.Parallel()
 	eventTypes := []string{
+		"keepalive",
 		"response.custom_tool_call_input.done",
+		"response.content_part.added",
+		"response.content_part.done",
 		"response.function_call_arguments.done",
 		"response.in_progress",
 		"response.output_item.added",
 		"response.output_item.done",
 		"response.reasoning_summary_part.added",
 		"response.reasoning_summary_text.done",
+		"responsesapi.websocket_timing",
 	}
 	for _, eventType := range eventTypes {
 		t.Run(eventType, func(t *testing.T) {
