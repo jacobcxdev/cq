@@ -21,6 +21,7 @@ import (
 const (
 	codexLeaseJournalVersion   = 1
 	codexLeaseHMACKeyBytes     = 32
+	codexLeaseJournalMaxBytes  = 16 << 20
 	DefaultCodexLeaseRetention = 7 * 24 * time.Hour
 )
 
@@ -69,10 +70,33 @@ func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*
 	if path == "" || keyPath == "" || filepath.Dir(path) != filepath.Dir(keyPath) {
 		return nil, errors.New("Codex lease journal and key require one state directory")
 	}
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	opener, ok := fsys.(fsutil.SecureDirectoryOpener)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	directoryPath := filepath.Dir(path)
+	if err := fsutil.EnsureSecureDirectory(fsys, directoryPath); err != nil {
+		return nil, fmt.Errorf("secure Codex lease state directory: %w", err)
+	}
+	directory, err := opener.OpenSecureDirectory(directoryPath)
+	if err != nil {
+		return nil, fmt.Errorf("open Codex lease state directory: %w", err)
+	}
+	defer directory.Close()
+	journalName := filepath.Base(path)
+	keyName := filepath.Base(keyPath)
+	journalData, _, journalErr := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, journalName, codexLeaseJournalMaxBytes)
+	journalExists := journalErr == nil
+	if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("read Codex lease journal: %w", journalErr)
+	}
 	store := &CodexLeaseStore{fs: fsys, path: path, keyPath: keyPath}
-	journalExists := fileExists(fsys, path)
-	key, err := fsys.ReadFile(keyPath)
-	if os.IsNotExist(err) {
+	key, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, keyName, codexLeaseHMACKeyBytes)
+	if errors.Is(err, os.ErrNotExist) {
 		if journalExists {
 			return nil, errors.New("Codex lease HMAC key missing for existing journal")
 		}
@@ -80,8 +104,12 @@ func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*
 		if _, err := rand.Read(key); err != nil {
 			return nil, fmt.Errorf("generate Codex lease HMAC key: %w", err)
 		}
-		if err := durableAtomicWrite(fsys, keyPath, key); err != nil {
+		if err := fsutil.SecureAtomicWriteInDirectory(inspector, directory, keyName, key); err != nil {
 			return nil, fmt.Errorf("persist Codex lease HMAC key: %w", err)
+		}
+		key, _, err = fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, keyName, codexLeaseHMACKeyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("verify Codex lease HMAC key: %w", err)
 		}
 	} else if err != nil {
 		return nil, fmt.Errorf("read Codex lease HMAC key: %w", err)
@@ -93,12 +121,8 @@ func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*
 	if !journalExists {
 		return store, nil
 	}
-	data, err := fsys.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read Codex lease journal: %w", err)
-	}
 	var envelope codexLeaseJournalEnvelope
-	if err := json.Unmarshal(data, &envelope); err != nil {
+	if err := json.Unmarshal(journalData, &envelope); err != nil {
 		return nil, fmt.Errorf("decode Codex lease journal: %w", err)
 	}
 	if envelope.Version != codexLeaseJournalVersion {
@@ -110,7 +134,9 @@ func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*
 	store.generation = envelope.Generation
 	store.records = append([]CodexJournalRecord(nil), envelope.Records...)
 	if store.orphanRestoredRecords() {
-		if err := store.commitRecordsLocked(store.records, store.generation); err != nil {
+		if err := store.commitRecordsLockedWithWriter(store.records, store.generation, func(data []byte) error {
+			return fsutil.SecureAtomicWriteInDirectory(inspector, directory, journalName, data)
+		}); err != nil {
 			return nil, fmt.Errorf("orphan restored Codex leases: %w", err)
 		}
 	}
@@ -200,8 +226,17 @@ func (store *CodexLeaseStore) commitLeasesLocked(leases []CodexTurnLease, expect
 }
 
 func (store *CodexLeaseStore) commitRecordsLocked(records []CodexJournalRecord, expectedGeneration uint64) error {
+	return store.commitRecordsLockedWithWriter(records, expectedGeneration, func(data []byte) error {
+		return durableAtomicWrite(store.fs, store.path, data)
+	})
+}
+
+func (store *CodexLeaseStore) commitRecordsLockedWithWriter(records []CodexJournalRecord, expectedGeneration uint64, write func([]byte) error) error {
 	if expectedGeneration != store.generation {
 		return fmt.Errorf("Codex lease journal generation changed: have %d, expected %d", store.generation, expectedGeneration)
+	}
+	if write == nil {
+		return errors.New("Codex lease journal writer required")
 	}
 	envelope := codexLeaseJournalEnvelope{Version: codexLeaseJournalVersion, Generation: store.generation + 1, Records: records}
 	mac, err := store.envelopeMAC(envelope)
@@ -213,7 +248,7 @@ func (store *CodexLeaseStore) commitRecordsLocked(records []CodexJournalRecord, 
 	if err != nil {
 		return fmt.Errorf("encode Codex lease journal: %w", err)
 	}
-	if err := durableAtomicWrite(store.fs, store.path, data); err != nil {
+	if err := write(data); err != nil {
 		return err
 	}
 	store.generation = envelope.Generation
@@ -222,34 +257,7 @@ func (store *CodexLeaseStore) commitRecordsLocked(records []CodexJournalRecord, 
 }
 
 func durableAtomicWrite(fsys fsutil.DurableFileSystem, path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := fsys.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create durable state directory: %w", err)
-	}
-	if err := fsys.Chmod(dir, 0o700); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("secure durable state directory: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := fsys.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write durable temporary file: %w", err)
-	}
-	cleanup := func() { _ = fsys.Remove(tmp) }
-	if err := fsys.Chmod(tmp, 0o600); err != nil {
-		cleanup()
-		return fmt.Errorf("secure durable temporary file: %w", err)
-	}
-	if err := fsys.SyncFile(tmp); err != nil {
-		cleanup()
-		return fmt.Errorf("sync durable temporary file: %w", err)
-	}
-	if err := fsys.Rename(tmp, path); err != nil {
-		cleanup()
-		return fmt.Errorf("replace durable file: %w", err)
-	}
-	if err := fsys.SyncDir(dir); err != nil {
-		return fmt.Errorf("sync durable state directory: %w", err)
-	}
-	return nil
+	return fsutil.SecureAtomicWrite(fsys, path, data)
 }
 
 func (store *CodexLeaseStore) recordForLease(lease CodexTurnLease) CodexJournalRecord {

@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -462,7 +463,10 @@ func TestCodexPrimerStoreRetiresLegacyCoalescedDormantTarget(t *testing.T) {
 }
 
 func TestCodexPrimerStoreUsesPrivateFiles(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store, err := OpenCodexPrimerStore(fsutil.OSFileSystem{}, dir+"/primer.json", dir+"/primer.key")
 	if err != nil {
 		t.Fatal(err)

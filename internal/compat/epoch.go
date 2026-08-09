@@ -11,7 +11,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
-const CurrentEpoch = 2
+const CurrentEpoch = 3
 
 var ErrIncompatibleEpoch = errors.New("CQ binary predates persisted compatibility epoch")
 
@@ -32,7 +32,7 @@ func EnsureEpoch(fs fsutil.FileSystem, path string, binaryEpoch int) error {
 	if fs == nil || path == "" || binaryEpoch <= 0 {
 		return fmt.Errorf("invalid compatibility epoch configuration")
 	}
-	data, err := fs.ReadFile(path)
+	data, err := readEpoch(fs, path)
 	stored := 0
 	if err == nil {
 		stored, err = strconv.Atoi(strings.TrimSpace(string(data)))
@@ -48,16 +48,15 @@ func EnsureEpoch(fs fsutil.FileSystem, path string, binaryEpoch int) error {
 	if stored == binaryEpoch {
 		return nil
 	}
-	if err := fs.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create compatibility state directory: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := fs.WriteFile(tmp, []byte(strconv.Itoa(binaryEpoch)+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write compatibility epoch: %w", err)
-	}
-	if err := fs.Rename(tmp, path); err != nil {
-		_ = fs.Remove(tmp)
+	if err := fsutil.SecureAtomicWrite(fs, path, []byte(strconv.Itoa(binaryEpoch)+"\n")); err != nil {
 		return fmt.Errorf("commit compatibility epoch: %w", err)
 	}
 	return nil
+}
+
+func readEpoch(fs fsutil.FileSystem, path string) ([]byte, error) {
+	if err := fsutil.EnsureSecureDirectory(fs, filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	return fsutil.ReadSecureFile(fs, path, 64)
 }

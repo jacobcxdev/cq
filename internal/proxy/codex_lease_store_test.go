@@ -106,6 +106,74 @@ func TestCodexJournalKeyLossFailsClosed(t *testing.T) {
 	}
 }
 
+func TestOpenCodexLeaseStoreRejectsSymlinkKey(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "outside.key")
+	if err := os.WriteFile(target, make([]byte, codexLeaseHMACKeyBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(state, "leases.key")
+	if err := os.Symlink(target, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenCodexLeaseStore(fsutil.OSFileSystem{}, filepath.Join(state, "leases.json"), keyPath)
+	if store != nil || err == nil {
+		t.Fatalf("OpenCodexLeaseStore = %v, %v; want symlink rejection", store, err)
+	}
+}
+
+func TestOpenCodexLeaseStoreRejectsSymlinkJournal(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	journalPath := filepath.Join(state, "leases.json")
+	keyPath := filepath.Join(state, "leases.key")
+	store, err := OpenCodexLeaseStore(fsutil.OSFileSystem{}, journalPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitLeases(nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "outside.json")
+	if err := os.Rename(journalPath, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, journalPath); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenCodexLeaseStore(fsutil.OSFileSystem{}, journalPath, keyPath)
+	if reopened != nil || err == nil {
+		t.Fatalf("OpenCodexLeaseStore = %v, %v; want symlink rejection", reopened, err)
+	}
+}
+
+func TestOpenCodexLeaseStoreBoundsJournalRead(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(state, "leases.key")
+	if err := os.WriteFile(keyPath, make([]byte, codexLeaseHMACKeyBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(state, "leases.json")
+	if err := os.WriteFile(journalPath, make([]byte, (16<<20)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenCodexLeaseStore(fsutil.OSFileSystem{}, journalPath, keyPath)
+	if store != nil || !errors.Is(err, fsutil.ErrSecureFileTooLarge) {
+		t.Fatalf("OpenCodexLeaseStore = %v, %v; want ErrSecureFileTooLarge", store, err)
+	}
+}
+
 func TestCodexJournalRestartOrphansAndExtinguishesSocket(t *testing.T) {
 	t.Parallel()
 	fsys := fsutil.NewMemFS()
@@ -121,6 +189,43 @@ func TestCodexJournalRestartOrphansAndExtinguishesSocket(t *testing.T) {
 	record, account, found := restarted.Lookup(lease.Key, []codex.AccountKey{lease.AccountKey})
 	if !found || account != lease.AccountKey || record.State != LeaseOrphaned || record.SocketGeneration != 0 || record.ActiveRefs != 0 {
 		t.Fatalf("restored record = %#v", record)
+	}
+}
+
+func TestCodexJournalRestartCommitsThroughRetainedDirectory(t *testing.T) {
+	t.Parallel()
+	if _, ok := any(fsutil.OSFileSystem{}).(fsutil.SecurePathInspector); !ok {
+		t.Skip("secure path inspection is unavailable on this platform")
+	}
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	journalPath := filepath.Join(state, "leases.json")
+	keyPath := filepath.Join(state, "leases.key")
+	store, err := OpenCodexLeaseStore(fsutil.OSFileSystem{}, journalPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitLeases([]CodexTurnLease{testJournalLease(time.Now())}, 0); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heldState := state + ".held"
+	fys := &replaceLeaseDirectoryAfterReadsFS{OSFileSystem: fsutil.OSFileSystem{}, state: state, heldState: heldState}
+	if _, err := OpenCodexLeaseStore(fys, journalPath, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement namespace journal error = %v, want not exist", err)
+	}
+	after, err := os.ReadFile(filepath.Join(heldState, filepath.Base(journalPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(after, before) {
+		t.Fatal("retained namespace journal was not updated during restart recovery")
 	}
 }
 
@@ -153,7 +258,7 @@ func TestCodexJournalRetentionAndLateResumeTombstone(t *testing.T) {
 
 func TestCodexJournalDurableWriteOrderAndPermissions(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "state")
 	fsys := &recordingDurableFS{OSFileSystem: fsutil.OSFileSystem{}}
 	store, err := OpenCodexLeaseStore(fsys, filepath.Join(dir, "leases.json"), filepath.Join(dir, "leases.key"))
 	if err != nil {
@@ -163,7 +268,7 @@ func TestCodexJournalDurableWriteOrderAndPermissions(t *testing.T) {
 	if err := store.CommitLeases([]CodexTurnLease{testJournalLease(time.Now())}, 0); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mkdir", "chmod-dir", "write", "chmod-file", "sync-file", "rename", "sync-dir"}
+	want := []string{"create", "write", "sync-file", "close", "rename", "sync-dir"}
 	if !slices.Equal(fsys.events, want) {
 		t.Fatalf("events = %v, want %v", fsys.events, want)
 	}
@@ -185,6 +290,33 @@ func TestCodexJournalDurableWriteOrderAndPermissions(t *testing.T) {
 	}
 }
 
+func TestDurableAtomicWriteUsesUniqueExclusiveTemporaryFiles(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "state")
+	fsys := &recordingDurableFS{OSFileSystem: fsutil.OSFileSystem{}}
+	path := filepath.Join(dir, "state.json")
+	if err := durableAtomicWrite(fsys, path, []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableAtomicWrite(fsys, path, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if len(fsys.writePaths) != 2 {
+		t.Fatalf("temporary paths = %v, want two", fsys.writePaths)
+	}
+	if fsys.writePaths[0] == fsys.writePaths[1] {
+		t.Fatalf("temporary paths reused %q", fsys.writePaths[0])
+	}
+	for _, temporaryPath := range fsys.writePaths {
+		if temporaryPath == path+".tmp" {
+			t.Fatalf("fixed temporary path used %q", temporaryPath)
+		}
+		if filepath.Dir(temporaryPath) != dir {
+			t.Fatalf("temporary path directory = %q, want %q", filepath.Dir(temporaryPath), dir)
+		}
+	}
+}
+
 func TestCodexJournalENOSPCDoesNotAdvanceGeneration(t *testing.T) {
 	t.Parallel()
 	fsys := &failingDurableFS{MemFS: fsutil.NewMemFS()}
@@ -195,6 +327,20 @@ func TestCodexJournalENOSPCDoesNotAdvanceGeneration(t *testing.T) {
 	}
 	if store.Generation() != 0 {
 		t.Fatalf("generation = %d", store.Generation())
+	}
+}
+
+func TestCodexJournalIndeterminateCommitDoesNotAdvanceGeneration(t *testing.T) {
+	t.Parallel()
+	fsys := &failingDurableFS{MemFS: fsutil.NewMemFS()}
+	store := openTestCodexLeaseStore(t, fsys)
+	fsys.failSyncDir = true
+	err := store.CommitLeases([]CodexTurnLease{testJournalLease(time.Now())}, 0)
+	if !errors.Is(err, fsutil.ErrCommitIndeterminate) {
+		t.Fatalf("commit error = %v, want ErrCommitIndeterminate", err)
+	}
+	if store.Generation() != 0 {
+		t.Fatalf("generation = %d, want 0", store.Generation())
 	}
 }
 
@@ -227,7 +373,84 @@ func testJournalLease(now time.Time) CodexTurnLease {
 
 type recordingDurableFS struct {
 	fsutil.OSFileSystem
-	events []string
+	events     []string
+	writePaths []string
+}
+
+type replaceLeaseDirectoryAfterReadsFS struct {
+	fsutil.OSFileSystem
+	state     string
+	heldState string
+	reads     int
+}
+
+func (fsys *replaceLeaseDirectoryAfterReadsFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fsys.OSFileSystem.OpenSecureDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return &replaceLeaseDirectoryAfterReads{
+		SecureDirectory: directory,
+		fsys:            fsys,
+	}, nil
+}
+
+type replaceLeaseDirectoryAfterReads struct {
+	fsutil.SecureDirectory
+	fsys *replaceLeaseDirectoryAfterReadsFS
+}
+
+func (directory *replaceLeaseDirectoryAfterReads) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	file, err := directory.SecureDirectory.OpenNoFollow(name)
+	if err != nil {
+		return nil, err
+	}
+	directory.fsys.reads++
+	if directory.fsys.reads == 2 {
+		if err := os.Rename(directory.fsys.state, directory.fsys.heldState); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := os.Mkdir(directory.fsys.state, 0o700); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	return file, nil
+}
+
+func (fsys *recordingDurableFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fsys.OSFileSystem.OpenSecureDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingSecureDirectory{SecureDirectory: directory, fsys: fsys, path: path}, nil
+}
+
+type recordingSecureDirectory struct {
+	fsutil.SecureDirectory
+	fsys *recordingDurableFS
+	path string
+}
+
+func (directory *recordingSecureDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {
+	directory.fsys.events = append(directory.fsys.events, "create")
+	directory.fsys.writePaths = append(directory.fsys.writePaths, filepath.Join(directory.path, name))
+	file, err := directory.SecureDirectory.CreateExclusive(name, mode)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingDurableFile{DurableFile: file, events: &directory.fsys.events}, nil
+}
+
+func (directory *recordingSecureDirectory) Rename(oldName, newName string) error {
+	directory.fsys.events = append(directory.fsys.events, "rename")
+	return directory.SecureDirectory.Rename(oldName, newName)
+}
+
+func (directory *recordingSecureDirectory) Sync() error {
+	directory.fsys.events = append(directory.fsys.events, "sync-dir")
+	return directory.SecureDirectory.Sync()
 }
 
 func (fsys *recordingDurableFS) MkdirAll(path string, mode os.FileMode) error {
@@ -237,7 +460,18 @@ func (fsys *recordingDurableFS) MkdirAll(path string, mode os.FileMode) error {
 
 func (fsys *recordingDurableFS) WriteFile(path string, data []byte, mode os.FileMode) error {
 	fsys.events = append(fsys.events, "write")
+	fsys.writePaths = append(fsys.writePaths, path)
 	return fsys.OSFileSystem.WriteFile(path, data, mode)
+}
+
+func (fsys *recordingDurableFS) CreateExclusive(path string, mode os.FileMode) (fsutil.DurableFile, error) {
+	fsys.events = append(fsys.events, "create")
+	fsys.writePaths = append(fsys.writePaths, path)
+	file, err := fsys.OSFileSystem.CreateExclusive(path, mode)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingDurableFile{DurableFile: file, events: &fsys.events}, nil
 }
 
 func (fsys *recordingDurableFS) Chmod(path string, mode os.FileMode) error {
@@ -266,7 +500,99 @@ func (fsys *recordingDurableFS) SyncDir(path string) error {
 
 type failingDurableFS struct {
 	*fsutil.MemFS
+	failWrite   bool
+	failSyncDir bool
+}
+
+func (fsys *failingDurableFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fsys.MemFS.OpenSecureDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return &failingSecureDirectory{SecureDirectory: directory, fsys: fsys}, nil
+}
+
+type failingSecureDirectory struct {
+	fsutil.SecureDirectory
+	fsys *failingDurableFS
+}
+
+func (directory *failingSecureDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {
+	file, err := directory.SecureDirectory.CreateExclusive(name, mode)
+	if err != nil {
+		return nil, err
+	}
+	return &failingDurableFile{DurableFile: file, failWrite: directory.fsys.failWrite}, nil
+}
+
+func (directory *failingSecureDirectory) Sync() error {
+	if directory.fsys.failSyncDir {
+		return errors.New("injected directory sync failure")
+	}
+	return directory.SecureDirectory.Sync()
+}
+
+func (fsys *failingDurableFS) CreateExclusive(path string, mode os.FileMode) (fsutil.DurableFile, error) {
+	file, err := fsys.MemFS.CreateExclusive(path, mode)
+	if err != nil {
+		return nil, err
+	}
+	return &failingDurableFile{DurableFile: file, failWrite: fsys.failWrite}, nil
+}
+
+func (fsys *failingDurableFS) SyncDir(path string) error {
+	if fsys.failSyncDir {
+		return errors.New("injected directory sync failure")
+	}
+	return fsys.MemFS.SyncDir(path)
+}
+
+type recordingDurableFile struct {
+	fsutil.DurableFile
+	events *[]string
+}
+
+func (file *recordingDurableFile) Stat() (os.FileInfo, error) {
+	inspector, ok := file.DurableFile.(fsutil.DurableFileInspector)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return inspector.Stat()
+}
+
+func (file *recordingDurableFile) Write(data []byte) (int, error) {
+	*file.events = append(*file.events, "write")
+	return file.DurableFile.Write(data)
+}
+
+func (file *recordingDurableFile) Sync() error {
+	*file.events = append(*file.events, "sync-file")
+	return file.DurableFile.Sync()
+}
+
+func (file *recordingDurableFile) Close() error {
+	*file.events = append(*file.events, "close")
+	return file.DurableFile.Close()
+}
+
+type failingDurableFile struct {
+	fsutil.DurableFile
 	failWrite bool
+}
+
+func (file *failingDurableFile) Stat() (os.FileInfo, error) {
+	inspector, ok := file.DurableFile.(fsutil.DurableFileInspector)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return inspector.Stat()
+}
+
+func (file *failingDurableFile) Write(data []byte) (int, error) {
+	if file.failWrite {
+		return 0, errors.New("ENOSPC")
+	}
+	return file.DurableFile.Write(data)
 }
 
 func (fsys *failingDurableFS) WriteFile(path string, data []byte, mode os.FileMode) error {

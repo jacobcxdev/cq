@@ -38,6 +38,52 @@ func TestEnsureEpochAdvancesAndRejectsOlderBinary(t *testing.T) {
 	}
 }
 
+func TestCurrentEpochThreeRejectsFloorTwoBinary(t *testing.T) {
+	fs := fsutil.NewMemFS()
+	path := "/state/compatibility_epoch"
+	if CurrentEpoch != 3 {
+		t.Fatalf("CurrentEpoch = %d, want 3", CurrentEpoch)
+	}
+	if err := EnsureEpoch(fs, path, CurrentEpoch); err != nil {
+		t.Fatalf("record floor 3: %v", err)
+	}
+	if err := EnsureEpoch(fs, path, 2); !errors.Is(err, ErrIncompatibleEpoch) {
+		t.Fatalf("floor-2 binary error = %v, want ErrIncompatibleEpoch", err)
+	}
+}
+
+func TestEnsureEpochRequiresSecureCurrentRead(t *testing.T) {
+	base := fsutil.NewMemFS()
+	path := "/state/compatibility_epoch"
+	if err := base.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.WriteFile(path, []byte("3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs := struct{ fsutil.FileSystem }{FileSystem: base}
+	if err := EnsureEpoch(fs, path, 3); !errors.Is(err, fsutil.ErrSecureCapabilityUnavailable) {
+		t.Fatalf("EnsureEpoch error = %v, want ErrSecureCapabilityUnavailable", err)
+	}
+}
+
+func TestEnsureEpochUsesUniqueDurableWriter(t *testing.T) {
+	fs := &recordingEpochFS{MemFS: fsutil.NewMemFS()}
+	path := "/state/compatibility_epoch"
+	if err := EnsureEpoch(fs, path, 3); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.createPaths) != 1 {
+		t.Fatalf("exclusive temporary paths = %v, want one", fs.createPaths)
+	}
+	if fs.createPaths[0] == path+".tmp" {
+		t.Fatalf("fixed temporary path used %q", fs.createPaths[0])
+	}
+	if filepath.Dir(fs.createPaths[0]) != filepath.Dir(path) {
+		t.Fatalf("temporary directory = %q, want %q", filepath.Dir(fs.createPaths[0]), filepath.Dir(path))
+	}
+}
+
 func TestEnsureEpochRejectsCorruptState(t *testing.T) {
 	fs := fsutil.NewMemFS()
 	path := "/state/compatibility_epoch"
@@ -68,6 +114,30 @@ func TestDefaultEpochPathUsesAbsoluteXDGConfigHome(t *testing.T) {
 type failingFS struct {
 	fsutil.FileSystem
 	writeErr error
+}
+
+type recordingEpochFS struct {
+	*fsutil.MemFS
+	createPaths []string
+}
+
+func (fs *recordingEpochFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fs.MemFS.OpenSecureDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingEpochDirectory{SecureDirectory: directory, fs: fs, path: path}, nil
+}
+
+type recordingEpochDirectory struct {
+	fsutil.SecureDirectory
+	fs   *recordingEpochFS
+	path string
+}
+
+func (directory *recordingEpochDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {
+	directory.fs.createPaths = append(directory.fs.createPaths, filepath.Join(directory.path, name))
+	return directory.SecureDirectory.CreateExclusive(name, mode)
 }
 
 func (f failingFS) WriteFile(string, []byte, os.FileMode) error { return f.writeErr }
