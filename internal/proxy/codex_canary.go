@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,6 +15,8 @@ import (
 )
 
 const CodexCanaryVersion = 1
+
+var ErrCodexCanaryActive = errors.New("Codex canary is already active")
 
 type CodexCanaryTuple struct {
 	CQBuild      string `json:"cq_build"`
@@ -54,6 +57,17 @@ func DefaultCodexCanaryPath() string {
 func StartCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []string, tuple CodexCanaryTuple, now time.Time) (*CodexCanaryRecorder, error) {
 	if fsys == nil || path == "" || tuple.CQBuild == "" || tuple.ClientBuild == "" || tuple.ParserSchema <= 0 || tuple.LeaseSchema <= 0 || tuple.FixtureHash == "" {
 		return nil, errors.New("incomplete Codex canary configuration")
+	}
+	if _, err := fsys.ReadFile(path); err == nil {
+		existing, err := OpenCodexCanary(fsys, path, protected)
+		if err != nil {
+			return nil, fmt.Errorf("open existing Codex canary: %w", err)
+		}
+		if existing.State().Active {
+			return nil, ErrCodexCanaryActive
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read existing Codex canary: %w", err)
 	}
 	recorder := &CodexCanaryRecorder{fs: fsys, path: path, protected: append([]string(nil), protected...)}
 	observed := canaryCalendarDay(now)

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -86,5 +87,16 @@ func TestCodexCanaryRecordsSecretLeakCounter(t *testing.T) {
 	}
 	if recorder.State().SecretLeaks != 1 {
 		t.Fatalf("state = %+v", recorder.State())
+	}
+}
+
+func TestCodexCanaryRefusesToReplaceActiveRun(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	tuple := CodexCanaryTuple{CQBuild: "build", ClientBuild: "client", ParserSchema: 1, LeaseSchema: 1, FixtureHash: "fixture"}
+	if _, err := StartCodexCanary(fsys, "/state/canary.json", nil, tuple, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StartCodexCanary(fsys, "/state/canary.json", nil, tuple, time.Now()); !errors.Is(err, ErrCodexCanaryActive) {
+		t.Fatalf("second start error = %v", err)
 	}
 }
