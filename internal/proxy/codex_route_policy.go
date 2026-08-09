@@ -53,8 +53,9 @@ func (e *CodexRoutePolicyError) Unwrap() error {
 
 // CodexRoutePlan is an immutable, eagerly materialised sequence of route choices.
 type CodexRoutePlan struct {
-	choices []RouteChoice
-	status  CodexRoutePlanStatus
+	choices           []RouteChoice
+	defaultAccountKey codex.AccountKey
+	status            CodexRoutePlanStatus
 }
 
 // BuildCodexRoutePlan freezes an ordered route plan without inspecting credentials or system identity.
@@ -156,7 +157,14 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 			}
 		}
 	}
-	return CodexRoutePlan{choices: choices, status: status}, nil
+	var defaultAccountKey codex.AccountKey
+	for _, choice := range choices {
+		if choice.AccountKey == hints.DefaultAccountKey {
+			defaultAccountKey = codex.AccountKey(strings.Clone(string(hints.DefaultAccountKey)))
+			break
+		}
+	}
+	return CodexRoutePlan{choices: choices, defaultAccountKey: defaultAccountKey, status: status}, nil
 }
 
 func codexRoutePolicyCandidateValid(candidate CodexRoutePolicyCandidate) bool {
@@ -196,6 +204,12 @@ func (p CodexRoutePlan) EffectiveModel() string {
 		return ""
 	}
 	return p.choices[0].EffectiveModel
+}
+
+// DefaultAccountKey returns the configured default's immutable role when it is
+// present in the frozen choices.
+func (p CodexRoutePlan) DefaultAccountKey() codex.AccountKey {
+	return p.defaultAccountKey
 }
 
 // Choices returns a deep clone of the complete frozen attempt order.

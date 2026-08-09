@@ -341,6 +341,9 @@ func TestCodexRoutePolicyAppendsKnownZeroDefaultLast(t *testing.T) {
 	if plan.Status() != CodexRoutePlanReady {
 		t.Fatalf("status = %q, want %q", plan.Status(), CodexRoutePlanReady)
 	}
+	if got := plan.DefaultAccountKey(); got != "account-default" {
+		t.Fatalf("default account key = %q, want account-default", got)
+	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary", "account-default")
 }
 
@@ -363,6 +366,9 @@ func TestCodexRoutePolicyReportsMissingDefaultWithoutDiscardingOrdinaryPlan(t *t
 	if policyErr.Status != CodexRoutePlanDefaultMissing {
 		t.Fatalf("terminal error status = %q, want %q", policyErr.Status, CodexRoutePlanDefaultMissing)
 	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
+	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary")
 }
 
@@ -384,6 +390,9 @@ func TestCodexRoutePolicyReportsUnresolvedDefault(t *testing.T) {
 	}
 	if policyErr.Status != CodexRoutePlanDefaultUnresolved {
 		t.Fatalf("terminal error status = %q, want %q", policyErr.Status, CodexRoutePlanDefaultUnresolved)
+	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
 	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary")
 }
@@ -410,6 +419,9 @@ func TestCodexRoutePolicyReportsIncompatibleDefault(t *testing.T) {
 	if policyErr.Status != CodexRoutePlanDefaultIncompatible {
 		t.Fatalf("terminal error status = %q, want %q", policyErr.Status, CodexRoutePlanDefaultIncompatible)
 	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
+	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary")
 }
 
@@ -434,6 +446,9 @@ func TestCodexRoutePolicyReportsUnroutableDefault(t *testing.T) {
 	}
 	if policyErr.Status != CodexRoutePlanDefaultUnroutable {
 		t.Fatalf("terminal error status = %q, want %q", policyErr.Status, CodexRoutePlanDefaultUnroutable)
+	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
 	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary")
 }
@@ -615,6 +630,9 @@ func TestCodexRoutePolicyReportsFrozenModelIncompatibleDefault(t *testing.T) {
 	if plan.Status() != CodexRoutePlanDefaultIncompatible {
 		t.Fatalf("status = %q, want %q", plan.Status(), CodexRoutePlanDefaultIncompatible)
 	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
+	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary")
 }
 
@@ -627,6 +645,9 @@ func TestCodexRoutePolicyDoesNotDuplicateDefaultAlreadyInOrdinaryPlan(t *testing
 	}, CodexRoutePolicyHints{DefaultAccountKey: "account-default"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := plan.DefaultAccountKey(); got != "account-default" {
+		t.Fatalf("default account key = %q, want account-default", got)
 	}
 	assertRoutePolicyAccounts(t, plan, "account-ordinary", "account-default")
 }
