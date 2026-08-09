@@ -9,7 +9,14 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
+
+type codexEnvelopeRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip codexEnvelopeRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
 
 func TestCodexRequestEnvelopeOwnsImmutableCopies(t *testing.T) {
 	encoded := []byte("encoded-request")
@@ -132,6 +139,140 @@ func TestCodexRequestEnvelopeReplaysExactIndependentBodies(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("GetBody %d = %x, want %x", i, got, want)
 		}
+	}
+}
+
+func TestCodexRequestReplayReleasePreservesAsyncTransportBodyUntilClose(t *testing.T) {
+	want := bytes.Repeat([]byte("async-request-body-"), 128)
+	envelope, err := NewCodexRequestEnvelope(want, []byte("decoded"), nil, "gpt-5.4")
+	if err != nil {
+		t.Fatalf("NewCodexRequestEnvelope: %v", err)
+	}
+	replay, err := envelope.Replay()
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	body, err := replay.Body()
+	if err != nil {
+		t.Fatalf("Body: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://example.test/responses", body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	type result struct {
+		body     []byte
+		readErr  error
+		closeErr error
+	}
+	started := make(chan struct{})
+	continueRead := make(chan struct{})
+	finished := make(chan result, 1)
+	transport := codexEnvelopeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		go func() {
+			close(started)
+			<-continueRead
+			got, readErr := io.ReadAll(request.Body)
+			finished <- result{body: got, readErr: readErr, closeErr: request.Body.Close()}
+		}()
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Body:       http.NoBody,
+			Request:    request,
+		}, nil
+	})
+
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer response.Body.Close()
+	<-started
+
+	state := replay.state
+	ownedEncoded := state.encoded
+	replay.Release()
+	envelope.Release()
+	if _, err := replay.GetBody(); !errors.Is(err, ErrCodexRequestEnvelopeReleased) {
+		t.Fatalf("GetBody after release error = %v", err)
+	}
+	if allZero(ownedEncoded) {
+		t.Fatal("active transport body was wiped before Close")
+	}
+
+	close(continueRead)
+	got := <-finished
+	if got.readErr != nil || got.closeErr != nil {
+		t.Fatalf("async body read/close = %v/%v", got.readErr, got.closeErr)
+	}
+	if !bytes.Equal(got.body, want) {
+		t.Fatalf("async body = %q, want exact replay", got.body)
+	}
+	if !allZero(ownedEncoded) {
+		t.Fatal("replay body was not wiped after final Close")
+	}
+}
+
+func TestCodexRequestReplayConcurrentCloseWaitsForFinalCleanup(t *testing.T) {
+	envelope, err := NewCodexRequestEnvelope([]byte("encoded-request"), []byte("decoded-request"), nil, "gpt-5.4")
+	if err != nil {
+		t.Fatalf("NewCodexRequestEnvelope: %v", err)
+	}
+	bodyReplay, err := envelope.Replay()
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	body, err := bodyReplay.Body()
+	if err != nil {
+		t.Fatalf("Body: %v", err)
+	}
+
+	state := bodyReplay.state
+	ownedEncoded := state.encoded
+	bodyReplay.Release()
+	envelope.Release()
+	state.mu.Lock()
+
+	start := make(chan struct{})
+	done := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for range 2 {
+		go func() {
+			ready.Done()
+			<-start
+			done <- body.Close()
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	returnedBeforeCleanup := false
+	select {
+	case closeErr := <-done:
+		returnedBeforeCleanup = true
+		if closeErr != nil {
+			t.Errorf("early Close: %v", closeErr)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+	state.mu.Unlock()
+
+	remaining := 2
+	if returnedBeforeCleanup {
+		remaining--
+	}
+	for range remaining {
+		if closeErr := <-done; closeErr != nil {
+			t.Errorf("Close: %v", closeErr)
+		}
+	}
+	if returnedBeforeCleanup {
+		t.Fatal("concurrent Close returned before final replay cleanup completed")
+	}
+	if !allZero(ownedEncoded) {
+		t.Fatal("replay body was not wiped after concurrent Close completed")
 	}
 }
 
@@ -372,7 +513,7 @@ func TestCodexRequestEnvelopeReleaseClearsOwnedState(t *testing.T) {
 	}
 }
 
-func TestCodexRequestEnvelopeReleaseEndsExistingReplay(t *testing.T) {
+func TestCodexRequestEnvelopeReleaseLetsExistingBodyFinish(t *testing.T) {
 	envelope, err := NewCodexRequestEnvelope(
 		[]byte("encoded-request"),
 		[]byte("decoded-request"),
@@ -391,13 +532,20 @@ func TestCodexRequestEnvelopeReleaseEndsExistingReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Body: %v", err)
 	}
+	ownedEncoded := replay.state.encoded
 	envelope.Release()
 
-	if contents, err := io.ReadAll(body); !errors.Is(err, ErrCodexRequestEnvelopeReleased) {
+	if contents, err := io.ReadAll(body); err != nil || string(contents) != "encoded-request" {
 		t.Fatalf("existing body after release = %q, err %v", contents, err)
+	}
+	if allZero(ownedEncoded) {
+		t.Fatal("existing body was wiped before Close")
 	}
 	if err := body.Close(); err != nil {
 		t.Fatalf("close body: %v", err)
+	}
+	if !allZero(ownedEncoded) {
+		t.Fatal("existing body was not wiped after Close")
 	}
 	if nextBody, err := replay.GetBody(); !errors.Is(err, ErrCodexRequestEnvelopeReleased) || nextBody != nil {
 		t.Fatalf("GetBody after release = %#v, err %v", nextBody, err)
@@ -449,6 +597,24 @@ func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
 	var nilReplay *CodexRequestReplay
 	nilReplay.Release()
 
+	if allZero(ownedEncoded) || allZero(ownedDecoded) || len(ownedHeaders) == 0 {
+		t.Fatal("active replay state was cleared before its bodies closed")
+	}
+	if contents, readErr := io.ReadAll(body); readErr != nil || string(contents) != "encoded-request" {
+		t.Fatalf("Body after release = %q, err %v", contents, readErr)
+	}
+	if closeErr := body.Close(); closeErr != nil {
+		t.Fatalf("close Body: %v", closeErr)
+	}
+	if allZero(ownedEncoded) {
+		t.Fatal("replay was cleared while GetBody remained open")
+	}
+	if contents, readErr := io.ReadAll(getBody); readErr != nil || string(contents) != "encoded-request" {
+		t.Fatalf("GetBody after release = %q, err %v", contents, readErr)
+	}
+	if closeErr := getBody.Close(); closeErr != nil {
+		t.Fatalf("close GetBody: %v", closeErr)
+	}
 	if !allZero(ownedEncoded) {
 		t.Fatalf("replay encoded bytes not overwritten: %q", ownedEncoded)
 	}
@@ -460,14 +626,6 @@ func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
 	}
 	if state.encoded != nil || state.decoded != nil || state.headers != nil || state.effectiveModel != "" || !state.released {
 		t.Fatalf("released replay retains owned state: %#v", state)
-	}
-	for name, reader := range map[string]io.ReadCloser{"Body": body, "GetBody": getBody} {
-		if contents, readErr := io.ReadAll(reader); !errors.Is(readErr, ErrCodexRequestEnvelopeReleased) || len(contents) != 0 {
-			t.Errorf("%s after release = %q, err %v", name, contents, readErr)
-		}
-		if closeErr := reader.Close(); closeErr != nil {
-			t.Errorf("close %s: %v", name, closeErr)
-		}
 	}
 	if nextBody, bodyErr := replay.Body(); !errors.Is(bodyErr, ErrCodexRequestEnvelopeReleased) || nextBody != nil {
 		t.Errorf("Body after release = %#v, err %v", nextBody, bodyErr)
@@ -585,7 +743,7 @@ func TestCodexRequestReplayBodiesRaceRelease(t *testing.T) {
 					runtime.Gosched()
 					continue
 				}
-				if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, ErrCodexRequestEnvelopeReleased) {
+				if !errors.Is(readErr, io.EOF) {
 					failures <- fmt.Errorf("body %d: %w", index, readErr)
 					return
 				}
@@ -608,11 +766,8 @@ func TestCodexRequestReplayBodiesRaceRelease(t *testing.T) {
 	for failure := range failures {
 		t.Error(failure)
 	}
-	if !allZero(ownedEncoded) {
-		t.Fatalf("raced encoded bytes not overwritten")
-	}
-	if !allZero(ownedDecoded) {
-		t.Fatalf("raced decoded bytes not overwritten")
+	if allZero(ownedEncoded) || allZero(ownedDecoded) {
+		t.Fatal("raced replay state was cleared before its bodies closed")
 	}
 	for index, body := range bodies {
 		if closeErr := body.Close(); closeErr != nil {
@@ -621,6 +776,12 @@ func TestCodexRequestReplayBodiesRaceRelease(t *testing.T) {
 		if n, readErr := body.Read(make([]byte, 1)); n != 0 || !errors.Is(readErr, http.ErrBodyReadAfterClose) {
 			t.Errorf("closed body %d read = %d, err %v", index, n, readErr)
 		}
+	}
+	if !allZero(ownedEncoded) {
+		t.Fatal("raced encoded bytes not overwritten after final Close")
+	}
+	if !allZero(ownedDecoded) {
+		t.Fatal("raced decoded bytes not overwritten after final Close")
 	}
 }
 
@@ -706,10 +867,6 @@ func TestCodexRequestEnvelopeConcurrentReplayAndRelease(t *testing.T) {
 				}
 				body, readErr := io.ReadAll(bodyReader)
 				closeErr := bodyReader.Close()
-				if errors.Is(readErr, ErrCodexRequestEnvelopeReleased) {
-					replay.Release()
-					continue
-				}
 				if readErr != nil || closeErr != nil || string(body) != "encoded-request" {
 					report(fmt.Errorf("body=%q read=%v close=%v", body, readErr, closeErr))
 					replay.Release()

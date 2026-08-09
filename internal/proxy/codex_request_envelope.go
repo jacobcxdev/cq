@@ -47,6 +47,8 @@ type codexRequestReplayState struct {
 	decoded        []byte
 	headers        http.Header
 	effectiveModel string
+	activeBodies   int
+	releasePending bool
 	released       bool
 }
 
@@ -98,8 +100,9 @@ func (envelope *CodexRequestEnvelope) Replay() (*CodexRequestReplay, error) {
 	return &CodexRequestReplay{owner: envelope, state: state}, nil
 }
 
-// Release invalidates all replays and best-effort overwrites owned body bytes
-// before clearing references. It is safe to call repeatedly or on nil.
+// Release rejects new replay access and best-effort overwrites owned body bytes.
+// Replay state with active bodies is cleared after the final body closes. It is
+// safe to call repeatedly or on nil.
 func (envelope *CodexRequestEnvelope) Release() {
 	if envelope == nil {
 		return
@@ -123,8 +126,9 @@ func (envelope *CodexRequestEnvelope) Release() {
 	envelope.released = true
 }
 
-// Body returns a new guarded reader positioned at the start of the exact
-// encoded request body. Releasing the replay invalidates the reader.
+// Body returns a new registered reader positioned at the start of the exact
+// encoded request body. Release rejects new access while registered readers
+// remain exact until closed.
 func (replay *CodexRequestReplay) Body() (io.ReadCloser, error) {
 	if replay == nil || replay.state == nil {
 		return nil, ErrCodexRequestEnvelopeReleased
@@ -145,7 +149,7 @@ func (replay *CodexRequestReplay) DecodedBody() ([]byte, error) {
 	}
 	replay.state.mu.RLock()
 	defer replay.state.mu.RUnlock()
-	if replay.state.released {
+	if replay.state.releasePending || replay.state.released {
 		return nil, ErrCodexRequestEnvelopeReleased
 	}
 	return bytes.Clone(replay.state.decoded), nil
@@ -159,7 +163,7 @@ func (replay *CodexRequestReplay) Header() (http.Header, error) {
 	}
 	replay.state.mu.RLock()
 	defer replay.state.mu.RUnlock()
-	if replay.state.released {
+	if replay.state.releasePending || replay.state.released {
 		return nil, ErrCodexRequestEnvelopeReleased
 	}
 	return codexReplayHeaders(replay.state.headers), nil
@@ -172,7 +176,7 @@ func (replay *CodexRequestReplay) EffectiveModel() (string, error) {
 	}
 	replay.state.mu.RLock()
 	defer replay.state.mu.RUnlock()
-	if replay.state.released {
+	if replay.state.releasePending || replay.state.released {
 		return "", ErrCodexRequestEnvelopeReleased
 	}
 	return strings.Clone(replay.state.effectiveModel), nil
@@ -185,14 +189,15 @@ func (replay *CodexRequestReplay) ContentLength() (int64, error) {
 	}
 	replay.state.mu.RLock()
 	defer replay.state.mu.RUnlock()
-	if replay.state.released {
+	if replay.state.releasePending || replay.state.released {
 		return 0, ErrCodexRequestEnvelopeReleased
 	}
 	return int64(len(replay.state.encoded)), nil
 }
 
-// Release invalidates this replay and best-effort overwrites its owned body
-// bytes without affecting other replays. It is safe to call repeatedly or on nil.
+// Release rejects new access to this replay and best-effort overwrites its owned
+// state after the final registered body closes, without affecting other replays.
+// It is safe to call repeatedly or on nil.
 func (replay *CodexRequestReplay) Release() {
 	if replay == nil || replay.state == nil {
 		return
@@ -218,11 +223,12 @@ func (replay *codexRequestReplayState) newBody() (io.ReadCloser, error) {
 	if replay == nil {
 		return nil, ErrCodexRequestEnvelopeReleased
 	}
-	replay.mu.RLock()
-	defer replay.mu.RUnlock()
-	if replay.released {
+	replay.mu.Lock()
+	defer replay.mu.Unlock()
+	if replay.releasePending || replay.released {
 		return nil, ErrCodexRequestEnvelopeReleased
 	}
+	replay.activeBodies++
 	return &codexRequestReplayBody{state: replay}, nil
 }
 
@@ -232,9 +238,31 @@ func (replay *codexRequestReplayState) release() {
 	}
 	replay.mu.Lock()
 	defer replay.mu.Unlock()
-	if replay.released {
+	if replay.releasePending {
 		return
 	}
+	replay.releasePending = true
+	if replay.activeBodies != 0 {
+		return
+	}
+	replay.clearLocked()
+}
+
+func (replay *codexRequestReplayState) closeBody() {
+	if replay == nil {
+		return
+	}
+	replay.mu.Lock()
+	defer replay.mu.Unlock()
+	if replay.activeBodies > 0 {
+		replay.activeBodies--
+	}
+	if replay.releasePending && replay.activeBodies == 0 && !replay.released {
+		replay.clearLocked()
+	}
+}
+
+func (replay *codexRequestReplayState) clearLocked() {
 	clearBytes(replay.encoded)
 	clearBytes(replay.decoded)
 	clear(replay.headers)
@@ -272,8 +300,12 @@ func (body *codexRequestReplayBody) Close() error {
 		return nil
 	}
 	body.mu.Lock()
+	defer body.mu.Unlock()
+	if body.closed {
+		return nil
+	}
 	body.closed = true
-	body.mu.Unlock()
+	body.state.closeBody()
 	return nil
 }
 
