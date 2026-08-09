@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/klauspost/compress/zstd"
 )
 
 type codexTransportRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -238,6 +239,97 @@ func TestCodexTokenTransportRewritesEncodedEffectiveModel(t *testing.T) {
 	}
 	if req.ContentLength != int64(len(encoded)) || req.Header.Get("Content-Length") != strconv.Itoa(len(encoded)) || req.Header.Get("Content-Encoding") != "zstd" {
 		t.Fatalf("caller framing changed: ContentLength=%d headers=%v", req.ContentLength, req.Header)
+	}
+}
+
+func TestCodexTokenTransportAcceptsLowExpansionFrameWithLargeWindow(t *testing.T) {
+	body := codexLargeWindowRewriteBody(23 << 10)
+	encoded := encodeCodexZstdStreamingWindow(t, body, 2<<20)
+	assertCodexLargeWindowFixture(t, encoded, body)
+
+	upstreamCalls := 0
+	var upstreamBody []byte
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		var err error
+		upstreamBody, err = io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+	})}
+	request := makeCodexBytesRequest(encoded)
+	request.Header.Set("Content-Encoding", "zstd")
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	response, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
+	}
+	decoded, err := DecodeCodexRequest(upstreamBody, "zstd", codexTransportRewriteLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(decoded.Decoded(), []byte(`"model":"`+codexFallbackModel+`"`)) {
+		t.Fatal("upstream model was not rewritten")
+	}
+}
+
+func TestCodexTokenTransportRejectsLargeWindowExpansionBeforeDispatch(t *testing.T) {
+	body := codexLargeWindowRewriteBody(2 << 20)
+	encoded := encodeCodexZstdStreamingWindow(t, body, 2<<20)
+	if len(body) <= len(encoded)*DefaultCodexZstdLimits.MaxExpansion {
+		t.Fatalf("fixture expansion = %d/%d, want over %d", len(body), len(encoded), DefaultCodexZstdLimits.MaxExpansion)
+	}
+
+	upstreamCalls := 0
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return nil, errors.New("unexpected upstream dispatch")
+	})}
+	request := makeCodexBytesRequest(encoded)
+	request.Header.Set("Content-Encoding", "zstd")
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	_, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"})
+	if err == nil || !strings.Contains(err.Error(), "Codex zstd expansion ratio exceeds limit") {
+		t.Fatalf("error = %v, want expansion limit", err)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+}
+
+func codexLargeWindowRewriteBody(repeatedBytes int) []byte {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	noise := make([]byte, 13<<10)
+	state := uint64(0x9e3779b97f4a7c15)
+	for index := range noise {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		noise[index] = alphabet[state&63]
+	}
+	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"`)
+	body = append(body, noise...)
+	body = append(body, bytes.Repeat([]byte("x"), repeatedBytes)...)
+	return append(body, []byte(`"}`)...)
+}
+
+func assertCodexLargeWindowFixture(t *testing.T, encoded, decoded []byte) {
+	t.Helper()
+	var header zstd.Header
+	if err := header.Decode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if header.HasFCS || header.WindowSize != 2<<20 {
+		t.Fatalf("frame FCS=%v window=%d, want false/%d", header.HasFCS, header.WindowSize, 2<<20)
+	}
+	decodeLimit, ratioLimited := codexZstdDecodeLimit(len(encoded), codexTransportRewriteLimits())
+	if !ratioLimited || len(decoded) > decodeLimit || decodeLimit >= int(header.WindowSize) {
+		t.Fatalf("fixture encoded=%d decoded=%d decode_limit=%d window=%d", len(encoded), len(decoded), decodeLimit, header.WindowSize)
 	}
 }
 

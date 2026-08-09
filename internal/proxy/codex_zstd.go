@@ -96,9 +96,9 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(true),
 		zstd.WithDecoderMaxWindow(uint64(max(1024, limits.MaxDecodedBytes))),
+		zstd.WithDecoderMaxMemory(uint64(limits.MaxDecodedBytes)),
 		zstd.WithDecodeAllCapLimit(true),
 	}
-	decodeOptions = append(decodeOptions, zstd.WithDecoderMaxMemory(uint64(decodeLimit)))
 	decoder, err := zstd.NewReader(nil, decodeOptions...)
 	if err != nil {
 		return CodexDecodedRequest{}, fmt.Errorf("create Codex zstd decoder: %w", err)
