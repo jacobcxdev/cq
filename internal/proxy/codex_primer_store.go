@@ -109,7 +109,14 @@ func OpenCodexPrimerStore(fsys fsutil.DurableFileSystem, path, keyPath string) (
 		}
 	}
 	store.generation = envelope.Generation
-	store.records = append([]PrimerRecord(nil), envelope.Records...)
+	records, compacted := compactCodexPrimerObservations(envelope.Records)
+	if compacted {
+		if err := store.commitLocked(records); err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+	store.records = records
 	return store, nil
 }
 
@@ -130,6 +137,20 @@ func (s *CodexPrimerStore) Observe(account codex.AccountKey, target CodexPrimerT
 		records := append([]PrimerRecord(nil), s.records...)
 		records[index].ModelID = target.ModelID
 		records[index].WindowHash = windowHash
+		return s.commitLocked(records)
+	}
+	for index := range s.records {
+		record := s.records[index]
+		if record.AccountHash != accountHash || record.WindowHash != windowHash || record.ModelID != target.ModelID ||
+			record.State != PrimerStateObserved || record.Attempts != 0 {
+			continue
+		}
+		if !target.ResetAt.After(record.ResetAt) {
+			return nil
+		}
+		records := append([]PrimerRecord(nil), s.records...)
+		records[index].ScopeHash = scopeHash
+		records[index].ResetAt = target.ResetAt.UTC()
 		return s.commitLocked(records)
 	}
 	records := append([]PrimerRecord(nil), s.records...)
@@ -393,6 +414,46 @@ func (s *CodexPrimerStore) index(accountHash, scopeHash string) int {
 		}
 	}
 	return -1
+}
+
+func compactCodexPrimerObservations(records []PrimerRecord) ([]PrimerRecord, bool) {
+	type lineage struct {
+		accountHash string
+		windowHash  string
+		modelID     string
+	}
+	newest := make(map[lineage]int)
+	removed := make([]bool, len(records))
+	changed := false
+	for i := range records {
+		record := records[i]
+		if record.State != PrimerStateObserved || record.Attempts != 0 || record.WindowHash == "" {
+			continue
+		}
+		key := lineage{accountHash: record.AccountHash, windowHash: record.WindowHash, modelID: record.ModelID}
+		prior, ok := newest[key]
+		if !ok {
+			newest[key] = i
+			continue
+		}
+		changed = true
+		if records[prior].ResetAt.Before(record.ResetAt) {
+			removed[prior] = true
+			newest[key] = i
+			continue
+		}
+		removed[i] = true
+	}
+	if !changed {
+		return append([]PrimerRecord(nil), records...), false
+	}
+	compacted := make([]PrimerRecord, 0, len(records))
+	for i := range records {
+		if !removed[i] {
+			compacted = append(compacted, records[i])
+		}
+	}
+	return compacted, true
 }
 
 func (s *CodexPrimerStore) commitLocked(records []PrimerRecord) error {
