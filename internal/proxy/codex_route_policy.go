@@ -22,6 +22,7 @@ type CodexRoutePolicyCandidate struct {
 type CodexRoutePolicyHints struct {
 	AffinityAccountKey codex.AccountKey
 	DefaultAccountKey  codex.AccountKey
+	BoundAccountKey    codex.AccountKey
 }
 
 // CodexRoutePlanStatus describes the frozen plan's terminal disposition.
@@ -33,6 +34,9 @@ const (
 	CodexRoutePlanDefaultUnresolved   CodexRoutePlanStatus = "default_unresolved"
 	CodexRoutePlanDefaultIncompatible CodexRoutePlanStatus = "default_incompatible"
 	CodexRoutePlanDefaultUnroutable   CodexRoutePlanStatus = "default_unroutable"
+	CodexRoutePlanBoundUnresolved     CodexRoutePlanStatus = "bound_unresolved"
+	CodexRoutePlanBoundIncompatible   CodexRoutePlanStatus = "bound_incompatible"
+	CodexRoutePlanBoundUnroutable     CodexRoutePlanStatus = "bound_unroutable"
 	CodexRoutePlanCanceled            CodexRoutePlanStatus = "canceled"
 	CodexRoutePlanInvalidCandidate    CodexRoutePlanStatus = "invalid_candidate"
 )
@@ -71,6 +75,47 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 			plan := CodexRoutePlan{status: CodexRoutePlanInvalidCandidate}
 			return plan, &CodexRoutePolicyError{Status: plan.status}
 		}
+	}
+	if hints.BoundAccountKey != "" {
+		bound := make([]CodexRoutePolicyCandidate, 0, 1)
+		resolved := false
+		compatible := false
+		routable := false
+		for _, candidate := range candidates {
+			if candidate.Choice.AccountKey != hints.BoundAccountKey {
+				continue
+			}
+			resolved = true
+			if !candidate.Compatible {
+				continue
+			}
+			compatible = true
+			if !candidate.Routable {
+				continue
+			}
+			routable = true
+			bound = append(bound, candidate)
+		}
+		sort.SliceStable(bound, func(i, j int) bool {
+			return codexRoutePolicyCandidateLess(bound[i], bound[j], "")
+		})
+		status := CodexRoutePlanReady
+		switch {
+		case !resolved:
+			status = CodexRoutePlanBoundUnresolved
+		case !compatible:
+			status = CodexRoutePlanBoundIncompatible
+		case !routable:
+			status = CodexRoutePlanBoundUnroutable
+		}
+		plan := CodexRoutePlan{status: status}
+		if len(bound) != 0 {
+			plan.choices = []RouteChoice{cloneRoutePolicyChoice(bound[0].Choice)}
+			if hints.DefaultAccountKey == hints.BoundAccountKey {
+				plan.defaultAccountKey = codex.AccountKey(strings.Clone(string(hints.BoundAccountKey)))
+			}
+		}
+		return plan, nil
 	}
 	eligible := make([]CodexRoutePolicyCandidate, 0, len(candidates))
 	for _, candidate := range candidates {

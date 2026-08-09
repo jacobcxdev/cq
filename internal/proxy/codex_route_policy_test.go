@@ -652,6 +652,179 @@ func TestCodexRoutePolicyDoesNotDuplicateDefaultAlreadyInOrdinaryPlan(t *testing
 	assertRoutePolicyAccounts(t, plan, "account-ordinary", "account-default")
 }
 
+func TestCodexRoutePolicyBoundAccountIsSoleChoiceAtKnownZero(t *testing.T) {
+	t.Parallel()
+
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{
+		routePolicyCandidate("account-bound", CapacityZero, 0),
+		routePolicyCandidate("account-ordinary", CapacityPositive, 100),
+		routePolicyCandidate("account-default", CapacityPositive, 100),
+	}, CodexRoutePolicyHints{
+		AffinityAccountKey: "account-ordinary",
+		DefaultAccountKey:  "account-default",
+		BoundAccountKey:    "account-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Status(); got != CodexRoutePlanReady {
+		t.Fatalf("status = %q, want %q", got, CodexRoutePlanReady)
+	}
+	if err := plan.TerminalError(); err != nil {
+		t.Fatalf("terminal error = %v, want nil", err)
+	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
+	}
+	assertRoutePolicyAccounts(t, plan, "account-bound")
+}
+
+func TestCodexRoutePolicyBoundAccountRetainsConfiguredDefaultRole(t *testing.T) {
+	t.Parallel()
+
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{
+		routePolicyCandidate("account-bound", CapacityZero, 0),
+	}, CodexRoutePolicyHints{
+		DefaultAccountKey: "account-bound",
+		BoundAccountKey:   "account-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.DefaultAccountKey(); got != "account-bound" {
+		t.Fatalf("default account key = %q, want account-bound", got)
+	}
+	assertRoutePolicyAccounts(t, plan, "account-bound")
+}
+
+func TestCodexRoutePolicyBoundAccountVariantIsPermutationDeterministic(t *testing.T) {
+	t.Parallel()
+
+	variantZ := routePolicyCandidate("account-bound", CapacityPositive, 50)
+	variantZ.Choice.EffectiveModel = "gpt-5-fallback-z"
+	variantA := routePolicyCandidate("account-bound", CapacityPositive, 50)
+	variantA.Choice.EffectiveModel = "gpt-5-fallback-a"
+	for _, candidates := range [][]CodexRoutePolicyCandidate{
+		{variantZ, variantA},
+		{variantA, variantZ},
+	} {
+		plan, err := BuildCodexRoutePlan(context.Background(), candidates, CodexRoutePolicyHints{
+			BoundAccountKey: "account-bound",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := plan.EffectiveModel(); got != "gpt-5-fallback-a" {
+			t.Fatalf("effective model = %q, want gpt-5-fallback-a", got)
+		}
+		assertRoutePolicyAccounts(t, plan, "account-bound")
+	}
+}
+
+func TestCodexRoutePolicyBoundAccountClonesInputAndOutput(t *testing.T) {
+	t.Parallel()
+
+	candidate := routePolicyCandidate("account-bound", CapacityZero, 0)
+	candidate.Choice.RequiredBuckets = []CapacityBucket{CapacityBucketBase, "model:spark"}
+	candidate.RequiredCapacity = []CapacityView{
+		{State: CapacityZero, RemainingPct: 0},
+		{State: CapacityZero, RemainingPct: 0},
+	}
+	candidates := []CodexRoutePolicyCandidate{candidate}
+	plan, err := BuildCodexRoutePlan(context.Background(), candidates, CodexRoutePolicyHints{
+		BoundAccountKey: "account-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	candidates[0].Choice.RequiredBuckets[0] = "mutated-input"
+	returned := plan.Choices()
+	returned[0].RequiredBuckets[1] = "mutated-output"
+
+	again := plan.Choices()
+	if !reflect.DeepEqual(again[0].RequiredBuckets, []CapacityBucket{CapacityBucketBase, "model:spark"}) {
+		t.Fatalf("frozen bound buckets mutated through alias: %#v", again[0].RequiredBuckets)
+	}
+}
+
+func TestCodexRoutePolicyReportsUnresolvedBoundAccount(t *testing.T) {
+	t.Parallel()
+
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{
+		routePolicyCandidate("account-default", CapacityPositive, 100),
+	}, CodexRoutePolicyHints{
+		DefaultAccountKey: "account-default",
+		BoundAccountKey:   "account-missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Status(); got != CodexRoutePlanBoundUnresolved {
+		t.Fatalf("status = %q, want %q", got, CodexRoutePlanBoundUnresolved)
+	}
+	var policyErr *CodexRoutePolicyError
+	if terminal := plan.TerminalError(); !errors.As(terminal, &policyErr) || policyErr.Status != CodexRoutePlanBoundUnresolved {
+		t.Fatalf("terminal error = %#v, want unresolved-bound policy error", terminal)
+	}
+	if got := plan.DefaultAccountKey(); got != "" {
+		t.Fatalf("default account key = %q, want empty", got)
+	}
+	assertRoutePolicyAccounts(t, plan)
+}
+
+func TestCodexRoutePolicyReportsIncompatibleBoundAccount(t *testing.T) {
+	t.Parallel()
+
+	bound := routePolicyCandidate("account-bound", CapacityPositive, 100)
+	bound.Compatible = false
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{
+		bound,
+		routePolicyCandidate("account-default", CapacityPositive, 100),
+	}, CodexRoutePolicyHints{
+		DefaultAccountKey: "account-default",
+		BoundAccountKey:   "account-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatus := CodexRoutePlanBoundIncompatible
+	if got := plan.Status(); got != wantStatus {
+		t.Fatalf("status = %q, want %q", got, wantStatus)
+	}
+	var policyErr *CodexRoutePolicyError
+	if terminal := plan.TerminalError(); !errors.As(terminal, &policyErr) || policyErr.Status != wantStatus {
+		t.Fatalf("terminal error = %#v, want incompatible-bound policy error", terminal)
+	}
+	assertRoutePolicyAccounts(t, plan)
+}
+
+func TestCodexRoutePolicyReportsUnroutableBoundAccount(t *testing.T) {
+	t.Parallel()
+
+	bound := routePolicyCandidate("account-bound", CapacityPositive, 100)
+	bound.Routable = false
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{
+		bound,
+		routePolicyCandidate("account-default", CapacityPositive, 100),
+	}, CodexRoutePolicyHints{
+		DefaultAccountKey: "account-default",
+		BoundAccountKey:   "account-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStatus := CodexRoutePlanBoundUnroutable
+	if got := plan.Status(); got != wantStatus {
+		t.Fatalf("status = %q, want %q", got, wantStatus)
+	}
+	var policyErr *CodexRoutePolicyError
+	if terminal := plan.TerminalError(); !errors.As(terminal, &policyErr) || policyErr.Status != wantStatus {
+		t.Fatalf("terminal error = %#v, want unroutable-bound policy error", terminal)
+	}
+	assertRoutePolicyAccounts(t, plan)
+}
+
 func TestCodexRoutePolicyClonesInputsAndReturnedChoices(t *testing.T) {
 	t.Parallel()
 
