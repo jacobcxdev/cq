@@ -88,6 +88,18 @@ func TestTurnMetadataPriority(t *testing.T) {
 	}
 }
 
+func TestTurnMetadataAcceptsCurrentCompactionObject(t *testing.T) {
+	t.Parallel()
+	header := `{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"compaction","compaction":{"trigger":"automatic","reason":"context_window_exceeded","implementation":"responses_compaction_v2","phase":"mid_turn","strategy":"memento"}}`
+	got, err := ParseCodexTurnMetadata(nil, header, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata.CompactionPhase != CodexCompactionMidTurn {
+		t.Fatalf("metadata = %#v", got.Metadata)
+	}
+}
+
 func TestTurnMetadataRejectsMalformedHigherPriority(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{","session_id":"flat","thread_id":"t","turn_id":"u","request_kind":"turn"}}`)

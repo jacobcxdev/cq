@@ -160,7 +160,7 @@ func TestCodexObservePersistsCompactEncryptedAffinity(t *testing.T) {
 	store := openTestCodexLeaseStore(t, fsutil.NewMemFS())
 	manager := NewCodexTurnLeaseManager(14, true, nil)
 	observer := newCodexTurnObserverWithKey(manager, store, []byte("01234567890123456789012345678901"))
-	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"compaction","compaction":"standalone"}}}`)
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"responses_compaction_v2","phase":"standalone_turn","strategy":"memento"}}}}`)
 	handle := observer.BeginHTTP(context.Background(), body, "identity", "", true)
 	handle.Selected(RouteChoice{AccountKey: "account"}, false)
 	handle.ResponseHeaders(http.StatusOK, nil)

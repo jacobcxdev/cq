@@ -49,6 +49,58 @@ type CodexTurnMetadata struct {
 	CompactionPhase CodexCompactionPhase `json:"compaction,omitempty"`
 }
 
+func (metadata *CodexTurnMetadata) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		SessionID   string           `json:"session_id"`
+		ThreadID    string           `json:"thread_id"`
+		TurnID      string           `json:"turn_id"`
+		WindowID    string           `json:"window_id"`
+		RequestKind CodexRequestKind `json:"request_kind"`
+		Compaction  json.RawMessage  `json:"compaction"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	phase, err := decodeCodexCompactionPhase(wire.Compaction)
+	if err != nil {
+		return err
+	}
+	*metadata = CodexTurnMetadata{
+		SessionID:       wire.SessionID,
+		ThreadID:        wire.ThreadID,
+		TurnID:          wire.TurnID,
+		WindowID:        wire.WindowID,
+		RequestKind:     wire.RequestKind,
+		CompactionPhase: phase,
+	}
+	return nil
+}
+
+func decodeCodexCompactionPhase(raw json.RawMessage) (CodexCompactionPhase, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	var phase CodexCompactionPhase
+	switch trimmed[0] {
+	case '"':
+		if err := json.Unmarshal(trimmed, &phase); err != nil {
+			return "", fmt.Errorf("decode Codex compaction phase: %w", err)
+		}
+	case '{':
+		var object struct {
+			Phase CodexCompactionPhase `json:"phase"`
+		}
+		if err := json.Unmarshal(trimmed, &object); err != nil {
+			return "", fmt.Errorf("decode Codex compaction metadata: %w", err)
+		}
+		phase = object.Phase
+	default:
+		return "", errors.New("Codex compaction metadata must be a string or object")
+	}
+	return phase, nil
+}
+
 type CodexTurnMetadataResult struct {
 	Metadata CodexTurnMetadata
 	Source   CodexTurnMetadataSource
@@ -156,6 +208,11 @@ func validateCodexTurnMetadata(metadata CodexTurnMetadata) error {
 	case CodexRequestCompaction:
 		if metadata.SessionID == "" || metadata.ThreadID == "" || metadata.TurnID == "" {
 			return errors.New("Codex compaction metadata requires session_id, thread_id, and turn_id")
+		}
+		switch metadata.CompactionPhase {
+		case CodexCompactionStandalone, CodexCompactionPreTurn, CodexCompactionMidTurn:
+		default:
+			return errors.New("Codex compaction metadata requires a supported phase")
 		}
 	case CodexRequestMemory:
 		// Memory requests deliberately may not identify a turn.
