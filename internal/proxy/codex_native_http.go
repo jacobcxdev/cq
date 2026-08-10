@@ -16,6 +16,13 @@ type CodexNativeHTTPRequestPlanner interface {
 	Build(context.Context, CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error)
 }
 
+// CodexRetainedNativeHTTPRequestPlanner can prove one exact retained binding
+// without selecting a prospective route or mutating durable authority.
+type CodexRetainedNativeHTTPRequestPlanner interface {
+	CodexNativeHTTPRequestPlanner
+	ProbeRetained(context.Context, CodexHTTPRequestPlanInput) (*CodexLeaseBoundExpectation, bool, error)
+}
+
 // CodexNativeHTTPRequestSession executes one prepared request without
 // inspecting, transforming, or selecting from live request state again.
 type CodexNativeHTTPRequestSession interface {
@@ -77,9 +84,14 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 		return true, ""
 	}
 
+	return handler.serveEncoded(writer, request, compact, encoded, nil)
+}
+
+func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, request *http.Request, compact bool, encoded []byte, expected *CodexLeaseBoundExpectation) (bool, string) {
 	prepared, err := handler.planner.Build(request.Context(), CodexHTTPRequestPlanInput{
-		Encoded: encoded,
-		Headers: request.Header,
+		Encoded:       encoded,
+		Headers:       request.Header,
+		ExpectedBound: expected,
 	})
 	clearBytes(encoded)
 	if err != nil {

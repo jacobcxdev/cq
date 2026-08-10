@@ -351,6 +351,11 @@ func TestCodexLeaseRuntimeResumesRetainedAuthoritativeTurnInObserveMode(t *testi
 		ModeEpoch:                   10,
 		RetainedAuthoritativeEpochs: []uint64{9},
 	}
+	retained.ExpectedBound = &CodexLeaseBoundExpectation{
+		Identity:         admitted.identity,
+		AccountKey:       admitted.AccountKey(),
+		RecordGeneration: admitted.record.RecordGeneration,
+	}
 
 	resumed, err := runtimeLease.BeginRequest(retained)
 	if err != nil {
@@ -361,6 +366,34 @@ func TestCodexLeaseRuntimeResumesRetainedAuthoritativeTurnInObserveMode(t *testi
 	}
 	if len(coordinator.Store().v2.Records) != 1 || coordinator.Store().v2.Records[0].Identity() != admitted.identity {
 		t.Fatalf("retained request created shadow authority: %#v", coordinator.Store().v2.Records)
+	}
+}
+
+func TestCodexLeaseRuntimeRejectsChangedExpectedBoundRecordBeforeMutation(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("expected-bound", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "candidate-a",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	admitted := completeCodexLeaseRuntimeTurn(t, runtimeLease, plan)
+
+	next := plan
+	next.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-next", Kind: CodexAttemptSlotDirect}}
+	next.ExpectedBound = &CodexLeaseBoundExpectation{
+		Identity:         admitted.identity,
+		AccountKey:       admitted.AccountKey(),
+		RecordGeneration: admitted.record.RecordGeneration - 1,
+	}
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	beforeGeneration := coordinator.store.Generation()
+	if _, err := runtimeLease.BeginRequest(next); !errors.Is(err, ErrCodexLeaseAuthorityMismatch) {
+		t.Fatalf("BeginRequest error = %T %v, want authority mismatch", err, err)
+	}
+	if coordinator.store.Generation() != beforeGeneration || !bytes.Equal(coordinator.store.journalBytes, before) {
+		t.Fatal("changed expected bound mutated journal")
 	}
 }
 

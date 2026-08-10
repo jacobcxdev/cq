@@ -87,7 +87,7 @@ func TestCodexLeaseV2AdmissionEvidenceStampedOnceWithStreamingCAS(t *testing.T) 
 	}
 }
 
-func TestCodexLeaseV2AffinityEligibilityExcludesShadowPrewarmAndMidTurn(t *testing.T) {
+func TestCodexLeaseV2AffinityEligibilityKeepsShadowTurnExact(t *testing.T) {
 	tests := []struct {
 		name         string
 		kind         CodexRequestKind
@@ -99,7 +99,7 @@ func TestCodexLeaseV2AffinityEligibilityExcludesShadowPrewarmAndMidTurn(t *testi
 		{name: "turn", kind: CodexRequestTurn, authority: true, wantEvidence: true, wantAffinity: true},
 		{name: "standalone compaction", kind: CodexRequestCompaction, phase: CodexCompactionStandalone, authority: true, wantEvidence: true, wantAffinity: true},
 		{name: "pre-turn compaction", kind: CodexRequestCompaction, phase: CodexCompactionPreTurn, authority: true, wantEvidence: true, wantAffinity: true},
-		{name: "shadow turn", kind: CodexRequestTurn, authority: false},
+		{name: "shadow turn", kind: CodexRequestTurn, authority: false, wantEvidence: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -704,11 +704,6 @@ func TestCodexLeaseV2SchemaRejectsInvalidAdmissionEvidence(t *testing.T) {
 		{name: "provisional evidence", mutate: func(value *codexLeaseJournalEnvelopeV2) {
 			value.Records[0].State = LeaseProvisional
 			value.Records[0].Attempts[0].State = CodexAttemptPrepared
-		}},
-		{name: "shadow evidence", mutate: func(value *codexLeaseJournalEnvelopeV2) {
-			value.Records[0].Authoritative = false
-			value.Lanes[0].CurrentAuthoritative = false
-			value.Lanes[0].LastAuthoritative = false
 		}},
 		{name: "raw prewarm evidence", mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Records[0].AdmissionRequestKind = CodexRequestPrewarm }},
 		{name: "lane affinity missing", mutate: func(value *codexLeaseJournalEnvelopeV2) {

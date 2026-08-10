@@ -12,10 +12,15 @@ import (
 // lease-owned routing state. The accepted credential revision is deliberately
 // absent: callers own that inventory revision and must combine it explicitly.
 type CodexLeaseRouteSnapshot struct {
-	BoundAccountKey    codex.AccountKey
-	AffinityAccountKey codex.AccountKey
-	Provisional        map[codex.AccountKey]int
-	JournalGeneration  uint64
+	Classification          CodexRestoredLaneClassification
+	BoundAccountKey         codex.AccountKey
+	BoundIdentity           CodexJournalRecordIdentity
+	BoundRecordGeneration   uint64
+	BoundChoice             RouteChoice
+	HistoricalAuthoritative bool
+	AffinityAccountKey      codex.AccountKey
+	Provisional             map[codex.AccountKey]int
+	JournalGeneration       uint64
 }
 
 // LoadRouteSnapshot returns the requested lane's bound and affinity accounts
@@ -55,6 +60,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 		}
 
 		snapshot := CodexLeaseRouteSnapshot{
+			Classification:    restored.Classification,
 			Provisional:       provisional,
 			JournalGeneration: restored.Fence.Journal,
 		}
@@ -70,7 +76,18 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 					return CodexLeaseRouteSnapshot{}, fmt.Errorf("%w: persisted bound account is unavailable", ErrCodexLeaseAuthorityMismatch)
 				}
 				snapshot.BoundAccountKey = record.AccountKey
+				snapshot.BoundIdentity = record.Identity
+				snapshot.BoundRecordGeneration = record.Record.RecordGeneration
+				snapshot.BoundChoice = cloneRouteChoice(record.Choice)
 				break
+			}
+		}
+		if restored.Classification == CodexRestoredLaneHistorical {
+			for _, record := range restored.ResolvedRecords {
+				if record.Identity.TurnDigest == restored.RequestedIdentity.TurnDigest && record.Identity.Authoritative && codexLeaseRecordAllowedByPolicy(record.Record, policy) {
+					snapshot.HistoricalAuthoritative = true
+					break
+				}
 			}
 		}
 		return snapshot, nil

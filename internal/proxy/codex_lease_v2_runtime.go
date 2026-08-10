@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,15 @@ type CodexLeaseRequestEvidence struct {
 	HasEncryptedState  bool
 }
 
+// CodexLeaseBoundExpectation fences a request to one already observed exact
+// turn binding. It prevents a read-only retained probe from becoming an
+// unseen route after the probe and before BeginRequest.
+type CodexLeaseBoundExpectation struct {
+	Identity         CodexJournalRecordIdentity
+	AccountKey       codex.AccountKey
+	RecordGeneration uint64
+}
+
 // CodexLeaseRequestPlan is the complete request authority persisted before an
 // upstream dispatch. Raw account and candidate values are HMACed before they
 // enter the journal.
@@ -42,6 +52,7 @@ type CodexLeaseRequestPlan struct {
 	Slots           []CodexLeaseAttemptSlotPlan
 	InitialSlot     uint32
 	Evidence        CodexLeaseRequestEvidence
+	ExpectedBound   *CodexLeaseBoundExpectation
 }
 
 // CodexLeaseRuntime performs the high-level durable request lifecycle over the
@@ -134,6 +145,9 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		return nil, err
 	}
 	requestIdentity := codexLeaseRuntimeRequestIdentity(restored)
+	if err := runtime.validateExpectedBound(restored, plan, selected.AccountKey); err != nil {
+		return nil, err
+	}
 	if restored.Classification == CodexRestoredLaneHistorical {
 		return nil, ErrCodexStaleTurn
 	}
@@ -1195,7 +1209,26 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	plan.RequiredBuckets = append([]CapacityBucket(nil), plan.RequiredBuckets...)
 	plan.Slots = append([]CodexLeaseAttemptSlotPlan(nil), plan.Slots...)
 	plan.Authority = cloneCodexLeaseAuthorityPolicy(plan.Authority)
+	if plan.ExpectedBound != nil {
+		if plan.ExpectedBound.Identity.IsZero() || plan.ExpectedBound.AccountKey == "" || plan.ExpectedBound.RecordGeneration == 0 {
+			return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid expected bound", ErrCodexLeaseInvalidMutation)
+		}
+		expected := *plan.ExpectedBound
+		plan.ExpectedBound = &expected
+	}
 	return plan, nil
+}
+
+func (runtime *CodexLeaseRuntime) validateExpectedBound(restored CodexRestoredLane, plan CodexLeaseRequestPlan, selected codex.AccountKey) error {
+	expected := plan.ExpectedBound
+	if expected == nil {
+		return nil
+	}
+	record, found := runtime.restoredRecord(restored, expected.Identity)
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || !record.Record.EverAdmitted || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey || !constantTimeCodexLeaseDigestEqual(record.Record.RequestedModelHash, runtime.store.hash("requested-model", plan.RequestedModel)) || record.Record.EffectiveModel != plan.EffectiveModel || !slices.Equal(record.Record.RequiredBuckets, plan.RequiredBuckets) {
+		return fmt.Errorf("%w: expected bound turn changed", ErrCodexLeaseAuthorityMismatch)
+	}
+	return nil
 }
 
 func codexLeaseRuntimeCanBeginRequest(record CodexJournalRecordV2) bool {

@@ -1147,7 +1147,7 @@ func (store *CodexLeaseStore) validateCodexLeaseAdmissionEvidence(envelope codex
 			}
 			continue
 		}
-		if !record.Authoritative || record.AdmissionRequestKind == CodexRequestPrewarm || !validCodexLeaseRequestKind(record.AdmissionRequestKind, record.AdmissionCompactionPhase) || !validCodexLeaseDigest(record.AccountHash) {
+		if record.AdmissionRequestKind == CodexRequestPrewarm || !validCodexLeaseRequestKind(record.AdmissionRequestKind, record.AdmissionCompactionPhase) || !validCodexLeaseDigest(record.AccountHash) {
 			return errors.New("ineligible record has admission evidence")
 		}
 		if record.AdmissionJournalGeneration <= envelope.Cutover.CompletionGeneration || record.AdmissionJournalGeneration > envelope.Generation || record.AdmissionRequestGeneration == 0 || record.AdmissionRequestGeneration > record.Generation {
@@ -1389,9 +1389,6 @@ func codexLeaseAffinityEligible(record CodexJournalRecordV2) bool {
 }
 
 func codexLeaseFirstAdmissionEligible(record CodexJournalRecordV2) bool {
-	if !record.Authoritative {
-		return false
-	}
 	switch record.RequestKind {
 	case CodexRequestTurn:
 		return record.CompactionPhase == ""

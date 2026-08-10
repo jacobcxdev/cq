@@ -1040,6 +1040,13 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	if observation != nil {
 		_, failover := routeDiag.fields()
 		observation.Selected(choice, failover)
+		if err := observation.PrepareV2Response(resp); err != nil {
+			_ = resp.Body.Close()
+			observation.Finish(err)
+			fmt.Fprintf(os.Stderr, "cq: Codex v2 observation: %v\n", err)
+			writeError(w, http.StatusBadGateway, "api_error", "codex continuity observation failed")
+			return
+		}
 		observation.Response(resp)
 		observeCodexResponseBody(resp, observation)
 	}

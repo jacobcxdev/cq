@@ -26,7 +26,8 @@ func TestCodexLeaseRouteSnapshotReturnsDetachedGenerationFencedRouteState(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := targetHandle.AdmitHTTP2xx(); err != nil {
+	targetHandle, err = targetHandle.AdmitHTTP2xx()
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,6 +69,12 @@ func TestCodexLeaseRouteSnapshotReturnsDetachedGenerationFencedRouteState(t *tes
 	if snapshot.BoundAccountKey != "account-a" || snapshot.AffinityAccountKey != "account-a" {
 		t.Fatalf("route accounts = bound %q affinity %q, want account-a/account-a", snapshot.BoundAccountKey, snapshot.AffinityAccountKey)
 	}
+	if snapshot.BoundIdentity != targetHandle.identity || snapshot.BoundRecordGeneration != targetHandle.record.RecordGeneration {
+		t.Fatalf("bound fence = identity %#v record %d, want %#v/%d", snapshot.BoundIdentity, snapshot.BoundRecordGeneration, targetHandle.identity, targetHandle.record.RecordGeneration)
+	}
+	if snapshot.Classification != CodexRestoredLaneCurrent || snapshot.BoundChoice.AccountKey != "account-a" || snapshot.BoundChoice.EffectiveModel != targetHandle.record.EffectiveModel {
+		t.Fatalf("bound disposition = %q choice %#v", snapshot.Classification, snapshot.BoundChoice)
+	}
 	wantProvisional := map[codex.AccountKey]int{"account-a": 1, "account-b": 1}
 	if !reflect.DeepEqual(snapshot.Provisional, wantProvisional) {
 		t.Fatalf("provisional = %#v, want %#v", snapshot.Provisional, wantProvisional)
@@ -86,6 +93,169 @@ func TestCodexLeaseRouteSnapshotReturnsDetachedGenerationFencedRouteState(t *tes
 	}
 	if !reflect.DeepEqual(again.Provisional, wantProvisional) {
 		t.Fatalf("second provisional = %#v, want detached %#v", again.Provisional, wantProvisional)
+	}
+}
+
+func TestCodexLeaseRouteSnapshotBindsAdmittedShadowTurnWithoutAffinity(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("shadow-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "shadow-a",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	plan.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 10}
+
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handle.EverAdmitted() {
+		t.Fatal("shadow admission was not retained as an actual admission fact")
+	}
+
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BoundAccountKey != "account-a" {
+		t.Fatalf("bound account = %q, want account-a", snapshot.BoundAccountKey)
+	}
+	if snapshot.BoundIdentity.Authoritative || snapshot.BoundIdentity.ModeEpoch != 10 || snapshot.BoundRecordGeneration == 0 {
+		t.Fatalf("shadow bound fence = identity %#v record %d", snapshot.BoundIdentity, snapshot.BoundRecordGeneration)
+	}
+	if snapshot.AffinityAccountKey != "" {
+		t.Fatalf("shadow account became cross-turn affinity: %q", snapshot.AffinityAccountKey)
+	}
+}
+
+func TestCodexLeaseRouteSnapshotRestoresAdmittedShadowExactTurnWithoutCrossTurnAffinity(t *testing.T) {
+	t.Parallel()
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("restored-shadow-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "restored-shadow-a",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	plan.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 10}
+	handle := completeCodexLeaseRuntimeTurn(t, runtimeLease, plan)
+	if !handle.EverAdmitted() || handle.identity.Authoritative {
+		t.Fatalf("completed shadow authority = identity %#v admitted %t", handle.identity, handle.EverAdmitted())
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Minute)
+	reopened := reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+
+	exact, err := reopened.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exact.Classification != CodexRestoredLaneCurrent || exact.BoundAccountKey != "account-a" {
+		t.Fatalf("restored exact shadow = classification %q bound %q", exact.Classification, exact.BoundAccountKey)
+	}
+	if exact.BoundIdentity.Authoritative || exact.BoundIdentity.ModeEpoch != 10 || exact.BoundRecordGeneration == 0 {
+		t.Fatalf("restored shadow fence = identity %#v record %d", exact.BoundIdentity, exact.BoundRecordGeneration)
+	}
+	if exact.AffinityAccountKey != "" {
+		t.Fatalf("restored exact shadow became affinity: %q", exact.AffinityAccountKey)
+	}
+
+	otherKey := plan.Key
+	otherKey.Turn = "other-shadow-turn"
+	other, err := reopened.LoadRouteSnapshot(context.Background(), otherKey, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Classification != CodexRestoredLaneUnseen || other.BoundAccountKey != "" || other.AffinityAccountKey != "" {
+		t.Fatalf("cross-turn shadow state = classification %q bound %q affinity %q", other.Classification, other.BoundAccountKey, other.AffinityAccountKey)
+	}
+}
+
+func TestCodexLeaseRouteSnapshotDoesNotPromoteAdmittedShadowAcrossPolicyEpoch(t *testing.T) {
+	t.Parallel()
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("epoch-shadow-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "epoch-shadow-a",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	plan.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 10}
+	handle := completeCodexLeaseRuntimeTurn(t, runtimeLease, plan)
+	if !handle.EverAdmitted() || handle.identity.Authoritative {
+		t.Fatalf("completed shadow authority = identity %#v admitted %t", handle.identity, handle.EverAdmitted())
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Minute)
+	reopened := reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+
+	nextPolicy := CodexLeaseAuthorityPolicy{ModeEpoch: 11}
+	beforeGeneration := reopened.Store().Generation()
+	next, err := reopened.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, nextPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Classification != CodexRestoredLaneUnseen || next.BoundAccountKey != "" || !next.BoundIdentity.IsZero() || next.BoundRecordGeneration != 0 || !reflect.DeepEqual(next.BoundChoice, RouteChoice{}) {
+		t.Fatalf("next-epoch shadow state = classification %q bound %q identity %#v record %d choice %#v", next.Classification, next.BoundAccountKey, next.BoundIdentity, next.BoundRecordGeneration, next.BoundChoice)
+	}
+	if next.AffinityAccountKey != "" {
+		t.Fatalf("next-epoch shadow became affinity: %q", next.AffinityAccountKey)
+	}
+	if reopened.Store().Generation() != beforeGeneration {
+		t.Fatalf("next-epoch read changed journal generation from %d to %d", beforeGeneration, reopened.Store().Generation())
+	}
+	for _, record := range reopened.Store().v2.Records {
+		if record.TurnHash == reopened.Store().hash("turn", plan.Key.Turn) && record.Authoritative {
+			t.Fatalf("shadow record promoted across policy epoch: %#v", record.Identity())
+		}
+	}
+}
+
+func TestCodexLeaseRouteSnapshotDistinguishesHistoricalAuthority(t *testing.T) {
+	tests := []struct {
+		name          string
+		firstPolicy   CodexLeaseAuthorityPolicy
+		probePolicy   CodexLeaseAuthorityPolicy
+		authoritative bool
+	}{
+		{name: "retained authoritative", firstPolicy: CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true}, probePolicy: CodexLeaseAuthorityPolicy{ModeEpoch: 10, RetainedAuthoritativeEpochs: []uint64{9}}, authoritative: true},
+		{name: "shadow", firstPolicy: CodexLeaseAuthorityPolicy{ModeEpoch: 10}, probePolicy: CodexLeaseAuthorityPolicy{ModeEpoch: 10}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			first := codexLeaseRuntimeTestPlan("historical-first", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "first", Kind: CodexAttemptSlotDirect}})
+			first.Authority = test.firstPolicy
+			completeCodexLeaseRuntimeTurn(t, runtimeLease, first)
+			successor := codexLeaseRuntimeTestPlan("historical-successor", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "successor", Kind: CodexAttemptSlotDirect}})
+			successor.Authority = test.firstPolicy
+			if _, err := runtimeLease.BeginRequest(successor); err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), first.Key, first.Accounts, test.probePolicy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Classification != CodexRestoredLaneHistorical || snapshot.HistoricalAuthoritative != test.authoritative {
+				t.Fatalf("historical snapshot = classification %q authoritative %t", snapshot.Classification, snapshot.HistoricalAuthoritative)
+			}
+		})
 	}
 }
 

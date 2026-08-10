@@ -45,6 +45,7 @@ type CodexTurnObserver struct {
 	Leases  *CodexTurnLeaseManager
 	Prewarm *CodexPrewarmManager
 	Store   *CodexLeaseStore
+	v2      *codexV2ObserveBackend
 
 	hintKey []byte
 	storeMu sync.Mutex
@@ -144,6 +145,11 @@ type CodexTurnObservation struct {
 	ws       bool
 	socket   uint64
 
+	v2ActualChoice  RouteChoice
+	v2ActualAttempt CandidateAttempt
+	v2ActualFound   bool
+	v2RequestErr    error
+
 	mu              sync.Mutex
 	leaseAcquired   bool
 	routingReleased bool
@@ -182,6 +188,7 @@ func observeCodexAttempt(ctx context.Context, choice RouteChoice, attempt Candid
 	var observer *CodexTurnObserver
 	switch value := ctx.Value(codexObservationContextKey{}).(type) {
 	case *CodexTurnObservation:
+		value.recordV2Actual(choice, attempt)
 		observer = value.observer
 	case *CodexTurnObserver:
 		observer = value
@@ -313,6 +320,9 @@ func (handle *CodexTurnObservation) Selected(choice RouteChoice, failover bool) 
 
 func (handle *CodexTurnObservation) pinnedChoice() (RouteChoice, bool, error) {
 	if handle == nil || handle.observer == nil || handle.prewarm || !handle.request.Metadata.Strong {
+		return RouteChoice{}, false, nil
+	}
+	if handle.observer.v2 != nil {
 		return RouteChoice{}, false, nil
 	}
 	metadata := handle.request.Metadata.Metadata
@@ -898,14 +908,18 @@ func (s *Server) beginCodexHTTPObservation(ctx context.Context, body []byte, hea
 	if s == nil || s.CodexObserver == nil {
 		return nil
 	}
-	return s.CodexObserver.BeginHTTP(ctx, body, header.Get("Content-Encoding"), header.Get(codexTurnMetadataKey), compact)
+	handle := s.CodexObserver.BeginHTTP(ctx, body, header.Get("Content-Encoding"), header.Get(codexTurnMetadataKey), compact)
+	handle.observeV2RequestHeaders(header)
+	return handle
 }
 
 func (s *Server) beginCodexHTTPObservationDecoded(ctx context.Context, body []byte, header http.Header, compact bool) *CodexTurnObservation {
 	if s == nil || s.CodexObserver == nil {
 		return nil
 	}
-	return s.CodexObserver.beginHTTPDecoded(ctx, body, header.Get("Content-Encoding"), header.Get(codexTurnMetadataKey), compact)
+	handle := s.CodexObserver.beginHTTPDecoded(ctx, body, header.Get("Content-Encoding"), header.Get(codexTurnMetadataKey), compact)
+	handle.observeV2RequestHeaders(header)
+	return handle
 }
 
 func observeCodexResponseBody(response *http.Response, handle *CodexTurnObservation) {

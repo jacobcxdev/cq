@@ -334,6 +334,114 @@ func TestCodexHTTPRequestPlanFactoryRejectsInvalidRouteSnapshotBeforeFreeze(t *t
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryProbeRetainedClaimsOnlyExactAuthoritativeBinding(t *testing.T) {
+	t.Parallel()
+
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	factory.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 9, RetainedAuthoritativeEpochs: []uint64{7}}
+	identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true}
+	routes := &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		Classification:        CodexRestoredLaneCurrent,
+		BoundAccountKey:       "account",
+		BoundIdentity:         identity,
+		BoundRecordGeneration: 12,
+		JournalGeneration:     13,
+	}}
+	factory.Routes = routes
+	input := CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")}
+
+	expected, claimed, err := factory.ProbeRetained(context.Background(), input)
+	if err != nil || !claimed || expected == nil || expected.Identity != identity || expected.AccountKey != "account" || expected.RecordGeneration != 12 {
+		t.Fatalf("retained probe = %#v, claimed=%t, err=%v", expected, claimed, err)
+	}
+	if routes.calls != 1 {
+		t.Fatalf("route snapshot calls = %d, want 1", routes.calls)
+	}
+
+	routes.snapshot.BoundIdentity.Authoritative = false
+	if expected, claimed, err := factory.ProbeRetained(context.Background(), input); err != nil || claimed || expected != nil {
+		t.Fatalf("shadow probe = %#v, claimed=%t, err=%v", expected, claimed, err)
+	}
+
+	routes.snapshot.Classification = CodexRestoredLaneHistorical
+	routes.snapshot.BoundIdentity = CodexJournalRecordIdentity{}
+	routes.snapshot.HistoricalAuthoritative = true
+	if expected, claimed, err := factory.ProbeRetained(context.Background(), input); expected != nil || !claimed || !errors.Is(err, ErrCodexStaleTurn) {
+		t.Fatalf("historical probe = %#v, claimed=%t, err=%v", expected, claimed, err)
+	}
+	routes.snapshot.HistoricalAuthoritative = false
+	if expected, claimed, err := factory.ProbeRetained(context.Background(), input); expected != nil || claimed || err != nil {
+		t.Fatalf("historical shadow probe = %#v, claimed=%t, err=%v", expected, claimed, err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRejectsChangedExpectedBoundBeforeDecision(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	routes := &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		Classification:        CodexRestoredLaneCurrent,
+		BoundAccountKey:       "account",
+		BoundIdentity:         CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true},
+		BoundRecordGeneration: 13,
+		JournalGeneration:     14,
+	}}
+	factory.Routes = routes
+	planCalls := 0
+	factory.operations.buildDispatch = func(context.Context, CodexFrozenDispatchInput) (CodexFrozenDispatchPlan, error) {
+		planCalls++
+		return CodexFrozenDispatchPlan{}, errors.New("unexpected route decision")
+	}
+	expected := &CodexLeaseBoundExpectation{
+		Identity:         routes.snapshot.BoundIdentity,
+		AccountKey:       "account",
+		RecordGeneration: 12,
+	}
+
+	_, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded:       frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		ExpectedBound: expected,
+	})
+	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanRouteSnapshot, "private-body")
+	if planCalls != 0 || runtime.calls != 0 {
+		t.Fatalf("route decision/begin calls = %d/%d, want 0/0", planCalls, runtime.calls)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryCarriesMatchingExpectedBound(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true}
+	expected := &CodexLeaseBoundExpectation{Identity: identity, AccountKey: "account", RecordGeneration: 12}
+	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		Classification:        CodexRestoredLaneCurrent,
+		BoundAccountKey:       "account",
+		BoundIdentity:         identity,
+		BoundRecordGeneration: 12,
+		BoundChoice: RouteChoice{
+			AccountKey:      "account",
+			EffectiveModel:  "gpt-5",
+			RequiredBuckets: []CapacityBucket{CapacityBucketBase},
+		},
+		JournalGeneration: 13,
+	}}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded:       frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		ExpectedBound: expected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	if runtime.plan.ExpectedBound == nil || *runtime.plan.ExpectedBound != *expected || runtime.plan.ExpectedBound == expected {
+		t.Fatalf("runtime expected bound = %#v, want detached %#v", runtime.plan.ExpectedBound, expected)
+	}
+}
+
 type codexHTTPRequestPlanTestInventory struct {
 	inventory codex.Inventory
 	err       error

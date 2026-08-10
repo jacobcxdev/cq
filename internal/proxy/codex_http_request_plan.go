@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -27,6 +28,51 @@ type CodexHTTPRequestPlanInput struct {
 	Encoded          []byte
 	Headers          http.Header
 	AcceptedRevision codex.Revision
+	ExpectedBound    *CodexLeaseBoundExpectation
+}
+
+// ProbeRetained performs the read-only half of retained routing. A claimed
+// result must either carry an exact bound expectation or a fail-closed error.
+func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, input CodexHTTPRequestPlanInput) (*CodexLeaseBoundExpectation, bool, error) {
+	if factory == nil || factory.Inventory == nil || factory.Routes == nil {
+		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanUnavailable, nil)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	inspection, err := factory.inspect(ctx, input.Encoded, input.Headers)
+	if err != nil {
+		return nil, false, nil
+	}
+	defer inspection.Release()
+	protocol, err := inspection.Protocol()
+	if err != nil || !protocol.Metadata.Found || !protocol.Metadata.Strong {
+		return nil, false, nil
+	}
+	key := NewCodexLeaseKey(protocol.Metadata.Metadata)
+	inventory, err := factory.Inventory.List(ctx)
+	if err != nil {
+		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
+	}
+	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, codexHTTPRequestPlanAccountKeys(inventory), factory.Authority)
+	if err != nil || snapshot.JournalGeneration == 0 {
+		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, err)
+	}
+	switch snapshot.Classification {
+	case CodexRestoredLaneHistorical:
+		if snapshot.HistoricalAuthoritative {
+			return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexStaleTurn)
+		}
+	case CodexRestoredLaneCurrent:
+		if snapshot.BoundIdentity.Authoritative && containsCodexLeaseEpoch(factory.Authority.RetainedAuthoritativeEpochs, snapshot.BoundIdentity.ModeEpoch) && snapshot.BoundAccountKey != "" && snapshot.BoundRecordGeneration != 0 {
+			return &CodexLeaseBoundExpectation{
+				Identity:         snapshot.BoundIdentity,
+				AccountKey:       snapshot.BoundAccountKey,
+				RecordGeneration: snapshot.BoundRecordGeneration,
+			}, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 // CodexPreparedHTTPRequest transfers one frozen replay request and its durable
@@ -149,6 +195,9 @@ func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input Cod
 	if err != nil || snapshot.JournalGeneration == 0 {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, err)
 	}
+	if !codexHTTPRequestExpectedBoundMatchesSnapshot(input.ExpectedBound, snapshot) {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexLeaseAuthorityMismatch)
+	}
 
 	now := time.Now()
 	if factory.Now != nil {
@@ -174,7 +223,10 @@ func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input Cod
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, dispatch.TerminalError())
 	}
 	choice := dispatchAccounts[0].Choice()
-	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch)
+	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
+	}
+	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound)
 
 	frozen, err := factory.freeze(ctx, inspection, choice)
 	if err != nil {
@@ -252,7 +304,7 @@ func cloneCodexHTTPRequestPlanProvisional(source map[codex.AccountKey]int) map[c
 	return clone
 }
 
-func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan) CodexLeaseRequestPlan {
+func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation) CodexLeaseRequestPlan {
 	httpSlots := CodexHTTPAttemptSlots(dispatch)
 	slots := make([]CodexLeaseAttemptSlotPlan, len(httpSlots))
 	for index, slot := range httpSlots {
@@ -263,6 +315,11 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		}
 	}
 	metadata := protocol.Metadata.Metadata
+	var expectedClone *CodexLeaseBoundExpectation
+	if expected != nil {
+		clone := *expected
+		expectedClone = &clone
+	}
 	return CodexLeaseRequestPlan{
 		Key:             key,
 		Accounts:        append([]codex.AccountKey(nil), accounts...),
@@ -274,6 +331,7 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		RequiredBuckets: append([]CapacityBucket(nil), choice.RequiredBuckets...),
 		Slots:           slots,
 		InitialSlot:     1,
+		ExpectedBound:   expectedClone,
 		Evidence: CodexLeaseRequestEvidence{
 			PreviousResponseID: protocol.PreviousResponseID,
 			TurnState:          protocol.TurnState,
@@ -281,4 +339,14 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 			HasEncryptedState:  protocol.HasEncryptedState,
 		},
 	}
+}
+
+func codexHTTPRequestExpectedBoundMatchesSnapshot(expected *CodexLeaseBoundExpectation, snapshot CodexLeaseRouteSnapshot) bool {
+	if expected == nil {
+		return true
+	}
+	return snapshot.Classification == CodexRestoredLaneCurrent &&
+		snapshot.BoundIdentity == expected.Identity &&
+		snapshot.BoundAccountKey == expected.AccountKey &&
+		snapshot.BoundRecordGeneration == expected.RecordGeneration
 }

@@ -1052,8 +1052,12 @@ func TestCodexLeaseV2LiveIndeterminateLatchesNonMigratableAndRejectsAnotherAccou
 		t.Fatal(err)
 	}
 	record = findCodexLeaseV2CASTestRecord(t, store.v2.Records, record.Identity())
-	if !record.NonMigratable || record.EverAdmitted || record.State != LeaseOrphaned || codexLeaseCurrentAttemptState(record) != CodexAttemptIndeterminate {
+	if !record.NonMigratable || !record.EverAdmitted || record.State != LeaseOrphaned || codexLeaseCurrentAttemptState(record) != CodexAttemptIndeterminate {
 		t.Fatalf("live uncertain record = %#v", record)
+	}
+	lane := findCodexLeaseV2CASTestLane(t, store.v2.Lanes, record.Identity().LaneDigest)
+	if !codexLaneAffinityIsZero(lane) {
+		t.Fatalf("shadow uncertainty supplied cross-turn affinity: %#v", lane)
 	}
 
 	otherAccount := store.hash("account", "other-account")
