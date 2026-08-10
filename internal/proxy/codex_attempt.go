@@ -65,6 +65,10 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 	}
 	plan, err := scoper.PlanChoice(ctx, choice, "")
 	if err != nil {
+		if errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+			closeResponse(rejected)
+			return nil, CandidateAttempt{}, CodexPinnedAccepted, false, codex.ErrCredentialInventoryDegraded
+		}
 		if rejected != nil {
 			return rejected, CandidateAttempt{}, CodexPinnedAuthFailure, true, nil
 		}
@@ -81,6 +85,11 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 			observeCodexAttempt(ctx, choice, actual)
 		})
 		if err != nil {
+			if errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+				closeResponse(rejected)
+				rejected = nil
+				return nil, CodexPinnedAccepted, false, codex.ErrCredentialInventoryDegraded
+			}
 			if !dispatched && rejected != nil {
 				return rejected, CodexPinnedAuthFailure, true, nil
 			}
@@ -127,6 +136,10 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 			}
 			return response, last, failure, terminal, nil
 		}
+		if errors.Is(refreshErr, codex.ErrCredentialInventoryDegraded) {
+			closeResponse(rejected)
+			return nil, *refreshAttempt, CodexPinnedAccepted, false, codex.ErrCredentialInventoryDegraded
+		}
 		if !errors.Is(refreshErr, codex.ErrRefreshIneligible) && !errors.Is(refreshErr, codex.ErrRefreshUnavailable) && !errors.Is(refreshErr, codex.ErrStaleRevision) {
 			if rejected != nil {
 				return rejected, last, CodexPinnedAuthFailure, true, nil
@@ -157,6 +170,10 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 	for {
 		plan, err := r.Scope.Plan(ctx, requirements, "", excluded...)
 		if err != nil {
+			if errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+				closeResponse(rejected)
+				return nil, rejectedChoice, rejectedAttempt, codex.ErrCredentialInventoryDegraded
+			}
 			if rejected != nil {
 				return rejected, rejectedChoice, rejectedAttempt, nil
 			}
@@ -174,6 +191,10 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 				observeCodexAttempt(ctx, plan.Choice, actual)
 			})
 			if err != nil {
+				if errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+					closeResponse(rejected)
+					return nil, plan.Choice, actual, codex.ErrCredentialInventoryDegraded
+				}
 				if !dispatched && rejected != nil {
 					return rejected, rejectedChoice, rejectedAttempt, nil
 				}
@@ -217,6 +238,10 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 					observeCodexAttempt(ctx, plan.Choice, actual)
 				})
 				if err != nil {
+					if errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+						closeResponse(rejected)
+						return nil, plan.Choice, actual, codex.ErrCredentialInventoryDegraded
+					}
 					if !dispatched && rejected != nil {
 						return rejected, rejectedChoice, rejectedAttempt, nil
 					}
@@ -239,6 +264,9 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 					closeResponse(rejected)
 					return resp, plan.Choice, actual, nil
 				}
+			case errors.Is(refreshErr, codex.ErrCredentialInventoryDegraded):
+				closeResponse(rejected)
+				return nil, plan.Choice, *refreshAttempt, codex.ErrCredentialInventoryDegraded
 			case errors.Is(refreshErr, codex.ErrRefreshIneligible), errors.Is(refreshErr, codex.ErrRefreshUnavailable), errors.Is(refreshErr, codex.ErrStaleRevision):
 				// Another candidate or identity remains safe to try.
 			default:

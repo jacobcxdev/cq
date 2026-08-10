@@ -19,14 +19,18 @@ import (
 const codexLiveUsageLimitBody = `{"error":{"eligible_promo":null,"message":"The usage limit has been reached","plan_type":"pro","resets_at":1786832019,"resets_in_seconds":539708,"type":"usage_limit_reached"}}`
 
 type queuedRequestScope struct {
-	plans []CodexRequestPlan
-	calls int
+	plans        []CodexRequestPlan
+	calls        int
+	exhaustedErr error
 }
 
 func (s *queuedRequestScope) Plan(_ context.Context, _ CodexRouteRequirements, _ codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
 	s.calls++
 	index := len(exclude)
 	if index >= len(s.plans) {
+		if s.exhaustedErr != nil {
+			return CodexRequestPlan{}, s.exhaustedErr
+		}
 		return CodexRequestPlan{}, errors.New("no account")
 	}
 	return s.plans[index], nil
@@ -37,6 +41,9 @@ func (s *queuedRequestScope) PlanChoice(_ context.Context, choice RouteChoice, _
 		if plan.Choice.AccountKey == choice.AccountKey {
 			return plan, nil
 		}
+	}
+	if s.exhaustedErr != nil {
+		return CodexRequestPlan{}, s.exhaustedErr
 	}
 	return CodexRequestPlan{}, errors.New("no account")
 }
@@ -78,6 +85,44 @@ func (e *queuedAttemptExecutor) Do(_ context.Context, _ RouteChoice, attempt Can
 		header = make(http.Header)
 	}
 	return &http.Response{StatusCode: result.status, Header: header, Body: io.NopCloser(strings.NewReader(result.body))}, nil
+}
+
+type queuedPredispatchAttemptExecutor struct {
+	results map[codex.CandidateID][]attemptResult
+	calls   []codex.CandidateID
+}
+
+func (e *queuedPredispatchAttemptExecutor) Do(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request) (*http.Response, error) {
+	response, _, err := e.doOnDispatch(ctx, choice, attempt, req, nil)
+	return response, err
+}
+
+func (e *queuedPredispatchAttemptExecutor) doOnDispatch(_ context.Context, _ RouteChoice, attempt CandidateAttempt, _ *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+	id := attempt.Candidate.CandidateID
+	e.calls = append(e.calls, id)
+	queue := e.results[id]
+	if len(queue) == 0 {
+		return nil, attempt, errors.New("unexpected attempt")
+	}
+	result := queue[0]
+	e.results[id] = queue[1:]
+	if result.before != nil {
+		result.before()
+	}
+	if result.err != nil {
+		return nil, attempt, result.err
+	}
+	if onDispatch != nil {
+		onDispatch(attempt)
+	}
+	if result.resp != nil {
+		return result.resp, attempt, nil
+	}
+	header := result.header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{StatusCode: result.status, Header: header, Body: io.NopCloser(strings.NewReader(result.body))}, attempt, nil
 }
 
 type trackingReadCloser struct {
@@ -691,6 +736,134 @@ func TestCodexRequestRouterReturnsRejectedResponseWhenRefreshFailsBeforeDispatch
 			_ = response.Body.Close()
 		})
 	}
+}
+
+func TestCodexRequestRouterInventoryDegradedOverridesRetainedRejection(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		name := "routed"
+		if pinned {
+			name = "pinned"
+		}
+		t.Run(name, func(t *testing.T) {
+			first := requestPlan("one", "managed", "external")
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{first, requestPlan("two", "other")}}
+			body := &trackingReadCloser{Reader: strings.NewReader("private upstream rejection")}
+			executor := &queuedPredispatchAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"managed":  {{resp: &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: body}}},
+				"external": {{err: codex.ErrCredentialInventoryDegraded}},
+				"other":    {{status: http.StatusOK}},
+			}}
+			router := &CodexRequestRouter{Scope: scope, Executor: executor}
+
+			var response *http.Response
+			var err error
+			if pinned {
+				response, _, _, err = router.DoPinned(context.Background(), first.Choice, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			} else {
+				response, _, _, err = router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			}
+			if response != nil || !errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+				t.Fatalf("response=%p error=%v", response, err)
+			}
+			if body.closeCalls != 1 {
+				t.Fatalf("retained body close calls = %d, want 1", body.closeCalls)
+			}
+			if !slices.Equal(executor.calls, []codex.CandidateID{"managed", "external"}) {
+				t.Fatalf("attempt calls = %v", executor.calls)
+			}
+			wantScopeCalls := 1
+			if pinned {
+				wantScopeCalls = 0
+			}
+			if scope.calls != wantScopeCalls {
+				t.Fatalf("scope calls = %d, want %d", scope.calls, wantScopeCalls)
+			}
+		})
+	}
+}
+
+func TestCodexRequestRouterRefreshDegradedOverridesRetainedRejection(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		name := "routed"
+		if pinned {
+			name = "pinned"
+		}
+		t.Run(name, func(t *testing.T) {
+			first := requestPlan("one", "managed")
+			refreshAttempt := first.Attempts[0]
+			first.refreshAttempt = &refreshAttempt
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{first, requestPlan("two", "other")}}
+			body := &trackingReadCloser{Reader: strings.NewReader("private upstream rejection")}
+			executor := &queuedPredispatchAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"managed": {{resp: &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: body}}},
+				"other":   {{status: http.StatusOK}},
+			}}
+			router := &CodexRequestRouter{
+				Scope: scope, Executor: executor,
+				Refresher: &fakeReferenceRefresher{err: codex.ErrCredentialInventoryDegraded},
+			}
+
+			var response *http.Response
+			var err error
+			if pinned {
+				response, _, _, err = router.DoPinned(context.Background(), first.Choice, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			} else {
+				response, _, _, err = router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			}
+			if response != nil || !errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+				t.Fatalf("response=%p error=%v", response, err)
+			}
+			if body.closeCalls != 1 {
+				t.Fatalf("retained body close calls = %d, want 1", body.closeCalls)
+			}
+			if !slices.Equal(executor.calls, []codex.CandidateID{"managed"}) {
+				t.Fatalf("attempt calls = %v", executor.calls)
+			}
+			wantScopeCalls := 1
+			if pinned {
+				wantScopeCalls = 0
+			}
+			if scope.calls != wantScopeCalls {
+				t.Fatalf("scope calls = %d, want %d", scope.calls, wantScopeCalls)
+			}
+		})
+	}
+}
+
+func TestCodexRequestRouterPlanningDegradedOverridesRetainedRejection(t *testing.T) {
+	t.Run("routed", func(t *testing.T) {
+		first := requestPlan("one", "managed")
+		scope := &queuedRequestScope{plans: []CodexRequestPlan{first}, exhaustedErr: codex.ErrCredentialInventoryDegraded}
+		body := &trackingReadCloser{Reader: strings.NewReader("private upstream rejection")}
+		executor := &queuedPredispatchAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+			"managed": {{resp: &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: body}}},
+		}}
+		router := &CodexRequestRouter{Scope: scope, Executor: executor}
+
+		response, _, _, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+		if response != nil || !errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+			t.Fatalf("response=%p error=%v", response, err)
+		}
+		if body.closeCalls != 1 || scope.calls != 2 || !slices.Equal(executor.calls, []codex.CandidateID{"managed"}) {
+			t.Fatalf("close calls=%d scope calls=%d attempts=%v", body.closeCalls, scope.calls, executor.calls)
+		}
+	})
+
+	t.Run("pinned", func(t *testing.T) {
+		choice := requestPlan("one", "managed").Choice
+		scope := &queuedRequestScope{exhaustedErr: codex.ErrCredentialInventoryDegraded}
+		body := &trackingReadCloser{Reader: strings.NewReader("private upstream rejection")}
+		prior := &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: body}
+		router := &CodexRequestRouter{Scope: scope, Executor: &queuedPredispatchAttemptExecutor{}}
+
+		response, _, _, _, err := router.doPinned(context.Background(), choice, makeCodexRequest(`{"model":"gpt-5.4"}`), prior)
+		if response != nil || !errors.Is(err, codex.ErrCredentialInventoryDegraded) {
+			t.Fatalf("response=%p error=%v", response, err)
+		}
+		if body.closeCalls != 1 {
+			t.Fatalf("retained body close calls = %d, want 1", body.closeCalls)
+		}
+	})
 }
 
 func TestCodexRequestRouterReturnsRetainedResponseWhenRealExecutorFailsBeforeDispatch(t *testing.T) {
