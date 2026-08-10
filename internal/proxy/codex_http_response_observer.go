@@ -281,6 +281,18 @@ func (observer *codexHTTPResponseObserver) storeFinishError(err error) {
 	observer.mu.Unlock()
 }
 
+func closeCodexHTTPResponseBody(body io.Closer) (err error) {
+	if body == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = errors.New("Codex HTTP response body close failed")
+		}
+	}()
+	return body.Close()
+}
+
 // relayCodexAcceptedHTTPResponse consumes response.Body. The body is closed
 // before terminal persistence and Drain so durable socket extinction never
 // precedes release of the live upstream response.
@@ -296,7 +308,7 @@ func relayCodexAcceptedHTTPResponse(ctx context.Context, writer http.ResponseWri
 		return observer.Finish(errors.New("Codex accepted response body is nil"))
 	}
 	if writer == nil {
-		closeErr := response.Body.Close()
+		closeErr := closeCodexHTTPResponseBody(response.Body)
 		return observer.Finish(errors.Join(errors.New("Codex accepted response writer is nil"), closeErr))
 	}
 	for key, values := range response.Header {
@@ -306,7 +318,7 @@ func relayCodexAcceptedHTTPResponse(ctx context.Context, writer http.ResponseWri
 	}
 	writer.WriteHeader(response.StatusCode)
 	relayErr := relayCodexObservedHTTPBody(ctx, writer, response.Body, mode == codexHTTPResponseModeSSE, observer.Observe)
-	closeErr := response.Body.Close()
+	closeErr := closeCodexHTTPResponseBody(response.Body)
 	return observer.Finish(errors.Join(relayErr, closeErr, ctx.Err()))
 }
 

@@ -238,6 +238,29 @@ func TestRelayCodexAcceptedHTTPResponseTransportUncertaintyDominatesTerminalByte
 	}
 }
 
+func TestRelayCodexAcceptedHTTPResponseRecoversBodyClosePanicAndDrains(t *testing.T) {
+	t.Parallel()
+	calls := &codexHTTPObserverLifecycleCalls{}
+	body := newCodexHTTPObserverBody([]string{"data: {\"type\":\"response.completed\",\"response\":{}}\n\n"}, nil, calls)
+	body.closePanic = true
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+
+	err := relayCodexAcceptedHTTPResponse(context.Background(), newCodexHTTPObserverWriter(), response, codexHTTPResponseModeSSE, &codexHTTPObserverLifecycle{calls: calls, generation: 1})
+	if err == nil {
+		t.Fatal("relay error = nil, want private-safe close uncertainty")
+	}
+	if strings.Contains(err.Error(), "private response body close panic") {
+		t.Fatalf("relay error disclosed body close panic: %v", err)
+	}
+	got := calls.snapshot()
+	if got.terminalKind != "indeterminate" || got.terminalCalls != 1 || got.drainCalls != 1 {
+		t.Fatalf("lifecycle calls = %#v", got)
+	}
+	if !reflect.DeepEqual(got.order, []string{"close", "indeterminate@1", "drain@2"}) {
+		t.Fatalf("lifecycle order = %#v", got.order)
+	}
+}
+
 func TestCodexHTTPResponseObserverFinishesOnceAndIgnoresLateBytes(t *testing.T) {
 	t.Parallel()
 	calls := &codexHTTPObserverLifecycleCalls{}
@@ -506,6 +529,7 @@ type codexHTTPObserverBody struct {
 	chunks     [][]byte
 	readErr    error
 	closeErr   error
+	closePanic bool
 	closeCalls int
 	calls      *codexHTTPObserverLifecycleCalls
 }
@@ -538,6 +562,9 @@ func (body *codexHTTPObserverBody) Read(buffer []byte) (int, error) {
 func (body *codexHTTPObserverBody) Close() error {
 	body.closeCalls++
 	body.calls.append("close")
+	if body.closePanic {
+		panic("private response body close panic")
+	}
 	return body.closeErr
 }
 

@@ -118,7 +118,7 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 	}
 
 	if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
-		defer result.Response.Body.Close()
+		defer closeCodexHTTPResponseBody(result.Response.Body)
 		_ = relayCodexHTTPResponse(writer, result.Response, false)
 		return true, model
 	}
