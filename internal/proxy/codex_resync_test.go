@@ -105,15 +105,61 @@ func TestCodexWSHandshakeRequiresModelAndFirstFrameMatch(t *testing.T) {
 	}
 }
 
-func TestCodexWebSocketPreupgradeRelaysSafeFinalResponse(t *testing.T) {
-	response := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)}
-	response.Header.Set("Retry-After", "30")
-	response.Header.Set("X-Request-Id", "safe-request")
-	response.Header.Set("Authorization", "secret")
-	recorder := httptest.NewRecorder()
-	relayCodexWebSocketPreupgrade(recorder, response, []byte(`{"error":{"type":"usage_limit_reached"}}`))
-	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "30" || recorder.Header().Get("Authorization") != "" {
-		t.Fatalf("preupgrade response = code %d headers %v", recorder.Code, recorder.Header())
+func TestCodexWebSocketPreupgradeProjectionUnitPassedUnwired(t *testing.T) {
+	// This characterises the isolated copier only. Production proxyCodexUpgrade
+	// sends downstream 101 before upstream dispatch and does not call this helper.
+	statuses := []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusTooManyRequests,
+		http.StatusUpgradeRequired,
+	}
+	safe := map[string]string{
+		"Content-Type":         "application/problem+json",
+		"Retry-After":          "30",
+		"X-Request-Id":         "safe-request",
+		"Cf-Ray":               "safe-ray",
+		"Openai-Processing-Ms": "12",
+	}
+	forbidden := map[string]string{
+		"Authorization":            "Bearer secret",
+		"Connection":               "upgrade",
+		"Proxy-Authenticate":       "secret",
+		"Sec-Websocket-Accept":     "secret",
+		"Sec-Websocket-Extensions": "permessage-deflate",
+		"Sec-Websocket-Protocol":   "secret-protocol",
+		"Set-Cookie":               "session=secret",
+		"Upgrade":                  "websocket",
+		"Www-Authenticate":         "Bearer secret",
+		"X-Api-Key":                "secret",
+	}
+	for _, status := range statuses {
+		t.Run(fmt.Sprintf("status-%d", status), func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"error":{"status":%d}}`, status))
+			response := &http.Response{StatusCode: status, Header: make(http.Header)}
+			for name, value := range safe {
+				response.Header.Set(name, value)
+			}
+			for name, value := range forbidden {
+				response.Header.Set(name, value)
+			}
+
+			recorder := httptest.NewRecorder()
+			relayCodexWebSocketPreupgrade(recorder, response, body)
+			if recorder.Code != status || recorder.Body.String() != string(body) {
+				t.Fatalf("projection = status %d body %q, want %d %q", recorder.Code, recorder.Body.String(), status, body)
+			}
+			for name, want := range safe {
+				if got := recorder.Header().Get(name); got != want {
+					t.Errorf("safe header %s = %q, want %q", name, got, want)
+				}
+			}
+			for name := range forbidden {
+				if got := recorder.Header().Values(name); len(got) != 0 {
+					t.Errorf("forbidden header %s projected: %q", name, got)
+				}
+			}
+		})
 	}
 }
 

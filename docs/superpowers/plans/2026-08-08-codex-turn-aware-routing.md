@@ -582,8 +582,10 @@ git diff --check
 
 - [x] Implement shadow-only rotation intent keyed to exact turn, mode epoch, downstream generation, upstream generation, client build, and retry budget.
 - [x] Require model-bearing handshake and first-frame model match before any model-aware prospective decision. Stale handshake metadata loses to current frame.
-- [x] Preserve upstream 101 semantics, required beta/header/subprotocol values, and permessage-deflate across two legs. Pass pre-upgrade final 401/403/429/426 status/body/safe headers without downstream upgrade.
-- [x] Add exact wrapped `previous_response_not_found` event. Do not require graceful close: client receives error, invalidates socket, then reconnects or crosses to HTTP with portable full request.
+- [x] Unit-prove request-side beta/header/subprotocol forwarding and permessage-deflate logical-payload preservation across two legs, plus the isolated safe final-response projection for exact 401/403/429/426 status/body/allowed headers. These are component proofs only; the final-response projector is not wired into production.
+- [ ] In production, dial and bind upstream before downstream 101, preserve successful upstream 101 semantics and required response headers, and pass final 401/403/429/426 status/body/safe headers without downstream upgrade. Supported clients do not provide the model before downstream 101, so model-aware production routing remains blocked.
+- [x] Recognise the exact wrapped `previous_response_not_found` code and unit-prove synthetic new-generation consumption plus rejection of unchanged generations, incremental response chaining, and non-portable encrypted state.
+- [ ] Add one exact version-gated `previous_response_not_found` emitter with zero upstream dispatch, then prove installed client invalidation, a new WebSocket generation or HTTP crossover, and a portable full request before replacement dispatch. Do not add an inert emitter without an exact client-owned fixture.
 - [x] Never transparently replay incremental frame or open replacement upstream behind same downstream socket. Same-account reconnect also invalidates predecessor response ID.
 - [ ] Run 100 trials for each explicitly supported CLI/Desktop build and retry budget 0, 1, exhausted. Prove error -> client invalidation -> new WS generation or HTTP crossover -> full portable request before replacement dispatch.
 - [x] Test full new-turn rotation trigger separately. Keep unsupported trigger account-affine/fail-closed until fixture proves signal.

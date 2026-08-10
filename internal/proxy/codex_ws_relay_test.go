@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -105,6 +106,125 @@ func TestCodexWebSocketAttemptExecutorInjectsOnlySelectedCredential(t *testing.T
 		t.Fatalf("subprotocol = %q", conn.Subprotocol())
 	}
 	_ = conn.Close()
+}
+
+func TestCodexWebSocketRelayPreservesLogicalPayloadAcrossCompressedLegs(t *testing.T) {
+	type upstreamObservation struct {
+		beta       string
+		extensions string
+		protocol   string
+		payload    []byte
+		err        error
+	}
+	observations := make(chan upstreamObservation, 1)
+	upstreamReply := []byte(`{"type":"response.created","response":{"id":"synthetic-response"}}`)
+	upgrader := websocket.Upgrader{
+		CheckOrigin:       func(*http.Request) bool { return true },
+		EnableCompression: true,
+		Subprotocols:      []string{"responses"},
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		observation := upstreamObservation{
+			beta:       request.Header.Get("OpenAI-Beta"),
+			extensions: request.Header.Get("Sec-WebSocket-Extensions"),
+			protocol:   request.Header.Get("Sec-WebSocket-Protocol"),
+		}
+		defer func() { observations <- observation }()
+		connection, err := upgrader.Upgrade(writer, request, nil)
+		if err != nil {
+			observation.err = err
+			return
+		}
+		defer connection.Close()
+		if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			observation.err = err
+			return
+		}
+		messageType, payload, err := connection.ReadMessage()
+		if err != nil {
+			observation.err = err
+			return
+		}
+		if messageType != websocket.TextMessage {
+			observation.err = errors.New("upstream received non-text logical message")
+			return
+		}
+		observation.payload = bytes.Clone(payload)
+		observation.err = connection.WriteMessage(websocket.TextMessage, upstreamReply)
+	}))
+	defer upstream.Close()
+
+	plan := requestPlan("one", "candidate")
+	attempt := plan.Attempts[0]
+	resolver := &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+		attempt.Revision: testExactCredentialMaterial(attempt.Identity, "selected"),
+	}}
+	server := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://claude.test",
+			CodexUpstream:  upstream.URL,
+			LocalToken:     "local-token",
+		},
+		CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}},
+		CodexWebSocketExecutor: NewCodexWebSocketAttemptExecutor(nil, resolver),
+	}
+	handler, err := server.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	dialer := websocket.Dialer{
+		EnableCompression: true,
+		HandshakeTimeout:  2 * time.Second,
+		Subprotocols:      []string{"responses"},
+	}
+	header := http.Header{"OpenAI-Beta": []string{"responses_websockets=2026-02-06"}}
+	client, response, err := dialer.Dial("ws"+strings.TrimPrefix(proxy.URL, "http")+legacyCodexResponsesPath, header)
+	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if response == nil || response.StatusCode != http.StatusSwitchingProtocols || !strings.Contains(response.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+		t.Fatalf("downstream compression response = %#v", response)
+	}
+	if client.Subprotocol() != "responses" {
+		t.Fatalf("downstream subprotocol = %q, want responses", client.Subprotocol())
+	}
+
+	clientPayload := []byte(`{"type":"response.create","model":"gpt-5.4","input":"logical payload across compressed legs"}`)
+	if err := client.WriteMessage(websocket.TextMessage, clientPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	messageType, reply, err := client.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.TextMessage || !bytes.Equal(reply, upstreamReply) {
+		t.Fatalf("downstream logical reply = type %d %s, want %s", messageType, reply, upstreamReply)
+	}
+
+	select {
+	case observation := <-observations:
+		if observation.err != nil {
+			t.Fatal(observation.err)
+		}
+		if observation.beta != "responses_websockets=2026-02-06" || observation.protocol != "responses" || !strings.Contains(observation.extensions, "permessage-deflate") {
+			t.Fatalf("upstream handshake beta=%q protocol=%q extensions=%q", observation.beta, observation.protocol, observation.extensions)
+		}
+		if !bytes.Equal(observation.payload, clientPayload) {
+			t.Fatalf("upstream logical payload = %s, want %s", observation.payload, clientPayload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream compressed-leg observation timed out")
+	}
 }
 
 func TestCodexWebSocketAttemptExecutorRelistsSameIdentityRevisionBeforeDial(t *testing.T) {

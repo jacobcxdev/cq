@@ -52,6 +52,12 @@ func (f codexWebSocketDispatchExecutorFunc) dialOnDispatch(ctx context.Context, 
 	return f(ctx, choice, attempt, upstreamURL, header, onDispatch)
 }
 
+type codexRequestScoperFunc func(context.Context, CodexRouteRequirements, codex.Revision, ...codex.SelectionExclusion) (CodexRequestPlan, error)
+
+func (f codexRequestScoperFunc) Plan(ctx context.Context, requirements CodexRouteRequirements, accepted codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
+	return f(ctx, requirements, accepted, exclude...)
+}
+
 func TestServer_HealthEndpoint(t *testing.T) {
 	srv := &Server{
 		Config: &Config{
@@ -2317,20 +2323,37 @@ func TestServerCodexWebSocketPost101PinsFirstCandidateAcrossDialFailures(t *test
 	}
 }
 
-func TestServerCodexWebSocketPost101HandlerPinsFirstCandidate(t *testing.T) {
+func TestServerCodexWebSocketProductionPost101Characterisation(t *testing.T) {
 	first := requestPlan("one", "first", "same-identity-second")
-	second := requestPlan("two", "other-account")
+	routes := make(chan CodexRouteRequirements, 2)
+	scope := codexRequestScoperFunc(func(_ context.Context, requirements CodexRouteRequirements, _ codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
+		routes <- requirements
+		if len(exclude) != 0 {
+			return CodexRequestPlan{}, fmt.Errorf("unexpected WebSocket account exclusion: %+v", exclude)
+		}
+		return first, nil
+	})
 	type dispatch struct {
-		account   codex.AccountKey
-		candidate codex.CandidateID
+		account        codex.AccountKey
+		candidate      codex.CandidateID
+		requestedModel string
+		effectiveModel string
 	}
 	dispatches := make(chan dispatch, 4)
 	executor := codexWebSocketExecutorFunc(func(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
-		dispatches <- dispatch{account: choice.AccountKey, candidate: attempt.Candidate.CandidateID}
+		dispatches <- dispatch{
+			account:        choice.AccountKey,
+			candidate:      attempt.Candidate.CandidateID,
+			requestedModel: choice.RequestedModel,
+			effectiveModel: choice.EffectiveModel,
+		}
+		header := make(http.Header)
+		header.Set("Retry-After", "30")
+		header.Set("X-Request-Id", "upstream-request")
 		return nil, &http.Response{
 			Status:     "429 Too Many Requests",
 			StatusCode: http.StatusTooManyRequests,
-			Header:     make(http.Header),
+			Header:     header,
 			Body:       http.NoBody,
 		}, []byte(codexLiveUsageLimitBody), errors.New("websocket: bad handshake")
 	})
@@ -2340,7 +2363,7 @@ func TestServerCodexWebSocketPost101HandlerPinsFirstCandidate(t *testing.T) {
 			CodexUpstream:  "https://codex.test",
 			LocalToken:     "local-token",
 		},
-		CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{first, second}}},
+		CodexRequests:          &CodexRequestRouter{Scope: scope},
 		CodexWebSocketExecutor: executor,
 	}
 	handler, err := server.handler()
@@ -2358,24 +2381,52 @@ func TestServerCodexWebSocketPost101HandlerPinsFirstCandidate(t *testing.T) {
 	if response == nil || response.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("downstream upgrade response = %v, want 101", response)
 	}
-	if err := client.WriteMessage(websocket.TextMessage, []byte(`{"method":"response.create","params":{"model":"gpt-5.4"}}`)); err != nil {
+	if got := response.Header.Get("Retry-After"); got != "" {
+		t.Fatalf("downstream 101 projected later upstream Retry-After = %q", got)
+	}
+	select {
+	case route := <-routes:
+		t.Fatalf("route selected before first frame: %+v", route)
+	case attempt := <-dispatches:
+		t.Fatalf("upstream dispatched before first frame: %+v", attempt)
+	default:
+	}
+
+	// Production consumes exactly the first frame. This characterises model-aware
+	// routing only when that first frame is itself model-bearing.
+	if err := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseInternalServerErr) {
 		t.Fatalf("downstream read error = %v, want close 1011", err)
 	}
 
-	var got []dispatch
-	for {
-		select {
-		case attempt := <-dispatches:
-			got = append(got, attempt)
-		default:
-			if !slices.Equal(got, []dispatch{{account: "one", candidate: "first"}}) {
-				t.Fatalf("upstream dispatches = %+v", got)
-			}
-			return
+	select {
+	case route := <-routes:
+		if route.RequestedModel != "gpt-5.4" {
+			t.Fatalf("route model = %q, want gpt-5.4", route.RequestedModel)
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("model-aware route was not selected after first frame")
+	}
+	select {
+	case attempt := <-dispatches:
+		want := dispatch{account: "one", candidate: "first", requestedModel: "gpt-5.4", effectiveModel: "gpt-5.4"}
+		if attempt != want {
+			t.Fatalf("upstream dispatch = %+v, want %+v", attempt, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pinned upstream attempt was not dispatched after first frame")
+	}
+	select {
+	case route := <-routes:
+		t.Fatalf("additional route selected after upstream rejection: %+v", route)
+	case attempt := <-dispatches:
+		t.Fatalf("additional upstream attempt after rejection: %+v", attempt)
+	default:
 	}
 }
 
