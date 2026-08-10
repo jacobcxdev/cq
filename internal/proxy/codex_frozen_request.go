@@ -95,7 +95,8 @@ func (adapter codexRequestHeadroomAdapter) CompressResponses(ctx context.Context
 // CodexFrozenRequestInspection owns one bounded decoded view until Freeze or
 // Release consumes it. Source metadata and model authority are parsed once.
 type CodexFrozenRequestInspection struct {
-	state *codexFrozenRequestInspectionState
+	state         *codexFrozenRequestInspectionState
+	encodeRequest func([]byte, string, CodexZstdLimits) ([]byte, error)
 }
 
 type codexFrozenRequestInspectionState struct {
@@ -299,7 +300,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 	if modelChanged || headroomChanged {
 		clearBytes(preparedEncoded)
 		preparedEncoded = nil
-		preparedEncoded, err = EncodeCodexRequest(preparedDecoded, encoding, codexTransportRewriteLimits())
+		preparedEncoded, err = inspection.encode(preparedDecoded, encoding, codexTransportRewriteLimits())
 		if err != nil {
 			return nil, classifyCodexFrozenCodecError(err, true)
 		}
@@ -329,6 +330,13 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 	headers = nil
 	cleanup = false
 	return frozen, nil
+}
+
+func (inspection *CodexFrozenRequestInspection) encode(body []byte, contentEncoding string, limits CodexZstdLimits) ([]byte, error) {
+	if inspection != nil && inspection.encodeRequest != nil {
+		return inspection.encodeRequest(body, contentEncoding, limits)
+	}
+	return EncodeCodexRequest(body, contentEncoding, limits)
 }
 
 func (inspection *CodexFrozenRequestInspection) consume() ([]byte, []byte, http.Header, string, CodexProtocolRequest, codexFrozenModelAuthority, codexFrozenPreviousAuthority, codexFrozenMetadataSources, error) {
