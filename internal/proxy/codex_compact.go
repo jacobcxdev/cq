@@ -79,6 +79,13 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		}()
 	}
 
+	if s.CodexNativeHTTP != nil {
+		if handled, routedModel := s.CodexNativeHTTP.TryServe(w, r, true); handled {
+			model = routedModel
+			return
+		}
+	}
+
 	if !s.codexHTTPAvailable() {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return

@@ -90,6 +90,9 @@ type Server struct {
 	CodexHealth            func() CodexHealth
 	CodexRequests          *CodexRequestRouter
 	CodexWebSocketExecutor ExplicitWebSocketExecutor
+	// CodexNativeHTTP may claim readiness-gated or retained-fence native traffic.
+	// Nil or a declined untouched request preserves the off/observe path below.
+	CodexNativeHTTP CodexNativeHTTPRoutingHandler
 	// Deprecated compatibility seams. Production routing never sets these.
 	CodexTransport            http.RoundTripper
 	CodexUpgradeTransport     http.RoundTripper // HTTP/1.1-only transport for WebSocket upgrades
@@ -905,6 +908,12 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 			event.applySessionCorrelation(r.Header)
 			s.emitDiagnostics(event)
 		}()
+	}
+	if s.CodexNativeHTTP != nil {
+		if handled, routedModel := s.CodexNativeHTTP.TryServe(w, r, false); handled {
+			model = routedModel
+			return
+		}
 	}
 
 	if !s.codexHTTPAvailable() {
