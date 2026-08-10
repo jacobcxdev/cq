@@ -595,7 +595,20 @@ func spliceMessages(body []byte, messages json.RawMessage) ([]byte, error) {
 // Fail-open: any parse error, bridge error, skip condition (previous_response_id
 // present, empty input, no compressible text, missing responses_converter), or
 // zero savings returns the original body unchanged (with err=nil for skips).
-func (b *HeadroomBridge) CompressResponses(body []byte, _ HeadroomMode) ([]byte, int, error) {
+func (b *HeadroomBridge) CompressResponses(body []byte, mode HeadroomMode) ([]byte, int, error) {
+	return b.CompressResponsesContext(context.Background(), body, mode)
+}
+
+// CompressResponsesContext compresses a Responses API request body while
+// allowing cancellation of queued and in-flight bridge work.
+func (b *HeadroomBridge) CompressResponsesContext(ctx context.Context, body []byte, _ HeadroomMode) ([]byte, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return body, 0, err
+	}
+
 	// Parse only the fields we need to decide whether to compress.
 	var partial struct {
 		Model              string          `json:"model"`
@@ -618,6 +631,7 @@ func (b *HeadroomBridge) CompressResponses(body []byte, _ HeadroomMode) ([]byte,
 	}
 
 	compressed, compressedInstr, clearInstr, saved, err := b.compressResponses(
+		ctx,
 		partial.Model, partial.Input, partial.Instructions,
 	)
 	if err != nil {
@@ -640,6 +654,7 @@ func (b *HeadroomBridge) CompressResponses(body []byte, _ HeadroomMode) ([]byte,
 // clearInstructions is true when the bridge absorbed the system message entirely and
 // wants the instructions field removed from the request.
 func (b *HeadroomBridge) compressResponses(
+	ctx context.Context,
 	model string,
 	input json.RawMessage,
 	instructions *string,
@@ -656,7 +671,7 @@ func (b *HeadroomBridge) compressResponses(
 		return nil, nil, false, 0, fmt.Errorf("marshal responses bridge request: %w", err)
 	}
 
-	response, err := b.exchange(context.Background(), line, nil)
+	response, err := b.exchange(ctx, line, nil)
 	if err != nil {
 		return nil, nil, false, 0, err
 	}
@@ -910,6 +925,19 @@ func (b *HeadroomBridge) CompressCache(body []byte) ([]byte, int, error) {
 //   - After compression, restore the frozen prefix to its original bytes exactly,
 //     so cache keys for prior turns remain stable.
 func (b *HeadroomBridge) CompressResponsesCache(body []byte) ([]byte, int, error) {
+	return b.CompressResponsesCacheContext(context.Background(), body)
+}
+
+// CompressResponsesCacheContext compresses a cache-mode Responses API request
+// while allowing cancellation of queued and in-flight bridge work.
+func (b *HeadroomBridge) CompressResponsesCacheContext(ctx context.Context, body []byte) ([]byte, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return body, 0, err
+	}
+
 	var partial struct {
 		Model              string          `json:"model"`
 		Input              json.RawMessage `json:"input"`
@@ -945,6 +973,7 @@ func (b *HeadroomBridge) CompressResponsesCache(body []byte) ([]byte, int, error
 	// Instructions are frozen context — they must not change in cache mode, and
 	// passing them would allow the bridge to compress or drop them.
 	compressed, _, _, saved, err := b.compressResponses(
+		ctx,
 		partial.Model, partial.Input, nil, // nil instructions: frozen
 	)
 	if err != nil {

@@ -445,6 +445,143 @@ func TestHeadroomProbeQueuedCancellationDoesNotRetireBridge(t *testing.T) {
 	}
 }
 
+func TestHeadroomCompressResponsesContextRejectsPreCanceledOperation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(*HeadroomBridge, context.Context, []byte) ([]byte, int, error)
+	}{
+		{name: "token", call: func(bridge *HeadroomBridge, ctx context.Context, body []byte) ([]byte, int, error) {
+			return bridge.CompressResponsesContext(ctx, body, HeadroomModeToken)
+		}},
+		{name: "cache", call: func(bridge *HeadroomBridge, ctx context.Context, body []byte) ([]byte, int, error) {
+			return bridge.CompressResponsesCacheContext(ctx, body)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatched := make(chan struct{}, 1)
+			bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+				dispatched <- struct{}{}
+				return headroomTestAction{}
+			})
+			body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			out, saved, err := test.call(bridge, ctx, body)
+			if !errors.Is(err, context.Canceled) || saved != 0 || !bytes.Equal(out, body) {
+				t.Fatalf("output/saved/error = %q/%d/%v", out, saved, err)
+			}
+			select {
+			case <-dispatched:
+				t.Fatal("pre-canceled compression dispatched")
+			default:
+			}
+		})
+	}
+}
+
+func TestHeadroomCompressResponsesContextQueuedCancellationKeepsBridgeUsable(t *testing.T) {
+	firstSeen := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstOnce sync.Once
+	bridge := headroomTestBridge(t, func(request []byte) headroomTestAction {
+		firstOnce.Do(func() {
+			close(firstSeen)
+			<-releaseFirst
+		})
+		var parsed headroomResponsesRequest
+		_ = json.Unmarshal(request, &parsed)
+		response, _ := json.Marshal(headroomResponsesResponse{OK: true, Input: parsed.Input})
+		return headroomTestAction{Response: response, Respond: true}
+	})
+	defer func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	}()
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`)
+	firstResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.CompressResponsesContext(context.Background(), body, HeadroomModeToken)
+		firstResult <- err
+	}()
+	select {
+	case <-firstSeen:
+	case <-time.After(time.Second):
+		t.Fatal("first compression was not dispatched")
+	}
+
+	queuedCtx, queuedCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer queuedCancel()
+	queuedResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.CompressResponsesContext(queuedCtx, body, HeadroomModeToken)
+		queuedResult <- err
+	}()
+	select {
+	case err := <-queuedResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("queued compression error = %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("queued compression ignored context deadline")
+	}
+
+	close(releaseFirst)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first compression: %v", err)
+	}
+	usableCtx, usableCancel := context.WithTimeout(context.Background(), time.Second)
+	defer usableCancel()
+	if _, _, err := bridge.CompressResponsesContext(usableCtx, body, HeadroomModeToken); err != nil {
+		t.Fatalf("compression after queued cancellation: %v", err)
+	}
+}
+
+func TestHeadroomCompressResponsesCacheContextDispatchedCancellationRetiresBridge(t *testing.T) {
+	dispatched := make(chan struct{})
+	var dispatchedOnce sync.Once
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		dispatchedOnce.Do(func() { close(dispatched) })
+		return headroomTestAction{}
+	})
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	result := make(chan struct {
+		body  []byte
+		saved int
+		err   error
+	}, 1)
+	go func() {
+		out, saved, err := bridge.CompressResponsesCacheContext(ctx, body)
+		result <- struct {
+			body  []byte
+			saved int
+			err   error
+		}{body: out, saved: saved, err: err}
+	}()
+	select {
+	case <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("cache compression was not dispatched")
+	}
+	select {
+	case got := <-result:
+		if !errors.Is(got.err, context.DeadlineExceeded) || got.saved != 0 || !bytes.Equal(got.body, body) {
+			t.Fatalf("output/saved/error = %q/%d/%v", got.body, got.saved, got.err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("dispatched cache compression ignored context deadline")
+	}
+	usableCtx, usableCancel := context.WithTimeout(context.Background(), time.Second)
+	defer usableCancel()
+	if _, _, err := bridge.CompressResponsesCacheContext(usableCtx, body); !errors.Is(err, errHeadroomProbeUnavailable) {
+		t.Fatalf("compression after dispatched cancellation = %v, want unavailable", err)
+	}
+}
+
 func TestHeadroomProbeConcurrentStopReturnsPromptly(t *testing.T) {
 	probeSeen := make(chan struct{})
 	var probeOnce sync.Once
