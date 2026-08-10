@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"reflect"
 	"testing"
@@ -185,6 +186,152 @@ func TestProxyCodexContinuityAccountRevalidatorFailsClosed(t *testing.T) {
 	if err := newProxyCodexContinuityAccountRevalidator(authority)(canceled, account); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
+}
+
+func TestNewProxyCodexNativeHTTPInstallsOnlyForEffectiveEnforcement(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []proxy.CodexModeStatus{
+		{Configured: proxy.CodexRoutingOff, Effective: proxy.CodexRoutingOff},
+		{Configured: proxy.CodexRoutingObserve, Effective: proxy.CodexRoutingObserve, ModeEpoch: 8},
+		{Configured: proxy.CodexRoutingEnforce, Effective: proxy.CodexRoutingOff, ModeEpoch: 9},
+	} {
+		called := false
+		handler, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
+			Status: status,
+			newHandler: func(proxy.CodexNativeHTTPRequestPlanner, proxy.CodexNativeHTTPRequestSession, string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+				called = true
+				return &proxyCodexNativeHTTPTestHandler{}, nil
+			},
+		})
+		if err != nil || handler != nil || called {
+			t.Fatalf("status %#v installed native handler: handler=%T err=%v called=%t", status, handler, err, called)
+		}
+	}
+	retainedHandler, retainedErr := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
+		Status: proxy.CodexModeStatus{
+			Configured:                  proxy.CodexRoutingObserve,
+			Effective:                   proxy.CodexRoutingObserve,
+			ModeEpoch:                   10,
+			RetainedAuthoritativeEpochs: []uint64{9},
+		},
+	})
+	var retainedUnavailable *proxyCodexRetainedHTTPAdapterUnavailableError
+	if retainedHandler != nil || !errors.As(retainedErr, &retainedUnavailable) {
+		t.Fatalf("retained observe = handler %T error %T %v", retainedHandler, retainedErr, retainedErr)
+	}
+	for _, status := range []proxy.CodexModeStatus{
+		{Effective: proxy.CodexRoutingEnforce, ModeEpoch: 9},
+		{Effective: proxy.CodexRoutingEnforce, ModeEpoch: 9, AuthoritativeEpoch: 8},
+	} {
+		called := false
+		handler, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
+			Status: status,
+			newHandler: func(proxy.CodexNativeHTTPRequestPlanner, proxy.CodexNativeHTTPRequestSession, string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+				called = true
+				return &proxyCodexNativeHTTPTestHandler{}, nil
+			},
+		})
+		if err == nil || handler != nil || called {
+			t.Fatalf("invalid authority status %#v = handler %T error %v called=%t", status, handler, err, called)
+		}
+	}
+
+	dependency := &proxyCodexNativeHTTPTestDependency{}
+	capacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
+	retained := []uint64{4, 7}
+	var planner *proxy.CodexHTTPRequestPlanFactory
+	var session *proxy.CodexHTTPRequestSession
+	var upstream string
+	wantHandler := &proxyCodexNativeHTTPTestHandler{}
+	handler, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
+		Status: proxy.CodexModeStatus{
+			Configured:                  proxy.CodexRoutingEnforce,
+			Effective:                   proxy.CodexRoutingEnforce,
+			ModeEpoch:                   9,
+			AuthoritativeEpoch:          9,
+			RetainedAuthoritativeEpochs: retained,
+		},
+		Inventory:         dependency,
+		Capacity:          capacity,
+		Routes:            dependency,
+		Runtime:           dependency,
+		DefaultAccountKey: "default-account",
+		Executor:          dependency,
+		Refresher:         dependency,
+		Upstream:          "https://codex.example/backend-api",
+		Now:               time.Now,
+		newHandler: func(gotPlanner proxy.CodexNativeHTTPRequestPlanner, gotSession proxy.CodexNativeHTTPRequestSession, gotUpstream string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+			planner, _ = gotPlanner.(*proxy.CodexHTTPRequestPlanFactory)
+			session, _ = gotSession.(*proxy.CodexHTTPRequestSession)
+			upstream = gotUpstream
+			return wantHandler, nil
+		},
+	})
+	if err != nil || handler != wantHandler {
+		t.Fatalf("native handler = %T, %v", handler, err)
+	}
+	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.Authority.ModeEpoch != 9 || !planner.Authority.Authoritative || !reflect.DeepEqual(planner.Authority.RetainedAuthoritativeEpochs, retained) {
+		t.Fatalf("planner dependencies = %#v", planner)
+	}
+	if session == nil || session.Executor != dependency || session.Refresher != dependency || session.Capacity != capacity || upstream != "https://codex.example/backend-api" {
+		t.Fatalf("session/upstream = %#v %q", session, upstream)
+	}
+	retained[0] = 99
+	if !reflect.DeepEqual(planner.Authority.RetainedAuthoritativeEpochs, []uint64{4, 7}) {
+		t.Fatalf("planner retained epochs aliased routing state: %v", planner.Authority.RetainedAuthoritativeEpochs)
+	}
+}
+
+func TestNewProxyCodexMemoryObserverIsObserveOnlyAndNonPersistent(t *testing.T) {
+	t.Parallel()
+
+	capacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
+	observer, err := newProxyCodexMemoryObserver(&proxy.CodexRoutingRuntime{
+		HTTP:      proxy.CodexModeStatus{Effective: proxy.CodexRoutingObserve, ModeEpoch: 7},
+		WebSocket: proxy.CodexModeStatus{Effective: proxy.CodexRoutingOff, ModeEpoch: 8},
+	}, capacity)
+	if err != nil || observer == nil || observer.Store != nil || observer.Leases == nil {
+		t.Fatalf("observe memory observer = %#v, %v", observer, err)
+	}
+	for _, modes := range []*proxy.CodexRoutingRuntime{
+		nil,
+		{HTTP: proxy.CodexModeStatus{Effective: proxy.CodexRoutingOff}},
+		{HTTP: proxy.CodexModeStatus{Effective: proxy.CodexRoutingEnforce, ModeEpoch: 9}},
+	} {
+		observer, err := newProxyCodexMemoryObserver(modes, capacity)
+		if err != nil || observer != nil {
+			t.Fatalf("non-observe modes %#v created observer %#v, %v", modes, observer, err)
+		}
+	}
+}
+
+type proxyCodexNativeHTTPTestHandler struct{}
+
+func (*proxyCodexNativeHTTPTestHandler) TryServe(http.ResponseWriter, *http.Request, bool) (bool, string) {
+	return true, ""
+}
+
+type proxyCodexNativeHTTPTestDependency struct{}
+
+func (*proxyCodexNativeHTTPTestDependency) List(context.Context) (codexprov.Inventory, error) {
+	return codexprov.Inventory{}, nil
+}
+
+func (*proxyCodexNativeHTTPTestDependency) LoadRouteSnapshot(context.Context, proxy.LeaseKey, []codexprov.AccountKey, proxy.CodexLeaseAuthorityPolicy) (proxy.CodexLeaseRouteSnapshot, error) {
+	return proxy.CodexLeaseRouteSnapshot{}, nil
+}
+
+func (*proxyCodexNativeHTTPTestDependency) BeginRequestContext(context.Context, proxy.CodexLeaseRequestPlan) (*proxy.CodexLeaseRequestHandle, error) {
+	return nil, nil
+}
+
+func (*proxyCodexNativeHTTPTestDependency) DispatchFrozen(context.Context, proxy.RouteChoice, proxy.CandidateAttempt, *http.Request, func(proxy.CandidateAttempt) error) (*http.Response, proxy.CandidateAttempt, bool, error) {
+	return nil, proxy.CandidateAttempt{}, false, nil
+}
+
+func (*proxyCodexNativeHTTPTestDependency) RefreshReference(context.Context, codexprov.CandidateRef, codexprov.Revision) (codexprov.CandidateRef, codexprov.Revision, error) {
+	return codexprov.CandidateRef{}, "", nil
 }
 
 func proxyCodexContinuityInventory(account codexprov.AccountKey, routable, unstable, blocked bool) codexprov.Inventory {

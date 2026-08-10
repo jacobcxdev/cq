@@ -39,11 +39,110 @@ type proxyCodexContinuity struct {
 	Runtime     *proxy.CodexLeaseRuntime
 }
 
+type proxyCodexRetainedHTTPAdapterUnavailableError struct{}
+
+func (*proxyCodexRetainedHTTPAdapterUnavailableError) Error() string {
+	return "Codex retained HTTP continuity adapter unavailable"
+}
+
+type proxyCodexNativeHTTPDependencies struct {
+	Status            proxy.CodexModeStatus
+	Inventory         codexprov.CredentialInventory
+	Capacity          *proxy.CodexCapacityLedger
+	Routes            proxy.CodexHTTPRequestRouteSnapshotter
+	Runtime           proxy.CodexHTTPRequestPlanRuntime
+	DefaultAccountKey codexprov.AccountKey
+	Executor          proxy.CodexHTTPAttemptDispatcher
+	Refresher         codexprov.CredentialReferenceRefresher
+	Headroom          proxy.CodexRequestHeadroom
+	HeadroomMode      proxy.HeadroomMode
+	Upstream          string
+	Now               func() time.Time
+
+	newHandler func(proxy.CodexNativeHTTPRequestPlanner, proxy.CodexNativeHTTPRequestSession, string) (proxy.CodexNativeHTTPRoutingHandler, error)
+}
+
 func (continuity *proxyCodexContinuity) Close() error {
 	if continuity == nil || continuity.Coordinator == nil {
 		return nil
 	}
 	return continuity.Coordinator.Close()
+}
+
+func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.CodexNativeHTTPRoutingHandler, error) {
+	if deps.Status.Effective != proxy.CodexRoutingEnforce {
+		if err := proxyCodexRetainedHTTPAdapterBlocker(deps.Status); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	if deps.Status.ModeEpoch == 0 || deps.Status.AuthoritativeEpoch != deps.Status.ModeEpoch {
+		return nil, errors.New("Codex native HTTP authority epoch unavailable")
+	}
+	if deps.Inventory == nil || deps.Capacity == nil || deps.Routes == nil || deps.Runtime == nil || deps.Executor == nil || deps.Refresher == nil || deps.Now == nil {
+		return nil, errors.New("Codex native HTTP dependencies unavailable")
+	}
+
+	planner := &proxy.CodexHTTPRequestPlanFactory{
+		Inventory:         deps.Inventory,
+		Capacity:          deps.Capacity,
+		Routes:            deps.Routes,
+		Runtime:           deps.Runtime,
+		DefaultAccountKey: deps.DefaultAccountKey,
+		Authority: proxy.CodexLeaseAuthorityPolicy{
+			ModeEpoch:                   deps.Status.ModeEpoch,
+			Authoritative:               true,
+			RetainedAuthoritativeEpochs: append([]uint64(nil), deps.Status.RetainedAuthoritativeEpochs...),
+		},
+		Headroom:     deps.Headroom,
+		HeadroomMode: deps.HeadroomMode,
+		Now:          deps.Now,
+	}
+	session := &proxy.CodexHTTPRequestSession{
+		Executor:  deps.Executor,
+		Refresher: deps.Refresher,
+		Capacity:  deps.Capacity,
+	}
+	newHandler := deps.newHandler
+	if newHandler == nil {
+		newHandler = func(planner proxy.CodexNativeHTTPRequestPlanner, session proxy.CodexNativeHTTPRequestSession, upstream string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+			return proxy.NewCodexNativeHTTPHandler(planner, session, upstream)
+		}
+	}
+	handler, err := newHandler(planner, session, deps.Upstream)
+	if err != nil {
+		return nil, fmt.Errorf("construct Codex native HTTP handler: %w", err)
+	}
+	if handler == nil {
+		return nil, errors.New("Codex native HTTP handler unavailable")
+	}
+	return handler, nil
+}
+
+func proxyCodexRetainedHTTPAdapterBlocker(status proxy.CodexModeStatus) error {
+	if status.Effective != proxy.CodexRoutingEnforce && len(status.RetainedAuthoritativeEpochs) != 0 {
+		return &proxyCodexRetainedHTTPAdapterUnavailableError{}
+	}
+	return nil
+}
+
+func newProxyCodexMemoryObserver(runtime *proxy.CodexRoutingRuntime, capacity *proxy.CodexCapacityLedger) (*proxy.CodexTurnObserver, error) {
+	if runtime == nil || (runtime.HTTP.Effective != proxy.CodexRoutingObserve && runtime.WebSocket.Effective != proxy.CodexRoutingObserve) {
+		return nil, nil
+	}
+	if capacity == nil {
+		return nil, errors.New("Codex observe capacity unavailable")
+	}
+	epoch := max(runtime.HTTP.ModeEpoch, runtime.WebSocket.ModeEpoch)
+	if epoch == 0 {
+		return nil, errors.New("Codex observe mode epoch unavailable")
+	}
+	observer, err := proxy.NewCodexTurnObserver(proxy.NewCodexTurnLeaseManager(epoch, false, time.Now), nil)
+	if err != nil {
+		return nil, fmt.Errorf("construct Codex memory observer: %w", err)
+	}
+	observer.BindCapacity(capacity)
+	return observer, nil
 }
 
 func openProxyCodexContinuity(deps proxyCodexContinuityDependencies) (*proxyCodexContinuity, error) {

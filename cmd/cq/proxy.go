@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -283,7 +284,7 @@ func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOpt
 	return opts, nil
 }
 
-func runProxyStart(opts proxyCommandOptions) error {
+func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	cfg, err := proxy.LoadConfig()
 	if err != nil {
 		return err
@@ -300,14 +301,33 @@ func runProxyStart(opts proxyCommandOptions) error {
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
-	defer credentialControl.Close()
+	defer func() {
+		if closeErr := credentialControl.Close(); closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close Codex credential coordinator: %w", closeErr))
+		}
+	}()
 	codexRouting, err := proxy.OpenCodexRoutingRuntime(cfg, version, codexClientBuild)
 	if err != nil {
 		return fmt.Errorf("Codex routing modes: %w", err)
 	}
-	codexObserver, err := proxy.OpenCodexRuntimeObserver(codexRouting, fsys)
+	codexContinuity, err := openProxyCodexContinuity(proxyCodexContinuityDependencies{
+		FS:        fsys,
+		StateDir:  filepath.Dir(proxy.DefaultCodexCanaryPath()),
+		Routing:   codexRouting,
+		Retention: time.Duration(cfg.CodexLeaseRetentionDays) * 24 * time.Hour,
+		Now:       time.Now,
+		Authority: credentialControl,
+	})
 	if err != nil {
-		return fmt.Errorf("Codex turn observer: %w", err)
+		return fmt.Errorf("Codex continuity: %w", err)
+	}
+	if codexContinuity != nil {
+		defer func() {
+			returnErr = errors.Join(returnErr, proxyCodexContinuityCloseError(codexContinuity.Close()))
+		}()
+	}
+	if err := proxyCodexRetainedHTTPAdapterBlocker(codexRouting.HTTP); err != nil {
+		return fmt.Errorf("Codex HTTP routing: %w", err)
 	}
 
 	accounts := discoverClaudeAccountsFn()
@@ -382,7 +402,10 @@ func runProxyStart(opts proxyCommandOptions) error {
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
-	codexObserver.BindCapacity(codexCapacity)
+	codexObserver, err := newProxyCodexMemoryObserver(codexRouting, codexCapacity)
+	if err != nil {
+		return fmt.Errorf("Codex turn observer: %w", err)
+	}
 	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
@@ -392,36 +415,20 @@ func runProxyStart(opts proxyCommandOptions) error {
 		Chooser:   codexSelector,
 		Inventory: credentialControl,
 	}
-	codexRequestRouter := &proxy.CodexRequestRouter{
-		Scope: codexRequestScope,
-		Executor: &proxy.CodexAttemptExecutor{
-			Inventory: credentialControl,
-			Secrets:   credentialControl,
-			Transport: &proxy.CodexTokenTransport{
-				Inner: http.DefaultTransport,
-			},
+	codexAttemptExecutor := &proxy.CodexAttemptExecutor{
+		Inventory: credentialControl,
+		Secrets:   credentialControl,
+		Transport: &proxy.CodexTokenTransport{
+			Inner: http.DefaultTransport,
 		},
+	}
+	codexRequestRouter := &proxy.CodexRequestRouter{
+		Scope:     codexRequestScope,
+		Executor:  codexAttemptExecutor,
 		Refresher: credentialControl,
 		Capacity:  codexCapacity,
 	}
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
-	var codexHTTPEnforcer *proxy.CodexHTTPEnforcer
-	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce || len(codexRouting.HTTP.RetainedAuthoritativeEpochs) != 0 {
-		if codexObserver == nil || codexObserver.Store == nil {
-			return fmt.Errorf("Codex HTTP enforcement: lease store unavailable")
-		}
-		codexHTTPEnforcer, err = proxy.NewCodexHTTPEnforcerWithSharedLeases(
-			codexRequestRouter,
-			codexRouting.HTTP.ModeEpoch,
-			codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce,
-			codexRouting.HTTP.RetainedAuthoritativeEpochs,
-			codexObserver.Store,
-			codexObserver.Leases,
-		)
-		if err != nil {
-			return fmt.Errorf("Codex HTTP enforcement: %w", err)
-		}
-	}
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
@@ -431,22 +438,6 @@ func runProxyStart(opts proxyCommandOptions) error {
 	if homeErr != nil {
 		fmt.Fprintf(os.Stderr, "cq: registry: resolve home dir: %v (registry disabled)\n", homeErr)
 	}
-	if homeErr == nil && codexHTTPEnforcer != nil {
-		protected := []string{filepath.Join(homeDir, ".codex", "auth.json"), filepath.Join(homeDir, ".codex", "accounts", "registry.json")}
-		canary, canaryErr := proxy.OpenCodexCanary(fsys, proxy.DefaultCodexCanaryPath(), protected)
-		if canaryErr == nil {
-			state := canary.State()
-			if state.Active {
-				if state.Tuple.CQBuild != version || state.Tuple.ClientBuild != codexClientBuild || state.Tuple.ParserSchema != proxy.CurrentCodexParserSchema || state.Tuple.LeaseSchema != proxy.CurrentCodexLeaseSchema || state.Tuple.FixtureHash != proxy.CodexHTTPFixtureHash {
-					return fmt.Errorf("Codex canary tuple does not match running enforcement")
-				}
-				codexHTTPEnforcer.SetCanary(canary)
-			}
-		} else if !os.IsNotExist(canaryErr) {
-			return fmt.Errorf("Codex canary: %w", canaryErr)
-		}
-	}
-
 	var pipeline *registryPipeline
 	if homeErr == nil {
 		pipeline, err = newProxyRegistryPipeline(cfg, proxyRegistryDependencies{
@@ -537,6 +528,29 @@ func runProxyStart(opts proxyCommandOptions) error {
 			fmt.Fprintf(os.Stderr, "cq: headroom compression enabled (mode: %s)\n", resolvedMode)
 		}
 	}
+	var codexRoutes proxy.CodexHTTPRequestRouteSnapshotter
+	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
+	if codexContinuity != nil {
+		codexRoutes = codexContinuity.Coordinator
+		codexPlanRuntime = codexContinuity.Runtime
+	}
+	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
+		Status:            codexRouting.HTTP,
+		Inventory:         credentialControl,
+		Capacity:          codexCapacity,
+		Routes:            codexRoutes,
+		Runtime:           codexPlanRuntime,
+		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
+		Executor:          codexAttemptExecutor,
+		Refresher:         credentialControl,
+		Headroom:          proxy.NewCodexRequestHeadroomAdapter(headroom),
+		HeadroomMode:      resolvedMode,
+		Upstream:          cfg.CodexUpstream,
+		Now:               time.Now,
+	})
+	if err != nil {
+		return fmt.Errorf("Codex native HTTP routing: %w", err)
+	}
 
 	var diagnostics *proxy.DiagnosticsWriter
 	if cfg.DiagnosticsLog != "" {
@@ -583,8 +597,8 @@ func runProxyStart(opts proxyCommandOptions) error {
 		PayloadDiag:            payloadDiag,
 		ServingAttestor:        servingAttestor,
 		CodexRouting:           codexRouting,
+		CodexNativeHTTP:        codexNativeHTTP,
 		CodexObserver:          codexObserver,
-		CodexHTTPEnforcer:      codexHTTPEnforcer,
 		CodexPrimer:            codexPrimer,
 		HeadroomMode:           resolvedMode,
 		Catalog:                catalog,
