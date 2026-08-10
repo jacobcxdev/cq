@@ -126,40 +126,42 @@ type CodexCurrentRequest struct {
 }
 
 type CodexJournalRecordV2 struct {
-	SessionHash                string     `json:"session_hash"`
-	ThreadHash                 string     `json:"thread_hash"`
-	NamespaceHash              string     `json:"namespace_hash"`
-	TurnHash                   string     `json:"turn_hash"`
-	AccountHash                string     `json:"account_hash,omitempty"`
-	PredecessorTurnHash        string     `json:"predecessor_turn_hash,omitempty"`
-	PredecessorModeEpoch       uint64     `json:"predecessor_mode_epoch,omitempty"`
-	PredecessorAuthoritative   bool       `json:"predecessor_authoritative,omitempty"`
-	CorrelationHash            string     `json:"correlation_hash,omitempty"`
-	TurnStateHash              string     `json:"turn_state_hash,omitempty"`
-	RecordGeneration           uint64     `json:"record_generation"`
-	LaneGeneration             uint64     `json:"lane_generation"`
-	PredecessorGeneration      uint64     `json:"predecessor_generation,omitempty"`
-	LeaseGeneration            uint64     `json:"lease_generation"`
-	ModeEpoch                  uint64     `json:"mode_epoch"`
-	DownstreamSocketGeneration uint64     `json:"downstream_socket_generation,omitempty"`
-	UpstreamSocketGeneration   uint64     `json:"upstream_socket_generation,omitempty"`
-	State                      LeaseState `json:"state"`
-	ProtocolSchema             int        `json:"protocol_schema"`
-	Authoritative              bool       `json:"authoritative"`
-	SocketLineageExtinct       bool       `json:"socket_lineage_extinct"`
-	CodexCurrentRequest        `json:"current_request"`
-	HasEncryptedState          bool                 `json:"has_encrypted_state,omitempty"`
-	HasResponseAnchor          bool                 `json:"has_response_anchor,omitempty"`
-	HasTurnState               bool                 `json:"has_turn_state,omitempty"`
-	NonMigratable              bool                 `json:"non_migratable,omitempty"`
-	EverAdmitted               bool                 `json:"ever_admitted,omitempty"`
-	AdmissionJournalGeneration uint64               `json:"admission_journal_generation,omitempty"`
-	AdmissionRequestGeneration uint64               `json:"admission_request_generation,omitempty"`
-	AdmissionRequestKind       CodexRequestKind     `json:"admission_request_kind,omitempty"`
-	AdmissionCompactionPhase   CodexCompactionPhase `json:"admission_compaction_phase,omitempty"`
-	AdmittedAt                 time.Time            `json:"admitted_at,omitempty"`
-	CreatedAt                  time.Time            `json:"created_at"`
-	LastObservedAt             time.Time            `json:"last_observed_at"`
+	SessionHash                      string     `json:"session_hash"`
+	ThreadHash                       string     `json:"thread_hash"`
+	NamespaceHash                    string     `json:"namespace_hash"`
+	TurnHash                         string     `json:"turn_hash"`
+	AccountHash                      string     `json:"account_hash,omitempty"`
+	PredecessorTurnHash              string     `json:"predecessor_turn_hash,omitempty"`
+	PredecessorModeEpoch             uint64     `json:"predecessor_mode_epoch,omitempty"`
+	PredecessorAuthoritative         bool       `json:"predecessor_authoritative,omitempty"`
+	CorrelationHash                  string     `json:"correlation_hash,omitempty"`
+	TurnStateHash                    string     `json:"turn_state_hash,omitempty"`
+	RecordGeneration                 uint64     `json:"record_generation"`
+	LaneGeneration                   uint64     `json:"lane_generation"`
+	PredecessorGeneration            uint64     `json:"predecessor_generation,omitempty"`
+	LeaseGeneration                  uint64     `json:"lease_generation"`
+	ModeEpoch                        uint64     `json:"mode_epoch"`
+	DownstreamSocketGeneration       uint64     `json:"downstream_socket_generation,omitempty"`
+	UpstreamSocketGeneration         uint64     `json:"upstream_socket_generation,omitempty"`
+	State                            LeaseState `json:"state"`
+	ProtocolSchema                   int        `json:"protocol_schema"`
+	Authoritative                    bool       `json:"authoritative"`
+	SocketLineageExtinct             bool       `json:"socket_lineage_extinct"`
+	CodexCurrentRequest              `json:"current_request"`
+	HasEncryptedState                bool                 `json:"has_encrypted_state,omitempty"`
+	HasResponseAnchor                bool                 `json:"has_response_anchor,omitempty"`
+	HasTurnState                     bool                 `json:"has_turn_state,omitempty"`
+	NonMigratable                    bool                 `json:"non_migratable,omitempty"`
+	AdoptedPrewarm                   bool                 `json:"adopted_prewarm,omitempty"`
+	PrewarmAdoptionJournalGeneration uint64               `json:"prewarm_adoption_journal_generation,omitempty"`
+	EverAdmitted                     bool                 `json:"ever_admitted,omitempty"`
+	AdmissionJournalGeneration       uint64               `json:"admission_journal_generation,omitempty"`
+	AdmissionRequestGeneration       uint64               `json:"admission_request_generation,omitempty"`
+	AdmissionRequestKind             CodexRequestKind     `json:"admission_request_kind,omitempty"`
+	AdmissionCompactionPhase         CodexCompactionPhase `json:"admission_compaction_phase,omitempty"`
+	AdmittedAt                       time.Time            `json:"admitted_at,omitempty"`
+	CreatedAt                        time.Time            `json:"created_at"`
+	LastObservedAt                   time.Time            `json:"last_observed_at"`
 }
 
 type codexLeaseJournalEnvelopeV2 struct {
@@ -233,8 +235,9 @@ type CodexLeaseAffinityHint struct {
 }
 
 type CodexContinuityCoordinator struct {
-	store  *CodexLeaseStore
-	leases *CodexTurnLeaseManager
+	store    *CodexLeaseStore
+	leases   *CodexTurnLeaseManager
+	prewarms *CodexPrewarmManager
 }
 
 type codexLeaseStoreOperation struct {
@@ -359,7 +362,7 @@ func OpenCodexContinuityCoordinator(options CodexContinuityOpenOptions, owner Co
 		epoch = store.modes.RecognisedAuthoritativeEpochs[len(store.modes.RecognisedAuthoritativeEpochs)-1]
 	}
 	leases := NewCodexTurnLeaseManager(epoch, false, options.Policy.Now)
-	return &CodexContinuityCoordinator{store: store, leases: leases}, nil
+	return &CodexContinuityCoordinator{store: store, leases: leases, prewarms: NewCodexPrewarmManager(leases, options.Policy.Now)}, nil
 }
 
 func (coordinator *CodexContinuityCoordinator) Close() error {
@@ -1047,6 +1050,12 @@ func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelop
 	}
 	if record.HasResponseAnchor != (record.CorrelationHash != "") || record.HasTurnState != (record.TurnStateHash != "") {
 		return errors.New("continuation hash presence flag mismatch")
+	}
+	if record.AdoptedPrewarm != (record.PrewarmAdoptionJournalGeneration != 0) {
+		return errors.New("partial prewarm adoption marker")
+	}
+	if record.AdoptedPrewarm && (!record.Authoritative || !record.NonMigratable || record.PrewarmAdoptionJournalGeneration <= envelope.Cutover.CompletionGeneration || record.PrewarmAdoptionJournalGeneration > envelope.Generation) {
+		return errors.New("invalid prewarm adoption marker")
 	}
 	if record.RecordGeneration == 0 || record.RecordGeneration > envelope.Generation || record.LaneGeneration == 0 || record.LaneGeneration > lane.Generation || record.LeaseGeneration == 0 || record.LeaseGeneration > record.RecordGeneration || record.ModeEpoch == 0 || record.ProtocolSchema != CurrentCodexLeaseSchema || record.RoutingRefs < 0 || record.AttemptRefs < 0 || record.ResponseObserverRefs < 0 {
 		return errors.New("invalid record generation, schema, or reference count")

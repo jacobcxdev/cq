@@ -106,7 +106,7 @@ func TestCodexLeaseV2CloseClearsOwnedBuffersAndBlocksPublicOperations(t *testing
 	if epoch, authoritative := manager.ForMode(5, true).Mode(); epoch != 0 || authoritative {
 		t.Fatalf("closed mode alias = (%d, %t), want unavailable", epoch, authoritative)
 	}
-	if _, err := manager.adoptPrewarm(testCodexLeaseKey("closed-prewarm", "turn"), CodexPrewarmReservation{AccountKey: "prewarm-account"}); !errors.Is(err, ErrCodexLeaseWriterUnavailable) {
+	if _, err := NewCodexPrewarmManager(manager, nil).Adopt(testCodexLeaseKey("closed-prewarm", "turn"), "correlation"); !errors.Is(err, ErrCodexLeaseWriterUnavailable) {
 		t.Fatalf("closed prewarm adoption error = %T %v", err, err)
 	}
 	coordinatorType := reflect.TypeOf(CodexContinuityCoordinator{})

@@ -151,6 +151,7 @@ type CodexTurnLease struct {
 	TurnStateUnavailable     bool
 	HasEncryptedState        bool
 	NonMigratable            bool
+	AdoptedPrewarm           bool
 	LastSeen                 time.Time
 }
 

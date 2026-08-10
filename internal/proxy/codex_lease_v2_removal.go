@@ -152,11 +152,10 @@ const (
 	codexBoundAuthorityAdoptedPrewarm
 )
 
-// BeginAccountRemoval excludes new Task 10A admission/restore authority while
-// its returned guard is held and summarises the authenticated durable/live
-// union. AdoptedPrewarm deliberately remains zero until Task 10B adds a signed
-// adoption marker and brings legacy prewarm adoption under this same gate.
-// Credential removal must not be wired to this seam before that union exists.
+// BeginAccountRemoval excludes new admission, restore, and prewarm-adoption
+// authority while its returned guard is held and summarises the authenticated
+// durable/live union. Only a signed store-owned adoption marker contributes to
+// AdoptedPrewarm; legacy live prewarm state cannot invent that authority.
 func (coordinator *CodexContinuityCoordinator) BeginAccountRemoval(ctx context.Context, account codex.AccountKey) (CodexAccountRemovalGuard, CodexBoundAuthoritySummary, error) {
 	if coordinator == nil || coordinator.store == nil || coordinator.leases == nil || coordinator.leases.mu == nil || coordinator.leases.accountGates == nil || coordinator.leases.writerUnavailable() {
 		return nil, CodexBoundAuthoritySummary{}, ErrCodexLeaseWriterUnavailable
@@ -224,9 +223,11 @@ func (coordinator *CodexContinuityCoordinator) boundAuthoritySummaryLocked(accou
 			continue
 		}
 		category := codexLeaseBoundAuthorityCategory(record.State)
-		// Task 10B owns the explicit adopted-prewarm record union. A generic
-		// prewarm request-kind row is not proof that its handoff completed.
-		if record.RequestKind == CodexRequestPrewarm && !record.EverAdmitted {
+		if category == codexBoundAuthorityNone && record.AdoptedPrewarm && (record.State == LeaseProvisional || record.State == LeaseFailedUnadmitted) {
+			category = codexBoundAuthorityAdoptedPrewarm
+		} else if record.RequestKind == CodexRequestPrewarm && !record.EverAdmitted {
+			// A generic prewarm request-kind row is not proof that its handoff
+			// completed. Only the signed store-owned marker carries authority.
 			category = codexBoundAuthorityNone
 		}
 		if category != codexBoundAuthorityNone {
@@ -243,6 +244,9 @@ func (coordinator *CodexContinuityCoordinator) boundAuthoritySummaryLocked(accou
 			return CodexBoundAuthoritySummary{}, fmt.Errorf("%w: live authoritative epoch %d is not retained", ErrCodexLeaseAuthorityMismatch, lease.ModeEpoch)
 		}
 		identity := codexJournalIdentityForLiveLease(store, lease)
+		if lease.AdoptedPrewarm && categories[identity] != codexBoundAuthorityAdoptedPrewarm {
+			continue
+		}
 		category := codexLeaseBoundAuthorityCategory(lease.State)
 		if category == codexBoundAuthorityNone {
 			continue

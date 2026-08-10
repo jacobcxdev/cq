@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -23,15 +22,17 @@ const (
 )
 
 type CodexPrewarmReservation struct {
-	Lane             LaneKey
-	Correlation      string
-	State            CodexPrewarmState
-	AccountKey       codex.AccountKey
-	SocketGeneration uint64
-	ResponseAnchor   string
-	TurnState        string
-	Generation       uint64
-	LastSeen         time.Time
+	Lane                       LaneKey
+	Correlation                string
+	State                      CodexPrewarmState
+	AccountKey                 codex.AccountKey
+	SocketGeneration           uint64
+	DownstreamSocketGeneration uint64
+	UpstreamSocketGeneration   uint64
+	ResponseAnchor             string
+	TurnState                  string
+	Generation                 uint64
+	LastSeen                   time.Time
 }
 
 type CodexPrewarmManager struct {
@@ -70,15 +71,21 @@ func (manager *CodexPrewarmManager) Create(metadata CodexTurnMetadata, correlati
 }
 
 func (manager *CodexPrewarmManager) Bind(lane LaneKey, account codex.AccountKey, socketGeneration uint64) (CodexPrewarmReservation, error) {
+	return manager.BindSockets(lane, account, socketGeneration, socketGeneration)
+}
+
+func (manager *CodexPrewarmManager) BindSockets(lane LaneKey, account codex.AccountKey, downstreamSocketGeneration, upstreamSocketGeneration uint64) (CodexPrewarmReservation, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	reservation := manager.reservations[lane]
-	if reservation == nil || reservation.State != CodexPrewarmCreating || account == "" || socketGeneration == 0 {
+	if reservation == nil || reservation.State != CodexPrewarmCreating || account == "" || downstreamSocketGeneration == 0 || upstreamSocketGeneration == 0 {
 		return CodexPrewarmReservation{}, errors.New("prewarm cannot bind")
 	}
 	reservation.State = CodexPrewarmBoundActive
 	reservation.AccountKey = account
-	reservation.SocketGeneration = socketGeneration
+	reservation.SocketGeneration = upstreamSocketGeneration
+	reservation.DownstreamSocketGeneration = downstreamSocketGeneration
+	reservation.UpstreamSocketGeneration = upstreamSocketGeneration
 	reservation.Generation++
 	reservation.LastSeen = manager.now()
 	return *reservation, nil
@@ -121,41 +128,32 @@ func (manager *CodexPrewarmManager) Disconnect(lane LaneKey) error {
 	}
 	reservation.State = CodexPrewarmDisconnected
 	reservation.SocketGeneration = 0
+	reservation.DownstreamSocketGeneration = 0
+	reservation.UpstreamSocketGeneration = 0
 	reservation.Generation++
 	reservation.LastSeen = manager.now()
 	return nil
 }
 
-func (manager *CodexPrewarmManager) Adopt(key LeaseKey, correlation string) (CodexTurnLease, error) {
-	if err := key.validate(); err != nil {
-		return CodexTurnLease{}, err
-	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	reservation := manager.reservations[key.Lane]
-	if reservation == nil || reservation.State != CodexPrewarmReady || reservation.Correlation != correlation || reservation.SocketGeneration == 0 {
-		return CodexTurnLease{}, fmt.Errorf("%w: prewarm lineage mismatch", ErrCodexContinuity)
-	}
-	if manager.leases == nil {
-		return CodexTurnLease{}, errors.New("Codex lease manager unavailable")
-	}
-	lease, err := manager.leases.adoptPrewarm(key, *reservation)
-	if err != nil {
-		return CodexTurnLease{}, err
-	}
-	reservation.State = CodexPrewarmAdopted
-	reservation.Generation++
-	reservation.LastSeen = manager.now()
-	return lease, nil
+// Adopt is retained only as a fail-closed compatibility seam. Durable
+// promotion must use CodexContinuityCoordinator.AdoptPrewarm.
+func (manager *CodexPrewarmManager) Adopt(LeaseKey, string) (CodexTurnLease, error) {
+	return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
 }
 
 func (manager *CodexPrewarmManager) Restore(reservations []CodexPrewarmReservation) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	for _, reservation := range reservations {
+		if reservation.State == CodexPrewarmAdopted {
+			delete(manager.reservations, reservation.Lane)
+			continue
+		}
 		if reservation.State == CodexPrewarmCreating || reservation.State == CodexPrewarmBoundActive || reservation.State == CodexPrewarmReady {
 			reservation.State = CodexPrewarmDisconnected
 			reservation.SocketGeneration = 0
+			reservation.DownstreamSocketGeneration = 0
+			reservation.UpstreamSocketGeneration = 0
 			reservation.Generation++
 		}
 		copy := reservation
@@ -163,37 +161,15 @@ func (manager *CodexPrewarmManager) Restore(reservations []CodexPrewarmReservati
 	}
 }
 
-func (manager *CodexTurnLeaseManager) adoptPrewarm(key LeaseKey, reservation CodexPrewarmReservation) (CodexTurnLease, error) {
-	if manager == nil || manager.mu == nil {
-		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+func (manager *CodexPrewarmManager) snapshot(lane LaneKey) CodexPrewarmReservation {
+	if manager == nil {
+		return CodexPrewarmReservation{}
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	if manager.writerUnavailableLocked() {
-		return CodexTurnLease{}, ErrCodexLeaseWriterUnavailable
+	reservation := manager.reservations[lane]
+	if reservation == nil {
+		return CodexPrewarmReservation{}
 	}
-	if _, exists := manager.leases[key]; exists {
-		return CodexTurnLease{}, ErrCodexStaleTurn
-	}
-	if _, exists := manager.current[key.Lane]; exists {
-		return CodexTurnLease{}, ErrCodexConcurrentTurn
-	}
-	lease := CodexTurnLease{
-		Key:                      key,
-		State:                    LeaseBoundQuiescent,
-		AccountKey:               reservation.AccountKey,
-		Choice:                   RouteChoice{AccountKey: reservation.AccountKey},
-		Generation:               1,
-		ModeEpoch:                manager.modeEpoch,
-		Authoritative:            manager.authoritative,
-		UpstreamSocketGeneration: reservation.SocketGeneration,
-		ResponseAnchor:           reservation.ResponseAnchor,
-		TurnState:                reservation.TurnState,
-		LastSeen:                 manager.now(),
-	}
-	managed := &codexManagedLease{lease: lease, ready: make(chan struct{})}
-	close(managed.ready)
-	manager.leases[key] = managed
-	manager.current[key.Lane] = key
-	return cloneCodexTurnLease(lease), nil
+	return *reservation
 }

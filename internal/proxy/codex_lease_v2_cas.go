@@ -560,13 +560,16 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: incomplete record identity/protocol", ErrCodexLeaseInvalidMutation)
 	}
 	if !exists {
-		if beginRequest || result.State != LeaseReserving || result.AccountHash != "" || !codexCurrentRequestIsZero(result.CodexCurrentRequest) {
+		if beginRequest || result.State != LeaseReserving || result.AccountHash != "" || !codexCurrentRequestIsZero(result.CodexCurrentRequest) || result.AdoptedPrewarm || result.PrewarmAdoptionJournalGeneration != 0 {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: new record must begin as a clean reserving lease", ErrCodexLeaseInvalidMutation)
 		}
 		result.RecordGeneration = 1
 		result.LeaseGeneration = 1
 		result.CreatedAt = now
 	} else {
+		if old.AdoptedPrewarm != input.AdoptedPrewarm || old.PrewarmAdoptionJournalGeneration != input.PrewarmAdoptionJournalGeneration {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: prewarm adoption marker changed", ErrCodexLeaseInvalidMutation)
+		}
 		if old.RecordGeneration == math.MaxUint64 {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: record generation overflow", ErrCodexLeaseInvalidMutation)
 		}
@@ -1342,6 +1345,8 @@ func sameCodexLeaseSemantics(left, right CodexJournalRecordV2) bool {
 		left.HasResponseAnchor == right.HasResponseAnchor &&
 		left.HasTurnState == right.HasTurnState &&
 		left.NonMigratable == right.NonMigratable &&
+		left.AdoptedPrewarm == right.AdoptedPrewarm &&
+		left.PrewarmAdoptionJournalGeneration == right.PrewarmAdoptionJournalGeneration &&
 		sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
 }
 

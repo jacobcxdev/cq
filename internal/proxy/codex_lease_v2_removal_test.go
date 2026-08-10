@@ -33,21 +33,20 @@ func TestCodexLeaseV2RemovalDoesNotClassifyLegacyPrewarmAsAuthenticatedAdoption(
 	manager := coordinator.leases.ForMode(9, true)
 	account := codex.AccountKey("legacy-prewarm-account")
 	key := testCodexRemovalLeaseKey("legacy-prewarm-thread", "adopted-turn")
-	if _, err := manager.adoptPrewarm(key, CodexPrewarmReservation{
-		AccountKey:       account,
-		SocketGeneration: 41,
-		ResponseAnchor:   "legacy-prewarm-response",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	manager.mu.Lock()
+	ready := make(chan struct{})
+	close(ready)
+	manager.leases[key] = &codexManagedLease{lease: CodexTurnLease{Key: key, State: LeaseBoundQuiescent, AccountKey: account, ModeEpoch: 9, Authoritative: true, AdoptedPrewarm: true}, ready: ready}
+	manager.current[key.Lane] = key
+	manager.mu.Unlock()
 
 	guard, summary, err := coordinator.BeginAccountRemoval(context.Background(), account)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer guard.Release()
-	if summary.BoundCount != 1 || summary.BoundQuiescent != 1 || summary.AdoptedPrewarm != 0 {
-		t.Fatalf("legacy prewarm summary = %#v, want conservative quiescent authority without authenticated adoption", summary)
+	if summary.BoundCount != 0 || summary.BoundQuiescent != 0 || summary.AdoptedPrewarm != 0 {
+		t.Fatalf("legacy prewarm summary = %#v, want no authority without authenticated adoption", summary)
 	}
 }
 
@@ -562,7 +561,7 @@ func openCodexLeaseV2RemovalTestCoordinator(t *testing.T) (*CodexContinuityCoord
 	store.modes = CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{9}}
 	store.mu.Unlock()
 	leases := NewCodexTurnLeaseManager(9, true, store.policy.Now)
-	return &CodexContinuityCoordinator{store: store, leases: leases}, fsys
+	return &CodexContinuityCoordinator{store: store, leases: leases, prewarms: NewCodexPrewarmManager(leases, store.policy.Now)}, fsys
 }
 
 func codexLeaseV2RemovalRecord(store *CodexLeaseStore, thread string, state LeaseState, authoritative bool, requestKind CodexRequestKind, account codex.AccountKey) (CodexJournalLane, CodexJournalRecordV2) {

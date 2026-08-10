@@ -453,7 +453,7 @@ func TestCodexObserveClassifiesRequestInputs(t *testing.T) {
 	}
 }
 
-func TestCodexObservePrewarmAdoptsMatchingRealTurn(t *testing.T) {
+func TestCodexObservePrewarmCannotBypassDurableAdoption(t *testing.T) {
 	t.Parallel()
 	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(3, false, nil), nil, []byte("01234567890123456789012345678901"))
 	choice := RouteChoice{AccountKey: "account-a"}
@@ -468,8 +468,8 @@ func TestCodexObservePrewarmAdoptsMatchingRealTurn(t *testing.T) {
 	real := observer.BeginWebSocket(context.Background(), realBody, nil, 41)
 	real.Selected(choice, false)
 	lease, found := observer.Leases.Get(testCodexLeaseKeyFor("session-p", "thread-p", "turn-real"))
-	if !found || lease.ResponseAnchor != "resp-prewarm" || lease.UpstreamSocketGeneration != 41 || lease.AccountKey != "account-a" {
-		t.Fatalf("adopted lease = %#v, found = %v", lease, found)
+	if !found || lease.ResponseAnchor != "" || lease.UpstreamSocketGeneration != 0 || lease.AccountKey != "account-a" || lease.State != LeaseProvisional {
+		t.Fatalf("ordinary lease = %#v, found = %v", lease, found)
 	}
 }
 
