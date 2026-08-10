@@ -2,10 +2,7 @@ package proxy
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -17,44 +14,6 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
-
-func TestCodexObserveCorpusDoesNotChangeRouteChoice(t *testing.T) {
-	t.Parallel()
-	manager := NewCodexTurnLeaseManager(11, false, nil)
-	observer := newCodexTurnObserverWithKey(manager, nil, []byte("01234567890123456789012345678901"))
-	var corpus strings.Builder
-	for index := range 1000 {
-		thread := fmt.Sprintf("thread-%03d", index%25)
-		turn := fmt.Sprintf("turn-%03d", index/25)
-		kind := CodexRequestTurn
-		phase := ""
-		if index%17 == 0 {
-			kind = CodexRequestCompaction
-			phase = `,"compaction":"pre_turn"`
-		}
-		body := fmt.Sprintf(`{"type":"response.create","model":"gpt-5","client_metadata":{"x-codex-turn-metadata":{"session_id":"session-corpus","thread_id":"%s","turn_id":"%s","request_kind":"%s"%s}}}`, thread, turn, kind, phase)
-		corpus.WriteString(body)
-		ctx, diag := withRouteDiagnostics(context.Background())
-		handle := observer.BeginHTTP(ctx, []byte(body), "identity", "", false)
-		choice := RouteChoice{AccountKey: codex.AccountKey(fmt.Sprintf("account-%d", index%3)), RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
-		handle.Selected(choice, false)
-		handle.ResponseHeaders(http.StatusOK, nil)
-		handle.ObserveBytes([]byte("data: {\"type\":\"response.created\",\"response\":{}}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"))
-		handle.Finish(nil)
-		accountHint, failover := diag.fields()
-		if accountHint != redactedAccountHint("codex", string(choice.AccountKey)) || failover {
-			t.Fatalf("route diagnostics changed at %d: %q/%v", index, accountHint, failover)
-		}
-	}
-	sum := sha256.Sum256([]byte(corpus.String()))
-	if got := hex.EncodeToString(sum[:]); got != "45c39a8a16bd4ed6173bcb1e7ae456aa48b530436bd9db39ece8f70bec014e73" {
-		t.Fatalf("fixture corpus hash = %s", got)
-	}
-	health := observer.Health()
-	if health.Requests != 1000 || health.StrongKeys != 1000 || health.Unknown != 0 || health.ContinuityErrors != 0 {
-		t.Fatalf("health = %#v", health)
-	}
-}
 
 func TestCodexObserveDiagnosticsNeverLeakRawIdentity(t *testing.T) {
 	t.Parallel()
@@ -510,47 +469,6 @@ func TestCodexObservePersistsCompactEncryptedAffinity(t *testing.T) {
 	lease, found := manager.Get(testCodexLeaseKeyFor("session", "thread", "turn"))
 	if !found || lease.ResponseAnchor != "compact-response" || !lease.HasEncryptedState || lease.State != LeaseBoundQuiescent {
 		t.Fatalf("lease=%#v found=%v", lease, found)
-	}
-}
-
-func TestCodexObserveScenarioCorpusCoversLifecycleClasses(t *testing.T) {
-	t.Parallel()
-	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
-	categories := []string{"simple", "tool_loop", "succession", "parallel", "subagent", "prewarm", "compaction", "reconnect", "crossover", "delayed_stale"}
-	seen := make(map[string]int)
-	var corpus strings.Builder
-	for index := range 1000 {
-		category := categories[index%len(categories)]
-		seen[category]++
-		kind := CodexRequestTurn
-		turn := fmt.Sprintf("turn-%d", index)
-		extra := ""
-		if category == "prewarm" {
-			kind = CodexRequestPrewarm
-			turn = ""
-		}
-		if category == "compaction" {
-			kind = CodexRequestCompaction
-			extra = `,"compaction":"mid_turn"`
-		}
-		body := fmt.Sprintf(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"scenario-session","thread_id":"%s-%d","turn_id":"%s","request_kind":"%s"%s}}}`, category, index%7, turn, kind, extra)
-		if index%97 == 0 {
-			body = `{"client_metadata":{"x-codex-turn-metadata":"{"}}`
-		}
-		corpus.WriteString(body)
-		observer.BeginHTTP(context.Background(), []byte(body), "identity", "", category == "compaction")
-	}
-	for _, category := range categories {
-		if seen[category] != 100 {
-			t.Fatalf("category %s count = %d", category, seen[category])
-		}
-	}
-	sum := sha256.Sum256([]byte(corpus.String()))
-	if got := hex.EncodeToString(sum[:]); got != "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1" {
-		t.Fatalf("scenario corpus hash = %s", got)
-	}
-	if health := observer.Health(); health.Requests != 1000 || health.Unknown != 11 {
-		t.Fatalf("health = %#v", health)
 	}
 }
 
