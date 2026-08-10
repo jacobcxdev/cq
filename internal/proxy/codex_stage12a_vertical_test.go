@@ -381,6 +381,309 @@ func TestCodexStage12AProductionVertical(t *testing.T) {
 	}
 }
 
+func TestCodexStage12AMonotonicAdmittedTurn(t *testing.T) {
+	const (
+		accountA       codex.AccountKey = "account-a"
+		accountB       codex.AccountKey = "account-b"
+		defaultAccount codex.AccountKey = "account-default"
+	)
+
+	coordinator, journalFS, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtime := newCodexLeaseRuntimeTest(t, coordinator)
+	expires := now.Add(time.Hour)
+	accounts := []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount(defaultAccount, frozenDispatchCandidate(defaultAccount, "candidate-default", "revision-default", codex.SourceExternal, false, expires)),
+		frozenDispatchTestLogicalAccount(accountB, frozenDispatchCandidate(accountB, "candidate-b", "revision-b", codex.SourceExternal, false, expires)),
+		frozenDispatchTestLogicalAccount(accountA, frozenDispatchCandidate(accountA, "candidate-a", "revision-a", codex.SourceExternal, false, expires)),
+	}
+	accounts[2].Active = true
+	inventory := &stage12AInventory{inventory: codex.Inventory{Accounts: accounts}}
+
+	ledger := NewCodexCapacityLedger(func() time.Time { return *now }, time.Hour)
+	frozenDispatchObserveCapacity(t, ledger, accountA, CapacityBucketBase, 90, *now)
+	frozenDispatchObserveCapacity(t, ledger, accountB, CapacityBucketBase, 80, *now)
+	frozenDispatchObserveCapacity(t, ledger, defaultAccount, CapacityBucketBase, 0, *now)
+
+	var frozenMu sync.Mutex
+	var inspections []*CodexFrozenRequestInspection
+	var frozenRequests []*CodexFrozenRequest
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory:         inventory,
+		Capacity:          ledger,
+		Routes:            coordinator,
+		Runtime:           runtime,
+		DefaultAccountKey: defaultAccount,
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
+		Now:               func() time.Time { return *now },
+	}
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, headers http.Header) (*CodexFrozenRequestInspection, error) {
+		inspection, err := InspectCodexNativeRequest(ctx, encoded, headers)
+		if inspection != nil {
+			frozenMu.Lock()
+			inspections = append(inspections, inspection)
+			frozenMu.Unlock()
+		}
+		return inspection, err
+	}
+	factory.operations.freeze = func(ctx context.Context, inspection *CodexFrozenRequestInspection, choice RouteChoice, headroom CodexRequestHeadroom, mode HeadroomMode) (*CodexFrozenRequest, error) {
+		frozen, err := inspection.Freeze(ctx, choice, headroom, mode)
+		if frozen != nil {
+			frozenMu.Lock()
+			frozenRequests = append(frozenRequests, frozen)
+			frozenMu.Unlock()
+		}
+		return frozen, err
+	}
+
+	hard429Headers := http.Header{
+		"Content-Type":      {"application/json"},
+		"X-Codex-Trace":     {"stage12a-private-trace-a"},
+		"X-RateLimit-Reset": {"stage12a-private-reset-a", "stage12a-private-reset-b"},
+	}
+	transport := &stage12ATransport{
+		accountsByAuthorization: map[string]codex.AccountKey{
+			"Bearer stage12a-private-token-a":       accountA,
+			"Bearer stage12a-private-token-b":       accountB,
+			"Bearer stage12a-private-token-default": defaultAccount,
+		},
+		outcomes: map[codex.AccountKey][]stage12AOutcome{
+			accountA: {
+				stage12AAcceptedOutcome("stage12a-private-response-a", "stage12a-private-turn-state-a"),
+				{status: http.StatusTooManyRequests, header: hard429Headers, body: codexLiveUsageLimitBody},
+			},
+			accountB:       {stage12AAcceptedOutcome("stage12a-private-response-b", "stage12a-private-turn-state-b")},
+			defaultAccount: {stage12AAcceptedOutcome("stage12a-private-response-default", "stage12a-private-turn-state-default")},
+		},
+	}
+	resolver := &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+		"revision-a":       testExactCredentialMaterial(accounts[2].Identity, "stage12a-private-token-a"),
+		"revision-b":       testExactCredentialMaterial(accounts[1].Identity, "stage12a-private-token-b"),
+		"revision-default": testExactCredentialMaterial(accounts[0].Identity, "stage12a-private-token-default"),
+	}}
+	executor := &CodexAttemptExecutor{
+		Inventory: inventory,
+		Secrets:   resolver,
+		Transport: &CodexTokenTransport{Inner: transport},
+	}
+	handler, err := NewCodexNativeHTTPHandler(
+		factory,
+		&CodexHTTPRequestSession{Executor: executor, Capacity: ledger},
+		"https://codex.example/private-upstream",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tempRoot := t.TempDir()
+	processTemp := filepath.Join(tempRoot, "process-temp")
+	if err := os.MkdirAll(processTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", processTemp)
+	diagnosticsPath := filepath.Join(tempRoot, "diagnostics", "proxy.jsonl")
+	if err := os.MkdirAll(filepath.Dir(diagnosticsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics, err := OpenDiagnosticsWriter(diagnosticsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = diagnostics.Close() })
+	config := &Config{
+		Port:                          DefaultPort,
+		ClaudeUpstream:                "https://claude.example",
+		CodexUpstream:                 "https://codex.example/private-upstream",
+		LocalToken:                    "opaque-local-proxy-token",
+		CodexTurnRouting:              CodexRoutingEnforce,
+		CodexWSTurnRouting:            CodexRoutingOff,
+		CodexRoutingDefaultAccountKey: defaultAccount,
+		CodexLeaseRetentionDays:       7,
+	}
+	configPath := filepath.Join(tempRoot, "config", "proxy.json")
+	if err := saveConfig(configPath, config); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Config:          config,
+		CodexNativeHTTP: handler,
+		Diag:            diagnostics,
+		CodexHealth: func() CodexHealth {
+			return CodexHealth{AccountCount: 3, AccountCountKnown: true, HealthCode: "ok"}
+		},
+		CodexRouting: &CodexRoutingRuntime{
+			HTTP:      CodexModeStatus{Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 9, AuthoritativeEpoch: 9},
+			WebSocket: CodexModeStatus{Configured: CodexRoutingOff, Effective: CodexRoutingOff},
+		},
+	}
+
+	requestBody := stage12ARequestBody(t, "stage12a-private-session", "stage12a-private-thread", "stage12a-private-turn", "stage12a-private-prompt")
+	firstInput := newStage12AOwnedBody(encodeCodexZstd(t, requestBody))
+	secondInput := newStage12AOwnedBody(encodeCodexZstd(t, requestBody))
+	firstResponse := &stage12AAdmissionResponseRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		beforeFirstWrite: func() {
+			journal := readCodexLeaseV2CASTestEnvelope(t, journalFS)
+			if len(journal.Records) != 1 || journal.Records[0].State != LeaseBoundActive || !journal.Records[0].EverAdmitted || journal.Records[0].ResponseObserverRefs != 1 {
+				t.Fatalf("admission was not durable before downstream bytes: %#v", journal.Records)
+			}
+		},
+	}
+	stage12AServeWithWriter(t, server, firstInput, "stage12a-private-session-header", "", firstResponse)
+	if firstResponse.Code != http.StatusOK || !strings.Contains(firstResponse.Body.String(), "stage12a-private-response-a") {
+		t.Fatalf("first response = %d/%q", firstResponse.Code, firstResponse.Body.String())
+	}
+
+	inventory.setActive(accountB, defaultAccount)
+	secondResponse := httptest.NewRecorder()
+	stage12AServeWithWriter(t, server, secondInput, "stage12a-private-session-header", "stage12a-private-turn-state-a", secondResponse)
+	if secondResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("second response status = %d, want %d", secondResponse.Code, http.StatusTooManyRequests)
+	}
+	wantHard429Headers := make(http.Header, len(hard429Headers))
+	for key, values := range hard429Headers {
+		for _, value := range values {
+			wantHard429Headers.Add(key, value)
+		}
+	}
+	if got := secondResponse.Header(); !reflect.DeepEqual(got, wantHard429Headers) {
+		t.Fatalf("second response headers = %#v, want %#v", got, wantHard429Headers)
+	}
+	if got := secondResponse.Body.Bytes(); !bytes.Equal(got, []byte(codexLiveUsageLimitBody)) {
+		t.Fatalf("second response body = %q, want exact provider bytes", got)
+	}
+
+	attempts, responseBodies := transport.snapshot()
+	if got, want := stage12AAttemptAccounts(attempts), []codex.AccountKey{accountA, accountA}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("attempt accounts = %v, want %v", got, want)
+	}
+	if got, want := inventory.activeSnapshots(), [][]codex.AccountKey{{accountA}, {defaultAccount, accountB}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("inventory Active snapshots = %v, want %v", got, want)
+	}
+	if got := ledger.Capacity(accountA, CapacityBucketBase); got.State != CapacityZero || got.Source != CapacitySourceHardLimit {
+		t.Fatalf("account A hard-429 capacity = %#v", got)
+	}
+	if got := ledger.Capacity(accountB, CapacityBucketBase); got.State != CapacityPositive || got.Source != CapacitySourceLiveRateLimits {
+		t.Fatalf("account B capacity changed after admitted A hard-429: %#v", got)
+	}
+	if got := ledger.Capacity(defaultAccount, CapacityBucketBase); got.State != CapacityZero || got.Source != CapacitySourceLiveRateLimits {
+		t.Fatalf("default capacity changed after admitted A hard-429: %#v", got)
+	}
+	for index, body := range []*stage12AOwnedBody{firstInput, secondInput} {
+		if got := body.closeCount(); got != 1 {
+			t.Fatalf("downstream request body %d closes = %d, want 1", index, got)
+		}
+	}
+	for index, body := range responseBodies {
+		if got := body.closeCount(); got != 1 {
+			t.Fatalf("upstream response body %d closes = %d, want 1", index, got)
+		}
+	}
+	frozenMu.Lock()
+	gotInspections := append([]*CodexFrozenRequestInspection(nil), inspections...)
+	gotFrozenRequests := append([]*CodexFrozenRequest(nil), frozenRequests...)
+	frozenMu.Unlock()
+	if len(gotInspections) != 2 || len(gotFrozenRequests) != 2 {
+		t.Fatalf("inspection/frozen count = %d/%d, want 2/2", len(gotInspections), len(gotFrozenRequests))
+	}
+	for index, inspection := range gotInspections {
+		if _, err := inspection.Protocol(); !errors.Is(err, ErrCodexFrozenRequestReleased) {
+			t.Fatalf("inspection %d retained request authority: %v", index, err)
+		}
+	}
+	for index, frozen := range gotFrozenRequests {
+		if _, err := frozen.Replay(); !errors.Is(err, ErrCodexRequestEnvelopeReleased) {
+			t.Fatalf("frozen request %d retained replay ownership: %v", index, err)
+		}
+	}
+	journal := readCodexLeaseV2CASTestEnvelope(t, journalFS)
+	if len(journal.Records) != 1 {
+		t.Fatalf("journal records = %d, want 1", len(journal.Records))
+	}
+	if record := journal.Records[0]; record.State != LeaseBoundQuiescent || record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !record.SocketLineageExtinct {
+		t.Fatalf("journal retained ownership after admitted hard-429: state=%s refs=%d/%d/%d extinct=%t", record.State, record.RoutingRefs, record.AttemptRefs, record.ResponseObserverRefs, record.SocketLineageExtinct)
+	}
+
+	healthResponse := httptest.NewRecorder()
+	server.handleHealth(healthResponse, httptest.NewRequest(http.MethodGet, "http://localhost/health", nil))
+	malformedBody := newStage12AOwnedBody([]byte(`{"stage12a-private-malformed-body"`))
+	malformedRequest := httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", nil)
+	malformedRequest.Body = malformedBody
+	malformedRequest.Header.Set("Content-Type", "application/json")
+	malformedResponse := httptest.NewRecorder()
+	server.handleNativeCodex(malformedResponse, malformedRequest)
+	if malformedResponse.Code != http.StatusBadRequest || strings.Contains(malformedResponse.Body.String(), "stage12a-private-malformed-body") || malformedBody.closeCount() != 1 {
+		t.Fatalf("malformed response/body = %d/%q/%d", malformedResponse.Code, malformedResponse.Body.String(), malformedBody.closeCount())
+	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	privacyOutputs := map[string][]byte{
+		"journal":     fsysFileBytes(t, journalFS, "/state/leases.json"),
+		"config":      stage12AReadFile(t, configPath),
+		"diagnostics": stage12AReadFile(t, diagnosticsPath),
+		"health":      bytes.Clone(healthResponse.Body.Bytes()),
+		"error":       bytes.Clone(malformedResponse.Body.Bytes()),
+		"temp":        stage12ATempFiles(t, tempRoot),
+	}
+	for outputName, output := range privacyOutputs {
+		for _, fixture := range []string{
+			"stage12a-private-session", "stage12a-private-thread", "stage12a-private-turn", "stage12a-private-prompt",
+			"stage12a-private-session-header", "stage12a-private-downstream-token", "stage12a-private-cookie", "stage12a-private-semantic-header",
+			"stage12a-private-token-a", "stage12a-private-token-b", "stage12a-private-token-default",
+			"stage12a-private-response-a", "stage12a-private-response-b", "stage12a-private-response-default",
+			"stage12a-private-turn-state-a", "stage12a-private-turn-state-b", "stage12a-private-turn-state-default",
+			"stage12a-private-trace-a", "stage12a-private-reset-a", "stage12a-private-reset-b", "stage12a-private-malformed-body",
+			"private-account-account-a", "private-account-account-b", "private-account-account-default",
+			"private-user-account-a", "private-user-account-b", "private-user-account-default",
+			"private-email-account-a@test.invalid", "private-email-account-b@test.invalid", "private-email-account-default@test.invalid",
+		} {
+			if bytes.Contains(output, []byte(fixture)) {
+				t.Fatalf("%s output exposed raw fixture %q", outputName, fixture)
+			}
+		}
+	}
+}
+
+type stage12AAdmissionResponseRecorder struct {
+	*httptest.ResponseRecorder
+	firstWrite       sync.Once
+	beforeFirstWrite func()
+}
+
+func (recorder *stage12AAdmissionResponseRecorder) WriteHeader(statusCode int) {
+	if recorder != nil && recorder.beforeFirstWrite != nil {
+		recorder.firstWrite.Do(recorder.beforeFirstWrite)
+	}
+	recorder.ResponseRecorder.WriteHeader(statusCode)
+}
+
+func (recorder *stage12AAdmissionResponseRecorder) Write(body []byte) (int, error) {
+	if recorder != nil && recorder.beforeFirstWrite != nil {
+		recorder.firstWrite.Do(recorder.beforeFirstWrite)
+	}
+	return recorder.ResponseRecorder.Write(body)
+}
+
+func stage12AServeWithWriter(t *testing.T, server *Server, body *stage12AOwnedBody, sessionHeader, turnState string, response http.ResponseWriter) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses?include=usage", nil)
+	request.Body = body
+	request.Header = http.Header{
+		"Accept":           {"text/event-stream"},
+		"Authorization":    {"Bearer stage12a-private-downstream-token"},
+		"Content-Encoding": {"zstd"},
+		"Content-Type":     {"application/json"},
+		"Cookie":           {"stage12a-private-cookie"},
+		"Openai-Beta":      {"stage12a-private-semantic-header"},
+		"Session_id":       {sessionHeader},
+		"User-Agent":       {"stage12a-client"},
+	}
+	if turnState != "" {
+		request.Header.Set("X-Codex-Turn-State", turnState)
+	}
+	server.handleNativeCodex(response, request)
+}
+
 type stage12AInventory struct {
 	mu        sync.Mutex
 	inventory codex.Inventory
