@@ -19,6 +19,11 @@ func TestCodexRetainedNativeHTTPDeclineRestoresExactRequest(t *testing.T) {
 	planner := &codexRetainedHTTPPlannerStub{mutateProbe: true}
 	handler := newCodexRetainedHTTPTestHandler(t, planner)
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", original)
+	originalGetBodyCalls := 0
+	request.GetBody = func() (io.ReadCloser, error) {
+		originalGetBodyCalls++
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 	request.ContentLength = int64(len(body))
 	request.Header = http.Header{"X-Private": {"unchanged"}}
 	wantHeaders := request.Header.Clone()
@@ -31,15 +36,34 @@ func TestCodexRetainedNativeHTTPDeclineRestoresExactRequest(t *testing.T) {
 	if !reflect.DeepEqual(request.Header, wantHeaders) || request.ContentLength != wantLength || original.closes != 0 {
 		t.Fatalf("request metadata changed: headers=%#v length=%d closes=%d", request.Header, request.ContentLength, original.closes)
 	}
-	assertCodexRetainedHTTPBody(t, request.Body, body)
-	if original.closes != 1 {
-		t.Fatalf("original closes = %d, want 1 after fallback ownership", original.closes)
+	replay, ok := request.Body.(*codexRetainedReplayBody)
+	if !ok || replay.state == nil {
+		t.Fatalf("restored body = %T, want retained replay ownership", request.Body)
 	}
+	buffered := replay.state.buffered
 	getBody, err := request.GetBody()
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertCodexRetainedHTTPBody(t, request.Body, body)
+	if original.closes != 1 {
+		t.Fatalf("original closes = %d, want 1 after fallback ownership", original.closes)
+	}
+	if replay.state.buffered == nil {
+		t.Fatal("restored buffer released while a GetBody replay still owned it")
+	}
 	assertCodexRetainedHTTPBody(t, getBody, body)
+	if replay.state.buffered != nil || bytes.Count(buffered, []byte{0}) != len(buffered) {
+		t.Fatal("restored private buffer remained reachable after all replay bodies closed")
+	}
+	restoredBody, err := request.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCodexRetainedHTTPBody(t, restoredBody, body)
+	if originalGetBodyCalls != 1 {
+		t.Fatalf("original GetBody calls = %d, want 1 after retained buffer release", originalGetBodyCalls)
+	}
 }
 
 func TestCodexRetainedNativeHTTPOversizeDeclineReplaysPrefixAndTail(t *testing.T) {
@@ -55,9 +79,17 @@ func TestCodexRetainedNativeHTTPOversizeDeclineReplaysPrefixAndTail(t *testing.T
 	if handled || planner.probeCalls != 0 || planner.buildCalls != 0 || request.GetBody != nil || original.closes != 0 {
 		t.Fatalf("oversize decline = handled %t probe/build %d/%d getbody=%t closes=%d", handled, planner.probeCalls, planner.buildCalls, request.GetBody != nil, original.closes)
 	}
+	replay, ok := request.Body.(*codexRetainedReplayBody)
+	if !ok || replay.state == nil {
+		t.Fatalf("oversize body = %T, want retained replay ownership", request.Body)
+	}
+	prefix := replay.state.buffered
 	assertCodexRetainedHTTPBody(t, request.Body, body)
 	if original.closes != 1 {
 		t.Fatalf("original closes = %d, want 1", original.closes)
+	}
+	if replay.state.buffered != nil || bytes.Count(prefix, []byte{0}) != len(prefix) {
+		t.Fatal("oversize private prefix remained reachable after fallback body closed")
 	}
 }
 
@@ -118,6 +150,29 @@ func TestCodexRetainedNativeHTTPCancellationClosesBodyOnce(t *testing.T) {
 	}
 	if body.closeCalls() != 1 || planner.probeCalls != 0 || planner.buildCalls != 0 {
 		t.Fatalf("cancel = closes %d probe/build %d/%d", body.closeCalls(), planner.probeCalls, planner.buildCalls)
+	}
+}
+
+func TestCodexRetainedNativeHTTPCancellationRecoversPrivateClosePanic(t *testing.T) {
+	body := newCodexNativeHTTPPanickingCloseBody()
+	planner := &codexRetainedHTTPPlannerStub{}
+	handler := newCodexRetainedHTTPTestHandler(t, planner)
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", body).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		handler.TryServe(httptest.NewRecorder(), request, false)
+		close(done)
+	}()
+	<-body.started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("panicking retained body close escaped or remained blocked")
+	}
+	if planner.probeCalls != 0 || planner.buildCalls != 0 {
+		t.Fatalf("private close panic reached probe/build %d/%d", planner.probeCalls, planner.buildCalls)
 	}
 }
 

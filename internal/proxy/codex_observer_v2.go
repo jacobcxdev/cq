@@ -16,8 +16,12 @@ import (
 // codexV2ObserveBackend records the accepted result of legacy routing in the
 // durable v2 shadow journal. It deliberately has no route-planning surface.
 type codexV2ObserveBackend struct {
-	runtime   *CodexLeaseRuntime
+	runtime   codexV2ObserveRuntime
 	authority CodexLeaseAuthorityPolicy
+}
+
+type codexV2ObserveRuntime interface {
+	BeginRequestContext(context.Context, CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error)
 }
 
 // NewCodexV2TurnObserver preserves the legacy parser and counters while
@@ -155,20 +159,34 @@ func (handle *CodexTurnObservation) PrepareV2Response(response *http.Response) e
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cleanup := context.WithoutCancel(ctx)
 	prepared, err := backend.runtime.BeginRequestContext(ctx, plan)
 	if err != nil {
-		return fmt.Errorf("begin Codex v2 shadow observation: %w", err)
+		var abandonErr error
+		if prepared != nil {
+			_, abandonErr = prepared.AbandonBeforeDispatchContext(cleanup)
+		}
+		return fmt.Errorf("begin Codex v2 shadow observation: %w", errors.Join(err, abandonErr))
+	}
+	if prepared == nil {
+		return fmt.Errorf("begin Codex v2 shadow observation: %w", ErrCodexLeaseWriterUnavailable)
 	}
 	dispatched, err := prepared.MarkDispatchedContext(ctx)
 	if err != nil {
-		return fmt.Errorf("mark Codex v2 shadow dispatch: %w", err)
+		_, abandonErr := prepared.AbandonBeforeDispatchContext(cleanup)
+		return fmt.Errorf("mark Codex v2 shadow dispatch: %w", errors.Join(err, abandonErr))
 	}
 	admitted, err := dispatched.AdmitHTTP2xxContext(ctx, CodexHTTPAdmissionEvidence{
 		TurnState:    turnState,
 		HasTurnState: hasTurnState,
 	})
 	if err != nil {
-		return fmt.Errorf("admit Codex v2 shadow response: %w", err)
+		indeterminate, terminalErr := dispatched.IndeterminateContext(cleanup, CodexHTTPResponseEvidence{})
+		var drainErr error
+		if indeterminate != nil {
+			_, drainErr = indeterminate.Drain()
+		}
+		return fmt.Errorf("admit Codex v2 shadow response: %w", errors.Join(err, terminalErr, drainErr))
 	}
 	mode := codexHTTPResponseModeSSE
 	if compact {
@@ -197,7 +215,7 @@ type codexV2ObservedBody struct {
 }
 
 func (body *codexV2ObservedBody) Read(buffer []byte) (int, error) {
-	read, readErr := body.body.Read(buffer)
+	read, readErr := readCodexHTTPResponseBody(body.body, buffer)
 	if read > 0 {
 		body.observer.Observe(buffer[:read])
 	}
@@ -217,7 +235,7 @@ func (body *codexV2ObservedBody) Read(buffer []byte) (int, error) {
 }
 
 func (body *codexV2ObservedBody) Close() error {
-	closeErr := body.body.Close()
+	closeErr := closeCodexHTTPResponseBody(body.body)
 	cause := closeErr
 	if cause == nil && !body.terminal.Load() {
 		cause = context.Canceled

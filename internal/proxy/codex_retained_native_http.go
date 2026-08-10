@@ -78,13 +78,17 @@ func (owner *codexRetainedBodyOwner) Read(target []byte) (int, error) {
 }
 
 func (owner *codexRetainedBodyOwner) Close() error {
-	owner.once.Do(func() { owner.err = owner.body.Close() })
+	owner.once.Do(func() { owner.err = closeCodexHTTPResponseBody(owner.body) })
 	return owner.err
 }
 
 type codexRetainedReplayBody struct {
-	reader io.Reader
-	owner  *codexRetainedBodyOwner
+	reader    io.Reader
+	owner     *codexRetainedBodyOwner
+	state     *codexRetainedReplayState
+	root      bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (body *codexRetainedReplayBody) Read(target []byte) (int, error) {
@@ -92,7 +96,84 @@ func (body *codexRetainedReplayBody) Read(target []byte) (int, error) {
 }
 
 func (body *codexRetainedReplayBody) Close() error {
-	return body.owner.Close()
+	body.closeOnce.Do(func() {
+		if body.owner != nil {
+			body.closeErr = body.owner.Close()
+		}
+		if body.state != nil {
+			body.state.release(body.root)
+		}
+	})
+	return body.closeErr
+}
+
+type codexRetainedReplayState struct {
+	mu              sync.Mutex
+	buffered        []byte
+	refs            int
+	rootOpen        bool
+	request         *http.Request
+	originalGetBody func() (io.ReadCloser, error)
+}
+
+func newCodexRetainedReplayState(buffered []byte) *codexRetainedReplayState {
+	return &codexRetainedReplayState{buffered: buffered, refs: 1, rootOpen: true}
+}
+
+func (state *codexRetainedReplayState) read(offset *int, target []byte) (int, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if *offset >= len(state.buffered) {
+		return 0, io.EOF
+	}
+	n := copy(target, state.buffered[*offset:])
+	*offset += n
+	return n, nil
+}
+
+func (state *codexRetainedReplayState) getBody() (io.ReadCloser, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.rootOpen || state.buffered == nil {
+		return nil, errors.New("Codex retained HTTP replay unavailable")
+	}
+	state.refs++
+	return &codexRetainedReplayBody{
+		reader: &codexRetainedReplayReader{state: state},
+		state:  state,
+	}, nil
+}
+
+func (state *codexRetainedReplayState) release(root bool) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if root {
+		if !state.rootOpen {
+			return
+		}
+		state.rootOpen = false
+		if state.request != nil {
+			state.request.GetBody = state.originalGetBody
+			state.request = nil
+			state.originalGetBody = nil
+		}
+	}
+	if state.refs > 0 {
+		state.refs--
+	}
+	if state.refs == 0 {
+		clearBytes(state.buffered)
+		state.buffered = nil
+	}
+}
+
+type codexRetainedReplayReader struct {
+	state  *codexRetainedReplayState
+	offset int
+}
+
+func (reader *codexRetainedReplayReader) Read(target []byte) (int, error) {
+	return reader.state.read(&reader.offset, target)
 }
 
 func bufferCodexRetainedRequest(request *http.Request) ([]byte, bool, *codexRetainedBodyOwner, func() (io.ReadCloser, error), error) {
@@ -118,13 +199,15 @@ func bufferCodexRetainedRequest(request *http.Request) ([]byte, bool, *codexReta
 }
 
 func restoreCodexRetainedRequest(request *http.Request, buffered []byte, owner *codexRetainedBodyOwner, originalGetBody func() (io.ReadCloser, error), complete bool) {
+	state := newCodexRetainedReplayState(buffered)
+	prefix := &codexRetainedReplayReader{state: state}
 	if complete {
-		request.Body = &codexRetainedReplayBody{reader: bytes.NewReader(buffered), owner: owner}
-		request.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(buffered)), nil
-		}
+		state.request = request
+		state.originalGetBody = originalGetBody
+		request.Body = &codexRetainedReplayBody{reader: prefix, owner: owner, state: state, root: true}
+		request.GetBody = state.getBody
 		return
 	}
-	request.Body = &codexRetainedReplayBody{reader: io.MultiReader(bytes.NewReader(buffered), owner), owner: owner}
+	request.Body = &codexRetainedReplayBody{reader: io.MultiReader(prefix, owner), owner: owner, state: state, root: true}
 	request.GetBody = originalGetBody
 }

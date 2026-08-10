@@ -281,6 +281,19 @@ func (observer *codexHTTPResponseObserver) storeFinishError(err error) {
 	observer.mu.Unlock()
 }
 
+func readCodexHTTPResponseBody(body io.Reader, buffer []byte) (read int, err error) {
+	if body == nil {
+		return 0, errors.New("Codex HTTP response body read failed")
+	}
+	defer func() {
+		if recover() != nil {
+			read = 0
+			err = errors.New("Codex HTTP response body read failed")
+		}
+	}()
+	return body.Read(buffer)
+}
+
 func closeCodexHTTPResponseBody(body io.Closer) (err error) {
 	if body == nil {
 		return nil

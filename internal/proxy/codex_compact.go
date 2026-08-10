@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -181,8 +182,8 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		_, failover := routeDiag.fields()
 		observation.Selected(choice, failover)
 		if err := observation.PrepareV2Response(resp); err != nil {
-			_ = resp.Body.Close()
-			observation.Finish(err)
+			closeErr := closeCodexHTTPResponseBody(resp.Body)
+			observation.Finish(errors.Join(err, closeErr))
 			fmt.Fprintf(os.Stderr, "cq: Codex v2 compact observation: %v\n", err)
 			writeError(w, http.StatusBadGateway, "api_error", "codex continuity observation failed")
 			return
@@ -190,7 +191,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		observation.Response(resp)
 		observeCodexResponseBody(resp, observation)
 	}
-	defer resp.Body.Close()
+	defer closeCodexHTTPResponseBody(resp.Body)
 
 	fmt.Fprintf(os.Stderr, "cq: proxy POST %s → %d (codex native compact)\n", upstreamURL, resp.StatusCode)
 

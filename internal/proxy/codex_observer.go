@@ -930,7 +930,7 @@ func observeCodexResponseBody(response *http.Response, handle *CodexTurnObservat
 }
 
 func (body *codexObservedBody) Read(buffer []byte) (int, error) {
-	read, err := body.body.Read(buffer)
+	read, err := readCodexHTTPResponseBody(body.body, buffer)
 	if read > 0 {
 		body.handle.ObserveBytes(buffer[:read])
 	}
@@ -942,7 +942,7 @@ func (body *codexObservedBody) Read(buffer []byte) (int, error) {
 }
 
 func (body *codexObservedBody) Close() error {
-	err := body.body.Close()
+	err := closeCodexHTTPResponseBody(body.body)
 	finishErr := err
 	if finishErr == nil && !body.terminal.Load() {
 		finishErr = context.Canceled
