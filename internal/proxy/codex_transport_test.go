@@ -141,6 +141,164 @@ func TestCodexTokenTransportConsumesRouteModel(t *testing.T) {
 	}
 }
 
+func TestCodexTokenTransportFrozenPreservesPreparedRequest(t *testing.T) {
+	original := []byte("{\n  \"model\": \"gpt-5.3-codex-spark\",\n  \"input\": []\n}\n")
+	req := makeCodexBytesRequest(original)
+	req.Header.Set("Authorization", "Bearer caller")
+	req.Header.Set("ChatGPT-Account-ID", "caller-account")
+	req.Header.Set("x-api-key", "caller-key")
+	req.Header["authorization"] = []string{"Bearer raw-caller"}
+	req.Header["CHATGPT-ACCOUNT-ID"] = []string{"raw-caller-account"}
+	req.Header["X-API-KEY"] = []string{"raw-caller-key"}
+	req.Header.Set("Content-Length", strconv.Itoa(len(original)))
+
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(out *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(out.Body)
+		if err != nil {
+			return nil, err
+		}
+		replay, err := out.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		replayed, err := io.ReadAll(replay)
+		_ = replay.Close()
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(body, original) || !bytes.Equal(replayed, original) {
+			t.Fatalf("prepared body changed: body=%q replay=%q", body, replayed)
+		}
+		if out.ContentLength != int64(len(original)) || out.Header.Get("Content-Length") != strconv.Itoa(len(original)) {
+			t.Fatalf("framing = %d/%q", out.ContentLength, out.Header.Get("Content-Length"))
+		}
+		if got := out.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := out.Header.Get("ChatGPT-Account-ID"); got != "exact-account" {
+			t.Fatalf("ChatGPT-Account-ID = %q", got)
+		}
+		if got := out.Header.Get("x-api-key"); got != "" {
+			t.Fatalf("x-api-key = %q", got)
+		}
+		foldedValues := func(name string) []string {
+			var values []string
+			for key, current := range out.Header {
+				if strings.EqualFold(key, name) {
+					values = append(values, current...)
+				}
+			}
+			return values
+		}
+		if got := foldedValues("Authorization"); !reflect.DeepEqual(got, []string{"Bearer secret"}) {
+			t.Fatalf("folded Authorization = %q", got)
+		}
+		if got := foldedValues("ChatGPT-Account-ID"); !reflect.DeepEqual(got, []string{"exact-account"}) {
+			t.Fatalf("folded ChatGPT-Account-ID = %q", got)
+		}
+		if got := foldedValues("x-api-key"); len(got) != 0 {
+			t.Fatalf("folded x-api-key = %q", got)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	})}
+
+	response, err := transport.DoFrozen(req, codex.CredentialMaterial{AccessToken: "secret", AccountID: "exact-account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if req.Header.Get("Authorization") != "Bearer caller" || req.Header.Get("ChatGPT-Account-ID") != "caller-account" || req.Header.Get("x-api-key") != "caller-key" {
+		t.Fatal("caller request was mutated")
+	}
+}
+
+func TestCodexAttemptExecutorFrozenPropagatesOperationContext(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor := &CodexAttemptExecutor{
+		Secrets: &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision": testExactCredentialMaterial(identity, "secret"),
+		}},
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			select {
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
+			default:
+				return nil, errors.New("operation context was not propagated")
+			}
+		})},
+	}
+
+	_, _, err := executor.doFrozenOnDispatch(
+		ctx,
+		RouteChoice{AccountKey: "identity"},
+		attempt,
+		makeCodexRequest(`{"model":"gpt-5.4"}`),
+		func(CandidateAttempt) { cancel() },
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCodexAttemptExecutorFrozenDispatchesAfterExactResolution(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	original := []byte(`{"model":"gpt-5.3-codex-spark","input":[]}`)
+	dispatched := false
+	executor := &CodexAttemptExecutor{
+		Secrets: &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision": testExactCredentialMaterial(identity, "secret"),
+		}},
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if !dispatched {
+				t.Fatal("request reached transport before dispatch callback")
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				return nil, err
+			}
+			if !bytes.Equal(body, original) {
+				t.Fatalf("prepared body changed: %q", body)
+			}
+			if got := request.Header.Get("Authorization"); got != "Bearer secret" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		})},
+	}
+
+	response, actual, err := executor.doFrozenOnDispatch(
+		context.Background(),
+		RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel},
+		attempt,
+		makeCodexBytesRequest(original),
+		func(resolved CandidateAttempt) {
+			dispatched = true
+			if resolved != attempt {
+				t.Fatalf("resolved attempt = %+v, want %+v", resolved, attempt)
+			}
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if actual != attempt {
+		t.Fatalf("actual attempt = %+v, want %+v", actual, attempt)
+	}
+}
+
 func TestCodexTokenTransportRewritesEncodedEffectiveModel(t *testing.T) {
 	originalJSON := []byte("{\n  \"input\" : [{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}],\n  \"model\" : \"gpt-5.3-codex-spark\",\n  \"metadata\" : {\"trace\":\"kept\"},\n  \"include\" : [\"reasoning.encrypted_content\"]\n}\n")
 	encoded := encodeCodexZstd(t, originalJSON)

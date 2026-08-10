@@ -41,20 +41,35 @@ func (e *CodexAttemptExecutor) Do(ctx context.Context, choice RouteChoice, attem
 	return response, err
 }
 
-func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+// DoFrozen resolves exact candidate material and dispatches one already-prepared
+// request without inspecting or rewriting its body.
+func (e *CodexAttemptExecutor) DoFrozen(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request) (*http.Response, error) {
+	response, _, err := e.doFrozenOnDispatch(ctx, choice, attempt, req, nil)
+	return response, err
+}
+
+func (e *CodexAttemptExecutor) resolveAttempt(ctx context.Context, choice RouteChoice, attempt CandidateAttempt) (codex.CredentialMaterial, CandidateAttempt, error) {
 	if e == nil || e.Secrets == nil || e.Transport == nil {
-		return nil, attempt, fmt.Errorf("Codex attempt executor unavailable")
+		return codex.CredentialMaterial{}, attempt, fmt.Errorf("Codex attempt executor unavailable")
 	}
 	if attempt.AccountKey == "" || attempt.Candidate.AccountKey != attempt.AccountKey || choice.AccountKey != attempt.AccountKey {
-		return nil, attempt, fmt.Errorf("Codex attempt identity mismatch")
+		return codex.CredentialMaterial{}, attempt, fmt.Errorf("Codex attempt identity mismatch")
 	}
 	material, resolved, err := codex.ResolvePlannedCandidate(ctx, e.Inventory, e.Secrets, attempt.plannedCandidate())
 	actual := candidateAttemptFromPlan(resolved, attempt.Ordinal)
 	if err != nil {
-		return nil, actual, fmt.Errorf("resolve Codex credential candidate: %w", err)
+		return codex.CredentialMaterial{}, actual, fmt.Errorf("resolve Codex credential candidate: %w", err)
 	}
 	if material.AccessToken == "" {
-		return nil, actual, fmt.Errorf("resolved Codex credential has no access token")
+		return codex.CredentialMaterial{}, actual, fmt.Errorf("resolved Codex credential has no access token")
+	}
+	return material, actual, nil
+}
+
+func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+	material, actual, err := e.resolveAttempt(ctx, choice, attempt)
+	if err != nil {
+		return nil, actual, err
 	}
 	dispatch := func() {
 		if onDispatch != nil {
@@ -62,6 +77,23 @@ func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteCho
 		}
 	}
 	response, err := e.Transport.doOnDispatch(req, choice, material, dispatch)
+	return response, actual, err
+}
+
+func (e *CodexAttemptExecutor) doFrozenOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+	material, actual, err := e.resolveAttempt(ctx, choice, attempt)
+	if err != nil {
+		return nil, actual, err
+	}
+	if req != nil {
+		req = req.WithContext(ctx)
+	}
+	dispatch := func() {
+		if onDispatch != nil {
+			onDispatch(actual)
+		}
+	}
+	response, err := e.Transport.doFrozenOnDispatch(req, material, dispatch)
 	return response, actual, err
 }
 
@@ -83,6 +115,12 @@ func (t *CodexTokenTransport) Do(req *http.Request, choice RouteChoice, material
 	return t.doOnDispatch(req, choice, material, nil)
 }
 
+// DoFrozen performs one explicit request attempt without inspecting or
+// rewriting the already-prepared body.
+func (t *CodexTokenTransport) DoFrozen(req *http.Request, material codex.CredentialMaterial) (*http.Response, error) {
+	return t.doFrozenOnDispatch(req, material, nil)
+}
+
 func (t *CodexTokenTransport) doOnDispatch(req *http.Request, choice RouteChoice, material codex.CredentialMaterial, onDispatch func()) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("Codex request is nil")
@@ -94,18 +132,46 @@ func (t *CodexTokenTransport) doOnDispatch(req *http.Request, choice RouteChoice
 	if err := rewriteCodexModelTo(out, choice.RequestedModel, choice.EffectiveModel); err != nil {
 		return nil, err
 	}
-	out.Header.Set("Authorization", "Bearer "+material.AccessToken)
-	if material.AccountID != "" {
-		out.Header.Set("ChatGPT-Account-ID", material.AccountID)
-	} else {
-		out.Header.Del("ChatGPT-Account-ID")
-	}
-	out.Header.Del("x-api-key")
+	applyCodexTransportCredentials(out, material)
 	inner := t.inner()
 	if onDispatch != nil {
 		onDispatch()
 	}
 	return inner.RoundTrip(out)
+}
+
+func (t *CodexTokenTransport) doFrozenOnDispatch(req *http.Request, material codex.CredentialMaterial, onDispatch func()) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("Codex request is nil")
+	}
+	out, err := cloneCodexTransportRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	applyCodexTransportCredentials(out, material)
+	inner := t.inner()
+	if onDispatch != nil {
+		onDispatch()
+	}
+	return inner.RoundTrip(out)
+}
+
+func applyCodexTransportCredentials(out *http.Request, material codex.CredentialMaterial) {
+	deleteCodexTransportHeaderFold(out.Header, "Authorization")
+	deleteCodexTransportHeaderFold(out.Header, "ChatGPT-Account-ID")
+	deleteCodexTransportHeaderFold(out.Header, "x-api-key")
+	out.Header.Set("Authorization", "Bearer "+material.AccessToken)
+	if material.AccountID != "" {
+		out.Header.Set("ChatGPT-Account-ID", material.AccountID)
+	}
+}
+
+func deleteCodexTransportHeaderFold(header http.Header, name string) {
+	for key := range header {
+		if strings.EqualFold(key, name) {
+			delete(header, key)
+		}
+	}
 }
 
 func cloneCodexTransportRequest(req *http.Request) (*http.Request, error) {
