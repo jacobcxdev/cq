@@ -1,0 +1,424 @@
+package proxy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+)
+
+func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-b",
+			frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceExternal, false, time.Time{}),
+		),
+		frozenDispatchTestLogicalAccount("account-a",
+			frozenDispatchCandidate("account-a", "candidate-managed", "revision-managed", codex.SourceManaged, true, now.Add(time.Hour)),
+			frozenDispatchCandidate("account-a", "candidate-accepted", "revision-accepted", codex.SourceSystem, false, now.Add(-time.Hour)),
+		),
+	}}
+	events := make([]string, 0, 7)
+	inventorySource := &codexHTTPRequestPlanTestInventory{inventory: inventory, events: &events}
+	snapshotter := &codexHTTPRequestPlanTestSnapshotter{
+		snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration:  13,
+			Provisional:        map[codex.AccountKey]int{"account-b": 2},
+			AffinityAccountKey: "account-a",
+		},
+		events: &events,
+	}
+	handle := &CodexLeaseRequestHandle{account: "account-a"}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: handle, events: &events}
+	headroomCalls := 0
+	headroom := CodexRequestHeadroomFunc(func(_ context.Context, body []byte, mode HeadroomMode) ([]byte, int, error) {
+		events = append(events, "headroom")
+		headroomCalls++
+		if mode != HeadroomModeCache {
+			t.Fatalf("Headroom mode = %v, want cache", mode)
+		}
+		return body, 7, nil
+	})
+
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory:         inventorySource,
+		Capacity:          NewCodexCapacityLedger(func() time.Time { return now }, time.Hour),
+		Routes:            snapshotter,
+		Runtime:           runtime,
+		DefaultAccountKey: "account-b",
+		Authority: CodexLeaseAuthorityPolicy{
+			ModeEpoch:                   9,
+			Authoritative:               true,
+			RetainedAuthoritativeEpochs: []uint64{7},
+		},
+		Headroom:     headroom,
+		HeadroomMode: HeadroomModeCache,
+		Now:          func() time.Time { return now },
+	}
+	var inspected *CodexFrozenRequestInspection
+	var frozenByOperation *CodexFrozenRequest
+	factory.operations = codexHTTPRequestPlanFactoryOperations{
+		inspect: func(ctx context.Context, encoded []byte, headers http.Header) (*CodexFrozenRequestInspection, error) {
+			events = append(events, "inspect")
+			var err error
+			inspected, err = InspectCodexNativeRequest(ctx, encoded, headers)
+			return inspected, err
+		},
+		buildDispatch: func(ctx context.Context, input CodexFrozenDispatchInput) (CodexFrozenDispatchPlan, error) {
+			events = append(events, "plan")
+			return BuildCodexFrozenDispatchPlan(ctx, input)
+		},
+		freeze: func(ctx context.Context, inspection *CodexFrozenRequestInspection, choice RouteChoice, headroom CodexRequestHeadroom, mode HeadroomMode) (*CodexFrozenRequest, error) {
+			events = append(events, "freeze")
+			var err error
+			frozenByOperation, err = inspection.Freeze(ctx, choice, headroom, mode)
+			return frozenByOperation, err
+		},
+	}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded:          frozenRequestBody("gpt-5", CodexRequestTurn, "private-request-material"),
+		Headers:          http.Header{"X-Private": {"private-header-material"}},
+		AcceptedRevision: "revision-accepted",
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer result.Frozen.Release()
+
+	wantEvents := []string{"inspect", "inventory", "snapshot", "plan", "freeze", "headroom", "begin"}
+	if !slices.Equal(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+	if headroomCalls != 1 || inventorySource.calls != 1 || snapshotter.calls != 1 || runtime.calls != 1 {
+		t.Fatalf("calls: headroom=%d inventory=%d snapshot=%d begin=%d", headroomCalls, inventorySource.calls, snapshotter.calls, runtime.calls)
+	}
+	if result.Frozen != frozenByOperation || result.Lifecycle == nil || result.Lifecycle.AccountKey() != handle.AccountKey() {
+		t.Fatalf("ownership result = %#v", result)
+	}
+	if _, err := inspected.Protocol(); !errors.Is(err, ErrCodexFrozenRequestReleased) {
+		t.Fatalf("inspection remains owned after Freeze: %v", err)
+	}
+	choices := result.Dispatch.Accounts()
+	if len(choices) != 2 || choices[0].Choice().AccountKey != "account-a" || choices[1].Choice().AccountKey != "account-b" {
+		t.Fatalf("dispatch choices = %#v", choices)
+	}
+
+	wantKey := LeaseKey{Lane: LaneKey{Session: "session", Thread: "thread", Namespace: CodexResponsesNamespace}, Turn: "turn"}
+	if snapshotter.key != wantKey || !slices.Equal(snapshotter.accounts, []codex.AccountKey{"account-b", "account-a"}) || !reflect.DeepEqual(snapshotter.authority, factory.Authority) {
+		t.Fatalf("snapshot request = key %#v accounts %v authority %#v", snapshotter.key, snapshotter.accounts, snapshotter.authority)
+	}
+	wantSlots := []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-accepted", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-managed", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-managed", Kind: CodexAttemptSlotEligibleManagedRefresh},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	}
+	wantLeasePlan := CodexLeaseRequestPlan{
+		Key:             wantKey,
+		Accounts:        []codex.AccountKey{"account-b", "account-a"},
+		Authority:       factory.Authority,
+		RequestKind:     CodexRequestTurn,
+		RequestedModel:  "gpt-5",
+		EffectiveModel:  "gpt-5",
+		RequiredBuckets: []CapacityBucket{CapacityBucketBase},
+		Slots:           wantSlots,
+		InitialSlot:     1,
+	}
+	if !reflect.DeepEqual(runtime.plan, wantLeasePlan) {
+		t.Fatalf("lease plan = %#v, want %#v", runtime.plan, wantLeasePlan)
+	}
+	if result.Frozen.HeadroomSavings() != 7 {
+		t.Fatalf("Headroom savings = %d, want 7", result.Frozen.HeadroomSavings())
+	}
+	choice, err := result.Frozen.Choice()
+	if err != nil || !reflect.DeepEqual(choice, choices[0].Choice()) {
+		t.Fatalf("frozen choice = %#v, %v", choice, err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryReleasesInspectionBeforeFreeze(t *testing.T) {
+	t.Parallel()
+
+	privateCause := errors.New("private-inventory-cause")
+	var inspected *CodexFrozenRequestInspection
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{err: privateCause},
+		Routes:    &codexHTTPRequestPlanTestSnapshotter{},
+		Runtime:   &codexHTTPRequestPlanTestRuntime{},
+		Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+	}
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, headers http.Header) (*CodexFrozenRequestInspection, error) {
+		var err error
+		inspected, err = InspectCodexNativeRequest(ctx, encoded, headers)
+		return inspected, err
+	}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if result.Frozen != nil || result.Lifecycle != nil {
+		t.Fatalf("result retained ownership: %#v", result)
+	}
+	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanInventory, privateCause.Error())
+	if _, protocolErr := inspected.Protocol(); !errors.Is(protocolErr, ErrCodexFrozenRequestReleased) {
+		t.Fatalf("inspection was not released: %v", protocolErr)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryDerivesPreTurnCompactionCapacity(t *testing.T) {
+	t.Parallel()
+
+	handle := &CodexLeaseRequestHandle{account: "account"}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: handle}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	body := []byte(strings.Replace(
+		string(frozenRequestBody("gpt-5", CodexRequestCompaction, "private-body")),
+		`"compaction":"standalone_turn"`,
+		`"compaction":"pre_turn"`,
+		1,
+	))
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer result.Frozen.Release()
+
+	wantBuckets := []CapacityBucket{CapacityBucketBase, CapacityBucketForModel(codexSparkModel)}
+	if runtime.plan.RequestKind != CodexRequestCompaction || runtime.plan.CompactionPhase != CodexCompactionPreTurn || !slices.Equal(runtime.plan.RequiredBuckets, wantBuckets) {
+		t.Fatalf("compaction lease plan = kind %q phase %q buckets %v, want pre-turn %v", runtime.plan.RequestKind, runtime.plan.CompactionPhase, runtime.plan.RequiredBuckets, wantBuckets)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryProjectsPrivateContinuityEvidence(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	body := []byte(strings.Replace(
+		string(frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")),
+		`,"input":`,
+		`,"previous_response_id":"private-response","encrypted_content":"private-encrypted","input":`,
+		1,
+	))
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: body,
+		Headers: http.Header{"X-Codex-Turn-State": {"private-turn-state"}},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer result.Frozen.Release()
+
+	want := CodexLeaseRequestEvidence{
+		PreviousResponseID: "private-response",
+		TurnState:          "private-turn-state",
+		HasTurnState:       true,
+		HasEncryptedState:  true,
+	}
+	if runtime.plan.Evidence != want {
+		t.Fatalf("evidence = %#v, want private continuity projection", runtime.plan.Evidence)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryReleasesFrozenOnBeginFailure(t *testing.T) {
+	t.Parallel()
+
+	privateCause := errors.New("private-runtime-cause")
+	var frozen *CodexFrozenRequest
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{err: privateCause})
+	factory.operations.freeze = func(ctx context.Context, inspection *CodexFrozenRequestInspection, choice RouteChoice, headroom CodexRequestHeadroom, mode HeadroomMode) (*CodexFrozenRequest, error) {
+		var err error
+		frozen, err = inspection.Freeze(ctx, choice, headroom, mode)
+		return frozen, err
+	}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if result.Frozen != nil || result.Lifecycle != nil {
+		t.Fatalf("result retained ownership: %#v", result)
+	}
+	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanBegin, privateCause.Error())
+	if _, protocolErr := frozen.Protocol(); !errors.Is(protocolErr, ErrCodexFrozenRequestReleased) {
+		t.Fatalf("frozen request was not released: %v", protocolErr)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryAbandonsCommittedHandleAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	preparedPlan := codexLeaseRuntimeTestPlan("factory-cleanup", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	prepared, err := runtimeLease.BeginRequest(preparedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	privateCause := errors.New("private-runtime-cause")
+	runtime := &codexHTTPRequestPlanTestRuntime{
+		handle:       prepared,
+		err:          privateCause,
+		beforeReturn: cancel,
+	}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+
+	result, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if result.Frozen != nil || result.Lifecycle != nil {
+		t.Fatalf("result retained ownership: %#v", result)
+	}
+	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanBegin, privateCause.Error())
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("build context = %v, want cancellation before cleanup", ctx.Err())
+	}
+
+	nextPlan := preparedPlan
+	nextPlan.Accounts = []codex.AccountKey{"account-b"}
+	nextPlan.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect}}
+	next, beginErr := runtimeLease.BeginRequest(nextPlan)
+	if beginErr != nil {
+		t.Fatalf("BeginRequest after factory cleanup: %v", beginErr)
+	}
+	if next.RequestGeneration() != 2 || next.AccountKey() != "account-b" {
+		t.Fatalf("request after cleanup = account %q generation %d", next.AccountKey(), next.RequestGeneration())
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryErrorsAreTypedPrivateAndPreserveCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	_, err := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")})
+	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanInspect, "private-body")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error does not preserve cancellation: %v", err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRejectsInvalidRouteSnapshotBeforeFreeze(t *testing.T) {
+	t.Parallel()
+
+	routes := &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{JournalGeneration: 0}}
+	runtime := &codexHTTPRequestPlanTestRuntime{}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.Routes = routes
+	freezeCalls := 0
+	factory.operations.freeze = func(context.Context, *CodexFrozenRequestInspection, RouteChoice, CodexRequestHeadroom, HeadroomMode) (*CodexFrozenRequest, error) {
+		freezeCalls++
+		return nil, errors.New("unexpected freeze")
+	}
+
+	_, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")})
+	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanRouteSnapshot, "private-body")
+	if freezeCalls != 0 || runtime.calls != 0 || routes.calls != 1 {
+		t.Fatalf("calls: snapshot=%d freeze=%d begin=%d", routes.calls, freezeCalls, runtime.calls)
+	}
+}
+
+type codexHTTPRequestPlanTestInventory struct {
+	inventory codex.Inventory
+	err       error
+	calls     int
+	events    *[]string
+}
+
+func (inventory *codexHTTPRequestPlanTestInventory) List(context.Context) (codex.Inventory, error) {
+	inventory.calls++
+	if inventory.events != nil {
+		*inventory.events = append(*inventory.events, "inventory")
+	}
+	return inventory.inventory, inventory.err
+}
+
+type codexHTTPRequestPlanTestSnapshotter struct {
+	snapshot  CodexLeaseRouteSnapshot
+	err       error
+	calls     int
+	key       LeaseKey
+	accounts  []codex.AccountKey
+	authority CodexLeaseAuthorityPolicy
+	events    *[]string
+}
+
+func (snapshotter *codexHTTPRequestPlanTestSnapshotter) LoadRouteSnapshot(_ context.Context, key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (CodexLeaseRouteSnapshot, error) {
+	snapshotter.calls++
+	if snapshotter.events != nil {
+		*snapshotter.events = append(*snapshotter.events, "snapshot")
+	}
+	snapshotter.key = key
+	snapshotter.accounts = append([]codex.AccountKey(nil), accounts...)
+	snapshotter.authority = cloneCodexLeaseAuthorityPolicy(authority)
+	return snapshotter.snapshot, snapshotter.err
+}
+
+type codexHTTPRequestPlanTestRuntime struct {
+	handle       *CodexLeaseRequestHandle
+	err          error
+	calls        int
+	plan         CodexLeaseRequestPlan
+	events       *[]string
+	beforeReturn func()
+}
+
+func (runtime *codexHTTPRequestPlanTestRuntime) BeginRequestContext(_ context.Context, plan CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
+	runtime.calls++
+	if runtime.events != nil {
+		*runtime.events = append(*runtime.events, "begin")
+	}
+	runtime.plan = plan
+	if runtime.beforeReturn != nil {
+		runtime.beforeReturn()
+	}
+	return runtime.handle, runtime.err
+}
+
+func codexHTTPRequestPlanTestFactory(runtime CodexHTTPRequestPlanRuntime) *CodexHTTPRequestPlanFactory {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	account := frozenDispatchTestLogicalAccount("account",
+		frozenDispatchCandidate("account", "candidate", "revision", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	return &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{account}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration: 1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+}
+
+func assertCodexHTTPRequestPlanError(t *testing.T, err error, code CodexHTTPRequestPlanErrorCode, private string) {
+	t.Helper()
+	var planErr *CodexHTTPRequestPlanError
+	if !errors.As(err, &planErr) || planErr.Code != code {
+		t.Fatalf("error = %#v, want code %q", err, code)
+	}
+	if private != "" {
+		for _, formatted := range []string{err.Error(), fmt.Sprintf("%v", err), fmt.Sprintf("%+v", err)} {
+			if strings.Contains(formatted, private) {
+				t.Fatalf("error exposed private material: %s", formatted)
+			}
+		}
+	}
+}
