@@ -18,7 +18,11 @@ type CodexLeaseRouteSnapshot struct {
 	BoundRecordGeneration   uint64
 	BoundChoice             RouteChoice
 	HistoricalAuthoritative bool
+	AffinityPresent         bool
 	AffinityAccountKey      codex.AccountKey
+	AffinityCacheAdmittedAt time.Time
+	AffinityEffectiveModel  string
+	AffinityRequiresAccount bool
 	Provisional             map[codex.AccountKey]int
 	JournalGeneration       uint64
 }
@@ -64,12 +68,28 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 			Provisional:       provisional,
 			JournalGeneration: restored.Fence.Journal,
 		}
-		if restored.Affinity != nil && restored.Affinity.Resolved {
-			snapshot.AffinityAccountKey = restored.Affinity.AccountKey
+		if restored.Affinity != nil {
+			snapshot.AffinityPresent = true
+			snapshot.AffinityCacheAdmittedAt = restored.Affinity.CacheAdmittedAt
+			snapshot.AffinityEffectiveModel = restored.Affinity.CacheEffectiveModel
+			sourceFound := false
+			for _, record := range restored.ResolvedRecords {
+				if record.Identity == restored.Affinity.Source {
+					snapshot.AffinityRequiresAccount = record.Record.HasEncryptedState
+					sourceFound = true
+					break
+				}
+			}
+			if !sourceFound {
+				snapshot.AffinityRequiresAccount = true
+			}
+			if restored.Affinity.Resolved {
+				snapshot.AffinityAccountKey = restored.Affinity.AccountKey
+			}
 		}
 		if restored.Classification == CodexRestoredLaneCurrent {
 			for _, record := range restored.ResolvedRecords {
-				if record.Identity != restored.Fence.Current || !record.Record.EverAdmitted {
+				if record.Identity != restored.Fence.Current || (!record.Record.EverAdmitted && !record.Record.NonMigratable) {
 					continue
 				}
 				if record.AccountKey == "" {

@@ -80,9 +80,12 @@ func TestCodexReadinessMarkerRejectsEveryStaleDimension(t *testing.T) {
 
 func TestCodexHTTPReadinessRevisionInvalidatesPriorMarker(t *testing.T) {
 	required, _ := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	if required.LeaseSchema != 3 || required.SemanticsRevision != "http-conservative-routing-v3" {
+		t.Fatalf("current readiness boundary = lease %d semantics %q, want 3/v3", required.LeaseSchema, required.SemanticsRevision)
+	}
 	prior := testCodexMarker(required)
-	prior.Version = 1
-	prior.SemanticsRevision = "http-routing-v1"
+	prior.LeaseSchema = 2
+	prior.SemanticsRevision = "http-conservative-routing-v2"
 	prior.CompletedGates = []string{
 		"strong-metadata",
 		"lease-pinning",
@@ -92,8 +95,8 @@ func TestCodexHTTPReadinessRevisionInvalidatesPriorMarker(t *testing.T) {
 		"compressed-replay",
 		"installed-listener",
 	}
-	if err := ValidateCodexReadinessMarker(prior, required); err == nil || !strings.Contains(err.Error(), "version") {
-		t.Fatalf("prior marker error = %v, want version invalidation", err)
+	if err := ValidateCodexReadinessMarker(prior, required); err == nil || !strings.Contains(err.Error(), "lease schema") {
+		t.Fatalf("prior marker error = %v, want lease-schema invalidation", err)
 	}
 }
 

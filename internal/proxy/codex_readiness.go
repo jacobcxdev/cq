@@ -42,10 +42,10 @@ const (
 	CodexReadinessMarkerVersion = 2
 	CodexRoutingJournalVersion  = 1
 	CurrentCodexParserSchema    = 1
-	CurrentCodexLeaseSchema     = 2
+	CurrentCodexLeaseSchema     = 3
 	// CodexHTTPReadinessSemanticsRevision invalidates proof produced before
 	// conservative HTTP routing and replay became one frozen runtime contract.
-	CodexHTTPReadinessSemanticsRevision = "http-conservative-routing-v2"
+	CodexHTTPReadinessSemanticsRevision = "http-conservative-routing-v3"
 	CodexHTTPFixtureHash                = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
 )
 

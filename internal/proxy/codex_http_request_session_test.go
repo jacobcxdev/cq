@@ -187,6 +187,50 @@ func TestCodexHTTPRequestSessionAdvancesAccountOnlyForExactHard429(t *testing.T)
 	}
 }
 
+func TestCodexHTTPRequestSessionHardContinuitySurfacesExact429Once(t *testing.T) {
+	choice := codexHTTPSessionChoice("account-a")
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice: choice,
+			attempts: []CandidateAttempt{
+				codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1),
+			},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+	hardBody := []byte(`{"error":{"type":"usage_limit_reached"}}`)
+	response := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(bytes.NewReader(hardBody))}
+	events := make([]string, 0, 3)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{{response: response}},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", slotAccounts: map[uint32]codex.AccountKey{1: "account-a"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != response || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
+		t.Fatalf("hard continuity result/calls = %#v/%d, want original account-a response and one dispatch", result, dispatcher.calls)
+	}
+	got, readErr := io.ReadAll(result.Response.Body)
+	closeErr := result.Response.Body.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(got, hardBody) {
+		t.Fatalf("hard continuity body = %q, read/close %v/%v", got, readErr, closeErr)
+	}
+	if want := []string{"mark", "send:candidate-a", "finish"}; strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
 func TestCodexHTTPRequestSessionSurfacesRetainedEarlyDefaultAfterAlternativesExhaust(t *testing.T) {
 	defaultChoice := codexHTTPSessionChoice("account-default")
 	ordinaryChoice := codexHTTPSessionChoice("account-ordinary")
@@ -200,14 +244,15 @@ func TestCodexHTTPRequestSessionSurfacesRetainedEarlyDefaultAfterAlternativesExh
 		},
 	}
 	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, defaultChoice)
-	defaultBody := &codexRejectedTrackingBody{reader: strings.NewReader("default failure")}
+	defaultFailure := `{"error":{"type":"usage_limit_reached"}}`
+	defaultBody := &codexRejectedTrackingBody{reader: strings.NewReader(defaultFailure)}
 	ordinaryBody := &codexRejectedTrackingBody{reader: strings.NewReader("ordinary failure")}
 	events := make([]string, 0, 8)
 	dispatcher := &codexHTTPSessionDispatcher{
 		t:      t,
 		events: &events,
 		outcomes: []codexHTTPSessionOutcome{
-			{response: &http.Response{StatusCode: http.StatusUnauthorized, Body: defaultBody}},
+			{response: &http.Response{StatusCode: http.StatusTooManyRequests, Body: defaultBody}},
 			{response: &http.Response{StatusCode: http.StatusForbidden, Body: ordinaryBody}},
 		},
 		wantBody: encoded,
@@ -231,7 +276,7 @@ func TestCodexHTTPRequestSessionSurfacesRetainedEarlyDefaultAfterAlternativesExh
 	}
 	body, readErr := io.ReadAll(result.Response.Body)
 	closeErr := result.Response.Body.Close()
-	if readErr != nil || closeErr != nil || string(body) != "default failure" {
+	if readErr != nil || closeErr != nil || string(body) != defaultFailure {
 		t.Fatalf("retained default body = %q, read/close %v/%v", body, readErr, closeErr)
 	}
 	if defaultBody.closes != 1 || ordinaryBody.readBytes != len("ordinary failure") || ordinaryBody.closes != 1 {
@@ -260,13 +305,13 @@ func TestCodexHTTPRequestSessionDegradedInventoryOverridesRetainedDefault(t *tes
 		},
 	}
 	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, defaultChoice)
-	defaultBody := &codexRejectedTrackingBody{reader: strings.NewReader("default failure")}
+	defaultBody := &codexRejectedTrackingBody{reader: strings.NewReader(`{"error":{"type":"usage_limit_reached"}}`)}
 	events := make([]string, 0, 8)
 	dispatcher := &codexHTTPSessionDispatcher{
 		t:      t,
 		events: &events,
 		outcomes: []codexHTTPSessionOutcome{
-			{response: &http.Response{StatusCode: http.StatusUnauthorized, Body: defaultBody}},
+			{response: &http.Response{StatusCode: http.StatusTooManyRequests, Body: defaultBody}},
 			{preDispatchErr: codex.ErrCredentialInventoryDegraded},
 		},
 		wantBody: encoded,
@@ -432,6 +477,8 @@ func TestCodexHTTPRequestSessionStopsWithoutMigration(t *testing.T) {
 	}{
 		{name: "network", dispatchErr: networkErr, wantErr: networkErr},
 		{name: "timeout", dispatchErr: context.DeadlineExceeded, wantErr: context.DeadlineExceeded},
+		{name: "unauthorised", status: http.StatusUnauthorized, body: []byte("credential rejected")},
+		{name: "forbidden", status: http.StatusForbidden, body: []byte("credential forbidden")},
 		{name: "server error", status: http.StatusInternalServerError, body: []byte("provider failed")},
 		{name: "soft limit", status: http.StatusTooManyRequests, body: []byte(`{"error":{"type":"rate_limit_exceeded"}}`)},
 		{name: "encoded hard limit", status: http.StatusTooManyRequests, header: http.Header{"Content-Encoding": {"gzip"}}, body: []byte(`{"error":{"type":"usage_limit_reached"}}`)},
@@ -797,7 +844,7 @@ func TestCodexHTTPRequestSessionRefreshDegradationWinsAndStaleRevisionSkips(t *t
 		wantDispatch int
 	}{
 		{name: "degraded inventory wins", refreshErr: codex.ErrCredentialInventoryDegraded, wantErr: codex.ErrCredentialInventoryDegraded, wantDispatch: 1},
-		{name: "stale revision skips refresh", refreshRev: "revision-a", wantDispatch: 2},
+		{name: "stale revision surfaces rejection", refreshRev: "revision-a", wantDispatch: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			firstChoice := codexHTTPSessionChoice("account-a")
@@ -850,7 +897,7 @@ func TestCodexHTTPRequestSessionRefreshDegradationWinsAndStaleRevisionSkips(t *t
 				}
 				return
 			}
-			if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Choice.AccountKey != "account-b" {
+			if result.Response == nil || result.Response.StatusCode != http.StatusUnauthorized || result.Choice.AccountKey != "account-a" {
 				t.Fatalf("result = %#v", result)
 			}
 			result.Response.Body.Close()

@@ -20,25 +20,29 @@ type CodexRoutePolicyCandidate struct {
 
 // CodexRoutePolicyHints contains only opaque routing identities.
 type CodexRoutePolicyHints struct {
-	AffinityAccountKey codex.AccountKey
-	DefaultAccountKey  codex.AccountKey
-	BoundAccountKey    codex.AccountKey
+	AffinityAccountKey     codex.AccountKey
+	AffinityEffectiveModel string
+	DefaultAccountKey      codex.AccountKey
+	BoundAccountKey        codex.AccountKey
 }
 
 // CodexRoutePlanStatus describes the frozen plan's terminal disposition.
 type CodexRoutePlanStatus string
 
 const (
-	CodexRoutePlanReady               CodexRoutePlanStatus = "ready"
-	CodexRoutePlanDefaultMissing      CodexRoutePlanStatus = "default_missing"
-	CodexRoutePlanDefaultUnresolved   CodexRoutePlanStatus = "default_unresolved"
-	CodexRoutePlanDefaultIncompatible CodexRoutePlanStatus = "default_incompatible"
-	CodexRoutePlanDefaultUnroutable   CodexRoutePlanStatus = "default_unroutable"
-	CodexRoutePlanBoundUnresolved     CodexRoutePlanStatus = "bound_unresolved"
-	CodexRoutePlanBoundIncompatible   CodexRoutePlanStatus = "bound_incompatible"
-	CodexRoutePlanBoundUnroutable     CodexRoutePlanStatus = "bound_unroutable"
-	CodexRoutePlanCanceled            CodexRoutePlanStatus = "canceled"
-	CodexRoutePlanInvalidCandidate    CodexRoutePlanStatus = "invalid_candidate"
+	CodexRoutePlanReady                CodexRoutePlanStatus = "ready"
+	CodexRoutePlanDefaultMissing       CodexRoutePlanStatus = "default_missing"
+	CodexRoutePlanDefaultUnresolved    CodexRoutePlanStatus = "default_unresolved"
+	CodexRoutePlanDefaultIncompatible  CodexRoutePlanStatus = "default_incompatible"
+	CodexRoutePlanDefaultUnroutable    CodexRoutePlanStatus = "default_unroutable"
+	CodexRoutePlanBoundUnresolved      CodexRoutePlanStatus = "bound_unresolved"
+	CodexRoutePlanBoundIncompatible    CodexRoutePlanStatus = "bound_incompatible"
+	CodexRoutePlanBoundUnroutable      CodexRoutePlanStatus = "bound_unroutable"
+	CodexRoutePlanAffinityUnresolved   CodexRoutePlanStatus = "affinity_unresolved"
+	CodexRoutePlanAffinityIncompatible CodexRoutePlanStatus = "affinity_incompatible"
+	CodexRoutePlanAffinityUnroutable   CodexRoutePlanStatus = "affinity_unroutable"
+	CodexRoutePlanCanceled             CodexRoutePlanStatus = "canceled"
+	CodexRoutePlanInvalidCandidate     CodexRoutePlanStatus = "invalid_candidate"
 )
 
 // CodexRoutePolicyError is a credential-free terminal policy failure.
@@ -97,7 +101,7 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 			bound = append(bound, candidate)
 		}
 		sort.SliceStable(bound, func(i, j int) bool {
-			return codexRoutePolicyCandidateLess(bound[i], bound[j], "")
+			return codexRoutePolicyCandidateLess(bound[i], bound[j], "", "")
 		})
 		status := CodexRoutePlanReady
 		switch {
@@ -117,6 +121,11 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 		}
 		return plan, nil
 	}
+	affinityAccountKey, affinityEffectiveModel, affinityStatus := codexRoutePolicyAffinity(candidates, hints)
+	if affinityStatus != CodexRoutePlanReady {
+		plan := CodexRoutePlan{status: affinityStatus}
+		return plan, plan.TerminalError()
+	}
 	eligible := make([]CodexRoutePolicyCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		capacity := codexRoutePolicyCapacity(candidate)
@@ -127,7 +136,7 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 		eligible = append(eligible, candidate)
 	}
 	sort.SliceStable(eligible, func(i, j int) bool {
-		return codexRoutePolicyCandidateLess(eligible[i], eligible[j], hints.AffinityAccountKey)
+		return codexRoutePolicyCandidateLess(eligible[i], eligible[j], affinityAccountKey, affinityEffectiveModel)
 	})
 
 	choices := make([]RouteChoice, 0, len(eligible))
@@ -180,7 +189,7 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 			defaultAppended := false
 			if len(defaultCandidates) > 0 {
 				sort.SliceStable(defaultCandidates, func(i, j int) bool {
-					return codexRoutePolicyCandidateLess(defaultCandidates[i], defaultCandidates[j], "")
+					return codexRoutePolicyCandidateLess(defaultCandidates[i], defaultCandidates[j], "", "")
 				})
 				candidate := defaultCandidates[0]
 				if haveFrozenChoice {
@@ -210,6 +219,52 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 		}
 	}
 	return CodexRoutePlan{choices: choices, defaultAccountKey: defaultAccountKey, status: status}, nil
+}
+
+func codexRoutePolicyAffinity(candidates []CodexRoutePolicyCandidate, hints CodexRoutePolicyHints) (codex.AccountKey, string, CodexRoutePlanStatus) {
+	if hints.AffinityAccountKey == "" {
+		return "", "", CodexRoutePlanReady
+	}
+	accountPresent := false
+	modelPresent := false
+	compatible := false
+	routable := false
+	nonzero := false
+	for _, candidate := range candidates {
+		if candidate.Choice.AccountKey != hints.AffinityAccountKey {
+			continue
+		}
+		accountPresent = true
+		if hints.AffinityEffectiveModel != "" && !codexRoutePolicySameModel(candidate.Choice.EffectiveModel, hints.AffinityEffectiveModel) {
+			continue
+		}
+		modelPresent = true
+		if !candidate.Compatible {
+			continue
+		}
+		compatible = true
+		if !candidate.Routable {
+			continue
+		}
+		routable = true
+		if codexRoutePolicyCapacity(candidate).State != CapacityZero {
+			nonzero = true
+		}
+	}
+	switch {
+	case !accountPresent:
+		return "", "", CodexRoutePlanAffinityUnresolved
+	case !modelPresent:
+		return "", "", CodexRoutePlanReady
+	case !compatible:
+		return "", "", CodexRoutePlanAffinityIncompatible
+	case !routable:
+		return "", "", CodexRoutePlanAffinityUnroutable
+	case !nonzero:
+		return "", "", CodexRoutePlanReady
+	default:
+		return hints.AffinityAccountKey, hints.AffinityEffectiveModel, CodexRoutePlanReady
+	}
 }
 
 func codexRoutePolicyCandidateValid(candidate CodexRoutePolicyCandidate) bool {
@@ -301,9 +356,9 @@ func codexRoutePolicyChoiceForAccount(frozen RouteChoice, accountKey codex.Accou
 	return choice
 }
 
-func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affinity codex.AccountKey) bool {
-	leftAffinity := affinity != "" && left.Choice.AccountKey == affinity
-	rightAffinity := affinity != "" && right.Choice.AccountKey == affinity
+func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affinity codex.AccountKey, affinityModel string) bool {
+	leftAffinity := affinity != "" && left.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(left.Choice.EffectiveModel, affinityModel))
+	rightAffinity := affinity != "" && right.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(right.Choice.EffectiveModel, affinityModel))
 	if leftAffinity != rightAffinity {
 		return leftAffinity
 	}

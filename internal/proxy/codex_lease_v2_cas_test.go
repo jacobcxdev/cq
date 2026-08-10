@@ -1314,12 +1314,12 @@ func openCodexLeaseV2CASTestStore(t *testing.T) (*CodexLeaseStore, *fsutil.MemFS
 	now := time.Date(2026, 8, 9, 8, 0, 0, 0, time.UTC)
 	cutoverAt := now.Add(-time.Hour)
 	envelope := codexLeaseJournalEnvelopeV2{
-		Version:     codexLeaseJournalVersionV2,
+		Version:     codexLeaseJournalVersionV3,
 		HashVersion: codexLeaseHashVersion,
 		Generation:  1,
 		Cutover: CodexLeaseCutover{
 			SourceVersion:        0,
-			CompatibilityEpoch:   3,
+			CompatibilityEpoch:   4,
 			State:                CodexLeaseCutoverComplete,
 			At:                   cutoverAt,
 			JournalGeneration:    1,
@@ -1367,7 +1367,7 @@ func reservingCodexLeaseV2CASTestRecord(store *CodexLeaseStore, session, thread,
 		TurnHash:       store.hash("turn", turn),
 		ModeEpoch:      9,
 		State:          LeaseReserving,
-		ProtocolSchema: 2,
+		ProtocolSchema: CurrentCodexLeaseSchema,
 		Authoritative:  true,
 	}
 }
@@ -1483,6 +1483,8 @@ func codexLeaseV2CASTestMutationLane(lane CodexJournalLane) CodexJournalLane {
 	lane.LastAdmittedAuthoritative = false
 	lane.LastAdmissionJournalGeneration = 0
 	lane.LastAdmittedAt = time.Time{}
+	lane.LastCacheAdmittedAt = time.Time{}
+	lane.LastCacheEffectiveModel = ""
 	return lane
 }
 

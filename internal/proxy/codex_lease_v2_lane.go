@@ -122,6 +122,8 @@ func (store *CodexLeaseStore) LoadLane(key LeaseKey, accounts []codex.AccountKey
 			},
 			AdmissionJournalGeneration: restored.Lane.LastAdmissionJournalGeneration,
 			AdmittedAt:                 restored.Lane.LastAdmittedAt,
+			CacheAdmittedAt:            restored.Lane.LastCacheAdmittedAt,
+			CacheEffectiveModel:        restored.Lane.LastCacheEffectiveModel,
 		}
 		if resolved {
 			restored.Affinity.AccountKey = resolvedAccount

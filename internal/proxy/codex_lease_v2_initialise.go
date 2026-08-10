@@ -27,7 +27,7 @@ func InitialiseCodexContinuityAuthority(options CodexContinuityOpenOptions, owne
 	if !validCodexModeSnapshot(cloneCodexModeSnapshot(options.Modes)) {
 		return fmt.Errorf("%w: missing or non-canonical mode authority snapshot", ErrCodexLeaseTrustLost)
 	}
-	if compat.CurrentEpoch != 3 {
+	if compat.CurrentEpoch != 4 {
 		return fmt.Errorf("%w: unsupported compatibility floor %d", ErrCodexLeaseTrustLost, compat.CurrentEpoch)
 	}
 	keyName := filepath.Base(options.KeyPath)
@@ -248,7 +248,7 @@ func validateFreshCodexLeaseInstalledPair(inspector fsutil.SecurePathInspector, 
 func freshCodexLeaseJournal(key []byte, options CodexContinuityOpenOptions) ([]byte, error) {
 	now := options.Policy.Now().UTC()
 	envelope := codexLeaseJournalEnvelopeV2{
-		Version:     codexLeaseJournalVersionV2,
+		Version:     codexLeaseJournalVersionV3,
 		HashVersion: codexLeaseHashVersion,
 		Generation:  1,
 		Cutover: CodexLeaseCutover{
@@ -288,7 +288,7 @@ func validateFreshCodexLeaseJournal(key, journal []byte) error {
 		return err
 	}
 	cutover := envelope.Cutover
-	if envelope.Version != codexLeaseJournalVersionV2 || envelope.HashVersion != codexLeaseHashVersion || envelope.Generation != 1 ||
+	if envelope.Version != codexLeaseJournalVersionV3 || envelope.HashVersion != codexLeaseHashVersion || envelope.Generation != 1 ||
 		cutover.SourceVersion != 0 || cutover.CompatibilityEpoch != compat.CurrentEpoch || cutover.State != CodexLeaseCutoverComplete || cutover.At.IsZero() || cutover.JournalGeneration != 1 ||
 		len(cutover.AuthoritativeModeEpochs) != 0 || len(cutover.ShadowModeEpochs) != 0 || !cutover.LegacyQuarantineUntil.IsZero() || cutover.LegacyV1SHA256 != "" || cutover.CompletedAt != cutover.At || cutover.CompletionGeneration != 1 || !cutover.NoLegacyAuthority ||
 		len(envelope.Lanes) != 0 || len(envelope.Records) != 0 {

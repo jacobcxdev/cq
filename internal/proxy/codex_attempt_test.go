@@ -392,14 +392,15 @@ func TestCodexRequestRouterRefreshesActualRelistedRevision(t *testing.T) {
 	}
 }
 
-func TestCodexRequestRouterFailsOverOnlyForPreAdmissionHardFailures(t *testing.T) {
+func TestCodexRequestRouterFailsOverOnlyForExactHardQuota(t *testing.T) {
 	tests := []struct {
 		name       string
 		first      attemptResult
 		wantStatus int
 		wantCalls  string
 	}{
-		{name: "401", first: attemptResult{status: http.StatusUnauthorized}, wantStatus: http.StatusOK, wantCalls: "first,second"},
+		{name: "401", first: attemptResult{status: http.StatusUnauthorized}, wantStatus: http.StatusUnauthorized, wantCalls: "first"},
+		{name: "403", first: attemptResult{status: http.StatusForbidden}, wantStatus: http.StatusForbidden, wantCalls: "first"},
 		{name: "live hard 429", first: attemptResult{status: http.StatusTooManyRequests, body: codexLiveUsageLimitBody}, wantStatus: http.StatusOK, wantCalls: "first,second"},
 		{name: "hard 429", first: attemptResult{status: http.StatusTooManyRequests, body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`}, wantStatus: http.StatusOK, wantCalls: "first,second"},
 		{name: "hard 429 status alias", first: attemptResult{status: http.StatusTooManyRequests, body: `{"type":"error","status_code":429,"error":{"type":"usage_limit_reached"}}`}, wantStatus: http.StatusOK, wantCalls: "first,second"},
@@ -834,9 +835,9 @@ func TestCodexRequestRouterPlanningDegradedOverridesRetainedRejection(t *testing
 	t.Run("routed", func(t *testing.T) {
 		first := requestPlan("one", "managed")
 		scope := &queuedRequestScope{plans: []CodexRequestPlan{first}, exhaustedErr: codex.ErrCredentialInventoryDegraded}
-		body := &trackingReadCloser{Reader: strings.NewReader("private upstream rejection")}
+		body := &trackingReadCloser{Reader: strings.NewReader(codexLiveUsageLimitBody)}
 		executor := &queuedPredispatchAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
-			"managed": {{resp: &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header), Body: body}}},
+			"managed": {{resp: &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header), Body: body}}},
 		}}
 		router := &CodexRequestRouter{Scope: scope, Executor: executor}
 

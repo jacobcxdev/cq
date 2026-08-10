@@ -38,17 +38,17 @@ func TestEnsureEpochAdvancesAndRejectsOlderBinary(t *testing.T) {
 	}
 }
 
-func TestCurrentEpochThreeRejectsFloorTwoBinary(t *testing.T) {
+func TestCurrentEpochFourRejectsFloorThreeBinary(t *testing.T) {
 	fs := fsutil.NewMemFS()
 	path := "/state/compatibility_epoch"
-	if CurrentEpoch != 3 {
-		t.Fatalf("CurrentEpoch = %d, want 3", CurrentEpoch)
+	if CurrentEpoch != 4 {
+		t.Fatalf("CurrentEpoch = %d, want 4", CurrentEpoch)
 	}
 	if err := EnsureEpoch(fs, path, CurrentEpoch); err != nil {
-		t.Fatalf("record floor 3: %v", err)
+		t.Fatalf("record floor 4: %v", err)
 	}
-	if err := EnsureEpoch(fs, path, 2); !errors.Is(err, ErrIncompatibleEpoch) {
-		t.Fatalf("floor-2 binary error = %v, want ErrIncompatibleEpoch", err)
+	if err := EnsureEpoch(fs, path, 3); !errors.Is(err, ErrIncompatibleEpoch) {
+		t.Fatalf("floor-3 binary error = %v, want ErrIncompatibleEpoch", err)
 	}
 }
 

@@ -31,6 +31,65 @@ func TestCodexRoutePolicyAffinityBeatsHigherCapacity(t *testing.T) {
 	assertRoutePolicyAccounts(t, plan, "account-a", "account-b")
 }
 
+func TestCodexRoutePolicyWarmAffinityOnlyBreaksForHardQuotaOrModelChange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		mutate       func(*CodexRoutePolicyCandidate)
+		model        string
+		omitAffinity bool
+		wantStatus   CodexRoutePlanStatus
+		want         []codex.AccountKey
+	}{
+		{name: "available stays pinned", wantStatus: CodexRoutePlanReady, want: []codex.AccountKey{"account-a", "account-b"}},
+		{name: "hard quota permits switch", mutate: func(candidate *CodexRoutePolicyCandidate) {
+			candidate.RequiredCapacity[0] = CapacityView{State: CapacityZero}
+		}, wantStatus: CodexRoutePlanReady, want: []codex.AccountKey{"account-b"}},
+		{name: "unroutable fails closed", mutate: func(candidate *CodexRoutePolicyCandidate) {
+			candidate.Routable = false
+		}, wantStatus: CodexRoutePlanAffinityUnroutable},
+		{name: "incompatible fails closed", mutate: func(candidate *CodexRoutePolicyCandidate) {
+			candidate.Compatible = false
+		}, wantStatus: CodexRoutePlanAffinityIncompatible},
+		{name: "missing account fails closed", omitAffinity: true, wantStatus: CodexRoutePlanAffinityUnresolved},
+		{name: "changed model permits normal choice", model: "gpt-5.6-codex", wantStatus: CodexRoutePlanReady, want: []codex.AccountKey{"account-b", "account-a"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			affinity := routePolicyCandidate("account-a", CapacityPositive, 10)
+			affinity.Choice.EffectiveModel = "gpt-5.6-sol"
+			affinity.Choice.RequestedModel = "gpt-5.6-sol"
+			other := routePolicyCandidate("account-b", CapacityPositive, 90)
+			other.Choice.EffectiveModel = "gpt-5.6-sol"
+			other.Choice.RequestedModel = "gpt-5.6-sol"
+			if test.model != "" {
+				affinity.Choice.EffectiveModel = test.model
+				affinity.Choice.RequestedModel = test.model
+				other.Choice.EffectiveModel = test.model
+				other.Choice.RequestedModel = test.model
+			}
+			if test.mutate != nil {
+				test.mutate(&affinity)
+			}
+			candidates := []CodexRoutePolicyCandidate{affinity, other}
+			if test.omitAffinity {
+				candidates = candidates[1:]
+			}
+			plan, err := BuildCodexRoutePlan(context.Background(), candidates, CodexRoutePolicyHints{
+				AffinityAccountKey:     "account-a",
+				AffinityEffectiveModel: "gpt-5.6-sol",
+				DefaultAccountKey:      "account-b",
+			})
+			if got := plan.Status(); got != test.wantStatus {
+				t.Fatalf("status = %q, want %q (error %v)", got, test.wantStatus, err)
+			}
+			assertRoutePolicyAccounts(t, plan, test.want...)
+		})
+	}
+}
+
 func TestCodexRoutePolicyKnownPositivePrecedesUnknownAndZero(t *testing.T) {
 	t.Parallel()
 

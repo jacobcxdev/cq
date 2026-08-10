@@ -146,6 +146,184 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name             string
+		model            string
+		affinityModel    string
+		cacheAdmittedAt  time.Time
+		bound            bool
+		requiresAccount  bool
+		encryptedRequest bool
+		unresolved       bool
+		hardZero         bool
+		want             codex.AccountKey
+		wantDecision     codexRuntimeDecision
+		wantAccounts     int
+		wantContinuity   bool
+		wantErr          error
+	}{
+		{name: "warm before boundary", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-30*time.Minute + time.Second), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "normalised warm model", model: "gpt-5.6-sol[1m]", affinityModel: "gpt-5.6-sol[1m]", cacheAdmittedAt: now.Add(-30*time.Minute + time.Second), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "fairness eligible at boundary", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-30 * time.Minute), want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
+		{name: "fairness eligible after boundary", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-31 * time.Minute), want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
+		{name: "unknown future policy stays sticky", model: "gpt-5.7-codex", affinityModel: "gpt-5.7-codex", cacheAdmittedAt: now.Add(-24 * time.Hour), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "unknown dashed alias stays sticky", model: "gpt-5.6-private", affinityModel: "gpt-5.6-private", cacheAdmittedAt: now.Add(-24 * time.Hour), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "missing timing stays sticky", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "clock rollback stays sticky", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(time.Minute), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "model change has no reusable cache", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
+		{name: "encrypted predecessor remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "encrypted predecessor survives model change", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "encrypted predecessor survives hard zero", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, hardZero: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "encrypted request remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), encryptedRequest: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "exact turn remains bound after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1},
+		{name: "warm unresolved account fails closed", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), unresolved: true, wantErr: ErrCodexLeaseAuthorityMismatch},
+		{name: "unknown-policy unresolved account fails closed", model: "gpt-5.7-codex", affinityModel: "gpt-5.7-codex", cacheAdmittedAt: now.Add(-time.Hour), unresolved: true, wantErr: ErrCodexLeaseAuthorityMismatch},
+		{name: "private-policy unresolved account fails closed", model: "gpt-5.6-private", affinityModel: "gpt-5.6-private", cacheAdmittedAt: now.Add(-time.Hour), unresolved: true, wantErr: ErrCodexLeaseAuthorityMismatch},
+		{name: "future cache clock unresolved account fails closed", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(time.Minute), unresolved: true, wantErr: ErrCodexLeaseAuthorityMismatch},
+		{name: "floor reached unresolved account permits fairness", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-30 * time.Minute), unresolved: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
+		{name: "hard unresolved account fails closed", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), unresolved: true, requiresAccount: true, wantErr: ErrCodexLeaseAuthorityMismatch},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+				frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+				frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+			}}
+			snapshot := CodexLeaseRouteSnapshot{
+				JournalGeneration:       1,
+				AffinityPresent:         true,
+				AffinityCacheAdmittedAt: test.cacheAdmittedAt,
+				AffinityEffectiveModel:  test.affinityModel,
+				AffinityRequiresAccount: test.requiresAccount,
+				Provisional:             map[codex.AccountKey]int{"account-a": 1},
+			}
+			if !test.unresolved {
+				snapshot.AffinityAccountKey = "account-a"
+			}
+			if test.bound {
+				snapshot.Classification = CodexRestoredLaneCurrent
+				snapshot.BoundAccountKey = "account-a"
+			}
+			capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			if test.hardZero {
+				capacity.Observe(CapacityFact{AccountKey: "account-a", Bucket: CapacityBucketBase, Source: CapacitySourceHardLimit, ConnectionGeneration: 1, Sequence: 1, RemainingPct: 0, ObservedAt: now, Confidence: CapacityConfidenceAuthoritative})
+			}
+			handleAccount := test.want
+			if handleAccount == "" {
+				handleAccount = "account-b"
+			}
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: handleAccount}}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory:         &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Capacity:          capacity,
+				Routes:            &codexHTTPRequestPlanTestSnapshotter{snapshot: snapshot},
+				Runtime:           runtime,
+				DefaultAccountKey: "account-b",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+			}
+
+			encoded := frozenRequestBody(test.model, CodexRequestTurn, "private-body")
+			if test.encryptedRequest {
+				encoded = []byte(strings.TrimSuffix(string(encoded), "}") + `,"encrypted_content":"opaque"}`)
+			}
+			result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: encoded})
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("Build error = %v, want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer result.Frozen.Release()
+			accounts := result.Dispatch.Accounts()
+			if len(accounts) == 0 || accounts[0].Choice().AccountKey != test.want {
+				t.Fatalf("first dispatch account = %#v, want %q", accounts, test.want)
+			}
+			if len(accounts) != test.wantAccounts {
+				t.Fatalf("dispatch account count = %d, want %d", len(accounts), test.wantAccounts)
+			}
+			if len(accounts) != 0 && accounts[0].decision != test.wantDecision {
+				t.Fatalf("first dispatch decision = %q, want %q", accounts[0].decision, test.wantDecision)
+			}
+			if runtime.plan.RequiresAccountContinuity != test.wantContinuity {
+				t.Fatalf("durable account continuity = %v, want %v", runtime.plan.RequiresAccountContinuity, test.wantContinuity)
+			}
+		})
+	}
+}
+
+func TestCodexGPT56PromptCacheModelRecognisesOnlyInstalledPolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "gpt-5.6-sol", want: true},
+		{model: "gpt-5.6-sol[1m]", want: true},
+		{model: "gpt-5.6"},
+		{model: "gpt-5.6-private"},
+		{model: "gpt-5.6-sol-extra"},
+		{model: "GPT-5.6-SOL"},
+		{model: " gpt-5.6-sol"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.model, func(t *testing.T) {
+			t.Parallel()
+			if got := codexGPT56PromptCacheModel(test.model); got != test.want {
+				t.Fatalf("codexGPT56PromptCacheModel(%q) = %v, want %v", test.model, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPrefersExactBoundForRawContinuity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			Classification:          CodexRestoredLaneCurrent,
+			BoundAccountKey:         "account-b",
+			AffinityPresent:         true,
+			AffinityAccountKey:      "account-a",
+			AffinityCacheAdmittedAt: now.Add(-time.Minute),
+			AffinityEffectiveModel:  "gpt-5.6-sol",
+			JournalGeneration:       1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	encoded := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")), "}") + `,"encrypted_content":"opaque"}`)
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: encoded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	accounts := result.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" || accounts[0].decision != codexRuntimeDecisionNone {
+		t.Fatalf("hard exact-turn dispatch = %#v, want bound account-b only", accounts)
+	}
+	if !runtime.plan.RequiresAccountContinuity {
+		t.Fatal("raw hard continuity was not carried into the durable request plan")
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryReleasesInspectionBeforeFreeze(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +383,9 @@ func TestCodexHTTPRequestPlanFactoryProjectsPrivateContinuityEvidence(t *testing
 
 	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
 	factory := codexHTTPRequestPlanTestFactory(runtime)
+	snapshotter := factory.Routes.(*codexHTTPRequestPlanTestSnapshotter)
+	snapshotter.snapshot.Classification = CodexRestoredLaneCurrent
+	snapshotter.snapshot.BoundAccountKey = "account"
 	body := []byte(strings.Replace(
 		string(frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")),
 		`,"input":`,
@@ -229,6 +410,9 @@ func TestCodexHTTPRequestPlanFactoryProjectsPrivateContinuityEvidence(t *testing
 	}
 	if runtime.plan.Evidence != want {
 		t.Fatalf("evidence = %#v, want private continuity projection", runtime.plan.Evidence)
+	}
+	if !runtime.plan.RequiresAccountContinuity {
+		t.Fatal("private continuity evidence did not freeze the durable account plan")
 	}
 }
 

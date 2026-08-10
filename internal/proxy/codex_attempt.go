@@ -151,7 +151,7 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 }
 
 // Do executes a request with same-identity 401 recovery, one eligible refresh,
-// and account failover only for pre-admission 401 or hard quota rejection.
+// and account failover only for exact pre-admission hard quota rejection.
 func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequirements, req *http.Request) (*http.Response, RouteChoice, CandidateAttempt, error) {
 	if r == nil || r.Scope == nil || r.Executor == nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("Codex request router unavailable")
@@ -268,7 +268,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 				closeResponse(rejected)
 				return nil, plan.Choice, *refreshAttempt, codex.ErrCredentialInventoryDegraded
 			case errors.Is(refreshErr, codex.ErrRefreshIneligible), errors.Is(refreshErr, codex.ErrRefreshUnavailable), errors.Is(refreshErr, codex.ErrStaleRevision):
-				// Another candidate or identity remains safe to try.
+				// Same-identity recovery is exhausted; preserve the rejection.
 			default:
 				if rejected != nil {
 					return rejected, rejectedChoice, rejectedAttempt, nil
@@ -277,6 +277,9 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 			}
 		}
 
+		if !accountHardLimited && rejected != nil {
+			return rejected, rejectedChoice, rejectedAttempt, nil
+		}
 		excluded = append(excluded, codex.SelectionExclusion{AccountKey: plan.Choice.AccountKey})
 	}
 }

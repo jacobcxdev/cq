@@ -69,6 +69,12 @@ func TestCodexLeaseRouteSnapshotReturnsDetachedGenerationFencedRouteState(t *tes
 	if snapshot.BoundAccountKey != "account-a" || snapshot.AffinityAccountKey != "account-a" {
 		t.Fatalf("route accounts = bound %q affinity %q, want account-a/account-a", snapshot.BoundAccountKey, snapshot.AffinityAccountKey)
 	}
+	if snapshot.AffinityCacheAdmittedAt != targetHandle.record.AdmittedAt {
+		t.Fatalf("affinity cache admitted at = %v, want %v", snapshot.AffinityCacheAdmittedAt, targetHandle.record.AdmittedAt)
+	}
+	if snapshot.AffinityEffectiveModel != targetHandle.record.EffectiveModel {
+		t.Fatalf("affinity effective model = %q, want %q", snapshot.AffinityEffectiveModel, targetHandle.record.EffectiveModel)
+	}
 	if snapshot.BoundIdentity != targetHandle.identity || snapshot.BoundRecordGeneration != targetHandle.record.RecordGeneration {
 		t.Fatalf("bound fence = identity %#v record %d, want %#v/%d", snapshot.BoundIdentity, snapshot.BoundRecordGeneration, targetHandle.identity, targetHandle.record.RecordGeneration)
 	}
@@ -93,6 +99,393 @@ func TestCodexLeaseRouteSnapshotReturnsDetachedGenerationFencedRouteState(t *tes
 	}
 	if !reflect.DeepEqual(again.Provisional, wantProvisional) {
 		t.Fatalf("second provisional = %#v, want detached %#v", again.Provisional, wantProvisional)
+	}
+}
+
+func TestCodexLeaseRouteSnapshotRefreshesAffinityFromLatestAdmittedRequest(t *testing.T) {
+	t.Parallel()
+
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	firstPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "first-a", Kind: CodexAttemptSlotDirect,
+	}})
+	first, err := runtimeLease.BeginRequest(firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAdmissionGeneration := first.record.AdmissionJournalGeneration
+	firstAdmissionRequestGeneration := first.record.AdmissionRequestGeneration
+	firstAdmissionRequestKind := first.record.AdmissionRequestKind
+	firstAdmissionCompactionPhase := first.record.AdmissionCompactionPhase
+	firstAdmittedAt := first.record.AdmittedAt
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	*now = now.Add(40 * time.Minute)
+	secondPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "second-a", Kind: CodexAttemptSlotDirect,
+	}})
+	secondPlan.RequestedModel = "latest-requested-model"
+	secondPlan.EffectiveModel = "gpt-latest-cache-model"
+	second, err := runtimeLease.BeginRequest(secondPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestCacheAdmission := *now
+	if second.record.AdmissionJournalGeneration != firstAdmissionGeneration || second.record.AdmissionRequestGeneration != firstAdmissionRequestGeneration || second.record.AdmissionRequestKind != firstAdmissionRequestKind || second.record.AdmissionCompactionPhase != firstAdmissionCompactionPhase || second.record.AdmittedAt != firstAdmittedAt {
+		t.Fatalf("immutable first admission changed: %#v", second.record)
+	}
+	second, err = second.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(5 * time.Minute)
+	rejectedPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "rejected-a", Kind: CodexAttemptSlotDirect,
+	}})
+	rejectedPlan.EffectiveModel = "gpt-rejected-model"
+	rejected, err := runtimeLease.BeginRequest(rejectedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, err = rejected.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, err = rejected.FinishRejected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+
+	thirdPlan := codexLeaseRuntimeTestPlan("successor-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "third-a", Kind: CodexAttemptSlotDirect,
+	}})
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), thirdPlan.Key, thirdPlan.Accounts, thirdPlan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.AffinityAccountKey != "account-a" || snapshot.AffinityCacheAdmittedAt != latestCacheAdmission || snapshot.AffinityEffectiveModel != second.record.EffectiveModel {
+		t.Fatalf("latest affinity = account %q cache admitted %v model %q, want account-a/%v/%q", snapshot.AffinityAccountKey, snapshot.AffinityCacheAdmittedAt, snapshot.AffinityEffectiveModel, latestCacheAdmission, second.record.EffectiveModel)
+	}
+}
+
+func TestCodexLeaseV2MidTurnCompactionAdmissionRefreshesTaskCacheAffinity(t *testing.T) {
+	t.Parallel()
+	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	firstPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "turn-a", Kind: CodexAttemptSlotDirect,
+	}})
+	firstPlan.EffectiveModel = "gpt-cache-origin"
+	first, err := runtimeLease.BeginRequest(firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCacheAdmittedAt := first.record.AdmittedAt
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	*now = now.Add(29 * time.Minute)
+	compactionPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "compaction-a", Kind: CodexAttemptSlotDirect,
+	}})
+	compactionPlan.RequestKind = CodexRequestCompaction
+	compactionPlan.CompactionPhase = CodexCompactionMidTurn
+	compactionPlan.EffectiveModel = "gpt-5.6-sol"
+	compaction, err := runtimeLease.BeginRequest(compactionPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compaction, err = compaction.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compaction, err = compaction.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactCacheAdmittedAt := *now
+
+	successor := codexLeaseRuntimeTestPlan("successor", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "successor-a", Kind: CodexAttemptSlotDirect,
+	}})
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), successor.Key, successor.Accounts, successor.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.AffinityCacheAdmittedAt != compactCacheAdmittedAt || snapshot.AffinityEffectiveModel != compactionPlan.EffectiveModel {
+		t.Fatalf("mid-turn compaction cache affinity = %v/%q, want %v/%q (sampling was %v)", snapshot.AffinityCacheAdmittedAt, snapshot.AffinityEffectiveModel, compactCacheAdmittedAt, compactionPlan.EffectiveModel, firstCacheAdmittedAt)
+	}
+	compaction, err = compaction.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compaction, err = compaction.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	*now = firstCacheAdmittedAt.Add(30 * time.Minute)
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	capacity := NewCodexCapacityLedger(func() time.Time { return *now }, time.Hour)
+	frozenDispatchObserveCapacity(t, capacity, "account-a", CapacityBucketBase, 10, *now)
+	frozenDispatchObserveCapacity(t, capacity, "account-b", CapacityBucketBase, 90, *now)
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory}, Capacity: capacity, Routes: coordinator, Runtime: runtimeLease,
+		DefaultAccountKey: "account-b", Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true}, Now: func() time.Time { return *now },
+	}
+	encoded := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"runtime-session","thread_id":"runtime-thread","turn_id":"successor","request_kind":"turn"}},"input":[{"role":"user","content":"private"}]}`)
+	prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: encoded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) == 0 || accounts[0].Choice().AccountKey != "account-a" || prepared.Dispatch.accounts[0].decision != codexRuntimeDecisionAffinityReuse {
+		t.Fatalf("successor route = %#v decision %q, want account-a affinity reuse", accounts, prepared.Dispatch.accounts[0].decision)
+	}
+	if _, err := prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexLeaseV2UnadmittedMidTurnCompactionCannotRefreshTaskCacheAffinity(t *testing.T) {
+	t.Parallel()
+	old := CodexJournalRecordV2{
+		AccountHash: "account-digest", CodexCurrentRequest: CodexCurrentRequest{RequestKind: CodexRequestCompaction, CompactionPhase: CodexCompactionMidTurn},
+	}
+	result := old
+	if codexLeaseCurrentRequestCacheRefreshEligible(old, result) {
+		t.Fatal("unadmitted mid-turn compaction became cache-refresh eligible")
+	}
+	old.EverAdmitted = true
+	result.EverAdmitted = true
+	result.AccountHash = "other-account-digest"
+	if codexLeaseCurrentRequestCacheRefreshEligible(old, result) {
+		t.Fatal("cross-account mid-turn compaction became cache-refresh eligible")
+	}
+}
+
+func TestCodexLeaseV2UnsuccessfulMidTurnCompactionDoesNotRefreshTaskCacheAffinity(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		finish func(*CodexLeaseRequestHandle) (*CodexLeaseRequestHandle, error)
+	}{
+		{name: "rejected", finish: func(handle *CodexLeaseRequestHandle) (*CodexLeaseRequestHandle, error) {
+			return handle.FinishRejected()
+		}},
+		{name: "ambiguous", finish: func(handle *CodexLeaseRequestHandle) (*CodexLeaseRequestHandle, error) { return handle.Indeterminate() }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "sampling", Kind: CodexAttemptSlotDirect}})
+			plan.EffectiveModel = "gpt-5.6-sol"
+			handle, err := runtimeLease.BeginRequest(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handle, err = handle.MarkDispatched(); err != nil {
+				t.Fatal(err)
+			}
+			if handle, err = handle.AdmitHTTP2xx(); err != nil {
+				t.Fatal(err)
+			}
+			wantTime := handle.record.AdmittedAt
+			if handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false}); err != nil {
+				t.Fatal(err)
+			}
+			if handle, err = handle.Drain(); err != nil {
+				t.Fatal(err)
+			}
+
+			*now = now.Add(29 * time.Minute)
+			compactPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "compact", Kind: CodexAttemptSlotDirect}})
+			compactPlan.RequestKind = CodexRequestCompaction
+			compactPlan.CompactionPhase = CodexCompactionMidTurn
+			compactPlan.EffectiveModel = "gpt-5.6-sol"
+			compact, err := runtimeLease.BeginRequest(compactPlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compact, err = compact.MarkDispatched(); err != nil {
+				t.Fatal(err)
+			}
+			if compact, err = test.finish(compact); err != nil {
+				t.Fatal(err)
+			}
+			lane := coordinator.Store().v2.Lanes[0]
+			if lane.LastCacheAdmittedAt != wantTime || lane.LastCacheEffectiveModel != plan.EffectiveModel {
+				t.Fatalf("%s compact moved cache affinity to %v/%q, want %v/%q", test.name, lane.LastCacheAdmittedAt, lane.LastCacheEffectiveModel, wantTime, plan.EffectiveModel)
+			}
+		})
+	}
+}
+
+func TestCodexLeaseV2FailedUnadmittedCompactionDoesNotCreateCacheAdmission(t *testing.T) {
+	t.Parallel()
+	old := CodexJournalRecordV2{
+		AccountHash: "account-digest", CodexCurrentRequest: CodexCurrentRequest{
+			Generation: 1, RequestKind: CodexRequestCompaction, CompactionPhase: CodexCompactionMidTurn, CurrentAttemptGeneration: 1,
+			Attempts: []CodexJournalAttempt{{Generation: 1, State: CodexAttemptDispatched}},
+		},
+	}
+	failed := old
+	failed.State = LeaseFailedUnadmitted
+	failed.Attempts = []CodexJournalAttempt{{Generation: 1, State: CodexAttemptProviderFailed}}
+	if codexLeaseCacheAdmission(old, failed, true) {
+		t.Fatal("failed-unadmitted compaction created cache admission")
+	}
+}
+
+func TestCodexLeaseRouteSnapshotProjectsEncryptedAffinityWhenAccountIsUnavailable(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	predecessorPlan := codexLeaseRuntimeTestPlan("predecessor", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "predecessor-a", Kind: CodexAttemptSlotDirect,
+	}})
+	predecessor, err := runtimeLease.BeginRequest(predecessorPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{HasEncryptedState: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predecessor, err = predecessor.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	successor := codexLeaseRuntimeTestPlan("successor", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "successor-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "successor-b", Kind: CodexAttemptSlotDirect},
+	})
+	resolved, err := coordinator.LoadRouteSnapshot(context.Background(), successor.Key, successor.Accounts, successor.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.AffinityPresent || resolved.AffinityAccountKey != "account-a" || !resolved.AffinityRequiresAccount || resolved.AffinityCacheAdmittedAt != predecessor.record.AdmittedAt || resolved.AffinityEffectiveModel != predecessor.record.EffectiveModel {
+		t.Fatalf("resolved encrypted affinity = %#v", resolved)
+	}
+
+	unresolved, err := coordinator.LoadRouteSnapshot(context.Background(), successor.Key, []codex.AccountKey{"account-b"}, successor.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !unresolved.AffinityPresent || unresolved.AffinityAccountKey != "" || !unresolved.AffinityRequiresAccount || unresolved.AffinityCacheAdmittedAt != predecessor.record.AdmittedAt || unresolved.AffinityEffectiveModel != predecessor.record.EffectiveModel {
+		t.Fatalf("unresolved encrypted affinity = %#v", unresolved)
+	}
+}
+
+func TestCodexLeaseRouteSnapshotBindsCurrentNonMigratableRequest(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.Indeterminate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle, err = handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handle.record.NonMigratable || handle.record.EverAdmitted {
+		t.Fatalf("test precondition = non-migratable %v admitted %v, want true/false", handle.record.NonMigratable, handle.record.EverAdmitted)
+	}
+	if snapshot.BoundAccountKey != "account-a" || snapshot.BoundRecordGeneration != handle.record.RecordGeneration || snapshot.BoundChoice.AccountKey != "account-a" {
+		t.Fatalf("non-migratable binding = account %q generation %d choice %#v", snapshot.BoundAccountKey, snapshot.BoundRecordGeneration, snapshot.BoundChoice)
+	}
+	wrongAccount := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-b", CandidateID: "candidate-wrong", Kind: CodexAttemptSlotDirect,
+	}})
+	wrongAccount.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	if _, err := runtimeLease.BeginRequest(wrongAccount); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("non-migratable account change = %v, want continuity error", err)
+	}
+	retry := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-retry", Kind: CodexAttemptSlotDirect,
+	}})
+	retry.ExpectedBound = &CodexLeaseBoundExpectation{
+		Identity:         snapshot.BoundIdentity,
+		AccountKey:       snapshot.BoundAccountKey,
+		RecordGeneration: snapshot.BoundRecordGeneration,
+	}
+	if _, err := runtimeLease.BeginRequest(retry); err != nil {
+		t.Fatalf("raw-state-free non-migratable retry: %v", err)
 	}
 }
 

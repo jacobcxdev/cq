@@ -172,9 +172,11 @@ func TestCodexLeaseV2SuccessorAdmissionReplacesAffinityButFailureDoesNot(t *test
 	*now = now.Add(1)
 	fence, successor = commitCodexLeaseV2AffinityState(t, store, fence, successor, LeaseBoundActive, CodexAttemptStreaming, true)
 	lane := findCodexLeaseV2CASTestLane(t, store.v2.Lanes, successor.Identity().LaneDigest)
-	if lane.LastAdmittedTurnHash != successor.TurnHash || lane.LastAdmissionJournalGeneration != fence.Journal || successor.AdmissionJournalGeneration != fence.Journal || successor.AdmittedAt != *now {
+	if lane.LastAdmittedTurnHash != successor.TurnHash || lane.LastAdmissionJournalGeneration != fence.Journal || successor.AdmissionJournalGeneration != fence.Journal || successor.AdmittedAt != *now || lane.LastCacheAdmittedAt != *now || lane.LastCacheEffectiveModel != successor.EffectiveModel {
 		t.Fatalf("successor admission did not replace affinity: fence %#v record %#v lane %#v", fence, successor, lane)
 	}
+	cacheAdmittedAt := lane.LastCacheAdmittedAt
+	cacheEffectiveModel := lane.LastCacheEffectiveModel
 	retainedFirst := findCodexLeaseV2CASTestRecord(t, store.v2.Records, first.Identity())
 	if retainedFirst.AdmissionJournalGeneration != firstAdmissionGeneration || retainedFirst.AdmittedAt != firstAdmittedAt {
 		t.Fatalf("successor admission changed predecessor evidence: %#v", retainedFirst)
@@ -189,7 +191,7 @@ func TestCodexLeaseV2SuccessorAdmissionReplacesAffinityButFailureDoesNot(t *test
 	*now = now.Add(1)
 	_, failed = commitCodexLeaseV2AffinityState(t, store, fence, failed, LeaseFailedUnadmitted, CodexAttemptProviderFailed, false)
 	lane = findCodexLeaseV2CASTestLane(t, store.v2.Lanes, failed.Identity().LaneDigest)
-	if failed.EverAdmitted || lane.LastAdmittedTurnHash != successor.TurnHash || lane.LastAdmissionJournalGeneration != successor.AdmissionJournalGeneration || lane.LastAdmittedAt != successor.AdmittedAt {
+	if failed.EverAdmitted || lane.LastAdmittedTurnHash != successor.TurnHash || lane.LastAdmissionJournalGeneration != successor.AdmissionJournalGeneration || lane.LastAdmittedAt != successor.AdmittedAt || lane.LastCacheAdmittedAt != cacheAdmittedAt || lane.LastCacheEffectiveModel != cacheEffectiveModel {
 		t.Fatalf("failed successor changed affinity: failed %#v successor %#v lane %#v", failed, successor, lane)
 	}
 }
@@ -717,6 +719,18 @@ func TestCodexLeaseV2SchemaRejectsInvalidAdmissionEvidence(t *testing.T) {
 		{name: "lane time mismatch", mutate: func(value *codexLeaseJournalEnvelopeV2) {
 			value.Lanes[0].LastAdmittedAt = value.Lanes[0].LastAdmittedAt.Add(1)
 		}},
+		{name: "cache time before first admission", mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.Lanes[0].LastCacheAdmittedAt = value.Lanes[0].LastAdmittedAt.Add(-1)
+		}},
+		{name: "cache time after observation", mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.Lanes[0].LastCacheAdmittedAt = value.Lanes[0].LastObservedAt.Add(1)
+		}},
+		{name: "cache model without time", mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.Lanes[0].LastCacheAdmittedAt = time.Time{}
+		}},
+		{name: "cache time without model", mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.Lanes[0].LastCacheEffectiveModel = ""
+		}},
 		{name: "newer admitted history than lane affinity", mutate: func(value *codexLeaseJournalEnvelopeV2) {
 			value.Generation++
 			newer := value.Records[0]
@@ -902,6 +916,8 @@ func clearCodexLeaseLaneAffinity(lane *CodexJournalLane) {
 	lane.LastAdmittedAuthoritative = false
 	lane.LastAdmissionJournalGeneration = 0
 	lane.LastAdmittedAt = time.Time{}
+	lane.LastCacheAdmittedAt = time.Time{}
+	lane.LastCacheEffectiveModel = ""
 }
 
 func appendCodexLeaseV2AffinitySuccessor(t *testing.T, store *CodexLeaseStore, fence CodexLeaseGenerationFence, predecessor CodexJournalRecordV2, turn string) (CodexLeaseGenerationFence, CodexJournalRecordV2) {

@@ -442,12 +442,12 @@ func openCodexLeaseV2LaneTestCoordinator(t *testing.T) *CodexContinuityCoordinat
 		Kind:          CodexAttemptSlotDirect,
 	}}
 	envelope := codexLeaseJournalEnvelopeV2{
-		Version:     codexLeaseJournalVersionV2,
+		Version:     codexLeaseJournalVersionV3,
 		HashVersion: codexLeaseHashVersion,
 		Generation:  7,
 		Cutover: CodexLeaseCutover{
 			SourceVersion:        0,
-			CompatibilityEpoch:   3,
+			CompatibilityEpoch:   4,
 			State:                CodexLeaseCutoverComplete,
 			At:                   cutoverAt,
 			JournalGeneration:    1,

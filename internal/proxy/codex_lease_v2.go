@@ -26,6 +26,7 @@ import (
 
 const (
 	codexLeaseJournalVersionV2 = 2
+	codexLeaseJournalVersionV3 = 3
 	codexLeaseHashVersion      = 1
 
 	CodexLeaseCutoverComplete         = "complete"
@@ -74,6 +75,8 @@ type CodexJournalLane struct {
 	LastAdmittedAuthoritative      bool      `json:"last_admitted_authoritative,omitempty"`
 	LastAdmissionJournalGeneration uint64    `json:"last_admission_journal_generation,omitempty"`
 	LastAdmittedAt                 time.Time `json:"last_admitted_at,omitempty"`
+	LastCacheAdmittedAt            time.Time `json:"last_cache_admitted_at,omitzero"`
+	LastCacheEffectiveModel        string    `json:"last_cache_effective_model,omitempty"`
 	LastObservedAt                 time.Time `json:"last_observed_at"`
 }
 
@@ -232,6 +235,8 @@ type CodexLeaseAffinityHint struct {
 	Source                     CodexJournalRecordIdentity
 	AdmissionJournalGeneration uint64
 	AdmittedAt                 time.Time
+	CacheAdmittedAt            time.Time
+	CacheEffectiveModel        string
 }
 
 type CodexContinuityCoordinator struct {
@@ -267,7 +272,7 @@ func OpenCodexContinuityCoordinator(options CodexContinuityOpenOptions, owner Co
 	if !validCodexModeSnapshot(modes) {
 		return nil, fmt.Errorf("%w: missing or non-canonical mode authority snapshot", ErrCodexLeaseTrustLost)
 	}
-	if compat.CurrentEpoch != 3 {
+	if compat.CurrentEpoch != 4 {
 		return nil, fmt.Errorf("%w: unsupported compatibility floor %d", ErrCodexLeaseTrustLost, compat.CurrentEpoch)
 	}
 	operation, err := beginCodexLeaseOwnerOperation(owner)
@@ -493,6 +498,11 @@ func (store *CodexLeaseStore) loadOrMigrateV2Locked(journal []byte) error {
 	case codexLeaseJournalVersion:
 		return store.migrateV1Locked(journal)
 	case codexLeaseJournalVersionV2:
+		if err := store.migrateV2Locked(journal); err != nil {
+			return err
+		}
+		return store.normaliseRestoredV2Locked()
+	case codexLeaseJournalVersionV3:
 		if err := store.loadV2Locked(journal); err != nil {
 			return err
 		}
@@ -503,7 +513,7 @@ func (store *CodexLeaseStore) loadOrMigrateV2Locked(journal []byte) error {
 }
 
 func (store *CodexLeaseStore) migrateV1Locked(journal []byte) error {
-	if compat.CurrentEpoch != 3 {
+	if compat.CurrentEpoch != 4 {
 		return fmt.Errorf("%w: unsupported compatibility floor %d", ErrCodexLeaseTrustLost, compat.CurrentEpoch)
 	}
 	var legacy codexLeaseJournalEnvelope
@@ -523,7 +533,7 @@ func (store *CodexLeaseStore) migrateV1Locked(journal []byte) error {
 	now := store.policy.Now().UTC()
 	nextGeneration := legacy.Generation + 1
 	envelope := codexLeaseJournalEnvelopeV2{
-		Version:     codexLeaseJournalVersionV2,
+		Version:     codexLeaseJournalVersionV3,
 		HashVersion: codexLeaseHashVersion,
 		Generation:  nextGeneration,
 		Cutover: CodexLeaseCutover{
@@ -630,6 +640,86 @@ func (store *CodexLeaseStore) migrateV1Locked(journal []byte) error {
 	return nil
 }
 
+func (store *CodexLeaseStore) migrateV2Locked(journal []byte) error {
+	if err := store.loadLegacyV2Locked(journal); err != nil {
+		return err
+	}
+	if store.v2.Generation == math.MaxUint64 {
+		return fmt.Errorf("%w: schema-v2 Codex lease generation overflow", ErrCodexLeaseTrustLost)
+	}
+	digest := codexLeaseSHA256(journal)
+	archiveName := store.journalName + ".v2-" + digest + ".archive"
+	archive, archiveID, err := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, archiveName, codexLeaseJournalMaxBytes)
+	switch {
+	case err == nil:
+		if !bytes.Equal(archive, journal) {
+			return fmt.Errorf("%w: schema-v2 Codex lease archive mismatch", ErrCodexLeaseTrustLost)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		beforeArchive := func() error {
+			if err := store.revalidateV2InstalledLocked(); err != nil {
+				return err
+			}
+			file, openErr := store.directory.OpenNoFollow(archiveName)
+			if openErr == nil {
+				_ = file.Close()
+				return fmt.Errorf("%w: schema-v2 archive appeared before replace", ErrCodexLeaseTrustLost)
+			}
+			if !errors.Is(openErr, os.ErrNotExist) {
+				return openErr
+			}
+			return nil
+		}
+		if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, archiveName, journal, beforeArchive); err != nil {
+			return fmt.Errorf("archive schema-v2 Codex lease journal: %w", err)
+		}
+		archive, archiveID, err = fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, archiveName, codexLeaseJournalMaxBytes)
+		if err != nil || !bytes.Equal(archive, journal) {
+			cause := err
+			if cause == nil {
+				cause = errors.New("installed schema-v2 archive bytes differ")
+			}
+			return &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "verify schema-v2 Codex lease archive", Err: errors.Join(ErrCodexLeaseTrustLost, cause)}
+		}
+	default:
+		return fmt.Errorf("%w: read schema-v2 Codex lease archive: %v", ErrCodexLeaseTrustLost, err)
+	}
+
+	next := cloneCodexLeaseV2Envelope(*store.v2)
+	next.Version = codexLeaseJournalVersionV3
+	next.Cutover.CompatibilityEpoch = compat.CurrentEpoch
+	for index := range next.Records {
+		next.Records[index].ProtocolSchema = CurrentCodexLeaseSchema
+	}
+	beforeJournal := func() error {
+		if err := store.revalidateV2InstalledLocked(); err != nil {
+			return err
+		}
+		got, gotID, readErr := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, archiveName, codexLeaseJournalMaxBytes)
+		if readErr != nil || gotID != archiveID || !bytes.Equal(got, journal) {
+			return fmt.Errorf("%w: schema-v2 archive changed before cutover", ErrCodexLeaseTrustLost)
+		}
+		return nil
+	}
+	return store.installV3MigrationLocked(next, beforeJournal)
+}
+
+func (store *CodexLeaseStore) loadLegacyV2Locked(journal []byte) error {
+	var envelope codexLeaseJournalEnvelopeV2
+	if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
+		return fmt.Errorf("%w: decode legacy Codex lease journal v2: %v", ErrCodexLeaseTrustLost, err)
+	}
+	if err := store.validateLegacyV2Envelope(envelope); err != nil {
+		return err
+	}
+	if err := store.validateCodexLeaseV2StateForSchema(envelope, codexLeaseJournalVersionV2); err != nil {
+		return fmt.Errorf("%w: invalid legacy Codex lease journal v2: %v", ErrCodexLeaseTrustLost, err)
+	}
+	store.v2 = &envelope
+	store.generation = envelope.Generation
+	return store.loadCodexLeaseLegacyArchiveLocked(envelope)
+}
+
 func (store *CodexLeaseStore) loadV2Locked(journal []byte) error {
 	var envelope codexLeaseJournalEnvelopeV2
 	if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
@@ -640,6 +730,10 @@ func (store *CodexLeaseStore) loadV2Locked(journal []byte) error {
 	}
 	store.v2 = &envelope
 	store.generation = envelope.Generation
+	return store.loadCodexLeaseLegacyArchiveLocked(envelope)
+}
+
+func (store *CodexLeaseStore) loadCodexLeaseLegacyArchiveLocked(envelope codexLeaseJournalEnvelopeV2) error {
 	if envelope.Cutover.SourceVersion == 1 {
 		archiveName := store.journalName + ".v1-" + envelope.Cutover.LegacyV1SHA256 + ".archive"
 		archive, archiveID, err := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, archiveName, codexLeaseJournalMaxBytes)
@@ -698,7 +792,22 @@ func (store *CodexLeaseStore) revalidateV2InstalledLocked() error {
 	if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
 		return fmt.Errorf("%w: decode installed Codex lease journal: %v", ErrCodexLeaseTrustLost, err)
 	}
-	if err := store.validateV2Envelope(envelope); err != nil || envelope.Generation != store.v2.Generation {
+	var validateErr error
+	switch envelope.Version {
+	case codexLeaseJournalVersionV2:
+		validateErr = store.validateLegacyV2Envelope(envelope)
+		if validateErr == nil {
+			validateErr = store.validateCodexLeaseV2StateForSchema(envelope, codexLeaseJournalVersionV2)
+		}
+	case codexLeaseJournalVersionV3:
+		validateErr = store.validateV2Envelope(envelope)
+		if validateErr == nil {
+			validateErr = store.validateCodexLeaseV2State(envelope)
+		}
+	default:
+		validateErr = ErrCodexLeaseTrustLost
+	}
+	if validateErr != nil || envelope.Generation != store.v2.Generation || envelope.Version != store.v2.Version {
 		return fmt.Errorf("%w: installed Codex lease journal invalid", ErrCodexLeaseTrustLost)
 	}
 	if store.legacyArchive != "" {
@@ -711,6 +820,10 @@ func (store *CodexLeaseStore) revalidateV2InstalledLocked() error {
 }
 
 func (store *CodexLeaseStore) commitV2Locked(expectedGeneration uint64, envelope codexLeaseJournalEnvelopeV2) error {
+	return store.commitV2LockedWithPrecondition(expectedGeneration, envelope, store.revalidateV2InstalledLocked)
+}
+
+func (store *CodexLeaseStore) commitV2LockedWithPrecondition(expectedGeneration uint64, envelope codexLeaseJournalEnvelopeV2, beforeWrite func() error) error {
 	if store.v2 == nil || store.closed {
 		return ErrCodexLeaseWriterUnavailable
 	}
@@ -721,7 +834,7 @@ func (store *CodexLeaseStore) commitV2Locked(expectedGeneration uint64, envelope
 		return fmt.Errorf("%w: journal generation have %d expected %d", ErrCodexLeaseStaleMutation, store.v2.Generation, expectedGeneration)
 	}
 	envelope = cloneCodexLeaseV2Envelope(envelope)
-	envelope.Version = codexLeaseJournalVersionV2
+	envelope.Version = codexLeaseJournalVersionV3
 	envelope.HashVersion = codexLeaseHashVersion
 	envelope.Generation = expectedGeneration + 1
 	canonicaliseCodexLeaseV2(&envelope)
@@ -732,7 +845,7 @@ func (store *CodexLeaseStore) commitV2Locked(expectedGeneration uint64, envelope
 	if _, err := store.decodeAndValidateV2Candidate(data); err != nil {
 		return fmt.Errorf("validate Codex lease journal candidate: %w", err)
 	}
-	if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, store.journalName, data, store.revalidateV2InstalledLocked); err != nil {
+	if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, store.journalName, data, beforeWrite); err != nil {
 		if fsutil.AtomicWriteOutcome(err) == fsutil.CommitIndeterminate || errors.Is(err, ErrCodexLeaseTrustLost) {
 			store.poisoned = err
 		}
@@ -749,6 +862,43 @@ func (store *CodexLeaseStore) commitV2Locked(expectedGeneration uint64, envelope
 		uncertain := fmt.Errorf("%w: validate committed Codex lease journal", fsutil.ErrCommitIndeterminate)
 		store.poisoned = uncertain
 		return uncertain
+	}
+	store.v2 = &installedEnvelope
+	store.generation = installedEnvelope.Generation
+	store.journalBytes = append([]byte(nil), installed...)
+	store.journalID = installedID
+	return nil
+}
+
+func (store *CodexLeaseStore) installV3MigrationLocked(envelope codexLeaseJournalEnvelopeV2, beforeWrite func() error) error {
+	if store.v2 == nil || store.closed {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if store.poisoned != nil {
+		return fmt.Errorf("%w: %v", ErrCodexLeaseStorePoisoned, store.poisoned)
+	}
+	envelope = cloneCodexLeaseV2Envelope(envelope)
+	envelope.Version = codexLeaseJournalVersionV3
+	envelope.HashVersion = codexLeaseHashVersion
+	envelope.Generation = store.v2.Generation
+	canonicaliseCodexLeaseV2(&envelope)
+	data, err := store.marshalV2Envelope(envelope)
+	if err != nil {
+		return err
+	}
+	if _, err := store.decodeAndValidateV2Candidate(data); err != nil {
+		return fmt.Errorf("validate Codex lease schema migration candidate: %w", err)
+	}
+	if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, store.journalName, data, beforeWrite); err != nil {
+		return err
+	}
+	installed, installedID, err := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, store.journalName, codexLeaseJournalMaxBytes)
+	if err != nil || !bytes.Equal(installed, data) {
+		return &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "verify migrated Codex lease journal", Err: err}
+	}
+	installedEnvelope, err := store.decodeAndValidateV2Candidate(installed)
+	if err != nil {
+		return &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "validate migrated Codex lease journal", Err: err}
 	}
 	store.v2 = &installedEnvelope
 	store.generation = installedEnvelope.Generation
@@ -897,10 +1047,18 @@ func (store *CodexLeaseStore) marshalV2Envelope(envelope codexLeaseJournalEnvelo
 }
 
 func (store *CodexLeaseStore) validateV2Envelope(envelope codexLeaseJournalEnvelopeV2) error {
-	if envelope.Version != codexLeaseJournalVersionV2 || envelope.HashVersion != codexLeaseHashVersion {
+	return store.validateCodexLeaseEnvelope(envelope, codexLeaseJournalVersionV3, compat.CurrentEpoch, CurrentCodexLeaseSchema, true)
+}
+
+func (store *CodexLeaseStore) validateLegacyV2Envelope(envelope codexLeaseJournalEnvelopeV2) error {
+	return store.validateCodexLeaseEnvelope(envelope, codexLeaseJournalVersionV2, 3, codexLeaseJournalVersionV2, false)
+}
+
+func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJournalEnvelopeV2, journalVersion, compatibilityEpoch, protocolSchema int, cacheFieldsAllowed bool) error {
+	if envelope.Version != journalVersion || envelope.HashVersion != codexLeaseHashVersion {
 		return fmt.Errorf("%w: unsupported Codex lease schema/hash version", ErrCodexLeaseTrustLost)
 	}
-	if compat.CurrentEpoch != 3 || envelope.Cutover.CompatibilityEpoch != compat.CurrentEpoch || envelope.Generation < envelope.Cutover.JournalGeneration || envelope.Cutover.JournalGeneration == 0 || envelope.Cutover.At.IsZero() || !codexLeaseUTCTime(envelope.Cutover.At) {
+	if envelope.Cutover.CompatibilityEpoch != compatibilityEpoch || envelope.Generation < envelope.Cutover.JournalGeneration || envelope.Cutover.JournalGeneration == 0 || envelope.Cutover.At.IsZero() || !codexLeaseUTCTime(envelope.Cutover.At) {
 		return fmt.Errorf("%w: invalid Codex lease cutover tuple", ErrCodexLeaseTrustLost)
 	}
 	if !store.validV2EnvelopeMAC(envelope) {
@@ -928,13 +1086,24 @@ func (store *CodexLeaseStore) validateV2Envelope(envelope codexLeaseJournalEnvel
 	default:
 		return fmt.Errorf("%w: unsupported Codex lease cutover source", ErrCodexLeaseTrustLost)
 	}
-	if err := store.validateV2SemanticState(envelope); err != nil {
+	if !cacheFieldsAllowed {
+		for _, lane := range envelope.Lanes {
+			if !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" {
+				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 cache affinity", ErrCodexLeaseTrustLost)
+			}
+		}
+	}
+	if err := store.validateV2SemanticStateForSchema(envelope, protocolSchema); err != nil {
 		return fmt.Errorf("%w: %v", ErrCodexLeaseTrustLost, err)
 	}
 	return nil
 }
 
 func (store *CodexLeaseStore) validateV2SemanticState(envelope codexLeaseJournalEnvelopeV2) error {
+	return store.validateV2SemanticStateForSchema(envelope, CurrentCodexLeaseSchema)
+}
+
+func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLeaseJournalEnvelopeV2, protocolSchema int) error {
 	laneIndexes := make(map[string]int, len(envelope.Lanes))
 	for index, lane := range envelope.Lanes {
 		if !validCodexLeaseDigest(lane.SessionHash) || !validCodexLeaseDigest(lane.ThreadHash) || lane.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) {
@@ -984,7 +1153,7 @@ func (store *CodexLeaseStore) validateV2SemanticState(envelope codexLeaseJournal
 			return errors.New("record references absent lane")
 		}
 		lane := envelope.Lanes[laneIndex]
-		if err := store.validateV2Record(envelope, lane, record); err != nil {
+		if err := store.validateV2Record(envelope, lane, record, protocolSchema); err != nil {
 			return err
 		}
 	}
@@ -1039,7 +1208,7 @@ func (store *CodexLeaseStore) validateV2SemanticState(envelope codexLeaseJournal
 	return store.validateCodexLeaseAdmissionEvidence(envelope)
 }
 
-func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelopeV2, lane CodexJournalLane, record CodexJournalRecordV2) error {
+func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelopeV2, lane CodexJournalLane, record CodexJournalRecordV2, protocolSchema int) error {
 	if !validCodexLeaseDigest(record.SessionHash) || !validCodexLeaseDigest(record.ThreadHash) || record.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) || !validCodexLeaseDigest(record.TurnHash) {
 		return errors.New("invalid record identity hash")
 	}
@@ -1057,7 +1226,7 @@ func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelop
 	if record.AdoptedPrewarm && (!record.Authoritative || !record.NonMigratable || record.PrewarmAdoptionJournalGeneration <= envelope.Cutover.CompletionGeneration || record.PrewarmAdoptionJournalGeneration > envelope.Generation) {
 		return errors.New("invalid prewarm adoption marker")
 	}
-	if record.RecordGeneration == 0 || record.RecordGeneration > envelope.Generation || record.LaneGeneration == 0 || record.LaneGeneration > lane.Generation || record.LeaseGeneration == 0 || record.LeaseGeneration > record.RecordGeneration || record.ModeEpoch == 0 || record.ProtocolSchema != CurrentCodexLeaseSchema || record.RoutingRefs < 0 || record.AttemptRefs < 0 || record.ResponseObserverRefs < 0 {
+	if record.RecordGeneration == 0 || record.RecordGeneration > envelope.Generation || record.LaneGeneration == 0 || record.LaneGeneration > lane.Generation || record.LeaseGeneration == 0 || record.LeaseGeneration > record.RecordGeneration || record.ModeEpoch == 0 || record.ProtocolSchema != protocolSchema || record.RoutingRefs < 0 || record.AttemptRefs < 0 || record.ResponseObserverRefs < 0 {
 		return errors.New("invalid record generation, schema, or reference count")
 	}
 	if record.SocketLineageExtinct && (record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0) {

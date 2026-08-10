@@ -9,15 +9,16 @@ import (
 
 // CodexFrozenDispatchInput contains one caller-owned routing snapshot.
 type CodexFrozenDispatchInput struct {
-	Inventory          codex.Inventory
-	Capacity           *CodexCapacityLedger
-	Requirements       CodexRouteRequirements
-	Provisional        map[codex.AccountKey]int
-	AffinityAccountKey codex.AccountKey
-	DefaultAccountKey  codex.AccountKey
-	BoundAccountKey    codex.AccountKey
-	AcceptedRevision   codex.Revision
-	Now                time.Time
+	Inventory              codex.Inventory
+	Capacity               *CodexCapacityLedger
+	Requirements           CodexRouteRequirements
+	Provisional            map[codex.AccountKey]int
+	AffinityAccountKey     codex.AccountKey
+	AffinityEffectiveModel string
+	DefaultAccountKey      codex.AccountKey
+	BoundAccountKey        codex.AccountKey
+	AcceptedRevision       codex.Revision
+	Now                    time.Time
 }
 
 // CodexFrozenDispatchErrorCode classifies credential-free snapshot failures.
@@ -75,9 +76,10 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		return CodexFrozenDispatchPlan{}, err
 	}
 	policy, err := BuildCodexRoutePlan(ctx, candidates, CodexRoutePolicyHints{
-		AffinityAccountKey: input.AffinityAccountKey,
-		DefaultAccountKey:  input.DefaultAccountKey,
-		BoundAccountKey:    input.BoundAccountKey,
+		AffinityAccountKey:     input.AffinityAccountKey,
+		AffinityEffectiveModel: input.AffinityEffectiveModel,
+		DefaultAccountKey:      input.DefaultAccountKey,
+		BoundAccountKey:        input.BoundAccountKey,
 	})
 	plan := CodexFrozenDispatchPlan{status: policy.Status()}
 	if err != nil {
@@ -160,7 +162,7 @@ func codexFrozenDispatchDecision(input CodexFrozenDispatchInput, candidates []Co
 		return codexRuntimeDecisionNone
 	}
 	ordinaryEligible := codexFrozenDispatchOrdinarilyEligible(candidates, account.choice)
-	if ordinaryEligible && input.AffinityAccountKey != "" && account.choice.AccountKey == input.AffinityAccountKey {
+	if ordinaryEligible && input.AffinityAccountKey != "" && account.choice.AccountKey == input.AffinityAccountKey && (input.AffinityEffectiveModel == "" || codexRoutePolicySameModel(account.choice.EffectiveModel, input.AffinityEffectiveModel)) {
 		return codexRuntimeDecisionAffinityReuse
 	}
 	if account.isDefault && !ordinaryEligible {

@@ -391,7 +391,7 @@ accountsLoop:
 				result.Lifecycle = next
 				continue
 			}
-			if (authRejected || hardRejected) && !result.Lifecycle.EverAdmitted() && accountIndex+1 < len(accounts) {
+			if hardRejected && !result.Lifecycle.EverAdmitted() && accountIndex+1 < len(accounts) {
 				if account.IsDefault() {
 					retainErr := retention.Reject(ctx, response, true)
 					if retainErr != nil {

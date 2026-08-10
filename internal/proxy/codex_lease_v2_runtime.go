@@ -41,18 +41,19 @@ type CodexLeaseBoundExpectation struct {
 // upstream dispatch. Raw account and candidate values are HMACed before they
 // enter the journal.
 type CodexLeaseRequestPlan struct {
-	Key             LeaseKey
-	Accounts        []codex.AccountKey
-	Authority       CodexLeaseAuthorityPolicy
-	RequestKind     CodexRequestKind
-	CompactionPhase CodexCompactionPhase
-	RequestedModel  string
-	EffectiveModel  string
-	RequiredBuckets []CapacityBucket
-	Slots           []CodexLeaseAttemptSlotPlan
-	InitialSlot     uint32
-	Evidence        CodexLeaseRequestEvidence
-	ExpectedBound   *CodexLeaseBoundExpectation
+	Key                       LeaseKey
+	Accounts                  []codex.AccountKey
+	Authority                 CodexLeaseAuthorityPolicy
+	RequestKind               CodexRequestKind
+	CompactionPhase           CodexCompactionPhase
+	RequestedModel            string
+	EffectiveModel            string
+	RequiredBuckets           []CapacityBucket
+	Slots                     []CodexLeaseAttemptSlotPlan
+	InitialSlot               uint32
+	Evidence                  CodexLeaseRequestEvidence
+	ExpectedBound             *CodexLeaseBoundExpectation
+	RequiresAccountContinuity bool
 }
 
 // CodexLeaseRuntime performs the high-level durable request lifecycle over the
@@ -151,8 +152,17 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if restored.Classification == CodexRestoredLaneHistorical {
 		return nil, ErrCodexStaleTurn
 	}
-	if err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence); err != nil {
+	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence)
+	if err != nil {
 		return nil, err
+	}
+	requiresAccountContinuity := plan.RequiresAccountContinuity || restoredRequiresAccount
+	if requiresAccountContinuity {
+		for _, slot := range plan.Slots {
+			if slot.AccountKey != selected.AccountKey {
+				return nil, fmt.Errorf("%w: hard continuity plan contains an alternate account", ErrCodexLeaseInvalidMutation)
+			}
+		}
 	}
 	if plan.RequestKind == CodexRequestCompaction && plan.CompactionPhase == CodexCompactionMidTurn {
 		current, ok := runtime.restoredRecord(restored, requestIdentity)
@@ -205,7 +215,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
 	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
-	if plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState || plan.Evidence.HasEncryptedState {
+	if requiresAccountContinuity {
 		desired.NonMigratable = true
 	}
 	if plan.Evidence.HasEncryptedState {
@@ -920,6 +930,8 @@ func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account 
 	lane.LastAdmittedAuthoritative = false
 	lane.LastAdmissionJournalGeneration = 0
 	lane.LastAdmittedAt = time.Time{}
+	lane.LastCacheAdmittedAt = time.Time{}
+	lane.LastCacheEffectiveModel = ""
 	lane.LastObservedAt = time.Time{}
 	fence, err := restored.MutationFence(restored.Fence.Last, restored.RequestedIdentity)
 	if err != nil {
@@ -1034,7 +1046,7 @@ func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, ide
 	return CodexRestoredRecord{}, false
 }
 
-func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence) error {
+func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence) (bool, error) {
 	var authority CodexRestoredRecord
 	var found bool
 	newTurn := restored.Classification == CodexRestoredLaneUnseen
@@ -1047,27 +1059,27 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 	}
 
 	if newTurn && evidence.HasTurnState {
-		return fmt.Errorf("%w: unexpected request turn state", ErrCodexContinuity)
+		return false, fmt.Errorf("%w: unexpected request turn state", ErrCodexContinuity)
 	}
 	if !newTurn && found {
 		if authority.Record.HasTurnState != evidence.HasTurnState {
-			return fmt.Errorf("%w: request turn state presence mismatch", ErrCodexContinuity)
+			return false, fmt.Errorf("%w: request turn state presence mismatch", ErrCodexContinuity)
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) {
-			return fmt.Errorf("%w: request turn state mismatch", ErrCodexContinuity)
+			return false, fmt.Errorf("%w: request turn state mismatch", ErrCodexContinuity)
 		}
 	}
 	if evidence.PreviousResponseID != "" {
-		return fmt.Errorf("%w: live upstream generation unavailable for previous response", ErrCodexContinuity)
+		return false, fmt.Errorf("%w: live upstream generation unavailable for previous response", ErrCodexContinuity)
 	}
 	if newTurn && evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
-		return fmt.Errorf("%w: encrypted response affinity unavailable", ErrCodexContinuity)
+		return false, fmt.Errorf("%w: encrypted response affinity unavailable", ErrCodexContinuity)
 	}
-	requiresAccount := evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && authority.Record.HasEncryptedState)
+	requiresAccount := evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
-		return fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
+		return requiresAccount, fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
 	}
-	return nil
+	return requiresAccount, nil
 }
 
 func codexLeaseRuntimeRequestIdentity(restored CodexRestoredLane) CodexJournalRecordIdentity {
@@ -1190,7 +1202,7 @@ func (runtime *CodexLeaseRuntime) validateExpectedBound(restored CodexRestoredLa
 		return nil
 	}
 	record, found := runtime.restoredRecord(restored, expected.Identity)
-	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || !record.Record.EverAdmitted || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey || !constantTimeCodexLeaseDigestEqual(record.Record.RequestedModelHash, runtime.store.hash("requested-model", plan.RequestedModel)) || record.Record.EffectiveModel != plan.EffectiveModel || !slices.Equal(record.Record.RequiredBuckets, plan.RequiredBuckets) {
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || (!record.Record.EverAdmitted && !record.Record.NonMigratable) || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey || !constantTimeCodexLeaseDigestEqual(record.Record.RequestedModelHash, runtime.store.hash("requested-model", plan.RequestedModel)) || record.Record.EffectiveModel != plan.EffectiveModel || !slices.Equal(record.Record.RequiredBuckets, plan.RequiredBuckets) {
 		return fmt.Errorf("%w: expected bound turn changed", ErrCodexLeaseAuthorityMismatch)
 	}
 	return nil

@@ -24,6 +24,27 @@ func TestCodexLeaseV2SchemaAcceptsCanonicalSignedEnvelope(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseV2SchemaKeepsPreCacheLaneShapeCanonical(t *testing.T) {
+	store, envelope := codexLeaseV2SchemaFixture(t)
+	envelope.Version = codexLeaseJournalVersionV2
+	envelope.Cutover.CompatibilityEpoch = 3
+	for index := range envelope.Records {
+		envelope.Records[index].ProtocolSchema = codexLeaseJournalVersionV2
+	}
+	codexLeaseV2SignSchemaFixture(t, store, &envelope)
+	data := codexLeaseV2SchemaJSON(t, envelope)
+	const preCacheSignedFixture = `{"version":2,"hash_version":1,"generation":3,"cutover":{"source_version":0,"compatibility_epoch":3,"state":"complete","at":"2026-08-09T01:00:00Z","journal_generation":1,"legacy_quarantine_until":"0001-01-01T00:00:00Z","completed_at":"2026-08-09T01:00:00Z","completion_generation":1,"no_legacy_authority":true},"lanes":[{"session_hash":"dgBWzd8EwN4kdmzhi6eYZbC-tPYe3DYJaumYvSlkRlQ","thread_hash":"VNidpVh8Ah8iNIyQ6KyGN9wcLE8qP5_ZB2vwmfmXXJ4","namespace_hash":"G4h3HmuUzn852rX4_pZDgHeSnPhu6XeI4dhB-a8rAcQ","generation":1,"current_turn_hash":"AKyID641F-lean1vnZX5lsNsKEqwFD-23Z1eqfCyxUI","current_mode_epoch":1,"current_authoritative":true,"last_turn_hash":"AKyID641F-lean1vnZX5lsNsKEqwFD-23Z1eqfCyxUI","last_mode_epoch":1,"last_authoritative":true,"last_admitted_at":"0001-01-01T00:00:00Z","last_observed_at":"2026-08-09T01:03:00Z"}],"records":[{"session_hash":"dgBWzd8EwN4kdmzhi6eYZbC-tPYe3DYJaumYvSlkRlQ","thread_hash":"VNidpVh8Ah8iNIyQ6KyGN9wcLE8qP5_ZB2vwmfmXXJ4","namespace_hash":"G4h3HmuUzn852rX4_pZDgHeSnPhu6XeI4dhB-a8rAcQ","turn_hash":"AKyID641F-lean1vnZX5lsNsKEqwFD-23Z1eqfCyxUI","account_hash":"G9oyUa8g9pbZSAgY_ZSnMcRyAQfyMWDLjVEKtKvLhYg","record_generation":2,"lane_generation":1,"lease_generation":2,"mode_epoch":1,"state":2,"protocol_schema":2,"authoritative":true,"socket_lineage_extinct":false,"current_request":{"generation":1,"request_kind":"turn","requested_model_hash":"-uGV8_gIctpz3s_Jx9KI5jHpDR7k1NpQxewN5Sv88A8","effective_model":"gpt-5.4","required_buckets":["base"],"attempt_envelope":{"policy_version":1,"plan_digest":"d2Dwwqw-ZrfkbMVDCEIsMSuuoARtEZU_8rRaCBCTY-k","attempt_limit":2,"slots":[{"index":1,"account_hash":"G9oyUa8g9pbZSAgY_ZSnMcRyAQfyMWDLjVEKtKvLhYg","candidate_hash":"fI512M3wYn621dbZ2AhnYeoj98taEwbwf13Hz4CrvgE","kind":"direct"},{"index":2,"account_hash":"G9oyUa8g9pbZSAgY_ZSnMcRyAQfyMWDLjVEKtKvLhYg","candidate_hash":"_L_mesSHQeLsCk46J3RU5o-3_pg1Ym4i5RQ2oFRrfJY","kind":"eligible_managed_refresh"}]},"current_attempt_generation":1,"routing_refs":1,"attempt_refs":1,"attempts":[{"generation":1,"revision":1,"slot":1,"state":1,"created_at":"2026-08-09T01:02:00Z","last_observed_at":"2026-08-09T01:02:00Z"}]},"admitted_at":"0001-01-01T00:00:00Z","created_at":"2026-08-09T01:01:00Z","last_observed_at":"2026-08-09T01:03:00Z"}],"mac":"dKTMl_4cCDd5ngYOuWh7bWZgVp2OAz_uuG1meKSr8Ps"}`
+	if !bytes.Equal(data, []byte(preCacheSignedFixture)) {
+		t.Fatalf("pre-cache signed v2 fixture changed: %s", data)
+	}
+	if bytes.Contains(data, []byte(`"last_cache_admitted_at"`)) || bytes.Contains(data, []byte(`"last_cache_effective_model"`)) {
+		t.Fatalf("pre-cache v2 lane gained cache fields: %s", data)
+	}
+	if err := (&CodexLeaseStore{key: append([]byte(nil), store.key...)}).validateLegacyV2Envelope(envelope); err != nil {
+		t.Fatalf("reopen pre-cache v2 journal: %v", err)
+	}
+}
+
 func TestCodexLeaseV2SchemaAcceptsCrashRecoverableStructuralStates(t *testing.T) {
 	store, base := codexLeaseV2SchemaFixture(t)
 	tests := []struct {
@@ -166,6 +187,8 @@ func codexLeaseV2SetSchemaAdmissionEvidence(value *codexLeaseJournalEnvelopeV2, 
 	lane.LastAdmittedAuthoritative = true
 	lane.LastAdmissionJournalGeneration = generation
 	lane.LastAdmittedAt = record.AdmittedAt
+	lane.LastCacheAdmittedAt = record.AdmittedAt
+	lane.LastCacheEffectiveModel = record.EffectiveModel
 }
 
 func TestCodexLeaseV2SchemaRejectsUnknownJSONKeys(t *testing.T) {
@@ -178,7 +201,7 @@ func TestCodexLeaseV2SchemaRejectsUnknownJSONKeys(t *testing.T) {
 		old  string
 		new  string
 	}{
-		{name: "envelope", old: `{"version":2`, new: `{"unknown_envelope":true,"version":2`},
+		{name: "envelope", old: `{"version":3`, new: `{"unknown_envelope":true,"version":3`},
 		{name: "cutover", old: `"cutover":{"source_version":0`, new: `"cutover":{"unknown_cutover":true,"source_version":0`},
 		{name: "lane", old: `"lanes":[{`, new: `"lanes":[{"unknown_lane":true,`},
 		{name: "record", old: `"records":[{`, new: `"records":[{"unknown_record":true,`},
@@ -208,7 +231,7 @@ func TestCodexLeaseV2SchemaRejectsDuplicateJSONKeys(t *testing.T) {
 		old  string
 		new  string
 	}{
-		{name: "envelope", old: `{"version":2`, new: `{"version":2,"version":2`},
+		{name: "envelope", old: `{"version":3`, new: `{"version":3,"version":3`},
 		{name: "cutover", old: `"cutover":{"source_version":0`, new: `"cutover":{"source_version":0,"source_version":0`},
 		{
 			name: "lane",
@@ -270,8 +293,8 @@ func TestCodexLeaseV2SchemaRejectsReorderedObjectMembersWithoutWriting(t *testin
 		old         string
 		replacement string
 	}{
-		{name: "envelope", old: `{"version":2,"hash_version":1`, replacement: `{"hash_version":1,"version":2`},
-		{name: "cutover", old: `"cutover":{"source_version":0,"compatibility_epoch":3`, replacement: `"cutover":{"compatibility_epoch":3,"source_version":0`},
+		{name: "envelope", old: `{"version":3,"hash_version":1`, replacement: `{"hash_version":1,"version":3`},
+		{name: "cutover", old: `"cutover":{"source_version":0,"compatibility_epoch":4`, replacement: `"cutover":{"compatibility_epoch":4,"source_version":0`},
 		{name: "lane", old: `"lanes":[{"session_hash":"` + lane.SessionHash + `","thread_hash":"` + lane.ThreadHash + `"`, replacement: `"lanes":[{"thread_hash":"` + lane.ThreadHash + `","session_hash":"` + lane.SessionHash + `"`},
 		{name: "record", old: `"records":[{"session_hash":"` + record.SessionHash + `","thread_hash":"` + record.ThreadHash + `"`, replacement: `"records":[{"thread_hash":"` + record.ThreadHash + `","session_hash":"` + record.SessionHash + `"`},
 		{name: "current request", old: `"current_request":{"generation":1,"request_kind":"turn"`, replacement: `"current_request":{"request_kind":"turn","generation":1`},
@@ -308,6 +331,8 @@ func TestCodexLeaseV2SchemaRejectsDuplicateAdmissionEvidenceKeys(t *testing.T) {
 		{name: "lane admitted authority", field: "last_admitted_authoritative", value: lane.LastAdmittedAuthoritative},
 		{name: "lane admission generation", field: "last_admission_journal_generation", value: lane.LastAdmissionJournalGeneration},
 		{name: "lane admission time", field: "last_admitted_at", value: lane.LastAdmittedAt},
+		{name: "lane cache admission time", field: "last_cache_admitted_at", value: lane.LastCacheAdmittedAt},
+		{name: "lane cache effective model", field: "last_cache_effective_model", value: lane.LastCacheEffectiveModel},
 	}
 
 	for _, test := range tests {
@@ -894,12 +919,12 @@ func codexLeaseV2SchemaFixture(t *testing.T) (*CodexLeaseStore, codexLeaseJourna
 		{Index: 2, AccountHash: accountHash, CandidateHash: store.hash("candidate", "candidate-refresh"), Kind: CodexAttemptSlotEligibleManagedRefresh},
 	}
 	envelope := codexLeaseJournalEnvelopeV2{
-		Version:     codexLeaseJournalVersionV2,
+		Version:     codexLeaseJournalVersionV3,
 		HashVersion: codexLeaseHashVersion,
 		Generation:  3,
 		Cutover: CodexLeaseCutover{
 			SourceVersion:        0,
-			CompatibilityEpoch:   3,
+			CompatibilityEpoch:   4,
 			State:                CodexLeaseCutoverComplete,
 			At:                   cutoverAt,
 			JournalGeneration:    1,
@@ -970,7 +995,7 @@ func codexLeaseV2LegacyQuarantineSchemaFixture(t *testing.T, store *CodexLeaseSt
 	value.Generation = 8
 	value.Cutover = CodexLeaseCutover{
 		SourceVersion:           1,
-		CompatibilityEpoch:      3,
+		CompatibilityEpoch:      4,
 		State:                   CodexLeaseCutoverLegacyQuarantine,
 		At:                      source.Cutover.At,
 		JournalGeneration:       8,

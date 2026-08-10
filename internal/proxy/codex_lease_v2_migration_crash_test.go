@@ -66,21 +66,7 @@ func TestCodexLeaseV2MigrationCrashOutcomesRemainRetryable(t *testing.T) {
 			mem := fsutil.NewMemFS()
 			key, legacy := writeCodexLeaseV1Fixture(t, mem)
 			archivePath := filepath.Join("/state", "leases.json.v1-"+codexLeaseSHA256(legacy)+".archive")
-			fsys := &codexLeaseMigrationCrashFS{
-				MemFS:              mem,
-				target:             test.target,
-				phase:              test.phase,
-				tempClosed:         make(map[string]bool),
-				renamed:            make(map[string]bool),
-				prechecked:         make(map[string]bool),
-				openedAfterRename:  make(map[string]int),
-				preReplaceChecked:  make(map[string]bool),
-				installedChecked:   make(map[string]bool),
-				postReplaceChecked: make(map[string]bool),
-				directorySynced:    make(map[string]bool),
-				postSyncChecked:    make(map[string]bool),
-				finalDirChecked:    make(map[string]bool),
-			}
+			fsys := newCodexLeaseMigrationCrashFS(mem, test.target, test.phase)
 
 			coordinator, err := OpenCodexContinuityCoordinator(testCodexContinuityOptions(fsys), testCodexLeaseOwner{})
 			if coordinator != nil {
@@ -153,8 +139,8 @@ func assertCodexLeaseMigrationCrashState(t *testing.T, fsys *fsutil.MemFS, key, 
 		if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
 			t.Fatalf("post-rename canonical journal is not strict v2: %v", err)
 		}
-		if envelope.Version != codexLeaseJournalVersionV2 || envelope.Generation != 8 || envelope.Cutover.State != CodexLeaseCutoverLegacyQuarantine || len(envelope.Lanes) != 0 || len(envelope.Records) != 0 || !validCodexLeaseV2TestMAC(key, envelope) {
-			t.Fatalf("post-rename canonical authority is not valid empty quarantined v2: %#v", envelope)
+		if envelope.Version != codexLeaseJournalVersionV3 || envelope.Generation != 8 || envelope.Cutover.CompatibilityEpoch != 4 || envelope.Cutover.State != CodexLeaseCutoverLegacyQuarantine || len(envelope.Lanes) != 0 || len(envelope.Records) != 0 || !validCodexLeaseV2TestMAC(key, envelope) {
+			t.Fatalf("post-rename canonical authority is not valid empty quarantined v3: %#v", envelope)
 		}
 	}
 
@@ -200,6 +186,24 @@ type codexLeaseMigrationCrashFS struct {
 	finalDirChecked    map[string]bool
 	activeTarget       string
 	lastRenamed        string
+}
+
+func newCodexLeaseMigrationCrashFS(mem *fsutil.MemFS, target, phase string) *codexLeaseMigrationCrashFS {
+	return &codexLeaseMigrationCrashFS{
+		MemFS:              mem,
+		target:             target,
+		phase:              phase,
+		tempClosed:         make(map[string]bool),
+		renamed:            make(map[string]bool),
+		prechecked:         make(map[string]bool),
+		openedAfterRename:  make(map[string]int),
+		preReplaceChecked:  make(map[string]bool),
+		installedChecked:   make(map[string]bool),
+		postReplaceChecked: make(map[string]bool),
+		directorySynced:    make(map[string]bool),
+		postSyncChecked:    make(map[string]bool),
+		finalDirChecked:    make(map[string]bool),
+	}
 }
 
 func (fsys *codexLeaseMigrationCrashFS) disableFailure() {

@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -38,7 +40,9 @@ func TestServerServingProofUsesExactListenerConnectionAndBody(t *testing.T) {
 	if ordinaryProof != "" {
 		t.Fatal("ordinary health response exposed a serving proof")
 	}
-	if string(ordinaryBody) != string(body) {
+	provedStable := servingProofTestStableHealthBody(t, body)
+	ordinaryStable := servingProofTestStableHealthBody(t, ordinaryBody)
+	if !bytes.Equal(ordinaryStable, provedStable) {
 		t.Fatalf("ordinary health body changed under attestation\nordinary: %s\nproved: %s", ordinaryBody, body)
 	}
 
@@ -51,6 +55,28 @@ func TestServerServingProofUsesExactListenerConnectionAndBody(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not stop")
 	}
+}
+
+func servingProofTestStableHealthBody(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var health map[string]json.RawMessage
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatalf("decode health body: %v", err)
+	}
+	runtime, present := health["codex_runtime_observability"]
+	if !present {
+		t.Fatal("health body omitted codex_runtime_observability")
+	}
+	var aggregate codexRuntimeObservabilitySnapshot
+	if err := json.Unmarshal(runtime, &aggregate); err != nil {
+		t.Fatalf("decode aggregate runtime observability: %v", err)
+	}
+	delete(health, "codex_runtime_observability")
+	stable, err := json.Marshal(health)
+	if err != nil {
+		t.Fatalf("encode stable health body: %v", err)
+	}
+	return stable
 }
 
 func TestServerShutdownRejectsNewProofsAndWaitsForAcquiredLease(t *testing.T) {

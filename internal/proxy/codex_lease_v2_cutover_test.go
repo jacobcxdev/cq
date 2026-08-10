@@ -99,7 +99,7 @@ func TestCodexLeaseV2CompleteLegacyCutoverUsesPinnedHorizonAndCAS(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.LeaseSchemaVersion != 2 || evidence.HashVersion != 1 || evidence.CompatibilityEpoch != 3 || evidence.SourceVersion != 1 || evidence.JournalGeneration != 9 || evidence.Health != CodexLeaseAuthorityHealthy || evidence.CutoverState != CodexLeaseCutoverStateComplete || evidence.CutoverAt != time.Date(2026, 8, 9, 4, 5, 6, 700, time.UTC) || evidence.CutoverCompletedAt != horizon || evidence.CutoverCompletionGeneration != 9 || !evidence.NoLegacyAuthority || evidence.LegacyPinnedHorizon != horizon || evidence.LegacyV1ArchiveDigest != digest {
+	if evidence.LeaseSchemaVersion != 3 || evidence.HashVersion != 1 || evidence.CompatibilityEpoch != 4 || evidence.SourceVersion != 1 || evidence.JournalGeneration != 9 || evidence.Health != CodexLeaseAuthorityHealthy || evidence.CutoverState != CodexLeaseCutoverStateComplete || evidence.CutoverAt != time.Date(2026, 8, 9, 4, 5, 6, 700, time.UTC) || evidence.CutoverCompletedAt != horizon || evidence.CutoverCompletionGeneration != 9 || !evidence.NoLegacyAuthority || evidence.LegacyPinnedHorizon != horizon || evidence.LegacyV1ArchiveDigest != digest {
 		t.Fatalf("authority evidence = %#v", evidence)
 	}
 	if !slices.Equal(evidence.AuthoritativeModeEpochs, []uint64{4, 6}) || !slices.Equal(evidence.ShadowModeEpochs, []uint64{5}) || len(evidence.RepresentedAuthoritativeModeEpochs) != 0 {

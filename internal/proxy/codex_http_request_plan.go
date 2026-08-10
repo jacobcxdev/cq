@@ -204,16 +204,28 @@ func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input Cod
 		now = factory.Now()
 	}
 	requirements := codexHTTPRequestPlanRequirements(protocol)
+	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+	}
+	boundAccountKey := snapshot.BoundAccountKey
+	if continuityAccountKey != "" {
+		if boundAccountKey != "" && boundAccountKey != continuityAccountKey {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
+		}
+		boundAccountKey = continuityAccountKey
+	}
 	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
-		Inventory:          inventory,
-		Capacity:           factory.Capacity,
-		Requirements:       requirements,
-		Provisional:        cloneCodexHTTPRequestPlanProvisional(snapshot.Provisional),
-		AffinityAccountKey: snapshot.AffinityAccountKey,
-		DefaultAccountKey:  factory.DefaultAccountKey,
-		BoundAccountKey:    snapshot.BoundAccountKey,
-		AcceptedRevision:   input.AcceptedRevision,
-		Now:                now,
+		Inventory:              inventory,
+		Capacity:               factory.Capacity,
+		Requirements:           requirements,
+		Provisional:            cloneCodexHTTPRequestPlanProvisional(snapshot.Provisional),
+		AffinityAccountKey:     affinityAccountKey,
+		AffinityEffectiveModel: snapshot.AffinityEffectiveModel,
+		DefaultAccountKey:      factory.DefaultAccountKey,
+		BoundAccountKey:        boundAccountKey,
+		AcceptedRevision:       input.AcceptedRevision,
+		Now:                    now,
 	})
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
@@ -226,7 +238,7 @@ func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input Cod
 	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
-	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound)
+	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound, continuityAccountKey != "")
 
 	frozen, err := factory.freeze(ctx, inspection, choice)
 	if err != nil {
@@ -250,6 +262,41 @@ func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input Cod
 	result.Frozen = frozen
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
 	return result, nil
+}
+
+const codexGPT56PromptCacheFairnessFloor = 30 * time.Minute
+
+func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, now time.Time) (codex.AccountKey, codex.AccountKey, error) {
+	affinityPresent := snapshot.AffinityPresent || snapshot.AffinityAccountKey != ""
+	requiresContinuity := snapshot.AffinityRequiresAccount || protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState
+	if requiresContinuity {
+		account := snapshot.BoundAccountKey
+		if account == "" {
+			account = snapshot.AffinityAccountKey
+		}
+		if account == "" {
+			return "", "", ErrCodexLeaseAuthorityMismatch
+		}
+		return "", account, nil
+	}
+	if !affinityPresent {
+		return "", "", nil
+	}
+	if codexGPT56PromptCacheFairnessEligible(snapshot.AffinityEffectiveModel, snapshot.AffinityCacheAdmittedAt, now) {
+		return "", "", nil
+	}
+	if snapshot.AffinityAccountKey == "" {
+		return "", "", ErrCodexLeaseAuthorityMismatch
+	}
+	return snapshot.AffinityAccountKey, "", nil
+}
+
+func codexGPT56PromptCacheModel(model string) bool {
+	return ParseModel(model) == "gpt-5.6-sol"
+}
+
+func codexGPT56PromptCacheFairnessEligible(model string, admittedAt, now time.Time) bool {
+	return codexGPT56PromptCacheModel(model) && !admittedAt.IsZero() && !now.Before(admittedAt) && !now.Before(admittedAt.Add(codexGPT56PromptCacheFairnessFloor))
 }
 
 func codexHTTPRequestPlanRequirements(protocol CodexProtocolRequest) CodexRouteRequirements {
@@ -304,7 +351,7 @@ func cloneCodexHTTPRequestPlanProvisional(source map[codex.AccountKey]int) map[c
 	return clone
 }
 
-func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation) CodexLeaseRequestPlan {
+func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity bool) CodexLeaseRequestPlan {
 	httpSlots := CodexHTTPAttemptSlots(dispatch)
 	slots := make([]CodexLeaseAttemptSlotPlan, len(httpSlots))
 	for index, slot := range httpSlots {
@@ -321,17 +368,18 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		expectedClone = &clone
 	}
 	return CodexLeaseRequestPlan{
-		Key:             key,
-		Accounts:        append([]codex.AccountKey(nil), accounts...),
-		Authority:       cloneCodexLeaseAuthorityPolicy(authority),
-		RequestKind:     metadata.RequestKind,
-		CompactionPhase: metadata.CompactionPhase,
-		RequestedModel:  protocol.Model,
-		EffectiveModel:  choice.EffectiveModel,
-		RequiredBuckets: append([]CapacityBucket(nil), choice.RequiredBuckets...),
-		Slots:           slots,
-		InitialSlot:     1,
-		ExpectedBound:   expectedClone,
+		Key:                       key,
+		Accounts:                  append([]codex.AccountKey(nil), accounts...),
+		Authority:                 cloneCodexLeaseAuthorityPolicy(authority),
+		RequestKind:               metadata.RequestKind,
+		CompactionPhase:           metadata.CompactionPhase,
+		RequestedModel:            protocol.Model,
+		EffectiveModel:            choice.EffectiveModel,
+		RequiredBuckets:           append([]CapacityBucket(nil), choice.RequiredBuckets...),
+		Slots:                     slots,
+		InitialSlot:               1,
+		ExpectedBound:             expectedClone,
+		RequiresAccountContinuity: requiresAccountContinuity,
 		Evidence: CodexLeaseRequestEvidence{
 			PreviousResponseID: protocol.PreviousResponseID,
 			TurnState:          protocol.TurnState,

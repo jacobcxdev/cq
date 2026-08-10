@@ -19,7 +19,7 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
-func TestInitialiseCodexContinuityAuthorityCreatesFreshV2Pair(t *testing.T) {
+func TestInitialiseCodexContinuityAuthorityCreatesFreshV3Pair(t *testing.T) {
 	t.Parallel()
 	fsys := fsutil.NewMemFS()
 	options := CodexContinuityOpenOptions{
@@ -55,7 +55,7 @@ func TestInitialiseCodexContinuityAuthorityCreatesFreshV2Pair(t *testing.T) {
 	if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Version != 2 || envelope.HashVersion != 1 || envelope.Generation != 1 || envelope.Cutover.SourceVersion != 0 || envelope.Cutover.State != CodexLeaseCutoverComplete || !envelope.Cutover.NoLegacyAuthority || len(envelope.Lanes) != 0 || len(envelope.Records) != 0 {
+	if envelope.Version != 3 || envelope.HashVersion != 1 || envelope.Generation != 1 || envelope.Cutover.SourceVersion != 0 || envelope.Cutover.CompatibilityEpoch != 4 || envelope.Cutover.State != CodexLeaseCutoverComplete || !envelope.Cutover.NoLegacyAuthority || len(envelope.Lanes) != 0 || len(envelope.Records) != 0 {
 		t.Fatalf("fresh envelope tuple invalid: version=%d hash=%d generation=%d source=%d state=%s no_legacy=%t lanes=%d records=%d", envelope.Version, envelope.HashVersion, envelope.Generation, envelope.Cutover.SourceVersion, envelope.Cutover.State, envelope.Cutover.NoLegacyAuthority, len(envelope.Lanes), len(envelope.Records))
 	}
 	for _, path := range []string{freshCodexLeaseStagePath(options.KeyPath), freshCodexLeaseStagePath(options.JournalPath)} {
@@ -214,11 +214,11 @@ func TestCodexLeaseV2MigratesV1ToArchiveAndGlobalQuarantine(t *testing.T) {
 	if err := json.Unmarshal(journal, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Version != 2 || envelope.HashVersion != 1 || envelope.Generation != 8 {
-		t.Fatalf("v2 envelope versions/generation = %d/%d/%d, want 2/1/8", envelope.Version, envelope.HashVersion, envelope.Generation)
+	if envelope.Version != 3 || envelope.HashVersion != 1 || envelope.Generation != 8 {
+		t.Fatalf("v3 envelope versions/generation = %d/%d/%d, want 3/1/8", envelope.Version, envelope.HashVersion, envelope.Generation)
 	}
 	cutover := envelope.Cutover
-	if cutover.SourceVersion != 1 || cutover.CompatibilityEpoch != 3 || cutover.State != CodexLeaseCutoverLegacyQuarantine || cutover.At != now || cutover.JournalGeneration != 8 || cutover.LegacyQuarantineUntil != now.Add(retention) || cutover.LegacyV1SHA256 != digest || cutover.NoLegacyAuthority || !cutover.CompletedAt.IsZero() || cutover.CompletionGeneration != 0 {
+	if cutover.SourceVersion != 1 || cutover.CompatibilityEpoch != 4 || cutover.State != CodexLeaseCutoverLegacyQuarantine || cutover.At != now || cutover.JournalGeneration != 8 || cutover.LegacyQuarantineUntil != now.Add(retention) || cutover.LegacyV1SHA256 != digest || cutover.NoLegacyAuthority || !cutover.CompletedAt.IsZero() || cutover.CompletionGeneration != 0 {
 		t.Fatalf("cutover = %#v", cutover)
 	}
 	if !slices.Equal(cutover.AuthoritativeModeEpochs, []uint64{4, 6}) || !slices.Equal(cutover.ShadowModeEpochs, []uint64{5}) {

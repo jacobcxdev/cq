@@ -108,6 +108,57 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseRuntimePersistsInheritedAccountContinuityWithoutRawState(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	firstPlan := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-1", Kind: CodexAttemptSlotDirect,
+	}})
+	first, err := runtimeLease.BeginRequest(firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{HasEncryptedState: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	unsafePlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-2a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-2b", Kind: CodexAttemptSlotDirect},
+	})
+	unsafePlan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	if _, err := runtimeLease.BeginRequest(unsafePlan); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("hard predecessor alternate slots = %v, want invalid mutation", err)
+	}
+
+	secondPlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-2", Kind: CodexAttemptSlotDirect,
+	}})
+	second, err := runtimeLease.BeginRequest(secondPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.record.NonMigratable || second.record.HasEncryptedState {
+		t.Fatalf("inherited continuity = non-migratable %v current encrypted %v, want true/false", second.record.NonMigratable, second.record.HasEncryptedState)
+	}
+}
+
 func TestCodexLeaseRuntimeRetainsResponseEvidenceForEveryAdmittedTerminal(t *testing.T) {
 	t.Parallel()
 	for _, terminal := range []string{"completed", "failed", "indeterminate"} {
@@ -2204,8 +2255,9 @@ func TestCodexLeaseRuntimeIndeterminatePinsAccountAndDrains(t *testing.T) {
 		t.Fatalf("uncertain request = %#v", uncertain.record)
 	}
 	assertCodexLeaseRuntimeRefs(t, uncertain, 0, 0, 1, false)
+	same := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a-next", Kind: CodexAttemptSlotDirect}})
 	before := append([]byte(nil), store.journalBytes...)
-	if _, err := runtimeLease.BeginRequest(plan); !errors.Is(err, ErrCodexConcurrentTurn) {
+	if _, err := runtimeLease.BeginRequest(same); !errors.Is(err, ErrCodexConcurrentTurn) {
 		t.Fatalf("request before uncertain drain = %T %v, want concurrent", err, err)
 	}
 	if !bytes.Equal(before, store.journalBytes) {
@@ -2220,13 +2272,12 @@ func TestCodexLeaseRuntimeIndeterminatePinsAccountAndDrains(t *testing.T) {
 	other := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "candidate-b-next", Kind: CodexAttemptSlotDirect}})
 	other.Accounts = append(other.Accounts, "account-a")
 	before = append([]byte(nil), store.journalBytes...)
-	if _, err := runtimeLease.BeginRequest(other); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
-		t.Fatalf("cross-account uncertain request = %T %v, want invalid mutation", err, err)
+	if _, err := runtimeLease.BeginRequest(other); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("cross-account uncertain request = %T %v, want continuity error", err, err)
 	}
 	if !bytes.Equal(before, store.journalBytes) || store.poisoned != nil {
 		t.Fatalf("cross-account uncertain request changed authority: poison %v", store.poisoned)
 	}
-	same := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a-next", Kind: CodexAttemptSlotDirect}})
 	next, err := runtimeLease.BeginRequest(same)
 	if err != nil {
 		t.Fatal(err)
@@ -2396,12 +2447,12 @@ func openCodexLeaseRuntimeTestCoordinatorWithOwner(t *testing.T, owner CodexLeas
 	now := time.Date(2026, 8, 9, 8, 0, 0, 0, time.UTC)
 	cutoverAt := now.Add(-time.Hour)
 	envelope := codexLeaseJournalEnvelopeV2{
-		Version:     codexLeaseJournalVersionV2,
+		Version:     codexLeaseJournalVersionV3,
 		HashVersion: codexLeaseHashVersion,
 		Generation:  1,
 		Cutover: CodexLeaseCutover{
 			SourceVersion:        0,
-			CompatibilityEpoch:   3,
+			CompatibilityEpoch:   4,
 			State:                CodexLeaseCutoverComplete,
 			At:                   cutoverAt,
 			JournalGeneration:    1,
