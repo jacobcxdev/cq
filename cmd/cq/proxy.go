@@ -326,10 +326,6 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			returnErr = errors.Join(returnErr, proxyCodexContinuityCloseError(codexContinuity.Close()))
 		}()
 	}
-	if err := proxyCodexRetainedHTTPAdapterBlocker(codexRouting.HTTP); err != nil {
-		return fmt.Errorf("Codex HTTP routing: %w", err)
-	}
-
 	accounts := discoverClaudeAccountsFn()
 	var emails []string
 	for _, a := range accounts {
@@ -402,7 +398,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
-	codexObserver, err := newProxyCodexMemoryObserver(codexRouting, codexCapacity)
+	codexObserver, codexWebSocketObserver, err := newProxyCodexV2Observers(proxyCodexV2ObserverDependencies{
+		Routing:    codexRouting,
+		Continuity: codexContinuity,
+		Capacity:   codexCapacity,
+	})
 	if err != nil {
 		return fmt.Errorf("Codex turn observer: %w", err)
 	}
@@ -590,19 +590,21 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		CodexHealth: func() proxy.CodexHealth {
 			return codexHealthTracker.Health(context.Background())
 		},
-		CodexRequests:          codexRequestRouter,
-		CodexWebSocketExecutor: codexWebSocketExecutor,
-		Headroom:               headroom,
-		Diag:                   diagnostics,
-		PayloadDiag:            payloadDiag,
-		ServingAttestor:        servingAttestor,
-		CodexRouting:           codexRouting,
-		CodexNativeHTTP:        codexNativeHTTP,
-		CodexObserver:          codexObserver,
-		CodexPrimer:            codexPrimer,
-		HeadroomMode:           resolvedMode,
-		Catalog:                catalog,
-		Refresher:              proxyRefresher,
+		CodexRequests:                    codexRequestRouter,
+		CodexWebSocketExecutor:           codexWebSocketExecutor,
+		Headroom:                         headroom,
+		Diag:                             diagnostics,
+		PayloadDiag:                      payloadDiag,
+		ServingAttestor:                  servingAttestor,
+		CodexRouting:                     codexRouting,
+		CodexNativeHTTP:                  codexNativeHTTP,
+		CodexObserver:                    codexObserver,
+		CodexWebSocketObserver:           codexWebSocketObserver,
+		CodexWebSocketObserverConfigured: true,
+		CodexPrimer:                      codexPrimer,
+		HeadroomMode:                     resolvedMode,
+		Catalog:                          catalog,
+		Refresher:                        proxyRefresher,
 	}
 	if err := legacyFinaliseVerifier.bind(codexRouting, headroom, resolvedMode); err != nil {
 		return fmt.Errorf("legacy credential endpoint finalise verifier: %w", err)

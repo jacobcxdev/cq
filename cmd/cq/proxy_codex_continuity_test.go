@@ -188,7 +188,7 @@ func TestProxyCodexContinuityAccountRevalidatorFailsClosed(t *testing.T) {
 	}
 }
 
-func TestNewProxyCodexNativeHTTPInstallsOnlyForEffectiveEnforcement(t *testing.T) {
+func TestNewProxyCodexNativeHTTPInstallsForEnforcementAndRetainedAuthority(t *testing.T) {
 	t.Parallel()
 
 	for _, status := range []proxy.CodexModeStatus{
@@ -208,6 +208,10 @@ func TestNewProxyCodexNativeHTTPInstallsOnlyForEffectiveEnforcement(t *testing.T
 			t.Fatalf("status %#v installed native handler: handler=%T err=%v called=%t", status, handler, err, called)
 		}
 	}
+	retainedDependency := &proxyCodexNativeHTTPTestDependency{}
+	retainedCapacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
+	var retainedPlanner *proxy.CodexHTTPRequestPlanFactory
+	wantRetainedHandler := &proxyCodexNativeHTTPTestHandler{}
 	retainedHandler, retainedErr := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status: proxy.CodexModeStatus{
 			Configured:                  proxy.CodexRoutingObserve,
@@ -215,9 +219,14 @@ func TestNewProxyCodexNativeHTTPInstallsOnlyForEffectiveEnforcement(t *testing.T
 			ModeEpoch:                   10,
 			RetainedAuthoritativeEpochs: []uint64{9},
 		},
+		Inventory: retainedDependency, Capacity: retainedCapacity, Routes: retainedDependency, Runtime: retainedDependency,
+		Executor: retainedDependency, Refresher: retainedDependency, Upstream: "https://codex.example", Now: time.Now,
+		newRetainedHandler: func(planner proxy.CodexRetainedNativeHTTPRequestPlanner, _ proxy.CodexNativeHTTPRequestSession, _ string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+			retainedPlanner, _ = planner.(*proxy.CodexHTTPRequestPlanFactory)
+			return wantRetainedHandler, nil
+		},
 	})
-	var retainedUnavailable *proxyCodexRetainedHTTPAdapterUnavailableError
-	if retainedHandler != nil || !errors.As(retainedErr, &retainedUnavailable) {
+	if retainedErr != nil || retainedHandler != wantRetainedHandler || retainedPlanner == nil || retainedPlanner.Authority.Authoritative || retainedPlanner.Authority.ModeEpoch != 10 || !reflect.DeepEqual(retainedPlanner.Authority.RetainedAuthoritativeEpochs, []uint64{9}) {
 		t.Fatalf("retained observe = handler %T error %T %v", retainedHandler, retainedErr, retainedErr)
 	}
 	for _, status := range []proxy.CodexModeStatus{
@@ -283,25 +292,35 @@ func TestNewProxyCodexNativeHTTPInstallsOnlyForEffectiveEnforcement(t *testing.T
 	}
 }
 
-func TestNewProxyCodexMemoryObserverIsObserveOnlyAndNonPersistent(t *testing.T) {
+func TestNewProxyCodexV2ObserversAreObserveOnlyAndNonPersistent(t *testing.T) {
 	t.Parallel()
 
 	capacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
-	observer, err := newProxyCodexMemoryObserver(&proxy.CodexRoutingRuntime{
+	continuity := &proxyCodexContinuity{Runtime: &proxy.CodexLeaseRuntime{}}
+	shared := proxy.NewCodexTurnLeaseManager(1, false, time.Now)
+	var policies []proxy.CodexLeaseAuthorityPolicy
+	newObserver := func(_ *proxy.CodexLeaseRuntime, policy proxy.CodexLeaseAuthorityPolicy) (*proxy.CodexTurnObserver, error) {
+		policies = append(policies, policy)
+		return proxy.NewCodexTurnObserver(shared.ForMode(policy.ModeEpoch, false), nil)
+	}
+	httpObserver, wsObserver, err := newProxyCodexV2Observers(proxyCodexV2ObserverDependencies{Routing: &proxy.CodexRoutingRuntime{
 		HTTP:      proxy.CodexModeStatus{Effective: proxy.CodexRoutingObserve, ModeEpoch: 7},
-		WebSocket: proxy.CodexModeStatus{Effective: proxy.CodexRoutingOff, ModeEpoch: 8},
-	}, capacity)
-	if err != nil || observer == nil || observer.Store != nil || observer.Leases == nil {
-		t.Fatalf("observe memory observer = %#v, %v", observer, err)
+		WebSocket: proxy.CodexModeStatus{Effective: proxy.CodexRoutingObserve, ModeEpoch: 8},
+	}, Continuity: continuity, Capacity: capacity, newObserver: newObserver})
+	if err != nil || httpObserver == nil || wsObserver == nil || httpObserver == wsObserver || httpObserver.Store != nil || wsObserver.Store != nil || httpObserver.Leases == nil || wsObserver.Leases == nil {
+		t.Fatalf("observe v2 observers = HTTP %#v WS %#v, %v", httpObserver, wsObserver, err)
+	}
+	if !reflect.DeepEqual(policies, []proxy.CodexLeaseAuthorityPolicy{{ModeEpoch: 7}, {ModeEpoch: 8}}) {
+		t.Fatalf("observer policies = %#v", policies)
 	}
 	for _, modes := range []*proxy.CodexRoutingRuntime{
 		nil,
 		{HTTP: proxy.CodexModeStatus{Effective: proxy.CodexRoutingOff}},
 		{HTTP: proxy.CodexModeStatus{Effective: proxy.CodexRoutingEnforce, ModeEpoch: 9}},
 	} {
-		observer, err := newProxyCodexMemoryObserver(modes, capacity)
-		if err != nil || observer != nil {
-			t.Fatalf("non-observe modes %#v created observer %#v, %v", modes, observer, err)
+		httpObserver, wsObserver, err := newProxyCodexV2Observers(proxyCodexV2ObserverDependencies{Routing: modes, Continuity: continuity, Capacity: capacity, newObserver: newObserver})
+		if err != nil || httpObserver != nil || wsObserver != nil {
+			t.Fatalf("non-observe modes %#v created HTTP/WS observers %#v/%#v, %v", modes, httpObserver, wsObserver, err)
 		}
 	}
 }

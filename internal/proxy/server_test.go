@@ -119,6 +119,21 @@ func TestServerHealthReportsConfiguredEffectiveCodexModes(t *testing.T) {
 	}
 }
 
+func TestServerCodexWebSocketObserverHonoursExplicitOff(t *testing.T) {
+	httpObserver := &CodexTurnObserver{}
+	wsObserver := &CodexTurnObserver{}
+
+	if got := (&Server{CodexObserver: httpObserver}).codexWebSocketObserver(); got != httpObserver {
+		t.Fatalf("compatibility observer = %p, want %p", got, httpObserver)
+	}
+	if got := (&Server{CodexObserver: httpObserver, CodexWebSocketObserverConfigured: true}).codexWebSocketObserver(); got != nil {
+		t.Fatalf("explicitly disabled WebSocket observer = %p, want nil", got)
+	}
+	if got := (&Server{CodexObserver: httpObserver, CodexWebSocketObserver: wsObserver, CodexWebSocketObserverConfigured: true}).codexWebSocketObserver(); got != wsObserver {
+		t.Fatalf("explicit WebSocket observer = %p, want %p", got, wsObserver)
+	}
+}
+
 func TestServerHealthReportsPrivacySafeCodexPrimerSummary(t *testing.T) {
 	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
 	if err != nil {

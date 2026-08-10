@@ -112,6 +112,11 @@ type Server struct {
 	// CodexObserver mirrors Responses lifecycle and preserves an exact strong
 	// turn's first actual route without consuming prospective shadow choices.
 	CodexObserver *CodexTurnObserver
+	// CodexWebSocketObserver is the mode-specific WebSocket view over the same
+	// live coordinator core. CodexWebSocketObserverConfigured distinguishes an
+	// explicitly disabled WebSocket observer from the compatibility fallback.
+	CodexWebSocketObserver           *CodexTurnObserver
+	CodexWebSocketObserverConfigured bool
 	// CodexHTTPEnforcer owns readiness-gated turns and retained authority fences.
 	CodexHTTPEnforcer *CodexHTTPEnforcer
 	// CodexPrimer is non-nil only in credential-coordinator owner process.
@@ -795,6 +800,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.CodexObserver != nil {
 		resp["codex_turn_observation"] = s.CodexObserver.Health()
 	}
+	if s.CodexWebSocketObserverConfigured && s.CodexWebSocketObserver != nil && s.CodexWebSocketObserver != s.CodexObserver {
+		resp["codex_ws_turn_observation"] = s.CodexWebSocketObserver.Health()
+	}
 	if s.CodexHTTPEnforcer != nil {
 		resp["codex_turn_enforcement"] = s.CodexHTTPEnforcer.Observer.Health()
 	}
@@ -1141,8 +1149,9 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		requestedModel = extractCodexWebSocketFrameModel(message)
 		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, message, 1)
 	}
-	if s.CodexObserver != nil {
-		r = r.WithContext(withCodexObservation(r.Context(), s.CodexObserver))
+	wsObserver := s.codexWebSocketObserver()
+	if wsObserver != nil {
+		r = r.WithContext(withCodexObservation(r.Context(), wsObserver))
 	}
 	upstreamConn, choice, _, capacity, err := s.dialCodexWebSocketWithCapacity(r.Context(), upstreamURL, r.Header, requestedModel)
 	if err != nil {
@@ -1151,7 +1160,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstreamConn.Close()
 	upstreamConn.SetReadLimit(maxRequestBody)
-	observation := newCodexWSObservationSession(s.CodexObserver, r.Context(), choice, capacity)
+	observation := newCodexWSObservationSession(wsObserver, r.Context(), choice, capacity)
 	if observation != nil && messageType == websocket.TextMessage {
 		observation.ObserveClient(message)
 	}
@@ -1174,6 +1183,19 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	if observation != nil {
 		observation.Close(relayErr)
 	}
+}
+
+func (s *Server) codexWebSocketObserver() *CodexTurnObserver {
+	if s == nil {
+		return nil
+	}
+	if s.CodexWebSocketObserverConfigured {
+		return s.CodexWebSocketObserver
+	}
+	if s.CodexWebSocketObserver != nil {
+		return s.CodexWebSocketObserver
+	}
+	return s.CodexObserver
 }
 
 func codexAppServerWebSocketURL(raw string) (string, error) {

@@ -137,6 +137,48 @@ func TestCodexV2ObserverDoesNotPersistRejectedResponse(t *testing.T) {
 	}
 }
 
+func TestCodexV2ObserversShareLiveHTTPWebSocketShadowCoreWithoutRouting(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	httpObserver, err := NewCodexV2TurnObserver(runtimeLease, CodexLeaseAuthorityPolicy{ModeEpoch: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsObserver, err := NewCodexV2TurnObserver(runtimeLease, CodexLeaseAuthorityPolicy{ModeEpoch: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if httpObserver.Leases.mu != wsObserver.Leases.mu || httpObserver.Leases.mu != coordinator.leases.mu {
+		t.Fatal("HTTP and WebSocket observers do not share the coordinator live core")
+	}
+
+	httpHandle := beginCodexV2ObserverTestTurn(t, httpObserver, "crossover")
+	httpChoice := codexV2ObserverTestChoice("account-a")
+	observeCodexAttempt(withCodexObservation(context.Background(), httpHandle), httpChoice, codexV2ObserverTestAttempt("account-a", "candidate-a"))
+	httpHandle.Selected(httpChoice, false)
+	response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completedSSE("response-a")))}
+	if err := httpHandle.PrepareV2Response(response); err != nil {
+		t.Fatal(err)
+	}
+	httpHandle.Response(response)
+	defer response.Body.Close()
+
+	frame := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"observer-session","thread_id":"observer-thread","turn_id":"crossover","request_kind":"turn"}}}`)
+	wsHandle := wsObserver.BeginWebSocket(context.Background(), frame, nil, 1)
+	if choice, found, err := wsHandle.pinnedChoice(); err != nil || found || choice.AccountKey != "" {
+		t.Fatalf("WebSocket observer supplied a route decision: choice=%#v found=%t err=%v", choice, found, err)
+	}
+	wsChoice := codexV2ObserverTestChoice("account-b")
+	wsHandle.Selected(wsChoice, false)
+	wsHandle.ResponseHeaders(http.StatusSwitchingProtocols, make(http.Header))
+	if health := wsObserver.Health(); health.ContinuityErrors != 1 {
+		t.Fatalf("WebSocket shadow health = %#v, want one observed crossover mismatch", health)
+	}
+	if got := len(coordinator.Store().v2.Records); got != 1 {
+		t.Fatalf("WebSocket observation created durable routing authority: records=%d", got)
+	}
+}
+
 func beginCodexV2ObserverTestTurn(t *testing.T, observer *CodexTurnObserver, turn string) *CodexTurnObservation {
 	t.Helper()
 	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"observer-session","thread_id":"observer-thread","turn_id":"` + turn + `","request_kind":"turn"}}}`)
