@@ -28,6 +28,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 	if ctx == nil {
 		return CodexLeaseRouteSnapshot{}, fmt.Errorf("%w: nil route snapshot context", ErrCodexLeaseInvalidMutation)
 	}
+	policy = cloneCodexLeaseAuthorityPolicy(policy)
 	release, err := coordinator.beginCodexLeaseRouteSnapshot(ctx)
 	if err != nil {
 		return CodexLeaseRouteSnapshot{}, err

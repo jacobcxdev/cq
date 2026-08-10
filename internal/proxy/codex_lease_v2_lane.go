@@ -27,6 +27,7 @@ func (store *CodexLeaseStore) LoadLane(key LeaseKey, accounts []codex.AccountKey
 	if err := key.validate(); err != nil {
 		return blocked, fmt.Errorf("%w: %v", ErrCodexContinuity, err)
 	}
+	policy = cloneCodexLeaseAuthorityPolicy(policy)
 	if err := validateCodexLeaseAuthorityPolicy(policy); err != nil {
 		return blocked, err
 	}

@@ -165,6 +165,63 @@ func TestCodexLeaseRouteSnapshotRetriesGenerationDrift(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseRouteSnapshotDetachesAuthorityPolicyAcrossGenerationRetry(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("target", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "target-a", Kind: CodexAttemptSlotDirect}})
+	prepared, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retained := []uint64{9}
+	policy := CodexLeaseAuthorityPolicy{ModeEpoch: 10, RetainedAuthoritativeEpochs: retained}
+	owner := newBlockingCodexLeaseRouteSnapshotOwner()
+	owner.mutateFirst = func() { retained[0] = 8 }
+	coordinator.store.mu.Lock()
+	coordinator.store.owner = owner
+	coordinator.store.mu.Unlock()
+	t.Cleanup(owner.release)
+	type result struct {
+		snapshot CodexLeaseRouteSnapshot
+		err      error
+	}
+	resultChannel := make(chan result, 1)
+	go func() {
+		snapshot, loadErr := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, policy)
+		resultChannel <- result{snapshot: snapshot, err: loadErr}
+	}()
+
+	select {
+	case <-owner.secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("route snapshot did not reach its generation-verification read")
+	}
+	if _, err := prepared.transitionAttemptWithFence(prepared.fence, CodexAttemptPrepared, CodexAttemptDispatched, nil); err != nil {
+		t.Fatal(err)
+	}
+	owner.release()
+
+	select {
+	case result := <-resultChannel:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.snapshot.JournalGeneration != coordinator.store.Generation() {
+			t.Fatalf("snapshot generation = %d, store = %d", result.snapshot.JournalGeneration, coordinator.store.Generation())
+		}
+		if !reflect.DeepEqual(result.snapshot.Provisional, map[codex.AccountKey]int{"account-a": 1}) {
+			t.Fatalf("provisional = %#v, want retried current generation", result.snapshot.Provisional)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("route snapshot did not retry generation drift")
+	}
+	if retained[0] != 8 {
+		t.Fatal("owner callback did not mutate caller policy")
+	}
+}
+
 func TestCodexLeaseRouteSnapshotRejectsUnresolvedGlobalProvisionalAccount(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
@@ -190,6 +247,7 @@ type blockingCodexLeaseRouteSnapshotOwner struct {
 	secondStarted chan struct{}
 	releaseSecond chan struct{}
 	releaseOnce   sync.Once
+	mutateFirst   func()
 }
 
 func newBlockingCodexLeaseRouteSnapshotOwner() *blockingCodexLeaseRouteSnapshotOwner {
@@ -202,7 +260,11 @@ func newBlockingCodexLeaseRouteSnapshotOwner() *blockingCodexLeaseRouteSnapshotO
 func (owner *blockingCodexLeaseRouteSnapshotOwner) AssertOwner() error { return nil }
 
 func (owner *blockingCodexLeaseRouteSnapshotOwner) BeginOwnerOperation() (*codex.CredentialOwnerOperation, error) {
-	if owner.begins.Add(1) == 2 {
+	count := owner.begins.Add(1)
+	if count == 1 && owner.mutateFirst != nil {
+		owner.mutateFirst()
+	}
+	if count == 2 {
 		close(owner.secondStarted)
 		<-owner.releaseSecond
 	}

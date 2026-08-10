@@ -87,6 +87,29 @@ func TestCodexLeaseV2LoadLaneClassifiesHistoryUnseenShadowAndRetainedEpochs(t *t
 	}
 }
 
+func TestCodexLeaseV2LoadLaneDetachesAuthorityPolicyBeforeOwnerCallback(t *testing.T) {
+	coordinator := openCodexLeaseV2LaneTestCoordinator(t)
+	retained := []uint64{9}
+	coordinator.store.mu.Lock()
+	coordinator.store.owner = mutatingCodexLeaseTestOwner{mutate: func() { retained[0] = 8 }}
+	coordinator.store.mu.Unlock()
+
+	restored, err := coordinator.Store().LoadLane(
+		LeaseKey{Lane: LaneKey{Session: "session", Thread: "thread", Namespace: CodexResponsesNamespace}, Turn: "retained"},
+		[]codex.AccountKey{"account-one"},
+		CodexLeaseAuthorityPolicy{ModeEpoch: 10, RetainedAuthoritativeEpochs: retained},
+	)
+	if !errors.Is(err, ErrCodexLeaseAuthorityMismatch) {
+		t.Fatalf("LoadLane error = %T %v, want authority mismatch", err, err)
+	}
+	if restored.Classification != CodexRestoredLaneRecoveryBlocked {
+		t.Fatalf("classification = %q, want %q", restored.Classification, CodexRestoredLaneRecoveryBlocked)
+	}
+	if retained[0] != 8 {
+		t.Fatal("owner callback did not mutate caller policy")
+	}
+}
+
 func TestCodexLeaseV2LoadLaneAllowsDefinitelyAbandonedUnadmittedAccountToBeUnresolvedAndReturnsDetachedCopies(t *testing.T) {
 	t.Parallel()
 	coordinator := openCodexLeaseV2LaneTestCoordinator(t)
