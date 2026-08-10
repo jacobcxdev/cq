@@ -74,7 +74,7 @@ type codexRetainedBodyOwner struct {
 }
 
 func (owner *codexRetainedBodyOwner) Read(target []byte) (int, error) {
-	return owner.body.Read(target)
+	return readCodexHTTPResponseBody(owner.body, target)
 }
 
 func (owner *codexRetainedBodyOwner) Close() error {

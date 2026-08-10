@@ -342,7 +342,7 @@ func relayCodexObservedHTTPBody(ctx context.Context, writer http.ResponseWriter,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		read, readErr := body.Read(buffer)
+		read, readErr := readCodexHTTPResponseBody(body, buffer)
 		if read > 0 {
 			observe(buffer[:read])
 			written, writeErr := writer.Write(buffer[:read])

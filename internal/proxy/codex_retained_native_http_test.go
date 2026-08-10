@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,6 +177,24 @@ func TestCodexRetainedNativeHTTPCancellationRecoversPrivateClosePanic(t *testing
 	}
 }
 
+func TestCodexRetainedNativeHTTPReadPanicFailsClosedPrivately(t *testing.T) {
+	body := &codexRetainedHTTPPanickingReadBody{}
+	planner := &codexRetainedHTTPPlannerStub{}
+	handler := newCodexRetainedHTTPTestHandler(t, planner)
+	writer := httptest.NewRecorder()
+
+	handled, model := handler.TryServe(writer, httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", body), false)
+	if !handled || model != "" || writer.Code != http.StatusBadRequest {
+		t.Fatalf("read panic = handled %t model %q status %d", handled, model, writer.Code)
+	}
+	if planner.probeCalls != 0 || planner.buildCalls != 0 || body.closes != 1 {
+		t.Fatalf("read panic reached probe/build %d/%d or closed %d times", planner.probeCalls, planner.buildCalls, body.closes)
+	}
+	if strings.Contains(writer.Body.String(), "private retained request read panic") {
+		t.Fatalf("read panic disclosed private text: %s", writer.Body.String())
+	}
+}
+
 type codexRetainedHTTPPlannerStub struct {
 	expected      *CodexLeaseBoundExpectation
 	claimed       bool
@@ -212,6 +231,19 @@ func (planner *codexRetainedHTTPPlannerStub) Build(_ context.Context, input Code
 type codexRetainedHTTPTestBody struct {
 	*bytes.Reader
 	closes int
+}
+
+type codexRetainedHTTPPanickingReadBody struct {
+	closes int
+}
+
+func (*codexRetainedHTTPPanickingReadBody) Read([]byte) (int, error) {
+	panic("private retained request read panic")
+}
+
+func (body *codexRetainedHTTPPanickingReadBody) Close() error {
+	body.closes++
+	return nil
 }
 
 func (body *codexRetainedHTTPTestBody) Close() error {
