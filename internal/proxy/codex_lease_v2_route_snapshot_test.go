@@ -330,7 +330,7 @@ func TestCodexLeaseRouteSnapshotRetriesGenerationDrift(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("route snapshot did not retry generation drift")
 	}
-	if owner.begins.Load() < 6 {
+	if owner.begins.Load() < 5 {
 		t.Fatalf("owner operations = %d, want generation retry", owner.begins.Load())
 	}
 }

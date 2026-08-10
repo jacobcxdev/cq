@@ -245,7 +245,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
-	return runtime.committedRequestHandle(plan.Key, plan.Accounts, plan.Authority, identity, post, committedRecord)
+	return runtime.committedRequestHandle(plan.Key, plan.Accounts, plan.Authority, identity, post, committedRecord, true, 1)
 }
 
 func (handle *CodexLeaseRequestHandle) State() LeaseState {
@@ -359,10 +359,7 @@ func (handle *CodexLeaseRequestHandle) AbandonBeforeDispatchContext(ctx context.
 	desired.AttemptRefs = 0
 	desired.ResponseObserverRefs = 0
 	desired.SocketLineageExtinct = true
-	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
-		return nil, err
-	}
-	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+	return handle.commitRequestMutation(fence, desired, true)
 }
 
 // RejectAndPrepare atomically records a definite pre-admission failure and
@@ -433,10 +430,7 @@ func (handle *CodexLeaseRequestHandle) RejectAndPrepareContext(ctx context.Conte
 	if err := handle.runtime.revalidateAccountForCommit(ctx, nextAccount); err != nil {
 		return nil, err
 	}
-	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
-		return nil, err
-	}
-	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+	return handle.commitRequestMutation(fence, desired, true)
 }
 
 // FinishRejected records a final definite provider rejection. A never-admitted
@@ -478,10 +472,7 @@ func (handle *CodexLeaseRequestHandle) FinishRejected() (*CodexLeaseRequestHandl
 	desired.AttemptRefs = 0
 	desired.ResponseObserverRefs = 0
 	desired.SocketLineageExtinct = true
-	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
-		return nil, err
-	}
-	return handle.runtime.loadHandleForState(handle.key, handle.accounts, handle.authority, handle.identity, handle.record.EverAdmitted)
+	return handle.commitRequestMutation(fence, desired, handle.record.EverAdmitted)
 }
 
 // Indeterminate records that an upstream send may have occurred. The request
@@ -541,10 +532,7 @@ func (handle *CodexLeaseRequestHandle) IndeterminateContext(ctx context.Context,
 		desired.ResponseObserverRefs = 1
 	}
 	desired.SocketLineageExtinct = false
-	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
-		return nil, err
-	}
-	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+	return handle.commitRequestMutation(fence, desired, true)
 }
 
 // AdmitHTTP2xx atomically persists streaming plus first-admission evidence
@@ -652,10 +640,7 @@ func (handle *CodexLeaseRequestHandle) Drain() (*CodexLeaseRequestHandle, error)
 		return nil, fmt.Errorf("%w: current drain fence is absent", ErrCodexLeaseTrustLost)
 	}
 	currentFence.TouchedAttempts = nil
-	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
-		return nil, err
-	}
-	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+	return handle.commitRequestMutation(fence, desired, true)
 }
 
 func (handle *CodexLeaseRequestHandle) transitionAttempt(from, to CodexAttemptState, mutate func(*CodexJournalRecordV2) error) (*CodexLeaseRequestHandle, error) {
@@ -695,10 +680,32 @@ func (handle *CodexLeaseRequestHandle) transitionAttemptWithFence(fence CodexLea
 			return nil, err
 		}
 	}
-	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+	return handle.commitRequestMutation(fence, desired, true)
+}
+
+func (handle *CodexLeaseRequestHandle) commitRequestMutation(fence CodexLeaseGenerationFence, desired CodexJournalRecordV2, requireCurrent bool) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil || handle.runtime.store == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	identity := handle.identity
+	recordFence, found := codexLeaseRuntimeRecordFence(&fence, identity)
+	if !found {
+		return nil, fmt.Errorf("%w: request mutation fence is absent", ErrCodexLeaseTrustLost)
+	}
+	expectedTouchedAttempts := len(recordFence.TouchedAttempts)
+	var committedRecord CodexJournalRecordV2
+	post, err := handle.runtime.store.commitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
+		for _, record := range installed.Records {
+			if record.Identity() == identity {
+				committedRecord = cloneCodexJournalRecordV2(record)
+				return
+			}
+		}
+	})
+	if err != nil {
 		return nil, err
 	}
-	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+	return handle.runtime.committedRequestHandle(handle.key, handle.accounts, handle.authority, identity, post, committedRecord, requireCurrent, expectedTouchedAttempts)
 }
 
 func (handle *CodexLeaseRequestHandle) refreshMutationFence() (CodexLeaseGenerationFence, error) {
@@ -956,27 +963,29 @@ func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) 
 	}
 }
 
-// committedRequestHandle constructs the exact BeginRequest result from the
-// already verified installed after-image. The caller still holds the runtime's
+// committedRequestHandle constructs an exact request result from the already
+// verified installed after-image. The caller still holds the runtime's
 // lifecycle mutation lock, so this must not start another owner operation.
-func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity, post CodexLeaseGenerationFence, record CodexJournalRecordV2) (*CodexLeaseRequestHandle, error) {
+func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity, post CodexLeaseGenerationFence, record CodexJournalRecordV2, requireCurrent bool, expectedTouchedAttempts int) (*CodexLeaseRequestHandle, error) {
 	if runtime == nil || runtime.store == nil {
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
-	if record.Identity() != identity || post.Current != identity {
+	if record.Identity() != identity || (requireCurrent && post.Current != identity) || (!requireCurrent && post.Last != identity) {
 		return nil, fmt.Errorf("%w: committed request fence is not installed", ErrCodexLeaseTrustLost)
 	}
 	recordFence, foundFence := codexLeaseRuntimeRecordFence(&post, identity)
-	if !foundFence || record.RecordGeneration != recordFence.Revision || record.LeaseGeneration != recordFence.Lease || record.Generation != recordFence.RequestGeneration || record.CurrentAttemptGeneration != recordFence.CurrentAttempt {
+	if !foundFence || len(recordFence.TouchedAttempts) != expectedTouchedAttempts || record.RecordGeneration != recordFence.Revision || record.LeaseGeneration != recordFence.Lease || record.Generation != recordFence.RequestGeneration || record.CurrentAttemptGeneration != recordFence.CurrentAttempt {
 		return nil, fmt.Errorf("%w: committed request record fence mismatch", ErrCodexLeaseTrustLost)
 	}
 	attempt, foundAttempt := codexLeaseAttemptByGeneration(record.Attempts, record.CurrentAttemptGeneration)
-	if !foundAttempt || len(recordFence.TouchedAttempts) != 1 {
+	if !foundAttempt {
 		return nil, fmt.Errorf("%w: committed request attempt fence mismatch", ErrCodexLeaseTrustLost)
 	}
-	attemptFence := recordFence.TouchedAttempts[0]
-	if attemptFence.RequestGeneration != record.Generation || attemptFence.Generation != attempt.Generation || attemptFence.Revision != attempt.Revision {
-		return nil, fmt.Errorf("%w: committed request attempt fence mismatch", ErrCodexLeaseTrustLost)
+	for _, attemptFence := range recordFence.TouchedAttempts {
+		committedAttempt, found := codexLeaseAttemptByGeneration(record.Attempts, attemptFence.Generation)
+		if !found || attemptFence.RequestGeneration != record.Generation || attemptFence.Revision != committedAttempt.Revision {
+			return nil, fmt.Errorf("%w: committed request attempt fence mismatch", ErrCodexLeaseTrustLost)
+		}
 	}
 	account, resolved := runtime.store.resolveCodexLeaseAccount(record.AccountHash, accounts)
 	if !resolved {
@@ -990,6 +999,19 @@ func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts 
 		}
 		slotAccounts[index] = slotAccount
 	}
+	nextFence := cloneCodexLeaseGenerationFence(post)
+	for index := range nextFence.TouchedRecords {
+		nextFence.TouchedRecords[index].TouchedAttempts = nil
+	}
+	nextRecordFence, foundFence := codexLeaseRuntimeRecordFence(&nextFence, identity)
+	if !foundFence {
+		return nil, fmt.Errorf("%w: committed request fence is absent", ErrCodexLeaseTrustLost)
+	}
+	nextRecordFence.TouchedAttempts = []CodexAttemptFence{{
+		RequestGeneration: record.Generation,
+		Generation:        attempt.Generation,
+		Revision:          attempt.Revision,
+	}}
 	return &CodexLeaseRequestHandle{
 		runtime:      runtime,
 		key:          key,
@@ -999,64 +1021,7 @@ func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts 
 		record:       cloneCodexJournalRecordV2(record),
 		account:      account,
 		slotAccounts: slotAccounts,
-		fence:        cloneCodexLeaseGenerationFence(post),
-	}, nil
-}
-
-func (runtime *CodexLeaseRuntime) loadHandle(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity) (*CodexLeaseRequestHandle, error) {
-	return runtime.loadHandleForState(key, accounts, authority, identity, true)
-}
-
-func (runtime *CodexLeaseRuntime) loadHandleForState(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity, requireCurrent bool) (*CodexLeaseRequestHandle, error) {
-	restored, err := runtime.store.LoadLane(key, accounts, authority)
-	if err != nil {
-		return nil, err
-	}
-	if requireCurrent && (restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != identity) {
-		return nil, ErrCodexStaleTurn
-	}
-	current, ok := runtime.restoredRecord(restored, identity)
-	if !ok {
-		return nil, fmt.Errorf("%w: committed runtime record is absent", ErrCodexLeaseTrustLost)
-	}
-	fence, err := runtime.mutationFence(restored, current.Record)
-	if err != nil {
-		return nil, err
-	}
-	for index := range fence.TouchedRecords {
-		fence.TouchedRecords[index].TouchedAttempts = nil
-	}
-	attempt, ok := codexLeaseAttemptByGeneration(current.Record.Attempts, current.Record.CurrentAttemptGeneration)
-	if !ok {
-		return nil, fmt.Errorf("%w: committed runtime attempt is absent", ErrCodexLeaseTrustLost)
-	}
-	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, identity)
-	if !ok {
-		return nil, fmt.Errorf("%w: committed runtime fence is absent", ErrCodexLeaseTrustLost)
-	}
-	currentFence.TouchedAttempts = []CodexAttemptFence{{
-		RequestGeneration: current.Record.Generation,
-		Generation:        attempt.Generation,
-		Revision:          attempt.Revision,
-	}}
-	slotAccounts := make([]codex.AccountKey, len(current.Record.AttemptEnvelope.Slots))
-	for index, slot := range current.Record.AttemptEnvelope.Slots {
-		account, resolved := runtime.store.resolveCodexLeaseAccount(slot.AccountHash, accounts)
-		if !resolved {
-			return nil, fmt.Errorf("%w: request slot account is unavailable", ErrCodexLeaseAuthorityMismatch)
-		}
-		slotAccounts[index] = account
-	}
-	return &CodexLeaseRequestHandle{
-		runtime:      runtime,
-		key:          key,
-		accounts:     append([]codex.AccountKey(nil), accounts...),
-		authority:    cloneCodexLeaseAuthorityPolicy(authority),
-		identity:     identity,
-		record:       cloneCodexJournalRecordV2(current.Record),
-		account:      current.AccountKey,
-		slotAccounts: append([]codex.AccountKey(nil), slotAccounts...),
-		fence:        cloneCodexLeaseGenerationFence(fence),
+		fence:        nextFence,
 	}, nil
 }
 

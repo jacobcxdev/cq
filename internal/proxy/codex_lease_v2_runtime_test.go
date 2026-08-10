@@ -205,6 +205,176 @@ func TestCodexLeaseRuntimeBeginReturnsCommittedCleanupHandle(t *testing.T) {
 	assertCodexLeaseRuntimeRefs(t, handle, 0, 0, 0, true)
 }
 
+func TestCodexLeaseRuntimeMarkReturnsCommittedHandleWithoutPostCommitOwnerOperation(t *testing.T) {
+	t.Parallel()
+	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinatorWithOwner(t, owner)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	prepared, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.failAt.Store(owner.begins.Load() + 3)
+
+	dispatched, err := prepared.MarkDispatched()
+	if err != nil || dispatched == nil {
+		t.Fatalf("MarkDispatched = %#v, %v, want committed handle", dispatched, err)
+	}
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("MarkDispatched performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	if state := codexLeaseCurrentAttemptState(dispatched.record); state != CodexAttemptDispatched {
+		t.Fatalf("MarkDispatched attempt = %v, want dispatched", state)
+	}
+	assertCodexLeaseRuntimeRefs(t, dispatched, 1, 0, 0, false)
+}
+
+func TestCodexLeaseRuntimeAdmitReturnsCommittedHandleWithoutPostCommitOwnerOperation(t *testing.T) {
+	t.Parallel()
+	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinatorWithOwner(t, owner)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	prepared, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := prepared.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.failAt.Store(owner.begins.Load() + 3)
+
+	admitted, err := dispatched.AdmitHTTP2xx()
+	if err != nil || admitted == nil {
+		t.Fatalf("AdmitHTTP2xx = %#v, %v, want committed handle", admitted, err)
+	}
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("AdmitHTTP2xx performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	if state := codexLeaseCurrentAttemptState(admitted.record); state != CodexAttemptStreaming || !admitted.record.EverAdmitted {
+		t.Fatalf("AdmitHTTP2xx record = %#v, attempt=%v; want admitted streaming", admitted.record, state)
+	}
+	assertCodexLeaseRuntimeRefs(t, admitted, 1, 1, 1, false)
+}
+
+func TestCodexLeaseRuntimeRetryReturnsCommittedHandleWithoutPostCommitOwnerOperation(t *testing.T) {
+	t.Parallel()
+	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinatorWithOwner(t, owner)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	prepared, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := prepared.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.failAt.Store(owner.begins.Load() + 3)
+
+	retried, err := dispatched.RejectAndPrepare(2)
+	if err != nil || retried == nil {
+		t.Fatalf("RejectAndPrepare = %#v, %v, want committed handle", retried, err)
+	}
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("RejectAndPrepare performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	if retried.AccountKey() != "account-b" || retried.AttemptGeneration() != 2 || len(retried.record.Attempts) != 2 || retried.record.Attempts[0].State != CodexAttemptProviderFailed || retried.record.Attempts[1].State != CodexAttemptPrepared {
+		t.Fatalf("retry committed handle = %#v", retried)
+	}
+	recordFence, found := codexLeaseRuntimeRecordFence(&retried.fence, retried.identity)
+	if !found || len(recordFence.TouchedAttempts) != 1 || recordFence.TouchedAttempts[0].Generation != retried.AttemptGeneration() {
+		t.Fatalf("retry mutation fence = %#v, want current attempt only", retried.fence)
+	}
+	oldRevision := retried.record.Attempts[0].Revision
+	owner.failAt.Store(0)
+	resent, err := retried.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resent.record.Attempts[0].Revision != oldRevision {
+		t.Fatalf("resent retry changed terminal attempt revision: got %d want %d", resent.record.Attempts[0].Revision, oldRevision)
+	}
+}
+
+func TestCodexLeaseRuntimeFinishRejectedReturnsCommittedLastHandleWithoutPostCommitOwnerOperation(t *testing.T) {
+	t.Parallel()
+	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinatorWithOwner(t, owner)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	prepared, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := prepared.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.failAt.Store(owner.begins.Load() + 3)
+
+	failed, err := dispatched.FinishRejected()
+	if err != nil || failed == nil {
+		t.Fatalf("FinishRejected = %#v, %v, want committed handle", failed, err)
+	}
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("FinishRejected performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	if failed.State() != LeaseFailedUnadmitted || codexLeaseCurrentAttemptState(failed.record) != CodexAttemptProviderFailed || !failed.fence.Current.IsZero() || failed.fence.Last != failed.identity {
+		t.Fatalf("failed committed handle = %#v, fence=%#v", failed, failed.fence)
+	}
+	assertCodexLeaseRuntimeRefs(t, failed, 0, 0, 0, true)
+}
+
+func TestCodexLeaseRuntimeTerminalAndDrainReturnCommittedHandlesWithoutPostCommitOwnerOperations(t *testing.T) {
+	t.Parallel()
+	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinatorWithOwner(t, owner)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	prepared, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := prepared.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := dispatched.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.failAt.Store(owner.begins.Load() + 3)
+
+	terminal, err := admitted.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil || terminal == nil {
+		t.Fatalf("ProviderCompleted = %#v, %v, want committed handle", terminal, err)
+	}
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("ProviderCompleted performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	if terminal.State() != LeaseBoundQuiescent || codexLeaseCurrentAttemptState(terminal.record) != CodexAttemptProviderCompleted {
+		t.Fatalf("terminal committed handle = %#v", terminal)
+	}
+	assertCodexLeaseRuntimeRefs(t, terminal, 0, 0, 1, false)
+	owner.failAt.Store(owner.begins.Load() + 3)
+
+	drained, err := terminal.Drain()
+	if err != nil || drained == nil {
+		t.Fatalf("Drain = %#v, %v, want committed handle", drained, err)
+	}
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("Drain performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	assertCodexLeaseRuntimeRefs(t, drained, 0, 0, 0, true)
+}
+
 func TestCodexLeaseCommitCapturesInstalledRequestBeforeCompact(t *testing.T) {
 	t.Parallel()
 	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
