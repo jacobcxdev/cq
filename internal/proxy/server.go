@@ -107,6 +107,9 @@ type Server struct {
 	// ServingAttestor binds maintenance finalise proof authority to the exact
 	// pre-bound loopback listener passed to http.Server.Serve.
 	ServingAttestor *ServingAttestor
+	// CodexHTTPStartupValidation is an explicit one-shot validation mode. Nil
+	// preserves normal long-running server startup.
+	CodexHTTPStartupValidation CodexHTTPStartupValidationFunc
 	// shutdownGracePeriod is test-configurable; zero selects the production
 	// default. It is deliberately unexported so callers cannot weaken shutdown.
 	shutdownGracePeriod time.Duration
@@ -173,6 +176,10 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 		}
 		return errors.New("proxy server listener is unavailable")
 	}
+	if s.CodexHTTPStartupValidation != nil && s.ServingAttestor == nil {
+		_ = listener.Close()
+		return errors.New("Codex HTTP startup validation requires a serving attestor")
+	}
 	handler, err := s.handler()
 	if err != nil {
 		_ = listener.Close()
@@ -186,6 +193,12 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 			return err
 		}
 	}
+	var startupReady <-chan struct{}
+	if s.CodexHTTPStartupValidation != nil {
+		readyListener := newCodexHTTPStartupReadyListener(serveListener)
+		serveListener = readyListener
+		startupReady = readyListener.ready
+	}
 
 	srv := &http.Server{
 		Addr:              listener.Addr().String(),
@@ -196,12 +209,23 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var startupValidation codexHTTPStartupValidationRun
+	if s.CodexHTTPStartupValidation != nil {
+		startupValidation = runCodexHTTPStartupValidation(ctx, stop, startupReady, CodexHTTPStartupValidationRuntime{
+			ListenerAddress: listener.Addr().String(),
+			ServingAttestor: s.ServingAttestor,
+		}, s.CodexHTTPStartupValidation)
+	}
 
 	shutdownResult := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		if s.ServingAttestor != nil {
-			<-s.ServingAttestor.BeginClose()
+			if s.CodexHTTPStartupValidation != nil && !codexHTTPStartupValidationCompleted(startupValidation) {
+				<-s.ServingAttestor.abortUnexpected()
+			} else {
+				<-s.ServingAttestor.BeginClose()
+			}
 		}
 		gracePeriod := s.shutdownGracePeriod
 		if gracePeriod <= 0 {
@@ -233,6 +257,11 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 	}
 	if shutdownErr != nil {
 		return shutdownErr
+	}
+	if s.CodexHTTPStartupValidation != nil {
+		if err := codexHTTPStartupValidationResult(startupValidation); err != nil {
+			return errors.Join(errors.New("Codex HTTP startup validation failed"), err)
+		}
 	}
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
