@@ -6,8 +6,62 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
+
+func TestUnixSecureDirectoryRenameNoReplaceHasOneWinner(t *testing.T) {
+	t.Parallel()
+	state := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"first": "one", "second": "two"} {
+		if err := os.WriteFile(filepath.Join(state, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory, err := (OSFileSystem{}).OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+
+	var wait sync.WaitGroup
+	errorsBySource := make([]error, 2)
+	for index, source := range []string{"first", "second"} {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errorsBySource[index] = directory.RenameNoReplace(source, "canonical")
+		}()
+	}
+	wait.Wait()
+	winners := 0
+	losers := 0
+	for _, err := range errorsBySource {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, os.ErrExist):
+			losers++
+		case errors.Is(err, ErrSecureCapabilityUnavailable):
+			t.Skip("kernel no-replace rename is unavailable")
+		default:
+			t.Fatalf("rename error = %v", err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("rename winners/losers = %d/%d, want 1/1", winners, losers)
+	}
+	got, err := os.ReadFile(filepath.Join(state, "canonical"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "one" && string(got) != "two" {
+		t.Fatalf("canonical content = %q", got)
+	}
+}
 
 func TestUnixSecureDirectoryRetainsOpenedIdentity(t *testing.T) {
 	t.Parallel()

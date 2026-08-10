@@ -19,10 +19,10 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
-func TestCodexLeaseV2BothMissingRequiresAuthorityWithoutMutation(t *testing.T) {
+func TestInitialiseCodexContinuityAuthorityCreatesFreshV2Pair(t *testing.T) {
 	t.Parallel()
 	fsys := fsutil.NewMemFS()
-	_, err := OpenCodexContinuityCoordinator(CodexContinuityOpenOptions{
+	options := CodexContinuityOpenOptions{
 		FS:          fsys,
 		KeyPath:     "/state/leases.key",
 		JournalPath: "/state/leases.json",
@@ -31,18 +31,56 @@ func TestCodexLeaseV2BothMissingRequiresAuthorityWithoutMutation(t *testing.T) {
 			Now:       func() time.Time { return time.Date(2026, 8, 9, 3, 0, 0, 0, time.UTC) },
 		},
 		Modes: CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{}},
-	}, testCodexLeaseOwner{})
+	}
+	if err := InitialiseCodexContinuityAuthority(options, testCodexLeaseOwner{}); err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := OpenCodexContinuityCoordinator(options, testCodexLeaseOwner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	if coordinator.Store().Generation() != 1 {
+		t.Fatalf("generation = %d, want 1", coordinator.Store().Generation())
+	}
+	key, err := fsys.ReadFile(options.KeyPath)
+	if err != nil || len(key) != codexLeaseHMACKeyBytes {
+		t.Fatalf("key length/error = %d/%v, want %d/nil", len(key), err, codexLeaseHMACKeyBytes)
+	}
+	journal, err := fsys.ReadFile(options.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope codexLeaseJournalEnvelopeV2
+	if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Version != 2 || envelope.HashVersion != 1 || envelope.Generation != 1 || envelope.Cutover.SourceVersion != 0 || envelope.Cutover.State != CodexLeaseCutoverComplete || !envelope.Cutover.NoLegacyAuthority || len(envelope.Lanes) != 0 || len(envelope.Records) != 0 {
+		t.Fatalf("fresh envelope tuple invalid: version=%d hash=%d generation=%d source=%d state=%s no_legacy=%t lanes=%d records=%d", envelope.Version, envelope.HashVersion, envelope.Generation, envelope.Cutover.SourceVersion, envelope.Cutover.State, envelope.Cutover.NoLegacyAuthority, len(envelope.Lanes), len(envelope.Records))
+	}
+	for _, path := range []string{freshCodexLeaseStagePath(options.KeyPath), freshCodexLeaseStagePath(options.JournalPath)} {
+		if _, statErr := fsys.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("fresh stage remains at %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestCodexLeaseV2OpenBothMissingRemainsMutationFree(t *testing.T) {
+	t.Parallel()
+	fsys := fsutil.NewMemFS()
+	_, err := OpenCodexContinuityCoordinator(testCodexContinuityOptions(fsys), testCodexLeaseOwner{})
 	if !errors.Is(err, ErrCodexLeaseFreshInstallAuthorityRequired) {
-		t.Fatalf("open error = %T %v, want ErrCodexLeaseFreshInstallAuthorityRequired", err, err)
+		t.Fatalf("open error = %T %v, want fresh-install authority required", err, err)
 	}
 	for _, path := range []string{
 		"/state",
 		"/state/leases.key",
 		"/state/leases.json",
-		"/state/leases.json.v1.archive",
+		freshCodexLeaseStagePath("/state/leases.key"),
+		freshCodexLeaseStagePath("/state/leases.json"),
 	} {
 		if _, statErr := fsys.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("fresh-install refusal mutated %s: %v", path, statErr)
+			t.Fatalf("open mutated %s: %v", filepath.Base(path), statErr)
 		}
 	}
 }
@@ -80,10 +118,15 @@ func TestCodexLeaseV2RequiresExactDetachedModeAuthoritySnapshot(t *testing.T) {
 		owner := &countingCodexLeaseTestOwner{}
 		options := testCodexContinuityOptions(fsys)
 		options.Modes = CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{}}
-		if _, err := OpenCodexContinuityCoordinator(options, owner); !errors.Is(err, ErrCodexLeaseFreshInstallAuthorityRequired) {
-			t.Fatalf("empty mode snapshot open error = %T %v, want fresh-install authority", err, err)
+		if err := InitialiseCodexContinuityAuthority(options, owner); err != nil {
+			t.Fatalf("empty mode snapshot initialise error = %T %v", err, err)
 		}
-		if owner.asserts != 1 || owner.begins != 1 {
+		coordinator, err := OpenCodexContinuityCoordinator(options, owner)
+		if err != nil {
+			t.Fatalf("empty mode snapshot open error = %T %v", err, err)
+		}
+		defer coordinator.Close()
+		if owner.asserts != 2 || owner.begins != 2 {
 			t.Fatalf("valid empty mode snapshot owner calls = asserts %d begins %d", owner.asserts, owner.begins)
 		}
 	})

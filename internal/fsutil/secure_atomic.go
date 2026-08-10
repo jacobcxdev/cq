@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -99,14 +100,14 @@ func SecureAtomicWrite(fsys FileSystem, path string, data []byte) error {
 	defer directory.Close()
 	return secureAtomicWriteInDirectory(inspector, directory, base, data, nil, func() error {
 		return validateSecureDirectoryHandle(inspector, directory, dir)
-	})
+	}, false)
 }
 
 // SecureAtomicWriteInDirectory commits data relative to one retained directory
 // handle. Callers that already established directory authority use this form so
 // no operation can drift into a replacement pathname namespace.
 func SecureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte) error {
-	return secureAtomicWriteInDirectory(inspector, directory, name, data, nil, nil)
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, nil, nil, false)
 }
 
 // SecureAtomicWriteInDirectoryChecked is SecureAtomicWriteInDirectory with a
@@ -114,10 +115,23 @@ func SecureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 // final operation before the canonical rename. A failed precondition leaves the
 // previous destination intact and returns a not-committed outcome.
 func SecureAtomicWriteInDirectoryChecked(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace func() error) error {
-	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforeReplace, nil)
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforeReplace, nil, false)
 }
 
-func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error) error {
+// SecureAtomicCreateInDirectory publishes data under a previously absent name.
+// The final rename is an atomic no-replace operation, so a concurrent creator
+// wins without its bytes being overwritten.
+func SecureAtomicCreateInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte) error {
+	return SecureAtomicCreateInDirectoryChecked(inspector, directory, name, data, nil)
+}
+
+// SecureAtomicCreateInDirectoryChecked runs beforePublish after the temporary
+// file is durable and as the final operation before the no-replace rename.
+func SecureAtomicCreateInDirectoryChecked(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforePublish func() error) error {
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforePublish, nil, true)
+}
+
+func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error, noReplace bool) error {
 	if inspector == nil || directory == nil {
 		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
 	}
@@ -194,8 +208,13 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 			return commitFailure("validate durable write precondition", err)
 		}
 	}
-	if err := directory.Rename(temporaryName, name); err != nil {
-		return commitFailure("replace durable file", err)
+	if noReplace {
+		err = directory.RenameNoReplace(temporaryName, name)
+	} else {
+		err = directory.Rename(temporaryName, name)
+	}
+	if err != nil {
+		return commitFailure("publish durable file", err)
 	}
 	removeTemporary = false
 	installedInfo, err := secureRegularFileInfoInDirectory(inspector, directory, name)
@@ -224,6 +243,100 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 		return commitIndeterminate("validate durable state directory after sync", err)
 	}
 	return nil
+}
+
+// SecurePromoteNoReplaceInDirectory atomically promotes one already durable
+// private file to a previously absent canonical name. The source content and
+// identity must match the caller's retained proof before publication and after
+// the directory entry is durable.
+func SecurePromoteNoReplaceInDirectory(inspector SecurePathInspector, directory SecureDirectory, sourceName, destinationName string, expected []byte, expectedIdentity SecureFileIdentity) error {
+	return SecurePromoteNoReplaceInDirectoryChecked(inspector, directory, sourceName, destinationName, expected, expectedIdentity, nil)
+}
+
+// SecurePromoteNoReplaceInDirectoryChecked runs beforePromote after the final
+// source proof and immediately before the no-replace rename.
+func SecurePromoteNoReplaceInDirectoryChecked(inspector SecurePathInspector, directory SecureDirectory, sourceName, destinationName string, expected []byte, expectedIdentity SecureFileIdentity, beforePromote func() error) error {
+	if inspector == nil || directory == nil {
+		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
+	}
+	if err := validateSecureEntryName(sourceName); err != nil {
+		return commitFailure("validate source", err)
+	}
+	if err := validateSecureEntryName(destinationName); err != nil {
+		return commitFailure("validate destination", err)
+	}
+	if sourceName == destinationName {
+		return commitFailure("validate promotion", fmt.Errorf("%w: identical source and destination", ErrUnsafeSecurePath))
+	}
+	validateDirectory := func() error {
+		return validateSecureDirectoryDescriptor(inspector, directory)
+	}
+	if err := validateDirectory(); err != nil {
+		return commitFailure("validate durable state directory", err)
+	}
+	if err := validateSecureRegularFileInDirectoryIfPresent(inspector, directory, destinationName); err != nil {
+		return commitFailure("validate durable destination", err)
+	}
+	validateSource := func() error {
+		data, identity, err := ReadSecureFileInDirectoryWithIdentity(inspector, directory, sourceName, secureExpectedReadLimit(expected))
+		if err != nil {
+			return err
+		}
+		if identity != expectedIdentity || !bytes.Equal(data, expected) {
+			return fmt.Errorf("%w: promotion source proof", ErrUnsafeSecurePath)
+		}
+		return nil
+	}
+	if err := validateSource(); err != nil {
+		return commitFailure("validate promotion source", err)
+	}
+	if err := validateDirectory(); err != nil {
+		return commitFailure("validate durable state directory before promotion", err)
+	}
+	if err := validateSource(); err != nil {
+		return commitFailure("revalidate promotion source", err)
+	}
+	if beforePromote != nil {
+		if err := beforePromote(); err != nil {
+			return commitFailure("validate promotion precondition", err)
+		}
+	}
+	if err := directory.RenameNoReplace(sourceName, destinationName); err != nil {
+		return commitFailure("promote durable file", err)
+	}
+	validateInstalled := func() error {
+		data, identity, err := ReadSecureFileInDirectoryWithIdentity(inspector, directory, destinationName, secureExpectedReadLimit(expected))
+		if err != nil {
+			return err
+		}
+		if identity != expectedIdentity || !bytes.Equal(data, expected) {
+			return fmt.Errorf("%w: installed promotion proof", ErrUnsafeSecurePath)
+		}
+		return nil
+	}
+	if err := validateInstalled(); err != nil {
+		return commitIndeterminate("validate promoted durable file", err)
+	}
+	if err := validateDirectory(); err != nil {
+		return commitIndeterminate("validate durable state directory after promotion", err)
+	}
+	if err := directory.Sync(); err != nil {
+		return commitIndeterminate("sync durable state directory", err)
+	}
+	if err := validateInstalled(); err != nil {
+		return commitIndeterminate("revalidate promoted durable file after sync", err)
+	}
+	if err := validateDirectory(); err != nil {
+		return commitIndeterminate("validate durable state directory after sync", err)
+	}
+	return nil
+}
+
+func secureExpectedReadLimit(expected []byte) int64 {
+	if len(expected) >= int(^uint(0)>>1) {
+		return int64(len(expected))
+	}
+	return int64(len(expected)) + 1
 }
 
 func EnsureSecureDirectory(fsys FileSystem, path string) error {

@@ -40,6 +40,127 @@ func TestSecureAtomicWriteUsesUniqueExclusiveTemporaryFiles(t *testing.T) {
 	}
 }
 
+func TestSecureAtomicCreateInDirectoryDoesNotReplaceExisting(t *testing.T) {
+	t.Parallel()
+	fsys := NewMemFS()
+	if err := fsys.MkdirAll("/state", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/state/value", []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fsys.OpenSecureDirectory("/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+
+	err = SecureAtomicCreateInDirectory(fsys, directory, "value", []byte("new"))
+	if !errors.Is(err, ErrCommitNotCommitted) || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("SecureAtomicCreateInDirectory error = %v, want not-committed exists", err)
+	}
+	got, readErr := fsys.ReadFile("/state/value")
+	if readErr != nil || string(got) != "old" {
+		t.Fatalf("destination = %q, %v; want old", got, readErr)
+	}
+}
+
+func TestSecurePromoteNoReplaceInDirectoryMovesExactSource(t *testing.T) {
+	t.Parallel()
+	fsys := NewMemFS()
+	if err := fsys.MkdirAll("/state", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fsys.OpenSecureDirectory("/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if err := SecureAtomicCreateInDirectory(fsys, directory, ".value.fresh", []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	data, identity, err := ReadSecureFileInDirectoryWithIdentity(fsys, directory, ".value.fresh", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SecurePromoteNoReplaceInDirectory(fsys, directory, ".value.fresh", "value", data, identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsys.ReadFile("/state/.value.fresh"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source error = %v, want not exist", err)
+	}
+	got, gotIdentity, err := ReadSecureFileInDirectoryWithIdentity(fsys, directory, "value", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" || gotIdentity != identity {
+		t.Fatalf("installed = %q, %#v; want new, %#v", got, gotIdentity, identity)
+	}
+}
+
+func TestSecurePromoteNoReplaceInDirectoryDoesNotReplaceExisting(t *testing.T) {
+	t.Parallel()
+	fsys := NewMemFS()
+	if err := fsys.MkdirAll("/state", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fsys.OpenSecureDirectory("/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if err := SecureAtomicCreateInDirectory(fsys, directory, ".value.fresh", []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	data, identity, err := ReadSecureFileInDirectoryWithIdentity(fsys, directory, ".value.fresh", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SecureAtomicCreateInDirectory(fsys, directory, "value", []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+
+	err = SecurePromoteNoReplaceInDirectory(fsys, directory, ".value.fresh", "value", data, identity)
+	if !errors.Is(err, ErrCommitNotCommitted) || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("SecurePromoteNoReplaceInDirectory error = %v, want not-committed exists", err)
+	}
+	gotSource, sourceErr := fsys.ReadFile("/state/.value.fresh")
+	gotDestination, destinationErr := fsys.ReadFile("/state/value")
+	if sourceErr != nil || destinationErr != nil || string(gotSource) != "new" || string(gotDestination) != "old" {
+		t.Fatalf("source/destination = %q/%q, %v/%v; want new/old", gotSource, gotDestination, sourceErr, destinationErr)
+	}
+}
+
+func TestSecurePromoteNoReplaceInDirectoryRejectsSourceIdentitySwap(t *testing.T) {
+	t.Parallel()
+	fsys := NewMemFS()
+	if err := fsys.MkdirAll("/state", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := fsys.OpenSecureDirectory("/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SecureAtomicCreateInDirectory(fsys, opened, ".value.fresh", []byte("same")); err != nil {
+		t.Fatal(err)
+	}
+	data, identity, err := ReadSecureFileInDirectoryWithIdentity(fsys, opened, ".value.fresh", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := &replaceAfterOpenDirectory{SecureDirectory: opened, fsys: fsys, path: "/state"}
+	defer directory.Close()
+
+	err = SecurePromoteNoReplaceInDirectory(fsys, directory, ".value.fresh", "value", data, identity)
+	if !errors.Is(err, ErrCommitNotCommitted) || !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("promotion error = %v, want unsafe not-committed", err)
+	}
+	if _, err := fsys.ReadFile("/state/value"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination error = %v, want not exist", err)
+	}
+}
+
 func TestSecureAtomicWriteCrashOutcomes(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -1108,6 +1229,21 @@ func (dir *replacingSecureDirectory) OpenExclusiveLock(name string, mode os.File
 
 func (dir *replacingSecureDirectory) Rename(oldName, newName string) error {
 	if err := dir.fsys.MemFS.Rename(filepath.Join(dir.path, oldName), filepath.Join(dir.path, newName)); err != nil {
+		return err
+	}
+	if dir.fsys.replaceAfterRename {
+		dir.replacePath()
+	}
+	return nil
+}
+
+func (dir *replacingSecureDirectory) RenameNoReplace(oldName, newName string) error {
+	opened, err := dir.fsys.MemFS.OpenSecureDirectory(dir.path)
+	if err != nil {
+		return err
+	}
+	defer opened.Close()
+	if err := opened.RenameNoReplace(oldName, newName); err != nil {
 		return err
 	}
 	if dir.fsys.replaceAfterRename {

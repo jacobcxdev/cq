@@ -121,6 +121,7 @@ type SecureDirectory interface {
 	CreateExclusive(name string, perm os.FileMode) (DurableFile, error)
 	OpenExclusiveLock(name string, perm os.FileMode) (ExclusiveLock, error)
 	Rename(oldName, newName string) error
+	RenameNoReplace(oldName, newName string) error
 	Remove(name string) error
 	Sync() error
 	Close() error

@@ -651,6 +651,36 @@ func (directory *memSecureDirectory) Rename(oldName, newName string) error {
 	return nil
 }
 
+func (directory *memSecureDirectory) RenameNoReplace(oldName, newName string) error {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	if err := validateSecureEntryName(oldName); err != nil {
+		return err
+	}
+	if err := validateSecureEntryName(newName); err != nil {
+		return err
+	}
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return err
+	}
+	oldPath := filepath.Join(path, oldName)
+	file, ok := directory.fsys.files[oldPath]
+	if !ok {
+		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
+	}
+	newPath := filepath.Join(path, newName)
+	if _, exists := directory.fsys.files[newPath]; exists {
+		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+	}
+	if _, exists := directory.fsys.dirs[filepath.Clean(newPath)]; exists {
+		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+	}
+	directory.fsys.files[newPath] = file
+	delete(directory.fsys.files, oldPath)
+	return nil
+}
+
 func (directory *memSecureDirectory) Remove(name string) error {
 	directory.fsys.mu.Lock()
 	defer directory.fsys.mu.Unlock()

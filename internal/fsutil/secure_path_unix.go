@@ -137,6 +137,17 @@ func (directory *unixSecureDirectory) Rename(oldName, newName string) error {
 	return unix.Renameat(fd, oldName, fd, newName)
 }
 
+func (directory *unixSecureDirectory) RenameNoReplace(oldName, newName string) error {
+	if err := validateSecureEntryName(oldName); err != nil {
+		return err
+	}
+	if err := validateSecureEntryName(newName); err != nil {
+		return err
+	}
+	fd := int(directory.file.Fd())
+	return renameNoReplaceAt(fd, oldName, fd, newName)
+}
+
 func (directory *unixSecureDirectory) Remove(name string) error {
 	if err := validateSecureEntryName(name); err != nil {
 		return err
