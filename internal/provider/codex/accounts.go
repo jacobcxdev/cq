@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
@@ -211,58 +210,6 @@ func providerAccount(logical LogicalAccount, active bool) provider.Account {
 		AccountID: logical.Identity.AccountID, Email: logical.Identity.Email,
 		Label: logical.Identity.PlanType, Active: active, SwitchID: logical.Identity.Email,
 	}
-}
-
-// PersistCodexAccount atomically rewrites one CQ-managed account file. Automatic
-// code must never mirror a managed refresh into the shared system auth file.
-func PersistCodexAccount(fs fsutil.FileSystem, acct CodexAccount, home string) error {
-	systemAuthPath := filepath.Join(home, ".codex", "auth.json")
-	if filepath.Clean(acct.FilePath) == filepath.Clean(systemAuthPath) {
-		return errors.New("refusing to rewrite Codex system auth")
-	}
-	data, err := fs.ReadFile(acct.FilePath)
-	if err != nil {
-		return fmt.Errorf("read account file: %w", err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return fmt.Errorf("parse account file: %w", err)
-	}
-	if doc == nil {
-		doc = make(map[string]any)
-	}
-
-	tokens, _ := doc["tokens"].(map[string]any)
-	if tokens == nil {
-		tokens = make(map[string]any)
-	}
-	tokens["access_token"] = acct.AccessToken
-	if acct.RefreshToken != "" {
-		tokens["refresh_token"] = acct.RefreshToken
-	}
-	if acct.IDToken != "" {
-		tokens["id_token"] = acct.IDToken
-	}
-	if acct.AccountID != "" {
-		tokens["account_id"] = acct.AccountID
-	}
-	doc["tokens"] = tokens
-	if acct.ExpiresAt > 0 {
-		doc["cq_expires_at"] = acct.ExpiresAt
-	} else {
-		delete(doc, "cq_expires_at")
-	}
-
-	updated, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("marshal account file: %w", err)
-	}
-
-	if err := atomicWrite(fs, acct.FilePath, updated); err != nil {
-		return fmt.Errorf("write account file: %w", err)
-	}
-
-	return nil
 }
 
 // atomicWrite writes data to path using a tmp+rename pattern.

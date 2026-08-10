@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -108,56 +107,6 @@ func firstCodexAccessTokenFromInventory(ctx context.Context, inventory codexprov
 			}
 		}
 	}
-	return "", fmt.Errorf("no codex account with token")
-}
-
-// codexRefreshFunc is the signature for a Codex token refresh function.
-// It matches auth.RefreshCodexToken so real callers can pass it directly.
-type codexRefreshFunc func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error)
-
-// codexPersistFunc is the signature for persisting an updated CodexAccount.
-// It matches codexprov.PersistCodexAccount so real callers can pass it directly.
-type codexPersistFunc func(fs fsutil.FileSystem, acct codexprov.CodexAccount, home string) error
-
-// firstCodexAccessTokenWithRefresh returns the best available Codex access token
-// from accounts. The active account's access token is returned optimistically
-// when present because upstream may still accept it despite stale local expiry
-// metadata. Otherwise, fresh fallback tokens are preferred before refreshFn is
-// used to obtain and persist new tokens from a RefreshToken.
-func firstCodexAccessTokenWithRefresh(
-	ctx context.Context,
-	accounts []codexprov.CodexAccount,
-	refreshFn codexRefreshFunc,
-	fs fsutil.FileSystem,
-	home string,
-	persistFn codexPersistFunc,
-) (string, error) {
-	if len(accounts) == 0 {
-		return "", fmt.Errorf("no codex accounts")
-	}
-	now := time.Now()
-
-	// First pass: try the active account token optimistically. Codex access tokens
-	// can remain accepted by upstream even when local expiry metadata is stale.
-	for _, account := range accounts {
-		if account.IsActive && account.AccessToken != "" {
-			return account.AccessToken, nil
-		}
-	}
-
-	// Second pass: pick the best already-fresh fallback token.
-	best, bestExpires := "", int64(0)
-	for _, account := range accounts {
-		best, bestExpires = betterTokenCandidate(best, bestExpires, account.AccessToken, account.ExpiresAt, now)
-	}
-	if best != "" {
-		return best, nil
-	}
-
-	// Direct refresh of shared Codex credentials is permanently forbidden.
-	// Production callers use firstCodexAccessTokenFromInventory and the broker.
-	_, _, _, _, _ = ctx, refreshFn, fs, home, persistFn
-
 	return "", fmt.Errorf("no codex account with token")
 }
 

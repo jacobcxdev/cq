@@ -114,7 +114,9 @@ func TestRefreshEqualSystemTokenPermanentlyExportsLineage(t *testing.T) {
 
 func TestRefreshUnequalSystemTokenKeepsIndependentOwnership(t *testing.T) {
 	coordinator, fs, ref, revision := testRefreshRecord(t)
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthWithRefresh("other", "other", fakeCodexJWT("other@test.invalid", "other", "other", "plus"), "different")
+	systemPath := "/fake/home/.codex/auth.json"
+	systemBefore := codexAuthWithRefresh("other", "other", fakeCodexJWT("other@test.invalid", "other", "other", "plus"), "different")
+	fs.files[systemPath] = systemBefore
 	fs.modes["/fake/home/.codex/auth.json"] = 0o600
 	coordinator.RefreshExchange = successfulRefresh
 	if _, err := coordinator.Refresh(context.Background(), ref, revision); err != nil {
@@ -126,6 +128,35 @@ func TestRefreshUnequalSystemTokenKeepsIndependentOwnership(t *testing.T) {
 	}
 	if loaded.Metadata.RefreshOwnership != RefreshCQOwnedNeverExported {
 		t.Fatalf("ownership = %q", loaded.Metadata.RefreshOwnership)
+	}
+	if got := string(fs.files[systemPath]); got != string(systemBefore) {
+		t.Fatal("managed refresh rewrote system auth")
+	}
+}
+
+func TestCredentialCoordinatorRefreshReplacesHigherStoredExpiry(t *testing.T) {
+	coordinator, _, ref, revision := testRefreshRecord(t)
+	record, err := coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Document["cq_expires_at"] = int64(9_999_999_999_999)
+	if err := coordinator.Store.Commit(&record, revision); err != nil {
+		t.Fatal(err)
+	}
+
+	coordinator.RefreshExchange = successfulRefresh
+	if _, err := coordinator.Refresh(context.Background(), ref, record.Metadata.Revision); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantExpiresAt = int64(4_600_000)
+	got, ok := loaded.Document["cq_expires_at"].(float64)
+	if !ok || int64(got) != wantExpiresAt {
+		t.Fatalf("cq_expires_at = %#v, want %d", loaded.Document["cq_expires_at"], wantExpiresAt)
 	}
 }
 

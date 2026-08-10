@@ -239,6 +239,9 @@ func TestManagedStoreRoundTripsClosedMetadataAndUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveNew: %v", err)
 	}
+	record.Credential.AccessToken = "updated-access"
+	record.Credential.RefreshToken = "updated-refresh"
+	record.Document["OPENAI_API_KEY"] = "sk-test"
 	record.Document["unknown"] = map[string]any{"keep": true}
 	metadataDocument := record.Document["_cq"].(map[string]any)
 	metadataDocument["future_field"] = "keep"
@@ -252,6 +255,12 @@ func TestManagedStoreRoundTripsClosedMetadataAndUnknownFields(t *testing.T) {
 	}
 	if loaded.Metadata.Provenance != ProvenanceCQOAuth || loaded.Metadata.RefreshOwnership != RefreshCQOwnedNeverExported || loaded.Metadata.OperationState != OperationReady {
 		t.Fatalf("metadata = %+v", loaded.Metadata)
+	}
+	if loaded.Credential.AccessToken != "updated-access" || loaded.Credential.RefreshToken != "updated-refresh" {
+		t.Fatalf("credential = %+v", loaded.Credential)
+	}
+	if got := loaded.Document["OPENAI_API_KEY"]; got != "sk-test" {
+		t.Fatalf("OPENAI_API_KEY = %#v, want sk-test", got)
 	}
 	if _, ok := loaded.Document["unknown"]; !ok {
 		t.Fatal("unknown field was lost")
