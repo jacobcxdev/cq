@@ -39,36 +39,41 @@ const (
 )
 
 const (
-	CodexReadinessMarkerVersion = 1
+	CodexReadinessMarkerVersion = 2
 	CodexRoutingJournalVersion  = 1
 	CurrentCodexParserSchema    = 1
 	CurrentCodexLeaseSchema     = 2
-	CodexHTTPFixtureHash        = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
+	// CodexHTTPReadinessSemanticsRevision invalidates proof produced before
+	// conservative HTTP routing and replay became one frozen runtime contract.
+	CodexHTTPReadinessSemanticsRevision = "http-conservative-routing-v2"
+	CodexHTTPFixtureHash                = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
 )
 
 var CodexHTTPRequiredGates = []string{
-	"strong-metadata",
-	"lease-pinning",
-	"pre-admission-failover",
-	"synchronous-journal",
-	"continuity-affinity",
-	"compressed-replay",
+	"frozen-single-transform-envelope",
+	"warm-affinity",
+	"deterministic-fallback",
+	"terminal-default-once",
+	"exact-pre-admission-hard429-replay",
+	"admitted-no-migration",
+	"v2-journal-runtime",
 	"installed-listener",
 }
 
 // CodexReadinessMarker is explicit, versioned proof for one enforcement tuple.
 type CodexReadinessMarker struct {
-	Version         int                   `json:"version"`
-	Transport       CodexRoutingTransport `json:"transport"`
-	CQBuild         string                `json:"cq_build"`
-	ParserSchema    int                   `json:"parser_schema"`
-	LeaseSchema     int                   `json:"lease_schema"`
-	ClientBuild     string                `json:"client_build"`
-	RetryBudget     int                   `json:"retry_budget"`
-	FixtureHash     string                `json:"fixture_hash"`
-	InstalledResult string                `json:"installed_result"`
-	CompletedGates  []string              `json:"completed_gates"`
-	ValidatedAt     time.Time             `json:"validated_at"`
+	Version           int                   `json:"version"`
+	Transport         CodexRoutingTransport `json:"transport"`
+	CQBuild           string                `json:"cq_build"`
+	ParserSchema      int                   `json:"parser_schema"`
+	LeaseSchema       int                   `json:"lease_schema"`
+	SemanticsRevision string                `json:"semantics_revision"`
+	ClientBuild       string                `json:"client_build"`
+	RetryBudget       int                   `json:"retry_budget"`
+	FixtureHash       string                `json:"fixture_hash"`
+	InstalledResult   string                `json:"installed_result"`
+	CompletedGates    []string              `json:"completed_gates"`
+	ValidatedAt       time.Time             `json:"validated_at"`
 }
 
 // CodexTransportRequirements describes the exact runtime tuple a marker must match.
@@ -77,12 +82,63 @@ type CodexTransportRequirements struct {
 	CQBuild            string
 	ParserSchema       int
 	LeaseSchema        int
+	SemanticsRevision  string
 	ClientBuild        string
 	RetryBudget        int
 	FixtureHash        string
 	RequiredGates      []string
 	ObserveImplemented bool
 	EnforceImplemented bool
+}
+
+// CodexReadinessTuple is the exact runtime identity covered by validation.
+// It contains no credentials, account identity, or turn identity.
+type CodexReadinessTuple struct {
+	Transport         CodexRoutingTransport
+	CQBuild           string
+	ParserSchema      int
+	LeaseSchema       int
+	SemanticsRevision string
+	ClientBuild       string
+	RetryBudget       int
+	FixtureHash       string
+}
+
+// CodexHTTPReadinessEvidenceSource identifies whether validation exercised the
+// installed listener or only isolated synthetic listeners.
+type CodexHTTPReadinessEvidenceSource string
+
+const (
+	CodexHTTPReadinessEvidenceSynthetic         CodexHTTPReadinessEvidenceSource = "synthetic-only"
+	CodexHTTPReadinessEvidenceInstalledListener CodexHTTPReadinessEvidenceSource = "installed-listener"
+)
+
+// CodexHTTPReadinessEvidence is positive, privacy-safe proof supplied by the
+// post-handler acceptance runner. Synthetic corpus success alone is not proof.
+type CodexHTTPReadinessEvidence struct {
+	Source     CodexHTTPReadinessEvidenceSource
+	Tuple      CodexReadinessTuple
+	Gates      CodexHTTPReadinessGateEvidence
+	Acceptance CodexHTTPAcceptanceResult
+}
+
+// CodexHTTPReadinessGateEvidence contains only aggregate, privacy-safe
+// measurements. Positive case counts prove every semantic path was exercised;
+// zero violation counts prove promotion had no observed unsafe outcome.
+type CodexHTTPReadinessGateEvidence struct {
+	Stage11CorpusTurns                  uint64
+	InstalledTurns                      uint64
+	FrozenSingleTransformEnvelopeCases  uint64
+	WarmAffinityCases                   uint64
+	DeterministicFallbackCases          uint64
+	TerminalDefaultOnceCases            uint64
+	ExactPreAdmissionHard429ReplayCases uint64
+	AdmittedNoMigrationCases            uint64
+	V2JournalRuntimeCases               uint64
+	RoutingMismatches                   uint64
+	UnknownLifecycleEvents              uint64
+	RawIdentifierLeaks                  uint64
+	AutomaticAuthWrites                 uint64
 }
 
 // CodexModeStatus is immutable for one proxy process.
@@ -125,6 +181,7 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 	}
 	httpReq := common
 	httpReq.Transport = CodexRoutingHTTP
+	httpReq.SemanticsRevision = CodexHTTPReadinessSemanticsRevision
 	httpReq.RetryBudget = 1
 	httpReq.FixtureHash = CodexHTTPFixtureHash
 	httpReq.RequiredGates = append([]string(nil), CodexHTTPRequiredGates...)
@@ -288,7 +345,7 @@ func SaveCodexReadinessMarker(dir string, marker CodexReadinessMarker) error {
 	if marker.Transport != CodexRoutingHTTP && marker.Transport != CodexRoutingWebSocket {
 		return fmt.Errorf("invalid readiness marker transport %q", marker.Transport)
 	}
-	if marker.CQBuild == "" || marker.ParserSchema <= 0 || marker.LeaseSchema <= 0 || marker.ClientBuild == "" || marker.RetryBudget < 0 || marker.FixtureHash == "" || marker.InstalledResult == "" || len(marker.CompletedGates) == 0 || marker.ValidatedAt.IsZero() {
+	if marker.CQBuild == "" || marker.ParserSchema <= 0 || marker.LeaseSchema <= 0 || marker.SemanticsRevision == "" || marker.ClientBuild == "" || marker.RetryBudget < 0 || marker.FixtureHash == "" || marker.InstalledResult != "passed" || len(marker.CompletedGates) == 0 || marker.ValidatedAt.IsZero() {
 		return fmt.Errorf("readiness marker is incomplete")
 	}
 	return saveJSONFile(codexReadinessPath(dir, marker.Transport), &marker)
@@ -304,7 +361,7 @@ func ValidateCodexReadinessMarker(marker CodexReadinessMarker, required CodexTra
 	if required.Transport != CodexRoutingHTTP && required.Transport != CodexRoutingWebSocket {
 		return fmt.Errorf("readiness requirements have invalid transport")
 	}
-	if required.CQBuild == "" || required.ParserSchema <= 0 || required.LeaseSchema <= 0 || required.ClientBuild == "" || required.RetryBudget < 0 || required.FixtureHash == "" || len(required.RequiredGates) == 0 {
+	if required.CQBuild == "" || required.ParserSchema <= 0 || required.LeaseSchema <= 0 || required.SemanticsRevision == "" || required.ClientBuild == "" || required.RetryBudget < 0 || required.FixtureHash == "" || !validUniqueGates(required.RequiredGates) {
 		return fmt.Errorf("readiness requirements are incomplete")
 	}
 	checks := []struct {
@@ -316,6 +373,7 @@ func ValidateCodexReadinessMarker(marker CodexReadinessMarker, required CodexTra
 		{marker.CQBuild == required.CQBuild, "readiness marker CQ build mismatch"},
 		{marker.ParserSchema == required.ParserSchema, "readiness marker parser schema mismatch"},
 		{marker.LeaseSchema == required.LeaseSchema, "readiness marker lease schema mismatch"},
+		{marker.SemanticsRevision == required.SemanticsRevision, "readiness marker semantics revision mismatch"},
 		{marker.ClientBuild == required.ClientBuild, "readiness marker client build mismatch"},
 		{marker.RetryBudget == required.RetryBudget, "readiness marker retry budget mismatch"},
 		{marker.FixtureHash == required.FixtureHash, "readiness marker fixture hash mismatch"},
@@ -327,16 +385,150 @@ func ValidateCodexReadinessMarker(marker CodexReadinessMarker, required CodexTra
 			return fmt.Errorf("%s", check.reason)
 		}
 	}
-	gates := make(map[string]bool, len(marker.CompletedGates))
-	for _, gate := range marker.CompletedGates {
-		gates[gate] = true
-	}
-	for _, gate := range required.RequiredGates {
-		if !gates[gate] {
-			return fmt.Errorf("readiness marker missing gate %q", gate)
-		}
+	if !sameUniqueGates(marker.CompletedGates, required.RequiredGates) {
+		return fmt.Errorf("readiness marker gate set mismatch")
 	}
 	return nil
+}
+
+// BuildCodexHTTPReadinessMarker validates installed evidence against the exact
+// running tuple. It never infers completed gates from synthetic counters.
+func BuildCodexHTTPReadinessMarker(evidence CodexHTTPReadinessEvidence, required CodexTransportRequirements, validatedAt time.Time) (CodexReadinessMarker, error) {
+	if required.Transport != CodexRoutingHTTP {
+		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness requires HTTP transport")
+	}
+	if evidence.Source != CodexHTTPReadinessEvidenceInstalledListener {
+		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness requires installed-listener evidence")
+	}
+	if evidence.Tuple != readinessTuple(required) {
+		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness evidence tuple mismatch")
+	}
+	completedGates, err := codexHTTPCompletedReadinessGates(evidence.Gates)
+	if err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	if !sameUniqueGates(completedGates, required.RequiredGates) {
+		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness derived gate set mismatch")
+	}
+	if err := validateCodexHTTPAcceptanceEvidence(evidence.Acceptance, required.ClientBuild); err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	marker := CodexReadinessMarker{
+		Version:           CodexReadinessMarkerVersion,
+		Transport:         required.Transport,
+		CQBuild:           required.CQBuild,
+		ParserSchema:      required.ParserSchema,
+		LeaseSchema:       required.LeaseSchema,
+		SemanticsRevision: required.SemanticsRevision,
+		ClientBuild:       required.ClientBuild,
+		RetryBudget:       required.RetryBudget,
+		FixtureHash:       required.FixtureHash,
+		InstalledResult:   "passed",
+		CompletedGates:    completedGates,
+		ValidatedAt:       validatedAt,
+	}
+	if err := ValidateCodexReadinessMarker(marker, required); err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	return marker, nil
+}
+
+func codexHTTPCompletedReadinessGates(evidence CodexHTTPReadinessGateEvidence) ([]string, error) {
+	if evidence.Stage11CorpusTurns < 1_000 {
+		return nil, fmt.Errorf("Codex HTTP readiness requires at least 1000 corpus turns")
+	}
+	if evidence.InstalledTurns < 20 {
+		return nil, fmt.Errorf("Codex HTTP readiness requires at least 20 installed turns")
+	}
+	cases := []struct {
+		count uint64
+		gate  string
+	}{
+		{evidence.FrozenSingleTransformEnvelopeCases, "frozen-single-transform-envelope"},
+		{evidence.WarmAffinityCases, "warm-affinity"},
+		{evidence.DeterministicFallbackCases, "deterministic-fallback"},
+		{evidence.TerminalDefaultOnceCases, "terminal-default-once"},
+		{evidence.ExactPreAdmissionHard429ReplayCases, "exact-pre-admission-hard429-replay"},
+		{evidence.AdmittedNoMigrationCases, "admitted-no-migration"},
+		{evidence.V2JournalRuntimeCases, "v2-journal-runtime"},
+	}
+	completed := make([]string, 0, len(CodexHTTPRequiredGates))
+	for _, measured := range cases {
+		if measured.count == 0 {
+			return nil, fmt.Errorf("Codex HTTP readiness gate %q has no measured case", measured.gate)
+		}
+		completed = append(completed, measured.gate)
+	}
+	if evidence.RoutingMismatches != 0 || evidence.UnknownLifecycleEvents != 0 ||
+		evidence.RawIdentifierLeaks != 0 || evidence.AutomaticAuthWrites != 0 {
+		return nil, fmt.Errorf("Codex HTTP readiness observed unsafe installed evidence")
+	}
+	completed = append(completed, "installed-listener")
+	return completed, nil
+}
+
+func readinessTuple(required CodexTransportRequirements) CodexReadinessTuple {
+	return CodexReadinessTuple{
+		Transport:         required.Transport,
+		CQBuild:           required.CQBuild,
+		ParserSchema:      required.ParserSchema,
+		LeaseSchema:       required.LeaseSchema,
+		SemanticsRevision: required.SemanticsRevision,
+		ClientBuild:       required.ClientBuild,
+		RetryBudget:       required.RetryBudget,
+		FixtureHash:       required.FixtureHash,
+	}
+}
+
+func validateCodexHTTPAcceptanceEvidence(result CodexHTTPAcceptanceResult, clientBuild string) error {
+	if result.Turns < 20 || result.Requests < result.Turns*2 || result.SelectorCalls != result.Turns ||
+		result.ContinuityErrors != 0 || result.UnknownEvents != 0 {
+		return fmt.Errorf("Codex HTTP readiness corpus evidence incomplete")
+	}
+	if result.InstalledVersion != clientBuild || result.InstalledRequests == 0 ||
+		result.InstalledModelRequests == 0 || result.InstalledAttempts == 0 ||
+		result.InstalledSelectorCalls == 0 || result.InstalledStrongKeys == 0 ||
+		result.InstalledZstdRequests == 0 || result.InstalledUnknownEvents != 0 ||
+		result.InstalledContinuityErrors != 0 || result.InstalledQuiescentLeases == 0 ||
+		result.HeadroomRequests == 0 || result.HeadroomParseErrors != 0 ||
+		result.UnexpectedRoutes != 0 || result.EgressAttempts != 0 ||
+		result.InstalledResolutions == 0 || !result.PongVerified {
+		return fmt.Errorf("Codex HTTP installed-listener evidence incomplete")
+	}
+	return nil
+}
+
+func validUniqueGates(gates []string) bool {
+	if len(gates) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(gates))
+	for _, gate := range gates {
+		if gate == "" {
+			return false
+		}
+		if _, duplicate := seen[gate]; duplicate {
+			return false
+		}
+		seen[gate] = struct{}{}
+	}
+	return true
+}
+
+func sameUniqueGates(actual, required []string) bool {
+	if len(actual) != len(required) || !validUniqueGates(actual) || !validUniqueGates(required) {
+		return false
+	}
+	want := make(map[string]struct{}, len(required))
+	for _, gate := range required {
+		want[gate] = struct{}{}
+	}
+	for _, gate := range actual {
+		if _, ok := want[gate]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func codexReadinessPath(dir string, transport CodexRoutingTransport) string {
@@ -347,15 +539,16 @@ func requirementsFingerprint(requirements CodexTransportRequirements) string {
 	gates := append([]string(nil), requirements.RequiredGates...)
 	sort.Strings(gates)
 	value := struct {
-		Transport    CodexRoutingTransport
-		CQBuild      string
-		ParserSchema int
-		LeaseSchema  int
-		ClientBuild  string
-		RetryBudget  int
-		FixtureHash  string
-		Gates        []string
-	}{requirements.Transport, requirements.CQBuild, requirements.ParserSchema, requirements.LeaseSchema, requirements.ClientBuild, requirements.RetryBudget, requirements.FixtureHash, gates}
+		Transport         CodexRoutingTransport
+		CQBuild           string
+		ParserSchema      int
+		LeaseSchema       int
+		SemanticsRevision string
+		ClientBuild       string
+		RetryBudget       int
+		FixtureHash       string
+		Gates             []string
+	}{requirements.Transport, requirements.CQBuild, requirements.ParserSchema, requirements.LeaseSchema, requirements.SemanticsRevision, requirements.ClientBuild, requirements.RetryBudget, requirements.FixtureHash, gates}
 	data, _ := json.Marshal(value)
 	return hashBytes(data)
 }

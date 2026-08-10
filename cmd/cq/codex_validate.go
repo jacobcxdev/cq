@@ -13,7 +13,13 @@ import (
 
 const codexCaptureInputLimit = 10 << 20
 
-var runCodexHTTPInstalledAcceptanceFn = proxy.RunCodexHTTPInstalledAcceptance
+var runCodexHTTPReadinessEvidenceFn = func(ctx context.Context) (proxy.CodexHTTPReadinessEvidence, error) {
+	acceptance, err := proxy.RunCodexHTTPInstalledAcceptance(ctx)
+	return proxy.CodexHTTPReadinessEvidence{
+		Source:     proxy.CodexHTTPReadinessEvidenceSynthetic,
+		Acceptance: acceptance,
+	}, err
+}
 
 func runCodexValidate(args []string) error {
 	if len(args) == 0 || helpRequested(args) {
@@ -89,30 +95,19 @@ func runCodexHTTPValidation(args []string) error {
 		}
 		index++
 	}
+	clientBuild = strings.TrimSpace(clientBuild)
+	if clientBuild == "" {
+		return fmt.Errorf("Codex HTTP validation requires --client-build")
+	}
 	acceptanceCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	acceptance, err := runCodexHTTPInstalledAcceptanceFn(acceptanceCtx)
+	evidence, err := runCodexHTTPReadinessEvidenceFn(acceptanceCtx)
 	if err != nil {
 		return fmt.Errorf("Codex HTTP installed-listener validation failed: %w", err)
 	}
-	if acceptance.Turns < 20 || acceptance.Requests < 40 || acceptance.SelectorCalls != acceptance.Turns || acceptance.ContinuityErrors != 0 || acceptance.UnknownEvents != 0 {
-		return fmt.Errorf("Codex HTTP installed-listener validation returned incomplete evidence")
-	}
 	required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
-	marker := proxy.CodexReadinessMarker{
-		Version:         proxy.CodexReadinessMarkerVersion,
-		Transport:       proxy.CodexRoutingHTTP,
-		CQBuild:         version,
-		ParserSchema:    proxy.CurrentCodexParserSchema,
-		LeaseSchema:     proxy.CurrentCodexLeaseSchema,
-		ClientBuild:     clientBuild,
-		RetryBudget:     required.RetryBudget,
-		FixtureHash:     proxy.CodexHTTPFixtureHash,
-		InstalledResult: "passed",
-		CompletedGates:  append([]string(nil), proxy.CodexHTTPRequiredGates...),
-		ValidatedAt:     time.Now().UTC(),
-	}
-	if err := proxy.ValidateCodexReadinessMarker(marker, required); err != nil {
+	marker, err := proxy.BuildCodexHTTPReadinessMarker(evidence, required, time.Now().UTC())
+	if err != nil {
 		return fmt.Errorf("Codex HTTP validation failed: %w", err)
 	}
 	var writeErr error
@@ -124,7 +119,7 @@ func runCodexHTTPValidation(args []string) error {
 	if writeErr != nil {
 		return fmt.Errorf("write Codex HTTP readiness marker: %w", writeErr)
 	}
-	fmt.Fprintf(os.Stdout, "Codex HTTP installed listener passed: %d turns, %d requests\n", acceptance.Turns, acceptance.Requests)
+	fmt.Fprintf(os.Stdout, "Codex HTTP installed listener passed: %d turns, %d requests\n", evidence.Acceptance.Turns, evidence.Acceptance.Requests)
 	fmt.Fprintln(os.Stdout, "Codex HTTP enforcement readiness recorded; restart CQ to apply")
 	return nil
 }

@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ func testCodexRequirements(transport CodexRoutingTransport) CodexTransportRequir
 		CQBuild:            "cq-test-build",
 		ParserSchema:       3,
 		LeaseSchema:        4,
+		SemanticsRevision:  "http-test-semantics-v2",
 		ClientBuild:        "codex-test-build",
 		RetryBudget:        1,
 		FixtureHash:        "fixture-sha256",
@@ -25,17 +27,18 @@ func testCodexRequirements(transport CodexRoutingTransport) CodexTransportRequir
 
 func testCodexMarker(requirements CodexTransportRequirements) CodexReadinessMarker {
 	return CodexReadinessMarker{
-		Version:         CodexReadinessMarkerVersion,
-		Transport:       requirements.Transport,
-		CQBuild:         requirements.CQBuild,
-		ParserSchema:    requirements.ParserSchema,
-		LeaseSchema:     requirements.LeaseSchema,
-		ClientBuild:     requirements.ClientBuild,
-		RetryBudget:     requirements.RetryBudget,
-		FixtureHash:     requirements.FixtureHash,
-		InstalledResult: "passed",
-		CompletedGates:  append([]string(nil), requirements.RequiredGates...),
-		ValidatedAt:     time.Unix(20_000, 0).UTC(),
+		Version:           CodexReadinessMarkerVersion,
+		Transport:         requirements.Transport,
+		CQBuild:           requirements.CQBuild,
+		ParserSchema:      requirements.ParserSchema,
+		LeaseSchema:       requirements.LeaseSchema,
+		SemanticsRevision: requirements.SemanticsRevision,
+		ClientBuild:       requirements.ClientBuild,
+		RetryBudget:       requirements.RetryBudget,
+		FixtureHash:       requirements.FixtureHash,
+		InstalledResult:   "passed",
+		CompletedGates:    append([]string(nil), requirements.RequiredGates...),
+		ValidatedAt:       time.Unix(20_000, 0).UTC(),
 	}
 }
 
@@ -55,11 +58,12 @@ func TestCodexReadinessMarkerRejectsEveryStaleDimension(t *testing.T) {
 		{"CQ build", func(m *CodexReadinessMarker) { m.CQBuild = "old" }, "CQ build"},
 		{"parser schema", func(m *CodexReadinessMarker) { m.ParserSchema-- }, "parser schema"},
 		{"lease schema", func(m *CodexReadinessMarker) { m.LeaseSchema-- }, "lease schema"},
+		{"semantics revision", func(m *CodexReadinessMarker) { m.SemanticsRevision = "old" }, "semantics revision"},
 		{"client build", func(m *CodexReadinessMarker) { m.ClientBuild = "old" }, "client build"},
 		{"retry budget", func(m *CodexReadinessMarker) { m.RetryBudget++ }, "retry budget"},
 		{"fixture hash", func(m *CodexReadinessMarker) { m.FixtureHash = "old" }, "fixture hash"},
 		{"installed result", func(m *CodexReadinessMarker) { m.InstalledResult = "failed" }, "installed result"},
-		{"gate", func(m *CodexReadinessMarker) { m.CompletedGates = []string{"corpus"} }, "installed"},
+		{"gate", func(m *CodexReadinessMarker) { m.CompletedGates = []string{"corpus"} }, "gate set mismatch"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -71,6 +75,94 @@ func TestCodexReadinessMarkerRejectsEveryStaleDimension(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCodexHTTPReadinessRevisionInvalidatesPriorMarker(t *testing.T) {
+	required, _ := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	prior := testCodexMarker(required)
+	prior.Version = 1
+	prior.SemanticsRevision = "http-routing-v1"
+	prior.CompletedGates = []string{
+		"strong-metadata",
+		"lease-pinning",
+		"pre-admission-failover",
+		"synchronous-journal",
+		"continuity-affinity",
+		"compressed-replay",
+		"installed-listener",
+	}
+	if err := ValidateCodexReadinessMarker(prior, required); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("prior marker error = %v, want version invalidation", err)
+	}
+}
+
+func TestCodexHTTPReadinessRequiresExactCanonicalGateTuple(t *testing.T) {
+	required, _ := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	valid := testCodexMarker(required)
+	if err := ValidateCodexReadinessMarker(valid, required); err != nil {
+		t.Fatalf("valid marker rejected: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		gates []string
+	}{
+		{name: "missing", gates: valid.CompletedGates[:len(valid.CompletedGates)-1]},
+		{name: "extra", gates: append(append([]string(nil), valid.CompletedGates...), "legacy-routing")},
+		{name: "duplicate", gates: append(append([]string(nil), valid.CompletedGates...), valid.CompletedGates[0])},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			marker := valid
+			marker.CompletedGates = append([]string(nil), test.gates...)
+			if err := ValidateCodexReadinessMarker(marker, required); err == nil || !strings.Contains(err.Error(), "gate set mismatch") {
+				t.Fatalf("gate error = %v, want exact-set rejection", err)
+			}
+		})
+	}
+}
+
+func TestDefaultCodexHTTPReadinessTupleCoversConservativeRuntime(t *testing.T) {
+	httpReq, wsReq := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	wantGates := []string{
+		"frozen-single-transform-envelope",
+		"warm-affinity",
+		"deterministic-fallback",
+		"terminal-default-once",
+		"exact-pre-admission-hard429-replay",
+		"admitted-no-migration",
+		"v2-journal-runtime",
+		"installed-listener",
+	}
+	if httpReq.SemanticsRevision != CodexHTTPReadinessSemanticsRevision {
+		t.Fatalf("HTTP semantics revision = %q", httpReq.SemanticsRevision)
+	}
+	if !reflect.DeepEqual(httpReq.RequiredGates, wantGates) {
+		t.Fatalf("HTTP gates = %#v, want %#v", httpReq.RequiredGates, wantGates)
+	}
+	if !httpReq.EnforceImplemented {
+		t.Fatal("HTTP enforcement unexpectedly unavailable")
+	}
+	if wsReq.EnforceImplemented || wsReq.SemanticsRevision != "" || len(wsReq.RequiredGates) != 0 || wsReq.FixtureHash != "" {
+		t.Fatalf("WebSocket readiness advanced early: %#v", wsReq)
+	}
+}
+
+func TestCodexReadinessFingerprintChangesWithSemanticsOrGates(t *testing.T) {
+	required, _ := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	baseline := requirementsFingerprint(required)
+
+	changedRevision := required
+	changedRevision.SemanticsRevision = "changed"
+	if got := requirementsFingerprint(changedRevision); got == baseline {
+		t.Fatal("semantics revision did not change readiness fingerprint")
+	}
+
+	changedGates := required
+	changedGates.RequiredGates = append(append([]string(nil), required.RequiredGates...), "changed")
+	if got := requirementsFingerprint(changedGates); got == baseline {
+		t.Fatal("gate tuple did not change readiness fingerprint")
 	}
 }
 
