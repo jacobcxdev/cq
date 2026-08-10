@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -297,6 +299,41 @@ func TestCodexNativeHTTPCancellationUnblocksRequestBody(t *testing.T) {
 	}
 }
 
+func TestCodexNativeHTTPCancellationRecoversPanickingBodyClose(t *testing.T) {
+	const helper = "CQ_NATIVE_HTTP_PANICKING_CLOSE_HELPER"
+	if os.Getenv(helper) == "1" {
+		body := newCodexNativeHTTPPanickingCloseBody()
+		handler, err := NewCodexNativeHTTPHandler(&codexNativeHTTPPlannerStub{}, &CodexHTTPRequestSession{}, "https://codex.example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/v1/responses", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() {
+			handler.TryServe(newCodexNativeHTTPOrderWriter(new([]string)), request, false)
+			close(done)
+		}()
+		<-body.started
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("panicking body close stranded native request")
+		}
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestCodexNativeHTTPCancellationRecoversPanickingBodyClose$")
+	command.Env = append(os.Environ(), helper+"=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("panicking body close crashed helper: %v\n%s", err, output)
+	}
+}
+
 func TestCodexNativeHTTPAcceptedReadFailureBecomesIndeterminate(t *testing.T) {
 	choice := codexHTTPSessionChoice("account-a")
 	attempt := codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)
@@ -447,6 +484,28 @@ type codexNativeHTTPBlockingBody struct {
 	closeOnce sync.Once
 	mu        sync.Mutex
 	closes    int
+}
+
+type codexNativeHTTPPanickingCloseBody struct {
+	started   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newCodexNativeHTTPPanickingCloseBody() *codexNativeHTTPPanickingCloseBody {
+	return &codexNativeHTTPPanickingCloseBody{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (body *codexNativeHTTPPanickingCloseBody) Read([]byte) (int, error) {
+	body.startOnce.Do(func() { close(body.started) })
+	<-body.closed
+	return 0, errors.New("request body closed")
+}
+
+func (body *codexNativeHTTPPanickingCloseBody) Close() error {
+	body.closeOnce.Do(func() { close(body.closed) })
+	panic("private request body close panic")
 }
 
 func newCodexNativeHTTPBlockingBody() *codexNativeHTTPBlockingBody {

@@ -157,7 +157,14 @@ func readCodexNativeHTTPRequest(request *http.Request) ([]byte, error) {
 	var closeErr error
 	var closeOnce sync.Once
 	closeBody := func() {
-		closeOnce.Do(func() { closeErr = bodyReader.Close() })
+		closeOnce.Do(func() {
+			defer func() {
+				if recover() != nil {
+					closeErr = errors.New("close Codex native HTTP request body")
+				}
+			}()
+			closeErr = bodyReader.Close()
+		})
 	}
 	stopCancelClose := context.AfterFunc(request.Context(), closeBody)
 	body, err := io.ReadAll(io.LimitReader(bodyReader, maxRequestBody+1))
