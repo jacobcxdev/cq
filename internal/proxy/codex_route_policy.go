@@ -61,9 +61,10 @@ func (e *CodexRoutePolicyError) Unwrap() error {
 
 // CodexRoutePlan is an immutable, eagerly materialised sequence of route choices.
 type CodexRoutePlan struct {
-	choices           []RouteChoice
-	defaultAccountKey codex.AccountKey
-	status            CodexRoutePlanStatus
+	choices                []RouteChoice
+	defaultAccountKey      codex.AccountKey
+	terminalDefaultOrdinal uint32
+	status                 CodexRoutePlanStatus
 }
 
 // BuildCodexRoutePlan freezes an ordered route plan without inspecting credentials or system identity.
@@ -155,6 +156,7 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 		plannedAccounts[candidate.Choice.AccountKey] = true
 	}
 	status := CodexRoutePlanReady
+	var terminalDefaultOrdinal uint32
 	if hints.DefaultAccountKey == "" {
 		status = CodexRoutePlanDefaultMissing
 	} else {
@@ -198,6 +200,7 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 					choices = append(choices, cloneRoutePolicyChoice(candidate.Choice))
 				}
 				defaultAppended = true
+				terminalDefaultOrdinal = uint32(len(choices))
 			}
 			if !defaultAppended {
 				switch {
@@ -218,7 +221,10 @@ func BuildCodexRoutePlan(ctx context.Context, candidates []CodexRoutePolicyCandi
 			break
 		}
 	}
-	return CodexRoutePlan{choices: choices, defaultAccountKey: defaultAccountKey, status: status}, nil
+	return CodexRoutePlan{
+		choices: choices, defaultAccountKey: defaultAccountKey,
+		terminalDefaultOrdinal: terminalDefaultOrdinal, status: status,
+	}, nil
 }
 
 func codexRoutePolicyAffinity(candidates []CodexRoutePolicyCandidate, hints CodexRoutePolicyHints) (codex.AccountKey, string, CodexRoutePlanStatus) {

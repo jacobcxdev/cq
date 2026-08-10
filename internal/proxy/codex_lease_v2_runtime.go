@@ -63,6 +63,7 @@ type CodexLeaseRuntime struct {
 	store             *CodexLeaseStore
 	leases            *CodexTurnLeaseManager
 	revalidateAccount CodexLeaseAccountRevalidator
+	nativeAdmission   *codexNativeHTTPAdmissionOwner
 }
 
 // CodexLeaseAccountRevalidator proves that an account still exists, remains
@@ -91,6 +92,7 @@ func (err *codexLeaseAccountRevalidationError) Unwrap() error {
 // successful transition and cannot mutate later authority.
 type CodexLeaseRequestHandle struct {
 	runtime      *CodexLeaseRuntime
+	newTurn      bool
 	key          LeaseKey
 	accounts     []codex.AccountKey
 	authority    CodexLeaseAuthorityPolicy
@@ -106,6 +108,14 @@ type CodexLeaseRequestHandle struct {
 // revalidator is mandatory because cached route authority must fail closed
 // after a credential removal or routability change.
 func NewCodexLeaseRuntime(coordinator *CodexContinuityCoordinator, revalidate CodexLeaseAccountRevalidator) (*CodexLeaseRuntime, error) {
+	return newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(coordinator, revalidate, nil)
+}
+
+func newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(
+	coordinator *CodexContinuityCoordinator,
+	revalidate CodexLeaseAccountRevalidator,
+	sink codexNativeHTTPAdmissionSink,
+) (*CodexLeaseRuntime, error) {
 	if coordinator == nil || coordinator.store == nil || coordinator.leases == nil || coordinator.leases.mu == nil || coordinator.leases.lifecycle == nil || coordinator.leases.accountGates == nil || revalidate == nil || coordinator.leases.writerUnavailable() {
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
@@ -114,7 +124,12 @@ func NewCodexLeaseRuntime(coordinator *CodexContinuityCoordinator, revalidate Co
 		store:             coordinator.store,
 		leases:            coordinator.leases,
 		revalidateAccount: revalidate,
+		nativeAdmission:   newCodexNativeHTTPAdmissionOwner(sink),
 	}, nil
+}
+
+func (runtime *CodexLeaseRuntime) nativeHTTPAdmissionPromotionBlocked() bool {
+	return runtime != nil && runtime.nativeAdmission.promotionBlocked()
 }
 
 func (runtime *CodexLeaseRuntime) BeginRequest(plan CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
@@ -145,6 +160,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
+	newTurn := restored.Classification == CodexRestoredLaneUnseen
 	requestIdentity := codexLeaseRuntimeRequestIdentity(restored)
 	if err := runtime.validateExpectedBound(restored, plan, selected.AccountKey); err != nil {
 		return nil, err
@@ -255,7 +271,12 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
-	return runtime.committedRequestHandle(plan.Key, plan.Accounts, plan.Authority, identity, post, committedRecord, true, 1)
+	handle, err := runtime.committedRequestHandle(plan.Key, plan.Accounts, plan.Authority, identity, post, committedRecord, true, 1)
+	if err != nil {
+		return nil, err
+	}
+	handle.newTurn = newTurn
+	return handle, nil
 }
 
 func (handle *CodexLeaseRequestHandle) State() LeaseState {
@@ -558,19 +579,49 @@ func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context, 
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: nil admission context", ErrCodexLeaseInvalidMutation)
 	}
-	release, err := handle.runtime.beginAccountMutation(ctx, handle.account)
+	var admitted *CodexLeaseRequestHandle
+	var firstAdmission bool
+	err := func() error {
+		release, err := handle.runtime.beginAccountMutation(ctx, handle.account)
+		if err != nil {
+			return err
+		}
+		defer release()
+		fence, err := handle.refreshMutationFence()
+		if err != nil {
+			return err
+		}
+		if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
+			return err
+		}
+		admitted, firstAdmission, err = handle.admitHTTP2xxWithFence(fence, evidence)
+		return err
+	}()
+	if err == nil && admitted != nil && firstAdmission {
+		handle.runtime.nativeAdmission.observe(codexNativeHTTPAdmissionObservation{
+			RequestGeneration: admitted.RequestGeneration(),
+			AttemptGeneration: admitted.AttemptGeneration(),
+		})
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer release()
-	fence, err := handle.refreshMutationFence()
-	if err != nil {
-		return nil, err
+	return admitted, nil
+}
+
+func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGenerationFence, evidence CodexHTTPAdmissionEvidence) (*CodexLeaseRequestHandle, bool, error) {
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || current.State != CodexAttemptDispatched {
+		return nil, false, ErrCodexLeaseTransition
 	}
-	if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
-		return nil, err
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptStreaming
+			break
+		}
 	}
-	return handle.transitionAttemptWithFence(fence, CodexAttemptDispatched, CodexAttemptStreaming, func(record *CodexJournalRecordV2) error {
+	if err := func(record *CodexJournalRecordV2) error {
 		if record.State != LeaseProvisional && record.State != LeaseBoundActive {
 			return ErrCodexLeaseTransition
 		}
@@ -581,7 +632,12 @@ func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context, 
 		record.AttemptRefs++
 		record.ResponseObserverRefs++
 		return nil
-	})
+	}(&desired); err != nil {
+		return nil, false, err
+	}
+	firstAdmission := !handle.record.EverAdmitted && desired.Authoritative && codexLeaseCurrentRequestCacheEligible(desired)
+	admitted, err := handle.commitRequestMutation(fence, desired, true)
+	return admitted, firstAdmission, err
 }
 
 // ProviderCompleted records the terminal provider event while keeping its

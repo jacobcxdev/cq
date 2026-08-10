@@ -33,6 +33,8 @@ type CodexRequestEnvelope struct {
 	effectiveModel string
 	released       bool
 	replays        map[*codexRequestReplayState]struct{}
+	meter          *codexInstalledHTTPReplayMeter
+	retainedBytes  uint64
 }
 
 // CodexRequestReplay owns one independently releasable snapshot of an envelope.
@@ -52,6 +54,8 @@ type codexRequestReplayState struct {
 	activeBodies   int
 	releasePending bool
 	released       bool
+	meter          *codexInstalledHTTPReplayMeter
+	retainedBytes  uint64
 }
 
 type codexRequestReplayBody struct {
@@ -96,6 +100,14 @@ func (envelope *CodexRequestEnvelope) Replay() (*CodexRequestReplay, error) {
 		decoded:        bytes.Clone(envelope.decoded),
 		headers:        codexReplayHeaders(envelope.headers),
 		effectiveModel: strings.Clone(envelope.effectiveModel),
+		meter:          envelope.meter,
+		retainedBytes:  uint64(len(envelope.encoded)) + uint64(len(envelope.decoded)),
+	}
+	if state.meter != nil && !state.meter.retain(state.retainedBytes) {
+		clearBytes(state.encoded)
+		clearBytes(state.decoded)
+		clear(state.headers)
+		return nil, ErrCodexRequestEnvelopeReleased
 	}
 	state.ownedBytes = codexProcessRuntimeObservability.ownReplayBytes(state.encoded, state.decoded)
 	if envelope.replays == nil {
@@ -129,6 +141,11 @@ func (envelope *CodexRequestEnvelope) Release() {
 	envelope.ownedBytes = 0
 	envelope.headers = nil
 	envelope.effectiveModel = ""
+	if envelope.meter != nil {
+		envelope.meter.release(envelope.retainedBytes)
+	}
+	envelope.meter = nil
+	envelope.retainedBytes = 0
 	envelope.replays = nil
 	envelope.released = true
 }
@@ -279,6 +296,11 @@ func (replay *codexRequestReplayState) clearLocked() {
 	replay.ownedBytes = 0
 	replay.headers = nil
 	replay.effectiveModel = ""
+	if replay.meter != nil {
+		replay.meter.release(replay.retainedBytes)
+	}
+	replay.meter = nil
+	replay.retainedBytes = 0
 	replay.released = true
 }
 

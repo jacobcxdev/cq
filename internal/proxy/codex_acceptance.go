@@ -53,15 +53,17 @@ type CodexHTTPAcceptanceResult struct {
 }
 
 type codexAcceptanceCommand struct {
-	executable     string
-	args           []string
-	env            []string
-	dir            string
-	endpoint       string
-	outputPath     string
-	egressProxyURL string
-	captureOutput  bool
-	loopbackOnly   bool
+	executable         string
+	expectedExecutable codexInstalledExecutableProof
+	args               []string
+	env                []string
+	dir                string
+	endpoint           string
+	outputPath         string
+	egressProxyURL     string
+	sandboxWriteRoot   string
+	captureOutput      bool
+	loopbackOnly       bool
 }
 
 type codexAcceptanceRunner interface {

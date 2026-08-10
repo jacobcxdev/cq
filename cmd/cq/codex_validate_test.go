@@ -1,15 +1,17 @@
 package main
 
 import (
-	"context"
-	"errors"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+var testCodexHTTPMarkerTime = time.Date(2026, 8, 10, 4, 0, 0, 0, time.UTC)
 
 func TestRunCodexValidateCapture(t *testing.T) {
 	dir := t.TempDir()
@@ -39,129 +41,106 @@ func TestRunCodexValidateCaptureRequiresExplicitPaths(t *testing.T) {
 	}
 }
 
-func TestRunCodexValidateHTTPWritesOnlyCompleteMatchingMarker(t *testing.T) {
-	previous := runCodexHTTPReadinessEvidenceFn
-	t.Cleanup(func() { runCodexHTTPReadinessEvidenceFn = previous })
+func TestRunCodexValidateHTTPReportsCurrentMarkerWithoutWriting(t *testing.T) {
 	clientBuild := "codex-cli 0.146.0"
-	runCodexHTTPReadinessEvidenceFn = func(context.Context) (proxy.CodexHTTPReadinessEvidence, error) {
-		return completeCodexHTTPReadinessEvidence(clientBuild), nil
-	}
+	required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
+	marker := completeCodexHTTPReadinessMarker(required)
 	dir := t.TempDir()
+	writeTestCodexHTTPReadinessMarker(t, dir, marker)
+	before, err := os.ReadFile(filepath.Join(dir, "codex-readiness-http.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	args := []string{"http", "--client-build", clientBuild, "--state-dir", dir}
 	if err := runCodexValidate(args); err != nil {
 		t.Fatal(err)
 	}
-	marker, err := proxy.LoadCodexReadinessMarker(dir, proxy.CodexRoutingHTTP)
+	after, err := os.ReadFile(filepath.Join(dir, "codex-readiness-http.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if marker.Version != proxy.CodexReadinessMarkerVersion || marker.SemanticsRevision != proxy.CodexHTTPReadinessSemanticsRevision || marker.InstalledResult != "passed" || marker.FixtureHash != proxy.CodexHTTPFixtureHash || len(marker.CompletedGates) != len(proxy.CodexHTTPRequiredGates) {
-		t.Fatalf("marker = %#v", marker)
+	if string(after) != string(before) {
+		t.Fatal("report command rewrote readiness marker")
 	}
 
 	failedDir := t.TempDir()
-	runCodexHTTPReadinessEvidenceFn = func(context.Context) (proxy.CodexHTTPReadinessEvidence, error) {
-		return proxy.CodexHTTPReadinessEvidence{}, errors.New("acceptance failed")
-	}
 	if err := runCodexValidate([]string{"http", "--client-build", clientBuild, "--state-dir", failedDir}); err == nil {
-		t.Fatal("expected installed acceptance rejection")
+		t.Fatal("expected missing readiness rejection")
 	}
 	if _, err := os.Stat(filepath.Join(failedDir, "codex-readiness-http.json")); !os.IsNotExist(err) {
-		t.Fatalf("failed acceptance marker error = %v", err)
+		t.Fatalf("report command created marker: %v", err)
 	}
 	if err := runCodexValidate([]string{"http", "--client-build", "client", "--installed-result", "passed", "--state-dir", t.TempDir()}); err == nil {
 		t.Fatal("expected operator-supplied result rejection")
 	}
 }
 
-func TestRunCodexValidateHTTPRejectsIncompleteOrMismatchedEvidenceWithoutMarker(t *testing.T) {
-	previous := runCodexHTTPReadinessEvidenceFn
-	t.Cleanup(func() { runCodexHTTPReadinessEvidenceFn = previous })
+func TestRunCodexValidateHTTPRejectsStaleOrMalformedMarker(t *testing.T) {
 	clientBuild := "codex-cli 0.146.0"
-
+	required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
+	valid := completeCodexHTTPReadinessMarker(required)
 	tests := []struct {
 		name   string
-		mutate func(*proxy.CodexHTTPReadinessEvidence)
+		mutate func(*proxy.CodexReadinessMarker)
 	}{
-		{name: "synthetic only", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Source = proxy.CodexHTTPReadinessEvidenceSynthetic }},
-		{name: "partial corpus", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Acceptance.Turns-- }},
-		{name: "partial installed listener", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Acceptance.InstalledRequests = 0 }},
-		{name: "mismatched CQ build", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Tuple.CQBuild = "other" }},
-		{name: "mismatched client build", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Tuple.ClientBuild = "codex-cli 0.145.0" }},
-		{name: "mismatched semantics revision", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Tuple.SemanticsRevision = "old" }},
-		{name: "short corpus", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.Stage11CorpusTurns = 999 }},
-		{name: "short installed run", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.InstalledTurns = 19 }},
-		{name: "unmeasured frozen envelope", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.FrozenSingleTransformEnvelopeCases = 0 }},
-		{name: "unmeasured warm affinity", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.WarmAffinityCases = 0 }},
-		{name: "unmeasured deterministic fallback", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.DeterministicFallbackCases = 0 }},
-		{name: "unmeasured terminal default", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.TerminalDefaultOnceCases = 0 }},
-		{name: "unmeasured hard 429 replay", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.ExactPreAdmissionHard429ReplayCases = 0 }},
-		{name: "unmeasured admitted no migration", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.AdmittedNoMigrationCases = 0 }},
-		{name: "unmeasured v2 runtime", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.V2JournalRuntimeCases = 0 }},
-		{name: "routing mismatch", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.RoutingMismatches = 1 }},
-		{name: "unknown lifecycle", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.UnknownLifecycleEvents = 1 }},
-		{name: "raw identifier leak", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.RawIdentifierLeaks = 1 }},
-		{name: "automatic auth write", mutate: func(e *proxy.CodexHTTPReadinessEvidence) { e.Gates.AutomaticAuthWrites = 1 }},
+		{name: "mismatched CQ build", mutate: func(marker *proxy.CodexReadinessMarker) { marker.CQBuild = "other" }},
+		{name: "mismatched client build", mutate: func(marker *proxy.CodexReadinessMarker) { marker.ClientBuild = "codex-cli 0.145.0" }},
+		{name: "mismatched semantics", mutate: func(marker *proxy.CodexReadinessMarker) { marker.SemanticsRevision = "old" }},
+		{name: "incomplete gates", mutate: func(marker *proxy.CodexReadinessMarker) { marker.CompletedGates = marker.CompletedGates[:1] }},
+		{name: "unpassed result", mutate: func(marker *proxy.CodexReadinessMarker) { marker.InstalledResult = "failed" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			evidence := completeCodexHTTPReadinessEvidence(clientBuild)
-			test.mutate(&evidence)
-			runCodexHTTPReadinessEvidenceFn = func(context.Context) (proxy.CodexHTTPReadinessEvidence, error) {
-				return evidence, nil
-			}
+			marker := valid
+			marker.CompletedGates = append([]string(nil), valid.CompletedGates...)
+			test.mutate(&marker)
 			dir := t.TempDir()
-			err := runCodexValidate([]string{"http", "--client-build", clientBuild, "--state-dir", dir})
-			if err == nil {
-				t.Fatal("expected readiness evidence rejection")
+			encoded, err := json.Marshal(marker)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, statErr := os.Stat(filepath.Join(dir, "codex-readiness-http.json")); !os.IsNotExist(statErr) {
-				t.Fatalf("rejected evidence marker error = %v", statErr)
+			if err := os.WriteFile(filepath.Join(dir, "codex-readiness-http.json"), encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := runCodexValidate([]string{"http", "--client-build", clientBuild, "--state-dir", dir}); err == nil {
+				t.Fatal("expected stale readiness marker rejection")
 			}
 		})
 	}
 }
 
-func completeCodexHTTPReadinessEvidence(clientBuild string) proxy.CodexHTTPReadinessEvidence {
-	required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
-	return proxy.CodexHTTPReadinessEvidence{
-		Source: proxy.CodexHTTPReadinessEvidenceInstalledListener,
-		Tuple: proxy.CodexReadinessTuple{
-			Transport:         required.Transport,
-			CQBuild:           required.CQBuild,
-			ParserSchema:      required.ParserSchema,
-			LeaseSchema:       required.LeaseSchema,
-			SemanticsRevision: required.SemanticsRevision,
-			ClientBuild:       required.ClientBuild,
-			RetryBudget:       required.RetryBudget,
-			FixtureHash:       required.FixtureHash,
-		},
-		Gates: proxy.CodexHTTPReadinessGateEvidence{
-			Stage11CorpusTurns:                  1_000,
-			InstalledTurns:                      20,
-			FrozenSingleTransformEnvelopeCases:  1,
-			WarmAffinityCases:                   1,
-			DeterministicFallbackCases:          1,
-			TerminalDefaultOnceCases:            1,
-			ExactPreAdmissionHard429ReplayCases: 1,
-			AdmittedNoMigrationCases:            1,
-			V2JournalRuntimeCases:               1,
-		},
-		Acceptance: proxy.CodexHTTPAcceptanceResult{
-			Turns:                    20,
-			Requests:                 40,
-			SelectorCalls:            20,
-			InstalledVersion:         clientBuild,
-			InstalledRequests:        1,
-			InstalledModelRequests:   1,
-			InstalledAttempts:        1,
-			InstalledSelectorCalls:   1,
-			InstalledStrongKeys:      1,
-			InstalledZstdRequests:    1,
-			InstalledQuiescentLeases: 1,
-			HeadroomRequests:         1,
-			InstalledResolutions:     1,
-			PongVerified:             true,
-		},
+func completeCodexHTTPReadinessMarker(required proxy.CodexTransportRequirements) proxy.CodexReadinessMarker {
+	return proxy.CodexReadinessMarker{
+		Version:                proxy.CodexReadinessMarkerVersion,
+		Transport:              required.Transport,
+		CQBuild:                required.CQBuild,
+		ParserSchema:           required.ParserSchema,
+		LeaseSchema:            required.LeaseSchema,
+		SemanticsRevision:      required.SemanticsRevision,
+		ClientBuild:            required.ClientBuild,
+		RetryBudget:            required.RetryBudget,
+		FixtureHash:            required.FixtureHash,
+		CQExecutableSHA256:     strings.Repeat("a", 64),
+		ClientExecutableSHA256: strings.Repeat("b", 64),
+		ServiceKind:            "launchd",
+		ServiceIdentitySHA256:  strings.Repeat("c", 64),
+		InstalledResult:        "passed",
+		CompletedGates:         append([]string(nil), required.RequiredGates...),
+		ValidatedAt:            testCodexHTTPMarkerTime,
+	}
+}
+
+func writeTestCodexHTTPReadinessMarker(t *testing.T, dir string, marker proxy.CodexReadinessMarker) {
+	t.Helper()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(filepath.Join(dir, "codex-readiness-http.json"), encoded, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

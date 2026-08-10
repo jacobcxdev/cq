@@ -1,0 +1,248 @@
+package proxy
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/jacobcxdev/cq/internal/modelregistry"
+)
+
+func newCodexInstalledHTTPValidationToken() (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", errCodexInstalledListenerAcceptance
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw[:])
+	clearBytes(raw[:])
+	if !validCodexInstalledHTTPValidationToken(token) {
+		return "", errCodexInstalledListenerAcceptance
+	}
+	return token, nil
+}
+
+// RunCodexInstalledHTTPValidation is the sole production entrypoint for the
+// explicit one-shot installed HTTP validation startup. It accepts no evidence
+// or marker and keeps marker construction/publication private under the held
+// process and serving authority.
+func RunCodexInstalledHTTPValidation(
+	ctx context.Context,
+	cfg *Config,
+	cqBuild string,
+	clientBuild string,
+	guard CodexInstalledHTTPValidationGuard,
+) (returnErr error) {
+	return runCodexInstalledHTTPValidationWithDependencies(ctx, cfg, cqBuild, clientBuild, codexInstalledHTTPValidationDependencies{
+		markerDir:  configDir(),
+		invalidate: invalidateCodexHTTPReadinessMarkerDurably,
+		run:        runCodexInstalledHTTPValidationListener,
+		guard:      guard,
+	})
+}
+
+// InvalidateDefaultCodexHTTPReadinessMarker removes any marker that could
+// have raced ahead of a failed explicit installed-validation request.
+func InvalidateDefaultCodexHTTPReadinessMarker() error {
+	return invalidateCodexHTTPReadinessMarkerDurably(configDir())
+}
+
+type codexInstalledHTTPValidationDependencies struct {
+	markerDir  string
+	invalidate func(string) error
+	run        func(context.Context, *Config, string, string, string, CodexInstalledHTTPValidationGuard) error
+	guard      CodexInstalledHTTPValidationGuard
+}
+
+func runCodexInstalledHTTPValidationWithDependencies(
+	ctx context.Context,
+	cfg *Config,
+	cqBuild string,
+	clientBuild string,
+	dependencies codexInstalledHTTPValidationDependencies,
+) (returnErr error) {
+	markerDir := dependencies.markerDir
+	if !filepath.IsAbs(markerDir) || dependencies.invalidate == nil {
+		return errCodexInstalledListenerAcceptance
+	}
+	defer func() {
+		if recover() != nil {
+			returnErr = errCodexInstalledListenerAcceptance
+		}
+		if returnErr != nil {
+			returnErr = errors.Join(returnErr, invalidateCodexInstalledHTTPReadinessSafely(dependencies.invalidate, markerDir))
+		}
+	}()
+	if err := invalidateCodexInstalledHTTPReadinessSafely(dependencies.invalidate, markerDir); err != nil {
+		return fmt.Errorf("invalidate prior Codex HTTP readiness marker: %w", err)
+	}
+	if ctx == nil || ctx.Err() != nil || cfg == nil || strings.TrimSpace(cqBuild) == "" ||
+		clientBuild != strings.TrimSpace(clientBuild) || !codexInstalledHTTPClientBuildPattern.MatchString(clientBuild) || dependencies.run == nil || dependencies.guard == nil {
+		return errCodexInstalledListenerAcceptance
+	}
+	return dependencies.run(ctx, cfg, cqBuild, clientBuild, markerDir, dependencies.guard)
+}
+
+func invalidateCodexInstalledHTTPReadinessSafely(invalidate func(string) error, markerDir string) (returnErr error) {
+	defer func() {
+		if recover() != nil {
+			returnErr = errCodexInstalledListenerAcceptance
+		}
+	}()
+	return invalidate(markerDir)
+}
+
+func runCodexInstalledHTTPValidationListener(
+	ctx context.Context,
+	cfg *Config,
+	cqBuild string,
+	clientBuild string,
+	markerDir string,
+	guard CodexInstalledHTTPValidationGuard,
+) (returnErr error) {
+	localToken, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		return errCodexInstalledListenerAcceptance
+	}
+	corpus, err := loadCodexStage11CorpusBuildManifest(cqBuild, codexStage11CorpusBuildProvenanceSHA256)
+	if err != nil {
+		return errCodexInstalledListenerAcceptance
+	}
+	core, err := newCodexInstalledHTTPValidationRuntimeCore(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, core.close()) }()
+	routes, err := newCodexInstalledHTTPRouteAudit(clientBuild, localToken)
+	if err != nil {
+		return errCodexInstalledListenerAcceptance
+	}
+	protectedPaths, err := defaultCodexInstalledHTTPProtectedPaths(markerDir)
+	if err != nil {
+		return errCodexInstalledListenerAcceptance
+	}
+	servingAttestor := NewServingAttestor()
+	required, _ := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
+	validation := CodexHTTPStartupValidationFunc(func(validationCtx context.Context, runtime CodexHTTPStartupValidationRuntime) error {
+		if runtime.ServingAttestor != servingAttestor {
+			return errCodexInstalledListenerAcceptance
+		}
+		authority, err := newCodexInstalledListenerProcessAuthority(validationCtx, codexInstalledListenerProcessAuthorityConfig{
+			cqBuild:         cqBuild,
+			clientBuild:     clientBuild,
+			listenerAddress: runtime.ListenerAddress,
+			servingAttestor: runtime.ServingAttestor,
+			nativeHTTP:      core.nativeHTTPHandler(),
+		})
+		if err != nil {
+			return errCodexInstalledListenerAcceptance
+		}
+		outcome := &codexInstalledHTTPClientOutcome{}
+		installedClient, err := newCodexInstalledHTTPClientExercise(
+			runtime.ListenerAddress, authority.client.baseline, localToken, osCodexAcceptanceRunner{}, outcome,
+		)
+		if err != nil {
+			return errCodexInstalledListenerAcceptance
+		}
+		syntheticTraffic, err := core.installedListenerExercise(runtime.ListenerAddress, localToken)
+		if err != nil {
+			return errCodexInstalledListenerAcceptance
+		}
+		exercise := &codexInstalledHTTPCompositeExercise{first: installedClient, second: syntheticTraffic}
+		audit := newCodexInstalledHTTPAuditAuthority(codexInstalledHTTPAuditAuthorityConfig{
+			routes:         routes,
+			client:         outcome,
+			protectedPaths: protectedPaths,
+			privacyRoot:    core.tempRoot,
+			privacyNeedles: codexInstalledHTTPValidationPrivacyNeedles(localToken),
+		})
+		harness := &codexInstalledListenerHarness{dependencies: codexInstalledListenerHarnessDependencies{
+			authority:   authority,
+			clientBuild: authority,
+			exercise:    exercise,
+			audit:       audit,
+			quiesce:     core.nativeHTTPHandler(),
+			corpus:      corpus,
+			guard:       guard,
+			runtime:     &codexProcessRuntimeObservability,
+			admissions:  core,
+		}}
+		_, err = harness.RunAndCommit(validationCtx, required, func(marker CodexReadinessMarker) error {
+			return saveCodexHTTPReadinessMarkerDurably(markerDir, marker)
+		})
+		return err
+	})
+
+	validationConfig := *cfg
+	validationConfig.LocalToken = localToken
+	validationConfig.ClaudeUpstream = "http://" + core.upstream.address
+	validationConfig.CodexUpstream = validationConfig.ClaudeUpstream
+	server := &Server{
+		Config:                       &validationConfig,
+		CodexNativeHTTP:              core.nativeHTTPHandler(),
+		ServingAttestor:              servingAttestor,
+		CodexHTTPStartupValidation:   validation,
+		codexInstalledHTTPRouteAudit: routes,
+		Catalog:                      modelregistry.NewCatalog(modelregistry.Snapshot{}),
+		shutdownGracePeriod:          codexInstalledHTTPValidationQuiesceTimeout,
+	}
+	return server.ListenAndServe(ctx)
+}
+
+func defaultCodexInstalledHTTPProtectedPaths(markerDir string) ([]codexInstalledProtectedPath, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) || !filepath.IsAbs(markerDir) {
+		return nil, errCodexInstalledListenerAcceptance
+	}
+	paths := []codexInstalledProtectedPath{
+		{path: filepath.Join(home, ".codex", "auth.json")},
+		{path: filepath.Join(home, ".codex", "accounts", "registry.json")},
+		{path: filepath.Join(home, ".codex", "accounts"), directory: true},
+		{path: codexReadinessPath(markerDir, CodexRoutingHTTP)},
+	}
+	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
+		if !filepath.IsAbs(codexHome) {
+			return nil, errCodexInstalledListenerAcceptance
+		}
+		paths = append(paths,
+			codexInstalledProtectedPath{path: filepath.Join(codexHome, "auth.json")},
+			codexInstalledProtectedPath{path: filepath.Join(codexHome, "accounts", "registry.json")},
+			codexInstalledProtectedPath{path: filepath.Join(codexHome, "accounts"), directory: true},
+		)
+	}
+	seen := make(map[string]bool, len(paths))
+	result := make([]codexInstalledProtectedPath, 0, len(paths))
+	for _, protected := range paths {
+		clean := filepath.Clean(protected.path)
+		if seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		protected.path = clean
+		result = append(result, protected)
+	}
+	return result, nil
+}
+
+func codexInstalledHTTPValidationPrivacyNeedles(localToken string) [][]byte {
+	needles := [][]byte{
+		[]byte("validation-session-"),
+		[]byte("validation-thread-"),
+		[]byte("validation-turn-"),
+		[]byte("validation-account-"),
+		[]byte("validation-upstream-"),
+		[]byte("validation-token-"),
+		[]byte(codexTurnMetadataKey),
+		[]byte("ChatGPT-Account-ID"),
+		[]byte("Authorization"),
+		[]byte("Reply with exactly PONG."),
+	}
+	if validCodexInstalledHTTPValidationToken(localToken) {
+		needles = append(needles, []byte(localToken))
+	}
+	return needles
+}

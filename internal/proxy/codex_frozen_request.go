@@ -129,6 +129,7 @@ type codexFrozenRequestState struct {
 // InspectCodexNativeRequest performs bounded content decoding and strict source
 // authority parsing without dispatching, transforming, or retaining secrets.
 func InspectCodexNativeRequest(ctx context.Context, encoded []byte, headers http.Header) (*CodexFrozenRequestInspection, error) {
+	codexInstalledHTTPTraceFromContext(ctx).recordInspect()
 	if err := codexFrozenRequestContextError(ctx); err != nil {
 		return nil, err
 	}
@@ -209,6 +210,8 @@ func (inspection *CodexFrozenRequestInspection) Protocol() (CodexProtocolRequest
 // operation once, encodes at most once, and transfers ownership to an immutable
 // replay envelope. Every return consumes inspection, including errors.
 func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choice RouteChoice, headroom CodexRequestHeadroom, mode HeadroomMode) (*CodexFrozenRequest, error) {
+	trace := codexInstalledHTTPTraceFromContext(ctx)
+	trace.recordFreeze()
 	encoded, decoded, headers, encoding, protocol, modelAuthority, previousAuthority, metadataSources, err := inspection.consume()
 	if err != nil {
 		return nil, err
@@ -239,6 +242,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 		clearBytes(preparedDecoded)
 		preparedDecoded = rewritten
 		decoded = preparedDecoded
+		trace.recordModelRewrite()
 	}
 
 	headroomChanged := false
@@ -274,6 +278,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 			clearBytes(preparedDecoded)
 			preparedDecoded = transformedCopy
 			decoded = preparedDecoded
+			trace.recordHeadroomTransform()
 		} else {
 			clearBytes(transformedCopy)
 		}
@@ -300,6 +305,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 	if modelChanged || headroomChanged {
 		clearBytes(preparedEncoded)
 		preparedEncoded = nil
+		trace.recordEncode()
 		preparedEncoded, err = inspection.encode(preparedDecoded, encoding, codexTransportRewriteLimits())
 		if err != nil {
 			return nil, classifyCodexFrozenCodecError(err, true)
@@ -311,11 +317,18 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 		return nil, err
 	}
 
+	meter := codexInstalledHTTPReplayMeterFromContext(ctx)
+	retainedBytes := uint64(len(preparedEncoded)) + uint64(len(preparedDecoded))
+	if meter != nil && !meter.retain(retainedBytes) {
+		return nil, newCodexFrozenRequestError(CodexFrozenRequestEncodeFailed, errors.New("replay envelope accounting unavailable"))
+	}
 	envelope := &CodexRequestEnvelope{
 		encoded:        preparedEncoded,
 		decoded:        preparedDecoded,
 		headers:        headers,
 		effectiveModel: strings.Clone(choice.EffectiveModel),
+		meter:          meter,
+		retainedBytes:  retainedBytes,
 	}
 	envelope.ownedBytes = codexProcessRuntimeObservability.ownReplayBytes(envelope.encoded, envelope.decoded)
 	frozen := &CodexFrozenRequest{

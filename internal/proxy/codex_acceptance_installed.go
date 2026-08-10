@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,12 +29,12 @@ const (
 	codexAcceptanceVersionTimeout = 3 * time.Second
 	codexAcceptanceExecTimeout    = 20 * time.Second
 	codexAcceptanceOutputLimit    = 4 << 10
-	codexAcceptanceSandboxProfile = `(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))`
+	codexAcceptanceSandboxBase    = `(version 1) (allow default) (deny network*) (deny file-write*)`
 )
 
 type osCodexAcceptanceRunner struct{}
 
-func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
+func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) (result []byte, returnErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -41,6 +43,36 @@ func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceC
 	}
 	executable := command.executable
 	args := append([]string(nil), command.args...)
+	var retainedExecutable *os.File
+	executionProof := command.expectedExecutable
+	var removeMaterialised func() error
+	defer func() {
+		if removeMaterialised != nil {
+			if err := removeMaterialised(); err != nil {
+				clearBytes(result)
+				result = nil
+				returnErr = errors.New("Codex acceptance executable cleanup failed")
+			}
+		}
+	}()
+	if command.expectedExecutable != (codexInstalledExecutableProof{}) {
+		if !command.loopbackOnly || executable != command.expectedExecutable.path || !command.expectedExecutable.valid() {
+			return nil, errors.New("Codex acceptance executable identity unavailable")
+		}
+		var err error
+		retainedExecutable, err = openCodexInstalledAcceptanceExecutable(command.expectedExecutable)
+		if err != nil {
+			return nil, errors.New("Codex acceptance executable identity unavailable")
+		}
+		defer retainedExecutable.Close()
+		if command.loopbackOnly {
+			executionProof, removeMaterialised, err = materialiseCodexAcceptanceExecutable(command.sandboxWriteRoot, command.expectedExecutable, retainedExecutable)
+			if err != nil {
+				return nil, errors.New("Codex acceptance executable isolation unavailable")
+			}
+			executable = executionProof.path
+		}
+	}
 	if command.loopbackOnly {
 		if runtime.GOOS != "darwin" {
 			return nil, errors.New("Codex acceptance network confinement unavailable")
@@ -48,7 +80,11 @@ func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceC
 		if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
 			return nil, errors.New("Codex acceptance network confinement unavailable")
 		}
-		args = append([]string{"-p", codexAcceptanceSandboxProfile, executable}, args...)
+		profile, err := codexAcceptanceSandboxProfile(command)
+		if err != nil {
+			return nil, errors.New("Codex acceptance sandbox authority unavailable")
+		}
+		args = append([]string{"-p", profile, executable}, args...)
 		executable = "/usr/bin/sandbox-exec"
 	}
 
@@ -71,7 +107,209 @@ func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceC
 		}
 		return nil, errors.New("Codex acceptance command failed")
 	}
+	if retainedExecutable != nil {
+		current, err := captureCodexInstalledExecutable(command.expectedExecutable.path)
+		if err != nil || current != command.expectedExecutable {
+			return nil, errors.New("Codex acceptance executable identity changed")
+		}
+		if command.loopbackOnly {
+			currentExecution, err := captureCodexInstalledExecutable(executionProof.path)
+			if err != nil || currentExecution != executionProof {
+				return nil, errors.New("Codex acceptance isolated executable identity changed")
+			}
+		}
+	}
 	return output.Bytes(), nil
+}
+
+func materialiseCodexAcceptanceExecutable(
+	root string,
+	expected codexInstalledExecutableProof,
+	retained *os.File,
+) (codexInstalledExecutableProof, func() error, error) {
+	cleanRoot := filepath.Clean(root)
+	resolvedRoot, err := filepath.EvalSymlinks(cleanRoot)
+	if err != nil || resolvedRoot != cleanRoot || !filepath.IsAbs(cleanRoot) || retained == nil || !expected.valid() {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	executionRoot, err := os.MkdirTemp(filepath.Dir(cleanRoot), ".cq-codex-installed-exec-")
+	if err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	removeExecutionRoot := true
+	defer func() {
+		if removeExecutionRoot {
+			_ = os.Remove(executionRoot)
+		}
+	}()
+	resolvedExecutionRoot, err := filepath.EvalSymlinks(executionRoot)
+	if err != nil || resolvedExecutionRoot != executionRoot {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	fsys := fsutil.OSFileSystem{}
+	directory, err := fsys.OpenSecureDirectory(executionRoot)
+	if err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	closeDirectory := true
+	defer func() {
+		if closeDirectory {
+			_ = directory.Close()
+		}
+	}()
+	if err := fsutil.ValidateSecureDirectoryHandle(fsys, directory, executionRoot); err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	const name = ".cq-installed-client"
+	file, err := directory.CreateExclusive(name, 0o500)
+	if err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			_ = file.Close()
+		}
+	}()
+	removeFile := true
+	defer func() {
+		if removeFile {
+			_ = directory.Remove(name)
+		}
+	}()
+	if _, err := retained.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	written, copyErr := io.Copy(file, io.LimitReader(retained, expected.size+1))
+	if copyErr != nil || written != expected.size {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	if err := file.Sync(); err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	if err := file.Close(); err != nil {
+		fileClosed = true
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	fileClosed = true
+	if err := directory.Sync(); err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	if err := fsutil.ValidateSecureDirectoryHandle(fsys, directory, executionRoot); err != nil {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	executionProof, err := captureCodexInstalledExecutable(filepath.Join(executionRoot, name))
+	if err != nil || executionProof.sha256 != expected.sha256 || executionProof.size != expected.size {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
+	removeFile = false
+	closeDirectory = false
+	removeExecutionRoot = false
+	cleanup := func() error {
+		if err := fsutil.ValidateSecureDirectoryHandle(fsys, directory, executionRoot); err != nil {
+			_ = directory.Close()
+			return errCodexInstalledProcessAttestation
+		}
+		removeErr := directory.Remove(name)
+		syncErr := directory.Sync()
+		closeErr := directory.Close()
+		rootRemoveErr := os.Remove(executionRoot)
+		return errors.Join(removeErr, syncErr, closeErr, rootRemoveErr)
+	}
+	return executionProof, cleanup, nil
+}
+
+func codexAcceptanceSandboxProfile(command codexAcceptanceCommand) (string, error) {
+	profile := codexAcceptanceSandboxBase
+	seen := make(map[string]bool, 2)
+	for _, rawURL := range []string{command.endpoint, command.egressProxyURL} {
+		if rawURL == "" {
+			continue
+		}
+		address, err := codexAcceptanceSandboxLoopbackAddress(rawURL)
+		if err != nil {
+			return "", err
+		}
+		if !seen[address] {
+			profile += ` (allow network-outbound (remote ip ` + strconv.Quote(address) + `))`
+			seen[address] = true
+		}
+	}
+	if command.sandboxWriteRoot != "" {
+		root := filepath.Clean(command.sandboxWriteRoot)
+		if !filepath.IsAbs(root) || root == string(filepath.Separator) || filepath.Dir(root) == root {
+			return "", errCodexInstalledListenerAcceptance
+		}
+		profile += ` (allow file-write* (subpath ` + strconv.Quote(root) + `))`
+	}
+	return profile, nil
+}
+
+func codexAcceptanceSandboxLoopbackAddress(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" {
+		return "", errCodexInstalledListenerAcceptance
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return "", errCodexInstalledListenerAcceptance
+	}
+	return net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port)), nil
+}
+
+func openCodexInstalledAcceptanceExecutable(expected codexInstalledExecutableProof) (*os.File, error) {
+	if !expected.valid() {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	inspector := fsutil.OSFileSystem{}
+	opened, err := inspector.OpenNoFollow(expected.path)
+	if err != nil {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	file, ok := opened.(*os.File)
+	if !ok {
+		_ = opened.Close()
+		return nil, errCodexInstalledProcessAttestation
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	owner, ownerOK := inspector.FileOwnerUID(info)
+	identity, identityOK := inspector.FileIdentity(info)
+	if !ownerOK || !identityOK || identity.Device != expected.device || identity.Inode != expected.inode ||
+		identity.Links != expected.links || owner != expected.owner || info.Size() != expected.size || info.Mode() != expected.mode {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	hash := sha256.New()
+	if copied, err := io.Copy(hash, io.LimitReader(file, codexInstalledExecutableMaxBytes+1)); err != nil || copied != expected.size {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	if digest != expected.sha256 {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	afterIdentity, afterIdentityOK := inspector.FileIdentity(after)
+	if !afterIdentityOK || afterIdentity != identity || after.Size() != info.Size() || after.Mode() != info.Mode() {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	succeeded = true
+	return file, nil
 }
 
 type codexAcceptanceLimitedBuffer struct {
@@ -517,7 +755,7 @@ func codexAcceptanceExecArguments(baseURL, work, outputPath string) []string {
 		"-s", "read-only",
 		"-C", work,
 		"-o", outputPath,
-		"--model", "gpt-5.4",
+		"--model", "gpt-5.6-sol",
 		"-c", `model_provider="cq_acceptance"`,
 		"-c", provider + `name = "OpenAI"`,
 		"-c", provider + "base_url = " + strconv.Quote(baseURL),
@@ -539,13 +777,20 @@ func codexAcceptanceExecArguments(baseURL, work, outputPath string) []string {
 }
 
 func writeCodexAcceptanceAuth(path string) error {
+	return writeCodexAcceptanceAuthWithToken(path, codexAcceptanceLocalToken)
+}
+
+func writeCodexAcceptanceAuthWithToken(path, accessToken string) error {
+	if strings.TrimSpace(accessToken) == "" {
+		return errCodexInstalledListenerAcceptance
+	}
 	jwt := codexAcceptanceJWT()
 	auth := map[string]any{
 		"auth_mode":      "chatgpt",
 		"OPENAI_API_KEY": nil,
 		"tokens": map[string]any{
 			"id_token":      jwt,
-			"access_token":  codexAcceptanceLocalToken,
+			"access_token":  accessToken,
 			"refresh_token": "acceptance-refresh",
 			"account_id":    "acceptance-bootstrap",
 		},
@@ -624,7 +869,7 @@ func validateCodexInstalledAcceptanceEvidence(result CodexHTTPAcceptanceResult, 
 		return errors.New("installed Codex acceptance lease evidence incomplete")
 	}
 	decoded, err := DecodeCodexRequest(snapshot.requestBody, snapshot.requestEncoding, DefaultCodexZstdLimits)
-	if err != nil || !json.Valid(decoded.Decoded()) || extractModel(decoded.Decoded()) != "gpt-5.4" {
+	if err != nil || !json.Valid(decoded.Decoded()) || extractModel(decoded.Decoded()) != "gpt-5.6-sol" {
 		return errors.New("installed Codex acceptance request evidence invalid")
 	}
 	return nil

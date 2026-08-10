@@ -36,6 +36,7 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 		"proxy uninstall",
 		"proxy restart",
 		"proxy status",
+		"proxy validate-http",
 		"proxy pin",
 		"proxy prime",
 		"proxy codex-default",
@@ -71,6 +72,15 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 			name: "proxy start",
 			path: []string{"proxy", "start"},
 			want: []string{"Usage: cq proxy start [--port PORT]", "Start local Claude and Codex proxy"},
+		},
+		{
+			name: "proxy validate HTTP",
+			path: []string{"proxy", "validate-http"},
+			want: []string{
+				"Usage: cq proxy validate-http",
+				"one-shot installed HTTP validation",
+				"does not write readiness evidence",
+			},
 		},
 		{
 			name: "proxy pin",

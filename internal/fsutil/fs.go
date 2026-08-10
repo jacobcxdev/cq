@@ -127,6 +127,12 @@ type SecureDirectory interface {
 	Close() error
 }
 
+// SecureDirectoryReader enumerates the immediate entries of a retained
+// directory capability without resolving its pathname again.
+type SecureDirectoryReader interface {
+	ReadDir() ([]os.DirEntry, error)
+}
+
 // SecureDirectoryOpener opens a directory without following its final path
 // component and retains the handle for the complete atomic transaction.
 type SecureDirectoryOpener interface {

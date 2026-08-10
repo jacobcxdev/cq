@@ -491,6 +491,31 @@ func (directory *memSecureDirectory) Stat() (os.FileInfo, error) {
 	return directory.fsys.fileInfo(path, file, true), nil
 }
 
+func (directory *memSecureDirectory) ReadDir() ([]os.DirEntry, error) {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return nil, err
+	}
+	prefix := path + string(filepath.Separator)
+	entries := make([]os.DirEntry, 0)
+	for childPath, file := range directory.fsys.files {
+		name := strings.TrimPrefix(childPath, prefix)
+		if childPath != path && name != childPath && name != "" && !strings.ContainsRune(name, filepath.Separator) {
+			entries = append(entries, fs.FileInfoToDirEntry(directory.fsys.fileInfo(childPath, file, false)))
+		}
+	}
+	for childPath, file := range directory.fsys.dirs {
+		name := strings.TrimPrefix(childPath, prefix)
+		if childPath != path && name != childPath && name != "" && !strings.ContainsRune(name, filepath.Separator) {
+			entries = append(entries, fs.FileInfoToDirEntry(directory.fsys.fileInfo(childPath, file, true)))
+		}
+	}
+	sort.Slice(entries, func(first, second int) bool { return entries[first].Name() < entries[second].Name() })
+	return entries, nil
+}
+
 func (directory *memSecureDirectory) OpenDirectory(name string) (DurableDirectory, error) {
 	directory.fsys.mu.Lock()
 	defer directory.fsys.mu.Unlock()

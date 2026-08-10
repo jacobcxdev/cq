@@ -43,6 +43,7 @@ Commands:
   proxy install       Install proxy launch agent
   proxy uninstall     Uninstall proxy launch agent
   proxy restart       Restart proxy launch agent
+  proxy validate-http Request one-shot installed HTTP validation
   proxy pin           Pin Claude proxy routing
   proxy codex-default Configure Codex routing default
   proxy prime         Manage Codex quota-window priming
@@ -73,6 +74,13 @@ Uninstall the proxy launch agent for the current user.
 	"proxy restart": `Usage: cq proxy restart
 
 Restart the proxy launch agent for the current user.
+`,
+	"proxy validate-http": `Usage: cq proxy validate-http
+
+Request one-shot installed HTTP validation from the installed proxy service.
+The command writes only an expiring private request and restarts the service.
+The serving process owns validation and does not write readiness evidence until
+every installed acceptance gate and process attestation succeeds.
 `,
 	"proxy pin": `Usage: cq proxy pin [--clear | <email-or-account-uuid>]
 

@@ -291,6 +291,7 @@ accountsLoop:
 			if err != nil {
 				return session.abandonPrepared(ctx, result, err)
 			}
+			probeAttempt := codexInstalledHTTPTraceFromContext(ctx).prepareAttempt(replay, uint32(accountIndex+1))
 			marked := false
 			response, actual, dispatched, err := session.Executor.DispatchFrozen(ctx, choice, attempt, request, func(CandidateAttempt) error {
 				if marked {
@@ -308,6 +309,7 @@ accountsLoop:
 				}
 				return nil
 			})
+			probeAttempt.dispatched(dispatched && marked)
 			replay.Release()
 			result.Attempt = actual
 			if err != nil {
@@ -339,6 +341,7 @@ accountsLoop:
 					result.Response = nil
 					return session.finishIndeterminate(ctx, result, errors.Join(evidenceErr, admitErr))
 				}
+				probeAttempt.admitted()
 				return result, nil
 			}
 			failure, classifyErr := (&CodexRequestRouter{Capacity: session.Capacity}).classifyAttemptResponse(choice, response)
@@ -353,6 +356,13 @@ accountsLoop:
 			}
 			authRejected := failure == CodexPinnedAuthFailure
 			hardRejected := failure == CodexPinnedHardLimit
+			rejectKind := codexInstalledHTTPRejectOther
+			if authRejected {
+				rejectKind = codexInstalledHTTPRejectAuth
+			} else if hardRejected {
+				rejectKind = codexInstalledHTTPRejectExactHard429
+			}
+			probeAttempt.rejected(rejectKind)
 			if authRejected && attemptIndex+1 == len(attempts) && hasRefresh && !refreshConsidered && session.Refresher != nil {
 				refreshConsidered = true
 				ref, revision, refreshErr := session.Refresher.RefreshReference(ctx, refreshPlanned.Candidate, refreshPlanned.Revision)

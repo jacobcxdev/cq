@@ -673,6 +673,25 @@ func readSecureFileInDirectory(inspector SecurePathInspector, directory SecureDi
 	if !ok || afterIdentity != identity {
 		return nil, SecureFileIdentity{}, fmt.Errorf("%w: secure file descriptor identity", ErrUnsafeSecurePath)
 	}
+	canonical, err := directory.OpenNoFollow(name)
+	if err != nil {
+		return nil, SecureFileIdentity{}, err
+	}
+	canonicalInfo, statErr := canonical.Stat()
+	closeErr := canonical.Close()
+	if statErr != nil {
+		return nil, SecureFileIdentity{}, statErr
+	}
+	if closeErr != nil {
+		return nil, SecureFileIdentity{}, closeErr
+	}
+	if err := validateSecureRegularInfo(inspector, canonicalInfo); err != nil {
+		return nil, SecureFileIdentity{}, err
+	}
+	canonicalIdentity, ok := inspector.FileIdentity(canonicalInfo)
+	if !ok || canonicalIdentity != identity {
+		return nil, SecureFileIdentity{}, fmt.Errorf("%w: secure file canonical entry identity", ErrUnsafeSecurePath)
+	}
 	if err := validateDirectory(); err != nil {
 		return nil, SecureFileIdentity{}, err
 	}
@@ -727,6 +746,12 @@ func validateSecureDirectoryHandle(inspector SecurePathInspector, directory Secu
 		return fmt.Errorf("%w: directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
+}
+
+// ValidateSecureDirectoryHandle proves a retained secure directory descriptor
+// still names the canonical no-follow path supplied by its caller.
+func ValidateSecureDirectoryHandle(inspector SecurePathInspector, directory SecureDirectory, path string) error {
+	return validateSecureDirectoryHandle(inspector, directory, path)
 }
 
 func validateSecureDirectoryDescriptor(inspector SecurePathInspector, directory SecureDirectory) error {

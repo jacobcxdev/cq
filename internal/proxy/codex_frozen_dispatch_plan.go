@@ -48,6 +48,7 @@ func (e *CodexFrozenDispatchError) Error() string {
 type CodexFrozenDispatchPlan struct {
 	accounts []CodexFrozenDispatchAccount
 	status   CodexRoutePlanStatus
+	probe    codexInstalledHTTPDispatchFacts
 }
 
 // CodexFrozenDispatchAccount binds one frozen route choice to exact credential attempts.
@@ -154,6 +155,11 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		return CodexFrozenDispatchPlan{status: CodexRoutePlanCanceled}, err
 	}
 	plan.accounts = accounts
+	plan.probe = codexInstalledHTTPDispatchFactsForPolicy(candidates, policy, CodexRoutePolicyHints{
+		AffinityAccountKey: input.AffinityAccountKey,
+		DefaultAccountKey:  input.DefaultAccountKey,
+		BoundAccountKey:    input.BoundAccountKey,
+	})
 	return plan, nil
 }
 
@@ -180,6 +186,53 @@ func codexFrozenDispatchOrdinarilyEligible(candidates []CodexRoutePolicyCandidat
 		return true
 	}
 	return false
+}
+
+func codexInstalledHTTPDispatchFactsForPolicy(candidates []CodexRoutePolicyCandidate, policy CodexRoutePlan, hints CodexRoutePolicyHints) codexInstalledHTTPDispatchFacts {
+	choices := policy.Choices()
+	facts := codexInstalledHTTPDispatchFacts{
+		selection:  codexInstalledHTTPSelectionOrdinary,
+		routeCount: uint32(len(choices)),
+	}
+	facts.terminalDefaultOrdinal = policy.terminalDefaultOrdinal
+	ordinaryCount := len(choices)
+	if facts.terminalDefaultOrdinal != 0 {
+		ordinaryCount--
+	}
+	if ordinaryCount > 1 {
+		facts.eligibleCompetitors = uint32(ordinaryCount - 1)
+	}
+	if hints.BoundAccountKey != "" {
+		facts.selection = codexInstalledHTTPSelectionBound
+		return facts
+	}
+	if ordinaryCount == 0 {
+		return facts
+	}
+	if hints.AffinityAccountKey == "" {
+		facts.fairnessSelect = true
+		return facts
+	}
+	if choices[0].AccountKey != hints.AffinityAccountKey {
+		facts.fairnessSelect = true
+		facts.affinityUnavailable = true
+		if facts.terminalDefaultOrdinal != 1 {
+			facts.selection = codexInstalledHTTPSelectionDeterministicFallback
+		}
+		return facts
+	}
+	facts.affinityReuse = true
+	natural, err := BuildCodexRoutePlan(context.Background(), candidates, CodexRoutePolicyHints{
+		DefaultAccountKey: hints.DefaultAccountKey,
+	})
+	if err == nil {
+		naturalChoices := natural.Choices()
+		if len(naturalChoices) > 0 && naturalChoices[0].AccountKey != hints.AffinityAccountKey {
+			facts.selection = codexInstalledHTTPSelectionWarmAffinity
+			facts.naturalWinnerDisplaced = true
+		}
+	}
+	return facts
 }
 
 func codexFrozenDispatchContextError(ctx context.Context) error {

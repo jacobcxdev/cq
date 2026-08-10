@@ -110,6 +110,9 @@ type Server struct {
 	// CodexHTTPStartupValidation is an explicit one-shot validation mode. Nil
 	// preserves normal long-running server startup.
 	CodexHTTPStartupValidation CodexHTTPStartupValidationFunc
+	// codexInstalledHTTPRouteAudit is non-nil only for the explicit one-shot
+	// installed validation process. Normal startup never attaches it.
+	codexInstalledHTTPRouteAudit *codexInstalledHTTPRouteAudit
 	// shutdownGracePeriod is test-configurable; zero selects the production
 	// default. It is deliberately unexported so callers cannot weaken shutdown.
 	shutdownGracePeriod time.Duration
@@ -324,6 +327,9 @@ func (s *Server) handler() (http.Handler, error) {
 		mux.HandleFunc(pattern, s.handleUnsupportedOpenAICompatibleRoute)
 	}
 	mux.HandleFunc("/", s.proxyHandler(upstream))
+	if s.codexInstalledHTTPRouteAudit != nil {
+		return s.codexInstalledHTTPRouteAudit.guard(mux), nil
+	}
 	return mux, nil
 }
 

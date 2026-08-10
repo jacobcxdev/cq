@@ -65,6 +65,13 @@ func (directory *unixSecureDirectory) Stat() (os.FileInfo, error) {
 	return directory.file.Stat()
 }
 
+func (directory *unixSecureDirectory) ReadDir() ([]os.DirEntry, error) {
+	if _, err := directory.file.Seek(0, 0); err != nil {
+		return nil, err
+	}
+	return directory.file.ReadDir(-1)
+}
+
 func (directory *unixSecureDirectory) OpenDirectory(name string) (DurableDirectory, error) {
 	if err := validateSecureEntryName(name); err != nil {
 		return nil, err

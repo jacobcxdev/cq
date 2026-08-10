@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -648,10 +649,10 @@ func TestCodexHTTPFenceOnlyRestoresRetainedAuthority(t *testing.T) {
 }
 
 func TestCodexHTTPRollbackKeepsExactAuthorityFence(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "state")
 	httpRequirements := testCodexRequirements(CodexRoutingHTTP)
 	wsRequirements := testCodexRequirements(CodexRoutingWebSocket)
-	if err := SaveCodexReadinessMarker(dir, testCodexMarker(httpRequirements)); err != nil {
+	if err := saveCodexHTTPReadinessMarkerDurably(dir, testCodexMarker(httpRequirements)); err != nil {
 		t.Fatal(err)
 	}
 	config := &Config{CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingOff}

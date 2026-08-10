@@ -763,6 +763,26 @@ func TestReadSecureFileInDirectoryWithIdentityRejectsReplacementAfterOpen(t *tes
 	}
 }
 
+func TestReadSecureFileInDirectoryWithIdentityRejectsCanonicalEntryReplacementAfterRead(t *testing.T) {
+	t.Parallel()
+	fsys := NewMemFS()
+	if err := EnsureSecureDirectory(fsys, "/state"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/state/value", []byte("trusted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := fsys.OpenSecureDirectory("/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := &replaceAfterReadDirectory{SecureDirectory: opened}
+	defer directory.Close()
+	if _, _, err := ReadSecureFileInDirectoryWithIdentity(fsys, directory, "value", 64); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("replacement read error = %v, want ErrUnsafeSecurePath", err)
+	}
+}
+
 func TestMemFSExclusiveLockRetainsOpenedIdentity(t *testing.T) {
 	t.Parallel()
 	fsys := &replacingMemLockFS{MemFS: NewMemFS()}
@@ -1070,6 +1090,58 @@ type replaceAfterOpenDirectory struct {
 	SecureDirectory
 	fsys *MemFS
 	path string
+}
+
+type replaceAfterReadDirectory struct{ SecureDirectory }
+
+func (directory *replaceAfterReadDirectory) OpenNoFollow(name string) (SecureReadFile, error) {
+	file, err := directory.SecureDirectory.OpenNoFollow(name)
+	if err != nil {
+		return nil, err
+	}
+	return &replaceAfterReadFile{
+		SecureReadFile: file,
+		directory:      directory.SecureDirectory,
+		name:           name,
+	}, nil
+}
+
+type replaceAfterReadFile struct {
+	SecureReadFile
+	directory fsutilSecureDirectoryForTest
+	name      string
+	stats     int
+}
+
+type fsutilSecureDirectoryForTest interface {
+	Rename(oldName, newName string) error
+	CreateExclusive(name string, perm os.FileMode) (DurableFile, error)
+}
+
+func (file *replaceAfterReadFile) Stat() (os.FileInfo, error) {
+	info, err := file.SecureReadFile.Stat()
+	if err != nil {
+		return nil, err
+	}
+	file.stats++
+	if file.stats != 2 {
+		return info, nil
+	}
+	if err := file.directory.Rename(file.name, file.name+".held"); err != nil {
+		return nil, err
+	}
+	replacement, err := file.directory.CreateExclusive(file.name, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := replacement.Write([]byte("attacker")); err != nil {
+		_ = replacement.Close()
+		return nil, err
+	}
+	if err := replacement.Close(); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 type replaceTemporaryOnCloseDirectory struct{ SecureDirectory }

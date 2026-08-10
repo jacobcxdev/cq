@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
+	"net"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -194,5 +197,68 @@ func TestServerCodexHTTPStartupValidationCancellationDoesNotWaitForStuckCallback
 		}
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("server waited for a stuck startup validation callback")
+	}
+}
+
+func TestServerCodexHTTPStartupValidationForcesDripBodyClosedWithoutMarker(t *testing.T) {
+	listener := listenServingAttestorTestTCP4(t)
+	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := core.tempRoot
+	markerPath := codexReadinessPath(t.TempDir(), CodexRoutingHTTP)
+	server := &Server{
+		Config:              &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "test-token"},
+		ServingAttestor:     NewServingAttestor(),
+		CodexNativeHTTP:     core.nativeHTTPHandler(),
+		shutdownGracePeriod: 20 * time.Millisecond,
+		CodexHTTPStartupValidation: CodexHTTPStartupValidationFunc(func(ctx context.Context, runtime CodexHTTPStartupValidationRuntime) error {
+			connection, err := net.Dial("tcp4", runtime.ListenerAddress)
+			if err != nil {
+				return err
+			}
+			defer connection.Close()
+			if _, err := fmt.Fprintf(connection, "POST /v1/responses HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer test-token\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n{", runtime.ListenerAddress); err != nil {
+				return err
+			}
+			deadline := time.Now().Add(time.Second)
+			for {
+				core.nativeHTTPHandler().requests.mu.Lock()
+				active := core.nativeHTTPHandler().requests.active
+				core.nativeHTTPHandler().requests.mu.Unlock()
+				if active == 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					return errors.New("drip-body request did not enter native admission")
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Millisecond):
+				}
+			}
+			drainCtx, cancelDrain := context.WithTimeout(ctx, 20*time.Millisecond)
+			defer cancelDrain()
+			return core.nativeHTTPHandler().CloseAndDrain(drainCtx)
+		}),
+	}
+	started := time.Now()
+	err = server.serve(context.Background(), listener)
+	if err == nil || !strings.Contains(err.Error(), "startup validation failed") {
+		t.Fatalf("serve error = %v, want failed bounded validation", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("outer validation returned after %v, want bounded force-close", elapsed)
+	}
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed drip-body validation left marker: %v", err)
+	}
+	if err := core.closeWithTimeout(time.Second); err != nil {
+		t.Fatalf("core close after forced connection close: %v", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("isolated authority remained after forced close: %v", err)
 	}
 }

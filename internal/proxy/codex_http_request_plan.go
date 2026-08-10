@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -261,6 +262,21 @@ func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input Cod
 	result.Dispatch = dispatch
 	result.Frozen = frozen
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
+	if trace := codexInstalledHTTPTraceFromContext(ctx); trace != nil {
+		requestGeneration, attemptGeneration, durableV2 := codexInstalledHTTPV2Generations(result.Lifecycle)
+		trace.plannedRequest(codexInstalledHTTPPlanFacts{
+			strongTurn:        protocol.Metadata.Strong && metadata.RequestKind == CodexRequestTurn && codexInstalledHTTPV2NewTurn(result.Lifecycle),
+			strongRequest:     protocol.Metadata.Strong,
+			zstd:              strings.EqualFold(strings.TrimSpace(input.Headers.Get("Content-Encoding")), "zstd"),
+			headroom:          factory.Headroom != nil,
+			initialAdmitted:   result.Lifecycle.EverAdmitted(),
+			durableV2:         durableV2,
+			requestGeneration: requestGeneration,
+			attemptGeneration: attemptGeneration,
+			dispatch:          dispatch.probe,
+		})
+		result.Lifecycle = trace.wrapLifecycle(result.Lifecycle)
+	}
 	return result, nil
 }
 

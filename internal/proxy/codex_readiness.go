@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,8 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
+
+const codexReadinessMarkerMaxBytes = 64 << 10
 
 // CodexRoutingMode controls turn-aware routing for one transport.
 type CodexRoutingMode string
@@ -39,7 +46,7 @@ const (
 )
 
 const (
-	CodexReadinessMarkerVersion = 2
+	CodexReadinessMarkerVersion = 3
 	CodexRoutingJournalVersion  = 1
 	CurrentCodexParserSchema    = 1
 	CurrentCodexLeaseSchema     = 3
@@ -49,7 +56,7 @@ const (
 	CodexHTTPFixtureHash                = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
 )
 
-var CodexHTTPRequiredGates = []string{
+var codexHTTPRequiredGates = []string{
 	"frozen-single-transform-envelope",
 	"warm-affinity",
 	"deterministic-fallback",
@@ -62,18 +69,22 @@ var CodexHTTPRequiredGates = []string{
 
 // CodexReadinessMarker is explicit, versioned proof for one enforcement tuple.
 type CodexReadinessMarker struct {
-	Version           int                   `json:"version"`
-	Transport         CodexRoutingTransport `json:"transport"`
-	CQBuild           string                `json:"cq_build"`
-	ParserSchema      int                   `json:"parser_schema"`
-	LeaseSchema       int                   `json:"lease_schema"`
-	SemanticsRevision string                `json:"semantics_revision"`
-	ClientBuild       string                `json:"client_build"`
-	RetryBudget       int                   `json:"retry_budget"`
-	FixtureHash       string                `json:"fixture_hash"`
-	InstalledResult   string                `json:"installed_result"`
-	CompletedGates    []string              `json:"completed_gates"`
-	ValidatedAt       time.Time             `json:"validated_at"`
+	Version                int                   `json:"version"`
+	Transport              CodexRoutingTransport `json:"transport"`
+	CQBuild                string                `json:"cq_build"`
+	ParserSchema           int                   `json:"parser_schema"`
+	LeaseSchema            int                   `json:"lease_schema"`
+	SemanticsRevision      string                `json:"semantics_revision"`
+	ClientBuild            string                `json:"client_build"`
+	RetryBudget            int                   `json:"retry_budget"`
+	FixtureHash            string                `json:"fixture_hash"`
+	CQExecutableSHA256     string                `json:"cq_executable_sha256"`
+	ClientExecutableSHA256 string                `json:"client_executable_sha256"`
+	ServiceKind            string                `json:"service_kind"`
+	ServiceIdentitySHA256  string                `json:"service_identity_sha256"`
+	InstalledResult        string                `json:"installed_result"`
+	CompletedGates         []string              `json:"completed_gates"`
+	ValidatedAt            time.Time             `json:"validated_at"`
 }
 
 // CodexTransportRequirements describes the exact runtime tuple a marker must match.
@@ -89,6 +100,40 @@ type CodexTransportRequirements struct {
 	RequiredGates      []string
 	ObserveImplemented bool
 	EnforceImplemented bool
+	installedArtifacts codexInstalledArtifactRequirement
+}
+
+type codexInstalledArtifactRequirement struct {
+	cqExecutableSHA256     [sha256.Size]byte
+	clientExecutableSHA256 [sha256.Size]byte
+	serviceKind            codexInstalledListenerServiceKind
+	serviceIdentitySHA256  [sha256.Size]byte
+}
+
+func (requirement codexInstalledArtifactRequirement) valid() bool {
+	if requirement.cqExecutableSHA256 == ([sha256.Size]byte{}) ||
+		requirement.clientExecutableSHA256 == ([sha256.Size]byte{}) ||
+		requirement.serviceIdentitySHA256 == ([sha256.Size]byte{}) {
+		return false
+	}
+	switch requirement.serviceKind {
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+		return true
+	default:
+		return false
+	}
+}
+
+func (requirement codexInstalledArtifactRequirement) cqExecutableHex() string {
+	return hex.EncodeToString(requirement.cqExecutableSHA256[:])
+}
+
+func (requirement codexInstalledArtifactRequirement) clientExecutableHex() string {
+	return hex.EncodeToString(requirement.clientExecutableSHA256[:])
+}
+
+func (requirement codexInstalledArtifactRequirement) serviceIdentityHex() string {
+	return hex.EncodeToString(requirement.serviceIdentitySHA256[:])
 }
 
 // CodexReadinessTuple is the exact runtime identity covered by validation.
@@ -184,7 +229,7 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 	httpReq.SemanticsRevision = CodexHTTPReadinessSemanticsRevision
 	httpReq.RetryBudget = 1
 	httpReq.FixtureHash = CodexHTTPFixtureHash
-	httpReq.RequiredGates = append([]string(nil), CodexHTTPRequiredGates...)
+	httpReq.RequiredGates = append([]string(nil), codexHTTPRequiredGates...)
 	httpReq.EnforceImplemented = true
 	wsReq := common
 	wsReq.Transport = CodexRoutingWebSocket
@@ -194,10 +239,21 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 // OpenCodexRoutingRuntime resolves modes once for process lifetime.
 func OpenCodexRoutingRuntime(cfg *Config, cqBuild, clientBuild string) (*CodexRoutingRuntime, error) {
 	httpReq, wsReq := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
-	return openCodexRoutingRuntimeAt(configDir(), cfg, httpReq, wsReq)
+	return openCodexRoutingRuntimeAtWithArtifactCapture(configDir(), cfg, httpReq, wsReq, captureCurrentCodexInstalledArtifacts)
 }
 
 func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTransportRequirements) (*CodexRoutingRuntime, error) {
+	return openCodexRoutingRuntimeAtWithArtifactCapture(dir, cfg, httpReq, wsReq, nil)
+}
+
+type codexInstalledArtifactCapture func(context.Context, string) (codexInstalledArtifactRequirement, error)
+
+func openCodexRoutingRuntimeAtWithArtifactCapture(
+	dir string,
+	cfg *Config,
+	httpReq, wsReq CodexTransportRequirements,
+	capture codexInstalledArtifactCapture,
+) (*CodexRoutingRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("proxy config is nil")
 	}
@@ -215,6 +271,12 @@ func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTran
 	if err := configuredWS.validate("codex_ws_turn_routing"); err != nil {
 		return nil, err
 	}
+	if configuredHTTP == CodexRoutingEnforce && capture != nil {
+		httpReq.installedArtifacts = codexInstalledArtifactRequirement{}
+		if installedArtifacts, err := captureCodexInstalledArtifactsSafely(capture, httpReq.ClientBuild); err == nil && installedArtifacts.valid() {
+			httpReq.installedArtifacts = installedArtifacts
+		}
+	}
 
 	journal, err := loadCodexRoutingJournal(dir)
 	if err != nil {
@@ -229,6 +291,21 @@ func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTran
 		return nil, fmt.Errorf("save Codex routing mode journal: %w", err)
 	}
 	return &CodexRoutingRuntime{HTTP: journal.HTTP.CodexModeStatus, WebSocket: journal.WebSocket.CodexModeStatus}, nil
+}
+
+func captureCodexInstalledArtifactsSafely(capture codexInstalledArtifactCapture, clientBuild string) (installedArtifacts codexInstalledArtifactRequirement, returnErr error) {
+	if capture == nil {
+		return codexInstalledArtifactRequirement{}, errCodexInstalledProcessAttestation
+	}
+	defer func() {
+		if recover() != nil {
+			installedArtifacts = codexInstalledArtifactRequirement{}
+			returnErr = errCodexInstalledProcessAttestation
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), codexInstalledProcessProofTimeout)
+	defer cancel()
+	return capture(ctx, clientBuild)
 }
 
 func resolveCodexMode(dir string, configured CodexRoutingMode, requirements CodexTransportRequirements) (CodexRoutingMode, string, string) {
@@ -247,6 +324,9 @@ func resolveCodexMode(dir string, configured CodexRoutingMode, requirements Code
 		}
 		if !requirements.EnforceImplemented {
 			return fallback, "enforcement implementation unavailable", requirementsFingerprint(requirements)
+		}
+		if requirements.Transport == CodexRoutingHTTP && !requirements.installedArtifacts.valid() {
+			return fallback, "installed artifact identity unavailable", requirementsFingerprint(requirements)
 		}
 		marker, err := LoadCodexReadinessMarker(dir, requirements.Transport)
 		if err != nil {
@@ -320,40 +400,112 @@ func loadCodexRoutingJournal(dir string) (codexRoutingJournal, error) {
 	return journal, nil
 }
 
+type codexReadinessMarkerLoadOps struct {
+	fileSystem fsutil.FileSystem
+}
+
+func defaultCodexReadinessMarkerLoadOps() codexReadinessMarkerLoadOps {
+	return codexReadinessMarkerLoadOps{fileSystem: fsutil.OSFileSystem{}}
+}
+
 // LoadCodexReadinessMarker reads explicit validation proof for one transport.
 func LoadCodexReadinessMarker(dir string, transport CodexRoutingTransport) (CodexReadinessMarker, error) {
+	return loadCodexReadinessMarkerWithOps(dir, transport, defaultCodexReadinessMarkerLoadOps())
+}
+
+func loadCodexReadinessMarkerWithOps(dir string, transport CodexRoutingTransport, ops codexReadinessMarkerLoadOps) (CodexReadinessMarker, error) {
 	if transport != CodexRoutingHTTP && transport != CodexRoutingWebSocket {
 		return CodexReadinessMarker{}, fmt.Errorf("invalid readiness marker transport %q", transport)
 	}
-	data, err := os.ReadFile(codexReadinessPath(dir, transport))
+	if ops.fileSystem == nil {
+		return CodexReadinessMarker{}, fsutil.ErrSecureCapabilityUnavailable
+	}
+	data, err := readCodexReadinessMarkerWithoutCommitPoison(ops.fileSystem, dir, transport)
 	if err != nil {
 		return CodexReadinessMarker{}, err
 	}
 	var marker CodexReadinessMarker
-	if err := json.Unmarshal(data, &marker); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&marker); err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	canonical, err := canonicalCodexReadinessMarkerJSON(marker)
+	if err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	if !bytes.Equal(data, canonical) {
+		return CodexReadinessMarker{}, fmt.Errorf("readiness marker is not canonical JSON")
+	}
+	if err := validateCodexReadinessMarkerArtifactBinding(marker); err != nil {
 		return CodexReadinessMarker{}, err
 	}
 	return marker, nil
 }
 
-// SaveCodexReadinessMarker atomically persists explicit validation proof.
-// Startup and upgrade paths never call this function.
-func SaveCodexReadinessMarker(dir string, marker CodexReadinessMarker) error {
-	if marker.Version != CodexReadinessMarkerVersion {
-		return fmt.Errorf("invalid readiness marker version %d", marker.Version)
+func readCodexReadinessMarkerWithoutCommitPoison(
+	fileSystem fsutil.FileSystem,
+	dir string,
+	transport CodexRoutingTransport,
+) ([]byte, error) {
+	inspector, ok := fileSystem.(fsutil.SecurePathInspector)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
 	}
-	if marker.Transport != CodexRoutingHTTP && marker.Transport != CodexRoutingWebSocket {
-		return fmt.Errorf("invalid readiness marker transport %q", marker.Transport)
+	opener, ok := fileSystem.(fsutil.SecureDirectoryOpener)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
 	}
-	if marker.CQBuild == "" || marker.ParserSchema <= 0 || marker.LeaseSchema <= 0 || marker.SemanticsRevision == "" || marker.ClientBuild == "" || marker.RetryBudget < 0 || marker.FixtureHash == "" || marker.InstalledResult != "passed" || len(marker.CompletedGates) == 0 || marker.ValidatedAt.IsZero() {
-		return fmt.Errorf("readiness marker is incomplete")
+	if err := fsutil.ValidateSecureDirectory(fileSystem, dir); err != nil {
+		return nil, err
 	}
-	return saveJSONFile(codexReadinessPath(dir, marker.Transport), &marker)
+	directory, err := opener.OpenSecureDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	fence := func() error {
+		return fsutil.ValidateSecureDirectoryHandle(inspector, directory, dir)
+	}
+	if err := fence(); err != nil {
+		return nil, err
+	}
+	poisonName := codexReadinessPoisonName(transport)
+	if err := requireCodexReadinessPoisonAbsent(directory, poisonName); err != nil {
+		return nil, err
+	}
+	data, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(
+		inspector,
+		directory,
+		filepath.Base(codexReadinessPath(dir, transport)),
+		codexReadinessMarkerMaxBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := fence(); err != nil {
+		return nil, err
+	}
+	if err := requireCodexReadinessPoisonAbsent(directory, poisonName); err != nil {
+		return nil, err
+	}
+	if err := fence(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
-// SaveDefaultCodexReadinessMarker stores explicit proof in CQ's runtime state.
-func SaveDefaultCodexReadinessMarker(marker CodexReadinessMarker) error {
-	return SaveCodexReadinessMarker(configDir(), marker)
+func canonicalCodexReadinessMarkerJSON(marker CodexReadinessMarker) ([]byte, error) {
+	data, err := json.MarshalIndent(&marker, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// LoadDefaultCodexReadinessMarker reads proof from CQ's runtime state.
+func LoadDefaultCodexReadinessMarker(transport CodexRoutingTransport) (CodexReadinessMarker, error) {
+	return LoadCodexReadinessMarker(configDir(), transport)
 }
 
 // ValidateCodexReadinessMarker rejects any stale or incomplete tuple dimension.
@@ -385,20 +537,67 @@ func ValidateCodexReadinessMarker(marker CodexReadinessMarker, required CodexTra
 			return fmt.Errorf("%s", check.reason)
 		}
 	}
+	if err := validateCodexReadinessMarkerArtifactBinding(marker); err != nil {
+		return err
+	}
+	if required.Transport == CodexRoutingHTTP && required.installedArtifacts.valid() {
+		checks := []struct {
+			ok     bool
+			reason string
+		}{
+			{marker.CQExecutableSHA256 == required.installedArtifacts.cqExecutableHex(), "readiness marker CQ executable mismatch"},
+			{marker.ClientExecutableSHA256 == required.installedArtifacts.clientExecutableHex(), "readiness marker client executable mismatch"},
+			{marker.ServiceKind == string(required.installedArtifacts.serviceKind), "readiness marker service kind mismatch"},
+			{marker.ServiceIdentitySHA256 == required.installedArtifacts.serviceIdentityHex(), "readiness marker service identity mismatch"},
+		}
+		for _, check := range checks {
+			if !check.ok {
+				return fmt.Errorf("%s", check.reason)
+			}
+		}
+	}
 	if !sameUniqueGates(marker.CompletedGates, required.RequiredGates) {
 		return fmt.Errorf("readiness marker gate set mismatch")
 	}
 	return nil
 }
 
-// BuildCodexHTTPReadinessMarker validates installed evidence against the exact
-// running tuple. It never infers completed gates from synthetic counters.
-func BuildCodexHTTPReadinessMarker(evidence CodexHTTPReadinessEvidence, required CodexTransportRequirements, validatedAt time.Time) (CodexReadinessMarker, error) {
+func validateCodexReadinessMarkerArtifactBinding(marker CodexReadinessMarker) error {
+	if marker.Transport != CodexRoutingHTTP {
+		return nil
+	}
+	if !validCodexReadinessSHA256(marker.CQExecutableSHA256) ||
+		!validCodexReadinessSHA256(marker.ClientExecutableSHA256) ||
+		!validCodexReadinessSHA256(marker.ServiceIdentitySHA256) {
+		return fmt.Errorf("readiness marker installed artifact digest invalid")
+	}
+	switch codexInstalledListenerServiceKind(marker.ServiceKind) {
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+		return nil
+	default:
+		return fmt.Errorf("readiness marker service kind invalid")
+	}
+}
+
+func validCodexReadinessSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && !bytes.Equal(decoded, make([]byte, sha256.Size))
+}
+
+// buildCodexHTTPReadinessMarker validates installed evidence against the exact
+// running tuple. Only the package-private sealed startup harness may call it.
+func buildCodexHTTPReadinessMarker(evidence CodexHTTPReadinessEvidence, required CodexTransportRequirements, validatedAt time.Time) (CodexReadinessMarker, error) {
 	if required.Transport != CodexRoutingHTTP {
 		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness requires HTTP transport")
 	}
 	if evidence.Source != CodexHTTPReadinessEvidenceInstalledListener {
 		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness requires installed-listener evidence")
+	}
+	if !required.installedArtifacts.valid() {
+		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness requires installed artifact identity")
 	}
 	if evidence.Tuple != readinessTuple(required) {
 		return CodexReadinessMarker{}, fmt.Errorf("HTTP readiness evidence tuple mismatch")
@@ -414,18 +613,22 @@ func BuildCodexHTTPReadinessMarker(evidence CodexHTTPReadinessEvidence, required
 		return CodexReadinessMarker{}, err
 	}
 	marker := CodexReadinessMarker{
-		Version:           CodexReadinessMarkerVersion,
-		Transport:         required.Transport,
-		CQBuild:           required.CQBuild,
-		ParserSchema:      required.ParserSchema,
-		LeaseSchema:       required.LeaseSchema,
-		SemanticsRevision: required.SemanticsRevision,
-		ClientBuild:       required.ClientBuild,
-		RetryBudget:       required.RetryBudget,
-		FixtureHash:       required.FixtureHash,
-		InstalledResult:   "passed",
-		CompletedGates:    completedGates,
-		ValidatedAt:       validatedAt,
+		Version:                CodexReadinessMarkerVersion,
+		Transport:              required.Transport,
+		CQBuild:                required.CQBuild,
+		ParserSchema:           required.ParserSchema,
+		LeaseSchema:            required.LeaseSchema,
+		SemanticsRevision:      required.SemanticsRevision,
+		ClientBuild:            required.ClientBuild,
+		RetryBudget:            required.RetryBudget,
+		FixtureHash:            required.FixtureHash,
+		CQExecutableSHA256:     required.installedArtifacts.cqExecutableHex(),
+		ClientExecutableSHA256: required.installedArtifacts.clientExecutableHex(),
+		ServiceKind:            string(required.installedArtifacts.serviceKind),
+		ServiceIdentitySHA256:  required.installedArtifacts.serviceIdentityHex(),
+		InstalledResult:        "passed",
+		CompletedGates:         completedGates,
+		ValidatedAt:            validatedAt,
 	}
 	if err := ValidateCodexReadinessMarker(marker, required); err != nil {
 		return CodexReadinessMarker{}, err
@@ -452,7 +655,7 @@ func codexHTTPCompletedReadinessGates(evidence CodexHTTPReadinessGateEvidence) (
 		{evidence.AdmittedNoMigrationCases, "admitted-no-migration"},
 		{evidence.V2JournalRuntimeCases, "v2-journal-runtime"},
 	}
-	completed := make([]string, 0, len(CodexHTTPRequiredGates))
+	completed := make([]string, 0, len(codexHTTPRequiredGates))
 	for _, measured := range cases {
 		if measured.count == 0 {
 			return nil, fmt.Errorf("Codex HTTP readiness gate %q has no measured case", measured.gate)
@@ -535,20 +738,42 @@ func codexReadinessPath(dir string, transport CodexRoutingTransport) string {
 	return filepath.Join(dir, "codex-readiness-"+string(transport)+".json")
 }
 
+func codexReadinessPoisonName(transport CodexRoutingTransport) string {
+	return ".codex-readiness-" + string(transport) + ".commit-in-progress"
+}
+
 func requirementsFingerprint(requirements CodexTransportRequirements) string {
 	gates := append([]string(nil), requirements.RequiredGates...)
 	sort.Strings(gates)
 	value := struct {
-		Transport         CodexRoutingTransport
-		CQBuild           string
-		ParserSchema      int
-		LeaseSchema       int
-		SemanticsRevision string
-		ClientBuild       string
-		RetryBudget       int
-		FixtureHash       string
-		Gates             []string
-	}{requirements.Transport, requirements.CQBuild, requirements.ParserSchema, requirements.LeaseSchema, requirements.SemanticsRevision, requirements.ClientBuild, requirements.RetryBudget, requirements.FixtureHash, gates}
+		Transport              CodexRoutingTransport
+		CQBuild                string
+		ParserSchema           int
+		LeaseSchema            int
+		SemanticsRevision      string
+		ClientBuild            string
+		RetryBudget            int
+		FixtureHash            string
+		Gates                  []string
+		CQExecutableSHA256     string
+		ClientExecutableSHA256 string
+		ServiceKind            codexInstalledListenerServiceKind
+		ServiceIdentitySHA256  string
+	}{
+		Transport:              requirements.Transport,
+		CQBuild:                requirements.CQBuild,
+		ParserSchema:           requirements.ParserSchema,
+		LeaseSchema:            requirements.LeaseSchema,
+		SemanticsRevision:      requirements.SemanticsRevision,
+		ClientBuild:            requirements.ClientBuild,
+		RetryBudget:            requirements.RetryBudget,
+		FixtureHash:            requirements.FixtureHash,
+		Gates:                  gates,
+		CQExecutableSHA256:     requirements.installedArtifacts.cqExecutableHex(),
+		ClientExecutableSHA256: requirements.installedArtifacts.clientExecutableHex(),
+		ServiceKind:            requirements.installedArtifacts.serviceKind,
+		ServiceIdentitySHA256:  requirements.installedArtifacts.serviceIdentityHex(),
+	}
 	data, _ := json.Marshal(value)
 	return hashBytes(data)
 }

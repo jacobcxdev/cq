@@ -207,6 +207,9 @@ func TestCodexInstalledAcceptanceHonoursCallerDeadline(t *testing.T) {
 }
 
 func TestRunCodexHTTPInstalledAcceptance(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_INSTALLED_ACCEPTANCE") != "1" {
+		t.Skip("installed Codex acceptance requires explicit opt-in")
+	}
 	if _, err := os.Stat(codexAcceptanceExecutable); err != nil {
 		t.Skip("installed Codex acceptance executable unavailable")
 	}
@@ -291,7 +294,7 @@ func runSyntheticCodexAcceptanceClient(ctx context.Context, command codexAccepta
 		requestCount = 1
 	}
 	for range requestCount {
-		body := []byte(`{"model":"gpt-5.4","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}`)
+		body := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}`)
 		encoding := ""
 		if options.zstd {
 			body = encodeCodexAcceptanceZstd(body)

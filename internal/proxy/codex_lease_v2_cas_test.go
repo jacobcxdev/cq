@@ -1528,7 +1528,7 @@ type failCodexLeaseV2PreReplaceReadDirectory struct {
 func (directory *failCodexLeaseV2PreReplaceReadDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
 	if name == directory.journalName {
 		directory.journalReads++
-		if directory.journalReads == 3 {
+		if directory.journalReads == 4 {
 			return nil, errors.New("injected pre-replace journal trust loss")
 		}
 	}

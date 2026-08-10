@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // CodexNativeHTTPRequestPlanner prepares one frozen native request and commits
@@ -45,9 +46,21 @@ type CodexNativeHTTPRoutingHandler interface {
 // CodexNativeHTTPHandler is the authoritative native Responses HTTP vertical.
 // A Server uses it only when startup readiness selected HTTP enforcement.
 type CodexNativeHTTPHandler struct {
-	planner  CodexNativeHTTPRequestPlanner
-	session  CodexNativeHTTPRequestSession
-	upstream url.URL
+	planner        CodexNativeHTTPRequestPlanner
+	session        CodexNativeHTTPRequestSession
+	upstream       url.URL
+	requests       *codexNativeHTTPRequestGate
+	installedProbe atomic.Pointer[codexInstalledHTTPGateProbe]
+}
+
+func (handler *CodexNativeHTTPHandler) installCodexInstalledHTTPGateProbe(probe *codexInstalledHTTPGateProbe) (func(), error) {
+	if handler == nil || probe == nil || !handler.installedProbe.CompareAndSwap(nil, probe) {
+		return nil, errCodexInstalledListenerAcceptance
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() { handler.installedProbe.CompareAndSwap(probe, nil) })
+	}, nil
 }
 
 // NewCodexNativeHTTPHandler validates every dependency before the listener can
@@ -60,7 +73,19 @@ func NewCodexNativeHTTPHandler(planner CodexNativeHTTPRequestPlanner, session Co
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("Codex native HTTP upstream is invalid")
 	}
-	return &CodexNativeHTTPHandler{planner: planner, session: session, upstream: *parsed}, nil
+	return &CodexNativeHTTPHandler{
+		planner: planner, session: session, upstream: *parsed,
+		requests: newCodexNativeHTTPRequestGate(),
+	}, nil
+}
+
+// CloseAndDrain permanently closes native request admission and waits until
+// every request admitted before the close has fully returned from TryServe.
+func (handler *CodexNativeHTTPHandler) CloseAndDrain(ctx context.Context) error {
+	if handler == nil {
+		return errors.New("Codex native HTTP handler unavailable")
+	}
+	return handler.requests.closeAndDrain(ctx)
 }
 
 // TryServe is the enforcement implementation. It claims every request before
@@ -71,6 +96,22 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 			writeError(writer, http.StatusServiceUnavailable, "api_error", "Codex native HTTP routing unavailable")
 		}
 		return true, ""
+	}
+	release, admitted := handler.requests.enter()
+	if !admitted {
+		closeCodexNativeHTTPRejectedRequestBody(request.Body)
+		writeError(writer, http.StatusServiceUnavailable, "api_error", "Codex native HTTP routing unavailable")
+		return true, ""
+	}
+	defer release()
+	path := codexInstalledHTTPProbeResponses
+	if compact {
+		path = codexInstalledHTTPProbeCompact
+	}
+	trace := handler.installedProbe.Load().begin(path)
+	if trace != nil {
+		request = request.Clone(withCodexInstalledHTTPTrace(request.Context(), trace))
+		defer trace.finish()
 	}
 	encoded, err := readCodexNativeHTTPRequest(request)
 	if err != nil {
@@ -88,6 +129,7 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 }
 
 func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, request *http.Request, compact bool, encoded []byte, expected *CodexLeaseBoundExpectation) (bool, string) {
+	trace := codexInstalledHTTPTraceFromContext(request.Context())
 	prepared, err := handler.planner.Build(request.Context(), CodexHTTPRequestPlanInput{
 		Encoded:       encoded,
 		Headers:       request.Header,
@@ -131,7 +173,8 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 
 	if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
 		defer closeCodexHTTPResponseBody(result.Response.Body)
-		_ = relayCodexHTTPResponse(writer, result.Response, false)
+		relayErr := relayCodexHTTPResponse(writer, result.Response, false)
+		trace.relayedResponse(false, true, relayErr)
 		return true, model
 	}
 
@@ -139,7 +182,8 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	if compact {
 		mode = codexHTTPResponseModeCompact
 	}
-	_ = relayCodexAcceptedHTTPResponse(request.Context(), writer, result.Response, mode, result.Lifecycle)
+	relayErr := relayCodexAcceptedHTTPResponse(request.Context(), writer, result.Response, mode, result.Lifecycle)
+	trace.relayedResponse(true, false, relayErr)
 	return true, model
 }
 

@@ -59,6 +59,11 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, []string{"proxy", "restart"})
 		}
 		return restartProxyAgent()
+	case "validate-http":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "validate-http"})
+		}
+		return runDefaultProxyValidateHTTP(args[1:], version)
 	case "status":
 		if helpRequested(args[1:]) {
 			return writeManualHelp(os.Stdout, []string{"proxy", "status"})
@@ -289,12 +294,23 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 }
 
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
-	cfg, err := proxy.LoadConfig()
+	intent, err := claimInstalledHTTPValidationStartupRequest(
+		version,
+		consumeInstalledHTTPValidationStartupRequestFn,
+		invalidateInstalledHTTPValidationMarkerFn,
+	)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadProxyStartConfigFn()
 	if err != nil {
 		return err
 	}
 	if opts.Port != 0 {
 		cfg.Port = opts.Port
+	}
+	if intent != nil {
+		return runInstalledHTTPValidationStartupFn(context.Background(), cfg, version, intent)
 	}
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}

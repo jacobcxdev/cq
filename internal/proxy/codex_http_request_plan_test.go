@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -85,7 +86,13 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 		},
 	}
 
-	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+	probe, err := newCodexInstalledHTTPGateProbe(sha256.Sum256([]byte("plan-listener")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := probe.begin(codexInstalledHTTPProbeResponses)
+	ctx := withCodexInstalledHTTPTrace(context.Background(), trace)
+	result, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
 		Encoded:          frozenRequestBody("gpt-5", CodexRequestTurn, "private-request-material"),
 		Headers:          http.Header{"X-Private": {"private-header-material"}},
 		AcceptedRevision: "revision-accepted",
@@ -139,6 +146,13 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	}
 	if result.Frozen.HeadroomSavings() != 7 {
 		t.Fatalf("Headroom savings = %d, want 7", result.Frozen.HeadroomSavings())
+	}
+	trace.mu.Lock()
+	probeFacts := trace.plan
+	trace.mu.Unlock()
+	if probeFacts.inspectCalls != 1 || probeFacts.freezeCalls != 1 || probeFacts.transformed ||
+		probeFacts.encodeCalls != 0 || probeFacts.headroomTransforms != 0 {
+		t.Fatalf("unchanged Headroom probe facts = %#v", probeFacts)
 	}
 	choice, err := result.Frozen.Choice()
 	if err != nil || !reflect.DeepEqual(choice, choices[0].Choice()) {

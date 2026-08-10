@@ -83,6 +83,7 @@ type ProxyCmd struct {
 	Uninstall    ProxyUninstallCmd    `cmd:"" help:"Uninstall proxy launch agent"`
 	Restart      ProxyRestartCmd      `cmd:"" help:"Restart proxy launch agent"`
 	Status       ProxyStatusCmd       `cmd:"" help:"Show proxy health"`
+	ValidateHTTP ProxyValidateHTTPCmd `cmd:"" name:"validate-http" help:"Request one-shot installed HTTP validation"`
 	Pin          ProxyPinCmd          `cmd:"" help:"Pin Claude proxy routing"`
 	CodexDefault ProxyCodexDefaultCmd `cmd:"" name:"codex-default" help:"Configure Codex routing default"`
 	Prime        ProxyPrimeCmd        `cmd:"" help:"Manage Codex quota-window priming"`
@@ -96,6 +97,7 @@ type ProxyStartCmd struct {
 type ProxyInstallCmd struct{}
 type ProxyUninstallCmd struct{}
 type ProxyRestartCmd struct{}
+type ProxyValidateHTTPCmd struct{}
 
 type ProxyStatusCmd struct {
 	Port int `help:"Override health-check port" placeholder:"PORT"`

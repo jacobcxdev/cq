@@ -159,6 +159,46 @@ func TestCodexLeaseRuntimePersistsInheritedAccountContinuityWithoutRawState(t *t
 	}
 }
 
+func TestCodexLeaseRuntimeMarksOnlyFirstRequestOfTurnAsNew(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+
+	first, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.newTurn {
+		t.Fatal("first durable request was not classified as a new turn")
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.newTurn {
+		t.Fatal("later request on the same durable turn was classified as a new turn")
+	}
+}
+
 func TestCodexLeaseRuntimeRetainsResponseEvidenceForEveryAdmittedTerminal(t *testing.T) {
 	t.Parallel()
 	for _, terminal := range []string{"completed", "failed", "indeterminate"} {

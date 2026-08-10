@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,14 +11,6 @@ import (
 )
 
 const codexCaptureInputLimit = 10 << 20
-
-var runCodexHTTPReadinessEvidenceFn = func(ctx context.Context) (proxy.CodexHTTPReadinessEvidence, error) {
-	acceptance, err := proxy.RunCodexHTTPInstalledAcceptance(ctx)
-	return proxy.CodexHTTPReadinessEvidence{
-		Source:     proxy.CodexHTTPReadinessEvidenceSynthetic,
-		Acceptance: acceptance,
-	}, err
-}
 
 func runCodexValidate(args []string) error {
 	if len(args) == 0 || helpRequested(args) {
@@ -99,27 +90,20 @@ func runCodexHTTPValidation(args []string) error {
 	if clientBuild == "" {
 		return fmt.Errorf("Codex HTTP validation requires --client-build")
 	}
-	acceptanceCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	evidence, err := runCodexHTTPReadinessEvidenceFn(acceptanceCtx)
-	if err != nil {
-		return fmt.Errorf("Codex HTTP installed-listener validation failed: %w", err)
-	}
 	required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
-	marker, err := proxy.BuildCodexHTTPReadinessMarker(evidence, required, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("Codex HTTP validation failed: %w", err)
-	}
-	var writeErr error
+	var marker proxy.CodexReadinessMarker
+	var err error
 	if strings.TrimSpace(stateDir) == "" {
-		writeErr = proxy.SaveDefaultCodexReadinessMarker(marker)
+		marker, err = proxy.LoadDefaultCodexReadinessMarker(proxy.CodexRoutingHTTP)
 	} else {
-		writeErr = proxy.SaveCodexReadinessMarker(stateDir, marker)
+		marker, err = proxy.LoadCodexReadinessMarker(stateDir, proxy.CodexRoutingHTTP)
 	}
-	if writeErr != nil {
-		return fmt.Errorf("write Codex HTTP readiness marker: %w", writeErr)
+	if err != nil {
+		return fmt.Errorf("Codex HTTP readiness is unavailable; run the installed service in explicit startup validation mode: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "Codex HTTP installed listener passed: %d turns, %d requests\n", evidence.Acceptance.Turns, evidence.Acceptance.Requests)
-	fmt.Fprintln(os.Stdout, "Codex HTTP enforcement readiness recorded; restart CQ to apply")
+	if err := proxy.ValidateCodexReadinessMarker(marker, required); err != nil {
+		return fmt.Errorf("Codex HTTP readiness marker is not current: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Codex HTTP installed-listener readiness is recorded for %s (validated %s)\n", marker.ClientBuild, marker.ValidatedAt.UTC().Format(time.RFC3339))
 	return nil
 }
