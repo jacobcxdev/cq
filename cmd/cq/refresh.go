@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -105,7 +106,11 @@ func runRefresh() error {
 	if claudeChanged {
 		invalidateProviderCacheFn(provider.Claude)
 	}
-	if refreshCodexAccountsFn(ctx, httpClient, now) {
+	codexChanged, err := refreshCodexAccountsFn(ctx, httpClient, now)
+	if err != nil {
+		return err
+	}
+	if codexChanged {
 		invalidateProviderCacheFn(provider.Codex)
 	}
 
@@ -151,35 +156,62 @@ func runRefresh() error {
 	return nil
 }
 
-func refreshCodexAccounts(ctx context.Context, client httputil.Doer, nowMs int64) bool {
+func refreshCodexAccounts(ctx context.Context, client httputil.Doer, nowMs int64) (bool, error) {
 	fs := codexRefreshFSFactory()
 	control, err := codexprov.OpenDefaultCredentialRefreshControl(ctx, fs, client)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: Codex credential coordinator: %v\n", err)
-		return false
+		return false, codexRefreshAuthorityError(err)
 	}
 	defer control.Close()
-	return refreshManagedCodexInventory(ctx, codexprov.DiscoverInventory(fs), control, nowMs)
+	return refreshManagedCodexAuthority(ctx, control, time.UnixMilli(nowMs))
 }
 
-func refreshManagedCodexInventory(ctx context.Context, inventory codexprov.Inventory, broker codexprov.CredentialRefreshBroker, nowMs int64) bool {
-	if broker == nil {
-		return false
+type codexRefreshAuthority interface {
+	codexprov.CredentialInventory
+	codexprov.CredentialRefreshBroker
+}
+
+func refreshManagedCodexAuthority(ctx context.Context, authority codexRefreshAuthority, now time.Time) (bool, error) {
+	if authority == nil {
+		return false, codexprov.ErrCredentialAuthorityUnavailable
 	}
-	threshold := nowMs + refreshMarginMs
+	inventory, err := authority.List(ctx)
+	if err != nil {
+		return false, codexRefreshAuthorityError(err)
+	}
+	for _, source := range inventory.ExternalSources {
+		if source.ErrorCode != "" && !source.OptionalAbsent {
+			return false, codexprov.ErrCredentialInventoryDegraded
+		}
+	}
+
+	threshold := now.Add(time.Duration(refreshMarginMs) * time.Millisecond)
 	changed := false
 	for _, logical := range inventory.Accounts {
-		for _, candidate := range codexprov.ResolveCandidate(logical, "", time.UnixMilli(nowMs)) {
-			if candidate.Source != codexprov.SourceManaged || candidate.Credential.ExpiresAt == 0 || candidate.Credential.ExpiresAt > threshold {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
+			if candidate.Source != codexprov.SourceManaged || candidate.AccessExpiresAt.IsZero() || candidate.AccessExpiresAt.After(threshold) {
 				continue
 			}
-			if _, err := broker.Refresh(ctx, candidate.Ref, candidate.Revision); err != nil {
+			if _, err := authority.Refresh(ctx, candidate.Ref, candidate.Revision); err != nil {
 				continue
 			}
 			changed = true
 		}
 	}
-	return changed
+	return changed, nil
+}
+
+func codexRefreshAuthorityError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, codexprov.ErrCredentialInventoryDegraded):
+		return codexprov.ErrCredentialInventoryDegraded
+	default:
+		return codexprov.ErrCredentialAuthorityUnavailable
+	}
 }
 
 // syncAnonymousToIdentified resolves anonymous keychain entries via the
