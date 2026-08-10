@@ -15,6 +15,246 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
+func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	turnState := "private-turn-state"
+	responseAnchor := "private-response-anchor"
+
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: turnState, HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handle.record.HasTurnState || handle.record.TurnStateHash != store.hash("turn-state", turnState) {
+		t.Fatalf("admission evidence = %#v", handle.record)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: responseAnchor, HasResponseAnchor: true, HasEncryptedState: true},
+		EndTurn:                   false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.State() != LeaseContinuationPending || !handle.record.HasResponseAnchor || handle.record.CorrelationHash != store.hash("correlation", responseAnchor) || !handle.record.HasEncryptedState {
+		t.Fatalf("completion evidence = %#v", handle.record)
+	}
+	if bytes.Contains(store.journalBytes, []byte(turnState)) || bytes.Contains(store.journalBytes, []byte(responseAnchor)) {
+		t.Fatal("raw HTTP evidence entered the journal")
+	}
+	handle, err = handle.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matching := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-next", Kind: CodexAttemptSlotDirect}})
+	matching.Evidence = CodexLeaseRequestEvidence{TurnState: turnState, HasTurnState: true, HasEncryptedState: true}
+	for _, test := range []struct {
+		name    string
+		mutate  func(*CodexLeaseRequestPlan)
+		private string
+	}{
+		{name: "previous response without live generation", private: responseAnchor, mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.PreviousResponseID = responseAnchor }},
+		{name: "turn state mismatch", private: "wrong-private-state", mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.TurnState = "wrong-private-state" }},
+		{name: "missing turn state", mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.TurnState = ""; plan.Evidence.HasTurnState = false }},
+		{name: "account mismatch", mutate: func(plan *CodexLeaseRequestPlan) {
+			plan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+			plan.Slots[0].AccountKey = "account-b"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := matching
+			invalid.Accounts = append([]codex.AccountKey(nil), matching.Accounts...)
+			invalid.Slots = append([]CodexLeaseAttemptSlotPlan(nil), matching.Slots...)
+			test.mutate(&invalid)
+			before := append([]byte(nil), store.journalBytes...)
+			_, beginErr := runtimeLease.BeginRequest(invalid)
+			if !errors.Is(beginErr, ErrCodexContinuity) {
+				t.Fatalf("BeginRequest = %T %v, want continuity error", beginErr, beginErr)
+			}
+			if !bytes.Equal(before, store.journalBytes) {
+				t.Fatal("rejected continuity evidence changed journal")
+			}
+			if test.private != "" && strings.Contains(beginErr.Error(), test.private) {
+				t.Fatal("continuity error exposed raw evidence")
+			}
+		})
+	}
+
+	next, err := runtimeLease.BeginRequest(matching)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = next.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeMismatch := append([]byte(nil), store.journalBytes...)
+	if _, err := next.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "wrong-response-state", HasTurnState: true}); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("mismatched admission = %T %v, want continuity error", err, err)
+	}
+	if !bytes.Equal(beforeMismatch, store.journalBytes) {
+		t.Fatal("mismatched admission changed journal")
+	}
+}
+
+func TestCodexLeaseRuntimeRetainsResponseEvidenceForEveryAdmittedTerminal(t *testing.T) {
+	t.Parallel()
+	for _, terminal := range []string{"completed", "failed", "indeterminate"} {
+		terminal := terminal
+		t.Run(terminal, func(t *testing.T) {
+			t.Parallel()
+			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+			store := coordinator.Store()
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+			handle, err := runtimeLease.BeginRequest(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			anchor := "private-" + terminal + "-anchor"
+			responseEvidence := CodexHTTPResponseEvidence{ResponseAnchor: anchor, HasResponseAnchor: true, HasEncryptedState: true}
+			switch terminal {
+			case "completed":
+				handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{CodexHTTPResponseEvidence: responseEvidence, EndTurn: true})
+			case "failed":
+				handle, err = handle.ProviderFailed(responseEvidence)
+			case "indeterminate":
+				handle, err = handle.IndeterminateContext(context.Background(), responseEvidence)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handle.record.HasResponseAnchor || handle.record.CorrelationHash != store.hash("correlation", anchor) || !handle.record.HasEncryptedState || bytes.Contains(store.journalBytes, []byte(anchor)) {
+				t.Fatalf("terminal evidence = %#v", handle.record)
+			}
+		})
+	}
+}
+
+func TestCodexLeaseHTTPRequestLifecycleAdapter(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := NewCodexHTTPRequestLifecycle(handle)
+	if lifecycle == nil || lifecycle.AccountKey() != "account-a" {
+		t.Fatalf("adapter = %#v", lifecycle)
+	}
+	lifecycle, err = lifecycle.MarkDispatchedContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err = lifecycle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "adapter-state", HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err = lifecycle.ProviderFailed(CodexHTTPResponseEvidence{ResponseAnchor: "adapter-anchor", HasResponseAnchor: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapted := lifecycle.(*codexLeaseHTTPRequestLifecycle)
+	if !adapted.handle.record.HasTurnState || !adapted.handle.record.HasResponseAnchor {
+		t.Fatalf("adapted evidence = %#v", adapted.handle.record)
+	}
+}
+
+func TestCodexLeaseRuntimeBeginReturnsCommittedCleanupHandle(t *testing.T) {
+	t.Parallel()
+	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinatorWithOwner(t, owner)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	owner.failAt.Store(owner.begins.Load() + 5)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil || handle == nil {
+		t.Fatalf("BeginRequest = %#v, %v, want committed cleanup handle", handle, err)
+	}
+	assertCodexLeaseRuntimeRefs(t, handle, 1, 0, 0, false)
+	if owner.begins.Load() >= owner.failAt.Load() {
+		t.Fatalf("BeginRequest performed a post-commit owner operation: begins %d fail-at %d", owner.begins.Load(), owner.failAt.Load())
+	}
+	owner.failAt.Store(0)
+	handle, err = handle.AbandonBeforeDispatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCodexLeaseRuntimeRefs(t, handle, 0, 0, 0, true)
+}
+
+func TestCodexLeaseCommitCapturesInstalledRequestBeforeCompact(t *testing.T) {
+	t.Parallel()
+	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	store := coordinator.Store()
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptDispatched
+		}
+	}
+	captureEntered := make(chan struct{})
+	releaseCapture := make(chan struct{})
+	commitDone := make(chan error, 1)
+	var captureErr error
+	go func() {
+		_, commitErr := store.commitLane(handle.fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
+			if len(installed.Records) == 0 || codexLeaseCurrentAttemptState(installed.Records[0]) != CodexAttemptDispatched {
+				captureErr = errors.New("capture did not observe installed dispatched request")
+			}
+			close(captureEntered)
+			<-releaseCapture
+		})
+		commitDone <- commitErr
+	}()
+	<-captureEntered
+	compactDone := make(chan error, 1)
+	go func() { compactDone <- store.Compact(*now, DefaultCodexLeaseRetention) }()
+	select {
+	case compactErr := <-compactDone:
+		t.Fatalf("Compact crossed installed capture: %v", compactErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseCapture)
+	if err := <-commitDone; err != nil {
+		t.Fatal(err)
+	}
+	if captureErr != nil {
+		t.Fatal(captureErr)
+	}
+	if err := <-compactDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexLeaseRuntimeHTTPAdmissionAndObserverDrain(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
@@ -46,7 +286,7 @@ func TestCodexLeaseRuntimeHTTPAdmissionAndObserverDrain(t *testing.T) {
 		t.Fatalf("admitted observer = state %v admitted %v", observer.State(), observer.EverAdmitted())
 	}
 	assertCodexLeaseRuntimeRefs(t, observer, 1, 1, 1, false)
-	completed, err := observer.ProviderCompleted(false)
+	completed, err := observer.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +451,7 @@ func TestCodexLeaseRuntimeProviderFailureRetainsObserverUntilDrain(t *testing.T)
 	}
 	reject.Store(true)
 	beforeRevalidations := revalidations.Load()
-	failed, err := observer.ProviderFailed()
+	failed, err := observer.ProviderFailed(CodexHTTPResponseEvidence{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +465,7 @@ func TestCodexLeaseRuntimeProviderFailureRetainsObserverUntilDrain(t *testing.T)
 
 	beforeStale := append([]byte(nil), store.journalBytes...)
 	beforeStaleGeneration := store.Generation()
-	if _, err := observer.ProviderFailed(); !errors.Is(err, ErrCodexLeaseStaleMutation) {
+	if _, err := observer.ProviderFailed(CodexHTTPResponseEvidence{}); !errors.Is(err, ErrCodexLeaseStaleMutation) {
 		t.Fatalf("stale provider failure = %T %v, want stale mutation", err, err)
 	}
 	if store.Generation() != beforeStaleGeneration || !bytes.Equal(beforeStale, store.journalBytes) || store.poisoned != nil {
@@ -319,7 +559,7 @@ func TestCodexLeaseRuntimeRejectsSuccessorUntilPredecessorDrains(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err = next.ProviderCompleted(true)
+			next, err = next.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -576,7 +816,7 @@ func TestCodexLeaseRuntimeFinalRejectionAfterAdmissionPreservesAuthority(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err = first.ProviderCompleted(false)
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,7 +1077,7 @@ func TestCodexLeaseRuntimeTerminalEvidenceDoesNotRequireRoutability(t *testing.T
 		}
 		beforeCalls := calls.Load()
 		reject.Store(true)
-		handle, err = handle.ProviderCompleted(true)
+		handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -913,7 +1153,7 @@ func TestCodexLeaseRuntimeMidTurnCompactionRequiresAdmittedTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err = request.ProviderCompleted(false)
+	request, err = request.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +1199,7 @@ func TestCodexLeaseRuntimeAdmissionUsesAccountRemovalGate(t *testing.T) {
 	before := append([]byte(nil), store.journalBytes...)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := dispatched.AdmitHTTP2xxContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := dispatched.AdmitHTTP2xxContext(ctx, CodexHTTPAdmissionEvidence{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("gated admission error = %T %v, want deadline", err, err)
 	}
 	if !bytes.Equal(before, store.journalBytes) || store.poisoned != nil {
@@ -1102,7 +1342,7 @@ func TestCodexLeaseRuntimeAdmittedIndeterminateHonoursCancellationWhilePersisten
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, err := handle.IndeterminateContext(ctx)
+		_, err := handle.IndeterminateContext(ctx, CodexHTTPResponseEvidence{})
 		result <- err
 	}()
 	cancel()
@@ -1885,7 +2125,7 @@ func completeCodexLeaseRuntimeTurn(t *testing.T, runtimeLease *CodexLeaseRuntime
 	if err != nil {
 		t.Fatal(err)
 	}
-	handle, err = handle.ProviderCompleted(true)
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1904,6 +2144,10 @@ func assertCodexLeaseRuntimeRefs(t *testing.T, handle *CodexLeaseRequestHandle, 
 }
 
 func openCodexLeaseRuntimeTestCoordinator(t *testing.T) (*CodexContinuityCoordinator, *fsutil.MemFS, *time.Time) {
+	return openCodexLeaseRuntimeTestCoordinatorWithOwner(t, codexLeaseV2CASTestOwner{})
+}
+
+func openCodexLeaseRuntimeTestCoordinatorWithOwner(t *testing.T, owner CodexLeaseWriterAuthority) (*CodexContinuityCoordinator, *fsutil.MemFS, *time.Time) {
 	t.Helper()
 	fsys := fsutil.NewMemFS()
 	if err := fsys.MkdirAll("/state", 0o700); err != nil {
@@ -1945,12 +2189,28 @@ func openCodexLeaseRuntimeTestCoordinator(t *testing.T) (*CodexContinuityCoordin
 			Now:       func() time.Time { return now },
 		},
 		Modes: CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{9}},
-	}, codexLeaseV2CASTestOwner{})
+	}, owner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = coordinator.Close() })
 	return coordinator, fsys, &now
+}
+
+type codexLeaseRuntimeFailingOwner struct {
+	begins atomic.Int32
+	failAt atomic.Int32
+	err    error
+}
+
+func (*codexLeaseRuntimeFailingOwner) AssertOwner() error { return nil }
+
+func (owner *codexLeaseRuntimeFailingOwner) BeginOwnerOperation() (*codex.CredentialOwnerOperation, error) {
+	begin := owner.begins.Add(1)
+	if failAt := owner.failAt.Load(); failAt != 0 && begin == failAt {
+		return nil, owner.err
+	}
+	return &codex.CredentialOwnerOperation{}, nil
 }
 
 func reopenCodexLeaseRuntimeTestCoordinator(t *testing.T, fsys *fsutil.MemFS, now *time.Time) *CodexContinuityCoordinator {

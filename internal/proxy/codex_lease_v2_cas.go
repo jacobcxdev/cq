@@ -117,6 +117,12 @@ func codexLeaseAttemptPlanDigest(key []byte, slots []CodexAttemptSlot) string {
 }
 
 func (store *CodexLeaseStore) CommitLane(expected CodexLeaseGenerationFence, mutation CodexLaneMutation) (CodexLeaseGenerationFence, error) {
+	return store.commitLane(expected, mutation, nil)
+}
+
+// commitLane runs capture after the verified after-image is installed and
+// while store.mu is still held. capture must detach any data it retains.
+func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mutation CodexLaneMutation, capture func(CodexLeaseGenerationFence, codexLeaseJournalEnvelopeV2)) (CodexLeaseGenerationFence, error) {
 	if store == nil {
 		return CodexLeaseGenerationFence{}, ErrCodexLeaseWriterUnavailable
 	}
@@ -197,6 +203,9 @@ func (store *CodexLeaseStore) CommitLane(expected CodexLeaseGenerationFence, mut
 	store.generation = installedEnvelope.Generation
 	store.journalBytes = append([]byte(nil), installed...)
 	store.journalID = installedID
+	if capture != nil {
+		capture(cloneCodexLeaseGenerationFence(post), installedEnvelope)
+	}
 	return cloneCodexLeaseGenerationFence(post), nil
 }
 

@@ -18,6 +18,15 @@ type CodexLeaseAttemptSlotPlan struct {
 	Kind        CodexAttemptSlotKind
 }
 
+// CodexLeaseRequestEvidence is raw request continuity authority. Values are
+// used only for keyed comparison and never enter the durable journal.
+type CodexLeaseRequestEvidence struct {
+	PreviousResponseID string
+	TurnState          string
+	HasTurnState       bool
+	HasEncryptedState  bool
+}
+
 // CodexLeaseRequestPlan is the complete request authority persisted before an
 // upstream dispatch. Raw account and candidate values are HMACed before they
 // enter the journal.
@@ -32,6 +41,7 @@ type CodexLeaseRequestPlan struct {
 	RequiredBuckets []CapacityBucket
 	Slots           []CodexLeaseAttemptSlotPlan
 	InitialSlot     uint32
+	Evidence        CodexLeaseRequestEvidence
 }
 
 // CodexLeaseRuntime performs the high-level durable request lifecycle over the
@@ -123,6 +133,12 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
+	if restored.Classification == CodexRestoredLaneHistorical {
+		return nil, ErrCodexStaleTurn
+	}
+	if err := runtime.validateRequestContinuity(restored, selected.AccountKey, plan.Evidence); err != nil {
+		return nil, err
+	}
 	if plan.RequestKind == CodexRequestCompaction && plan.CompactionPhase == CodexCompactionMidTurn {
 		current, ok := runtime.restoredRecord(restored, restored.RequestedIdentity)
 		if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != restored.RequestedIdentity || !ok || !current.Record.EverAdmitted {
@@ -173,6 +189,12 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
 	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
+	if plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState || plan.Evidence.HasEncryptedState {
+		desired.NonMigratable = true
+	}
+	if plan.Evidence.HasEncryptedState {
+		desired.HasEncryptedState = true
+	}
 	desired.SocketLineageExtinct = false
 	fence, err := runtime.mutationFence(restored, current.Record)
 	if err != nil {
@@ -192,13 +214,22 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		}
 	}
 	identity := restored.RequestedIdentity
-	if _, err := runtime.store.CommitLane(fence, CodexLaneMutation{
+	var committedRecord CodexJournalRecordV2
+	post, err := runtime.store.commitLane(fence, CodexLaneMutation{
 		BeginRequest:  &identity,
 		UpsertRecords: []CodexJournalRecordV2{desired},
-	}); err != nil {
+	}, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
+		for _, record := range installed.Records {
+			if record.Identity() == identity {
+				committedRecord = cloneCodexJournalRecordV2(record)
+				return
+			}
+		}
+	})
+	if err != nil {
 		return nil, err
 	}
-	return runtime.loadHandle(plan.Key, plan.Accounts, plan.Authority, identity)
+	return runtime.committedRequestHandle(plan.Key, plan.Accounts, plan.Authority, identity, post, committedRecord)
 }
 
 func (handle *CodexLeaseRequestHandle) State() LeaseState {
@@ -441,10 +472,10 @@ func (handle *CodexLeaseRequestHandle) FinishRejected() (*CodexLeaseRequestHandl
 // keeps one lifecycle-observer reference until Drain, even when no response
 // headers were accepted, so a newer request cannot race the terminal callback.
 func (handle *CodexLeaseRequestHandle) Indeterminate() (*CodexLeaseRequestHandle, error) {
-	return handle.IndeterminateContext(context.Background())
+	return handle.IndeterminateContext(context.Background(), CodexHTTPResponseEvidence{})
 }
 
-func (handle *CodexLeaseRequestHandle) IndeterminateContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+func (handle *CodexLeaseRequestHandle) IndeterminateContext(ctx context.Context, evidence CodexHTTPResponseEvidence) (*CodexLeaseRequestHandle, error) {
 	if handle == nil || handle.runtime == nil {
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
@@ -478,6 +509,9 @@ func (handle *CodexLeaseRequestHandle) IndeterminateContext(ctx context.Context)
 		}
 	}
 	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	if err := handle.applyResponseEvidence(&desired, evidence); err != nil {
+		return nil, err
+	}
 	for index := range desired.Attempts {
 		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
 			desired.Attempts[index].State = CodexAttemptIndeterminate
@@ -500,10 +534,10 @@ func (handle *CodexLeaseRequestHandle) IndeterminateContext(ctx context.Context)
 // AdmitHTTP2xx atomically persists streaming plus first-admission evidence
 // while holding the same account gate used by credential removal.
 func (handle *CodexLeaseRequestHandle) AdmitHTTP2xx() (*CodexLeaseRequestHandle, error) {
-	return handle.AdmitHTTP2xxContext(context.Background())
+	return handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{})
 }
 
-func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context, evidence CodexHTTPAdmissionEvidence) (*CodexLeaseRequestHandle, error) {
 	if handle == nil || handle.runtime == nil || handle.account == "" {
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
@@ -526,6 +560,9 @@ func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context) 
 		if record.State != LeaseProvisional && record.State != LeaseBoundActive {
 			return ErrCodexLeaseTransition
 		}
+		if err := handle.applyAdmissionEvidence(record, evidence); err != nil {
+			return err
+		}
 		record.State = LeaseBoundActive
 		record.AttemptRefs++
 		record.ResponseObserverRefs++
@@ -535,14 +572,17 @@ func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context) 
 
 // ProviderCompleted records the terminal provider event while keeping its
 // response observer reference live until Drain.
-func (handle *CodexLeaseRequestHandle) ProviderCompleted(endTurn bool) (*CodexLeaseRequestHandle, error) {
+func (handle *CodexLeaseRequestHandle) ProviderCompleted(evidence CodexHTTPCompletionEvidence) (*CodexLeaseRequestHandle, error) {
 	return handle.transitionAttempt(CodexAttemptStreaming, CodexAttemptProviderCompleted, func(record *CodexJournalRecordV2) error {
 		if record.State != LeaseBoundActive || record.ResponseObserverRefs <= 0 {
 			return ErrCodexLeaseTransition
 		}
+		if err := handle.applyResponseEvidence(record, evidence.CodexHTTPResponseEvidence); err != nil {
+			return err
+		}
 		record.RoutingRefs = 0
 		record.AttemptRefs = 0
-		if endTurn {
+		if evidence.EndTurn {
 			record.State = LeaseBoundQuiescent
 		} else {
 			record.State = LeaseContinuationPending
@@ -553,10 +593,13 @@ func (handle *CodexLeaseRequestHandle) ProviderCompleted(endTurn bool) (*CodexLe
 
 // ProviderFailed records a terminal provider failure after admission. The
 // observer reference remains live until Drain records callback completion.
-func (handle *CodexLeaseRequestHandle) ProviderFailed() (*CodexLeaseRequestHandle, error) {
+func (handle *CodexLeaseRequestHandle) ProviderFailed(evidence CodexHTTPResponseEvidence) (*CodexLeaseRequestHandle, error) {
 	return handle.transitionAttempt(CodexAttemptStreaming, CodexAttemptProviderFailed, func(record *CodexJournalRecordV2) error {
 		if record.State != LeaseBoundActive || record.ResponseObserverRefs <= 0 {
 			return ErrCodexLeaseTransition
+		}
+		if err := handle.applyResponseEvidence(record, evidence); err != nil {
+			return err
 		}
 		record.State = LeaseBoundQuiescent
 		record.RoutingRefs = 0
@@ -897,6 +940,53 @@ func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) 
 	}
 }
 
+// committedRequestHandle constructs the exact BeginRequest result from the
+// already verified installed after-image. The caller still holds the runtime's
+// lifecycle mutation lock, so this must not start another owner operation.
+func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity, post CodexLeaseGenerationFence, record CodexJournalRecordV2) (*CodexLeaseRequestHandle, error) {
+	if runtime == nil || runtime.store == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if record.Identity() != identity || post.Current != identity {
+		return nil, fmt.Errorf("%w: committed request fence is not installed", ErrCodexLeaseTrustLost)
+	}
+	recordFence, foundFence := codexLeaseRuntimeRecordFence(&post, identity)
+	if !foundFence || record.RecordGeneration != recordFence.Revision || record.LeaseGeneration != recordFence.Lease || record.Generation != recordFence.RequestGeneration || record.CurrentAttemptGeneration != recordFence.CurrentAttempt {
+		return nil, fmt.Errorf("%w: committed request record fence mismatch", ErrCodexLeaseTrustLost)
+	}
+	attempt, foundAttempt := codexLeaseAttemptByGeneration(record.Attempts, record.CurrentAttemptGeneration)
+	if !foundAttempt || len(recordFence.TouchedAttempts) != 1 {
+		return nil, fmt.Errorf("%w: committed request attempt fence mismatch", ErrCodexLeaseTrustLost)
+	}
+	attemptFence := recordFence.TouchedAttempts[0]
+	if attemptFence.RequestGeneration != record.Generation || attemptFence.Generation != attempt.Generation || attemptFence.Revision != attempt.Revision {
+		return nil, fmt.Errorf("%w: committed request attempt fence mismatch", ErrCodexLeaseTrustLost)
+	}
+	account, resolved := runtime.store.resolveCodexLeaseAccount(record.AccountHash, accounts)
+	if !resolved {
+		return nil, fmt.Errorf("%w: committed request account is unavailable", ErrCodexLeaseAuthorityMismatch)
+	}
+	slotAccounts := make([]codex.AccountKey, len(record.AttemptEnvelope.Slots))
+	for index, slot := range record.AttemptEnvelope.Slots {
+		slotAccount, resolved := runtime.store.resolveCodexLeaseAccount(slot.AccountHash, accounts)
+		if !resolved {
+			return nil, fmt.Errorf("%w: request slot account is unavailable", ErrCodexLeaseAuthorityMismatch)
+		}
+		slotAccounts[index] = slotAccount
+	}
+	return &CodexLeaseRequestHandle{
+		runtime:      runtime,
+		key:          key,
+		accounts:     append([]codex.AccountKey(nil), accounts...),
+		authority:    cloneCodexLeaseAuthorityPolicy(authority),
+		identity:     identity,
+		record:       cloneCodexJournalRecordV2(record),
+		account:      account,
+		slotAccounts: slotAccounts,
+		fence:        cloneCodexLeaseGenerationFence(post),
+	}, nil
+}
+
 func (runtime *CodexLeaseRuntime) loadHandle(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity) (*CodexLeaseRequestHandle, error) {
 	return runtime.loadHandleForState(key, accounts, authority, identity, true)
 }
@@ -963,6 +1053,78 @@ func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, ide
 	return CodexRestoredRecord{}, false
 }
 
+func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, selected codex.AccountKey, evidence CodexLeaseRequestEvidence) error {
+	var authority CodexRestoredRecord
+	var found bool
+	newTurn := restored.Classification == CodexRestoredLaneUnseen
+	if newTurn {
+		if !restored.Fence.Last.IsZero() {
+			authority, found = runtime.restoredRecord(restored, restored.Fence.Last)
+		}
+	} else {
+		authority, found = runtime.restoredRecord(restored, restored.RequestedIdentity)
+	}
+
+	if newTurn && evidence.HasTurnState {
+		return fmt.Errorf("%w: unexpected request turn state", ErrCodexContinuity)
+	}
+	if !newTurn && found {
+		if authority.Record.HasTurnState != evidence.HasTurnState {
+			return fmt.Errorf("%w: request turn state presence mismatch", ErrCodexContinuity)
+		}
+		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) {
+			return fmt.Errorf("%w: request turn state mismatch", ErrCodexContinuity)
+		}
+	}
+	if evidence.PreviousResponseID != "" {
+		return fmt.Errorf("%w: live upstream generation unavailable for previous response", ErrCodexContinuity)
+	}
+	if newTurn && evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
+		return fmt.Errorf("%w: encrypted response affinity unavailable", ErrCodexContinuity)
+	}
+	requiresAccount := evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && authority.Record.HasEncryptedState)
+	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
+		return fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
+	}
+	return nil
+}
+
+func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJournalRecordV2, evidence CodexHTTPAdmissionEvidence) error {
+	if handle == nil || handle.runtime == nil || record == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if evidence.HasTurnState != (evidence.TurnState != "") || len(evidence.TurnState) > codexTurnMetadataMaxBytes {
+		return fmt.Errorf("%w: invalid HTTP admission evidence", ErrCodexLeaseInvalidMutation)
+	}
+	if !evidence.HasTurnState {
+		return nil
+	}
+	digest := handle.runtime.store.hash("turn-state", evidence.TurnState)
+	if record.HasTurnState && !constantTimeCodexLeaseDigestEqual(record.TurnStateHash, digest) {
+		return fmt.Errorf("%w: admitted turn state mismatch", ErrCodexContinuity)
+	}
+	record.TurnStateHash = digest
+	record.HasTurnState = true
+	return nil
+}
+
+func (handle *CodexLeaseRequestHandle) applyResponseEvidence(record *CodexJournalRecordV2, evidence CodexHTTPResponseEvidence) error {
+	if handle == nil || handle.runtime == nil || record == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if evidence.HasResponseAnchor != (evidence.ResponseAnchor != "") || len(evidence.ResponseAnchor) > codexTurnIDMaxBytes {
+		return fmt.Errorf("%w: invalid HTTP response evidence", ErrCodexLeaseInvalidMutation)
+	}
+	if evidence.HasResponseAnchor {
+		record.CorrelationHash = handle.runtime.store.hash("correlation", evidence.ResponseAnchor)
+		record.HasResponseAnchor = true
+	}
+	if evidence.HasEncryptedState {
+		record.HasEncryptedState = true
+	}
+	return nil
+}
+
 func (runtime *CodexLeaseRuntime) mutationFence(restored CodexRestoredLane, record CodexJournalRecordV2) (CodexLeaseGenerationFence, error) {
 	identity := record.Identity()
 	identities := []CodexJournalRecordIdentity{identity}
@@ -1001,6 +1163,9 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	}
 	if !validCodexLeaseRuntimeRequest(plan.RequestKind, plan.CompactionPhase) || plan.RequestedModel == "" || plan.EffectiveModel == "" || strings.TrimSpace(plan.EffectiveModel) != plan.EffectiveModel || !validCodexLeaseBuckets(plan.RequiredBuckets, plan.EffectiveModel) || len(plan.Slots) == 0 || uint64(len(plan.Slots)) > uint64(math.MaxUint32) || plan.InitialSlot == 0 || int(plan.InitialSlot) > len(plan.Slots) {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: incomplete request plan", ErrCodexLeaseInvalidMutation)
+	}
+	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes {
+		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
 	}
 	accounts := make(map[codex.AccountKey]struct{}, len(plan.Accounts))
 	for _, account := range plan.Accounts {

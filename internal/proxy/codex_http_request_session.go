@@ -29,6 +29,21 @@ type CodexHTTPAdmissionEvidence struct {
 	HasTurnState bool
 }
 
+// CodexHTTPResponseEvidence is validated provider response metadata retained
+// monotonically even when a later read or parse outcome is indeterminate.
+type CodexHTTPResponseEvidence struct {
+	ResponseAnchor    string
+	HasResponseAnchor bool
+	HasEncryptedState bool
+}
+
+// CodexHTTPCompletionEvidence is terminal response evidence plus the provider's
+// sampling disposition. EndTurn describes this response, not whole-turn life.
+type CodexHTTPCompletionEvidence struct {
+	CodexHTTPResponseEvidence
+	EndTurn bool
+}
+
 // DispatchFrozen resolves one exact credential and lets the durable lifecycle
 // cross its dispatch fence immediately before RoundTrip.
 func (executor *CodexAttemptExecutor) DispatchFrozen(
@@ -79,11 +94,89 @@ type CodexHTTPRequestLifecycle interface {
 	RejectAndPrepareContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error)
 	AbandonBeforeDispatchContext(context.Context) (CodexHTTPRequestLifecycle, error)
 	FinishRejected() (CodexHTTPRequestLifecycle, error)
-	IndeterminateContext(context.Context) (CodexHTTPRequestLifecycle, error)
+	IndeterminateContext(context.Context, CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error)
 	Drain() (CodexHTTPRequestLifecycle, error)
 	AdmitHTTP2xxContext(context.Context, CodexHTTPAdmissionEvidence) (CodexHTTPRequestLifecycle, error)
-	ProviderCompleted(bool) (CodexHTTPRequestLifecycle, error)
-	ProviderFailed() (CodexHTTPRequestLifecycle, error)
+	ProviderCompleted(CodexHTTPCompletionEvidence) (CodexHTTPRequestLifecycle, error)
+	ProviderFailed(CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error)
+}
+
+type codexLeaseHTTPRequestLifecycle struct {
+	handle *CodexLeaseRequestHandle
+}
+
+var _ CodexHTTPRequestLifecycle = (*codexLeaseHTTPRequestLifecycle)(nil)
+
+// NewCodexHTTPRequestLifecycle adapts one durable immutable lease handle to the
+// HTTP session boundary while preserving the fresh handle after each mutation.
+func NewCodexHTTPRequestLifecycle(handle *CodexLeaseRequestHandle) CodexHTTPRequestLifecycle {
+	if handle == nil {
+		return nil
+	}
+	return &codexLeaseHTTPRequestLifecycle{handle: handle}
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) EverAdmitted() bool {
+	return lifecycle != nil && lifecycle.handle.EverAdmitted()
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) AccountKey() codex.AccountKey {
+	if lifecycle == nil {
+		return ""
+	}
+	return lifecycle.handle.AccountKey()
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) next(handle *CodexLeaseRequestHandle, err error) (CodexHTTPRequestLifecycle, error) {
+	if err != nil {
+		return nil, err
+	}
+	return NewCodexHTTPRequestLifecycle(handle), nil
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) MarkDispatchedContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.MarkDispatchedContext(ctx)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) RejectAndPrepareContext(ctx context.Context, slot uint32) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.RejectAndPrepareContext(ctx, slot)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) AbandonBeforeDispatchContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.AbandonBeforeDispatchContext(ctx)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) FinishRejected() (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.FinishRejected()
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) IndeterminateContext(ctx context.Context, evidence CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.IndeterminateContext(ctx, evidence)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) Drain() (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.Drain()
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) AdmitHTTP2xxContext(ctx context.Context, evidence CodexHTTPAdmissionEvidence) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.AdmitHTTP2xxContext(ctx, evidence)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) ProviderCompleted(evidence CodexHTTPCompletionEvidence) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.ProviderCompleted(evidence)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) ProviderFailed(evidence CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.ProviderFailed(evidence)
+	return lifecycle.next(handle, err)
 }
 
 // CodexHTTPRequestSession owns bounded retry and response retention for one
@@ -394,7 +487,7 @@ func (session *CodexHTTPRequestSession) abandonPrepared(ctx context.Context, res
 }
 
 func (session *CodexHTTPRequestSession) finishIndeterminate(ctx context.Context, result CodexHTTPRequestSessionResult, cause error) (CodexHTTPRequestSessionResult, error) {
-	next, err := result.Lifecycle.IndeterminateContext(context.WithoutCancel(ctx))
+	next, err := result.Lifecycle.IndeterminateContext(context.WithoutCancel(ctx), CodexHTTPResponseEvidence{})
 	if err != nil {
 		return result, errors.Join(cause, err)
 	}

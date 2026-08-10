@@ -684,7 +684,7 @@ func TestCodexHTTPRequestSessionCommitsAdmissionEvidenceBeforeExposure(t *testin
 	if latest.lastAdmission != (CodexHTTPAdmissionEvidence{TurnState: "private-state", HasTurnState: true}) {
 		t.Fatalf("admission evidence = %#v", latest.lastAdmission)
 	}
-	completed, err := result.Lifecycle.ProviderCompleted(true)
+	completed, err := result.Lifecycle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
 	if err != nil || completed == result.Lifecycle {
 		t.Fatalf("observer completion = %#v, %v", completed, err)
 	}
@@ -981,7 +981,7 @@ func (lifecycle *codexHTTPSessionLifecycle) FinishRejected() (CodexHTTPRequestLi
 	return next, nil
 }
 
-func (lifecycle *codexHTTPSessionLifecycle) IndeterminateContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+func (lifecycle *codexHTTPSessionLifecycle) IndeterminateContext(ctx context.Context, _ CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error) {
 	next := lifecycle.copy()
 	next.indeterminateContextErr = ctx.Err()
 	*next.events = append(*next.events, "indeterminate")
@@ -1005,14 +1005,14 @@ func (lifecycle *codexHTTPSessionLifecycle) AdmitHTTP2xxContext(_ context.Contex
 	return next, nil
 }
 
-func (lifecycle *codexHTTPSessionLifecycle) ProviderCompleted(endTurn bool) (CodexHTTPRequestLifecycle, error) {
+func (lifecycle *codexHTTPSessionLifecycle) ProviderCompleted(evidence CodexHTTPCompletionEvidence) (CodexHTTPRequestLifecycle, error) {
 	next := lifecycle.copy()
-	next.providerCompletedAt = endTurn
+	next.providerCompletedAt = evidence.EndTurn
 	*next.events = append(*next.events, "complete")
 	return next, nil
 }
 
-func (lifecycle *codexHTTPSessionLifecycle) ProviderFailed() (CodexHTTPRequestLifecycle, error) {
+func (lifecycle *codexHTTPSessionLifecycle) ProviderFailed(CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error) {
 	next := lifecycle.copy()
 	*next.events = append(*next.events, "provider-failed")
 	return next, nil
