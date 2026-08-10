@@ -284,6 +284,10 @@ func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOpt
 	return opts, nil
 }
 
+func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.CredentialInventory) (codexprov.Inventory, error) {
+	return inventory.List(ctx)
+}
+
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	cfg, err := proxy.LoadConfig()
 	if err != nil {
@@ -371,30 +375,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 
 	// Codex account discovery is owned by the credential coordinator.
-	codexInventory, err := credentialControl.List(context.Background())
+	codexInventory, err := listProxyCodexStartupInventory(context.Background(), credentialControl)
 	if err != nil {
 		return fmt.Errorf("Codex credential inventory: %w", err)
-	}
-	for _, intent := range codexInventory.Intents {
-		if intent.Kind != codexprov.IntentAdopt {
-			continue
-		}
-		activator, err := codexprov.NewFileSystemActivator(fsys)
-		if err != nil {
-			return err
-		}
-		snapshot, err := activator.Active(context.Background())
-		if err != nil {
-			return fmt.Errorf("Codex system snapshot: %w", err)
-		}
-		if _, _, err := credentialControl.Adopt(context.Background(), snapshot); err != nil {
-			return fmt.Errorf("Codex credential adoption: %w", err)
-		}
-		codexInventory, err = credentialControl.List(context.Background())
-		if err != nil {
-			return fmt.Errorf("Codex credential inventory after adoption: %w", err)
-		}
-		break
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()

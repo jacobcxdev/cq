@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func TestCacheTTL(t *testing.T) {
@@ -287,6 +290,34 @@ func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
 	}
 }
 
+func TestListProxyCodexStartupInventoryPreservesCandidates(t *testing.T) {
+	want := proxyCodexStartupInventoryFixture()
+	source := &staticProxyCodexStartupInventory{inventory: proxyCodexStartupInventoryFixture()}
+
+	got, err := listProxyCodexStartupInventory(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 1 {
+		t.Fatalf("inventory List calls = %d, want 1", source.calls)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("startup inventory = %+v, want distinct system and managed candidates %+v", got, want)
+	}
+}
+
+func TestRunProxyStartDoesNotReachCodexCredentialMutators(t *testing.T) {
+	file := parseGoFile(t, "proxy.go")
+	body := findFuncBody(t, file, "runProxyStart")
+
+	for _, selector := range codexCredentialMutationSelectors(body) {
+		t.Errorf("runProxyStart must not reference Codex credential mutation selector %s", selector)
+	}
+	if !hasIdentifier(body, "listProxyCodexStartupInventory") {
+		t.Fatal("runProxyStart should discover Codex candidates through the read-only startup inventory boundary")
+	}
+}
+
 func TestRunProxyStartDoesNotLogLocalToken(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
 	body := findFuncBody(t, file, "runProxyStart")
@@ -349,6 +380,64 @@ func hasIdentifier(body *ast.BlockStmt, name string) bool {
 		return true
 	})
 	return found
+}
+
+func codexCredentialMutationSelectors(body *ast.BlockStmt) []string {
+	var found []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		selector, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch selector.Sel.Name {
+		case "IntentAdopt", "NewFileSystemActivator", "SaveLogin", "Adopt", "Activate", "RemoveManaged", "RefreshReference":
+			found = append(found, selector.Sel.Name)
+		case "Refresh":
+			receiver, ok := selector.X.(*ast.Ident)
+			if !ok || receiver.Name != "registryRefresher" {
+				found = append(found, selector.Sel.Name)
+			}
+		}
+		return true
+	})
+	return found
+}
+
+type staticProxyCodexStartupInventory struct {
+	inventory codexprov.Inventory
+	calls     int
+}
+
+func (source *staticProxyCodexStartupInventory) List(context.Context) (codexprov.Inventory, error) {
+	source.calls++
+	return source.inventory, nil
+}
+
+func proxyCodexStartupInventoryFixture() codexprov.Inventory {
+	const accountKey = codexprov.AccountKey("account-key")
+	return codexprov.Inventory{
+		Accounts: []codexprov.LogicalAccount{{
+			Key: accountKey,
+			Candidates: []codexprov.CredentialCandidate{
+				{
+					Ref: codexprov.CandidateRef{
+						AccountKey: accountKey, CandidateID: "system-candidate",
+					},
+					Revision: "system-revision", Source: codexprov.SourceSystem, Routable: true,
+				},
+				{
+					Ref: codexprov.CandidateRef{
+						AccountKey: accountKey, CandidateID: "managed-candidate",
+					},
+					Revision: "managed-revision", Source: codexprov.SourceManaged, Routable: true,
+				},
+			},
+		}},
+		Intents: []codexprov.InventoryIntent{{
+			Kind: codexprov.IntentAdopt, AccountKey: accountKey,
+			Candidates: []codexprov.CandidateID{"system-candidate"},
+		}},
+	}
 }
 
 func hasStringLiteral(body *ast.BlockStmt, value string) bool {
