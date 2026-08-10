@@ -331,6 +331,39 @@ func TestCodexLeaseRuntimeHTTPAdmissionAndObserverDrain(t *testing.T) {
 	assertCodexLeaseRuntimeRefs(t, second, 1, 0, 0, false)
 }
 
+func TestCodexLeaseRuntimeResumesRetainedAuthoritativeTurnInObserveMode(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("retained-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "candidate-a",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	admitted := completeCodexLeaseRuntimeTurn(t, runtimeLease, plan)
+
+	retained := codexLeaseRuntimeTestPlan("retained-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "candidate-retained",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	retained.Authority = CodexLeaseAuthorityPolicy{
+		ModeEpoch:                   10,
+		RetainedAuthoritativeEpochs: []uint64{9},
+	}
+
+	resumed, err := runtimeLease.BeginRequest(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.AccountKey() != "account-a" || resumed.identity != admitted.identity || resumed.identity.ModeEpoch != 9 || !resumed.identity.Authoritative || resumed.RequestGeneration() != 2 || !resumed.EverAdmitted() {
+		t.Fatalf("retained request = identity %#v account %q request %d admitted %t", resumed.identity, resumed.AccountKey(), resumed.RequestGeneration(), resumed.EverAdmitted())
+	}
+	if len(coordinator.Store().v2.Records) != 1 || coordinator.Store().v2.Records[0].Identity() != admitted.identity {
+		t.Fatalf("retained request created shadow authority: %#v", coordinator.Store().v2.Records)
+	}
+}
+
 func TestCodexLeaseRuntimeAbandonsPreparedRequestAfterCancellation(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

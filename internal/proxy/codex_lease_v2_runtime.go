@@ -133,15 +133,16 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
+	requestIdentity := codexLeaseRuntimeRequestIdentity(restored)
 	if restored.Classification == CodexRestoredLaneHistorical {
 		return nil, ErrCodexStaleTurn
 	}
-	if err := runtime.validateRequestContinuity(restored, selected.AccountKey, plan.Evidence); err != nil {
+	if err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence); err != nil {
 		return nil, err
 	}
 	if plan.RequestKind == CodexRequestCompaction && plan.CompactionPhase == CodexCompactionMidTurn {
-		current, ok := runtime.restoredRecord(restored, restored.RequestedIdentity)
-		if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != restored.RequestedIdentity || !ok || !current.Record.EverAdmitted {
+		current, ok := runtime.restoredRecord(restored, requestIdentity)
+		if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != requestIdentity || !ok || !current.Record.EverAdmitted {
 			return nil, fmt.Errorf("%w: mid-turn compaction requires admitted turn authority", ErrCodexLeaseAuthorityMismatch)
 		}
 	}
@@ -170,11 +171,12 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		if err != nil {
 			return nil, err
 		}
+		requestIdentity = codexLeaseRuntimeRequestIdentity(restored)
 	}
-	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != restored.RequestedIdentity {
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != requestIdentity {
 		return nil, ErrCodexConcurrentTurn
 	}
-	current, ok := runtime.restoredRecord(restored, restored.RequestedIdentity)
+	current, ok := runtime.restoredRecord(restored, requestIdentity)
 	if !ok {
 		return nil, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
 	}
@@ -203,7 +205,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	for index := range fence.TouchedRecords {
 		fence.TouchedRecords[index].TouchedAttempts = nil
 	}
-	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, restored.RequestedIdentity)
+	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, requestIdentity)
 	if !ok {
 		return nil, fmt.Errorf("%w: current request fence is absent", ErrCodexLeaseTrustLost)
 	}
@@ -213,7 +215,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 			return nil, err
 		}
 	}
-	identity := restored.RequestedIdentity
+	identity := requestIdentity
 	var committedRecord CodexJournalRecordV2
 	post, err := runtime.store.commitLane(fence, CodexLaneMutation{
 		BeginRequest:  &identity,
@@ -1053,7 +1055,7 @@ func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, ide
 	return CodexRestoredRecord{}, false
 }
 
-func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, selected codex.AccountKey, evidence CodexLeaseRequestEvidence) error {
+func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence) error {
 	var authority CodexRestoredRecord
 	var found bool
 	newTurn := restored.Classification == CodexRestoredLaneUnseen
@@ -1062,7 +1064,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 			authority, found = runtime.restoredRecord(restored, restored.Fence.Last)
 		}
 	} else {
-		authority, found = runtime.restoredRecord(restored, restored.RequestedIdentity)
+		authority, found = runtime.restoredRecord(restored, requestIdentity)
 	}
 
 	if newTurn && evidence.HasTurnState {
@@ -1087,6 +1089,13 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		return fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
 	}
 	return nil
+}
+
+func codexLeaseRuntimeRequestIdentity(restored CodexRestoredLane) CodexJournalRecordIdentity {
+	if restored.Classification == CodexRestoredLaneCurrent && !restored.Fence.Current.IsZero() {
+		return restored.Fence.Current
+	}
+	return restored.RequestedIdentity
 }
 
 func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJournalRecordV2, evidence CodexHTTPAdmissionEvidence) error {
