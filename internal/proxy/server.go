@@ -778,8 +778,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		status = "degraded"
 	}
 	resp := map[string]any{
-		"status":   status,
-		"headroom": s.Headroom != nil,
+		"status":                      status,
+		"headroom":                    s.Headroom != nil,
+		"codex_runtime_observability": codexProcessRuntimeObservability.snapshot(),
 		"accounts": map[string]any{
 			"claude": claudeCount,
 			"codex":  codexCount,
@@ -898,6 +899,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var model string
 	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	r = r.WithContext(ctx)
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped
 		defer func() {

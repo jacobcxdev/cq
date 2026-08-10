@@ -317,6 +317,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 		headers:        headers,
 		effectiveModel: strings.Clone(choice.EffectiveModel),
 	}
+	envelope.ownedBytes = codexProcessRuntimeObservability.ownReplayBytes(envelope.encoded, envelope.decoded)
 	frozen := &CodexFrozenRequest{
 		state: &codexFrozenRequestState{
 			envelope:        envelope,

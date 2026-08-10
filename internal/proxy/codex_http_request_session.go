@@ -67,20 +67,23 @@ func (executor *CodexAttemptExecutor) DispatchFrozen(
 	if err != nil {
 		return nil, actual, false, err
 	}
-	applyCodexTransportCredentials(out, material)
-	if markDispatched == nil {
-		if out.Body != nil {
+	releaseBody := true
+	defer func() {
+		if releaseBody && out.Body != nil {
 			_ = out.Body.Close()
 		}
+	}()
+	applyCodexTransportCredentials(out, material)
+	if markDispatched == nil {
 		return nil, actual, false, errors.New("Codex dispatch fence unavailable")
 	}
 	if err := markDispatched(actual); err != nil {
-		if out.Body != nil {
-			_ = out.Body.Close()
-		}
 		return nil, actual, false, err
 	}
 	response, err := executor.Transport.inner().RoundTrip(out)
+	if err == nil {
+		releaseBody = false
+	}
 	return response, actual, true, err
 }
 
@@ -273,6 +276,7 @@ accountsLoop:
 	for accountIndex, account := range accounts {
 		choice := account.Choice()
 		attempts := account.Attempts()
+		decisionRecorded := false
 		directAttempts := len(attempts)
 		refreshPlanned, hasRefresh := account.RefreshAttempt()
 		refreshConsidered := false
@@ -298,6 +302,10 @@ accountsLoop:
 				}
 				result.Lifecycle = next
 				marked = true
+				if !decisionRecorded {
+					codexProcessRuntimeObservability.recordDecision(ctx, account.decision)
+					decisionRecorded = true
+				}
 				return nil
 			})
 			replay.Release()

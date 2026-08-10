@@ -28,6 +28,7 @@ type CodexRequestEnvelope struct {
 	mu             sync.Mutex
 	encoded        []byte
 	decoded        []byte
+	ownedBytes     uint64
 	headers        http.Header
 	effectiveModel string
 	released       bool
@@ -45,6 +46,7 @@ type codexRequestReplayState struct {
 	mu             sync.RWMutex
 	encoded        []byte
 	decoded        []byte
+	ownedBytes     uint64
 	headers        http.Header
 	effectiveModel string
 	activeBodies   int
@@ -68,12 +70,14 @@ func NewCodexRequestEnvelope(encoded, decoded []byte, headers http.Header, effec
 	if len(decoded) > maxCodexRequestEnvelopeBytes {
 		return nil, fmt.Errorf("%w: %d bytes", ErrCodexRequestEnvelopeDecodedTooLarge, len(decoded))
 	}
-	return &CodexRequestEnvelope{
+	envelope := &CodexRequestEnvelope{
 		encoded:        bytes.Clone(encoded),
 		decoded:        bytes.Clone(decoded),
 		headers:        codexReplayHeaders(headers),
 		effectiveModel: strings.Clone(effectiveModel),
-	}, nil
+	}
+	envelope.ownedBytes = codexProcessRuntimeObservability.ownReplayBytes(envelope.encoded, envelope.decoded)
+	return envelope, nil
 }
 
 // Replay returns a registered snapshot that remains valid until either it or
@@ -93,6 +97,7 @@ func (envelope *CodexRequestEnvelope) Replay() (*CodexRequestReplay, error) {
 		headers:        codexReplayHeaders(envelope.headers),
 		effectiveModel: strings.Clone(envelope.effectiveModel),
 	}
+	state.ownedBytes = codexProcessRuntimeObservability.ownReplayBytes(state.encoded, state.decoded)
 	if envelope.replays == nil {
 		envelope.replays = make(map[*codexRequestReplayState]struct{})
 	}
@@ -120,6 +125,8 @@ func (envelope *CodexRequestEnvelope) Release() {
 	}
 	envelope.encoded = nil
 	envelope.decoded = nil
+	codexProcessRuntimeObservability.releaseReplayBytes(envelope.ownedBytes)
+	envelope.ownedBytes = 0
 	envelope.headers = nil
 	envelope.effectiveModel = ""
 	envelope.replays = nil
@@ -268,6 +275,8 @@ func (replay *codexRequestReplayState) clearLocked() {
 	clear(replay.headers)
 	replay.encoded = nil
 	replay.decoded = nil
+	codexProcessRuntimeObservability.releaseReplayBytes(replay.ownedBytes)
+	replay.ownedBytes = 0
 	replay.headers = nil
 	replay.effectiveModel = ""
 	replay.released = true

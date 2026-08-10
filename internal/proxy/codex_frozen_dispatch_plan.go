@@ -55,6 +55,7 @@ type CodexFrozenDispatchAccount struct {
 	attempts       []CandidateAttempt
 	refreshAttempt *CandidateAttempt
 	isDefault      bool
+	decision       codexRuntimeDecision
 }
 
 func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatchInput) (CodexFrozenDispatchPlan, error) {
@@ -144,6 +145,7 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		if err != nil {
 			return plan, err
 		}
+		account.decision = codexFrozenDispatchDecision(input, candidates, account)
 		accounts = append(accounts, account)
 	}
 	if err := codexFrozenDispatchContextError(ctx); err != nil {
@@ -151,6 +153,31 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 	}
 	plan.accounts = accounts
 	return plan, nil
+}
+
+func codexFrozenDispatchDecision(input CodexFrozenDispatchInput, candidates []CodexRoutePolicyCandidate, account CodexFrozenDispatchAccount) codexRuntimeDecision {
+	if input.BoundAccountKey != "" {
+		return codexRuntimeDecisionNone
+	}
+	ordinaryEligible := codexFrozenDispatchOrdinarilyEligible(candidates, account.choice)
+	if ordinaryEligible && input.AffinityAccountKey != "" && account.choice.AccountKey == input.AffinityAccountKey {
+		return codexRuntimeDecisionAffinityReuse
+	}
+	if account.isDefault && !ordinaryEligible {
+		return codexRuntimeDecisionTerminalDefault
+	}
+	return codexRuntimeDecisionFairnessSelect
+}
+
+func codexFrozenDispatchOrdinarilyEligible(candidates []CodexRoutePolicyCandidate, choice RouteChoice) bool {
+	for _, candidate := range candidates {
+		if candidate.Choice.AccountKey != choice.AccountKey || !candidate.Compatible || !candidate.Routable ||
+			codexRoutePolicyCapacity(candidate).State == CapacityZero || !codexRoutePolicyCompatibleWithFrozen(candidate.Choice, choice) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func codexFrozenDispatchContextError(ctx context.Context) error {

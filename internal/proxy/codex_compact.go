@@ -60,6 +60,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	start := time.Now()
 	var model string
 	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	r = r.WithContext(ctx)
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped
 		defer func() {
