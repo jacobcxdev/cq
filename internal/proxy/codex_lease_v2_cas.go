@@ -314,6 +314,19 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		deleteIDs[identity] = struct{}{}
 		requiredFences[identity] = struct{}{}
 	}
+	for _, input := range mutation.UpsertRecords {
+		old, exists := originalRecords[input.Identity()]
+		if !exists {
+			continue
+		}
+		oldAttempt, oldFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+		inputAttempt, inputFound := codexLeaseAttemptByGeneration(input.Attempts, old.CurrentAttemptGeneration)
+		narrowTerminalTransition := old.State == LeaseProvisional && input.State == LeaseOrphaned
+		narrowTerminalTransition = narrowTerminalTransition || (oldFound && inputFound && oldAttempt.State == CodexAttemptPrepared && inputAttempt.State == CodexAttemptAbandonedBeforeDispatch)
+		if narrowTerminalTransition && (len(mutation.UpsertRecords) != 1 || len(mutation.DeleteRecords) != 0 || mutation.Lane != nil) {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: narrow terminal transition must be the sole record mutation", ErrCodexLeaseInvalidMutation)
+		}
+	}
 	for identity := range requiredFences {
 		if _, ok := fences[identity]; !ok {
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: missing fence for touched record", ErrCodexLeaseInvalidMutation)
@@ -573,7 +586,8 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		if old.RecordGeneration == math.MaxUint64 {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: record generation overflow", ErrCodexLeaseInvalidMutation)
 		}
-		if !beginRequest && old.State != input.State && !validLeaseTransition(old.State, input.State) {
+		provisionalUncertainty := !beginRequest && old.State == LeaseProvisional && input.State == LeaseOrphaned
+		if !provisionalUncertainty && !beginRequest && old.State != input.State && !validLeaseTransition(old.State, input.State) {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: forbidden lease transition %s -> %s", ErrCodexLeaseInvalidMutation, old.State, input.State)
 		}
 		if old.PredecessorTurnHash != input.PredecessorTurnHash || old.PredecessorModeEpoch != input.PredecessorModeEpoch || old.PredecessorAuthoritative != input.PredecessorAuthoritative {
@@ -653,6 +667,50 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		appendedAttempt, found := codexLeaseAttemptByGeneration(result.Attempts, appended)
 		if old.EverAdmitted || old.NonMigratable || appended == 0 || !found || result.CurrentAttemptGeneration != appended || appendedAttempt.State != CodexAttemptPrepared || appendedAttempt.Slot == 0 || int(appendedAttempt.Slot) > len(result.AttemptEnvelope.Slots) || !constantTimeCodexLeaseDigestEqual(result.AttemptEnvelope.Slots[appendedAttempt.Slot-1].AccountHash, result.AccountHash) {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: account change is not coupled to a prepared replacement attempt", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	if exists && old.State == LeaseProvisional && result.State == LeaseOrphaned {
+		oldAttempt, oldFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+		resultAttempt, resultFound := codexLeaseAttemptByGeneration(result.Attempts, old.CurrentAttemptGeneration)
+		expected := cloneCodexJournalRecordV2(old)
+		expected.State = LeaseOrphaned
+		expected.RoutingRefs = 0
+		expected.AttemptRefs = 0
+		expected.ResponseObserverRefs = 1
+		expected.NonMigratable = true
+		for index := range expected.Attempts {
+			if expected.Attempts[index].Generation == expected.CurrentAttemptGeneration {
+				expected.Attempts[index].State = CodexAttemptIndeterminate
+				break
+			}
+		}
+		if beginRequest || !oldFound || !resultFound || !codexLeaseExactCurrentAttemptFence(fence, old) || old.CurrentAttemptGeneration == 0 || result.CurrentAttemptGeneration != old.CurrentAttemptGeneration || oldAttempt.State != CodexAttemptDispatched || resultAttempt.State != CodexAttemptIndeterminate || oldAttempt.Slot != resultAttempt.Slot || !constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash) || old.Generation != result.Generation || old.RoutingRefs != 1 || old.AttemptRefs != 0 || old.ResponseObserverRefs != 0 || old.SocketLineageExtinct || result.RoutingRefs != 0 || result.AttemptRefs != 0 || result.ResponseObserverRefs != 1 || result.SocketLineageExtinct || !result.NonMigratable || !sameCodexLeaseSemantics(expected, result) {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: provisional uncertainty lacks an exact dispatched after-image", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	if exists {
+		oldAttempt, oldFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+		resultAttempt, resultFound := codexLeaseAttemptByGeneration(result.Attempts, old.CurrentAttemptGeneration)
+		if oldFound && resultFound && oldAttempt.State == CodexAttemptPrepared && resultAttempt.State == CodexAttemptAbandonedBeforeDispatch {
+			expected := cloneCodexJournalRecordV2(old)
+			expected.State = LeaseProvisional
+			if old.EverAdmitted {
+				expected.State = LeaseOrphaned
+			}
+			expected.RoutingRefs = 0
+			expected.AttemptRefs = 0
+			expected.ResponseObserverRefs = 0
+			expected.SocketLineageExtinct = true
+			for index := range expected.Attempts {
+				if expected.Attempts[index].Generation == expected.CurrentAttemptGeneration {
+					expected.Attempts[index].State = CodexAttemptAbandonedBeforeDispatch
+					break
+				}
+			}
+			validOldState := (!old.EverAdmitted && old.State == LeaseProvisional) || (old.EverAdmitted && old.State == LeaseBoundActive)
+			if beginRequest || !validOldState || !codexLeaseExactCurrentAttemptFence(fence, old) || result.CurrentAttemptGeneration != old.CurrentAttemptGeneration || oldAttempt.Slot != resultAttempt.Slot || !sameCodexLeaseSemantics(expected, result) {
+				return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: prepared abandonment lacks an exact terminal after-image", ErrCodexLeaseInvalidMutation)
+			}
 		}
 	}
 	firstAdmission := !result.EverAdmitted && codexLeaseFirstAdmissionEligible(result) && result.State == LeaseBoundActive && codexLeaseCurrentAttemptState(result) == CodexAttemptStreaming
@@ -770,7 +828,8 @@ func (store *CodexLeaseStore) buildCodexLeaseAttemptAfterImages(old []CodexJourn
 			if !touched {
 				return nil, 0, 0, fmt.Errorf("%w: changed attempt lacks fence", ErrCodexLeaseInvalidMutation)
 			}
-			if !validCodexAttemptTransition(previous.State, input.State) {
+			abandonedBeforeDispatch := previous.State == CodexAttemptPrepared && input.State == CodexAttemptAbandonedBeforeDispatch
+			if !abandonedBeforeDispatch && !validCodexAttemptTransition(previous.State, input.State) {
 				return nil, 0, 0, fmt.Errorf("%w: forbidden attempt transition", ErrCodexLeaseInvalidMutation)
 			}
 		}
@@ -877,6 +936,18 @@ func codexLeaseAttemptTerminalForRollover(state CodexAttemptState) bool {
 
 func codexLeaseAttemptTerminalForRequest(state CodexAttemptState) bool {
 	return codexLeaseAttemptTerminalForRollover(state) || state == CodexAttemptAbandonedBeforeDispatch
+}
+
+func codexLeaseExactCurrentAttemptFence(fence CodexLeaseRecordFence, record CodexJournalRecordV2) bool {
+	if len(fence.TouchedAttempts) != 1 || record.CurrentAttemptGeneration == 0 {
+		return false
+	}
+	attempt, found := codexLeaseAttemptByGeneration(record.Attempts, record.CurrentAttemptGeneration)
+	if !found {
+		return false
+	}
+	touched := fence.TouchedAttempts[0]
+	return touched.RequestGeneration == record.Generation && touched.Generation == record.CurrentAttemptGeneration && touched.Revision == attempt.Revision
 }
 
 func validateCodexLaneMutationOwnedFields(mutation CodexLaneMutation) error {

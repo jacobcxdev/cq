@@ -1,0 +1,1073 @@
+package proxy
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"strings"
+	"time"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+)
+
+// CodexLeaseAttemptSlotPlan is one frozen account/candidate route in a
+// request's durable attempt envelope.
+type CodexLeaseAttemptSlotPlan struct {
+	AccountKey  codex.AccountKey
+	CandidateID string
+	Kind        CodexAttemptSlotKind
+}
+
+// CodexLeaseRequestPlan is the complete request authority persisted before an
+// upstream dispatch. Raw account and candidate values are HMACed before they
+// enter the journal.
+type CodexLeaseRequestPlan struct {
+	Key             LeaseKey
+	Accounts        []codex.AccountKey
+	Authority       CodexLeaseAuthorityPolicy
+	RequestKind     CodexRequestKind
+	CompactionPhase CodexCompactionPhase
+	RequestedModel  string
+	EffectiveModel  string
+	RequiredBuckets []CapacityBucket
+	Slots           []CodexLeaseAttemptSlotPlan
+	InitialSlot     uint32
+}
+
+// CodexLeaseRuntime performs the high-level durable request lifecycle over the
+// exact store and shared close/account-gate authority owned by one coordinator.
+type CodexLeaseRuntime struct {
+	coordinator       *CodexContinuityCoordinator
+	store             *CodexLeaseStore
+	leases            *CodexTurnLeaseManager
+	revalidateAccount CodexLeaseAccountRevalidator
+}
+
+// CodexLeaseAccountRevalidator proves that an account still exists, remains
+// routable, and has no pending durable removal while its account gate is held.
+// It must honour ctx and must not re-enter this runtime, account removal, or
+// coordinator Close.
+type CodexLeaseAccountRevalidator func(ctx context.Context, account codex.AccountKey) error
+
+type codexLeaseAccountRevalidationError struct {
+	err error
+}
+
+func (err *codexLeaseAccountRevalidationError) Error() string {
+	return "revalidate Codex lease account"
+}
+
+func (err *codexLeaseAccountRevalidationError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.err
+}
+
+// CodexLeaseRequestHandle is an immutable, generation-fenced request snapshot.
+// Transition methods return a new handle; retained copies become stale after a
+// successful transition and cannot mutate later authority.
+type CodexLeaseRequestHandle struct {
+	runtime      *CodexLeaseRuntime
+	key          LeaseKey
+	accounts     []codex.AccountKey
+	authority    CodexLeaseAuthorityPolicy
+	identity     CodexJournalRecordIdentity
+	record       CodexJournalRecordV2
+	account      codex.AccountKey
+	slotAccounts []codex.AccountKey
+	fence        CodexLeaseGenerationFence
+}
+
+// NewCodexLeaseRuntime binds runtime transitions to a coordinator's exact
+// durable store, lifecycle barrier, and per-account exclusion gates. The
+// revalidator is mandatory because cached route authority must fail closed
+// after a credential removal or routability change.
+func NewCodexLeaseRuntime(coordinator *CodexContinuityCoordinator, revalidate CodexLeaseAccountRevalidator) (*CodexLeaseRuntime, error) {
+	if coordinator == nil || coordinator.store == nil || coordinator.leases == nil || coordinator.leases.mu == nil || coordinator.leases.lifecycle == nil || coordinator.leases.accountGates == nil || revalidate == nil || coordinator.leases.writerUnavailable() {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	return &CodexLeaseRuntime{
+		coordinator:       coordinator,
+		store:             coordinator.store,
+		leases:            coordinator.leases,
+		revalidateAccount: revalidate,
+	}, nil
+}
+
+func (runtime *CodexLeaseRuntime) BeginRequest(plan CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
+	return runtime.BeginRequestContext(context.Background(), plan)
+}
+
+// BeginRequestContext durably reserves an unseen turn, then atomically installs
+// one store-owned request generation with its first prepared attempt.
+func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil request context", ErrCodexLeaseInvalidMutation)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	plan, err := runtime.validateAndClonePlan(plan)
+	if err != nil {
+		return nil, err
+	}
+	selected := plan.Slots[plan.InitialSlot-1]
+	release, err := runtime.beginAccountMutation(ctx, selected.AccountKey)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	restored, err := runtime.store.LoadLane(plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		return nil, err
+	}
+	if plan.RequestKind == CodexRequestCompaction && plan.CompactionPhase == CodexCompactionMidTurn {
+		current, ok := runtime.restoredRecord(restored, restored.RequestedIdentity)
+		if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != restored.RequestedIdentity || !ok || !current.Record.EverAdmitted {
+			return nil, fmt.Errorf("%w: mid-turn compaction requires admitted turn authority", ErrCodexLeaseAuthorityMismatch)
+		}
+	}
+	revalidated := false
+	switch {
+	case restored.Classification == CodexRestoredLaneHistorical:
+		return nil, ErrCodexStaleTurn
+	case restored.Classification == CodexRestoredLaneUnseen && restored.Fence.Lane == 0:
+		if err := runtime.revalidateAccountForCommit(ctx, selected.AccountKey); err != nil {
+			return nil, err
+		}
+		revalidated = true
+		if err := runtime.reserveUnseen(restored); err != nil {
+			return nil, err
+		}
+	case restored.Classification == CodexRestoredLaneUnseen:
+		if err := runtime.reserveSuccessor(ctx, selected.AccountKey, restored); err != nil {
+			return nil, err
+		}
+		revalidated = true
+	default:
+		break
+	}
+	if revalidated {
+		restored, err = runtime.store.LoadLane(plan.Key, plan.Accounts, plan.Authority)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != restored.RequestedIdentity {
+		return nil, ErrCodexConcurrentTurn
+	}
+	current, ok := runtime.restoredRecord(restored, restored.RequestedIdentity)
+	if !ok {
+		return nil, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
+	}
+	if !codexLeaseRuntimeCanBeginRequest(current.Record) {
+		return nil, ErrCodexConcurrentTurn
+	}
+
+	desired := codexLeaseRuntimeMutationRecord(current.Record)
+	desired.State = LeaseProvisional
+	if current.Record.EverAdmitted {
+		desired.State = LeaseBoundActive
+	}
+	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
+	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
+	desired.SocketLineageExtinct = false
+	fence, err := runtime.mutationFence(restored, current.Record)
+	if err != nil {
+		return nil, err
+	}
+	for index := range fence.TouchedRecords {
+		fence.TouchedRecords[index].TouchedAttempts = nil
+	}
+	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, restored.RequestedIdentity)
+	if !ok {
+		return nil, fmt.Errorf("%w: current request fence is absent", ErrCodexLeaseTrustLost)
+	}
+	currentFence.TouchedAttempts = []CodexAttemptFence{{}}
+	if !revalidated {
+		if err := runtime.revalidateAccountForCommit(ctx, selected.AccountKey); err != nil {
+			return nil, err
+		}
+	}
+	identity := restored.RequestedIdentity
+	if _, err := runtime.store.CommitLane(fence, CodexLaneMutation{
+		BeginRequest:  &identity,
+		UpsertRecords: []CodexJournalRecordV2{desired},
+	}); err != nil {
+		return nil, err
+	}
+	return runtime.loadHandle(plan.Key, plan.Accounts, plan.Authority, identity)
+}
+
+func (handle *CodexLeaseRequestHandle) State() LeaseState {
+	if handle == nil {
+		return 0
+	}
+	return handle.record.State
+}
+
+func (handle *CodexLeaseRequestHandle) EverAdmitted() bool {
+	return handle != nil && handle.record.EverAdmitted
+}
+
+func (handle *CodexLeaseRequestHandle) AccountKey() codex.AccountKey {
+	if handle == nil {
+		return ""
+	}
+	return handle.account
+}
+
+func (handle *CodexLeaseRequestHandle) RequestGeneration() uint64 {
+	if handle == nil {
+		return 0
+	}
+	return handle.record.Generation
+}
+
+func (handle *CodexLeaseRequestHandle) AttemptGeneration() uint64 {
+	if handle == nil {
+		return 0
+	}
+	return handle.record.CurrentAttemptGeneration
+}
+
+// MarkDispatched durably crosses the last pre-send fence.
+func (handle *CodexLeaseRequestHandle) MarkDispatched() (*CodexLeaseRequestHandle, error) {
+	return handle.MarkDispatchedContext(context.Background())
+}
+
+func (handle *CodexLeaseRequestHandle) MarkDispatchedContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil || handle.account == "" {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil dispatch context", ErrCodexLeaseInvalidMutation)
+	}
+	release, err := handle.runtime.beginAccountMutation(ctx, handle.account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
+		return nil, err
+	}
+	return handle.transitionAttemptWithFence(fence, CodexAttemptPrepared, CodexAttemptDispatched, nil)
+}
+
+// AbandonBeforeDispatch records that a prepared request was cancelled before
+// any upstream send could occur. It releases every request reference so a
+// later explicit BeginRequest can safely replace the abandoned generation.
+func (handle *CodexLeaseRequestHandle) AbandonBeforeDispatch() (*CodexLeaseRequestHandle, error) {
+	return handle.AbandonBeforeDispatchContext(context.Background())
+}
+
+func (handle *CodexLeaseRequestHandle) AbandonBeforeDispatchContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil abandonment context", ErrCodexLeaseInvalidMutation)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	release, err := handle.runtime.beginLifecycleMutationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || current.State != CodexAttemptPrepared || (handle.record.State != LeaseProvisional && handle.record.State != LeaseBoundActive) {
+		return nil, ErrCodexLeaseTransition
+	}
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptAbandonedBeforeDispatch
+			break
+		}
+	}
+	if handle.record.EverAdmitted {
+		desired.State = LeaseOrphaned
+	} else {
+		desired.State = LeaseProvisional
+	}
+	desired.RoutingRefs = 0
+	desired.AttemptRefs = 0
+	desired.ResponseObserverRefs = 0
+	desired.SocketLineageExtinct = true
+	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+		return nil, err
+	}
+	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+}
+
+// RejectAndPrepare atomically records a definite pre-admission failure and
+// prepares one explicit unused slot from the frozen request envelope.
+func (handle *CodexLeaseRequestHandle) RejectAndPrepare(nextSlot uint32) (*CodexLeaseRequestHandle, error) {
+	return handle.RejectAndPrepareContext(context.Background(), nextSlot)
+}
+
+func (handle *CodexLeaseRequestHandle) RejectAndPrepareContext(ctx context.Context, nextSlot uint32) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil retry context", ErrCodexLeaseInvalidMutation)
+	}
+	if nextSlot == 0 || int(nextSlot) > len(handle.record.AttemptEnvelope.Slots) {
+		return nil, fmt.Errorf("%w: retry slot is outside the frozen envelope", ErrCodexLeaseInvalidMutation)
+	}
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || current.State != CodexAttemptDispatched || handle.record.State != LeaseProvisional || handle.record.EverAdmitted || handle.record.NonMigratable {
+		return nil, ErrCodexLeaseTransition
+	}
+	if int(nextSlot) > len(handle.slotAccounts) || handle.slotAccounts[nextSlot-1] == "" {
+		return nil, fmt.Errorf("%w: retry slot account is unavailable", ErrCodexLeaseAuthorityMismatch)
+	}
+	for _, attempt := range handle.record.Attempts {
+		if attempt.Slot == nextSlot {
+			return nil, fmt.Errorf("%w: retry slot is already used", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	nextAccount := handle.slotAccounts[nextSlot-1]
+	manager := handle.runtime.leases
+	if manager == nil || manager.accountGates == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	guard, err := manager.accountGates.acquire(ctx, nextAccount)
+	if err != nil {
+		return nil, err
+	}
+	defer guard.Release()
+	release, err := handle.runtime.beginLifecycleMutationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptProviderFailed
+			break
+		}
+	}
+	desired.Attempts = append(desired.Attempts, CodexJournalAttempt{Slot: nextSlot, State: CodexAttemptPrepared})
+	desired.CurrentAttemptGeneration = 0
+	desired.AccountHash = handle.record.AttemptEnvelope.Slots[nextSlot-1].AccountHash
+	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, handle.identity)
+	if !ok {
+		return nil, fmt.Errorf("%w: current retry fence is absent", ErrCodexLeaseTrustLost)
+	}
+	currentFence.TouchedAttempts = append(currentFence.TouchedAttempts, CodexAttemptFence{
+		RequestGeneration: handle.record.Generation,
+	})
+	if err := handle.runtime.revalidateAccountForCommit(ctx, nextAccount); err != nil {
+		return nil, err
+	}
+	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+		return nil, err
+	}
+	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+}
+
+// FinishRejected records a final definite provider rejection. A never-admitted
+// request becomes a failed tombstone; an already-admitted turn remains bound
+// and quiescent on its immutable account.
+func (handle *CodexLeaseRequestHandle) FinishRejected() (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	release, err := handle.runtime.beginLifecycleMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || current.State != CodexAttemptDispatched {
+		return nil, ErrCodexLeaseTransition
+	}
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptProviderFailed
+			break
+		}
+	}
+	if handle.record.EverAdmitted {
+		desired.State = LeaseBoundQuiescent
+	} else {
+		if handle.record.State != LeaseProvisional {
+			return nil, ErrCodexLeaseTransition
+		}
+		desired.State = LeaseFailedUnadmitted
+	}
+	desired.RoutingRefs = 0
+	desired.AttemptRefs = 0
+	desired.ResponseObserverRefs = 0
+	desired.SocketLineageExtinct = true
+	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+		return nil, err
+	}
+	return handle.runtime.loadHandleForState(handle.key, handle.accounts, handle.authority, handle.identity, handle.record.EverAdmitted)
+}
+
+// Indeterminate records that an upstream send may have occurred. The request
+// keeps one lifecycle-observer reference until Drain, even when no response
+// headers were accepted, so a newer request cannot race the terminal callback.
+func (handle *CodexLeaseRequestHandle) Indeterminate() (*CodexLeaseRequestHandle, error) {
+	return handle.IndeterminateContext(context.Background())
+}
+
+func (handle *CodexLeaseRequestHandle) IndeterminateContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil indeterminate context", ErrCodexLeaseInvalidMutation)
+	}
+	var (
+		release func()
+		err     error
+	)
+	if handle.record.EverAdmitted {
+		release, err = handle.runtime.beginLifecycleMutationContext(ctx)
+	} else {
+		release, err = handle.runtime.beginAccountMutation(ctx, handle.account)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || (current.State != CodexAttemptDispatched && current.State != CodexAttemptStreaming) {
+		return nil, ErrCodexLeaseTransition
+	}
+	if !handle.record.EverAdmitted {
+		if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
+			return nil, err
+		}
+	}
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptIndeterminate
+			break
+		}
+	}
+	desired.State = LeaseOrphaned
+	desired.RoutingRefs = 0
+	desired.AttemptRefs = 0
+	if desired.ResponseObserverRefs == 0 {
+		desired.ResponseObserverRefs = 1
+	}
+	desired.SocketLineageExtinct = false
+	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+		return nil, err
+	}
+	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+}
+
+// AdmitHTTP2xx atomically persists streaming plus first-admission evidence
+// while holding the same account gate used by credential removal.
+func (handle *CodexLeaseRequestHandle) AdmitHTTP2xx() (*CodexLeaseRequestHandle, error) {
+	return handle.AdmitHTTP2xxContext(context.Background())
+}
+
+func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil || handle.account == "" {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil admission context", ErrCodexLeaseInvalidMutation)
+	}
+	release, err := handle.runtime.beginAccountMutation(ctx, handle.account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
+		return nil, err
+	}
+	return handle.transitionAttemptWithFence(fence, CodexAttemptDispatched, CodexAttemptStreaming, func(record *CodexJournalRecordV2) error {
+		if record.State != LeaseProvisional && record.State != LeaseBoundActive {
+			return ErrCodexLeaseTransition
+		}
+		record.State = LeaseBoundActive
+		record.AttemptRefs++
+		record.ResponseObserverRefs++
+		return nil
+	})
+}
+
+// ProviderCompleted records the terminal provider event while keeping its
+// response observer reference live until Drain.
+func (handle *CodexLeaseRequestHandle) ProviderCompleted(endTurn bool) (*CodexLeaseRequestHandle, error) {
+	return handle.transitionAttempt(CodexAttemptStreaming, CodexAttemptProviderCompleted, func(record *CodexJournalRecordV2) error {
+		if record.State != LeaseBoundActive || record.ResponseObserverRefs <= 0 {
+			return ErrCodexLeaseTransition
+		}
+		record.RoutingRefs = 0
+		record.AttemptRefs = 0
+		if endTurn {
+			record.State = LeaseBoundQuiescent
+		} else {
+			record.State = LeaseContinuationPending
+		}
+		return nil
+	})
+}
+
+// ProviderFailed records a terminal provider failure after admission. The
+// observer reference remains live until Drain records callback completion.
+func (handle *CodexLeaseRequestHandle) ProviderFailed() (*CodexLeaseRequestHandle, error) {
+	return handle.transitionAttempt(CodexAttemptStreaming, CodexAttemptProviderFailed, func(record *CodexJournalRecordV2) error {
+		if record.State != LeaseBoundActive || record.ResponseObserverRefs <= 0 {
+			return ErrCodexLeaseTransition
+		}
+		record.State = LeaseBoundQuiescent
+		record.RoutingRefs = 0
+		record.AttemptRefs = 0
+		return nil
+	})
+}
+
+// Drain releases the request's final response-observer reference. A later
+// explicit BeginRequest remains blocked until every persisted reference is zero.
+func (handle *CodexLeaseRequestHandle) Drain() (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	release, err := handle.runtime.beginLifecycleMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	if !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(handle.record)) || handle.record.ResponseObserverRefs <= 0 {
+		return nil, ErrCodexLeaseTransition
+	}
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	desired.ResponseObserverRefs--
+	if desired.RoutingRefs == 0 && desired.AttemptRefs == 0 && desired.ResponseObserverRefs == 0 {
+		desired.SocketLineageExtinct = true
+	}
+	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, handle.identity)
+	if !ok {
+		return nil, fmt.Errorf("%w: current drain fence is absent", ErrCodexLeaseTrustLost)
+	}
+	currentFence.TouchedAttempts = nil
+	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+		return nil, err
+	}
+	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+}
+
+func (handle *CodexLeaseRequestHandle) transitionAttempt(from, to CodexAttemptState, mutate func(*CodexJournalRecordV2) error) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	release, err := handle.runtime.beginLifecycleMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return handle.transitionAttemptWithinLifecycle(from, to, mutate)
+}
+
+func (handle *CodexLeaseRequestHandle) transitionAttemptWithinLifecycle(from, to CodexAttemptState, mutate func(*CodexJournalRecordV2) error) (*CodexLeaseRequestHandle, error) {
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	return handle.transitionAttemptWithFence(fence, from, to, mutate)
+}
+
+func (handle *CodexLeaseRequestHandle) transitionAttemptWithFence(fence CodexLeaseGenerationFence, from, to CodexAttemptState, mutate func(*CodexJournalRecordV2) error) (*CodexLeaseRequestHandle, error) {
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || current.State != from {
+		return nil, ErrCodexLeaseTransition
+	}
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = to
+			break
+		}
+	}
+	if mutate != nil {
+		if err := mutate(&desired); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}); err != nil {
+		return nil, err
+	}
+	return handle.runtime.loadHandle(handle.key, handle.accounts, handle.authority, handle.identity)
+}
+
+func (handle *CodexLeaseRequestHandle) refreshMutationFence() (CodexLeaseGenerationFence, error) {
+	if handle == nil || handle.runtime == nil || len(handle.fence.TouchedRecords) == 0 {
+		return CodexLeaseGenerationFence{}, ErrCodexLeaseWriterUnavailable
+	}
+	restored, err := handle.runtime.store.LoadLane(handle.key, handle.accounts, handle.authority)
+	if err != nil {
+		return CodexLeaseGenerationFence{}, err
+	}
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != handle.identity {
+		if restored.Fence.Current.IsZero() && restored.Fence.Last == handle.identity {
+			return CodexLeaseGenerationFence{}, staleCodexLeaseMutation("lane_current", "runtime request is no longer current")
+		}
+		return CodexLeaseGenerationFence{}, ErrCodexStaleTurn
+	}
+	current, ok := handle.runtime.restoredRecord(restored, handle.identity)
+	if !ok {
+		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
+	}
+	fresh, err := handle.runtime.mutationFence(restored, current.Record)
+	if err != nil {
+		return CodexLeaseGenerationFence{}, err
+	}
+	if len(fresh.TouchedRecords) != len(handle.fence.TouchedRecords) {
+		return CodexLeaseGenerationFence{}, staleCodexLeaseMutation("record_set", "runtime predecessor authority changed")
+	}
+	predecessor := CodexJournalRecordIdentity{}
+	if handle.record.PredecessorTurnHash != "" {
+		predecessor = CodexJournalRecordIdentity{
+			LaneDigest:    handle.identity.LaneDigest,
+			TurnDigest:    handle.record.PredecessorTurnHash,
+			ModeEpoch:     handle.record.PredecessorModeEpoch,
+			Authoritative: handle.record.PredecessorAuthoritative,
+		}
+	}
+	for _, cachedRecord := range handle.fence.TouchedRecords {
+		freshRecord, found := codexLeaseRuntimeRecordFence(&fresh, cachedRecord.Record)
+		if !found {
+			return CodexLeaseGenerationFence{}, staleCodexLeaseMutation("record_revision", "runtime handle no longer matches retained record authority")
+		}
+		if cachedRecord.Revision != freshRecord.Revision || cachedRecord.Lease != freshRecord.Lease || cachedRecord.RequestGeneration != freshRecord.RequestGeneration || cachedRecord.CurrentAttempt != freshRecord.CurrentAttempt {
+			_, predecessorStillPresent := handle.runtime.restoredRecord(restored, cachedRecord.Record)
+			retentionDeletedPredecessor := !predecessor.IsZero() && cachedRecord.Record == predecessor && !predecessorStillPresent && cachedRecord.Revision == handle.record.PredecessorGeneration && len(cachedRecord.TouchedAttempts) == 0 && freshRecord.Revision == 0 && freshRecord.Lease == 0 && freshRecord.RequestGeneration == 0 && freshRecord.CurrentAttempt == 0 && len(freshRecord.TouchedAttempts) == 0
+			if retentionDeletedPredecessor {
+				continue
+			}
+			return CodexLeaseGenerationFence{}, staleCodexLeaseMutation("record_revision", "runtime handle no longer matches retained record authority")
+		}
+		touched := make([]CodexAttemptFence, 0, len(cachedRecord.TouchedAttempts))
+		for _, cachedAttempt := range cachedRecord.TouchedAttempts {
+			matched := false
+			for _, freshAttempt := range freshRecord.TouchedAttempts {
+				if freshAttempt.RequestGeneration == cachedAttempt.RequestGeneration && freshAttempt.Generation == cachedAttempt.Generation {
+					if freshAttempt.Revision != cachedAttempt.Revision {
+						return CodexLeaseGenerationFence{}, staleCodexLeaseMutation("attempt_revision", "runtime handle no longer matches the current attempt")
+					}
+					touched = append(touched, freshAttempt)
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return CodexLeaseGenerationFence{}, staleCodexLeaseMutation("attempt_generation", "runtime attempt is no longer retained")
+			}
+		}
+		freshRecord.TouchedAttempts = touched
+	}
+	return fresh, nil
+}
+
+func (runtime *CodexLeaseRuntime) beginLifecycleMutation() (func(), error) {
+	return runtime.beginLifecycleMutationContext(context.Background())
+}
+
+func (runtime *CodexLeaseRuntime) beginLifecycleMutationContext(ctx context.Context) (func(), error) {
+	if runtime == nil || runtime.coordinator == nil || runtime.store == nil || runtime.leases == nil || runtime.leases.lifecycle == nil || runtime.leases.mu == nil || runtime.coordinator.store != runtime.store || runtime.coordinator.leases != runtime.leases {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil lifecycle context", ErrCodexLeaseInvalidMutation)
+	}
+	lifecycle := runtime.leases.lifecycle
+	for !lifecycle.persistence.TryLock() {
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		lifecycle.persistence.Unlock()
+		return nil, err
+	}
+	runtime.leases.mu.Lock()
+	unavailable := runtime.leases.writerUnavailableLocked()
+	runtime.leases.mu.Unlock()
+	if unavailable {
+		lifecycle.persistence.Unlock()
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	return lifecycle.persistence.Unlock, nil
+}
+
+func (runtime *CodexLeaseRuntime) beginAccountMutation(ctx context.Context, account codex.AccountKey) (func(), error) {
+	if runtime == nil || runtime.leases == nil || runtime.leases.accountGates == nil || account == "" {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	guard, err := runtime.leases.accountGates.acquire(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	releaseLifecycle, err := runtime.beginLifecycleMutationContext(ctx)
+	if err != nil {
+		guard.Release()
+		return nil, err
+	}
+	return func() {
+		releaseLifecycle()
+		guard.Release()
+	}, nil
+}
+
+func (runtime *CodexLeaseRuntime) revalidateAccountForCommit(ctx context.Context, account codex.AccountKey) error {
+	if runtime == nil || runtime.revalidateAccount == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := runtime.revalidateAccount(ctx, account); err != nil {
+		return &codexLeaseAccountRevalidationError{err: err}
+	}
+	return ctx.Err()
+}
+
+func (runtime *CodexLeaseRuntime) reserveUnseen(restored CodexRestoredLane) error {
+	record := cloneCodexJournalRecordV2(restored.RequestedRecord)
+	record.State = LeaseReserving
+	lane := &CodexJournalLane{
+		SessionHash:          record.SessionHash,
+		ThreadHash:           record.ThreadHash,
+		NamespaceHash:        record.NamespaceHash,
+		CurrentTurnHash:      record.TurnHash,
+		CurrentModeEpoch:     record.ModeEpoch,
+		CurrentAuthoritative: record.Authoritative,
+		LastTurnHash:         record.TurnHash,
+		LastModeEpoch:        record.ModeEpoch,
+		LastAuthoritative:    record.Authoritative,
+	}
+	fence, err := restored.MutationFence(restored.RequestedIdentity)
+	if err != nil {
+		return err
+	}
+	_, err = runtime.store.CommitLane(fence, CodexLaneMutation{Lane: lane, UpsertRecords: []CodexJournalRecordV2{record}})
+	return err
+}
+
+func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account codex.AccountKey, restored CodexRestoredLane) error {
+	if restored.Fence.Last.IsZero() || restored.Fence.Last == restored.RequestedIdentity {
+		return ErrCodexConcurrentTurn
+	}
+	predecessor, ok := runtime.restoredRecord(restored, restored.Fence.Last)
+	if !ok {
+		return fmt.Errorf("%w: successor predecessor is absent", ErrCodexLeaseTrustLost)
+	}
+	if predecessor.Record.RoutingRefs != 0 || predecessor.Record.AttemptRefs != 0 || predecessor.Record.ResponseObserverRefs != 0 {
+		return ErrCodexConcurrentTurn
+	}
+	predecessorCurrent := restored.Fence.Current
+	upserts := make([]CodexJournalRecordV2, 0, 2)
+	switch {
+	case predecessorCurrent.IsZero():
+		if predecessor.Record.State != LeaseFailedUnadmitted && predecessor.Record.State != LeaseSuperseded && predecessor.Record.State != LeaseExpired {
+			return ErrCodexConcurrentTurn
+		}
+		if predecessor.Record.Generation != 0 && !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)) {
+			return ErrCodexConcurrentTurn
+		}
+	case predecessorCurrent == restored.Fence.Last:
+		if (predecessor.Record.State != LeaseContinuationPending && predecessor.Record.State != LeaseBoundQuiescent && predecessor.Record.State != LeaseOrphaned) || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)) || !predecessor.Record.SocketLineageExtinct {
+			return ErrCodexConcurrentTurn
+		}
+		superseded := codexLeaseRuntimeMutationRecord(predecessor.Record)
+		superseded.State = LeaseSuperseded
+		upserts = append(upserts, superseded)
+	default:
+		return fmt.Errorf("%w: lane current and last authority diverged", ErrCodexLeaseTrustLost)
+	}
+
+	successor := cloneCodexJournalRecordV2(restored.RequestedRecord)
+	successor.State = LeaseReserving
+	successor.PredecessorTurnHash = restored.Fence.Last.TurnDigest
+	successor.PredecessorModeEpoch = restored.Fence.Last.ModeEpoch
+	successor.PredecessorAuthoritative = restored.Fence.Last.Authoritative
+	upserts = append(upserts, successor)
+	lane := restored.Lane
+	lane.Generation = 0
+	lane.CurrentTurnHash = restored.RequestedIdentity.TurnDigest
+	lane.CurrentModeEpoch = restored.RequestedIdentity.ModeEpoch
+	lane.CurrentAuthoritative = restored.RequestedIdentity.Authoritative
+	lane.LastTurnHash = restored.RequestedIdentity.TurnDigest
+	lane.LastModeEpoch = restored.RequestedIdentity.ModeEpoch
+	lane.LastAuthoritative = restored.RequestedIdentity.Authoritative
+	lane.LastAdmittedAccountHash = ""
+	lane.LastAdmittedTurnHash = ""
+	lane.LastAdmittedModeEpoch = 0
+	lane.LastAdmittedAuthoritative = false
+	lane.LastAdmissionJournalGeneration = 0
+	lane.LastAdmittedAt = time.Time{}
+	lane.LastObservedAt = time.Time{}
+	fence, err := restored.MutationFence(restored.Fence.Last, restored.RequestedIdentity)
+	if err != nil {
+		return err
+	}
+	for index := range fence.TouchedRecords {
+		fence.TouchedRecords[index].TouchedAttempts = nil
+	}
+	if err := runtime.revalidateAccountForCommit(ctx, account); err != nil {
+		return err
+	}
+	_, err = runtime.store.CommitLane(fence, CodexLaneMutation{Lane: &lane, UpsertRecords: upserts})
+	return err
+}
+
+func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) CodexCurrentRequest {
+	slots := make([]CodexAttemptSlot, len(plan.Slots))
+	for index, slot := range plan.Slots {
+		slots[index] = CodexAttemptSlot{
+			Index:         uint32(index + 1),
+			AccountHash:   runtime.store.hash("account", string(slot.AccountKey)),
+			CandidateHash: runtime.store.hash("candidate", slot.CandidateID),
+			Kind:          slot.Kind,
+		}
+	}
+	envelope := CodexAttemptEnvelope{
+		PolicyVersion: CodexLeaseAttemptPolicyVersion,
+		AttemptLimit:  uint32(len(slots)),
+		Slots:         slots,
+	}
+	envelope.PlanDigest = codexLeaseAttemptPlanDigest(runtime.store.key, slots)
+	return CodexCurrentRequest{
+		RequestKind:        plan.RequestKind,
+		CompactionPhase:    plan.CompactionPhase,
+		RequestedModelHash: runtime.store.hash("requested-model", plan.RequestedModel),
+		EffectiveModel:     plan.EffectiveModel,
+		RequiredBuckets:    append([]CapacityBucket(nil), plan.RequiredBuckets...),
+		AttemptEnvelope:    envelope,
+		RoutingRefs:        1,
+		Attempts:           []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
+	}
+}
+
+func (runtime *CodexLeaseRuntime) loadHandle(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity) (*CodexLeaseRequestHandle, error) {
+	return runtime.loadHandleForState(key, accounts, authority, identity, true)
+}
+
+func (runtime *CodexLeaseRuntime) loadHandleForState(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, identity CodexJournalRecordIdentity, requireCurrent bool) (*CodexLeaseRequestHandle, error) {
+	restored, err := runtime.store.LoadLane(key, accounts, authority)
+	if err != nil {
+		return nil, err
+	}
+	if requireCurrent && (restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != identity) {
+		return nil, ErrCodexStaleTurn
+	}
+	current, ok := runtime.restoredRecord(restored, identity)
+	if !ok {
+		return nil, fmt.Errorf("%w: committed runtime record is absent", ErrCodexLeaseTrustLost)
+	}
+	fence, err := runtime.mutationFence(restored, current.Record)
+	if err != nil {
+		return nil, err
+	}
+	for index := range fence.TouchedRecords {
+		fence.TouchedRecords[index].TouchedAttempts = nil
+	}
+	attempt, ok := codexLeaseAttemptByGeneration(current.Record.Attempts, current.Record.CurrentAttemptGeneration)
+	if !ok {
+		return nil, fmt.Errorf("%w: committed runtime attempt is absent", ErrCodexLeaseTrustLost)
+	}
+	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, identity)
+	if !ok {
+		return nil, fmt.Errorf("%w: committed runtime fence is absent", ErrCodexLeaseTrustLost)
+	}
+	currentFence.TouchedAttempts = []CodexAttemptFence{{
+		RequestGeneration: current.Record.Generation,
+		Generation:        attempt.Generation,
+		Revision:          attempt.Revision,
+	}}
+	slotAccounts := make([]codex.AccountKey, len(current.Record.AttemptEnvelope.Slots))
+	for index, slot := range current.Record.AttemptEnvelope.Slots {
+		account, resolved := runtime.store.resolveCodexLeaseAccount(slot.AccountHash, accounts)
+		if !resolved {
+			return nil, fmt.Errorf("%w: request slot account is unavailable", ErrCodexLeaseAuthorityMismatch)
+		}
+		slotAccounts[index] = account
+	}
+	return &CodexLeaseRequestHandle{
+		runtime:      runtime,
+		key:          key,
+		accounts:     append([]codex.AccountKey(nil), accounts...),
+		authority:    cloneCodexLeaseAuthorityPolicy(authority),
+		identity:     identity,
+		record:       cloneCodexJournalRecordV2(current.Record),
+		account:      current.AccountKey,
+		slotAccounts: append([]codex.AccountKey(nil), slotAccounts...),
+		fence:        cloneCodexLeaseGenerationFence(fence),
+	}, nil
+}
+
+func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, identity CodexJournalRecordIdentity) (CodexRestoredRecord, bool) {
+	for _, record := range restored.ResolvedRecords {
+		if record.Identity == identity {
+			return record, true
+		}
+	}
+	return CodexRestoredRecord{}, false
+}
+
+func (runtime *CodexLeaseRuntime) mutationFence(restored CodexRestoredLane, record CodexJournalRecordV2) (CodexLeaseGenerationFence, error) {
+	identity := record.Identity()
+	identities := []CodexJournalRecordIdentity{identity}
+	if record.PredecessorTurnHash != "" {
+		identities = append(identities, CodexJournalRecordIdentity{
+			LaneDigest:    identity.LaneDigest,
+			TurnDigest:    record.PredecessorTurnHash,
+			ModeEpoch:     record.PredecessorModeEpoch,
+			Authoritative: record.PredecessorAuthoritative,
+		})
+	}
+	return restored.MutationFence(identities...)
+}
+
+func codexLeaseRuntimeRecordFence(fence *CodexLeaseGenerationFence, identity CodexJournalRecordIdentity) (*CodexLeaseRecordFence, bool) {
+	if fence == nil {
+		return nil, false
+	}
+	for index := range fence.TouchedRecords {
+		if fence.TouchedRecords[index].Record == identity {
+			return &fence.TouchedRecords[index], true
+		}
+	}
+	return nil, false
+}
+
+func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPlan) (CodexLeaseRequestPlan, error) {
+	if runtime == nil || runtime.store == nil || runtime.leases == nil {
+		return CodexLeaseRequestPlan{}, ErrCodexLeaseWriterUnavailable
+	}
+	if err := plan.Key.validate(); err != nil {
+		return CodexLeaseRequestPlan{}, err
+	}
+	if err := validateCodexLeaseAuthorityPolicy(plan.Authority); err != nil {
+		return CodexLeaseRequestPlan{}, err
+	}
+	if !validCodexLeaseRuntimeRequest(plan.RequestKind, plan.CompactionPhase) || plan.RequestedModel == "" || plan.EffectiveModel == "" || strings.TrimSpace(plan.EffectiveModel) != plan.EffectiveModel || !validCodexLeaseBuckets(plan.RequiredBuckets, plan.EffectiveModel) || len(plan.Slots) == 0 || uint64(len(plan.Slots)) > uint64(math.MaxUint32) || plan.InitialSlot == 0 || int(plan.InitialSlot) > len(plan.Slots) {
+		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: incomplete request plan", ErrCodexLeaseInvalidMutation)
+	}
+	accounts := make(map[codex.AccountKey]struct{}, len(plan.Accounts))
+	for _, account := range plan.Accounts {
+		if account == "" {
+			return CodexLeaseRequestPlan{}, fmt.Errorf("%w: empty resolvable account", ErrCodexLeaseInvalidMutation)
+		}
+		accounts[account] = struct{}{}
+	}
+	for _, slot := range plan.Slots {
+		if slot.AccountKey == "" || slot.CandidateID == "" || (slot.Kind != CodexAttemptSlotDirect && slot.Kind != CodexAttemptSlotEligibleManagedRefresh) {
+			return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request slot", ErrCodexLeaseInvalidMutation)
+		}
+		if _, ok := accounts[slot.AccountKey]; !ok {
+			return CodexLeaseRequestPlan{}, fmt.Errorf("%w: request slot account is not resolvable", ErrCodexLeaseAuthorityMismatch)
+		}
+	}
+	plan.Accounts = append([]codex.AccountKey(nil), plan.Accounts...)
+	plan.RequiredBuckets = append([]CapacityBucket(nil), plan.RequiredBuckets...)
+	plan.Slots = append([]CodexLeaseAttemptSlotPlan(nil), plan.Slots...)
+	plan.Authority = cloneCodexLeaseAuthorityPolicy(plan.Authority)
+	return plan, nil
+}
+
+func codexLeaseRuntimeCanBeginRequest(record CodexJournalRecordV2) bool {
+	if record.Generation == 0 {
+		return record.State == LeaseReserving && codexCurrentRequestIsZero(record.CodexCurrentRequest)
+	}
+	if record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(record)) {
+		return false
+	}
+	return record.State == LeaseContinuationPending || record.State == LeaseBoundQuiescent || record.State == LeaseOrphaned || (record.State == LeaseProvisional && codexLeaseCurrentAttemptState(record) == CodexAttemptAbandonedBeforeDispatch)
+}
+
+func validCodexLeaseRuntimeRequest(kind CodexRequestKind, phase CodexCompactionPhase) bool {
+	switch kind {
+	case CodexRequestTurn:
+		return phase == ""
+	case CodexRequestCompaction:
+		return phase == CodexCompactionStandalone || phase == CodexCompactionPreTurn || phase == CodexCompactionMidTurn
+	default:
+		return false
+	}
+}
+
+func codexLeaseRuntimeMutationRecord(record CodexJournalRecordV2) CodexJournalRecordV2 {
+	mutation := cloneCodexJournalRecordV2(record)
+	mutation.RecordGeneration = 0
+	mutation.LaneGeneration = 0
+	mutation.PredecessorGeneration = 0
+	mutation.LeaseGeneration = 0
+	mutation.EverAdmitted = false
+	mutation.AdmissionJournalGeneration = 0
+	mutation.AdmissionRequestGeneration = 0
+	mutation.AdmissionRequestKind = ""
+	mutation.AdmissionCompactionPhase = ""
+	mutation.AdmittedAt = time.Time{}
+	mutation.CreatedAt = time.Time{}
+	mutation.LastObservedAt = time.Time{}
+	for index := range mutation.Attempts {
+		mutation.Attempts[index].Revision = 0
+		mutation.Attempts[index].CreatedAt = time.Time{}
+		mutation.Attempts[index].LastObservedAt = time.Time{}
+	}
+	return mutation
+}
+
+func cloneCodexLeaseAuthorityPolicy(policy CodexLeaseAuthorityPolicy) CodexLeaseAuthorityPolicy {
+	policy.RetainedAuthoritativeEpochs = append([]uint64(nil), policy.RetainedAuthoritativeEpochs...)
+	return policy
+}
