@@ -137,8 +137,8 @@ func TestCodexHealthTrackerListFailureDoesNotRetainRoutingDefaultClassification(
 	tracker := newCodexHealthTracker(staticCodexHealthInventory{err: errors.New("unavailable")}, key, last)
 
 	health := tracker.Health(context.Background())
-	if health.AccountCount != last.AccountCount || !health.AccountCountKnown || health.HealthCode != "fetch_error" {
-		t.Fatalf("failure health = %+v, want retained fields with fetch_error", health)
+	if health.AccountCount != last.AccountCount || !health.AccountCountKnown || health.HealthCode != "stale" {
+		t.Fatalf("failure health = %+v, want retained fields marked stale", health)
 	}
 	want := proxy.CodexRoutingDefaultHealth{Configured: true, Status: proxy.CodexRoutingDefaultStatusUnknown}
 	if health.RoutingDefault != want {

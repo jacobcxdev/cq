@@ -12,6 +12,7 @@ var (
 	ErrExternalUnsafePath          = errors.New("external credential path unsafe")
 	ErrExternalIdentityMismatch    = errors.New("external credential identity mismatch")
 	ErrExternalFingerprintMismatch = errors.New("external credential fingerprint mismatch")
+	errExternalNotConfigured       = errors.New("external credential source not configured")
 )
 
 type ExternalCandidateRef struct {

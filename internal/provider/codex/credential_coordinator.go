@@ -44,9 +44,17 @@ type CredentialCoordinator struct {
 	Now             func() time.Time
 	ExternalSources []ExternalCredentialSource
 	mu              sync.Mutex
+	externalStateMu sync.Mutex
+	knownExternal   map[string]bool
+	externalPlans   map[externalPlanKey]string
 	refreshMu       sync.Mutex
 	refreshFlights  map[string]*refreshFlight
 	refreshRetained map[CandidateID]retainedRefresh
+}
+
+type externalPlanKey struct {
+	Ref      CandidateRef
+	Revision Revision
 }
 
 func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, error) {
@@ -59,8 +67,10 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 	}
 	coordinator := &CredentialCoordinator{
 		Store: store, Activator: activator,
-		Registry: Registry{FS: store.FS, Home: store.Home},
-		Now:      time.Now,
+		Registry:      Registry{FS: store.FS, Home: store.Home},
+		Now:           time.Now,
+		knownExternal: make(map[string]bool),
+		externalPlans: make(map[externalPlanKey]string),
 		ExternalSources: []ExternalCredentialSource{
 			NewCodexBarSource(DefaultCodexBarRoot(store.Home)),
 		},
@@ -77,7 +87,66 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 }
 
 func (c *CredentialCoordinator) List(ctx context.Context) (Inventory, error) {
-	return sanitiseCredentialInventory(DiscoverInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)), nil
+	if err := ctx.Err(); err != nil {
+		return Inventory{}, err
+	}
+	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Inventory{}, ctxErr
+	}
+	if err != nil {
+		return Inventory{}, ErrCredentialAuthorityUnavailable
+	}
+	c.classifyExternalSourceState(&inventory, true)
+	return sanitiseCredentialInventory(inventory), nil
+}
+
+func (c *CredentialCoordinator) classifyExternalSourceState(inventory *Inventory, replacePlans bool) {
+	if c == nil || inventory == nil {
+		return
+	}
+	c.externalStateMu.Lock()
+	defer c.externalStateMu.Unlock()
+	if c.knownExternal == nil {
+		c.knownExternal = make(map[string]bool)
+	}
+	degradedSources := make(map[string]bool)
+	for i := range inventory.ExternalSources {
+		status := &inventory.ExternalSources[i]
+		if status.OptionalAbsent {
+			if c.knownExternal[status.Name] {
+				status.OptionalAbsent = false
+			}
+		} else {
+			c.knownExternal[status.Name] = true
+		}
+		if status.ErrorCode != "" && !status.OptionalAbsent {
+			degradedSources[status.Name] = true
+		}
+	}
+	if replacePlans {
+		plans := make(map[externalPlanKey]string)
+		for _, logical := range inventory.Accounts {
+			for _, candidate := range logical.Candidates {
+				if candidate.Source == SourceExternal && candidate.externalRef != nil {
+					plans[externalPlanKey{Ref: candidate.Ref, Revision: candidate.Revision}] = candidate.externalRef.Source
+				}
+			}
+		}
+		for key, sourceName := range c.externalPlans {
+			if degradedSources[sourceName] {
+				plans[key] = sourceName
+			}
+		}
+		c.externalPlans = plans
+	}
+}
+
+func (c *CredentialCoordinator) externalSourceForPlan(planned PlannedCandidate) (string, bool) {
+	c.externalStateMu.Lock()
+	defer c.externalStateMu.Unlock()
+	source, ok := c.externalPlans[externalPlanKey{Ref: planned.Ref, Revision: planned.Revision}]
+	return source, ok
 }
 
 func sanitiseCredentialInventory(inventory Inventory) Inventory {
@@ -146,7 +215,11 @@ func (c *CredentialCoordinator) SaveLogin(ctx context.Context, credential LoginC
 func (c *CredentialCoordinator) Resolve(ctx context.Context, ref CandidateRef) (CredentialMaterial, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, logical := range DiscoverInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...).Accounts {
+	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)
+	if err != nil {
+		return CredentialMaterial{}, ErrCredentialAuthorityUnavailable
+	}
+	for _, logical := range inventory.Accounts {
 		for _, candidate := range logical.Candidates {
 			if candidate.Ref.AccountKey != ref.AccountKey || candidate.Ref.CandidateID != ref.CandidateID {
 				continue

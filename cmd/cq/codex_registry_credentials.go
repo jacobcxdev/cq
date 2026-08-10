@@ -13,6 +13,7 @@ import (
 
 var (
 	errCodexRegistryCredentialAuthorityUnavailable = errors.New("Codex registry credential authority unavailable")
+	errCodexRegistryCredentialInventoryDegraded    = errors.New("Codex registry credential inventory degraded")
 	errCodexRegistryCredentialUnavailable          = errors.New("no usable Codex registry credential")
 )
 
@@ -59,6 +60,9 @@ func (a codexRegistryControlAdapter) ResolveExact(ctx context.Context, planned c
 	if errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable) {
 		return codexprov.CredentialMaterial{}, errCodexRegistryCredentialAuthorityUnavailable
 	}
+	if errors.Is(err, codexprov.ErrCredentialInventoryDegraded) {
+		return codexprov.CredentialMaterial{}, errCodexRegistryCredentialInventoryDegraded
+	}
 	return material, err
 }
 
@@ -88,6 +92,7 @@ func codexRegistryAccessToken(ctx context.Context, authority codexRegistryCreden
 		return "", fmt.Errorf("%w", errCodexRegistryCredentialAuthorityUnavailable)
 	}
 	candidates := orderedCodexRegistryCandidates(inventory, now)
+	inventoryDegraded := codexRegistryInventoryDegraded(inventory)
 	for _, candidate := range candidates {
 		if codexRegistryCandidateExpired(candidate.candidate, now) {
 			continue
@@ -98,6 +103,10 @@ func codexRegistryAccessToken(ctx context.Context, authority codexRegistryCreden
 		}
 		if errors.Is(err, errCodexRegistryCredentialAuthorityUnavailable) {
 			return "", errCodexRegistryCredentialAuthorityUnavailable
+		}
+		if errors.Is(err, errCodexRegistryCredentialInventoryDegraded) || errors.Is(err, codexprov.ErrCredentialInventoryDegraded) {
+			inventoryDegraded = true
+			continue
 		}
 		if err == nil && material.AccessToken != "" {
 			return material.AccessToken, nil
@@ -114,6 +123,10 @@ func codexRegistryAccessToken(ctx context.Context, authority codexRegistryCreden
 		if errors.Is(err, errCodexRegistryCredentialAuthorityUnavailable) {
 			return "", errCodexRegistryCredentialAuthorityUnavailable
 		}
+		if errors.Is(err, errCodexRegistryCredentialInventoryDegraded) || errors.Is(err, codexprov.ErrCredentialInventoryDegraded) {
+			inventoryDegraded = true
+			continue
+		}
 		if err != nil || ref != candidate.candidate.Ref || revision == "" {
 			continue
 		}
@@ -127,9 +140,16 @@ func codexRegistryAccessToken(ctx context.Context, authority codexRegistryCreden
 		if errors.Is(err, errCodexRegistryCredentialAuthorityUnavailable) {
 			return "", errCodexRegistryCredentialAuthorityUnavailable
 		}
+		if errors.Is(err, errCodexRegistryCredentialInventoryDegraded) || errors.Is(err, codexprov.ErrCredentialInventoryDegraded) {
+			inventoryDegraded = true
+			continue
+		}
 		if err == nil && material.AccessToken != "" {
 			return material.AccessToken, nil
 		}
+	}
+	if inventoryDegraded {
+		return "", errCodexRegistryCredentialInventoryDegraded
 	}
 	return "", errCodexRegistryCredentialUnavailable
 }
@@ -151,6 +171,7 @@ func codexRegistryModelsRequest(ctx context.Context, authority codexRegistryCred
 		}
 		return nil, errCodexRegistryCredentialAuthorityUnavailable
 	}
+	inventoryDegraded := codexRegistryInventoryDegraded(inventory)
 
 	var rejected *http.Response
 	attempt := func(planned codexprov.PlannedCandidate) (*http.Response, codexprov.PlannedCandidate, bool, error) {
@@ -221,6 +242,10 @@ func codexRegistryModelsRequest(ctx context.Context, authority codexRegistryCred
 				closeCodexRegistryResponse(rejected)
 				return nil, errCodexRegistryCredentialAuthorityUnavailable
 			}
+			if codexRegistryInventoryDegradedError(err) {
+				inventoryDegraded = true
+				continue
+			}
 			if err != nil {
 				if attempted {
 					closeCodexRegistryResponse(response)
@@ -272,6 +297,10 @@ func codexRegistryModelsRequest(ctx context.Context, authority codexRegistryCred
 					closeCodexRegistryResponse(rejected)
 					return nil, errCodexRegistryCredentialAuthorityUnavailable
 				}
+				if codexRegistryInventoryDegradedError(err) {
+					inventoryDegraded = true
+					continue
+				}
 				if err != nil && attempted {
 					closeCodexRegistryResponse(response)
 					closeCodexRegistryResponse(rejected)
@@ -285,14 +314,31 @@ func codexRegistryModelsRequest(ctx context.Context, authority codexRegistryCred
 
 		start = end
 	}
+	if inventoryDegraded {
+		closeCodexRegistryResponse(rejected)
+		return nil, errCodexRegistryCredentialInventoryDegraded
+	}
 	if rejected != nil {
 		return rejected, nil
 	}
 	return nil, errCodexRegistryCredentialUnavailable
 }
 
+func codexRegistryInventoryDegraded(inventory codexprov.Inventory) bool {
+	for _, source := range inventory.ExternalSources {
+		if source.ErrorCode != "" && !source.OptionalAbsent {
+			return true
+		}
+	}
+	return false
+}
+
 func codexRegistryAuthorityUnavailable(err error) bool {
 	return errors.Is(err, errCodexRegistryCredentialAuthorityUnavailable) || errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable)
+}
+
+func codexRegistryInventoryDegradedError(err error) bool {
+	return errors.Is(err, errCodexRegistryCredentialInventoryDegraded) || errors.Is(err, codexprov.ErrCredentialInventoryDegraded)
 }
 
 func codexRegistryContextError(err error) error {

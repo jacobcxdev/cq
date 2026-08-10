@@ -150,12 +150,12 @@ func (s *CodexBarSource) loadManifest() (codexBarManifest, error) {
 	}
 	if err := validateExternalFile(s.fs, s.ownsFile, s.root, true); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return codexBarManifest{}, ErrExternalUnavailable
+			return codexBarManifest{}, errors.Join(ErrExternalUnavailable, errExternalNotConfigured)
 		}
 		return codexBarManifest{}, err
 	}
 	path := filepath.Join(s.root, "managed-codex-accounts.json")
-	read, err := s.readValidatedFile(path, ErrExternalUnavailable, ErrExternalUnsafePath)
+	read, err := s.readValidatedFile(path, errors.Join(ErrExternalUnavailable, errExternalNotConfigured), ErrExternalUnsafePath)
 	if err != nil {
 		return codexBarManifest{}, err
 	}

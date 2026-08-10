@@ -18,6 +18,7 @@ var (
 	ErrCredentialControlNotOwner      = errors.New("credential control does not own coordinator authority")
 	ErrCredentialOwnerRevoked         = errors.New("credential coordinator owner authority revoked")
 	ErrCredentialAuthorityUnavailable = errors.New("credential authority unavailable")
+	ErrCredentialInventoryDegraded    = errors.New("credential inventory degraded")
 )
 
 type CredentialControl struct {
@@ -364,7 +365,10 @@ func (c *CredentialControl) Resolve(ctx context.Context, ref CandidateRef) (Cred
 
 type resolveErrorCode string
 
-const resolveErrorStaleRevision resolveErrorCode = "stale_revision"
+const (
+	resolveErrorStaleRevision     resolveErrorCode = "stale_revision"
+	resolveErrorInventoryDegraded resolveErrorCode = "inventory_degraded"
+)
 
 type ResolveExactRPCArgs struct {
 	RequestID CredentialRPCRequestID
@@ -411,6 +415,8 @@ func (c *CredentialControl) ResolveExact(ctx context.Context, planned PlannedCan
 		return reply.Material, nil
 	case resolveErrorStaleRevision:
 		return CredentialMaterial{}, ErrStaleRevision
+	case resolveErrorInventoryDegraded:
+		return CredentialMaterial{}, ErrCredentialInventoryDegraded
 	default:
 		return CredentialMaterial{}, errors.New("credential resolver returned an unknown typed error")
 	}
@@ -549,6 +555,10 @@ func (r *credentialRPC) ResolveExact(args ResolveExactRPCArgs, reply *ResolveExa
 	result, err := r.Coordinator.ResolveExact(ctx, args.Planned)
 	if errors.Is(err, ErrStaleRevision) {
 		reply.ErrorCode = resolveErrorStaleRevision
+		return nil
+	}
+	if errors.Is(err, ErrCredentialInventoryDegraded) {
+		reply.ErrorCode = resolveErrorInventoryDegraded
 		return nil
 	}
 	reply.Material = result

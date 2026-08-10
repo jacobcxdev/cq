@@ -247,6 +247,43 @@ func TestCredentialControlResolveExactPreservesTypedStaleRevision(t *testing.T) 
 	}
 }
 
+func TestCredentialControlResolveExactPreservesTypedInventoryDegradation(t *testing.T) {
+	identity := AccountIdentity{AccountID: "rpc-account", UserID: "rpc-user", Email: "rpc@example.test"}
+	source := &fakeExternalCredentialSource{
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity: identity, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+		}},
+		listErr: ErrExternalUnavailable, listErrAfter: 1,
+	}
+	coordinator, _ := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+	path := shortControlPath(t)
+	owner, err := OpenCredentialControl(path, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	client, err := OpenCredentialControl(path, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	inventory, err := client.List(context.Background())
+	if err != nil || len(inventory.Accounts) != 1 {
+		t.Fatalf("List inventory/error = %+v/%v, want external candidate", inventory, err)
+	}
+	planned := PlanCandidate(inventory.Accounts[0], inventory.Accounts[0].Candidates[0])
+	material, err := client.ResolveExact(context.Background(), planned)
+	if !errors.Is(err, ErrCredentialInventoryDegraded) {
+		t.Fatalf("ResolveExact error = %T %v, want typed inventory degradation", err, err)
+	}
+	if material != (CredentialMaterial{}) {
+		t.Fatalf("ResolveExact returned material after source loss: %+v", material)
+	}
+}
+
 type blockingExternalCredentialSource struct {
 	started    chan struct{}
 	finished   chan struct{}

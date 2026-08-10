@@ -1,16 +1,21 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/auth"
 )
 
 type providerDoerFunc func(*http.Request) (*http.Response, error)
@@ -26,6 +31,25 @@ type providerCredentialAuthority struct {
 	resolveExact     func(int, PlannedCandidate) (CredentialMaterial, error)
 	resolveWeak      func(CandidateRef) (CredentialMaterial, error)
 	weakResolveCalls int
+}
+
+type providerExactResolverRecorder struct {
+	resolver ExactSecretResolver
+	mu       sync.Mutex
+	plans    []PlannedCandidate
+}
+
+func (r *providerExactResolverRecorder) ResolveExact(ctx context.Context, planned PlannedCandidate) (CredentialMaterial, error) {
+	r.mu.Lock()
+	r.plans = append(r.plans, planned)
+	r.mu.Unlock()
+	return r.resolver.ResolveExact(ctx, planned)
+}
+
+func (r *providerExactResolverRecorder) snapshot() []PlannedCandidate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]PlannedCandidate(nil), r.plans...)
 }
 
 func (a *providerCredentialAuthority) List(context.Context) (Inventory, error) {
@@ -113,6 +137,310 @@ func TestFetchCredentialAuthorityLossReturnsPrivacySafeFetchError(t *testing.T) 
 				t.Fatalf("upstream calls = %d, want %d", requestCalls, test.wantCalls)
 			}
 		})
+	}
+}
+
+func TestFetchPartialAuthorityWiringDoesNotUseReadableFilesystemCredentials(t *testing.T) {
+	identity := AccountIdentity{AccountID: "acct-1", UserID: "user-1", Email: "one@example.test"}
+	fs := newFakeFS()
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON(
+		"readable-filesystem-secret", identity.AccountID,
+		fakeCodexJWT(identity.Email, identity.AccountID, identity.UserID, "plus"),
+	)
+	tests := []struct {
+		name    string
+		secrets ExactSecretResolver
+		broker  CredentialRefreshBroker
+	}{
+		{name: "resolver only", secrets: staticSecretResolver{material: testCredentialMaterial(identity, "resolver-secret")}},
+		{name: "refresh broker only", broker: &providerRefreshBroker{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requestCalls := 0
+			p := &Provider{
+				client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+					requestCalls++
+					return providerUsageResponse(http.StatusOK), nil
+				}),
+				fs: fs, secrets: test.secrets, refreshBroker: test.broker,
+			}
+			results, err := p.Fetch(context.Background(), time.Now())
+			if err != nil || len(results) != 1 || results[0].Error == nil ||
+				results[0].Error.Code != "fetch_error" || results[0].Error.Message != credentialAuthorityUnavailableMessage {
+				t.Fatalf("Fetch results/error = %+v/%v, want typed authority unavailable", results, err)
+			}
+			if requestCalls != 0 {
+				t.Fatalf("upstream calls = %d, want none", requestCalls)
+			}
+		})
+	}
+}
+
+func TestFetchDegradedExternalInventoryDoesNotAuthoriseTerminalCredentialState(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	candidate := providerCandidate(
+		CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"},
+		"managed-revision", SourceManaged, time.Now().Add(time.Hour),
+	)
+	tests := []struct {
+		name       string
+		accounts   []LogicalAccount
+		status     int
+		wantUsable bool
+		wantCalls  int
+	}{
+		{name: "no visible candidates"},
+		{name: "visible candidate rejected", accounts: providerInventory(identity, candidate).Accounts, status: http.StatusUnauthorized, wantCalls: 1},
+		{name: "visible candidate succeeds", accounts: providerInventory(identity, candidate).Accounts, status: http.StatusOK, wantCalls: 1, wantUsable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authority := &providerCredentialAuthority{
+				inventories: []Inventory{{
+					Accounts:        test.accounts,
+					ExternalSources: []ExternalSourceStatus{{Name: "codexbar", ErrorCode: "invalid"}},
+				}},
+				resolveExact: func(_ int, planned PlannedCandidate) (CredentialMaterial, error) {
+					return testCredentialMaterial(planned.Identity, "visible-managed-secret"), nil
+				},
+			}
+			requestCalls := 0
+			p := &Provider{
+				client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+					requestCalls++
+					return providerUsageResponse(test.status), nil
+				}),
+				fs: newFakeFS(), inventory: authority, secrets: authority,
+			}
+			results, err := p.Fetch(context.Background(), time.Now())
+			if err != nil || len(results) != 1 {
+				t.Fatalf("Fetch results/error = %+v/%v", results, err)
+			}
+			if test.wantUsable {
+				if !results[0].IsUsable() {
+					t.Fatalf("results = %+v, want visible candidate success", results)
+				}
+			} else if results[0].Error == nil || results[0].Error.Code != "fetch_error" ||
+				results[0].Error.Message != "Codex credential inventory degraded" {
+				t.Fatalf("results = %+v, want typed degraded inventory", results)
+			}
+			if requestCalls != test.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", requestCalls, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestFetchAbsentOptionalExternalSourcePreservesVisibleTerminalState(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	candidate := providerCandidate(
+		CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"},
+		"managed-revision", SourceManaged, time.Now().Add(time.Hour),
+	)
+	tests := []struct {
+		name      string
+		accounts  []LogicalAccount
+		status    int
+		wantCode  string
+		wantCalls int
+	}{
+		{name: "no visible candidates", wantCode: "not_configured"},
+		{name: "visible candidate rejected", accounts: providerInventory(identity, candidate).Accounts, status: http.StatusUnauthorized, wantCode: "auth_expired", wantCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authority := &providerCredentialAuthority{
+				inventories: []Inventory{{
+					Accounts: test.accounts,
+					ExternalSources: []ExternalSourceStatus{{
+						Name: "codexbar", ErrorCode: "unavailable", OptionalAbsent: true,
+					}},
+				}},
+				resolveExact: func(_ int, planned PlannedCandidate) (CredentialMaterial, error) {
+					return testCredentialMaterial(planned.Identity, "visible-managed-secret"), nil
+				},
+			}
+			requestCalls := 0
+			p := &Provider{
+				client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+					requestCalls++
+					return providerUsageResponse(test.status), nil
+				}),
+				fs: newFakeFS(), inventory: authority, secrets: authority,
+			}
+			results, err := p.Fetch(context.Background(), time.Now())
+			if err != nil || len(results) != 1 || results[0].Error == nil || results[0].Error.Code != test.wantCode {
+				t.Fatalf("Fetch results/error = %+v/%v, want %s", results, err, test.wantCode)
+			}
+			if requestCalls != test.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", requestCalls, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestFetchExternalSourceDisappearsDuringExactResolutionReturnsDegraded(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	source := &fakeExternalCredentialSource{
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity: identity, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+		}},
+		listErr: ErrExternalUnavailable, listErrAfter: 1,
+	}
+	coordinator, fs := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+	requestCalls := 0
+	p := &Provider{
+		client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+			requestCalls++
+			return providerUsageResponse(http.StatusOK), nil
+		}),
+		fs: fs, inventory: coordinator, secrets: coordinator,
+	}
+
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "fetch_error" || results[0].Error.Message != credentialInventoryDegradedMessage {
+		t.Fatalf("Fetch results/error = %+v/%v, want typed degraded inventory", results, err)
+	}
+	if requestCalls != 0 {
+		t.Fatalf("upstream calls = %d, want none after source loss", requestCalls)
+	}
+}
+
+func TestFetchRetainsHealthyExternalIdentityAcrossSourceAndCoreFailures(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	source := &fakeExternalCredentialSource{
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity: identity, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+		}},
+		material: testCredentialMaterial(identity, "external-secret"),
+		listErr:  ErrExternalUnavailable, listErrAfter: 2,
+	}
+	coordinator, fs := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+	requestCalls := 0
+	p := &Provider{
+		client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+			requestCalls++
+			return providerUsageResponse(http.StatusOK), nil
+		}),
+		fs: fs, inventory: coordinator, secrets: coordinator,
+	}
+
+	first, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(first) != 1 || !first[0].IsUsable() || first[0].AccountID != identity.AccountID {
+		t.Fatalf("first Fetch results/error = %+v/%v, want healthy external identity", first, err)
+	}
+	second, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(second) != 1 || second[0].Error == nil || second[0].Error.Message != credentialInventoryDegradedMessage || second[0].AccountID != identity.AccountID || second[0].Email != identity.Email {
+		t.Fatalf("second Fetch results/error = %+v/%v, want retained identity degraded", second, err)
+	}
+	fs.homeDirErr = errors.New("private core authority failure")
+	third, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(third) != 1 || third[0].Error == nil || third[0].Error.Message != credentialInventoryStaleMessage || third[0].AccountID != identity.AccountID || third[0].Email != identity.Email {
+		t.Fatalf("third Fetch results/error = %+v/%v, want original healthy identity stale", third, err)
+	}
+	if requestCalls != 1 {
+		t.Fatalf("upstream calls = %d, want only healthy dispatch", requestCalls)
+	}
+}
+
+func TestFetchPartialDegradationRetainsSameAccountDifferentUserIdentity(t *testing.T) {
+	firstIdentity := AccountIdentity{AccountID: "shared-account", UserID: "user-1", Email: "one@example.test"}
+	secondIdentity := AccountIdentity{AccountID: "shared-account", UserID: "user-2", Email: "two@example.test"}
+	firstInventory := providerInventory(firstIdentity, providerCandidate(
+		CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}, "revision-1", SourceManaged, time.Now().Add(time.Hour),
+	))
+	secondAccount := providerInventory(secondIdentity, providerCandidate(
+		CandidateRef{AccountKey: "logical-2", CandidateID: "managed-2"}, "revision-2", SourceManaged, time.Now().Add(time.Hour),
+	)).Accounts[0]
+	secondAccount.Key = "logical-2"
+	firstInventory.Accounts = append(firstInventory.Accounts, secondAccount)
+	partial := Inventory{
+		Accounts:        firstInventory.Accounts[:1],
+		ExternalSources: []ExternalSourceStatus{{Name: "codexbar", ErrorCode: "unavailable"}},
+	}
+	authority := &providerCredentialAuthority{
+		inventories: []Inventory{firstInventory, partial},
+		resolveExact: func(_ int, planned PlannedCandidate) (CredentialMaterial, error) {
+			return testCredentialMaterial(planned.Identity, "visible-secret"), nil
+		},
+	}
+	p := &Provider{
+		client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+			return providerUsageResponse(http.StatusOK), nil
+		}),
+		fs: newFakeFS(), inventory: authority, secrets: authority,
+	}
+	if first, err := p.Fetch(context.Background(), time.Now()); err != nil || len(first) != 2 || !first[0].IsUsable() || !first[1].IsUsable() {
+		t.Fatalf("first Fetch results/error = %+v/%v, want two healthy identities", first, err)
+	}
+	second, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(second) != 2 {
+		t.Fatalf("second Fetch results/error = %+v/%v, want visible plus missing identity", second, err)
+	}
+	if !second[0].IsUsable() || second[0].Email != firstIdentity.Email {
+		t.Fatalf("visible result = %+v, want first user success", second[0])
+	}
+	if second[1].Error == nil || second[1].Error.Message != credentialInventoryDegradedMessage || second[1].Email != secondIdentity.Email {
+		t.Fatalf("missing result = %+v, want second user degraded", second[1])
+	}
+}
+
+func TestFetchRetainsLastLogicalInventoryAsStaleOnRealCoordinatorFailure(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	credential := testLoginCredential()
+	credential.Tokens.AccessToken = "managed-readable-secret"
+	credential.Tokens.IDToken = fakeCodexJWT("one@example.test", "acct-1", "user-1", "plus")
+	credential.Claims = auth.DecodeCodexClaims(credential.Tokens.IDToken)
+	ref, _, err := coordinator.SaveLogin(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join("/fake/home/.codex/accounts", string(ref.CandidateID)+".auth.json")
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
+	}
+	before, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	requestCalls := 0
+	p := &Provider{
+		client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+			requestCalls++
+			return providerUsageResponse(http.StatusOK), nil
+		}),
+		fs: fs, inventory: coordinator, secrets: coordinator,
+	}
+	first, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(first) != 1 || !first[0].IsUsable() {
+		t.Fatalf("initial Fetch results/error = %+v/%v, want one usable result", first, err)
+	}
+
+	const sensitive = "private managed directory and token-secret"
+	fs.readDirErr = map[string]error{"/fake/home/.codex/accounts": errors.New(sensitive)}
+	second, err := p.Fetch(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("degraded Fetch error = %v, want typed result", err)
+	}
+	if len(second) != 1 || second[0].Error == nil || second[0].Error.Code != "fetch_error" ||
+		second[0].Error.Message != "Codex credential inventory stale" || second[0].AccountID != "acct-1" || second[0].Email != "one@example.test" {
+		t.Fatalf("degraded results = %+v, want last logical account explicitly stale", second)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", second), sensitive) {
+		t.Fatalf("degraded results exposed coordinator detail: %+v", second)
+	}
+	if requestCalls != 1 {
+		t.Fatalf("upstream calls = %d, want only initial dispatch", requestCalls)
+	}
+	after, err := fs.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("managed credential bytes changed after authority failure: err=%v", err)
 	}
 }
 
@@ -547,6 +875,104 @@ func TestFetchExternal401AdvancesToManagedCandidateBeforeRefresh(t *testing.T) {
 	refreshCalls, _, _ := broker.snapshot()
 	if refreshCalls != 0 {
 		t.Fatalf("refresh calls = %d, want 0 before same-identity candidates finish", refreshCalls)
+	}
+}
+
+func TestFetchStaleManaged401UsesExactFreshCodexBarRevisionWithoutWrites(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	credential := testLoginCredential()
+	credential.Tokens.AccessToken = "synthetic-stale-managed-token"
+	credential.Tokens.IDToken = fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus")
+	credential.Claims = auth.DecodeCodexClaims(credential.Tokens.IDToken)
+	ref, revision, err := coordinator.SaveLogin(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
+	}
+	record, err := coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Document["cq_expires_at"] = time.Now().Add(2 * time.Hour).UnixMilli()
+	if err := coordinator.Store.Commit(&record, revision); err != nil {
+		t.Fatal(err)
+	}
+
+	codexBarRoot := filepath.Join(t.TempDir(), "CodexBar")
+	writeCodexBarFixture(t, codexBarRoot, 0o600, nil)
+	coordinator.ExternalSources = []ExternalCredentialSource{NewCodexBarSource(codexBarRoot)}
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 2 {
+		t.Fatalf("inventory = %+v, want one identity with managed and CodexBar candidates", inventory)
+	}
+	expected := make(map[CredentialSource]PlannedCandidate)
+	for _, candidate := range inventory.Accounts[0].Candidates {
+		expected[candidate.Source] = PlanCandidate(inventory.Accounts[0], candidate)
+	}
+	if expected[SourceManaged].Revision == "" || expected[SourceExternal].Revision == "" {
+		t.Fatalf("candidate plans = %+v, want exact managed and external revisions", expected)
+	}
+
+	managedPath := record.Path
+	externalPath := codexBarAuthPath(codexBarRoot)
+	manifestPath := filepath.Join(codexBarRoot, "managed-codex-accounts.json")
+	managedBefore, err := fs.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalBefore, err := os.ReadFile(externalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBefore, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := &providerExactResolverRecorder{resolver: coordinator}
+	broker := &providerRefreshBroker{}
+	var requestTokens []string
+	p := &Provider{
+		client: providerDoerFunc(func(req *http.Request) (*http.Response, error) {
+			token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+			requestTokens = append(requestTokens, token)
+			if token == credential.Tokens.AccessToken {
+				return providerUsageResponse(http.StatusUnauthorized), nil
+			}
+			if token == "synthetic-access" {
+				return providerUsageResponse(http.StatusOK), nil
+			}
+			return providerUsageResponse(http.StatusForbidden), nil
+		}),
+		fs: fs, inventory: coordinator, secrets: resolver, refreshBroker: broker,
+	}
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(results) != 1 || !results[0].IsUsable() {
+		t.Fatalf("Fetch results/error = %+v/%v, want fresh external success", results, err)
+	}
+	if !reflect.DeepEqual(requestTokens, []string{credential.Tokens.AccessToken, "synthetic-access"}) {
+		t.Fatalf("request tokens = %q, want stale managed then fresh CodexBar", requestTokens)
+	}
+	plans := resolver.snapshot()
+	if len(plans) != 2 || plans[0] != expected[SourceManaged] || plans[1] != expected[SourceExternal] {
+		t.Fatalf("exact plans = %+v, want exact managed then external revisions %+v", plans, expected)
+	}
+	refreshCalls, _, _ := broker.snapshot()
+	if refreshCalls != 0 {
+		t.Fatalf("managed refresh calls = %d, want none before external candidate succeeds", refreshCalls)
+	}
+
+	managedAfter, managedErr := fs.ReadFile(managedPath)
+	externalAfter, externalErr := os.ReadFile(externalPath)
+	manifestAfter, manifestErr := os.ReadFile(manifestPath)
+	if managedErr != nil || externalErr != nil || manifestErr != nil ||
+		!bytes.Equal(managedAfter, managedBefore) || !bytes.Equal(externalAfter, externalBefore) || !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatalf("credential stores changed: managed=%v external=%v manifest=%v", managedErr, externalErr, manifestErr)
 	}
 }
 

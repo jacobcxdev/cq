@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -81,9 +83,11 @@ type Inventory struct {
 }
 
 type ExternalSourceStatus struct {
-	Name           string
-	CandidateCount int
-	ErrorCode      string
+	Name            string
+	CandidateCount  int
+	ErrorCode       string
+	OptionalAbsent  bool
+	TopologyInvalid bool
 }
 
 type rawCandidate struct {
@@ -100,6 +104,8 @@ type sourcedExternalCandidate struct {
 	candidate  ExternalCandidate
 }
 
+const maximumCoreCredentialSize = int64(1 << 20)
+
 // DiscoverInventory builds one generation-local read model without writing.
 func DiscoverInventory(fs fsutil.FileSystem) Inventory {
 	return DiscoverInventoryWithSources(context.Background(), fs)
@@ -108,28 +114,97 @@ func DiscoverInventory(fs fsutil.FileSystem) Inventory {
 // DiscoverInventoryWithSources adds validated read-only candidates to the
 // local system/managed inventory without copying their credential material.
 func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sources ...ExternalCredentialSource) Inventory {
+	inventory, _ := discoverInventoryWithSources(ctx, fs, false, sources...)
+	return inventory
+}
+
+// discoverAuthoritativeInventoryWithSources fails closed when the core CQ or
+// system credential inventory is unreadable, malformed, or unsafe. External
+// sources remain optional and report their own typed degraded status.
+func discoverAuthoritativeInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sources ...ExternalCredentialSource) (Inventory, error) {
+	return discoverInventoryWithSources(ctx, fs, true, sources...)
+}
+
+func discoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, authoritative bool, sources ...ExternalCredentialSource) (Inventory, error) {
+	if authoritative {
+		if _, ok := fs.(fsutil.SecurePathInspector); !ok {
+			return Inventory{}, fsutil.ErrSecureCapabilityUnavailable
+		}
+		if _, ok := fs.(fsutil.NoFollowFileOpener); !ok {
+			return Inventory{}, fsutil.ErrSecureCapabilityUnavailable
+		}
+	}
 	home, err := fs.UserHomeDir()
 	if err != nil {
-		return Inventory{}
+		if authoritative {
+			return Inventory{}, err
+		}
+		return Inventory{}, nil
+	}
+	coreDir := filepath.Join(home, ".codex")
+	if authoritative {
+		inspector := fs.(fsutil.SecurePathInspector)
+		if _, err := inspector.Lstat(coreDir); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return Inventory{}, err
+			}
+		} else if err := fsutil.ValidateSecureDirectory(fs, coreDir); err != nil {
+			return Inventory{}, err
+		}
 	}
 	var raw []rawCandidate
-	systemPath := filepath.Join(home, ".codex", "auth.json")
-	if candidate, ok := readRawCandidate(fs, systemPath, SourceSystem, "system"); ok {
+	systemPath := filepath.Join(coreDir, "auth.json")
+	if candidate, ok, err := readRawCandidate(fs, systemPath, SourceSystem, "system", authoritative); err != nil {
+		return Inventory{}, err
+	} else if ok {
 		candidate.account.IsActive = true
 		raw = append(raw, candidate)
 	}
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-	entries, _ := fs.ReadDir(accountsDir)
+	accountsDir := filepath.Join(coreDir, "accounts")
+	var entries []os.DirEntry
+	if authoritative {
+		inspector := fs.(fsutil.SecurePathInspector)
+		if _, err := inspector.Lstat(accountsDir); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return Inventory{}, err
+			}
+		} else {
+			if err := fsutil.ValidateSecureDirectory(fs, filepath.Dir(accountsDir)); err != nil {
+				return Inventory{}, err
+			}
+			if err := fsutil.ValidateSecureDirectory(fs, accountsDir); err != nil {
+				return Inventory{}, err
+			}
+			entries, err = fs.ReadDir(accountsDir)
+			if err != nil {
+				return Inventory{}, err
+			}
+		}
+	} else {
+		entries, err = fs.ReadDir(accountsDir)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			entries = nil
+		}
+	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".auth.json") {
-			names = append(names, entry.Name())
+		if !strings.HasSuffix(entry.Name(), ".auth.json") {
+			continue
 		}
+		if entry.IsDir() {
+			if authoritative {
+				return Inventory{}, fsutil.ErrUnsafeSecurePath
+			}
+			continue
+		}
+		names = append(names, entry.Name())
 	}
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(accountsDir, name)
-		if candidate, ok := readRawCandidate(fs, path, SourceManaged, name); ok {
+		if candidate, ok, err := readRawCandidate(fs, path, SourceManaged, name, authoritative); err != nil {
+			return Inventory{}, err
+		} else if ok {
 			raw = append(raw, candidate)
 		}
 	}
@@ -199,6 +274,9 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 	var externalCandidates []sourcedExternalCandidate
 	sourceNames, sourceNameCounts := snapshotExternalSourceNames(sources)
 	for index, source := range sources {
+		if err := ctx.Err(); err != nil {
+			return Inventory{}, err
+		}
 		if source == nil {
 			continue
 		}
@@ -206,12 +284,17 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		status := ExternalSourceStatus{Name: sourceName}
 		if sourceName == "" || sourceNameCounts[sourceName] != 1 {
 			status.ErrorCode = externalSourceErrorCode(ErrExternalInvalid)
+			status.TopologyInvalid = true
 			inventory.ExternalSources = append(inventory.ExternalSources, status)
 			continue
 		}
 		candidates, err := source.List(ctx)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Inventory{}, ctxErr
+		}
 		if err != nil {
 			status.ErrorCode = externalSourceErrorCode(err)
+			status.OptionalAbsent = errors.Is(err, errExternalNotConfigured)
 			inventory.ExternalSources = append(inventory.ExternalSources, status)
 			continue
 		}
@@ -227,6 +310,7 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		}
 		if !validSource {
 			status.ErrorCode = externalSourceErrorCode(ErrExternalInvalid)
+			status.TopologyInvalid = true
 			inventory.ExternalSources = append(inventory.ExternalSources, status)
 			continue
 		}
@@ -285,27 +369,49 @@ func DiscoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, sou
 		}
 		return inventory.Accounts[i].Key < inventory.Accounts[j].Key
 	})
-	return inventory
+	return inventory, nil
 }
 
-func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource, sourceName string) (rawCandidate, bool) {
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		return rawCandidate{}, false
+func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource, sourceName string, authoritative bool) (rawCandidate, bool, error) {
+	var data []byte
+	if authoritative {
+		var present bool
+		var err error
+		data, present, err = readAuthoritativeCredentialFile(fs, path)
+		if err != nil || !present {
+			return rawCandidate{}, false, err
+		}
+	} else {
+		var err error
+		data, err = fs.ReadFile(path)
+		if err != nil {
+			return rawCandidate{}, false, nil
+		}
 	}
 	account, ok := parseAccountData(data, path)
 	if !ok {
-		return rawCandidate{}, false
+		if authoritative {
+			return rawCandidate{}, false, errors.New("malformed credential file")
+		}
+		return rawCandidate{}, false, nil
 	}
 	var doc map[string]any
-	_ = json.Unmarshal(data, &doc)
+	if err := json.Unmarshal(data, &doc); err != nil || doc == nil {
+		if authoritative {
+			return rawCandidate{}, false, errors.New("malformed credential file")
+		}
+		return rawCandidate{}, false, nil
+	}
 	var metadata *ManagedMetadata
 	if rawMetadata, ok := doc["_cq"]; ok && source == SourceManaged {
 		var parsed ManagedMetadata
 		metadataData, marshalErr := json.Marshal(rawMetadata)
 		valid := marshalErr == nil && json.Unmarshal(metadataData, &parsed) == nil && parsed.Version == 1 && parsed.AccountKey != "" && parsed.CandidateID != "" && parsed.LineageID != "" && parsed.Generation > 0
 		if !valid {
-			return rawCandidate{}, false
+			if authoritative {
+				return rawCandidate{}, false, errors.New("malformed managed credential metadata")
+			}
+			return rawCandidate{}, false, nil
 		}
 		if valid {
 			material := CredentialMaterial{
@@ -313,10 +419,15 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 				IDToken: account.IDToken, AccountID: account.AccountID,
 			}
 			if parsed.Revision != managedRecordRevision(doc, material, parsed) {
-				return rawCandidate{}, false
+				if authoritative {
+					return rawCandidate{}, false, errors.New("managed credential revision mismatch")
+				}
+				return rawCandidate{}, false, nil
 			}
-			if info, err := fs.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-				return rawCandidate{}, false
+			if !authoritative {
+				if info, err := fs.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+					return rawCandidate{}, false, nil
+				}
 			}
 			metadata = &parsed
 		}
@@ -325,7 +436,85 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 		account: account, data: data, source: source, sourceName: sourceName,
 		cqAuthored: metadata != nil && metadata.Provenance == ProvenanceCQOAuth,
 		metadata:   metadata,
-	}, true
+	}, true, nil
+}
+
+func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte, bool, error) {
+	inspector, ok := fs.(fsutil.SecurePathInspector)
+	if !ok {
+		return nil, false, fsutil.ErrSecureCapabilityUnavailable
+	}
+	opener, ok := fs.(fsutil.NoFollowFileOpener)
+	if !ok {
+		return nil, false, fsutil.ErrSecureCapabilityUnavailable
+	}
+	pathInfo, err := inspector.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if err := fsutil.ValidateSecureDirectory(fs, filepath.Dir(path)); err != nil {
+		return nil, false, err
+	}
+	if err := fsutil.ValidateSecureRegularFile(fs, path); err != nil {
+		return nil, false, err
+	}
+	pathIdentity, ok := inspector.FileIdentity(pathInfo)
+	if !ok {
+		return nil, false, fsutil.ErrUnsafeSecurePath
+	}
+	file, err := opener.OpenNoFollow(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	openedIdentity, err := validateAuthoritativeCredentialInfo(inspector, openedInfo)
+	if err != nil || openedIdentity.Device != pathIdentity.Device || openedIdentity.Inode != pathIdentity.Inode {
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, fsutil.ErrUnsafeSecurePath
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximumCoreCredentialSize+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > maximumCoreCredentialSize {
+		return nil, false, fsutil.ErrSecureFileTooLarge
+	}
+	afterInfo, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	afterIdentity, err := validateAuthoritativeCredentialInfo(inspector, afterInfo)
+	if err != nil || afterIdentity != openedIdentity {
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, fsutil.ErrUnsafeSecurePath
+	}
+	return data, true, nil
+}
+
+func validateAuthoritativeCredentialInfo(inspector fsutil.SecurePathInspector, info os.FileInfo) (fsutil.SecureFileIdentity, error) {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
+	}
+	owner, ok := inspector.FileOwnerUID(info)
+	if !ok || owner != inspector.EffectiveUID() {
+		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
+	}
+	identity, ok := inspector.FileIdentity(info)
+	if !ok || identity.Links != 1 {
+		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
+	}
+	return identity, nil
 }
 
 func identityFromAccount(account CodexAccount) AccountIdentity {

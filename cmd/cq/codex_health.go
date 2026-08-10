@@ -19,8 +19,9 @@ type codexHealthTracker struct {
 	inventory  codexHealthInventory
 	defaultKey codexprov.AccountKey
 
-	mu   sync.Mutex
-	last proxy.CodexHealth
+	mu      sync.Mutex
+	last    proxy.CodexHealth
+	hasLast bool
 }
 
 func newCodexHealthTracker(inventory codexHealthInventory, defaultKey codexprov.AccountKey, last proxy.CodexHealth) *codexHealthTracker {
@@ -28,6 +29,7 @@ func newCodexHealthTracker(inventory codexHealthInventory, defaultKey codexprov.
 		inventory:  inventory,
 		defaultKey: codexprov.AccountKey(string(defaultKey)),
 		last:       cloneCodexHealth(last),
+		hasLast:    last.AccountCountKnown,
 	}
 }
 
@@ -41,14 +43,23 @@ func (t *codexHealthTracker) Health(ctx context.Context) proxy.CodexHealth {
 		health.RoutingDefault = codexRoutingDefaultHealth(inventory, t.defaultKey)
 		t.mu.Lock()
 		t.last = cloneCodexHealth(health)
+		t.hasLast = true
 		t.mu.Unlock()
 		return health
 	}
 
 	t.mu.Lock()
+	hasLast := t.hasLast
 	health := cloneCodexHealth(t.last)
 	t.mu.Unlock()
-	health.HealthCode = "fetch_error"
+	if hasLast {
+		health.HealthCode = "stale"
+	} else {
+		health = proxy.CodexHealth{
+			HealthCode:      "unavailable",
+			ExternalSources: make([]proxy.CodexSourceHealth, 0),
+		}
+	}
 	if t.defaultKey == "" {
 		health.RoutingDefault = proxy.CodexRoutingDefaultHealth{Status: proxy.CodexRoutingDefaultStatusUnconfigured}
 	} else {

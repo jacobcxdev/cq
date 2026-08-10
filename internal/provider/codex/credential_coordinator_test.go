@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -17,6 +20,21 @@ func testCoordinator(t *testing.T) (*CredentialCoordinator, *durableFakeFS) {
 		t.Fatal(err)
 	}
 	return coordinator, fs
+}
+
+type cancellingInventorySource struct {
+	cancel context.CancelFunc
+}
+
+func (s cancellingInventorySource) Name() string { return "external-cancelling" }
+
+func (s cancellingInventorySource) List(ctx context.Context) ([]ExternalCandidate, error) {
+	s.cancel()
+	return nil, ctx.Err()
+}
+
+func (cancellingInventorySource) Resolve(context.Context, ExternalCandidateRef) (CredentialMaterial, error) {
+	return CredentialMaterial{}, errors.New("unexpected external resolution")
 }
 
 func TestCredentialCoordinatorSaveLoginCreatesOwnedManagedRecord(t *testing.T) {
@@ -53,6 +71,330 @@ func TestCredentialCoordinatorListNeverReturnsCredentialMaterial(t *testing.T) {
 	credential := inventory.Accounts[0].Candidates[0].Credential
 	if credential.AccessToken != "" || credential.RefreshToken != "" || credential.IDToken != "" || credential.AccountID != "" {
 		t.Fatalf("inventory exposed credential material: %+v", credential)
+	}
+}
+
+func TestCredentialCoordinatorPreservesCancellationDuringInventoryDiscovery(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *CredentialCoordinator) error
+	}{
+		{
+			name: "list",
+			call: func(ctx context.Context, coordinator *CredentialCoordinator) error {
+				_, err := coordinator.List(ctx)
+				return err
+			},
+		},
+		{
+			name: "exact resolution",
+			call: func(ctx context.Context, coordinator *CredentialCoordinator) error {
+				_, err := coordinator.ResolveExact(ctx, PlannedCandidate{
+					Ref:      CandidateRef{AccountKey: "logical-1", CandidateID: "external-1"},
+					Revision: "revision-1", Source: SourceExternal,
+					Identity: AccountIdentity{AccountID: "account-1", UserID: "user-1"},
+				})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator, _ := testCoordinator(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			coordinator.ExternalSources = []ExternalCredentialSource{cancellingInventorySource{cancel: cancel}}
+
+			if err := test.call(ctx, coordinator); !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestCredentialCoordinatorListFailsClosedOnCoreInventoryErrors(t *testing.T) {
+	const sensitive = "private credential path and token-secret"
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *CredentialCoordinator, *durableFakeFS)
+	}{
+		{
+			name: "home unavailable",
+			setup: func(_ *testing.T, _ *CredentialCoordinator, fs *durableFakeFS) {
+				fs.homeDirErr = errors.New(sensitive)
+			},
+		},
+		{
+			name: "managed directory unreadable",
+			setup: func(_ *testing.T, _ *CredentialCoordinator, fs *durableFakeFS) {
+				path := "/fake/home/.codex/accounts/readable.auth.json"
+				fs.files[path] = codexAuthJSON("readable-secret", "acct-1", fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"))
+				fs.modes[path] = 0o600
+				fs.readDirErr = map[string]error{"/fake/home/.codex/accounts": errors.New(sensitive)}
+			},
+		},
+		{
+			name: "managed credential malformed",
+			setup: func(_ *testing.T, _ *CredentialCoordinator, fs *durableFakeFS) {
+				path := "/fake/home/.codex/accounts/malformed.auth.json"
+				fs.files[path] = []byte(`{"tokens":`)
+				fs.modes[path] = 0o600
+				fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": {{name: "malformed.auth.json"}}}
+			},
+		},
+		{
+			name: "managed credential unsafe",
+			setup: func(t *testing.T, coordinator *CredentialCoordinator, fs *durableFakeFS) {
+				ref, _, err := coordinator.SaveLogin(context.Background(), testLoginCredential())
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := coordinator.candidatePath(ref.CandidateID)
+				fs.modes[path] = 0o644
+				fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}}}
+			},
+		},
+		{
+			name: "system credential malformed",
+			setup: func(_ *testing.T, _ *CredentialCoordinator, fs *durableFakeFS) {
+				fs.files["/fake/home/.codex/auth.json"] = []byte(`{"tokens":`)
+				fs.modes["/fake/home/.codex/auth.json"] = 0o600
+			},
+		},
+		{
+			name: "system credential unsafe",
+			setup: func(_ *testing.T, _ *CredentialCoordinator, fs *durableFakeFS) {
+				path := "/fake/home/.codex/auth.json"
+				fs.files[path] = codexAuthJSON("system-secret", "acct-1", fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"))
+				fs.modes[path] = 0o644
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator, fs := testCoordinator(t)
+			test.setup(t, coordinator, fs)
+
+			inventory, err := coordinator.List(context.Background())
+			if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
+				t.Fatalf("List inventory/error = %+v/%v, want typed authority unavailable", inventory, err)
+			}
+			if err != nil && strings.Contains(err.Error(), sensitive) {
+				t.Fatalf("List exposed raw authority failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestCredentialCoordinatorListRejectsUnsafeCoreCredentialPaths(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name: "system credential symlink",
+			setup: func(t *testing.T, home string) {
+				authDir := filepath.Join(home, ".codex")
+				if err := os.MkdirAll(authDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(t.TempDir(), "auth.json")
+				if err := os.WriteFile(target, codexAuthJSON("system-secret", "acct-1", fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(authDir, "auth.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "empty core directory permissive",
+			setup: func(t *testing.T, home string) {
+				coreDir := filepath.Join(home, ".codex")
+				if err := os.Mkdir(coreDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "empty core directory symlink",
+			setup: func(t *testing.T, home string) {
+				target := filepath.Join(t.TempDir(), "codex")
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(home, ".codex")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "managed directory permissive",
+			setup: func(t *testing.T, home string) {
+				accountsDir := filepath.Join(home, ".codex", "accounts")
+				if err := os.MkdirAll(accountsDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(accountsDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "managed directory symlink",
+			setup: func(t *testing.T, home string) {
+				authDir := filepath.Join(home, ".codex")
+				if err := os.MkdirAll(authDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(t.TempDir(), "accounts")
+				if err := os.MkdirAll(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(authDir, "accounts")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "system directory symlink",
+			setup: func(t *testing.T, home string) {
+				target := filepath.Join(t.TempDir(), "codex")
+				if err := os.MkdirAll(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(target, "auth.json"), codexAuthJSON("system-secret", "acct-1", fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(home, ".codex")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			test.setup(t, home)
+			store, err := NewManagedStore(fixedHomeDurableFS{home: home})
+			if err != nil {
+				t.Fatal(err)
+			}
+			coordinator, err := NewCredentialCoordinator(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coordinator.ExternalSources = nil
+
+			inventory, err := coordinator.List(context.Background())
+			if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
+				t.Fatalf("List inventory/error = %+v/%v, want typed authority unavailable", inventory, err)
+			}
+		})
+	}
+}
+
+func TestCredentialCoordinatorRejectsCredentialSuffixDirectoryButLegacyIgnoresIt(t *testing.T) {
+	home := t.TempDir()
+	credentialDir := filepath.Join(home, ".codex", "accounts", "decoy.auth.json")
+	if err := os.MkdirAll(credentialDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fsys := fixedHomeDurableFS{home: home}
+	if inventory := DiscoverInventory(fsys); len(inventory.Accounts) != 0 {
+		t.Fatalf("legacy inventory = %+v, want credential-shaped directory ignored", inventory)
+	}
+	store, err := NewManagedStore(fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCredentialCoordinator(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.ExternalSources = nil
+
+	inventory, err := coordinator.List(context.Background())
+	if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
+		t.Fatalf("List inventory/error = %+v/%v, want typed authority unavailable", inventory, err)
+	}
+}
+
+func TestCredentialCoordinatorListKeepsOptionalExternalFailureExplicit(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{&fakeExternalCredentialSource{
+		listErr: errors.New("external private path and token-secret"),
+	}}
+
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v, want optional source degradation", err)
+	}
+	if len(inventory.Accounts) != 0 || len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "fetch_error" || inventory.ExternalSources[0].OptionalAbsent {
+		t.Fatalf("inventory = %+v, want no external candidates and explicit degraded source", inventory)
+	}
+}
+
+func TestCredentialCoordinatorListAllowsAbsentSystemAndCodexBar(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v, want absent optional sources", err)
+	}
+	if len(inventory.Accounts) != 0 || len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "unavailable" || !inventory.ExternalSources[0].OptionalAbsent {
+		t.Fatalf("inventory = %+v, want empty accounts and unavailable optional CodexBar status", inventory)
+	}
+}
+
+func TestCredentialCoordinatorMarksPreviouslyPresentCodexBarDisappearanceDegraded(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+	coordinator.ExternalSources = []ExternalCredentialSource{NewCodexBarSource(root)}
+
+	first, err := coordinator.List(context.Background())
+	if err != nil || len(first.ExternalSources) != 1 || first.ExternalSources[0].ErrorCode != "" || first.ExternalSources[0].OptionalAbsent {
+		t.Fatalf("first List inventory/error = %+v/%v, want present CodexBar", first, err)
+	}
+	manifestPath := filepath.Join(root, "managed-codex-accounts.json")
+	backupPath := manifestPath + ".backup"
+	if err := os.Rename(manifestPath, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Rename(backupPath, manifestPath) })
+
+	second, err := coordinator.List(context.Background())
+	if err != nil || len(second.ExternalSources) != 1 || second.ExternalSources[0].ErrorCode != "unavailable" || second.ExternalSources[0].OptionalAbsent {
+		t.Fatalf("second List inventory/error = %+v/%v, want previously-present CodexBar degradation", second, err)
+	}
+}
+
+func TestCredentialCoordinatorBoundsExternalPlanStateToLatestList(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1"}
+	source := &fakeExternalCredentialSource{candidates: []ExternalCandidate{{
+		Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+		Identity: identity, Routable: true,
+	}}}
+	coordinator, _ := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+	first, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPlan := PlanCandidate(first.Accounts[0], first.Accounts[0].Candidates[0])
+	source.candidates[0].Ref.Revision = "revision-2"
+	second, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan := PlanCandidate(second.Accounts[0], second.Accounts[0].Candidates[0])
+
+	coordinator.externalStateMu.Lock()
+	defer coordinator.externalStateMu.Unlock()
+	if len(coordinator.externalPlans) != 1 || coordinator.externalPlans[externalPlanKey{Ref: secondPlan.Ref, Revision: secondPlan.Revision}] != "external-test" {
+		t.Fatalf("external plan state = %+v, want latest generation only", coordinator.externalPlans)
+	}
+	if _, retained := coordinator.externalPlans[externalPlanKey{Ref: firstPlan.Ref, Revision: firstPlan.Revision}]; retained {
+		t.Fatalf("obsolete external revision retained: %+v", firstPlan)
 	}
 }
 

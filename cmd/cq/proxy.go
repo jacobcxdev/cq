@@ -226,13 +226,17 @@ func codexHealthFromInventory(inventory codexprov.Inventory) proxy.CodexHealth {
 	}
 	for i, source := range inventory.ExternalSources {
 		health.ExternalSources[i] = proxy.CodexSourceHealth{
-			Name: source.Name, CandidateCount: source.CandidateCount, HealthCode: codexSourceHealthCode(source.ErrorCode),
+			Name: source.Name, CandidateCount: source.CandidateCount,
+			HealthCode: codexSourceHealthCode(source.ErrorCode, source.OptionalAbsent),
 		}
 	}
 	return health
 }
 
-func codexSourceHealthCode(code string) string {
+func codexSourceHealthCode(code string, optionalAbsent bool) string {
+	if optionalAbsent {
+		return "ok"
+	}
 	switch code {
 	case "":
 		return "ok"

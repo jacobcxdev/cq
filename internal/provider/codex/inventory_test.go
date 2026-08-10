@@ -9,12 +9,14 @@ import (
 )
 
 type fakeExternalCredentialSource struct {
-	name       string
-	candidates []ExternalCandidate
-	material   CredentialMaterial
-	resolveRef ExternalCandidateRef
-	listCalls  int
-	resolves   int
+	name         string
+	candidates   []ExternalCandidate
+	material     CredentialMaterial
+	listErr      error
+	listErrAfter int
+	resolveRef   ExternalCandidateRef
+	listCalls    int
+	resolves     int
 }
 
 func (s *fakeExternalCredentialSource) Name() string {
@@ -25,7 +27,10 @@ func (s *fakeExternalCredentialSource) Name() string {
 }
 func (s *fakeExternalCredentialSource) List(context.Context) ([]ExternalCandidate, error) {
 	s.listCalls++
-	return append([]ExternalCandidate(nil), s.candidates...), nil
+	if s.listErrAfter > 0 && s.listCalls <= s.listErrAfter {
+		return append([]ExternalCandidate(nil), s.candidates...), nil
+	}
+	return append([]ExternalCandidate(nil), s.candidates...), s.listErr
 }
 func (s *fakeExternalCredentialSource) Resolve(_ context.Context, ref ExternalCandidateRef) (CredentialMaterial, error) {
 	s.resolves++

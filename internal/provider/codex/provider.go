@@ -15,7 +15,19 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
-const credentialAuthorityUnavailableMessage = "Codex credential coordinator unavailable"
+const (
+	credentialAuthorityUnavailableMessage = "Codex credential coordinator unavailable"
+	credentialInventoryStaleMessage       = "Codex credential inventory stale"
+	credentialInventoryDegradedMessage    = "Codex credential inventory degraded"
+)
+
+type logicalInventoryAccount struct {
+	key       AccountKey
+	accountID string
+	userID    string
+	email     string
+	active    bool
+}
 
 // Provider implements provider.Provider for Codex (OpenAI).
 type Provider struct {
@@ -24,6 +36,10 @@ type Provider struct {
 	inventory     CredentialInventory
 	secrets       ExactSecretResolver
 	refreshBroker CredentialRefreshBroker
+
+	inventoryMu      sync.RWMutex
+	lastInventory    []logicalInventoryAccount
+	hasLastInventory bool
 }
 
 // New creates a Provider that uses the given HTTP client for API calls.
@@ -42,7 +58,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 			var err error
 			control, err = OpenDefaultCredentialRefreshControl(ctx, durableFS, p.client)
 			if err != nil {
-				return []quota.Result{credentialAuthorityUnavailableResult(AccountIdentity{})}, nil
+				return p.credentialInventoryFailureResults(), nil
 			}
 			defer control.Close()
 			broker = control
@@ -50,20 +66,32 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 			secrets = control
 		}
 	}
+	if broker != nil || inventoryReader != nil || secrets != nil {
+		if inventoryReader == nil || secrets == nil {
+			return p.credentialInventoryFailureResults(), nil
+		}
+	}
 	var inventory Inventory
 	if inventoryReader != nil {
 		listed, err := inventoryReader.List(ctx)
 		if err != nil {
-			if errors.Is(err, ErrCredentialAuthorityUnavailable) {
-				return []quota.Result{credentialAuthorityUnavailableResult(AccountIdentity{})}, nil
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
 			}
-			return nil, fmt.Errorf("list Codex credential inventory: %w", err)
+			return p.credentialInventoryFailureResults(), nil
 		}
 		inventory = listed
 	} else {
 		inventory = DiscoverInventory(p.fs)
 	}
+	inventoryDegraded := inventoryHasDegradedExternalSource(inventory)
+	if inventoryReader != nil && !inventoryDegraded {
+		p.rememberLogicalInventory(inventory)
+	}
 	if len(inventory.Accounts) == 0 {
+		if inventoryDegraded {
+			return p.appendMissingDegradedInventoryResults(inventory, nil), nil
+		}
 		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
 
@@ -84,8 +112,53 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 		}(i, logical)
 	}
 	wg.Wait()
+	if inventoryDegraded {
+		for i, result := range results {
+			if result.Error == nil || (result.Error.Code != "auth_expired" && result.Error.Code != "no_token") {
+				continue
+			}
+			results[i] = credentialInventoryDegradedResult(inventory.Accounts[i].Identity, inventory.Accounts[i].Active)
+		}
+		results = p.appendMissingDegradedInventoryResults(inventory, results)
+	}
 
 	return results, nil
+}
+
+func (p *Provider) appendMissingDegradedInventoryResults(inventory Inventory, results []quota.Result) []quota.Result {
+	p.inventoryMu.RLock()
+	hasLast := p.hasLastInventory
+	accounts := append([]logicalInventoryAccount(nil), p.lastInventory...)
+	p.inventoryMu.RUnlock()
+	for _, account := range accounts {
+		present := false
+		for _, logical := range inventory.Accounts {
+			if sameLogicalInventoryAccount(logical, account) {
+				present = true
+				break
+			}
+		}
+		if present {
+			continue
+		}
+		results = append(results, credentialInventoryDegradedResult(AccountIdentity{
+			AccountID: account.accountID,
+			Email:     account.email,
+		}, account.active))
+	}
+	if len(results) == 0 && (!hasLast || len(accounts) == 0) {
+		return []quota.Result{credentialInventoryDegradedResult(AccountIdentity{}, false)}
+	}
+	return results
+}
+
+func sameLogicalInventoryAccount(logical LogicalAccount, account logicalInventoryAccount) bool {
+	if logical.Key != "" && account.key != "" && logical.Key == account.key {
+		return true
+	}
+	identity := logical.Identity
+	return identity.AccountID != "" && identity.UserID != "" && account.accountID != "" && account.userID != "" &&
+		identity.AccountID == account.accountID && identity.UserID == account.userID
 }
 
 func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, inventory CredentialInventory, secrets ExactSecretResolver, broker CredentialRefreshBroker) quota.Result {
@@ -104,6 +177,7 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 		return noTokenResult(logical)
 	}
 	var last quota.Result
+	inventoryDegraded := false
 	refreshable := make([]PlannedCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		planned := PlanCandidate(logical, candidate)
@@ -119,6 +193,10 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 				}
 				if errors.Is(err, ErrCredentialAuthorityUnavailable) {
 					return credentialAuthorityUnavailableResult(logical.Identity)
+				}
+				if errors.Is(err, ErrCredentialInventoryDegraded) {
+					inventoryDegraded = true
+					continue
 				}
 				last = quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", 0)
 				last.Email = logical.Identity.Email
@@ -148,6 +226,9 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 		}
 	}
 	if broker == nil {
+		if inventoryDegraded {
+			return credentialInventoryDegradedResult(logical.Identity, logical.Active)
+		}
 		return last
 	}
 	for _, planned := range refreshable {
@@ -179,6 +260,9 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 			return last
 		}
 	}
+	if inventoryDegraded {
+		return credentialInventoryDegradedResult(logical.Identity, logical.Active)
+	}
 	return last
 }
 
@@ -194,6 +278,69 @@ func credentialAuthorityUnavailableResult(identity AccountIdentity) quota.Result
 	result.Email = identity.Email
 	result.AccountID = identity.AccountID
 	return result
+}
+
+func (p *Provider) rememberLogicalInventory(inventory Inventory) {
+	accounts := make([]logicalInventoryAccount, len(inventory.Accounts))
+	for i, logical := range inventory.Accounts {
+		accounts[i] = logicalInventoryAccount{
+			key:       logical.Key,
+			accountID: logical.Identity.AccountID,
+			userID:    logical.Identity.UserID,
+			email:     logical.Identity.Email,
+			active:    logical.Active,
+		}
+	}
+	p.inventoryMu.Lock()
+	p.lastInventory = accounts
+	p.hasLastInventory = true
+	p.inventoryMu.Unlock()
+}
+
+func (p *Provider) credentialInventoryFailureResults() []quota.Result {
+	p.inventoryMu.RLock()
+	hasLast := p.hasLastInventory
+	accounts := append([]logicalInventoryAccount(nil), p.lastInventory...)
+	p.inventoryMu.RUnlock()
+	if !hasLast {
+		return []quota.Result{credentialAuthorityUnavailableResult(AccountIdentity{})}
+	}
+	if len(accounts) == 0 {
+		return []quota.Result{credentialInventoryStaleResult(AccountIdentity{}, false)}
+	}
+	results := make([]quota.Result, len(accounts))
+	for i, account := range accounts {
+		results[i] = credentialInventoryStaleResult(AccountIdentity{
+			AccountID: account.accountID,
+			Email:     account.email,
+		}, account.active)
+	}
+	return results
+}
+
+func credentialInventoryStaleResult(identity AccountIdentity, active bool) quota.Result {
+	result := quota.ErrorResult("fetch_error", credentialInventoryStaleMessage, 0)
+	result.Email = identity.Email
+	result.AccountID = identity.AccountID
+	result.Active = active
+	return result
+}
+
+func credentialInventoryDegradedResult(identity AccountIdentity, active bool) quota.Result {
+	result := quota.ErrorResult("fetch_error", credentialInventoryDegradedMessage, 0)
+	result.Email = identity.Email
+	result.AccountID = identity.AccountID
+	result.Active = active
+	return result
+}
+
+func inventoryHasDegradedExternalSource(inventory Inventory) bool {
+	for _, source := range inventory.ExternalSources {
+		if source.ErrorCode != "" && !source.OptionalAbsent {
+			return true
+		}
+	}
+	return false
 }
 
 // DiscoverAccounts returns the coordinator's Codex account inventory without

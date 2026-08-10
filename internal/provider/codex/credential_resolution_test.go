@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type countingCredentialInventory struct {
@@ -34,6 +35,25 @@ type exactResolverFunc func(context.Context, PlannedCandidate) (CredentialMateri
 
 func (f exactResolverFunc) ResolveExact(ctx context.Context, planned PlannedCandidate) (CredentialMaterial, error) {
 	return f(ctx, planned)
+}
+
+type recoveringExternalListSource struct {
+	candidate ExternalCandidate
+	calls     int
+}
+
+func (s *recoveringExternalListSource) Name() string { return "external-recovering" }
+
+func (s *recoveringExternalListSource) List(context.Context) ([]ExternalCandidate, error) {
+	s.calls++
+	if s.calls == 2 || s.calls == 3 {
+		return nil, ErrExternalUnavailable
+	}
+	return []ExternalCandidate{s.candidate}, nil
+}
+
+func (s *recoveringExternalListSource) Resolve(context.Context, ExternalCandidateRef) (CredentialMaterial, error) {
+	return CredentialMaterial{}, errors.New("unexpected external resolution")
 }
 
 func testCredentialMaterial(identity AccountIdentity, accessToken string) CredentialMaterial {
@@ -539,5 +559,63 @@ func TestResolvePlannedCandidateStopsWhenInventoryRefreshFails(t *testing.T) {
 	}
 	if inventory.calls != 1 || len(resolver.plans) != 1 {
 		t.Fatalf("inventory/resolver calls = %d/%d, want 1/1", inventory.calls, len(resolver.plans))
+	}
+}
+
+func TestCredentialCoordinatorResolveExactTypesExternalDisappearanceAsDegraded(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	source := &fakeExternalCredentialSource{
+		candidates: []ExternalCandidate{{
+			Ref:      ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "revision-1"},
+			Identity: identity, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+		}},
+		listErr: ErrExternalUnavailable, listErrAfter: 1,
+	}
+	coordinator, _ := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+	inventory, err := coordinator.List(context.Background())
+	if err != nil || len(inventory.Accounts) != 1 {
+		t.Fatalf("List inventory/error = %+v/%v, want external candidate", inventory, err)
+	}
+	planned := PlanCandidate(inventory.Accounts[0], inventory.Accounts[0].Candidates[0])
+
+	material, _, err := ResolvePlannedCandidate(context.Background(), coordinator, coordinator, planned)
+	if !errors.Is(err, ErrCredentialInventoryDegraded) {
+		t.Fatalf("ResolvePlannedCandidate error = %v, want typed degraded inventory", err)
+	}
+	if material != (CredentialMaterial{}) {
+		t.Fatalf("ResolvePlannedCandidate returned material after source loss: %+v", material)
+	}
+}
+
+func TestResolvePlannedCandidatePreservesExternalPlanAcrossConcurrentDegradedList(t *testing.T) {
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	source := &recoveringExternalListSource{candidate: ExternalCandidate{
+		Ref: ExternalCandidateRef{
+			Source: "external-recovering", RecordID: "record-1", Revision: "revision-1",
+		},
+		Identity: identity, AccessExpiresAt: time.Now().Add(time.Hour), Routable: true,
+	}}
+	coordinator, _ := testCoordinator(t)
+	coordinator.ExternalSources = []ExternalCredentialSource{source}
+	inventory, err := coordinator.List(context.Background())
+	if err != nil || len(inventory.Accounts) != 1 {
+		t.Fatalf("initial List inventory/error = %+v/%v, want external candidate", inventory, err)
+	}
+	planned := PlanCandidate(inventory.Accounts[0], inventory.Accounts[0].Candidates[0])
+	degraded, err := coordinator.List(context.Background())
+	if err != nil || !inventoryHasDegradedExternalSource(degraded) {
+		t.Fatalf("concurrent List inventory/error = %+v/%v, want degraded source", degraded, err)
+	}
+
+	material, resolved, err := ResolvePlannedCandidate(context.Background(), coordinator, coordinator, planned)
+	if !errors.Is(err, ErrCredentialInventoryDegraded) {
+		t.Fatalf("ResolvePlannedCandidate error = %v, want typed degraded inventory", err)
+	}
+	if material != (CredentialMaterial{}) || resolved != planned {
+		t.Fatalf("resolution leaked material or changed plan: material=%+v resolved=%+v", material, resolved)
+	}
+	if source.calls != 3 {
+		t.Fatalf("external List calls = %d, want no same-revision recovery relist", source.calls)
 	}
 }

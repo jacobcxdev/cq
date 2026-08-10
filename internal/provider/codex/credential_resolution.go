@@ -69,6 +69,9 @@ func ResolvePlannedCandidate(ctx context.Context, inventory CredentialInventory,
 	}
 	replanned, err := replanSameCandidate(planned, refreshed)
 	if err != nil {
+		if inventoryHasDegradedExternalSource(refreshed) {
+			return CredentialMaterial{}, planned, ErrCredentialInventoryDegraded
+		}
 		return CredentialMaterial{}, planned, err
 	}
 	material, err = resolver.ResolveExact(ctx, replanned)
@@ -119,7 +122,15 @@ func (c *CredentialCoordinator) ResolveExact(ctx context.Context, planned Planne
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, logical := range DiscoverInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...).Accounts {
+	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return CredentialMaterial{}, ctxErr
+	}
+	if err != nil {
+		return CredentialMaterial{}, ErrCredentialAuthorityUnavailable
+	}
+	c.classifyExternalSourceState(&inventory, false)
+	for _, logical := range inventory.Accounts {
 		if logical.Key != planned.Ref.AccountKey || !logical.Routable || !sameStrongIdentity(logical.Identity, planned.Identity) {
 			continue
 		}
@@ -152,15 +163,33 @@ func (c *CredentialCoordinator) ResolveExact(ctx context.Context, planned Planne
 					if source != nil && sourceNames[index] == candidate.externalRef.Source {
 						material, err := source.Resolve(ctx, *candidate.externalRef)
 						if err != nil {
+							if ctxErr := ctx.Err(); ctxErr != nil {
+								return CredentialMaterial{}, ctxErr
+							}
+							if !errors.Is(err, ErrStaleRevision) {
+								return CredentialMaterial{}, ErrCredentialInventoryDegraded
+							}
 							return CredentialMaterial{}, err
 						}
 						if !credentialMaterialMatchesIdentity(material, planned.Identity) {
-							return CredentialMaterial{}, ErrCredentialIdentityMismatch
+							return CredentialMaterial{}, ErrCredentialInventoryDegraded
 						}
 						return material, nil
 					}
 				}
 				return CredentialMaterial{}, ErrStaleRevision
+			}
+		}
+	}
+	if planned.Source == SourceExternal {
+		sourceName, known := c.externalSourceForPlan(planned)
+		_, sourceNameCounts := snapshotExternalSourceNames(c.ExternalSources)
+		if !known || sourceNameCounts[sourceName] != 1 {
+			return CredentialMaterial{}, ErrStaleRevision
+		}
+		for _, status := range inventory.ExternalSources {
+			if status.Name == sourceName && status.ErrorCode != "" && !status.TopologyInvalid {
+				return CredentialMaterial{}, ErrCredentialInventoryDegraded
 			}
 		}
 	}

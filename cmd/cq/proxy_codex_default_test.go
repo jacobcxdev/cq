@@ -373,6 +373,43 @@ func TestRunProxyCodexDefaultRejectsPartialInventorySourceFailure(t *testing.T) 
 		"/private/managed-home", "private@example.test", "token-secret")
 }
 
+func TestRunProxyCodexDefaultAllowsOptionalAbsentExternalSource(t *testing.T) {
+	h := newProxyCodexDefaultHarness()
+	h.inventory = privateProxyCodexDefaultInventory("opaque-key", "private@example.test", false, true)
+	h.inventory.ExternalSources = []codexprov.ExternalSourceStatus{{
+		Name: "codexbar", ErrorCode: "unavailable", OptionalAbsent: true,
+	}}
+	h.config = proxyCodexDefaultConfigWithFutureField(t)
+
+	err := runProxyCodexDefaultWithDependencies(
+		context.Background(), []string{"private@example.test"}, h.dependencies(),
+	)
+	if err != nil {
+		t.Fatalf("runProxyCodexDefaultWithDependencies() error = %v", err)
+	}
+	assertProxyCodexDefaultCalls(t, h.calls, "inventory", "aliases", "config", "save")
+	if h.saved == nil || h.saved.CodexRoutingDefaultAccountKey != "opaque-key" {
+		t.Fatalf("saved routing default = %q, want opaque-key", h.saved.CodexRoutingDefaultAccountKey)
+	}
+}
+
+func TestListProxyCodexDefaultInventoryFailsClosedOnUnreadableManagedAuthority(t *testing.T) {
+	_, fsys, path, before := newReadableManagedInventoryCoordinator(t)
+	fsys.setFailing(true)
+
+	inventory, home, err := listProxyCodexDefaultInventory(context.Background(), fsys)
+	if !errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable) {
+		t.Fatalf("inventory/home/error = %+v/%q/%v, want typed authority unavailable", inventory, home, err)
+	}
+	if len(inventory.Accounts) != 0 {
+		t.Fatalf("inventory = %+v, want no permissive partial fallback", inventory)
+	}
+	after, readErr := fsys.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("authoritative inventory changed managed credential: %v", readErr)
+	}
+}
+
 func TestRunProxyCodexDefaultAliasFailureIsFixedAndPrivate(t *testing.T) {
 	h := newProxyCodexDefaultHarness()
 	h.inventory = privateProxyCodexDefaultInventory("opaque-key", "private@example.test", false, true)
@@ -470,8 +507,8 @@ func TestRunProxyCodexDefaultSourceHasReadOnlyAccountBoundary(t *testing.T) {
 
 	source := string(data)
 	for _, required := range []string{
-		"fsutil.OSFileSystem", "UserHomeDir", "codexprov.DiscoverInventoryWithSources",
-		"codexprov.NewCodexBarSource", "codexprov.DefaultCodexBarRoot", "codexprov.Registry",
+		"fsutil.OSFileSystem", "codexprov.NewManagedStore", "codexprov.NewCredentialCoordinator",
+		"coordinator.List", "codexprov.Registry",
 		"AccountAliasIndex", "proxy.LoadConfig", "proxy.SaveConfig", "os.Stdout",
 	} {
 		if !strings.Contains(source, required) {

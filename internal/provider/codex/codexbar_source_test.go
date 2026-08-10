@@ -635,6 +635,13 @@ func TestExternalSourceErrorCodesRemainDistinct(t *testing.T) {
 	}
 }
 
+func TestCodexBarMissingManifestIsOptionalAbsence(t *testing.T) {
+	_, err := NewCodexBarSource(t.TempDir()).List(context.Background())
+	if !errors.Is(err, ErrExternalUnavailable) || !errors.Is(err, errExternalNotConfigured) {
+		t.Fatalf("List() error = %v, want unavailable optional absence", err)
+	}
+}
+
 func TestCodexBarSourceValidationMatrix(t *testing.T) {
 	tests := []struct {
 		name  string

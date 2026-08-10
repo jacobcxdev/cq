@@ -3,6 +3,7 @@ package modelregistry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -157,10 +158,10 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		var errs []error
 		for _, s := range sources {
 			if e, ok := diag.SourceErrors[s.provider]; ok {
-				errs = append(errs, e)
+				errs = append(errs, fmt.Errorf("%s model source: %w", s.provider, e))
 			}
 		}
-		return diag, fmt.Errorf("all model sources failed: %v", errs)
+		return diag, fmt.Errorf("all model sources failed: %w", errors.Join(errs...))
 	}
 
 	// For providers that failed, fall back to stale entries from the current snapshot.

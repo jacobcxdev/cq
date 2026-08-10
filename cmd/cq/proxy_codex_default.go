@@ -28,16 +28,9 @@ func runProxyCodexDefault(args []string) error {
 	var home string
 	return runProxyCodexDefaultWithDependencies(context.Background(), args, proxyCodexDefaultDependencies{
 		ListInventory: func(ctx context.Context) (codexprov.Inventory, error) {
-			resolvedHome, err := fsys.UserHomeDir()
-			if err != nil {
-				return codexprov.Inventory{}, err
-			}
+			inventory, resolvedHome, err := listProxyCodexDefaultInventory(ctx, fsys)
 			home = resolvedHome
-			return codexprov.DiscoverInventoryWithSources(
-				ctx,
-				fsys,
-				codexprov.NewCodexBarSource(codexprov.DefaultCodexBarRoot(home)),
-			), nil
+			return inventory, err
 		},
 		LoadAliasIndex: func() (codexprov.AccountAliasIndex, error) {
 			return (codexprov.Registry{FS: fsys, Home: home}).AccountAliasIndex()
@@ -46,6 +39,19 @@ func runProxyCodexDefault(args []string) error {
 		SaveConfig: proxy.SaveConfig,
 		Stdout:     os.Stdout,
 	})
+}
+
+func listProxyCodexDefaultInventory(ctx context.Context, fsys fsutil.DurableFileSystem) (codexprov.Inventory, string, error) {
+	store, err := codexprov.NewManagedStore(fsys)
+	if err != nil {
+		return codexprov.Inventory{}, "", err
+	}
+	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	if err != nil {
+		return codexprov.Inventory{}, store.Home, err
+	}
+	inventory, err := coordinator.List(ctx)
+	return inventory, store.Home, err
 }
 
 func runProxyCodexDefaultWithDependencies(
@@ -113,7 +119,7 @@ func runProxyCodexDefaultWithDependencies(
 
 func proxyCodexDefaultInventoryIncomplete(inventory codexprov.Inventory) bool {
 	for _, source := range inventory.ExternalSources {
-		if source.ErrorCode != "" {
+		if source.ErrorCode != "" && !source.OptionalAbsent {
 			return true
 		}
 	}

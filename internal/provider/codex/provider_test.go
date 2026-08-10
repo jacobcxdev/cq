@@ -31,6 +31,7 @@ func fakeJWT(payload any) string {
 type fakeFS struct {
 	files      map[string][]byte
 	dirEntries map[string][]fakeDirEntry
+	readDirErr map[string]error
 	homeDirErr error
 	writeErr   error
 	renameErr  error
@@ -129,6 +130,9 @@ func (f *fakeFS) Remove(name string) error {
 func (f *fakeFS) MkdirAll(_ string, _ os.FileMode) error { return nil }
 
 func (f *fakeFS) ReadDir(name string) ([]os.DirEntry, error) {
+	if err := f.readDirErr[name]; err != nil {
+		return nil, err
+	}
 	if f.dirEntries == nil {
 		return nil, nil
 	}
@@ -652,6 +656,8 @@ func TestFetch401RequestsManagedRefreshBrokerThenRetriesUsage(t *testing.T) {
 	p := &Provider{
 		client:        &urlRewriter{client: srv.Client(), baseURL: srv.URL},
 		fs:            fs,
+		inventory:     coordinator,
+		secrets:       coordinator,
 		refreshBroker: coordinator,
 	}
 	results, err := p.Fetch(context.Background(), time.Now())

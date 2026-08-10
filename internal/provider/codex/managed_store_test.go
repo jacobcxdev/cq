@@ -150,6 +150,65 @@ func (f *durableFakeFS) Stat(name string) (os.FileInfo, error) {
 	return durableFileInfo{fakeFileInfo: fakeFileInfo{name: name}, mode: f.modes[name]}, nil
 }
 
+type durableDirectoryInfo struct {
+	name string
+	mode os.FileMode
+}
+
+func (i durableDirectoryInfo) Name() string       { return i.name }
+func (i durableDirectoryInfo) Size() int64        { return 0 }
+func (i durableDirectoryInfo) Mode() os.FileMode  { return os.ModeDir | i.mode.Perm() }
+func (i durableDirectoryInfo) ModTime() time.Time { return time.Now() }
+func (i durableDirectoryInfo) IsDir() bool        { return true }
+func (i durableDirectoryInfo) Sys() any           { return nil }
+
+func (f *durableFakeFS) Lstat(name string) (os.FileInfo, error) {
+	if name == "/fake/home/.codex" || name == "/fake/home/.codex/accounts" {
+		mode := os.FileMode(0o700)
+		if configured, ok := f.modes[name]; ok {
+			mode = configured
+		}
+		return durableDirectoryInfo{name: name, mode: mode}, nil
+	}
+	return f.Stat(name)
+}
+
+func (f *durableFakeFS) EffectiveUID() uint64 { return 1 }
+
+func (f *durableFakeFS) FileOwnerUID(os.FileInfo) (uint64, bool) { return 1, true }
+
+func (f *durableFakeFS) FileIdentity(info os.FileInfo) (fsutil.SecureFileIdentity, bool) {
+	var inode uint64 = 1469598103934665603
+	for _, value := range []byte(info.Name()) {
+		inode ^= uint64(value)
+		inode *= 1099511628211
+	}
+	return fsutil.SecureFileIdentity{Device: 1, Inode: inode, Links: 1}, true
+}
+
+type durableFakeSecureRead struct {
+	*bytes.Reader
+	info os.FileInfo
+}
+
+func (f *durableFakeSecureRead) Stat() (os.FileInfo, error) { return f.info, nil }
+func (f *durableFakeSecureRead) Close() error               { return nil }
+
+func (f *durableFakeFS) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	info, err := f.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fsutil.ErrUnsafeSecurePath
+	}
+	data, ok := f.files[name]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return &durableFakeSecureRead{Reader: bytes.NewReader(append([]byte(nil), data...)), info: info}, nil
+}
+
 func testManagedStore(t *testing.T, fs *durableFakeFS) *ManagedStore {
 	t.Helper()
 	store, err := NewManagedStore(fs)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -33,6 +34,61 @@ type fakeCodexRegistryAuthority struct {
 	refresh     func(codexprov.CandidateRef, codexprov.Revision) (codexprov.CandidateRef, codexprov.Revision, error)
 	refreshCall int
 	refreshArgs []registryRefreshArgs
+}
+
+type readableFailingManagedInventoryFS struct {
+	*fsutil.MemFS
+	mu      sync.Mutex
+	failing bool
+}
+
+func (f *readableFailingManagedInventoryFS) ReadDir(name string) ([]os.DirEntry, error) {
+	f.mu.Lock()
+	failing := f.failing
+	f.mu.Unlock()
+	if failing && filepath.Clean(name) == "/home/test/.codex/accounts" {
+		return nil, errors.New("private managed directory and token-secret")
+	}
+	return f.MemFS.ReadDir(name)
+}
+
+func (f *readableFailingManagedInventoryFS) setFailing(failing bool) {
+	f.mu.Lock()
+	f.failing = failing
+	f.mu.Unlock()
+}
+
+func newReadableManagedInventoryCoordinator(t testing.TB) (*codexprov.CredentialCoordinator, *readableFailingManagedInventoryFS, string, []byte) {
+	t.Helper()
+	fsys := &readableFailingManagedInventoryFS{MemFS: fsutil.NewMemFS()}
+	path := "/home/test/.codex/accounts/readable.auth.json"
+	if err := fsys.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity := codexprov.AccountIdentity{AccountID: "account-one", UserID: "user-one", Email: "one@example.test", PlanType: "plus"}
+	data, err := json.Marshal(map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]any{
+			"access_token": "readable-filesystem-token", "refresh_token": "readable-filesystem-refresh",
+			"id_token": registryCredentialJWT(identity), "account_id": identity.AccountID,
+		},
+		"cq_expires_at": time.Now().Add(time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := codexprov.NewManagedStore(fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coordinator, fsys, path, append([]byte(nil), data...)
 }
 
 type registryRefreshArgs struct {
@@ -306,6 +362,227 @@ func TestCodexRegistryTokenKeepsCoordinatorFailureTypedAndSanitised(t *testing.T
 	}
 }
 
+func TestCodexRegistryModelsRealCoordinatorFailureDoesNotUseReadableCQFiles(t *testing.T) {
+	coordinator, fsys, path, before := newReadableManagedInventoryCoordinator(t)
+	fsys.setFailing(true)
+	authority := &registryCoordinatorAuthority{coordinator: coordinator}
+	doer := &scriptedRegistryModelsDoer{statusByToken: map[string]int{"readable-filesystem-token": http.StatusOK}}
+	req, err := http.NewRequest(http.MethodGet, "https://codex.example/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := codexRegistryModelsRequest(context.Background(), authority, doer, time.Now(), req)
+	if response != nil {
+		response.Body.Close()
+		t.Fatalf("response = %+v, want authority failure before dispatch", response)
+	}
+	if !errors.Is(err, errCodexRegistryCredentialAuthorityUnavailable) {
+		t.Fatalf("error = %v, want typed registry authority unavailable", err)
+	}
+	if strings.Contains(err.Error(), "private managed directory") || strings.Contains(err.Error(), "token-secret") {
+		t.Fatalf("registry authority error exposed private detail: %v", err)
+	}
+	attempts, _ := doer.snapshot()
+	if len(attempts) != 0 {
+		t.Fatalf("HTTP attempts = %q, want none", attempts)
+	}
+	after, readErr := fsys.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("readable CQ credential changed after registry failure: %v", readErr)
+	}
+}
+
+func TestRegistryPipelineAllSourceFailurePreservesCodexAuthorityType(t *testing.T) {
+	coordinator, fsys, path, before := newReadableManagedInventoryCoordinator(t)
+	fsys.setFailing(true)
+	pipeline, err := newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
+		FS: fsys, HomeDir: "/home/test", ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example",
+		HTTPClient: &scriptedRegistryModelsDoer{}, ClaudeToken: func() (string, error) {
+			return "", errors.New("Anthropic unavailable")
+		}, Env: func(string) string { return "" }, Stderr: io.Discard,
+	}, &registryCoordinatorAuthority{coordinator: coordinator})
+	if err != nil {
+		t.Fatalf("newRegistryPipelineWithCodexAuthority() error = %v", err)
+	}
+
+	diagnostics, err := pipeline.Refresher.Refresh(context.Background())
+	if !errors.Is(err, errCodexRegistryCredentialAuthorityUnavailable) {
+		t.Fatalf("Refresh() error = %v, want typed Codex authority unavailable", err)
+	}
+	if !errors.Is(diagnostics.SourceErrors[modelregistry.ProviderCodex], errCodexRegistryCredentialAuthorityUnavailable) {
+		t.Fatalf("Codex source error = %v, want typed authority unavailable", diagnostics.SourceErrors[modelregistry.ProviderCodex])
+	}
+	after, readErr := fsys.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("registry refresh changed managed credential: %v", readErr)
+	}
+}
+
+func TestCodexRegistryModelsKeepsDegradedExternalInventoryTerminalTyped(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	identity := codexprov.AccountIdentity{AccountID: "account-one", UserID: "user-one", Email: "one@example.test", PlanType: "plus"}
+	candidate := codexprov.CredentialCandidate{
+		Ref:      codexprov.CandidateRef{AccountKey: "logical-one", CandidateID: "managed-one"},
+		Revision: "managed-revision", Source: codexprov.SourceManaged,
+		AccessExpiresAt: now.Add(time.Hour), Routable: true,
+	}
+	tests := []struct {
+		name       string
+		candidate  bool
+		status     int
+		wantUsable bool
+		wantCalls  int
+	}{
+		{name: "no visible candidates"},
+		{name: "visible candidate rejected", candidate: true, status: http.StatusUnauthorized, wantCalls: 1},
+		{name: "visible candidate succeeds", candidate: true, status: http.StatusOK, wantUsable: true, wantCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := codexprov.Inventory{
+				ExternalSources: []codexprov.ExternalSourceStatus{{Name: "codexbar", ErrorCode: "invalid"}},
+			}
+			if test.candidate {
+				inventory = registryInventory(identity, candidate)
+				inventory.ExternalSources = []codexprov.ExternalSourceStatus{{Name: "codexbar", ErrorCode: "invalid"}}
+			}
+			authority := &fakeCodexRegistryAuthority{
+				inventories: []codexprov.Inventory{inventory},
+				resolve: func(_ int, planned codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+					return registryCredentialMaterial(planned.Identity, "visible-managed-token"), nil
+				},
+			}
+			doer := &scriptedRegistryModelsDoer{statusByToken: map[string]int{"visible-managed-token": test.status}}
+			req, err := http.NewRequest(http.MethodGet, "https://codex.example/models", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := codexRegistryModelsRequest(context.Background(), authority, doer, now, req)
+			if test.wantUsable {
+				if err != nil || response == nil || response.StatusCode != http.StatusOK {
+					t.Fatalf("response/error = %+v/%v, want visible candidate success", response, err)
+				}
+				response.Body.Close()
+			} else {
+				if response != nil {
+					response.Body.Close()
+					t.Fatalf("response = %+v, want typed degraded error", response)
+				}
+				if !errors.Is(err, errCodexRegistryCredentialInventoryDegraded) {
+					t.Fatalf("error = %v, want typed degraded inventory", err)
+				}
+			}
+			attempts, _ := doer.snapshot()
+			if len(attempts) != test.wantCalls {
+				t.Fatalf("HTTP attempts = %q, want %d", attempts, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestCodexRegistryModelsIgnoresAbsentOptionalExternalSource(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	identity := codexprov.AccountIdentity{AccountID: "account-one", UserID: "user-one", Email: "one@example.test", PlanType: "plus"}
+	candidate := codexprov.CredentialCandidate{
+		Ref:      codexprov.CandidateRef{AccountKey: "logical-one", CandidateID: "managed-one"},
+		Revision: "managed-revision", Source: codexprov.SourceManaged,
+		AccessExpiresAt: now.Add(time.Hour), Routable: true,
+	}
+	tests := []struct {
+		name      string
+		candidate bool
+		wantCalls int
+	}{
+		{name: "no visible candidates"},
+		{name: "visible candidate rejected", candidate: true, wantCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := codexprov.Inventory{ExternalSources: []codexprov.ExternalSourceStatus{{
+				Name: "codexbar", ErrorCode: "unavailable", OptionalAbsent: true,
+			}}}
+			if test.candidate {
+				inventory = registryInventory(identity, candidate)
+				inventory.ExternalSources = []codexprov.ExternalSourceStatus{{
+					Name: "codexbar", ErrorCode: "unavailable", OptionalAbsent: true,
+				}}
+			}
+			authority := &fakeCodexRegistryAuthority{
+				inventories: []codexprov.Inventory{inventory},
+				resolve: func(_ int, planned codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+					return registryCredentialMaterial(planned.Identity, "visible-managed-token"), nil
+				},
+			}
+			doer := &scriptedRegistryModelsDoer{statusByToken: map[string]int{"visible-managed-token": http.StatusUnauthorized}}
+			req, err := http.NewRequest(http.MethodGet, "https://codex.example/models", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := codexRegistryModelsRequest(context.Background(), authority, doer, now, req)
+			if test.candidate {
+				if err != nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+					t.Fatalf("response/error = %+v/%v, want visible 401", response, err)
+				}
+				response.Body.Close()
+			} else if response != nil || !errors.Is(err, errCodexRegistryCredentialUnavailable) {
+				closeCodexRegistryResponse(response)
+				t.Fatalf("response/error = %+v/%v, want no usable credential", response, err)
+			}
+			attempts, _ := doer.snapshot()
+			if len(attempts) != test.wantCalls {
+				t.Fatalf("HTTP attempts = %q, want %d", attempts, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestCodexRegistryModelsExternalSourceDisappearsDuringExactResolution(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	identity := codexprov.AccountIdentity{AccountID: "account-one", UserID: "user-one", Email: "one@example.test", PlanType: "plus"}
+	idToken := registryCredentialJWT(identity)
+	root, _, manifestPath := writeRegistryCodexBarFixture(t, identity, "external-token", idToken)
+	fsys := fsutil.NewMemFS()
+	store, err := codexprov.NewManagedStore(fsys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.ExternalSources = []codexprov.ExternalCredentialSource{codexprov.NewCodexBarSource(root)}
+	var removeOnce sync.Once
+	authority := &registryCoordinatorAuthority{
+		coordinator: coordinator,
+		beforeResolve: func() {
+			removeOnce.Do(func() {
+				if err := os.Remove(manifestPath); err != nil {
+					t.Fatalf("Remove(CodexBar manifest) error = %v", err)
+				}
+			})
+		},
+	}
+	doer := &scriptedRegistryModelsDoer{statusByToken: map[string]int{"external-token": http.StatusOK}}
+	req, err := http.NewRequest(http.MethodGet, "https://codex.example/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := codexRegistryModelsRequest(context.Background(), authority, doer, now, req)
+	if response != nil {
+		response.Body.Close()
+		t.Fatalf("response = %+v, want degraded inventory error", response)
+	}
+	if !errors.Is(err, errCodexRegistryCredentialInventoryDegraded) {
+		t.Fatalf("error = %v, want typed degraded inventory", err)
+	}
+	attempts, _ := doer.snapshot()
+	if len(attempts) != 0 {
+		t.Fatalf("HTTP attempts = %q, want none after source loss", attempts)
+	}
+}
+
 func writeRegistryCodexBarFixture(t *testing.T, identity codexprov.AccountIdentity, accessToken, idToken string) (root, authPath, manifestPath string) {
 	t.Helper()
 	root = filepath.Join(t.TempDir(), "CodexBar")
@@ -352,10 +629,11 @@ func writeRegistryCodexBarFixture(t *testing.T, identity codexprov.AccountIdenti
 }
 
 type registryCoordinatorAuthority struct {
-	coordinator *codexprov.CredentialCoordinator
-	mu          sync.Mutex
-	plans       []codexprov.PlannedCandidate
-	refreshes   int
+	coordinator   *codexprov.CredentialCoordinator
+	beforeResolve func()
+	mu            sync.Mutex
+	plans         []codexprov.PlannedCandidate
+	refreshes     int
 }
 
 func (a *registryCoordinatorAuthority) List(ctx context.Context) (codexprov.Inventory, error) {
@@ -366,6 +644,9 @@ func (a *registryCoordinatorAuthority) ResolveExact(ctx context.Context, planned
 	a.mu.Lock()
 	a.plans = append(a.plans, planned)
 	a.mu.Unlock()
+	if a.beforeResolve != nil {
+		a.beforeResolve()
+	}
 	return a.coordinator.ResolveExact(ctx, planned)
 }
 

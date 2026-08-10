@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 type failingCodexHealthInventory struct{ err error }
@@ -64,6 +65,17 @@ func TestCodexInventoryStatusDiagnosticsArePrivacySafe(t *testing.T) {
 			},
 			wantJSON:   `{"account_count":1,"external_sources":[{"name":"codexbar","candidate_count":0,"health_code":"unavailable"}]}`,
 			wantStderr: "cq: codex accounts: 1\ncq: codex source: name=codexbar candidates=0 health=unavailable\n",
+		},
+		{
+			name: "optional absent",
+			inventory: codexprov.Inventory{
+				Accounts: []codexprov.LogicalAccount{{Identity: sensitiveIdentity, Candidates: []codexprov.CredentialCandidate{sensitiveCandidate}}},
+				ExternalSources: []codexprov.ExternalSourceStatus{{
+					Name: "codexbar", ErrorCode: "unavailable", OptionalAbsent: true,
+				}},
+			},
+			wantJSON:   `{"account_count":1,"external_sources":[{"name":"codexbar","candidate_count":0,"health_code":"ok"}]}`,
+			wantStderr: "cq: codex accounts: 1\ncq: codex source: name=codexbar candidates=0 health=ok\n",
 		},
 		{
 			name: "invalid",
@@ -149,8 +161,8 @@ func TestCodexHealthTrackerDegradesSafelyOnCoordinatorListFailure(t *testing.T) 
 	if health.AccountCount != 2 || !health.AccountCountKnown {
 		t.Fatalf("account count = %d known=%t, want last-known 2", health.AccountCount, health.AccountCountKnown)
 	}
-	if health.HealthCode != "fetch_error" {
-		t.Fatalf("health code = %q, want fetch_error", health.HealthCode)
+	if health.HealthCode != "stale" {
+		t.Fatalf("health code = %q, want stale", health.HealthCode)
 	}
 	if len(health.ExternalSources) != 1 || health.ExternalSources[0].Name != "codexbar" {
 		t.Fatalf("external source snapshot = %+v, want last-known source", health.ExternalSources)
@@ -167,6 +179,30 @@ func TestCodexHealthTrackerDegradesSafelyOnCoordinatorListFailure(t *testing.T) 
 		if strings.Contains(combined, forbidden) {
 			t.Fatalf("degraded diagnostics exposed raw error fixture %q: %s", forbidden, combined)
 		}
+	}
+}
+
+func TestCodexHealthTrackerDistinguishesStaleSnapshotFromColdUnavailable(t *testing.T) {
+	coordinator, fsys, path, before := newReadableManagedInventoryCoordinator(t)
+	tracker := newCodexHealthTracker(coordinator, "", proxy.CodexHealth{})
+
+	fresh := tracker.Health(context.Background())
+	if fresh.AccountCount != 1 || !fresh.AccountCountKnown || fresh.HealthCode != "ok" {
+		t.Fatalf("fresh health = %+v, want one known healthy account", fresh)
+	}
+
+	fsys.setFailing(true)
+	stale := tracker.Health(context.Background())
+	if stale.AccountCount != 1 || !stale.AccountCountKnown || stale.HealthCode != "stale" {
+		t.Fatalf("stale health = %+v, want retained logical inventory marked stale", stale)
+	}
+	cold := newCodexHealthTracker(coordinator, "", proxy.CodexHealth{}).Health(context.Background())
+	if cold.AccountCountKnown || cold.HealthCode != "unavailable" || cold.ExternalSources == nil {
+		t.Fatalf("cold health = %+v, want unknown account count and typed unavailable state", cold)
+	}
+	after, err := fsys.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("health discovery changed readable CQ credential: %v", err)
 	}
 }
 
