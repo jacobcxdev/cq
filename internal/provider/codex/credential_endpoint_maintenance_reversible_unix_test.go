@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -1048,7 +1049,7 @@ func TestFinaliseLegacyCredentialEndpointTransitionRunsVerifierInsideLiveOwner(t
 
 	coordinator, _ := testCoordinator(t)
 	var verified atomic.Int32
-	verifier := LegacyMaintenanceFinaliseVerifierFunc(func(_ context.Context, proof LegacyMaintenanceFinaliseVerification) error {
+	verifier := testLegacyMaintenanceFinaliseVerifier(func(_ context.Context, proof LegacyMaintenanceFinaliseVerification) error {
 		if proof.TicketHash == "" || proof.OwnerGeneration == "" {
 			return errors.New("unbound verification proof")
 		}
@@ -1779,10 +1780,17 @@ func TestFinaliseVerifierFailureIsZeroWriteAndPrivate(t *testing.T) {
 		{name: "missing", wantErr: ErrCredentialEndpointMaintenanceVerifierRequired},
 		{
 			name: "runtime gate rejected",
-			verifier: LegacyMaintenanceFinaliseVerifierFunc(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+			verifier: testLegacyMaintenanceFinaliseVerifier(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
 				return errors.New("SECRET_RUNTIME_CANARY")
 			}),
 			wantErr: ErrCredentialEndpointMaintenanceVerification,
+		},
+		{
+			name: "nil lease",
+			verifier: LegacyMaintenanceFinaliseVerifierFunc(func(context.Context, LegacyMaintenanceFinaliseVerification) (LegacyMaintenanceFinaliseLease, error) {
+				return nil, nil
+			}),
+			wantErr: ErrCredentialEndpointMaintenanceVerifierRequired,
 		},
 	} {
 		test := test
@@ -1880,7 +1888,7 @@ func TestFinaliseRPCWrongTicketAndGenerationAreZeroWrite(t *testing.T) {
 	coordinator, _ := testCoordinator(t)
 	owner, err := openCredentialControlPreparedWithLegacyMaintenanceVerifier(
 		context.Background(), path, coordinator, false, nil, nil, nil,
-		LegacyMaintenanceFinaliseVerifierFunc(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+		testLegacyMaintenanceFinaliseVerifier(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
 			verifierCalls.Add(1)
 			return nil
 		}),
@@ -1956,7 +1964,10 @@ func TestFinaliseOwnerOperationLinearisesWithClose(t *testing.T) {
 	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	verifier := LegacyMaintenanceFinaliseVerifierFunc(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	verifier := testLegacyMaintenanceFinaliseVerifier(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
 		close(entered)
 		<-release
 		return nil
@@ -1973,6 +1984,7 @@ func TestFinaliseOwnerOperationLinearisesWithClose(t *testing.T) {
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
+		unblock()
 		_ = owner.Close()
 		t.Fatal("verifier was not entered")
 	}
@@ -1980,11 +1992,11 @@ func TestFinaliseOwnerOperationLinearisesWithClose(t *testing.T) {
 	go func() { closeDone <- owner.Close() }()
 	select {
 	case err := <-closeDone:
-		close(release)
+		unblock()
 		t.Fatalf("Close returned before finalise operation released: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(release)
+	unblock()
 	if err := <-finaliseDone; err != nil {
 		t.Fatalf("Finalise error = %v", err)
 	}
@@ -2001,6 +2013,1062 @@ func TestFinaliseOwnerOperationLinearisesWithClose(t *testing.T) {
 			t.Fatalf("post-close artifact %s remains: %v", filepath.Base(absent), err)
 		}
 	}
+}
+
+func TestFinaliseServingLeaseSpansDurableFinalisingReceipt(t *testing.T) {
+	t.Parallel()
+	path := createRefusedLegacyCredentialSocket(t)
+	snapshot, err := InspectLegacyCredentialEndpoint(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := PrepareLegacyCredentialEndpointTransition(
+		context.Background(), path, snapshot,
+		DrainAuthorityFunc(func(context.Context, string) error { return nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket := transition.Ticket()
+	if err := transition.Activate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseStarted := make(chan struct{})
+	allowRelease := make(chan struct{})
+	var allowReleaseOnce sync.Once
+	allow := func() { allowReleaseOnce.Do(func() { close(allowRelease) }) }
+	lease := &blockingLegacyMaintenanceFinaliseLease{
+		started: releaseStarted,
+		allow:   allowRelease,
+	}
+	coordinator, _ := testCoordinator(t)
+	owner, err := openCredentialControlPreparedWithLegacyMaintenanceVerifier(
+		context.Background(), path, coordinator, false, nil, nil, nil,
+		legacyMaintenanceFinaliseLeaseVerifier{lease: lease},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	t.Cleanup(allow)
+
+	finaliseDone := make(chan error, 1)
+	go func() {
+		finaliseDone <- FinaliseLegacyCredentialEndpointTransition(context.Background(), path, ticket)
+	}()
+	select {
+	case <-releaseStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("finalise lease was not released")
+	}
+	select {
+	case err := <-finaliseDone:
+		t.Fatalf("Finalise returned before the serving lease released: %v", err)
+	default:
+	}
+	receipt, err := os.ReadFile(credentialEndpointMaintenanceRollbackPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := decodeCredentialEndpointMaintenanceJournal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != CredentialEndpointMaintenanceFinalising {
+		t.Fatalf("receipt state while lease held = %q, want finalising", record.State)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(path), ticket.QuarantineName)); err != nil {
+		t.Fatalf("quarantine removed before serving lease released: %v", err)
+	}
+
+	allow()
+	if err := <-finaliseDone; err != nil {
+		t.Fatalf("Finalise error = %v", err)
+	}
+	lease.Release()
+	if got := lease.calls.Load(); got != 1 {
+		t.Fatalf("lease release calls = %d, want idempotent 1", got)
+	}
+}
+
+func TestFinaliseAcquireFailureReleasesLeaseAndPreservesReceipt(t *testing.T) {
+	t.Parallel()
+	path := createRefusedLegacyCredentialSocket(t)
+	snapshot, err := InspectLegacyCredentialEndpoint(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := PrepareLegacyCredentialEndpointTransition(
+		context.Background(), path, snapshot,
+		DrainAuthorityFunc(func(context.Context, string) error { return nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket := transition.Ticket()
+	if err := transition.Activate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	allowRelease := make(chan struct{})
+	close(allowRelease)
+	lease := &blockingLegacyMaintenanceFinaliseLease{
+		started: make(chan struct{}),
+		allow:   allowRelease,
+	}
+	coordinator, _ := testCoordinator(t)
+	owner, err := openCredentialControlPreparedWithLegacyMaintenanceVerifier(
+		context.Background(), path, coordinator, false, nil, nil, nil,
+		legacyMaintenanceFinaliseLeaseVerifier{lease: lease, err: errors.New("PRIVATE_ACQUIRE_FAILURE")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	receiptPath := credentialEndpointMaintenanceRollbackPath(path)
+	before, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = FinaliseLegacyCredentialEndpointTransition(context.Background(), path, ticket)
+	if !errors.Is(err, ErrCredentialEndpointMaintenanceVerification) {
+		t.Fatalf("Finalise error = %v, want verification failure", err)
+	}
+	select {
+	case <-lease.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed acquisition did not release its lease")
+	}
+	if got := lease.calls.Load(); got != 1 {
+		t.Fatalf("lease release calls = %d, want 1", got)
+	}
+	after, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("failed acquisition rewrote rollback receipt")
+	}
+}
+
+func TestFinaliseServingLeaseOrdersDurableReceiptStages(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	sequence := &finaliseStageSequence{}
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory: endpoint.secureDirectory,
+		recordName:      filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:        sequence,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseStageLease{sequence: sequence}
+	verifier := legacyMaintenanceFinaliseLeaseVerifier{
+		lease: lease,
+		verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+			sequence.add("acquire")
+			trackedDirectory.arm()
+			return nil
+		},
+	}
+
+	if err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier); err != nil {
+		t.Fatal(err)
+	}
+	stages := sequence.snapshot()
+	for _, required := range [][]string{
+		{"temp-sync", "acquire"},
+		{"acquire", "rename"},
+		{"rename", "sync"},
+		{"sync", "read-after-sync"},
+		{"read-after-sync", "release"},
+	} {
+		if !finaliseStagesOrdered(stages, required[0], required[1]) {
+			t.Fatalf("finalise stages = %v, want %q before %q", stages, required[0], required[1])
+		}
+	}
+	if attempts, effects := lease.attempts.Load(), lease.effects.Load(); attempts != 1 || effects != 1 {
+		t.Fatalf("lease release attempts/effects = %d/%d, want 1/1", attempts, effects)
+	}
+}
+
+func TestFinaliseServingLeaseSyncFailureBlocksLiveRetryAndOfflineRecovers(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	sequence := &finaliseStageSequence{}
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory: endpoint.secureDirectory,
+		recordName:      filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:        sequence,
+		failSync:        true,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseStageLease{sequence: sequence}
+	var acquireCalls atomic.Int32
+	verifier := legacyMaintenanceFinaliseLeaseVerifier{
+		lease: lease,
+		verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+			acquireCalls.Add(1)
+			sequence.add("acquire")
+			trackedDirectory.arm()
+			return nil
+		},
+	}
+
+	err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier)
+	if err == nil {
+		t.Fatal("Finalise succeeded after an indeterminate directory sync")
+	}
+	stages := sequence.snapshot()
+	if !finaliseStagesOrdered(stages, "acquire", "rename") ||
+		!finaliseStagesOrdered(stages, "rename", "sync-error") ||
+		!finaliseStagesOrdered(stages, "sync-error", "release") {
+		t.Fatalf("finalise failure stages = %v", stages)
+	}
+	if attempts, effects := lease.attempts.Load(), lease.effects.Load(); attempts != 1 || effects != 1 {
+		t.Fatalf("lease release attempts/effects = %d/%d, want 1/1", attempts, effects)
+	}
+	quarantinePath := filepath.Join(filepath.Dir(path), ticket.QuarantineName)
+	receiptPath := credentialEndpointMaintenanceRollbackPath(path)
+	quarantineBefore, err := os.Lstat(quarantinePath)
+	if err != nil {
+		t.Fatalf("indeterminate finalise removed quarantine: %v", err)
+	}
+	receiptBefore, err := os.Lstat(receiptPath)
+	if err != nil {
+		t.Fatalf("indeterminate finalise removed receipt: %v", err)
+	}
+	receiptDataBefore, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier)
+	if !errors.Is(err, ErrCredentialEndpointMaintenanceConflict) {
+		t.Fatalf("live retry error = %v, want maintenance conflict", err)
+	}
+	if got := acquireCalls.Load(); got != 1 {
+		t.Fatalf("live retry acquisition calls = %d, want 1 total", got)
+	}
+	quarantineAfter, err := os.Lstat(quarantinePath)
+	if err != nil || !os.SameFile(quarantineBefore, quarantineAfter) {
+		t.Fatalf("live retry changed quarantine identity: before=%v after=%v err=%v", quarantineBefore, quarantineAfter, err)
+	}
+	receiptAfter, err := os.Lstat(receiptPath)
+	if err != nil || !os.SameFile(receiptBefore, receiptAfter) {
+		t.Fatalf("live retry changed receipt identity: before=%v after=%v err=%v", receiptBefore, receiptAfter, err)
+	}
+	receiptDataAfter, err := os.ReadFile(receiptPath)
+	if err != nil || !bytes.Equal(receiptDataBefore, receiptDataAfter) {
+		t.Fatalf("live retry changed receipt bytes: err=%v", err)
+	}
+
+	// A clean owner stop establishes a fresh offline recovery boundary. Restore the
+	// real directory before closing so the injected sync failure remains confined
+	// to the original activated-to-finalising attempt.
+	endpoint.secureDirectory = trackedDirectory.SecureDirectory
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("clean owner stop: %v", err)
+	}
+	if err := FinaliseLegacyCredentialEndpointTransition(context.Background(), path, ticket); err != nil {
+		t.Fatalf("offline finalise after clean stop: %v", err)
+	}
+	for _, removed := range []string{quarantinePath, receiptPath} {
+		if _, err := os.Lstat(removed); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("offline finalise retained %s: %v", filepath.Base(removed), err)
+		}
+	}
+}
+
+func TestFinaliseServingLeaseReleasesOnPostAcquireRenameFailure(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	sequence := &finaliseStageSequence{}
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory: endpoint.secureDirectory,
+		recordName:      filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:        sequence,
+		failRename:      true,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseStageLease{sequence: sequence}
+	verifier := legacyMaintenanceFinaliseLeaseVerifier{
+		lease: lease,
+		verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+			sequence.add("acquire")
+			trackedDirectory.arm()
+			return nil
+		},
+	}
+
+	err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier)
+	if err == nil {
+		t.Fatal("Finalise succeeded after an injected rename failure")
+	}
+	stages := sequence.snapshot()
+	if !finaliseStagesOrdered(stages, "acquire", "rename-error") ||
+		!finaliseStagesOrdered(stages, "rename-error", "release") {
+		t.Fatalf("rename failure stages = %v", stages)
+	}
+	if attempts, effects := lease.attempts.Load(), lease.effects.Load(); attempts != 1 || effects != 1 {
+		t.Fatalf("lease release attempts/effects = %d/%d, want 1/1", attempts, effects)
+	}
+	receiptData, err := os.ReadFile(credentialEndpointMaintenanceRollbackPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := decodeCredentialEndpointMaintenanceJournal(receiptData)
+	if err != nil || receipt.State != CredentialEndpointMaintenanceActivated {
+		t.Fatalf("receipt after rename failure = %#v, %v", receipt, err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(path), ticket.QuarantineName)); err != nil {
+		t.Fatalf("rename failure removed quarantine: %v", err)
+	}
+}
+
+func TestFinaliseServingLeasePostSyncReadFailureRequiresOfflineRecovery(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	sequence := &finaliseStageSequence{}
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory:   endpoint.secureDirectory,
+		recordName:        filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:          sequence,
+		failReadAfterSync: true,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseStageLease{sequence: sequence}
+	var acquireCalls atomic.Int32
+	verifier := legacyMaintenanceFinaliseLeaseVerifier{
+		lease: lease,
+		verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+			acquireCalls.Add(1)
+			sequence.add("acquire")
+			trackedDirectory.arm()
+			return nil
+		},
+	}
+
+	err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier)
+	if err == nil {
+		t.Fatal("Finalise succeeded after an injected post-sync receipt read failure")
+	}
+	stages := sequence.snapshot()
+	for _, required := range [][]string{{"acquire", "rename"}, {"rename", "sync"}, {"sync", "read-after-sync-error"}, {"read-after-sync-error", "release"}} {
+		if !finaliseStagesOrdered(stages, required[0], required[1]) {
+			t.Fatalf("post-sync read failure stages = %v, want %q before %q", stages, required[0], required[1])
+		}
+	}
+	if attempts, effects := lease.attempts.Load(), lease.effects.Load(); attempts != 1 || effects != 1 {
+		t.Fatalf("lease release attempts/effects = %d/%d, want 1/1", attempts, effects)
+	}
+	receiptData, err := os.ReadFile(credentialEndpointMaintenanceRollbackPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := decodeCredentialEndpointMaintenanceJournal(receiptData)
+	if err != nil || receipt.State != CredentialEndpointMaintenanceFinalising {
+		t.Fatalf("durable receipt after read failure = %#v, %v", receipt, err)
+	}
+	if err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier); !errors.Is(err, ErrCredentialEndpointMaintenanceConflict) {
+		t.Fatalf("live retry error = %v, want maintenance conflict", err)
+	}
+	if got := acquireCalls.Load(); got != 1 {
+		t.Fatalf("live retry acquisition calls = %d, want 1 total", got)
+	}
+
+	endpoint.secureDirectory = trackedDirectory.SecureDirectory
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("clean owner stop: %v", err)
+	}
+	if err := FinaliseLegacyCredentialEndpointTransition(context.Background(), path, ticket); err != nil {
+		t.Fatalf("offline finalise after durable read failure: %v", err)
+	}
+}
+
+func TestFinaliseExactFinalisingGateResumesWithoutReacquiring(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	sequence := &finaliseStageSequence{}
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory:     endpoint.secureDirectory,
+		recordName:          filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:            sequence,
+		failPostReceiptSync: true,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseStageLease{sequence: sequence}
+	var acquireCalls atomic.Int32
+	verifier := legacyMaintenanceFinaliseLeaseVerifier{
+		lease: lease,
+		verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+			acquireCalls.Add(1)
+			sequence.add("acquire")
+			trackedDirectory.arm()
+			return nil
+		},
+	}
+
+	err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier)
+	if err == nil {
+		t.Fatal("Finalise succeeded after an injected quarantine directory sync failure")
+	}
+	if !finaliseStagesOrdered(sequence.snapshot(), "release", "post-receipt-sync-error") {
+		t.Fatalf("finalise stages = %v, want release before cleanup sync failure", sequence.snapshot())
+	}
+	if got := acquireCalls.Load(); got != 1 {
+		t.Fatalf("initial acquisition calls = %d, want 1", got)
+	}
+	receiptData, err := os.ReadFile(credentialEndpointMaintenanceRollbackPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := decodeCredentialEndpointMaintenanceJournal(receiptData)
+	if err != nil || receipt.State != CredentialEndpointMaintenanceFinalising {
+		t.Fatalf("receipt after cleanup sync failure = %#v, %v", receipt, err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(path), ticket.QuarantineName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantine after unlink sync failure = %v, want absent", err)
+	}
+
+	if err := endpoint.finaliseActivatedMaintenance(context.Background(), ticket, generation, verifier); err != nil {
+		t.Fatalf("exact Finalising retry error = %v", err)
+	}
+	if got := acquireCalls.Load(); got != 1 {
+		t.Fatalf("Finalising retry acquisition calls = %d, want 1 total", got)
+	}
+	if _, err := os.Lstat(credentialEndpointMaintenanceRollbackPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Finalising retry retained receipt: %v", err)
+	}
+}
+
+func TestFinaliseRejectsSameByteReceiptReplacementBeforeQuarantineRemoval(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	finalising := endpoint.maintenanceGate.record
+	finalising.Generation++
+	finalising.State = CredentialEndpointMaintenanceFinalising
+	data, err := encodeCredentialEndpointMaintenanceJournal(finalising)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := &replaceFinalisingReceiptOnReadDirectory{
+		SecureDirectory: endpoint.secureDirectory,
+		recordName:      filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		recordData:      data,
+	}
+	endpoint.secureDirectory = directory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseCallbackLease{release: directory.arm}
+
+	err = endpoint.finaliseActivatedMaintenance(
+		context.Background(), ticket, generation,
+		legacyMaintenanceFinaliseLeaseVerifier{lease: lease},
+	)
+	if !errors.Is(err, ErrCredentialEndpointIdentityChanged) {
+		t.Fatalf("Finalise error = %v, want identity changed", err)
+	}
+	if got := directory.replacements.Load(); got != 1 {
+		t.Fatalf("same-byte receipt replacements = %d, want 1", got)
+	}
+	if got := lease.calls.Load(); got != 1 {
+		t.Fatalf("lease release calls = %d, want 1", got)
+	}
+	if _, statErr := os.Lstat(filepath.Join(filepath.Dir(path), ticket.QuarantineName)); statErr != nil {
+		t.Fatalf("same-byte receipt replacement removed quarantine: %v", statErr)
+	}
+	if _, statErr := os.Lstat(credentialEndpointMaintenanceRollbackPath(path)); statErr != nil {
+		t.Fatalf("same-byte receipt replacement removed receipt: %v", statErr)
+	}
+}
+
+func TestOfflineFinaliseRejectsSameByteReceiptReplacementBeforeQuarantineRemoval(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory:   endpoint.secureDirectory,
+		recordName:        filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:          &finaliseStageSequence{},
+		failReadAfterSync: true,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	if err := endpoint.finaliseActivatedMaintenance(
+		context.Background(), ticket, generation,
+		legacyMaintenanceFinaliseLeaseVerifier{
+			lease: noopLegacyMaintenanceFinaliseLease{},
+			verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+				trackedDirectory.arm()
+				return nil
+			},
+		},
+	); err == nil {
+		t.Fatal("fixture finalise unexpectedly completed")
+	}
+	endpoint.secureDirectory = trackedDirectory.SecureDirectory
+	if err := endpoint.Close(); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := credentialEndpointMaintenanceRollbackPath(path)
+	recordData, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := openLegacyCredentialMaintenanceNamespace(path, ticket.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer namespace.Close()
+	directory := &replaceFinalisingReceiptOnReadDirectory{
+		SecureDirectory: namespace.directory,
+		recordName:      filepath.Base(receiptPath),
+		recordData:      recordData,
+		armOnProbeAt:    3,
+	}
+	namespace.directory = directory
+
+	err = finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(context.Background(), path, ticket, namespace)
+	if !errors.Is(err, ErrCredentialEndpointIdentityChanged) {
+		t.Fatalf("offline Finalise error = %v, want identity changed (replacements=%d)", err, directory.replacements.Load())
+	}
+	if got := directory.replacements.Load(); got != 1 {
+		t.Fatalf("offline same-byte receipt replacements = %d, want 1", got)
+	}
+	for _, retained := range []string{receiptPath, filepath.Join(filepath.Dir(path), ticket.QuarantineName)} {
+		if _, err := os.Lstat(retained); err != nil {
+			t.Fatalf("offline replacement removed %s: %v", filepath.Base(retained), err)
+		}
+	}
+}
+
+func TestFinaliseRejectsSameByteReceiptReplacementBeforeReceiptRemoval(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	finalising := endpoint.maintenanceGate.record
+	finalising.Generation++
+	finalising.State = CredentialEndpointMaintenanceFinalising
+	recordData, err := encodeCredentialEndpointMaintenanceJournal(finalising)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementDirectory := &replaceFinalisingReceiptOnReadDirectory{
+		SecureDirectory: endpoint.secureDirectory,
+		recordName:      filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		recordData:      recordData,
+	}
+	sequence := &finaliseStageSequence{}
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory: replacementDirectory,
+		recordName:      replacementDirectory.recordName,
+		sequence:        sequence,
+		afterPostReceiptSync: func() {
+			replacementDirectory.arm()
+		},
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	lease := &finaliseStageLease{sequence: sequence}
+
+	err = endpoint.finaliseActivatedMaintenance(
+		context.Background(), ticket, generation,
+		legacyMaintenanceFinaliseLeaseVerifier{
+			lease: lease,
+			verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+				sequence.add("acquire")
+				trackedDirectory.arm()
+				return nil
+			},
+		},
+	)
+	if !errors.Is(err, ErrCredentialEndpointIdentityChanged) {
+		t.Fatalf("Finalise error = %v, want identity changed", err)
+	}
+	if got := replacementDirectory.replacements.Load(); got != 1 {
+		t.Fatalf("same-byte receipt replacements = %d, want 1", got)
+	}
+	if attempts, effects := lease.attempts.Load(), lease.effects.Load(); attempts != 1 || effects != 1 {
+		t.Fatalf("lease release attempts/effects = %d/%d, want 1/1", attempts, effects)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(path), ticket.QuarantineName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("receipt-removal replacement retained quarantine: %v", err)
+	}
+	if _, err := os.Lstat(credentialEndpointMaintenanceRollbackPath(path)); err != nil {
+		t.Fatalf("receipt-removal replacement removed receipt: %v", err)
+	}
+}
+
+func TestOfflineFinaliseRejectsSameByteReceiptReplacementBeforeReceiptRemoval(t *testing.T) {
+	t.Parallel()
+	path, ticket, endpoint := openActivatedMaintenanceEndpointForFinaliseTest(t)
+	trackedDirectory := &finaliseStageDirectory{
+		SecureDirectory:   endpoint.secureDirectory,
+		recordName:        filepath.Base(credentialEndpointMaintenanceRollbackPath(path)),
+		sequence:          &finaliseStageSequence{},
+		failReadAfterSync: true,
+	}
+	endpoint.secureDirectory = trackedDirectory
+	generation := endpoint.maintenanceGate.record.Owner.Generation
+	if err := endpoint.finaliseActivatedMaintenance(
+		context.Background(), ticket, generation,
+		legacyMaintenanceFinaliseLeaseVerifier{
+			lease: noopLegacyMaintenanceFinaliseLease{},
+			verify: func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+				trackedDirectory.arm()
+				return nil
+			},
+		},
+	); err == nil {
+		t.Fatal("fixture finalise unexpectedly completed")
+	}
+	endpoint.secureDirectory = trackedDirectory.SecureDirectory
+	if err := endpoint.Close(); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := credentialEndpointMaintenanceRollbackPath(path)
+	recordData, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := openLegacyCredentialMaintenanceNamespace(path, ticket.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer namespace.Close()
+	directory := &replaceFinalisingReceiptOnReadDirectory{
+		SecureDirectory: namespace.directory,
+		recordName:      filepath.Base(receiptPath),
+		recordData:      recordData,
+		armOnProbeAt:    4,
+	}
+	namespace.directory = directory
+
+	err = finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(context.Background(), path, ticket, namespace)
+	if !errors.Is(err, ErrCredentialEndpointIdentityChanged) {
+		t.Fatalf("offline Finalise error = %v, want identity changed (replacements=%d probes=%d)", err, directory.replacements.Load(), directory.probeCalls)
+	}
+	if got := directory.replacements.Load(); got != 1 {
+		t.Fatalf("offline same-byte receipt replacements = %d, want 1", got)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(path), ticket.QuarantineName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("offline receipt-removal replacement retained quarantine: %v", err)
+	}
+	if _, err := os.Lstat(receiptPath); err != nil {
+		t.Fatalf("offline receipt-removal replacement removed receipt: %v", err)
+	}
+}
+
+func openActivatedMaintenanceEndpointForFinaliseTest(t *testing.T) (string, LegacyCredentialEndpointTransitionTicket, *credentialEndpoint) {
+	t.Helper()
+	path := createRefusedLegacyCredentialSocket(t)
+	snapshot, err := InspectLegacyCredentialEndpoint(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := PrepareLegacyCredentialEndpointTransition(
+		context.Background(), path, snapshot,
+		DrainAuthorityFunc(func(context.Context, string) error { return nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket := transition.Ticket()
+	if err := transition.Activate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := transition.Close(); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, client, err := openCredentialEndpoint(path, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client != nil {
+		_ = client.Close()
+		t.Fatal("opened a delegate instead of the maintenance owner")
+	}
+	if endpoint.maintenanceGate.record.Owner == nil {
+		_ = endpoint.Close()
+		t.Fatal("maintenance owner receipt was not bound")
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	return path, ticket, endpoint
+}
+
+type finaliseStageSequence struct {
+	mu     sync.Mutex
+	stages []string
+}
+
+func (s *finaliseStageSequence) add(stage string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stages = append(s.stages, stage)
+}
+
+func (s *finaliseStageSequence) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.stages...)
+}
+
+func finaliseStagesOrdered(stages []string, before, after string) bool {
+	beforeIndex := -1
+	for index, stage := range stages {
+		if stage == before && beforeIndex < 0 {
+			beforeIndex = index
+		}
+		if stage == after && beforeIndex >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+type finaliseStageDirectory struct {
+	fsutil.SecureDirectory
+	recordName              string
+	sequence                *finaliseStageSequence
+	mu                      sync.Mutex
+	armed                   bool
+	renamed                 bool
+	synced                  bool
+	failSync                bool
+	failRename              bool
+	failReadAfterSync       bool
+	readFailureUsed         bool
+	failPostReceiptSync     bool
+	postReceiptSyncFailed   bool
+	postReceiptSyncObserved bool
+	afterPostReceiptSync    func()
+}
+
+func (d *finaliseStageDirectory) OpenNewExclusiveLock(name string, perm os.FileMode) (fsutil.ExclusiveLock, error) {
+	creator, ok := d.SecureDirectory.(fsutil.NewExclusiveLocker)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return creator.OpenNewExclusiveLock(name, perm)
+}
+
+func (d *finaliseStageDirectory) CreateExclusive(name string, perm os.FileMode) (fsutil.DurableFile, error) {
+	file, err := d.SecureDirectory.CreateExclusive(name, perm)
+	if err != nil {
+		return nil, err
+	}
+	return &finaliseStageDurableFile{
+		DurableFile: file,
+		temporary:   name != d.recordName,
+		sequence:    d.sequence,
+	}, nil
+}
+
+func (d *finaliseStageDirectory) ProbeExclusiveLockHeld(name string, perm os.FileMode) (os.FileInfo, error) {
+	prober, ok := d.SecureDirectory.(fsutil.ExclusiveLockHeldProber)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return prober.ProbeExclusiveLockHeld(name, perm)
+}
+
+func (d *finaliseStageDirectory) arm() {
+	d.mu.Lock()
+	d.armed = true
+	d.mu.Unlock()
+}
+
+func (d *finaliseStageDirectory) Rename(oldName, newName string) error {
+	d.mu.Lock()
+	armed := d.armed && newName == d.recordName
+	d.mu.Unlock()
+	if armed {
+		if d.failRename {
+			d.sequence.add("rename-error")
+			return errors.New("injected finalising receipt rename failure")
+		}
+		d.sequence.add("rename")
+	}
+	if err := d.SecureDirectory.Rename(oldName, newName); err != nil {
+		return err
+	}
+	if armed {
+		d.mu.Lock()
+		d.renamed = true
+		d.mu.Unlock()
+	}
+	return nil
+}
+
+func (d *finaliseStageDirectory) Sync() error {
+	d.mu.Lock()
+	receiptSync := d.armed && d.renamed && !d.synced
+	fail := receiptSync && d.failSync
+	postReceiptSync := d.armed && d.synced
+	failPostReceiptSync := postReceiptSync && d.failPostReceiptSync && !d.postReceiptSyncFailed
+	if failPostReceiptSync {
+		d.postReceiptSyncFailed = true
+	}
+	d.mu.Unlock()
+	if fail {
+		d.sequence.add("sync-error")
+		return errors.New("injected finalising receipt directory sync failure")
+	}
+	if failPostReceiptSync {
+		d.sequence.add("post-receipt-sync-error")
+		return errors.New("injected post-receipt directory sync failure")
+	}
+	if err := d.SecureDirectory.Sync(); err != nil {
+		return err
+	}
+	if receiptSync {
+		d.mu.Lock()
+		d.synced = true
+		d.mu.Unlock()
+		d.sequence.add("sync")
+	} else if postReceiptSync {
+		d.mu.Lock()
+		first := !d.postReceiptSyncObserved
+		d.postReceiptSyncObserved = true
+		after := d.afterPostReceiptSync
+		d.mu.Unlock()
+		if first && after != nil {
+			after()
+		}
+	}
+	return nil
+}
+
+func (d *finaliseStageDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	file, err := d.SecureDirectory.OpenNoFollow(name)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	readAfterSync := d.armed && d.synced && name == d.recordName
+	d.mu.Unlock()
+	return &finaliseStageReadFile{
+		SecureReadFile: file,
+		logRead:        readAfterSync,
+		failRead: func() bool {
+			if !readAfterSync {
+				return false
+			}
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if !d.failReadAfterSync || d.readFailureUsed {
+				return false
+			}
+			d.readFailureUsed = true
+			return true
+		},
+		sequence: d.sequence,
+	}, nil
+}
+
+type finaliseStageDurableFile struct {
+	fsutil.DurableFile
+	temporary bool
+	sequence  *finaliseStageSequence
+}
+
+func (f *finaliseStageDurableFile) Stat() (os.FileInfo, error) {
+	inspector, ok := f.DurableFile.(fsutil.DurableFileInspector)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return inspector.Stat()
+}
+
+func (f *finaliseStageDurableFile) Sync() error {
+	if err := f.DurableFile.Sync(); err != nil {
+		return err
+	}
+	if f.temporary {
+		f.sequence.add("temp-sync")
+	}
+	return nil
+}
+
+type finaliseStageReadFile struct {
+	fsutil.SecureReadFile
+	logRead  bool
+	failRead func() bool
+	logged   bool
+	sequence *finaliseStageSequence
+}
+
+func (f *finaliseStageReadFile) Read(data []byte) (int, error) {
+	if f.failRead != nil && !f.logged && f.failRead() {
+		f.logged = true
+		f.sequence.add("read-after-sync-error")
+		return 0, errors.New("injected finalising receipt read failure")
+	}
+	count, err := f.SecureReadFile.Read(data)
+	if f.logRead && !f.logged && errors.Is(err, io.EOF) {
+		f.logged = true
+		f.sequence.add("read-after-sync")
+	}
+	return count, err
+}
+
+type finaliseStageLease struct {
+	once     sync.Once
+	attempts atomic.Int32
+	effects  atomic.Int32
+	sequence *finaliseStageSequence
+}
+
+func (l *finaliseStageLease) Release() {
+	l.attempts.Add(1)
+	l.once.Do(func() {
+		l.effects.Add(1)
+		l.sequence.add("release")
+	})
+}
+
+type finaliseCallbackLease struct {
+	once    sync.Once
+	calls   atomic.Int32
+	release func()
+}
+
+func (l *finaliseCallbackLease) Release() {
+	l.once.Do(func() {
+		l.calls.Add(1)
+		if l.release != nil {
+			l.release()
+		}
+	})
+}
+
+type replaceFinalisingReceiptOnReadDirectory struct {
+	fsutil.SecureDirectory
+	recordName   string
+	recordData   []byte
+	mu           sync.Mutex
+	armed        bool
+	armOnProbeAt int
+	probeCalls   int
+	replacements atomic.Int32
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) arm() {
+	d.mu.Lock()
+	d.armed = true
+	d.mu.Unlock()
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	d.mu.Lock()
+	replace := d.armed && name == d.recordName
+	if replace {
+		d.replacements.Add(1)
+		d.armed = false
+	}
+	d.mu.Unlock()
+	if replace {
+		retained, err := d.SecureDirectory.OpenNoFollow(name)
+		if err != nil {
+			return nil, err
+		}
+		defer retained.Close()
+		if err := d.SecureDirectory.Remove(name); err != nil {
+			return nil, err
+		}
+		file, err := d.SecureDirectory.CreateExclusive(name, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := file.Write(d.recordData); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		if err := d.SecureDirectory.Sync(); err != nil {
+			return nil, err
+		}
+	}
+	return d.SecureDirectory.OpenNoFollow(name)
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) OpenNewExclusiveLock(name string, perm os.FileMode) (fsutil.ExclusiveLock, error) {
+	creator, ok := d.SecureDirectory.(fsutil.NewExclusiveLocker)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return creator.OpenNewExclusiveLock(name, perm)
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) ProbeExclusiveLockHeld(name string, perm os.FileMode) (os.FileInfo, error) {
+	prober, ok := d.SecureDirectory.(fsutil.ExclusiveLockHeldProber)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	info, err := prober.ProbeExclusiveLockHeld(name, perm)
+	if err == nil {
+		d.mu.Lock()
+		d.probeCalls++
+		if d.armOnProbeAt > 0 && d.probeCalls == d.armOnProbeAt {
+			d.armed = true
+		}
+		d.mu.Unlock()
+	}
+	return info, err
+}
+
+type legacyMaintenanceFinaliseLeaseVerifier struct {
+	lease  LegacyMaintenanceFinaliseLease
+	err    error
+	verify func(context.Context, LegacyMaintenanceFinaliseVerification) error
+}
+
+func (v legacyMaintenanceFinaliseLeaseVerifier) AcquireLegacyMaintenanceFinalise(ctx context.Context, proof LegacyMaintenanceFinaliseVerification) (LegacyMaintenanceFinaliseLease, error) {
+	if v.verify != nil {
+		if err := v.verify(ctx, proof); err != nil {
+			return v.lease, err
+		}
+	}
+	return v.lease, v.err
+}
+
+type noopLegacyMaintenanceFinaliseLease struct{}
+
+func (noopLegacyMaintenanceFinaliseLease) Release() {}
+
+func testLegacyMaintenanceFinaliseVerifier(verify func(context.Context, LegacyMaintenanceFinaliseVerification) error) LegacyMaintenanceFinaliseVerifier {
+	return legacyMaintenanceFinaliseLeaseVerifier{lease: noopLegacyMaintenanceFinaliseLease{}, verify: verify}
+}
+
+type blockingLegacyMaintenanceFinaliseLease struct {
+	once    sync.Once
+	calls   atomic.Int32
+	started chan struct{}
+	allow   <-chan struct{}
+}
+
+func (l *blockingLegacyMaintenanceFinaliseLease) Release() {
+	l.once.Do(func() {
+		l.calls.Add(1)
+		close(l.started)
+		<-l.allow
+	})
 }
 
 func TestCloseBeforeFinaliseLeavesActivatedRollbackWindow(t *testing.T) {
@@ -2027,7 +3095,7 @@ func TestCloseBeforeFinaliseLeavesActivatedRollbackWindow(t *testing.T) {
 	coordinator, _ := testCoordinator(t)
 	owner, err := openCredentialControlPreparedWithLegacyMaintenanceVerifier(
 		context.Background(), path, coordinator, false, nil, nil, nil,
-		LegacyMaintenanceFinaliseVerifierFunc(func(context.Context, LegacyMaintenanceFinaliseVerification) error { return nil }),
+		testLegacyMaintenanceFinaliseVerifier(func(context.Context, LegacyMaintenanceFinaliseVerification) error { return nil }),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2079,7 +3147,7 @@ func TestConcurrentFinaliseIsIdempotent(t *testing.T) {
 	var calls atomic.Int32
 	owner, err := openCredentialControlPreparedWithLegacyMaintenanceVerifier(
 		context.Background(), path, coordinator, false, nil, nil, nil,
-		LegacyMaintenanceFinaliseVerifierFunc(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
+		testLegacyMaintenanceFinaliseVerifier(func(context.Context, LegacyMaintenanceFinaliseVerification) error {
 			calls.Add(1)
 			return nil
 		}),

@@ -101,16 +101,27 @@ func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path
 		return err
 	}
 	defer namespace.Close()
+	return finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(ctx, path, ticket, namespace)
+}
+
+func finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket, namespace *legacyCredentialMaintenanceNamespace) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if namespace == nil {
+		return ErrCredentialEndpointMaintenanceConflict
+	}
 	if journal, exists, err := namespace.readOptionalRecord(namespace.journalName); err != nil || exists {
 		if exists && journal.Ticket != ticket {
 			return ErrCredentialEndpointMaintenanceTicketMismatch
 		}
 		return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
 	}
-	record, exists, err := namespace.readOptionalRecord(namespace.rollbackName)
+	receiptProof, exists, err := readLegacyMaintenanceRecordProof(namespace, namespace.rollbackName)
 	if err != nil {
 		return err
 	}
+	record := receiptProof.record
 	lockProof, err := namespace.inspectRegular(namespace.lockName)
 	if err != nil || lockProof != ticket.Lock {
 		return errors.Join(ErrCredentialEndpointIdentityChanged, err)
@@ -129,8 +140,8 @@ func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path
 		return err
 	}
 	defer lock.Close()
-	current, currentExists, err := namespace.readOptionalRecord(namespace.rollbackName)
-	if err != nil || !currentExists || !credentialEndpointMaintenanceJournalsEqual(current, record) {
+	currentProof, currentExists, err := readLegacyMaintenanceRecordProof(namespace, namespace.rollbackName)
+	if err != nil || !currentExists || !credentialEndpointMaintenanceRecordProofEqual(currentProof, receiptProof) {
 		return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
 	}
 	if err := namespace.validateHeldLock(ticket.Lock); err != nil {
@@ -150,9 +161,10 @@ func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path
 		path: path, finalName: namespace.finalName, lock: lock,
 		lockIdentity: fsutil.SecureFileIdentity{Device: ticket.Lock.Device, Inode: ticket.Lock.Inode, Links: ticket.Lock.Links},
 		maintenanceGate: credentialEndpointMaintenanceOpenGate{
-			initialised: true, activated: true, record: record,
+			initialised: true, activated: true,
 		},
 	}
+	candidate.maintenanceGate.setRecordProof(receiptProof)
 	if err := candidate.validateMaintenanceOwnerShape(record, false); err != nil {
 		return err
 	}
@@ -175,13 +187,13 @@ func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path
 		return errors.Join(ErrCredentialEndpointIdentityChanged, err)
 	}
 	if quarantineExists {
-		if err := namespace.validateRecord(namespace.rollbackName, record); err != nil {
-			return err
-		}
 		if err := namespace.validateHeldLock(ticket.Lock); err != nil {
 			return err
 		}
 		if err := candidate.validateMaintenanceOwnerShape(record, false); err != nil {
+			return err
+		}
+		if err := candidate.validateMaintenanceReceiptProof(candidate.maintenanceGate); err != nil {
 			return err
 		}
 		if err := unix.Unlinkat(namespace.directoryFD, ticket.QuarantineName, 0); err != nil {
@@ -201,7 +213,10 @@ func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path
 		if err := namespace.validateHeldLock(ticket.Lock); err != nil {
 			return err
 		}
-		return candidate.validateMaintenanceOwnerShape(record, false)
+		if err := candidate.validateMaintenanceOwnerShape(record, false); err != nil {
+			return err
+		}
+		return candidate.validateMaintenanceReceiptProof(candidate.maintenanceGate)
 	})
 }
 
@@ -405,6 +420,32 @@ func (e *credentialEndpoint) readMaintenanceRollbackRecordProof() (credentialEnd
 		return credentialEndpointMaintenanceRecordProof{}, true, errors.Join(ErrCredentialEndpointIdentityChanged, err)
 	}
 	return credentialEndpointMaintenanceRecordProof{record: record, identity: identity, digest: digestMaintenanceBytes(data)}, true, nil
+}
+
+func readLegacyMaintenanceRecordProof(namespace *legacyCredentialMaintenanceNamespace, name string) (credentialEndpointMaintenanceRecordProof, bool, error) {
+	if namespace == nil {
+		return credentialEndpointMaintenanceRecordProof{}, false, ErrCredentialEndpointMaintenanceConflict
+	}
+	data, identity, err := fsutil.ReadSecureFileInDirectoryWithIdentity(
+		namespace.fs, namespace.directory, name, legacyCredentialEndpointProofMaxBytes,
+	)
+	if errors.Is(err, os.ErrNotExist) {
+		return credentialEndpointMaintenanceRecordProof{}, false, nil
+	}
+	if err != nil {
+		return credentialEndpointMaintenanceRecordProof{}, true, err
+	}
+	record, err := decodeCredentialEndpointMaintenanceJournal(data)
+	if err != nil || record.Ticket.Path != namespace.path {
+		return credentialEndpointMaintenanceRecordProof{}, true, errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
+	}
+	named, err := namespace.inspectRegular(name)
+	if err != nil || named.Device != identity.Device || named.Inode != identity.Inode || named.Links != identity.Links {
+		return credentialEndpointMaintenanceRecordProof{}, true, errors.Join(ErrCredentialEndpointIdentityChanged, err)
+	}
+	return credentialEndpointMaintenanceRecordProof{
+		record: record, identity: identity, digest: digestMaintenanceBytes(data),
+	}, true, nil
 }
 
 func (gate *credentialEndpointMaintenanceOpenGate) setRecordProof(proof credentialEndpointMaintenanceRecordProof) {
@@ -733,6 +774,12 @@ func (e *credentialEndpoint) finaliseActivatedMaintenance(ctx context.Context, t
 		finalising := record
 		finalising.Generation++
 		finalising.State = CredentialEndpointMaintenanceFinalising
+		var finaliseLease LegacyMaintenanceFinaliseLease
+		defer func() {
+			if finaliseLease != nil {
+				finaliseLease.Release()
+			}
+		}()
 		if err := namespace.writeRecord(namespace.rollbackName, finalising, func() error {
 			if err := namespace.requireEntryAbsent(namespace.journalName); err != nil {
 				return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
@@ -754,10 +801,15 @@ func (e *credentialEndpoint) finaliseActivatedMaintenance(ctx context.Context, t
 			if err := e.validateMaintenanceOwnerShape(record, true); err != nil {
 				return err
 			}
-			if err := verifier.VerifyLegacyMaintenanceFinalise(ctx, LegacyMaintenanceFinaliseVerification{
+			lease, err := verifier.AcquireLegacyMaintenanceFinalise(ctx, LegacyMaintenanceFinaliseVerification{
 				TicketHash: record.TicketHash, OwnerGeneration: generation,
-			}); err != nil {
+			})
+			finaliseLease = lease
+			if err != nil {
 				return errors.Join(ErrCredentialEndpointMaintenanceVerification, err)
+			}
+			if finaliseLease == nil {
+				return ErrCredentialEndpointMaintenanceVerifierRequired
 			}
 			return nil
 		}); err != nil {
@@ -769,19 +821,16 @@ func (e *credentialEndpoint) finaliseActivatedMaintenance(ctx context.Context, t
 		}
 		record = finalising
 		gate.setRecordProof(finalisingProof)
+		finaliseLease.Release()
+		finaliseLease = nil
 	case CredentialEndpointMaintenanceFinalising:
-		if gate.record.State == CredentialEndpointMaintenanceFinalising {
-			if !gate.matchesRecordProof(proof) {
-				return ErrCredentialEndpointMaintenanceConflict
-			}
-		} else {
-			expected := gate.record
-			expected.Generation++
-			expected.State = CredentialEndpointMaintenanceFinalising
-			if !credentialEndpointMaintenanceJournalsEqual(record, expected) {
-				return ErrCredentialEndpointMaintenanceConflict
-			}
-			gate.setRecordProof(proof)
+		// A live owner may only continue a Finalising receipt that it already
+		// durably adopted. If the in-memory gate remains Activated, a prior write
+		// ended at an indeterminate durability boundary. Recovery then requires a
+		// clean stop and a fresh offline namespace proof; it must not be converted
+		// into live roll-forward authority.
+		if gate.record.State != CredentialEndpointMaintenanceFinalising || !gate.matchesRecordProof(proof) {
+			return ErrCredentialEndpointMaintenanceConflict
 		}
 	default:
 		return ErrCredentialEndpointMaintenanceConflict
@@ -792,11 +841,14 @@ func (e *credentialEndpoint) finaliseActivatedMaintenance(ctx context.Context, t
 		return errors.Join(ErrCredentialEndpointIdentityChanged, err)
 	}
 	if quarantineExists {
-		if err := namespace.validateRecord(namespace.rollbackName, record); err != nil {
-			return err
-		}
 		if currentLock, err := namespace.inspectHeldLock(e.lock); err != nil || currentLock != ticket.Lock {
 			return errors.Join(ErrCredentialEndpointIdentityChanged, err)
+		}
+		if err := e.validateMaintenanceOwnerShape(record, true); err != nil {
+			return err
+		}
+		if err := e.validateMaintenanceReceiptProof(*gate); err != nil {
+			return err
 		}
 		if err := unix.Unlinkat(namespace.directoryFD, ticket.QuarantineName, 0); err != nil {
 			return err
@@ -816,7 +868,10 @@ func (e *credentialEndpoint) finaliseActivatedMaintenance(ctx context.Context, t
 		if err != nil || currentLock != ticket.Lock {
 			return errors.Join(ErrCredentialEndpointIdentityChanged, err)
 		}
-		return e.validateMaintenanceOwnerShape(record, true)
+		if err := e.validateMaintenanceOwnerShape(record, true); err != nil {
+			return err
+		}
+		return e.validateMaintenanceReceiptProof(*gate)
 	}); err != nil {
 		return fmt.Errorf("remove finalised maintenance receipt: %w", err)
 	}

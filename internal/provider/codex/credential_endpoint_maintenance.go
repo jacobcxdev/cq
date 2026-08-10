@@ -69,19 +69,28 @@ type LegacyMaintenanceFinaliseVerification struct {
 	OwnerGeneration string
 }
 
-// LegacyMaintenanceFinaliseVerifier proves the current candidate/runtime
-// health tuple from inside the exact live owner operation immediately before
-// finalise becomes irreversible. Implementations remain outside the provider
-// and may inspect runtime-specific readiness without coupling it here.
-type LegacyMaintenanceFinaliseVerifier interface {
-	VerifyLegacyMaintenanceFinalise(context.Context, LegacyMaintenanceFinaliseVerification) error
+// LegacyMaintenanceFinaliseLease retains the runtime authority proved by a
+// finalise verifier. Release must be safe to call more than once.
+type LegacyMaintenanceFinaliseLease interface {
+	Release()
 }
 
-type LegacyMaintenanceFinaliseVerifierFunc func(context.Context, LegacyMaintenanceFinaliseVerification) error
+// LegacyMaintenanceFinaliseVerifier acquires a lease over the current
+// candidate/runtime health tuple from inside the exact live owner operation
+// immediately before finalise becomes irreversible. Implementations remain
+// outside the provider and may inspect runtime-specific readiness without
+// coupling it here. A successful acquisition must already be linearised
+// against runtime teardown; the provider retains that authority through the
+// durable Finalising receipt and then releases it.
+type LegacyMaintenanceFinaliseVerifier interface {
+	AcquireLegacyMaintenanceFinalise(context.Context, LegacyMaintenanceFinaliseVerification) (LegacyMaintenanceFinaliseLease, error)
+}
 
-func (verify LegacyMaintenanceFinaliseVerifierFunc) VerifyLegacyMaintenanceFinalise(ctx context.Context, proof LegacyMaintenanceFinaliseVerification) error {
+type LegacyMaintenanceFinaliseVerifierFunc func(context.Context, LegacyMaintenanceFinaliseVerification) (LegacyMaintenanceFinaliseLease, error)
+
+func (verify LegacyMaintenanceFinaliseVerifierFunc) AcquireLegacyMaintenanceFinalise(ctx context.Context, proof LegacyMaintenanceFinaliseVerification) (LegacyMaintenanceFinaliseLease, error) {
 	if verify == nil {
-		return ErrCredentialEndpointMaintenanceVerifierRequired
+		return nil, ErrCredentialEndpointMaintenanceVerifierRequired
 	}
 	return verify(ctx, proof)
 }

@@ -5,13 +5,16 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,19 +23,28 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	cqhttputil "github.com/jacobcxdev/cq/internal/httputil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 const legacyMaintenanceHealthMaxBytes = 64 << 10
 
+const legacyMaintenanceProcessProofTimeout = 2 * time.Second
+
 var (
 	errLegacyMaintenanceRuntimeNotReady         = errors.New("legacy maintenance candidate runtime is not ready")
 	errLegacyMaintenanceProcessProofUnavailable = errors.New("legacy maintenance candidate process proof is unavailable")
 )
 
-type legacyMaintenanceHealthDoer interface {
-	Do(*http.Request) (*http.Response, error)
+type legacyMaintenanceHeadroomProber interface {
+	Probe(context.Context) error
+}
+
+type legacyMaintenanceHeadroomProberFunc func(context.Context) error
+
+func (probe legacyMaintenanceHeadroomProberFunc) Probe(ctx context.Context) error {
+	return probe(ctx)
 }
 
 type legacyMaintenanceExecutableProof struct {
@@ -48,19 +60,21 @@ type legacyMaintenanceExecutableProof struct {
 type proxyLegacyMaintenanceFinaliseVerifier struct {
 	mu sync.RWMutex
 
-	build        string
-	clientBuild  string
-	healthURL    string
-	http         legacyMaintenanceHealthDoer
-	executable   legacyMaintenanceExecutableProof
-	initialErr   error
-	capture      func() (legacyMaintenanceExecutableProof, error)
-	runtime      *proxy.CodexRoutingRuntime
-	frozen       proxy.CodexRoutingRuntime
-	headroom     bool
-	headroomMode proxy.HeadroomMode
-	processProof func(context.Context) error
-	bound        bool
+	build         string
+	clientBuild   string
+	healthURL     string
+	healthAddr    string
+	attestor      *proxy.ServingAttestor
+	dialContext   func(context.Context, string, string) (net.Conn, error)
+	executable    legacyMaintenanceExecutableProof
+	initialErr    error
+	capture       func() (legacyMaintenanceExecutableProof, error)
+	runtime       *proxy.CodexRoutingRuntime
+	frozen        proxy.CodexRoutingRuntime
+	headroom      bool
+	headroomProbe legacyMaintenanceHeadroomProber
+	headroomMode  proxy.HeadroomMode
+	bound         bool
 }
 
 type legacyMaintenanceRuntimeHealth struct {
@@ -86,23 +100,24 @@ type legacyMaintenanceDefaultHealth struct {
 	Status     string `json:"status"`
 }
 
-func newProxyLegacyMaintenanceFinaliseVerifier(build, clientBuild string, port int) *proxyLegacyMaintenanceFinaliseVerifier {
+func newProxyLegacyMaintenanceFinaliseVerifier(build, clientBuild string, port int, attestor *proxy.ServingAttestor) *proxyLegacyMaintenanceFinaliseVerifier {
 	capture := captureLegacyMaintenanceExecutable
 	proof, err := capture()
+	healthAddr := net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", port))
+	dialer := &net.Dialer{}
 	return &proxyLegacyMaintenanceFinaliseVerifier{
 		build: build, clientBuild: clientBuild,
-		healthURL: "http://" + net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", port)) + "/health",
-		http: &http.Client{
-			Timeout: 2 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+		healthURL:  "http://" + healthAddr + "/health",
+		healthAddr: healthAddr,
+		attestor:   attestor,
+		dialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
 		},
 		executable: proof, initialErr: err, capture: capture,
 	}
 }
 
-func (v *proxyLegacyMaintenanceFinaliseVerifier) bind(runtime *proxy.CodexRoutingRuntime, headroom bool, mode proxy.HeadroomMode) error {
+func (v *proxyLegacyMaintenanceFinaliseVerifier) bind(runtime *proxy.CodexRoutingRuntime, headroom *proxy.HeadroomBridge, mode proxy.HeadroomMode) error {
 	if v == nil || runtime == nil {
 		return errLegacyMaintenanceRuntimeNotReady
 	}
@@ -113,67 +128,192 @@ func (v *proxyLegacyMaintenanceFinaliseVerifier) bind(runtime *proxy.CodexRoutin
 	}
 	v.runtime = runtime
 	v.frozen = cloneLegacyMaintenanceRoutingRuntime(*runtime)
-	v.headroom = headroom
+	v.headroom = headroom != nil
+	if headroom != nil {
+		// HeadroomBridge.Probe is supplied by the independently owned headroom
+		// slice. The assertion keeps this branch buildable before that commit is
+		// integrated while finalise remains strictly fail-closed without it.
+		v.headroomProbe, _ = any(headroom).(legacyMaintenanceHeadroomProber)
+	}
 	v.headroomMode = mode
 	v.bound = true
 	return nil
 }
 
-func (v *proxyLegacyMaintenanceFinaliseVerifier) VerifyLegacyMaintenanceFinalise(ctx context.Context, proof codexprov.LegacyMaintenanceFinaliseVerification) error {
+func (v *proxyLegacyMaintenanceFinaliseVerifier) AcquireLegacyMaintenanceFinalise(ctx context.Context, proof codexprov.LegacyMaintenanceFinaliseVerification) (codexprov.LegacyMaintenanceFinaliseLease, error) {
+	if ctx == nil {
+		return nil, errLegacyMaintenanceRuntimeNotReady
+	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if v == nil || !validLegacyMaintenanceRuntimeProof(proof) {
-		return errLegacyMaintenanceRuntimeNotReady
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
 	v.mu.RLock()
 	build, clientBuild := v.build, v.clientBuild
-	healthURL, client := v.healthURL, v.http
+	healthURL, healthAddr := v.healthURL, v.healthAddr
+	attestor, dialContext := v.attestor, v.dialContext
 	executable, initialErr, capture := v.executable, v.initialErr, v.capture
 	runtime, frozen := v.runtime, cloneLegacyMaintenanceRoutingRuntime(v.frozen)
-	headroom, headroomMode, bound := v.headroom, v.headroomMode, v.bound
-	processProof := v.processProof
+	headroom, headroomProbe, headroomMode, bound := v.headroom, v.headroomProbe, v.headroomMode, v.bound
 	v.mu.RUnlock()
-	if !bound || initialErr != nil || capture == nil || client == nil || healthURL == "" ||
-		strings.TrimSpace(build) == "" || strings.TrimSpace(clientBuild) == "" || runtime == nil {
-		return errLegacyMaintenanceRuntimeNotReady
+	if !bound || initialErr != nil || capture == nil || attestor == nil || dialContext == nil ||
+		healthURL == "" || healthAddr == "" || strings.TrimSpace(build) == "" ||
+		strings.TrimSpace(clientBuild) == "" || runtime == nil || !headroom ||
+		headroomProbe == nil || headroomMode != proxy.HeadroomModeCache {
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
-	if !legacyMaintenanceRoutingRuntimeEqual(*runtime, frozen) || !legacyMaintenanceRoutingReady(frozen) ||
-		!headroom || headroomMode != proxy.HeadroomModeCache {
-		return errLegacyMaintenanceRuntimeNotReady
-	}
-	if processProof == nil {
-		return errors.Join(errLegacyMaintenanceRuntimeNotReady, errLegacyMaintenanceProcessProofUnavailable)
-	}
-	if err := processProof(ctx); err != nil {
-		return errors.Join(errLegacyMaintenanceRuntimeNotReady, errLegacyMaintenanceProcessProofUnavailable)
+	if !legacyMaintenanceRoutingRuntimeEqual(*runtime, frozen) || !legacyMaintenanceRoutingReady(frozen) {
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
 	currentExecutable, err := capture()
 	if err != nil || currentExecutable != executable {
-		return errLegacyMaintenanceRuntimeNotReady
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, legacyMaintenanceProcessProofTimeout)
+	probeErr := headroomProbe.Probe(probeCtx)
+	cancelProbe()
+	if probeErr != nil {
+		return nil, errLegacyMaintenanceRuntimeNotReady
+	}
+	binding, err := legacyMaintenanceProcessBinding(proof, build, clientBuild, executable, frozen)
 	if err != nil {
-		return errLegacyMaintenanceRuntimeNotReady
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
-	response, err := client.Do(request)
+	servingLease, err := attestor.Acquire(binding)
 	if err != nil {
-		return errLegacyMaintenanceRuntimeNotReady
+		return nil, errors.Join(errLegacyMaintenanceRuntimeNotReady, errLegacyMaintenanceProcessProofUnavailable)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return errLegacyMaintenanceRuntimeNotReady
-	}
-	data, err := readLegacyMaintenanceHealth(response.Body)
-	if err != nil {
-		return errLegacyMaintenanceRuntimeNotReady
+	release := true
+	defer func() {
+		if release {
+			servingLease.Release()
+		}
+	}()
+	data, encodedProof, local, remote, err := requestLegacyMaintenanceProcessHealth(
+		ctx, healthURL, healthAddr, servingLease.Challenge(), dialContext,
+	)
+	if err != nil || servingLease.VerifyResponse(data, encodedProof, local, remote) != nil {
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
 	health, err := decodeLegacyMaintenanceRuntimeHealth(data)
 	if err != nil || !legacyMaintenanceRuntimeHealthReady(health, frozen) {
-		return errLegacyMaintenanceRuntimeNotReady
+		return nil, errLegacyMaintenanceRuntimeNotReady
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := servingLease.Seal(); err != nil {
+		return nil, errLegacyMaintenanceRuntimeNotReady
+	}
+	release = false
+	return servingLease, nil
+}
+
+func legacyMaintenanceProcessBinding(proof codexprov.LegacyMaintenanceFinaliseVerification, build, clientBuild string, executable legacyMaintenanceExecutableProof, runtime proxy.CodexRoutingRuntime) ([sha256.Size]byte, error) {
+	var binding [sha256.Size]byte
+	ticketHash, err := hex.DecodeString(proof.TicketHash)
+	if err != nil || len(ticketHash) != sha256.Size {
+		return binding, errLegacyMaintenanceRuntimeNotReady
+	}
+	ownerGeneration, err := hex.DecodeString(proof.OwnerGeneration)
+	if err != nil || len(ownerGeneration) != 16 || executable.path == "" || executable.device == 0 ||
+		executable.inode == 0 || executable.links == 0 || executable.size < 0 || !executable.mode.IsRegular() ||
+		executable.sha256 == ([sha256.Size]byte{}) {
+		return binding, errLegacyMaintenanceRuntimeNotReady
+	}
+	runtimeData, err := json.Marshal(runtime)
+	if err != nil {
+		return binding, errLegacyMaintenanceRuntimeNotReady
+	}
+	destination := sha256.New()
+	writeLegacyMaintenanceBindingField(destination, []byte("cq-legacy-maintenance-process-binding-v1"))
+	writeLegacyMaintenanceBindingField(destination, ticketHash)
+	writeLegacyMaintenanceBindingField(destination, ownerGeneration)
+	writeLegacyMaintenanceBindingField(destination, []byte(build))
+	writeLegacyMaintenanceBindingField(destination, []byte(clientBuild))
+	writeLegacyMaintenanceBindingField(destination, []byte(executable.path))
+	writeLegacyMaintenanceBindingUint64(destination, executable.device)
+	writeLegacyMaintenanceBindingUint64(destination, executable.inode)
+	writeLegacyMaintenanceBindingUint64(destination, executable.links)
+	writeLegacyMaintenanceBindingUint64(destination, uint64(executable.size))
+	writeLegacyMaintenanceBindingUint64(destination, uint64(executable.mode))
+	writeLegacyMaintenanceBindingField(destination, executable.sha256[:])
+	writeLegacyMaintenanceBindingField(destination, runtimeData)
+	copy(binding[:], destination.Sum(nil))
+	return binding, nil
+}
+
+func writeLegacyMaintenanceBindingUint64(destination hash.Hash, value uint64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], value)
+	writeLegacyMaintenanceBindingField(destination, encoded[:])
+}
+
+func writeLegacyMaintenanceBindingField(destination hash.Hash, value []byte) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	_, _ = destination.Write(length[:])
+	_, _ = destination.Write(value)
+}
+
+func requestLegacyMaintenanceProcessHealth(ctx context.Context, healthURL, healthAddr, challenge string, dialContext func(context.Context, string, string) (net.Conn, error)) ([]byte, string, string, string, error) {
+	if ctx == nil || healthURL == "" || healthAddr == "" || challenge == "" || dialContext == nil {
+		return nil, "", "", "", errLegacyMaintenanceRuntimeNotReady
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, legacyMaintenanceProcessProofTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return nil, "", "", "", errLegacyMaintenanceRuntimeNotReady
+	}
+	request.Header.Set(proxy.ServingProofChallengeHeader, challenge)
+	request.Header.Set("Connection", "close")
+	var localAddress, remoteAddress string
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Reused || info.WasIdle || info.Conn == nil {
+				return
+			}
+			localAddress = info.Conn.LocalAddr().String()
+			remoteAddress = info.Conn.RemoteAddr().String()
+		},
+	}))
+	transport := &http.Transport{
+		Proxy:              nil,
+		DisableCompression: true,
+		DisableKeepAlives:  true,
+		ForceAttemptHTTP2:  false,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if network != "tcp" || address != healthAddr {
+				return nil, errLegacyMaintenanceRuntimeNotReady
+			}
+			return dialContext(ctx, "tcp4", healthAddr)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, "", "", "", errLegacyMaintenanceRuntimeNotReady
+	}
+	defer response.Body.Close()
+	proofValues := response.Header.Values(proxy.ServingProofResponseHeader)
+	if response.StatusCode != http.StatusOK || len(proofValues) != 1 ||
+		response.Header.Get("Content-Encoding") != "" || localAddress == "" || remoteAddress == "" {
+		return nil, "", "", "", errLegacyMaintenanceRuntimeNotReady
+	}
+	data, err := readLegacyMaintenanceHealth(response.Body)
+	if err != nil {
+		return nil, "", "", "", errLegacyMaintenanceRuntimeNotReady
+	}
+	return data, proofValues[0], localAddress, remoteAddress, nil
 }
 
 func captureLegacyMaintenanceExecutable() (legacyMaintenanceExecutableProof, error) {
@@ -220,7 +360,7 @@ func captureLegacyMaintenanceExecutable() (legacyMaintenanceExecutableProof, err
 }
 
 func readLegacyMaintenanceHealth(reader io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(reader, legacyMaintenanceHealthMaxBytes+1))
+	data, err := cqhttputil.ReadBody(reader)
 	if err != nil {
 		return nil, err
 	}

@@ -11,14 +11,14 @@ import (
 
 type proxyLegacyMaintenanceFinaliseVerifier struct{}
 
-func newProxyLegacyMaintenanceFinaliseVerifier(string, string, int) *proxyLegacyMaintenanceFinaliseVerifier {
+func newProxyLegacyMaintenanceFinaliseVerifier(string, string, int, *proxy.ServingAttestor) *proxyLegacyMaintenanceFinaliseVerifier {
 	return &proxyLegacyMaintenanceFinaliseVerifier{}
 }
 
-func (*proxyLegacyMaintenanceFinaliseVerifier) bind(*proxy.CodexRoutingRuntime, bool, proxy.HeadroomMode) error {
+func (*proxyLegacyMaintenanceFinaliseVerifier) bind(*proxy.CodexRoutingRuntime, *proxy.HeadroomBridge, proxy.HeadroomMode) error {
 	return nil
 }
 
-func (*proxyLegacyMaintenanceFinaliseVerifier) VerifyLegacyMaintenanceFinalise(context.Context, codexprov.LegacyMaintenanceFinaliseVerification) error {
-	return codexprov.ErrCredentialControlDisabled
+func (*proxyLegacyMaintenanceFinaliseVerifier) AcquireLegacyMaintenanceFinalise(context.Context, codexprov.LegacyMaintenanceFinaliseVerification) (codexprov.LegacyMaintenanceFinaliseLease, error) {
+	return nil, codexprov.ErrCredentialControlDisabled
 }

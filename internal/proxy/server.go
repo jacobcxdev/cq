@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -22,6 +23,8 @@ import (
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB
+
+const defaultServerShutdownGracePeriod = 5 * time.Second
 
 const (
 	codexResponsesPath              = "/v1/responses"
@@ -95,6 +98,12 @@ type Server struct {
 	Headroom                  *HeadroomBridge
 	Diag                      *DiagnosticsWriter
 	PayloadDiag               *PayloadWriter
+	// ServingAttestor binds maintenance finalise proof authority to the exact
+	// pre-bound loopback listener passed to http.Server.Serve.
+	ServingAttestor *ServingAttestor
+	// shutdownGracePeriod is test-configurable; zero selects the production
+	// default. It is deliberately unexported so callers cannot weaken shutdown.
+	shutdownGracePeriod time.Duration
 	// CodexRouting is resolved once at startup. Config reload never mutates it.
 	CodexRouting *CodexRoutingRuntime
 	// CodexObserver mirrors Responses lifecycle and preserves an exact strong
@@ -134,14 +143,41 @@ func (s *Server) codexWebSocketRouting() (*CodexRequestRouter, ExplicitWebSocket
 
 // ListenAndServe starts the proxy and blocks until the context is cancelled or a signal is received.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	handler, err := s.handler()
+	if s == nil || s.Config == nil {
+		return errors.New("proxy server configuration is unavailable")
+	}
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{
+		IP: net.IPv4(127, 0, 0, 1), Port: s.Config.Port,
+	})
 	if err != nil {
 		return err
 	}
+	return s.serve(ctx, listener)
+}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", s.Config.Port)
+func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
+	if s == nil || listener == nil || ctx == nil {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		return errors.New("proxy server listener is unavailable")
+	}
+	handler, err := s.handler()
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	serveListener := net.Listener(listener)
+	if s.ServingAttestor != nil {
+		serveListener, err = s.ServingAttestor.ActivateListener(listener)
+		if err != nil {
+			_ = listener.Close()
+			return err
+		}
+	}
+
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              listener.Addr().String(),
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -150,19 +186,66 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	shutdownResult := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if s.ServingAttestor != nil {
+			<-s.ServingAttestor.BeginClose()
+		}
+		gracePeriod := s.shutdownGracePeriod
+		if gracePeriod <= 0 {
+			gracePeriod = defaultServerShutdownGracePeriod
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracePeriod)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			closeErr := srv.Close()
+			shutdownResult <- errors.Join(fmt.Errorf("proxy server graceful shutdown: %w", err), closeErr)
+			return
+		}
+		shutdownResult <- nil
 	}()
 
-	fmt.Fprintf(os.Stderr, "cq: proxy listening on %s\n", addr)
+	fmt.Fprintf(os.Stderr, "cq: proxy listening on %s\n", listener.Addr().String())
 
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	serveErr := srv.Serve(serveListener)
+	if !errors.Is(serveErr, http.ErrServerClosed) && s.ServingAttestor != nil {
+		<-s.ServingAttestor.abortUnexpected()
+	}
+	stop()
+	if s.ServingAttestor != nil {
+		<-s.ServingAttestor.BeginClose()
+	}
+	shutdownErr := <-shutdownResult
+	if !errors.Is(serveErr, http.ErrServerClosed) {
+		return errors.Join(serveErr, shutdownErr)
+	}
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	return nil
+}
+
+// servingAttestedTCP4Listener delegates the exact pre-bound TCP4 listener and
+// revokes unsealed proof authority before an unexpected Accept error reaches
+// http.Server.Serve.
+type servingAttestedTCP4Listener struct {
+	net.Listener
+	attestor *ServingAttestor
+}
+
+func (l *servingAttestedTCP4Listener) Accept() (net.Conn, error) {
+	connection, err := l.Listener.Accept()
+	if err != nil && l.attestor != nil {
+		if temporary, ok := err.(net.Error); ok && temporary.Temporary() {
+			return connection, err
+		}
+		<-l.attestor.abortUnexpected()
+	}
+	return connection, err
 }
 
 func (s *Server) handler() (http.Handler, error) {
@@ -722,8 +805,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			resp["headroom_mode"] = "token"
 		}
 	}
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "encode health response")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	if s.ServingAttestor != nil {
+		if proof, ok := s.ServingAttestor.ProveHealth(r, body.Bytes()); ok {
+			w.Header().Set(ServingProofResponseHeader, proof)
+		}
+	}
+	_, _ = w.Write(body.Bytes())
 }
 
 func normaliseCodexRoutingDefaultHealth(health CodexRoutingDefaultHealth) CodexRoutingDefaultHealth {
