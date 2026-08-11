@@ -22,8 +22,24 @@ type codexInstalledHTTPClientExercise struct {
 	localToken string
 	runner     codexAcceptanceRunner
 	outcome    *codexInstalledHTTPClientOutcome
+	webSocket  bool
 	running    bool
 	ran        bool
+}
+
+func newCodexInstalledWebSocketClientExercise(
+	address string,
+	executable codexInstalledExecutableProof,
+	localToken string,
+	runner codexAcceptanceRunner,
+	outcome *codexInstalledHTTPClientOutcome,
+) (*codexInstalledHTTPClientExercise, error) {
+	exercise, err := newCodexInstalledHTTPClientExercise(address, executable, localToken, runner, outcome)
+	if err != nil {
+		return nil, err
+	}
+	exercise.webSocket = true
+	return exercise, nil
 }
 
 func newCodexInstalledHTTPClientExercise(
@@ -129,7 +145,7 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 	command := codexAcceptanceCommand{
 		executable:         exercise.executable.path,
 		expectedExecutable: exercise.executable,
-		args:               codexAcceptanceExecArguments(baseURL, work, outputPath),
+		args:               codexAcceptanceExecArgumentsForTransport(baseURL, work, outputPath, exercise.webSocket),
 		env:                environment,
 		dir:                work,
 		endpoint:           baseURL + legacyCodexResponsesPath,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -72,6 +73,32 @@ func TestRunCodexValidateHTTPReportsCurrentMarkerWithoutWriting(t *testing.T) {
 	}
 	if err := runCodexValidate([]string{"http", "--client-build", "client", "--installed-result", "passed", "--state-dir", t.TempDir()}); err == nil {
 		t.Fatal("expected operator-supplied result rejection")
+	}
+}
+
+func TestRunCodexValidateWebSocketRunsIsolatedCandidate(t *testing.T) {
+	original := runCodexInstalledWebSocketValidationFn
+	defer func() { runCodexInstalledWebSocketValidationFn = original }()
+	var gotBuild, gotDir string
+	runCodexInstalledWebSocketValidationFn = func(_ context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (proxy.CodexReadinessMarker, error) {
+		if cqBuild != version {
+			t.Fatalf("CQ build = %q", cqBuild)
+		}
+		if clientExecutable != "/opt/homebrew/bin/codex" {
+			t.Fatalf("client executable = %q", clientExecutable)
+		}
+		gotBuild, gotDir = clientBuild, markerDir
+		return proxy.CodexReadinessMarker{ClientBuild: clientBuild, ValidatedAt: testCodexHTTPMarkerTime}, nil
+	}
+	dir := t.TempDir()
+	if err := runCodexValidate([]string{"websocket", "--client-build", "0.146.0", "--client-executable", "/opt/homebrew/bin/codex", "--state-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	if gotBuild != "0.146.0" || gotDir != dir {
+		t.Fatalf("validation args = %q/%q", gotBuild, gotDir)
+	}
+	if err := runCodexValidate([]string{"websocket", "--client-build", "0.146.0", "--installed-result", "passed"}); err == nil {
+		t.Fatal("operator supplied WebSocket result accepted")
 	}
 }
 

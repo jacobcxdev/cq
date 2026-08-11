@@ -71,6 +71,34 @@ func TestCodexInstalledHTTPClientExerciseUsesIsolatedExactClient(t *testing.T) {
 	}
 }
 
+func TestCodexInstalledWebSocketClientExerciseUsesWebSocketProvider(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(executable, []byte("exact client"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := captureCodexInstalledExecutable(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localToken := "Qx9m0c9Yx6L-1wH2fBzE3pV8uN5kT7rS4aD6jG0lM2o"
+	runner := testCodexAcceptanceRunner(func(_ context.Context, command codexAcceptanceCommand) ([]byte, error) {
+		joined := strings.Join(command.args, "\n")
+		if !strings.Contains(joined, `supports_websockets = true`) || strings.Contains(joined, `supports_websockets = false`) {
+			return nil, errors.New("installed client did not use WebSocket provider")
+		}
+		return nil, os.WriteFile(command.outputPath, []byte("PONG\n"), 0o600)
+	})
+	exercise, err := newCodexInstalledWebSocketClientExercise(
+		"127.0.0.1:43123", proof, localToken, runner, &codexInstalledHTTPClientOutcome{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exercise.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexInstalledHTTPClientExerciseRequiresPerRunToken(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(executable, []byte("exact client"), 0o500); err != nil {

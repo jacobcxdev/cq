@@ -32,6 +32,10 @@ func saveCodexHTTPReadinessMarkerDurably(dir string, marker CodexReadinessMarker
 	return saveCodexHTTPReadinessMarkerDurablyWithOps(dir, marker, defaultCodexReadinessMarkerDurableOps())
 }
 
+func saveCodexWebSocketReadinessMarkerDurably(dir string, marker CodexReadinessMarker) error {
+	return saveCodexReadinessMarkerDurablyWithOps(dir, marker, CodexRoutingWebSocket, defaultCodexReadinessMarkerDurableOps())
+}
+
 // invalidateCodexHTTPReadinessMarkerDurably removes any prior HTTP marker
 // before a one-shot installed validation attempt can fail. The marker remains
 // absent unless the held listener/process authority later commits a new one.
@@ -39,7 +43,15 @@ func invalidateCodexHTTPReadinessMarkerDurably(dir string) error {
 	return invalidateCodexHTTPReadinessMarkerDurablyWithOps(dir, defaultCodexReadinessMarkerDurableOps())
 }
 
+func invalidateCodexWebSocketReadinessMarkerDurably(dir string) error {
+	return invalidateCodexReadinessMarkerDurablyWithOps(dir, CodexRoutingWebSocket, defaultCodexReadinessMarkerDurableOps())
+}
+
 func invalidateCodexHTTPReadinessMarkerDurablyWithOps(dir string, ops codexReadinessMarkerDurableOps) error {
+	return invalidateCodexReadinessMarkerDurablyWithOps(dir, CodexRoutingHTTP, ops)
+}
+
+func invalidateCodexReadinessMarkerDurablyWithOps(dir string, transport CodexRoutingTransport, ops codexReadinessMarkerDurableOps) error {
 	if ops.fileSystem == nil {
 		return fmt.Errorf("durable readiness marker filesystem is unavailable")
 	}
@@ -68,8 +80,8 @@ func invalidateCodexHTTPReadinessMarkerDurablyWithOps(dir string, ops codexReadi
 	if err := validateCodexReadinessMarkerDirectoryAuthority(inspector, directory, dir); err != nil {
 		return err
 	}
-	name := filepath.Base(codexReadinessPath(dir, CodexRoutingHTTP))
-	poisonName := codexReadinessPoisonName(CodexRoutingHTTP)
+	name := filepath.Base(codexReadinessPath(dir, transport))
+	poisonName := codexReadinessPoisonName(transport)
 	if err := prepareCodexReadinessMarkerCommit(inspector, directory, name, poisonName, func() error {
 		return validateCodexReadinessMarkerDirectoryAuthority(inspector, directory, dir)
 	}); err != nil {
@@ -83,8 +95,20 @@ func saveCodexHTTPReadinessMarkerDurablyWithOps(
 	marker CodexReadinessMarker,
 	ops codexReadinessMarkerDurableOps,
 ) error {
-	if marker.Transport != CodexRoutingHTTP {
-		return fmt.Errorf("durable readiness marker requires HTTP transport")
+	return saveCodexReadinessMarkerDurablyWithOps(dir, marker, CodexRoutingHTTP, ops)
+}
+
+func saveCodexReadinessMarkerDurablyWithOps(
+	dir string,
+	marker CodexReadinessMarker,
+	transport CodexRoutingTransport,
+	ops codexReadinessMarkerDurableOps,
+) error {
+	if transport != CodexRoutingHTTP && transport != CodexRoutingWebSocket {
+		return fmt.Errorf("durable readiness marker transport is invalid")
+	}
+	if marker.Transport != transport {
+		return fmt.Errorf("durable readiness marker transport mismatch")
 	}
 	if marker.Version != CodexReadinessMarkerVersion || marker.CQBuild == "" || marker.ParserSchema <= 0 || marker.LeaseSchema <= 0 ||
 		marker.SemanticsRevision == "" || marker.ClientBuild == "" || marker.RetryBudget < 0 || marker.FixtureHash == "" ||
@@ -130,8 +154,8 @@ func saveCodexHTTPReadinessMarkerDurablyWithOps(
 	if err := fence(); err != nil {
 		return err
 	}
-	name := filepath.Base(codexReadinessPath(dir, CodexRoutingHTTP))
-	poisonName := codexReadinessPoisonName(CodexRoutingHTTP)
+	name := filepath.Base(codexReadinessPath(dir, transport))
+	poisonName := codexReadinessPoisonName(transport)
 	if err := prepareCodexReadinessMarkerCommit(inspector, directory, name, poisonName, fence); err != nil {
 		return err
 	}

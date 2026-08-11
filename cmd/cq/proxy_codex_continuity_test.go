@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -326,6 +327,70 @@ func TestNewProxyCodexNativeHTTPInstallsForEnforcementAndRetainedAuthority(t *te
 	}
 }
 
+func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
+	t.Parallel()
+	for _, status := range []proxy.CodexModeStatus{
+		{Configured: proxy.CodexRoutingOff, Effective: proxy.CodexRoutingOff},
+		{Configured: proxy.CodexRoutingObserve, Effective: proxy.CodexRoutingObserve, ModeEpoch: 8},
+		{Configured: proxy.CodexRoutingEnforce, Effective: proxy.CodexRoutingOff, ModeEpoch: 9},
+	} {
+		called := false
+		handler, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
+			Status: status,
+			newHandler: func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, string) (proxy.CodexWebSocketRoutingHandler, error) {
+				called = true
+				return &proxyCodexWebSocketTestHandler{}, nil
+			},
+		})
+		if err != nil || handler != nil || called {
+			t.Fatalf("status %#v installed WebSocket handler: handler=%T err=%v called=%t", status, handler, err, called)
+		}
+	}
+
+	dependency := &proxyCodexNativeHTTPTestDependency{}
+	capacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
+	executor := proxyCodexWebSocketTestExecutor{}
+	wantHandler := &proxyCodexWebSocketTestHandler{}
+	var planner *proxy.CodexHTTPRequestPlanFactory
+	var gotExecutor proxy.ExplicitWebSocketExecutor
+	var upstream string
+	handler, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
+		Status: proxy.CodexModeStatus{
+			Configured:         proxy.CodexRoutingEnforce,
+			Effective:          proxy.CodexRoutingEnforce,
+			ModeEpoch:          12,
+			AuthoritativeEpoch: 12,
+		},
+		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
+		DefaultAccountKey: "default-account", Executor: executor, Upstream: "https://codex.example/backend-api", Now: time.Now,
+		newHandler: func(gotPlanner proxy.CodexNativeHTTPRequestPlanner, executor proxy.ExplicitWebSocketExecutor, gotUpstream string) (proxy.CodexWebSocketRoutingHandler, error) {
+			planner, _ = gotPlanner.(*proxy.CodexHTTPRequestPlanFactory)
+			gotExecutor = executor
+			upstream = gotUpstream
+			return wantHandler, nil
+		},
+	})
+	if err != nil || handler != wantHandler {
+		t.Fatalf("WebSocket handler = %T, %v", handler, err)
+	}
+	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.Authority.ModeEpoch != 12 || !planner.Authority.Authoritative {
+		t.Fatalf("WebSocket planner dependencies = %#v", planner)
+	}
+	if planner.Headroom != nil || gotExecutor != executor || upstream != "https://codex.example/backend-api" {
+		t.Fatalf("WebSocket execution dependencies = headroom %T executor %T upstream %q", planner.Headroom, gotExecutor, upstream)
+	}
+
+	for _, status := range []proxy.CodexModeStatus{
+		{Effective: proxy.CodexRoutingEnforce, ModeEpoch: 12},
+		{Effective: proxy.CodexRoutingEnforce, ModeEpoch: 12, AuthoritativeEpoch: 11},
+	} {
+		handler, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{Status: status})
+		if err == nil || handler != nil {
+			t.Fatalf("invalid authority status %#v = handler %T error %v", status, handler, err)
+		}
+	}
+}
+
 func TestNewProxyCodexV2ObserversAreObserveOnlyAndNonPersistent(t *testing.T) {
 	t.Parallel()
 
@@ -363,6 +428,18 @@ type proxyCodexNativeHTTPTestHandler struct{}
 
 func (*proxyCodexNativeHTTPTestHandler) TryServe(http.ResponseWriter, *http.Request, bool) (bool, string) {
 	return true, ""
+}
+
+type proxyCodexWebSocketTestHandler struct{}
+
+func (*proxyCodexWebSocketTestHandler) Serve(context.Context, *websocket.Conn, http.Header) error {
+	return nil
+}
+
+type proxyCodexWebSocketTestExecutor struct{}
+
+func (proxyCodexWebSocketTestExecutor) Dial(context.Context, proxy.RouteChoice, proxy.CandidateAttempt, string, http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+	return nil, nil, nil, nil
 }
 
 type proxyCodexNativeHTTPTestDependency struct{}

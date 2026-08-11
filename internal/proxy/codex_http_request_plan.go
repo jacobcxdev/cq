@@ -82,6 +82,8 @@ type CodexPreparedHTTPRequest struct {
 	Dispatch  CodexFrozenDispatchPlan
 	Frozen    *CodexFrozenRequest
 	Lifecycle CodexHTTPRequestLifecycle
+
+	leaseHandle *CodexLeaseRequestHandle
 }
 
 // CodexHTTPRequestPlanErrorCode classifies preparation failures without
@@ -288,6 +290,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 
 	result.Dispatch = dispatch
 	result.Frozen = frozen
+	result.leaseHandle = handle
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
 	if trace := codexInstalledHTTPTraceFromContext(ctx); trace != nil {
 		requestGeneration, attemptGeneration, durableV2 := codexInstalledHTTPV2Generations(result.Lifecycle)

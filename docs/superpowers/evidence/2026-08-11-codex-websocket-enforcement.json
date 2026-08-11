@@ -1,0 +1,58 @@
+{
+  "stage": 14,
+  "transport": "websocket",
+  "record_kind": "terminating_broker_enforcement",
+  "supersedes": "docs/superpowers/evidence/2026-08-10-codex-websocket-resync-correction.json",
+  "base_commit": "95bf7bc539ba2ba842e8f027417e3efaac98b189",
+  "tested_code_context": "base commit plus terminating broker, durable WebSocket lifecycle, readiness, isolated validation, and tests in the commit containing this artifact",
+  "parser_schema": 1,
+  "lease_schema": 3,
+  "supported_client_builds": ["0.146.0"],
+  "client_executable": "/opt/homebrew/bin/codex",
+  "client_executable_sha256": "ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02",
+  "result": "passed",
+  "architecture": {
+    "downstream_101": "local_transport_acceptance",
+    "route_authority": "first_bounded_response_create",
+    "upstream": "account_bound_and_reused_while_compatible",
+    "portable_pre_admission_hard_quota": "one_account_rotation",
+    "admitted_or_generation_bound_request": "never_migrated"
+  },
+  "production": {
+    "terminating_broker": "implemented",
+    "durable_account_and_socket_generation": "implemented",
+    "same_account_candidate_auth_recovery": "implemented",
+    "canonical_401_403_429_426_translation": "implemented",
+    "effective_enforce_requires_marker": true
+  },
+  "installed_isolated_acceptance": {
+    "command": "go run ./cmd/cq codex validate websocket --client-build 0.146.0 --client-executable /opt/homebrew/bin/codex --state-dir PRIVATE_TEMP_DIR",
+    "custom_provider_websocket": true,
+    "pong_verified": true,
+    "downstream_connections": 2,
+    "websocket_requests": "nonzero",
+    "upstream_dials": "nonzero",
+    "unexpected_routes": 0,
+    "egress_attempts": 0,
+    "temporary_marker_written": true,
+    "temporary_marker_deleted_after_proof": true
+  },
+  "live_proxy_invariance": {
+    "before": "pid=41342 address=127.0.0.1:19280",
+    "after": "pid=41342 address=127.0.0.1:19280",
+    "unchanged": true,
+    "live_restart_or_rebind_attempted": false
+  },
+  "verification": {
+    "focused_race_count": 100,
+    "focused_result": "passed",
+    "focused_seconds": 46.467,
+    "full_race": "passed",
+    "full_proxy_seconds": 175.456,
+    "go_vet": "passed",
+    "go_build": "passed",
+    "git_diff_check": "passed"
+  },
+  "readiness_marker_installed_to_live_state": false,
+  "live_cutover": "not_attempted_by_design"
+}

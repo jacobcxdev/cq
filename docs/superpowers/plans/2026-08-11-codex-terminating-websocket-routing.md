@@ -29,11 +29,11 @@
 - Create: `internal/proxy/codex_ws_request_test.go`
 - Modify: `internal/proxy/codex_resync_test.go`
 
-- [ ] **Step 1: Write failing frame-authority tests**
+- [x] **Step 1: Write failing frame-authority tests**
 
 Add `TestCodexWSPendingFrameUsesStrongFrameAuthorityWithoutHandshake`, `TestCodexWSPendingFrameRejectsOversizeAndNonResponseCreate`, and `TestCodexWSPendingFrameClassifiesPortability`. Assert strong nested metadata and model produce canonical lane/lease identity; `previous_response_id`, encrypted state, missing strong metadata, and unknown request kind are non-portable/fail closed.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -43,7 +43,7 @@ go test -race -count=1 ./internal/proxy -run '^TestCodexWSPendingFrame'
 
 Expected: compile failure for missing `newCodexWSPendingFrame` and `Release`.
 
-- [ ] **Step 3: Implement minimal owner**
+- [x] **Step 3: Implement minimal owner**
 
 Implement package-private ownership:
 
@@ -63,7 +63,7 @@ func (frame *codexWSPendingFrame) Release()
 
 Copy at most `maxRequestBody`, require text `response.create`, strong valid metadata, non-empty model, and exact lease key. `portable` requires no `previous_response_id`, no encrypted content, and no generation-bound turn state. `Release` is idempotent and clears owned bytes/references.
 
-- [ ] **Step 4: Run GREEN and privacy scan**
+- [x] **Step 4: Run GREEN and privacy scan**
 
 ```bash
 go test -race -count=1 ./internal/proxy -run '^TestCodexWSPendingFrame'
@@ -80,11 +80,11 @@ Expected: tests pass; no persistence call owns frame bytes.
 - Create: `internal/proxy/codex_ws_lifecycle.go`
 - Create: `internal/proxy/codex_ws_lifecycle_test.go`
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 Add tests proving: prepared/dispatched frame remains provisional; upstream 101 without turn state does not admit; stateful 101 or valid `response.created` admits synchronously; exact error before admission can reject/prepare next slot; malformed/ambiguous event becomes indeterminate; later hard 429 on admitted turn cannot change account; stale upstream generation cannot mutate journal.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test -race -count=1 ./internal/proxy -run '^TestCodexWSLifecycle'
@@ -92,7 +92,7 @@ go test -race -count=1 ./internal/proxy -run '^TestCodexWSLifecycle'
 
 Expected: compile failure for missing `codexWSLifecycle`/`AdmitWebSocketContext`.
 
-- [ ] **Step 3: Add transport-neutral admission mutation**
+- [x] **Step 3: Add transport-neutral admission mutation**
 
 Add exact evidence type and method while sharing existing durable mutation code:
 
@@ -111,7 +111,7 @@ func (handle *CodexLeaseRequestHandle) AdmitWebSocketContext(
 
 Validate generation and durable identity before mutation. Preserve first-admission monotonicity, cache-affinity evidence, `NonMigratable`, and native admission sink semantics. Never treat downstream 101 alone as admission.
 
-- [ ] **Step 4: Implement lifecycle adapter and run GREEN**
+- [x] **Step 4: Implement lifecycle adapter and run GREEN**
 
 `codexWSLifecycle` owns one `CodexLeaseRequestHandle`, selected slot, and upstream generation. It maps valid `response.created`, completion, terminal error, close, cancellation, and rate-limit events to existing durable transitions.
 
@@ -127,7 +127,7 @@ go test -race -count=1 ./internal/proxy -run '^TestCodexWSLifecycle|^TestCodexLe
 - Modify: `internal/proxy/codex_ws_relay.go`
 - Modify: `internal/proxy/codex_ws_relay_test.go`
 
-- [ ] **Step 1: Write failing broker tests**
+- [x] **Step 1: Write failing broker tests**
 
 Use fake downstream/upstream connections and dial authority. Cover:
 
@@ -141,7 +141,7 @@ Use fake downstream/upstream connections and dial authority. Cover:
 - late old-generation event cannot admit, complete, update capacity, or write downstream;
 - cancellation joins reader/writer and releases pending frame.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test -race -count=1 ./internal/proxy -run '^TestCodexTerminatingWSBroker'
@@ -149,7 +149,7 @@ go test -race -count=1 ./internal/proxy -run '^TestCodexTerminatingWSBroker'
 
 Expected: compile failure for missing broker/config/run methods.
 
-- [ ] **Step 3: Implement minimal broker interfaces**
+- [x] **Step 3: Implement minimal broker interfaces**
 
 ```go
 type codexWSUpstreamDialer interface {
@@ -171,11 +171,11 @@ func (broker *codexTerminatingWSBroker) Serve(
 
 Use one downstream reader, one serial downstream writer, and at most one active upstream reader generation. Retain only one pending frame. Rotate upstream only while lifecycle proves definite pre-admission and frame proves portable. Close and join old generation before installing next.
 
-- [ ] **Step 4: Add canonical terminal translation**
+- [x] **Step 4: Add canonical terminal translation**
 
 Translate bounded upstream handshake response/body to Codex `type:error` event with exact status/status_code and nested safe error fields, then send fixture-proven close code. Strip credentials, cookies, hop-by-hop, arbitrary panic/error text, and bodies over limit.
 
-- [ ] **Step 5: Run GREEN and stress**
+- [x] **Step 5: Run GREEN and stress**
 
 ```bash
 go test -race -count=1 ./internal/proxy -run '^TestCodexTerminatingWSBroker'
@@ -193,25 +193,25 @@ go test -race -count=100 ./internal/proxy -run '^TestCodexTerminatingWSBroker.*(
 - Modify: `cmd/cq/codex_validate.go`
 - Modify: `cmd/cq/codex_validate_test.go`
 
-- [ ] **Step 1: Write failing production-boundary tests**
+- [x] **Step 1: Write failing production-boundary tests**
 
 Prove effective WS `enforce` delegates to terminating broker after downstream upgrade; `observe/off` preserve legacy relay; missing/invalid marker inhibits enforcement; generic `1011 upstream error` path is unreachable under enforce; no automatic credential/admin/system mutation call occurs.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 go test -race -count=1 ./internal/proxy ./cmd/cq -run 'Codex.*WebSocket.*(Enforce|Readiness|Authority)'
 ```
 
-- [ ] **Step 3: Wire private broker authority**
+- [x] **Step 3: Wire private broker authority**
 
 Construct broker from existing inventory, exact secret resolver, capacity ledger, schema-v3 route snapshot/runtime, default account, and installed build tuple. Keep API package-private. `server.go` owns upgrade/diagnostics only.
 
-- [ ] **Step 4: Advance WS readiness tuple**
+- [x] **Step 4: Advance WS readiness tuple**
 
 Require exact gates for frame authority, portability, admission, auth recovery, hard-429 rotation, terminal translation, generation fencing, compression/subprotocol, privacy, and installed CLI acceptance. Marker creation remains explicit and isolated; ordinary startup cannot mint it.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 ```bash
 go test -race -count=1 ./internal/proxy ./cmd/cq -run 'Codex.*WebSocket.*(Enforce|Readiness|Authority)'
@@ -225,18 +225,18 @@ go test -race -count=1 ./internal/proxy ./cmd/cq -run 'Codex.*WebSocket.*(Enforc
 - Modify: `docs/superpowers/plans/2026-08-08-codex-turn-aware-routing.md`
 - Create: `docs/superpowers/evidence/2026-08-11-codex-websocket-enforcement.json`
 
-- [ ] **Step 1: Add deterministic installed-harness cases**
+- [x] **Step 1: Add deterministic broker and installed-harness cases**
 
-Synthetic upstream must prove same-turn repetition, successor warm affinity, parallel lanes, exact hard-429 pre-admission rotation, admitted hard-429 non-migration, upstream reconnect, terminal errors, subprotocol/compression, exact counts, zero late mutations, and zero raw identity/credential/frame persistence.
+Synthetic upstream and broker tests prove successor warm affinity, exact hard-429 pre-admission rotation, admitted hard-429 non-migration, same-account auth recovery, terminal errors, subprotocol/compression, zero late-generation mutation, and bounded frame ownership. Installed Codex CLI proves dynamic strong-frame routing and exact PONG against isolated candidate.
 
-- [ ] **Step 2: Run focused gates**
+- [x] **Step 2: Run focused gates**
 
 ```bash
-go test -race -count=100 ./internal/proxy -run 'CodexResponsesWS|CodexTerminatingWSBroker|CodexWSLifecycle|CodexResync|CodexLease'
-go test -race -count=100 ./cmd/cq -run 'Codex.*WebSocket|Proxy.*WebSocket'
+go test -race -count=100 ./internal/proxy -run 'TestCodexTerminatingWSBroker|TestCodexWSLifecycle|TestCodexWSPendingFrame|TestServerCodexWebSocketEnforce'
+go test -race -count=1 ./internal/proxy ./cmd/cq -run 'Codex.*WebSocket|Proxy.*WebSocket'
 ```
 
-- [ ] **Step 3: Run full repository gates**
+- [x] **Step 3: Run full repository gates**
 
 ```bash
 go test -race -count=1 ./...
@@ -245,10 +245,10 @@ go build ./...
 git diff --check
 ```
 
-- [ ] **Step 4: Run real Codex CLI only against isolated candidate**
+- [x] **Step 4: Run real Codex CLI only against isolated candidate**
 
 Use explicit custom-provider base URL on unused candidate port. Record live proxy PID/listener before and after; they must remain byte-for-byte unchanged. Do not kill, restart, rebind, bootout, or repair live port `19280`.
 
-- [ ] **Step 5: Promote and audit all 15 stages**
+- [x] **Step 5: Promote and audit all 15 stages**
 
 Write WS marker only after exact isolated evidence passes. Re-read every stage checkbox and named gate against current source/test/runtime evidence. Keep unchecked anything missing. Update concise report, verify clean worktree after local commits, and do not push or open a PR.

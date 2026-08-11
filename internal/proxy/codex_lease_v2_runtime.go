@@ -619,6 +619,73 @@ func (handle *CodexLeaseRequestHandle) AdmitHTTP2xxContext(ctx context.Context, 
 	return admitted, nil
 }
 
+// AdmitWebSocketContext atomically persists provider admission and the exact
+// downstream/upstream socket generation that produced it. A downstream 101 is
+// not evidence: callers must supply either provider turn state or a validated
+// response.created event.
+func (handle *CodexLeaseRequestHandle) AdmitWebSocketContext(ctx context.Context, evidence CodexWebSocketAdmissionEvidence) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil || handle.account == "" {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil WebSocket admission context", ErrCodexLeaseInvalidMutation)
+	}
+	if err := evidence.validate(); err != nil {
+		return nil, err
+	}
+	release, err := handle.runtime.beginAccountMutation(ctx, handle.account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
+		return nil, err
+	}
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || (current.State != CodexAttemptDispatched && current.State != CodexAttemptStreaming) {
+		return nil, ErrCodexLeaseTransition
+	}
+	firstAttemptAdmission := current.State == CodexAttemptDispatched
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	if (desired.DownstreamSocketGeneration != 0 && desired.DownstreamSocketGeneration != evidence.DownstreamGeneration) ||
+		(desired.UpstreamSocketGeneration != 0 && desired.UpstreamSocketGeneration != evidence.UpstreamGeneration) {
+		return nil, ErrCodexWSStaleGeneration
+	}
+	if firstAttemptAdmission {
+		for index := range desired.Attempts {
+			if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+				desired.Attempts[index].State = CodexAttemptStreaming
+				break
+			}
+		}
+	}
+	if err := handle.applyAdmissionEvidence(&desired, CodexHTTPAdmissionEvidence{
+		TurnState: evidence.TurnState, HasTurnState: evidence.HasTurnState,
+	}); err != nil {
+		return nil, err
+	}
+	if evidence.ResponseID != "" {
+		if err := handle.applyResponseEvidence(&desired, CodexHTTPResponseEvidence{
+			ResponseAnchor: evidence.ResponseID, HasResponseAnchor: true,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	desired.DownstreamSocketGeneration = evidence.DownstreamGeneration
+	desired.UpstreamSocketGeneration = evidence.UpstreamGeneration
+	desired.SocketLineageExtinct = false
+	desired.State = LeaseBoundActive
+	if firstAttemptAdmission {
+		desired.AttemptRefs++
+		desired.ResponseObserverRefs++
+	}
+	return handle.commitRequestMutation(fence, desired, true)
+}
+
 func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGenerationFence, evidence CodexHTTPAdmissionEvidence) (*CodexLeaseRequestHandle, bool, error) {
 	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
 	if !ok || current.State != CodexAttemptDispatched {

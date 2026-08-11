@@ -334,8 +334,86 @@ func TestDefaultCodexHTTPReadinessTupleCoversConservativeRuntime(t *testing.T) {
 	if !httpReq.EnforceImplemented {
 		t.Fatal("HTTP enforcement unexpectedly unavailable")
 	}
-	if wsReq.EnforceImplemented || wsReq.SemanticsRevision != "" || len(wsReq.RequiredGates) != 0 || wsReq.FixtureHash != "" {
-		t.Fatalf("WebSocket readiness advanced early: %#v", wsReq)
+	wantWSGates := []string{
+		"strong-frame-authority",
+		"portable-pre-admission-hard429-rotation",
+		"same-account-candidate-auth-recovery",
+		"admitted-no-migration",
+		"persistent-account-upstream",
+		"upstream-generation-fence",
+		"canonical-terminal-error",
+		"compression-subprotocol",
+		"installed-isolated-client",
+	}
+	if !wsReq.EnforceImplemented || wsReq.SemanticsRevision != CodexWebSocketReadinessSemanticsRevision ||
+		wsReq.FixtureHash != CodexWebSocketFixtureHash || !reflect.DeepEqual(wsReq.RequiredGates, wantWSGates) {
+		t.Fatalf("WebSocket readiness tuple = %#v", wsReq)
+	}
+}
+
+func TestBuildCodexWebSocketReadinessMarkerRequiresExactIsolatedEvidence(t *testing.T) {
+	_, required := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	evidence := CodexWebSocketReadinessEvidence{
+		Source: CodexWebSocketReadinessEvidenceInstalledIsolated,
+		Tuple:  readinessTuple(required),
+		Gates: CodexWebSocketReadinessGateEvidence{
+			StrongFrameAuthorityCases:             1,
+			PortablePreAdmissionHard429Rotations:  1,
+			SameAccountCandidateAuthRecoveryCases: 1,
+			AdmittedNoMigrationCases:              1,
+			PersistentAccountUpstreamCases:        1,
+			UpstreamGenerationFenceCases:          1,
+			CanonicalTerminalErrorCases:           1,
+			CompressionSubprotocolCases:           1,
+		},
+		Acceptance: CodexWebSocketAcceptanceResult{
+			InstalledVersion:      required.ClientBuild,
+			DownstreamConnections: 1,
+			WebSocketRequests:     1,
+			UpstreamDials:         1,
+			PongVerified:          true,
+		},
+	}
+	marker, err := buildCodexWebSocketReadinessMarker(evidence, required, time.Unix(30_000, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marker.Transport != CodexRoutingWebSocket || !reflect.DeepEqual(marker.CompletedGates, required.RequiredGates) {
+		t.Fatalf("WebSocket marker = %#v", marker)
+	}
+
+	unsafe := evidence
+	unsafe.Gates.LateGenerationMutations = 1
+	if _, err := buildCodexWebSocketReadinessMarker(unsafe, required, time.Now()); err == nil {
+		t.Fatal("unsafe late generation evidence minted marker")
+	}
+	notInstalled := evidence
+	notInstalled.Source = CodexWebSocketReadinessEvidenceSynthetic
+	if _, err := buildCodexWebSocketReadinessMarker(notInstalled, required, time.Now()); err == nil {
+		t.Fatal("synthetic-only WebSocket evidence minted marker")
+	}
+}
+
+func TestSaveCodexWebSocketReadinessMarkerDurablyRoundTrips(t *testing.T) {
+	_, required := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
+	marker := testCodexMarker(required)
+	marker.CQExecutableSHA256 = ""
+	marker.ClientExecutableSHA256 = ""
+	marker.ServiceKind = ""
+	marker.ServiceIdentitySHA256 = ""
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCodexWebSocketReadinessMarkerDurably(dir, marker); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadCodexReadinessMarker(dir, CodexRoutingWebSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCodexReadinessMarker(loaded, required); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -90,6 +90,9 @@ type Server struct {
 	CodexHealth            func() CodexHealth
 	CodexRequests          *CodexRequestRouter
 	CodexWebSocketExecutor ExplicitWebSocketExecutor
+	// CodexWebSocketBroker owns readiness-gated terminating WebSocket routing.
+	// Nil fails closed when WebSocket enforcement is effective.
+	CodexWebSocketBroker CodexWebSocketRoutingHandler
 	// CodexNativeHTTP may claim readiness-gated or retained-fence native traffic.
 	// Nil or a declined untouched request preserves the off/observe path below.
 	CodexNativeHTTP CodexNativeHTTPRoutingHandler
@@ -1019,10 +1022,11 @@ func (s *Server) parseCodexHTTPEnforcementDecoded(body []byte, header http.Heade
 	return s.CodexHTTPEnforcer.parseDecoded(body, header)
 }
 
-// proxyCodexUpgrade handles WebSocket upgrade requests to /responses by
-// reverse-proxying to the Codex upstream. Explicit-account execution injects
-// auth on the initial HTTP upgrade request; after upgrade, supervised pumps
-// connection is relayed without further intervention.
+// proxyCodexUpgrade handles WebSocket upgrade requests to /responses. Enforced
+// routing accepts the local downstream first, then the terminating broker reads
+// the strong response.create frame, selects its durable account, and owns the
+// account-bound upstream lifecycle. Legacy routing retains first-frame dial and
+// blind relay behaviour.
 //
 // Note: native Codex WebSocket traffic is intentionally out of scope for
 // headroom compression — the handshake body is minimal and the subsequent
@@ -1031,6 +1035,12 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	statusCode := 0
 	diagError := ""
+	routeKind := "codex_legacy_websocket"
+	_, wsMode := s.codexRoutingHealth()
+	webSocketEnforcing := wsMode.Effective == CodexRoutingEnforce
+	if webSocketEnforcing {
+		routeKind = "codex_websocket_broker"
+	}
 	ctx, routeDiag := withRouteDiagnostics(r.Context())
 	r = r.WithContext(ctx)
 	defer func() {
@@ -1039,7 +1049,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			Method:     r.Method,
 			Path:       r.URL.Path,
 			Provider:   "codex",
-			RouteKind:  "codex_legacy_websocket",
+			RouteKind:  routeKind,
 			StatusCode: statusCode,
 			LatencyMS:  time.Since(start).Milliseconds(),
 			Error:      diagError,
@@ -1049,18 +1059,30 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.emitDiagnostics(event)
 	}()
 
-	if router, executor := s.codexWebSocketRouting(); router == nil || executor == nil {
+	if webSocketEnforcing && s.CodexWebSocketBroker == nil {
 		statusCode = http.StatusServiceUnavailable
-		diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
-		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
+		diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing unavailable")
+		writeError(w, http.StatusServiceUnavailable, "api_error", "Codex WebSocket routing unavailable")
 		return
 	}
-	upstreamURL, err := codexAppServerWebSocketURL(s.Config.CodexUpstream)
-	if err != nil {
-		statusCode = http.StatusInternalServerError
-		diagError = diagnosticsErrorCode("api_error", "invalid codex upstream URL")
-		writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
-		return
+	if !webSocketEnforcing {
+		if router, executor := s.codexWebSocketRouting(); router == nil || executor == nil {
+			statusCode = http.StatusServiceUnavailable
+			diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
+			writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
+			return
+		}
+	}
+	upstreamURL := ""
+	if !webSocketEnforcing {
+		var err error
+		upstreamURL, err = codexAppServerWebSocketURL(s.Config.CodexUpstream)
+		if err != nil {
+			statusCode = http.StatusInternalServerError
+			diagError = diagnosticsErrorCode("api_error", "invalid codex upstream URL")
+			writeError(w, http.StatusInternalServerError, "api_error", "invalid codex upstream URL")
+			return
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade) provider=codex (native)\n", r.Method)
@@ -1077,6 +1099,14 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	statusCode = http.StatusSwitchingProtocols
 	defer clientConn.Close()
 	clientConn.SetReadLimit(maxRequestBody)
+
+	if webSocketEnforcing {
+		if err := s.CodexWebSocketBroker.Serve(r.Context(), clientConn, r.Header); err != nil {
+			diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing failed")
+			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
+		}
+		return
+	}
 
 	messageType, message, err := clientConn.ReadMessage()
 	if err != nil {

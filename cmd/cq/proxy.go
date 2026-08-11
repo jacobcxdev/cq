@@ -607,6 +607,20 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("Codex native HTTP routing: %w", err)
 	}
+	codexWebSocketBroker, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
+		Status:            codexRouting.WebSocket,
+		Inventory:         credentialControl,
+		Capacity:          codexCapacity,
+		Routes:            codexRoutes,
+		Runtime:           codexPlanRuntime,
+		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
+		Executor:          codexWebSocketExecutor,
+		Upstream:          cfg.CodexUpstream,
+		Now:               time.Now,
+	})
+	if err != nil {
+		return fmt.Errorf("Codex WebSocket routing: %w", err)
+	}
 	codexCanaryStop, err := newProxyCodexCanaryStop(activeCanary, codexContinuity, codexNativeHTTP)
 	if err != nil {
 		return err
@@ -655,6 +669,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		},
 		CodexRequests:                    codexRequestRouter,
 		CodexWebSocketExecutor:           codexWebSocketExecutor,
+		CodexWebSocketBroker:             codexWebSocketBroker,
 		Headroom:                         headroom,
 		Diag:                             diagnostics,
 		PayloadDiag:                      payloadDiag,

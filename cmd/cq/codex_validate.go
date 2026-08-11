@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,13 +13,18 @@ import (
 
 const codexCaptureInputLimit = 10 << 20
 
+var runCodexInstalledWebSocketValidationFn = proxy.RunCodexInstalledWebSocketValidation
+
 func runCodexValidate(args []string) error {
 	if len(args) == 0 || helpRequested(args) {
-		fmt.Fprintln(os.Stdout, "Usage: cq codex validate capture ... | http --client-build BUILD [--state-dir DIR]")
+		fmt.Fprintln(os.Stdout, "Usage: cq codex validate capture ... | http --client-build BUILD [--state-dir DIR] | websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]")
 		return nil
 	}
 	if args[0] == "http" {
 		return runCodexHTTPValidation(args[1:])
+	}
+	if args[0] == "websocket" {
+		return runCodexWebSocketValidation(args[1:])
 	}
 	if args[0] != "capture" {
 		return fmt.Errorf("unknown Codex validation command: %s", args[0])
@@ -66,6 +72,37 @@ func runCodexValidate(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Wrote sanitised Codex fixture to %s\n", outputPath)
+	return nil
+}
+
+func runCodexWebSocketValidation(args []string) error {
+	var clientBuild, clientExecutable, stateDir string
+	for index := 0; index < len(args); index++ {
+		if index+1 >= len(args) {
+			return fmt.Errorf("%s requires a value", args[index])
+		}
+		value := args[index+1]
+		switch args[index] {
+		case "--client-build":
+			clientBuild = value
+		case "--client-executable":
+			clientExecutable = value
+		case "--state-dir":
+			stateDir = value
+		default:
+			return fmt.Errorf("unknown Codex WebSocket validation argument: %s", args[index])
+		}
+		index++
+	}
+	clientBuild = strings.TrimSpace(clientBuild)
+	if clientBuild == "" {
+		return fmt.Errorf("Codex WebSocket validation requires --client-build")
+	}
+	marker, err := runCodexInstalledWebSocketValidationFn(context.Background(), version, clientBuild, clientExecutable, stateDir)
+	if err != nil {
+		return fmt.Errorf("Codex WebSocket isolated validation failed: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Codex WebSocket isolated readiness recorded for %s (validated %s)\n", marker.ClientBuild, marker.ValidatedAt.UTC().Format(time.RFC3339))
 	return nil
 }
 

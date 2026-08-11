@@ -52,8 +52,10 @@ const (
 	CurrentCodexLeaseSchema     = 3
 	// CodexHTTPReadinessSemanticsRevision invalidates proof produced before
 	// conservative HTTP routing and replay became one frozen runtime contract.
-	CodexHTTPReadinessSemanticsRevision = "http-conservative-routing-v3"
-	CodexHTTPFixtureHash                = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
+	CodexHTTPReadinessSemanticsRevision      = "http-conservative-routing-v3"
+	CodexHTTPFixtureHash                     = "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1"
+	CodexWebSocketReadinessSemanticsRevision = "websocket-terminating-routing-v1"
+	CodexWebSocketFixtureHash                = "858d90f3e827194cdfc0dbf5e11d35dfb25e7afc395cf547f17a30936889f9f9"
 )
 
 var codexHTTPRequiredGates = []string{
@@ -65,6 +67,18 @@ var codexHTTPRequiredGates = []string{
 	"admitted-no-migration",
 	"v2-journal-runtime",
 	"installed-listener",
+}
+
+var codexWebSocketRequiredGates = []string{
+	"strong-frame-authority",
+	"portable-pre-admission-hard429-rotation",
+	"same-account-candidate-auth-recovery",
+	"admitted-no-migration",
+	"persistent-account-upstream",
+	"upstream-generation-fence",
+	"canonical-terminal-error",
+	"compression-subprotocol",
+	"installed-isolated-client",
 }
 
 // CodexReadinessMarker is explicit, versioned proof for one enforcement tuple.
@@ -186,6 +200,46 @@ type CodexHTTPReadinessGateEvidence struct {
 	AutomaticAuthWrites                 uint64
 }
 
+type CodexWebSocketReadinessEvidenceSource string
+
+const (
+	CodexWebSocketReadinessEvidenceSynthetic         CodexWebSocketReadinessEvidenceSource = "synthetic-only"
+	CodexWebSocketReadinessEvidenceInstalledIsolated CodexWebSocketReadinessEvidenceSource = "installed-isolated-client"
+)
+
+type CodexWebSocketReadinessEvidence struct {
+	Source     CodexWebSocketReadinessEvidenceSource
+	Tuple      CodexReadinessTuple
+	Gates      CodexWebSocketReadinessGateEvidence
+	Acceptance CodexWebSocketAcceptanceResult
+}
+
+type CodexWebSocketReadinessGateEvidence struct {
+	StrongFrameAuthorityCases             uint64
+	PortablePreAdmissionHard429Rotations  uint64
+	SameAccountCandidateAuthRecoveryCases uint64
+	AdmittedNoMigrationCases              uint64
+	PersistentAccountUpstreamCases        uint64
+	UpstreamGenerationFenceCases          uint64
+	CanonicalTerminalErrorCases           uint64
+	CompressionSubprotocolCases           uint64
+	RoutingMismatches                     uint64
+	UnknownLifecycleEvents                uint64
+	LateGenerationMutations               uint64
+	RawIdentifierLeaks                    uint64
+	AutomaticAuthWrites                   uint64
+}
+
+type CodexWebSocketAcceptanceResult struct {
+	InstalledVersion      string
+	DownstreamConnections uint64
+	WebSocketRequests     uint64
+	UpstreamDials         uint64
+	UnexpectedRoutes      uint64
+	EgressAttempts        uint64
+	PongVerified          bool
+}
+
 // CodexModeStatus is immutable for one proxy process.
 type CodexModeStatus struct {
 	Configured                  CodexRoutingMode `json:"configured"`
@@ -233,6 +287,11 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 	httpReq.EnforceImplemented = true
 	wsReq := common
 	wsReq.Transport = CodexRoutingWebSocket
+	wsReq.SemanticsRevision = CodexWebSocketReadinessSemanticsRevision
+	wsReq.RetryBudget = 1
+	wsReq.FixtureHash = CodexWebSocketFixtureHash
+	wsReq.RequiredGates = append([]string(nil), codexWebSocketRequiredGates...)
+	wsReq.EnforceImplemented = true
 	return httpReq, wsReq
 }
 
@@ -634,6 +693,82 @@ func buildCodexHTTPReadinessMarker(evidence CodexHTTPReadinessEvidence, required
 		return CodexReadinessMarker{}, err
 	}
 	return marker, nil
+}
+
+func buildCodexWebSocketReadinessMarker(evidence CodexWebSocketReadinessEvidence, required CodexTransportRequirements, validatedAt time.Time) (CodexReadinessMarker, error) {
+	if required.Transport != CodexRoutingWebSocket {
+		return CodexReadinessMarker{}, fmt.Errorf("WebSocket readiness requires WebSocket transport")
+	}
+	if evidence.Source != CodexWebSocketReadinessEvidenceInstalledIsolated {
+		return CodexReadinessMarker{}, fmt.Errorf("WebSocket readiness requires installed isolated-client evidence")
+	}
+	if evidence.Tuple != readinessTuple(required) {
+		return CodexReadinessMarker{}, fmt.Errorf("WebSocket readiness evidence tuple mismatch")
+	}
+	completedGates, err := codexWebSocketCompletedReadinessGates(evidence.Gates)
+	if err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	if !sameUniqueGates(completedGates, required.RequiredGates) {
+		return CodexReadinessMarker{}, fmt.Errorf("WebSocket readiness derived gate set mismatch")
+	}
+	if err := validateCodexWebSocketAcceptanceEvidence(evidence.Acceptance, required.ClientBuild); err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	marker := CodexReadinessMarker{
+		Version:           CodexReadinessMarkerVersion,
+		Transport:         required.Transport,
+		CQBuild:           required.CQBuild,
+		ParserSchema:      required.ParserSchema,
+		LeaseSchema:       required.LeaseSchema,
+		SemanticsRevision: required.SemanticsRevision,
+		ClientBuild:       required.ClientBuild,
+		RetryBudget:       required.RetryBudget,
+		FixtureHash:       required.FixtureHash,
+		InstalledResult:   "passed",
+		CompletedGates:    completedGates,
+		ValidatedAt:       validatedAt,
+	}
+	if err := ValidateCodexReadinessMarker(marker, required); err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	return marker, nil
+}
+
+func codexWebSocketCompletedReadinessGates(evidence CodexWebSocketReadinessGateEvidence) ([]string, error) {
+	cases := []struct {
+		count uint64
+		gate  string
+	}{
+		{evidence.StrongFrameAuthorityCases, "strong-frame-authority"},
+		{evidence.PortablePreAdmissionHard429Rotations, "portable-pre-admission-hard429-rotation"},
+		{evidence.SameAccountCandidateAuthRecoveryCases, "same-account-candidate-auth-recovery"},
+		{evidence.AdmittedNoMigrationCases, "admitted-no-migration"},
+		{evidence.PersistentAccountUpstreamCases, "persistent-account-upstream"},
+		{evidence.UpstreamGenerationFenceCases, "upstream-generation-fence"},
+		{evidence.CanonicalTerminalErrorCases, "canonical-terminal-error"},
+		{evidence.CompressionSubprotocolCases, "compression-subprotocol"},
+	}
+	completed := make([]string, 0, len(codexWebSocketRequiredGates))
+	for _, measured := range cases {
+		if measured.count == 0 {
+			return nil, fmt.Errorf("Codex WebSocket readiness gate %q has no measured case", measured.gate)
+		}
+		completed = append(completed, measured.gate)
+	}
+	if evidence.RoutingMismatches != 0 || evidence.UnknownLifecycleEvents != 0 || evidence.LateGenerationMutations != 0 ||
+		evidence.RawIdentifierLeaks != 0 || evidence.AutomaticAuthWrites != 0 {
+		return nil, fmt.Errorf("Codex WebSocket readiness observed unsafe isolated evidence")
+	}
+	return append(completed, "installed-isolated-client"), nil
+}
+
+func validateCodexWebSocketAcceptanceEvidence(result CodexWebSocketAcceptanceResult, clientBuild string) error {
+	if result.InstalledVersion != clientBuild || result.DownstreamConnections == 0 || result.WebSocketRequests == 0 || result.UpstreamDials == 0 ||
+		result.UnexpectedRoutes != 0 || result.EgressAttempts != 0 || !result.PongVerified {
+		return fmt.Errorf("Codex WebSocket installed isolated-client evidence incomplete")
+	}
+	return nil
 }
 
 func codexHTTPCompletedReadinessGates(evidence CodexHTTPReadinessGateEvidence) ([]string, error) {

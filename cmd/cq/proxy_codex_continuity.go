@@ -59,6 +59,20 @@ type proxyCodexNativeHTTPDependencies struct {
 	newRetainedHandler func(proxy.CodexRetainedNativeHTTPRequestPlanner, proxy.CodexNativeHTTPRequestSession, string) (proxy.CodexNativeHTTPRoutingHandler, error)
 }
 
+type proxyCodexWebSocketDependencies struct {
+	Status            proxy.CodexModeStatus
+	Inventory         codexprov.CredentialInventory
+	Capacity          *proxy.CodexCapacityLedger
+	Routes            proxy.CodexHTTPRequestRouteSnapshotter
+	Runtime           proxy.CodexHTTPRequestPlanRuntime
+	DefaultAccountKey codexprov.AccountKey
+	Executor          proxy.ExplicitWebSocketExecutor
+	Upstream          string
+	Now               func() time.Time
+
+	newHandler func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, string) (proxy.CodexWebSocketRoutingHandler, error)
+}
+
 func (continuity *proxyCodexContinuity) Close() error {
 	if continuity == nil || continuity.Coordinator == nil {
 		return nil
@@ -127,6 +141,43 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 	}
 	if handler == nil {
 		return nil, errors.New("Codex native HTTP handler unavailable")
+	}
+	return handler, nil
+}
+
+func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWebSocketRoutingHandler, error) {
+	if deps.Status.Effective != proxy.CodexRoutingEnforce {
+		return nil, nil
+	}
+	if deps.Status.ModeEpoch == 0 || deps.Status.AuthoritativeEpoch != deps.Status.ModeEpoch {
+		return nil, errors.New("Codex WebSocket authority epoch unavailable")
+	}
+	if deps.Inventory == nil || deps.Capacity == nil || deps.Routes == nil || deps.Runtime == nil || deps.Executor == nil || deps.Now == nil {
+		return nil, errors.New("Codex WebSocket dependencies unavailable")
+	}
+	planner := &proxy.CodexHTTPRequestPlanFactory{
+		Inventory:         deps.Inventory,
+		Capacity:          deps.Capacity,
+		Routes:            deps.Routes,
+		Runtime:           deps.Runtime,
+		DefaultAccountKey: deps.DefaultAccountKey,
+		Authority: proxy.CodexLeaseAuthorityPolicy{
+			ModeEpoch:                   deps.Status.ModeEpoch,
+			Authoritative:               true,
+			RetainedAuthoritativeEpochs: append([]uint64(nil), deps.Status.RetainedAuthoritativeEpochs...),
+		},
+		Now: deps.Now,
+	}
+	newHandler := deps.newHandler
+	if newHandler == nil {
+		newHandler = proxy.NewCodexTerminatingWebSocketHandler
+	}
+	handler, err := newHandler(planner, deps.Executor, deps.Upstream)
+	if err != nil {
+		return nil, fmt.Errorf("construct Codex WebSocket handler: %w", err)
+	}
+	if handler == nil {
+		return nil, errors.New("Codex WebSocket handler unavailable")
 	}
 	return handler, nil
 }

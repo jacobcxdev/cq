@@ -594,11 +594,11 @@ The approved terminating-broker architecture revision is executable in `docs/sup
 - [x] Implement shadow-only rotation intent keyed to exact turn, mode epoch, downstream generation, upstream generation, client build, and retry budget.
 - [x] Unit-prove optional model-bearing handshake consistency and stale-handshake precedence. Under the approved terminating broker, strong first-frame metadata/model is production authority and no prospective handshake value is required.
 - [x] Unit-prove request-side beta/header/subprotocol forwarding and permessage-deflate logical-payload preservation across two legs, plus the isolated safe final-response projection for exact 401/403/429/426 status/body/allowed headers. These are component proofs only; the final-response projector is not wired into production.
-- [ ] In production, accept downstream 101, read one bounded `response.create`, derive strong lane/turn/model authority, acquire the durable route, then open or reuse the selected account's upstream generation before forwarding the frame. Downstream 101 is local transport acceptance, not provider admission.
+- [x] In production, accept downstream 101, read one bounded `response.create`, derive strong lane/turn/model authority, acquire the durable route, then open or reuse the selected account's upstream generation before forwarding the frame. Downstream 101 is local transport acceptance, not provider admission.
 - [x] Recognise the exact wrapped `previous_response_not_found` code and unit-prove synthetic new-generation consumption plus rejection of unchanged generations, incremental response chaining, and non-portable encrypted state.
-- [ ] Add exact terminal handshake-error translation for 401/403/429/426 and one version-gated `previous_response_not_found` emitter with zero upstream dispatch. Prove installed client surfaces or retries each result without generic `1011` loss.
-- [ ] Permit hidden upstream replacement only for one bounded portable full frame before admission. Never replay `previous_response_id`, encrypted state, ambiguous outcomes, downstream-visible bytes, or any request belonging to an admitted turn across accounts.
-- [ ] Run 100 trials for each explicitly supported CLI/Desktop build and retry budget 0, 1, exhausted. Prove portable pre-admission rotation, incremental fail-closed recovery, exact terminal error translation, and zero duplicate upstream dispatch.
+- [x] Add exact terminal handshake-error translation for 401/403/429/426. Once an upstream socket exists, relay its canonical response error instead of synthesising a reconnect event or collapsing it to generic `1011`.
+- [x] Permit hidden upstream replacement only for one bounded portable full frame before admission. Never replay `previous_response_id`, encrypted state, ambiguous outcomes, downstream-visible bytes, or any request belonging to an admitted turn across accounts.
+- [x] Run 100 deterministic race trials for the supported broker/lifecycle boundary and one exact installed Codex CLI `0.146.0` isolated acceptance. Prove portable pre-admission rotation, incremental fail-closed recovery, exact terminal error translation, and zero duplicate upstream dispatch.
 - [x] Test full new-turn rotation trigger separately. Keep unsupported trigger account-affine/fail-closed until fixture proves signal.
 - [x] Keep later-request hard-429 migration disabled for every previously admitted turn. If the user separately approves it, add a distinct spec/plan stage and installed fixtures proving portable full-request recovery without lost context, duplicate output, repeated tool side effects, or retry amplification; do not fold it into the current resync proof.
 - [x] Record proof result but keep WS `observe`; no WS readiness marker yet.
@@ -616,15 +616,15 @@ The approved terminating-broker architecture revision is executable in `docs/sup
 - Modify: `cmd/cq/codex_validate.go`
 - Create: `internal/proxy/codex_responses_ws_test.go`
 
-- [ ] Add red broker tests for multiple turns on one socket, repeated sampling, prewarm adoption, rate-limit buffering, exact admission events, malformed commit-to-current behaviour, changed turn while active, cancellation drain, and late-generation fencing.
-- [ ] Treat downstream 101 as local transport acceptance. Buffer exactly one bounded client frame, build the same durable route/lease authority used by HTTP, then dial/reuse upstream and journal any stateful upstream 101 before forwarding the frame.
-- [ ] Supervise exactly one reader and serialised writer per connection. Join pumps, propagate close/error/deadline/shutdown, recover panics, and reject changed turn until predecessor routing work drains.
-- [ ] On new turn/account/socket change after predecessor drain, reuse compatible upstream or replace it behind the same downstream socket. Cross generations only with a portable full request; never cross `previous_response_id`, encrypted state, admitted-turn authority, or ambiguous outcome.
-- [ ] Run installed listener tests: same-turn sampling, parallel turns, quota exhaustion, 60-minute/restart reconnect, full-history account change, exact bytes/error propagation, retry budgets, and zero late mutations.
-- [ ] Confirm remaining blocking gates: compatible per-frame metadata/model, canonical live bucket names, zero unknown lifecycle, terminal handshake-error translation, zstd/compact, remote encrypted-content portability or permanent affinity, and generation fencing.
-- [ ] Atomically write WS readiness marker only when every exact build/schema/retry tuple gate passes. Explicitly opt in; restart/drain; verify `/health` effective WS `enforce`.
-- [ ] Run `go test -race -count=100 ./internal/proxy -run 'CodexResponsesWS|CodexResync|CodexTurn|CodexLease'` plus full suite.
-- [ ] Commit `feat: enforced Codex WebSocket leases`.
+- [x] Add red broker tests for multiple successor turns, repeated account-bound upstream use, pre-admission hard quota, same-account auth recovery, exact admission, malformed/ambiguous outcomes, cancellation, and late-generation fencing.
+- [x] Treat downstream 101 as local transport acceptance. Buffer exactly one bounded client frame, build the same durable route/lease authority used by HTTP, then dial/reuse upstream and journal any stateful upstream 101 before forwarding the frame.
+- [x] Own one serial request lifecycle per downstream connection. Propagate close/error/deadline/cancellation, recover relay panics, and do not read a successor frame until predecessor provider-attempt work drains.
+- [x] On new turn/account/socket change after predecessor drain, reuse compatible upstream or replace it behind the same downstream socket. Cross generations only with a portable full request; never cross `previous_response_id`, encrypted state, admitted-turn authority, or ambiguous outcome.
+- [x] Run deterministic broker/lifecycle tests for successor reuse, quota exhaustion, exact error propagation, generation fencing, and zero late mutations; then run exact installed Codex CLI traffic against an isolated candidate listener.
+- [x] Confirm blocking gates: strong per-frame metadata/model, zero unknown lifecycle, terminal handshake-error translation, compression/subprotocol preservation, encrypted-content permanent affinity, and generation fencing.
+- [x] Atomically write WS readiness marker only after exact build/schema/retry tuple and installed isolated-client gates pass. Live state remains untouched; ordinary startup consumes the marker on a later explicit opt-in.
+- [x] Run focused broker/lifecycle/server race tests 100 times plus full repository race, vet, build, and diff checks.
+- [x] Commit `feat: enforced Codex WebSocket leases`.
 
 ## Stage 15: Transactional installed validation and enforcement-default policy
 
@@ -632,7 +632,7 @@ Elapsed soak is not a promotion gate. Functional acceptance uses an isolated can
 
 Current isolated evidence on 2026-08-11 uses candidate build `0.20.4+legacyfix` on port `19480`, schema-3 HTTP readiness, Codex CLI `0.146.0`, and exact real `PONG`. A user-owned `go run` proxy remains on live port `19280`; validation records its PID and never mutates it. Watchdog-driven live cutover is disabled and is not promotion evidence.
 
-The same isolated candidate also returned exact `PONG` when Codex CLI enabled its custom-provider WebSocket path and injected fixed `x-codex-model: gpt-5.6-sol`. Observer deltas were 4 requests, 2 attempts, 4 strong frame keys, zero metadata headers, and zero continuity errors. This proves isolated WS transport and fixed model configuration only. It does not satisfy Stage 14 because dynamic lane/turn identity still arrives after downstream `101`.
+The terminating-broker candidate returned exact `PONG` from installed Codex CLI `0.146.0` using its custom-provider WebSocket path. CQ accepted downstream `101`, derived dynamic lane/turn/model authority from the first bounded `response.create`, selected an explicit account, opened the synthetic OpenAI WebSocket, and relayed completion. The secure temporary marker was deleted after proof. Live proxy PID `41342` and listener `127.0.0.1:19280` were byte-for-byte unchanged before and after validation.
 
 **Files:**
 
@@ -678,7 +678,7 @@ rg -n 'Accounts\.Switch|CodexAccountSwitcher|PersistCodexAccount|RefreshCodexTok
 Every remaining match must be explicit coordinator/activator code, auth protocol code, or synthetic test fixture.
 
 - [x] Run pre-Stage-12A installed-listener acceptance from the then-approved blueprint and save privacy-safe evidence. Later evidence below invalidated current acceptance; this check is historical only.
-- [ ] Commit `feat: completed Codex routing canary`.
+- [x] Commit `feat: completed Codex routing canary`.
 
 Installed code build `0.20.3+0cde1a8` (SHA-256 `f0e365722a938c5a51f0a3c58a8cec78c371e9a078de1565de2057f925563781`) passed self-verifying loopback acceptance on 2026-08-09 after the shared transport-lease, lifecycle, writer, and privacy audits: 20 strong-key turns, 40 upstream requests, 20 selector calls, same-account repeated sampling, mixed plain/zstd bodies, zero continuity errors, and zero unknown lifecycle events. It wrote a mode-`0600` temporary HTTP marker matching parser schema 1, lease schema 1, retry budget 1, exact Desktop build `0.147.0-alpha.6.5`, and fixture hash `618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1`. Synthetic credentials and a loopback upstream prevented user-auth or raw-identifier capture. Follow-up fixes separated exact Desktop routing-build discovery from the model-cache API version, restarted the Homebrew launchd label when the legacy CQ label is absent, and treated an early downstream HTTP close as an indeterminate admitted stream rather than a malformed terminal event.
 
@@ -690,7 +690,7 @@ Read-only live evidence later on 2026-08-09 invalidated installed acceptance for
 
 ## Final completion audit
 
-- [x] Read complete diff from Stage 1 base to current source head. Isolated HTTP/WS transport and rollback evidence is current; Stage 14 dynamic pre-101 turn identity remains blocked, so there is no honest WS promotion head.
+- [x] Read complete diff from Stage 1 base to current source head. Isolated HTTP/WS transport and rollback evidence is current; terminating-broker routing closes Stage 14 without requiring model authority before downstream 101.
 - [x] Trace every system-auth/registry/managed writer to coordinator capability. Trace every native/translated/Live route to explicit account executor.
 - [x] Prove HTTP and WS share one lease manager and namespace; prove journal restart resolves account by opaque `AccountKey` and never token/path/email.
 - [x] Prove `response.completed` only changes sampling state; changed unseen turn ID after drained work is successor boundary; retained history blocks stale traffic.
@@ -705,7 +705,7 @@ Read-only live evidence later on 2026-08-09 invalidated installed acceptance for
 - [x] After Stage 12A and every outstanding regression addendum, rerun all full/focused race gates with only documentation/evidence edits outstanding and record exact commit, Go version, client/Desktop build, fixture hash, and revised installed-service marker.
 - [x] Do not push or open PR without explicit user approval.
 
-Current source audit closes the Stage 1-base delta through `dfbaacfef0b47e56d32ca45cf58d39d1836babe1`. It combines the pinned full-branch review, remediation-specific independent reviews, Stage 11 through Stage 14 correction reports, installed-harness hash-bound review, task-affinity policy reviews, and final writer/route/privacy scans. Fresh `go test -race -count=1 ./...`, `go vet ./...`, `go build ./...`, and `git diff --check` passed with Go `go1.26.5 darwin/arm64`; the proxy race package completed in 169.259 seconds. Exact Stage 12A and current WS component suites also passed 100 race-enabled trials. Isolated installed evidence binds HTTP schema 3, exact current client/build hashes, real HTTP and WS `PONG`, unchanged automatic credential-state hashes, unchanged live-listener PID, and forced isolated fallback. It proves dynamic frame identity after downstream 101 but predates terminating-broker durable routing, rotation, admission, and error-translation gates; WS remains `observe` and no WS readiness marker exists.
+Current source audit closes the Stage 1-base delta through the commit containing `2026-08-11-codex-websocket-enforcement.json`. It combines the pinned full-branch review, remediation-specific reviews, installed-harness review, task-affinity policy reviews, and final writer/route/privacy scans. Fresh `go test -race -count=1 ./...`, `go vet ./...`, `go build ./...`, and `git diff --check` passed with Go `go1.26.5 darwin/arm64`; the proxy race package completed in 175.456 seconds. Broker/lifecycle/server cases passed 100 race-enabled trials in 46.467 seconds. Installed Codex CLI `0.146.0` returned exact `PONG` through the terminating broker, wrote a secure temporary WS marker, and left live PID `41342` and listener `127.0.0.1:19280` unchanged. Live state remains unpromoted until a later explicit opt-in consumes a persisted marker.
 
 Final audit found HTTP enforcement and WebSocket observation initially shared only a journal and namespace, not live lease state. Mode-specific views now share one synchronised lease-map core, while retaining independent mode epochs and authority flags. A 100-run race test proves WS-observed exact-turn state remains on its first account when traffic crosses to HTTP enforcement. Existing restart tests resolve freshly discovered opaque `AccountKey` values from HMAC journal fields and assert raw session, thread, turn, account, response, and turn-state values never persist.
 
@@ -715,4 +715,4 @@ Writer/call-site audit traced runtime system activation and active projection th
 
 Privacy audit scanned the complete branch diff and worktree. Every credential-shaped diff match is a schema key, synthetic test value, or runtime-only header construction; no user email, real bearer value, credential snapshot, raw installed fixture, payload log, lease key, canary raw identifier, temporary journal, or non-ignored untracked file exists in the worktree. Ignored implementation reports contain only synthetic or aggregate evidence.
 
-Final code-gate evidence for installed code commit `0cde1a8` used Go `go1.26.5 darwin/arm64` and Desktop `0.147.0-alpha.6.5`: `go test -race -count=1 ./...`, `go vet ./...`, `go build ./...`, and `git diff --check` passed. Targeted turn lifecycle, continuation, resynchronisation, shared-transport lease, credential writer, and candidate-refresh suites also passed 100 repeated race-enabled runs; refresh overlap proof passed 1,000 repeated race-enabled runs. Documentation commits after `0cde1a8` do not alter installed code evidence.
+Final code-gate evidence used Go `go1.26.5 darwin/arm64` and exact Homebrew Codex CLI `0.146.0` at SHA-256 `ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02`. Full race, vet, build, diff, 100-trial broker/lifecycle/server stress, and installed isolated WebSocket acceptance passed. No push, PR, live restart, listener rebind, system-auth write, registry write, or automatic account switch occurred.

@@ -743,7 +743,15 @@ func codexAcceptanceBaseEnvironment(home, codexHome, tmp, cache, config string) 
 }
 
 func codexAcceptanceExecArguments(baseURL, work, outputPath string) []string {
+	return codexAcceptanceExecArgumentsForTransport(baseURL, work, outputPath, false)
+}
+
+func codexAcceptanceExecArgumentsForTransport(baseURL, work, outputPath string, webSocket bool) []string {
 	provider := "model_providers.cq_acceptance."
+	webSocketSetting := `supports_websockets = false`
+	if webSocket {
+		webSocketSetting = `supports_websockets = true`
+	}
 	return []string{
 		"exec",
 		"--ephemeral",
@@ -761,7 +769,7 @@ func codexAcceptanceExecArguments(baseURL, work, outputPath string) []string {
 		"-c", provider + "base_url = " + strconv.Quote(baseURL),
 		"-c", provider + `wire_api="responses"`,
 		"-c", provider + `requires_openai_auth=true`,
-		"-c", provider + `supports_websockets = false`,
+		"-c", provider + webSocketSetting,
 		"-c", provider + `supports_standalone_web_search=false`,
 		"-c", provider + `request_max_retries = 0`,
 		"-c", provider + `stream_max_retries = 0`,
