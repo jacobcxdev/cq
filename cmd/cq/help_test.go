@@ -71,7 +71,7 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 		{
 			name: "proxy start",
 			path: []string{"proxy", "start"},
-			want: []string{"Usage: cq proxy start [--port PORT]", "Start local Claude and Codex proxy"},
+			want: []string{"Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]", "Start local Claude and Codex proxy", "--migrate-legacy-managed"},
 		},
 		{
 			name: "proxy validate HTTP",

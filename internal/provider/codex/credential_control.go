@@ -458,6 +458,27 @@ type AdoptRPCReply struct {
 	Revision Revision
 }
 
+type MigrateLegacyManagedRPCReply struct {
+	Result LegacyManagedMigrationResult
+}
+
+func (c *CredentialControl) MigrateLegacyManaged(ctx context.Context) (LegacyManagedMigrationResult, error) {
+	if c == nil {
+		return LegacyManagedMigrationResult{}, ErrCredentialAuthorityUnavailable
+	}
+	if c.owner {
+		operation, err := c.beginCredentialOwnerOperation()
+		if err != nil {
+			return LegacyManagedMigrationResult{}, err
+		}
+		defer operation.Release()
+		return c.coordinator.MigrateLegacyManaged(ctx)
+	}
+	var reply MigrateLegacyManagedRPCReply
+	err := c.client.Call("CredentialRPC.MigrateLegacyManaged", struct{}{}, &reply)
+	return reply.Result, credentialRPCError(err)
+}
+
 func (c *CredentialControl) Adopt(ctx context.Context, snapshot SystemSnapshot) (CandidateRef, Revision, error) {
 	if c.owner {
 		operation, err := c.beginCredentialOwnerOperation()
@@ -657,6 +678,16 @@ func (r *credentialRPC) SaveLogin(args SaveLoginRPCArgs, reply *SaveLoginRPCRepl
 	defer operation.Release()
 	ref, revision, err := r.Coordinator.SaveLogin(context.Background(), args.Credential)
 	reply.Ref, reply.Revision = ref, revision
+	return err
+}
+func (r *credentialRPC) MigrateLegacyManaged(_ struct{}, reply *MigrateLegacyManagedRPCReply) error {
+	operation, err := r.beginCoordinatorOperation()
+	if err != nil {
+		return err
+	}
+	defer operation.Release()
+	result, err := r.Coordinator.MigrateLegacyManaged(context.Background())
+	reply.Result = result
 	return err
 }
 func (r *credentialRPC) Adopt(args AdoptRPCArgs, reply *AdoptRPCReply) error {

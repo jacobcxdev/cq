@@ -146,6 +146,23 @@ func TestCodexInventoryStatusDiagnosticsRejectUntypedHealth(t *testing.T) {
 	}
 }
 
+func TestCodexInventoryHealthRejectsUnstableOnlyAccounts(t *testing.T) {
+	health := codexHealthFromInventory(codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Key: "generated", Identity: codexprov.AccountIdentity{AccountID: "account", UserID: "user"},
+		Routable: true, Unstable: true,
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "generated", CandidateID: "candidate"},
+			Revision: "revision", Routable: true,
+		}},
+	}}})
+	if health.HealthCode != "unroutable" || codexDispatchableAccountCount(codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Key: "generated", Identity: codexprov.AccountIdentity{AccountID: "account", UserID: "user"},
+		Routable: true, Unstable: true,
+	}}}) != 0 {
+		t.Fatalf("health = %+v, want unroutable with zero dispatchable accounts", health)
+	}
+}
+
 func TestCodexHealthTrackerDegradesSafelyOnCoordinatorListFailure(t *testing.T) {
 	last := codexHealthFromInventory(codexprov.Inventory{
 		Accounts: []codexprov.LogicalAccount{{}, {}},
@@ -187,8 +204,8 @@ func TestCodexHealthTrackerDistinguishesStaleSnapshotFromColdUnavailable(t *test
 	tracker := newCodexHealthTracker(coordinator, "", proxy.CodexHealth{})
 
 	fresh := tracker.Health(context.Background())
-	if fresh.AccountCount != 1 || !fresh.AccountCountKnown || fresh.HealthCode != "ok" {
-		t.Fatalf("fresh health = %+v, want one known healthy account", fresh)
+	if fresh.AccountCount != 1 || !fresh.AccountCountKnown || fresh.HealthCode != "unroutable" {
+		t.Fatalf("fresh health = %+v, want one known legacy-unroutable account", fresh)
 	}
 
 	fsys.setFailing(true)

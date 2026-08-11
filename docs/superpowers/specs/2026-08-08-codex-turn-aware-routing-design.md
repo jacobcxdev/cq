@@ -323,7 +323,7 @@ Credential material, `_cq` candidate ID, lineage ID, provenance, ownership state
 
 On first discovery of an unseen system identity, the read model reports an adoption intent. Only the credential coordinator may commit it as `system_borrowed`; discovery itself never writes. On later reconciliation the coordinator rolls that borrowed snapshot forward from a newer matching live system revision. It never overwrites `cq_oauth` or `legacy_unknown`. If a CQ-owned record already exists for that identity, CQ retains both live and managed candidates in memory.
 
-Existing files are read without destructive migration. Unknown JSON fields are preserved on every managed write and explicit activation.
+Existing files are read without destructive migration. A user-requested, revision-fenced coordinator migration may add closed routing identity metadata to legacy CQ-managed records; it never writes system or external credential authorities, preserves unknown JSON fields, remains refresh-suspended as `legacy_unknown`, and resumes safely after a partial durable failure. Unknown JSON fields are preserved on every managed write and explicit activation.
 
 ### External candidate federation
 

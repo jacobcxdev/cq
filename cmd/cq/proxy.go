@@ -192,7 +192,8 @@ func runProxyPin(args []string) error {
 }
 
 type proxyCommandOptions struct {
-	Port int
+	Port                 int
+	MigrateLegacyManaged bool
 }
 
 type proxyRegistryDependencies struct {
@@ -230,6 +231,9 @@ func codexHealthFromInventory(inventory codexprov.Inventory) proxy.CodexHealth {
 		HealthCode:        "ok",
 		ExternalSources:   make([]proxy.CodexSourceHealth, len(inventory.ExternalSources)),
 	}
+	if len(inventory.Accounts) > 0 && codexDispatchableAccountCount(inventory) == 0 {
+		health.HealthCode = "unroutable"
+	}
 	for i, source := range inventory.ExternalSources {
 		health.ExternalSources[i] = proxy.CodexSourceHealth{
 			Name: source.Name, CandidateCount: source.CandidateCount,
@@ -237,6 +241,22 @@ func codexHealthFromInventory(inventory codexprov.Inventory) proxy.CodexHealth {
 		}
 	}
 	return health
+}
+
+func codexDispatchableAccountCount(inventory codexprov.Inventory) int {
+	count := 0
+	for _, account := range inventory.Accounts {
+		if !account.Routable || account.Unstable || account.Identity.AccountID == "" || account.Identity.UserID == "" {
+			continue
+		}
+		for _, candidate := range account.Candidates {
+			if candidate.Routable && !candidate.DispatchBlocked && candidate.Ref.AccountKey == account.Key && candidate.Ref.CandidateID != "" && candidate.Revision != "" {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 func codexSourceHealthCode(code string, optionalAbsent bool) string {
@@ -282,6 +302,11 @@ func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOpt
 			}
 			opts.Port = port
 			i++
+		case "--migrate-legacy-managed":
+			if command != "proxy start" {
+				return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
+			}
+			opts.MigrateLegacyManaged = true
 		default:
 			return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 		}
@@ -343,6 +368,13 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			returnErr = errors.Join(returnErr, fmt.Errorf("close Codex credential coordinator: %w", closeErr))
 		}
 	}()
+	if opts.MigrateLegacyManaged {
+		migration, migrateErr := credentialControl.MigrateLegacyManaged(context.Background())
+		if migrateErr != nil {
+			return fmt.Errorf("migrate legacy Codex managed records: %w", migrateErr)
+		}
+		fmt.Fprintf(os.Stderr, "cq: migrated legacy Codex managed records: %d\n", migration.Migrated)
+	}
 	codexRouting, err := proxy.OpenCodexRoutingRuntime(cfg, version, codexClientBuild)
 	if err != nil {
 		return fmt.Errorf("Codex routing modes: %w", err)
@@ -415,6 +447,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	codexInventory, err := listProxyCodexStartupInventory(context.Background(), credentialControl)
 	if err != nil {
 		return fmt.Errorf("Codex credential inventory: %w", err)
+	}
+	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
+		return errors.New("Codex HTTP enforcement has no stable dispatchable account")
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()

@@ -49,12 +49,13 @@ Commands:
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
 `,
-	"proxy start": `Usage: cq proxy start [--port PORT]
+	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
 
 Start local Claude and Codex proxy.
 
 Options:
-  --port PORT         Override configured listen port for this run
+  --port PORT                    Override configured listen port for this run
+  --migrate-legacy-managed       Explicitly add routing identity metadata to legacy CQ-managed records
 `,
 	"proxy status": `Usage: cq proxy status [--port PORT]
 

@@ -187,7 +187,7 @@ func (s *ManagedStore) Load(path string) (ManagedRecord, error) {
 			Path: path, Document: doc, Credential: credential, RefreshSuspended: true,
 			Metadata: ManagedMetadata{
 				Version: 0, AccountKey: AccountKey("legacy:" + shortHash(path)),
-				CandidateID: CandidateID("legacy:" + shortHash(path)), Provenance: ProvenanceLegacyUnknown,
+				CandidateID: CandidateID("legacy:" + shortHash(path)), Revision: credentialRevision(data), Provenance: ProvenanceLegacyUnknown,
 				RefreshOwnership: RefreshOwnershipUnknown, OperationState: OperationReady,
 			},
 		}, nil

@@ -52,6 +52,13 @@ type CredentialCoordinator struct {
 	refreshRetained map[CandidateID]retainedRefresh
 }
 
+// LegacyManagedMigrationResult reports explicit, revision-fenced upgrades of
+// legacy CQ-managed records. System and external credential authorities are
+// never written by this operation.
+type LegacyManagedMigrationResult struct {
+	Migrated int
+}
+
 type externalPlanKey struct {
 	Ref      CandidateRef
 	Revision Revision
@@ -255,6 +262,90 @@ func (c *CredentialCoordinator) Adopt(ctx context.Context, snapshot SystemSnapsh
 		return CandidateRef{}, "", err
 	}
 	return c.adoptLocked(snapshot)
+}
+
+// MigrateLegacyManaged adds closed routing identity metadata to legacy
+// CQ-managed records. It is an explicit administrative mutation, not part of
+// discovery or automatic proxy startup.
+func (c *CredentialCoordinator) MigrateLegacyManaged(ctx context.Context) (LegacyManagedMigrationResult, error) {
+	var result LegacyManagedMigrationResult
+	if c == nil || c.Store == nil || c.Store.FS == nil {
+		return result, ErrCredentialAuthorityUnavailable
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if err := c.finishPendingRemovalLocked(ctx); err != nil {
+		return result, err
+	}
+	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS)
+	if err != nil {
+		return result, ErrCredentialAuthorityUnavailable
+	}
+	for _, logical := range inventory.Accounts {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		legacy := make([]CredentialCandidate, 0, len(logical.Candidates))
+		for _, candidate := range logical.Candidates {
+			if candidate.Source != SourceManaged || candidate.Ref.path == "" {
+				continue
+			}
+			record, loadErr := c.Store.Load(candidate.Ref.path)
+			if loadErr != nil {
+				return result, loadErr
+			}
+			if record.Metadata.Version == 0 && record.Metadata.Provenance == ProvenanceLegacyUnknown {
+				legacy = append(legacy, candidate)
+			}
+		}
+		if len(legacy) == 0 {
+			continue
+		}
+		accountKey := logical.Key
+		if logical.Unstable {
+			value, randomErr := c.Store.randomID("acct")
+			if randomErr != nil {
+				return result, randomErr
+			}
+			accountKey = AccountKey(value)
+		}
+		for _, candidate := range legacy {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+			record, loadErr := c.Store.Load(candidate.Ref.path)
+			if loadErr != nil {
+				return result, loadErr
+			}
+			if record.Metadata.Version != 0 || record.Metadata.Revision != candidate.Revision {
+				return result, ErrStaleRevision
+			}
+			candidateID, randomErr := c.Store.randomID("cand")
+			if randomErr != nil {
+				return result, randomErr
+			}
+			lineageID, randomErr := c.Store.randomID("lineage")
+			if randomErr != nil {
+				return result, randomErr
+			}
+			expected := record.Metadata.Revision
+			record.Metadata = ManagedMetadata{
+				Version: 1, AccountKey: accountKey, CandidateID: CandidateID(candidateID),
+				LineageID: LineageID(lineageID), Generation: 1,
+				Provenance: ProvenanceLegacyUnknown, RefreshOwnership: RefreshOwnershipUnknown,
+				OperationState: OperationReady,
+			}
+			record.RefreshSuspended = true
+			if err := c.Store.Commit(&record, expected); err != nil {
+				return result, err
+			}
+			result.Migrated++
+		}
+	}
+	return result, nil
 }
 
 func (c *CredentialCoordinator) adoptLocked(snapshot SystemSnapshot) (CandidateRef, Revision, error) {

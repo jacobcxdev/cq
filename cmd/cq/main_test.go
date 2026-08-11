@@ -263,12 +263,15 @@ func TestCLIParsesProxyCodexDefault(t *testing.T) {
 }
 
 func TestParseProxyCommandOptionsPort(t *testing.T) {
-	opts, err := parseProxyCommandOptions([]string{"--port", "19281"})
+	opts, err := parseProxyCommandOptions([]string{"--port", "19281", "--migrate-legacy-managed"})
 	if err != nil {
 		t.Fatalf("parseProxyCommandOptions() error = %v", err)
 	}
 	if opts.Port != 19281 {
 		t.Fatalf("Port = %d, want 19281", opts.Port)
+	}
+	if !opts.MigrateLegacyManaged {
+		t.Fatal("MigrateLegacyManaged = false")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -579,6 +580,105 @@ func TestCredentialCoordinatorAdoptsAndRollsForwardBorrowedSystem(t *testing.T) 
 	record, _ := coordinator.loadRef(ref)
 	if record.Credential.AccessToken != "system-two" || record.Metadata.Provenance != ProvenanceSystemBorrowed {
 		t.Fatalf("record = %+v", record)
+	}
+}
+
+func TestCredentialCoordinatorMigratesLegacyManagedRoutingIdentity(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	jwt := fakeCodexJWT("legacy@test.com", "acct-legacy", "user-legacy", "plus")
+	systemPath := "/fake/home/.codex/auth.json"
+	managedPath := "/fake/home/.codex/accounts/legacy.auth.json"
+	systemBefore := codexAuthJSON("system", "acct-legacy", jwt)
+	managedBefore := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"managed","id_token":"` + jwt + `","account_id":"acct-legacy"},"unknown":{"kept":true}}`)
+	fs.files[systemPath] = append([]byte(nil), systemBefore...)
+	fs.files[managedPath] = append([]byte(nil), managedBefore...)
+	fs.modes[systemPath] = 0o600
+	fs.modes[managedPath] = 0o600
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "legacy.auth.json"}},
+	}
+
+	before := DiscoverInventory(fs)
+	if len(before.Accounts) != 1 || !before.Accounts[0].Unstable {
+		t.Fatalf("legacy inventory = %+v, want one unstable account", before.Accounts)
+	}
+	result, err := coordinator.MigrateLegacyManaged(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Migrated != 1 {
+		t.Fatalf("migrated = %d, want 1", result.Migrated)
+	}
+	if got := string(fs.files[systemPath]); got != string(systemBefore) {
+		t.Fatal("legacy migration changed system auth")
+	}
+	after := DiscoverInventory(fs)
+	if len(after.Accounts) != 1 || after.Accounts[0].Unstable || !after.Accounts[0].Routable {
+		t.Fatalf("migrated inventory = %+v, want one stable routable account", after.Accounts)
+	}
+	record, err := coordinator.Store.Load(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Metadata.Version != 1 || record.Metadata.Provenance != ProvenanceLegacyUnknown || record.Metadata.RefreshOwnership != RefreshOwnershipUnknown || !record.RefreshSuspended {
+		t.Fatalf("migrated metadata = %+v suspended=%t", record.Metadata, record.RefreshSuspended)
+	}
+	if _, ok := record.Document["unknown"]; !ok {
+		t.Fatal("legacy migration dropped unknown field")
+	}
+	second, err := coordinator.MigrateLegacyManaged(context.Background())
+	if err != nil || second.Migrated != 0 {
+		t.Fatalf("repeat migration = %+v, %v", second, err)
+	}
+}
+
+func TestCredentialCoordinatorResumesLegacyManagedMigration(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	jwts := []string{
+		fakeCodexJWT("legacy-a@test.com", "acct-legacy-a", "user-legacy-a", "plus"),
+		fakeCodexJWT("legacy-b@test.com", "acct-legacy-b", "user-legacy-b", "plus"),
+	}
+	paths := []string{
+		"/fake/home/.codex/accounts/legacy-a.auth.json",
+		"/fake/home/.codex/accounts/legacy-b.auth.json",
+	}
+	for index, path := range paths {
+		fs.files[path] = []byte(fmt.Sprintf(`{"auth_mode":"chatgpt","tokens":{"access_token":"managed-%d","id_token":"%s","account_id":"acct-legacy-%c"}}`, index, jwts[index], 'a'+index))
+		fs.modes[path] = 0o600
+	}
+	fs.dirEntries = map[string][]fakeDirEntry{
+		"/fake/home/.codex/accounts": {{name: "legacy-a.auth.json"}, {name: "legacy-b.auth.json"}},
+	}
+	before := DiscoverInventory(fs)
+	if len(before.Accounts) != 2 {
+		t.Fatalf("legacy accounts = %d, want 2", len(before.Accounts))
+	}
+	fs.failRenameAt = 2
+	if _, err := coordinator.MigrateLegacyManaged(context.Background()); err == nil {
+		t.Fatal("partial migration error = nil")
+	}
+	versions := make([]int, len(paths))
+	for index, path := range paths {
+		record, err := coordinator.Store.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		versions[index] = record.Metadata.Version
+	}
+	if !((versions[0] == 1 && versions[1] == 0) || (versions[0] == 0 && versions[1] == 1)) {
+		t.Fatalf("partially migrated versions = %v, want one v1 and one legacy", versions)
+	}
+
+	fs.failRenameAt = 0
+	result, err := coordinator.MigrateLegacyManaged(context.Background())
+	if err != nil || result.Migrated != 1 {
+		t.Fatalf("resumed migration = %+v, %v", result, err)
+	}
+	for _, path := range paths {
+		record, err := coordinator.Store.Load(path)
+		if err != nil || record.Metadata.Version != 1 || record.Metadata.AccountKey == "" {
+			t.Fatalf("resumed record %q = %+v, %v", path, record.Metadata, err)
+		}
 	}
 }
 
