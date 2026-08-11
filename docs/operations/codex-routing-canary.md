@@ -6,7 +6,7 @@ HTTP enforcement remains explicit opt-in. WebSocket enforcement remains unavaila
 
 1. Run the serving-process HTTP validation mode for the exact installed CQ and client builds. Restart normally and confirm its current readiness marker still matches the configured parser, lease, retry, semantics, and fixture tuple.
 2. Disable payload diagnostics. Set `codex_turn_routing` to `enforce`; keep `codex_ws_turn_routing` at `observe`.
-3. Run `cq codex canary start` to capture protected-state baselines for the enforced HTTP configuration.
+3. Run `cq codex canary start` to capture protected-state baselines for the enforced HTTP configuration. Start fails before writing canary state unless the current CQ executable, Codex client executable, and loaded service identity exactly match the readiness marker.
 4. Restart CQ once, after active streams drain, then confirm `/health` reports HTTP `effective: enforce`, WebSocket `effective: observe`, and `canary_errors: 0`.
 
 Starting canary after restart does not attach it to the running process. Do not replace an active canary; stop and archive completed evidence first.

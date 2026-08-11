@@ -47,12 +47,11 @@ func runCodexCanary(args []string) error {
 			return err
 		}
 		clientBuild := defaultCodexRoutingClientBuild()
-		required, _ := proxy.DefaultCodexRoutingRequirements(version, clientBuild)
 		marker, err := proxy.LoadCodexReadinessMarker(configDirectory, proxy.CodexRoutingHTTP)
 		if err != nil {
 			return fmt.Errorf("load HTTP readiness marker: %w", err)
 		}
-		tuple, err := proxy.BuildCodexCanaryTuple(required, marker)
+		tuple, err := proxy.BuildCurrentCodexCanaryTuple(version, clientBuild, marker)
 		if err != nil {
 			return err
 		}

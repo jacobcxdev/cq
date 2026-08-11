@@ -781,6 +781,27 @@ func BuildCodexCanaryTuple(required CodexTransportRequirements, marker CodexRead
 	}, nil
 }
 
+// BuildCurrentCodexCanaryTuple binds canary start to the exact currently
+// installed CQ, client, and loaded service artifacts. It returns no process or
+// path evidence to the caller.
+func BuildCurrentCodexCanaryTuple(cqBuild, clientBuild string, marker CodexReadinessMarker) (CodexCanaryTuple, error) {
+	required, _ := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
+	return buildCurrentCodexCanaryTupleWithArtifactCapture(required, marker, captureCurrentCodexInstalledArtifacts)
+}
+
+func buildCurrentCodexCanaryTupleWithArtifactCapture(
+	required CodexTransportRequirements,
+	marker CodexReadinessMarker,
+	capture codexInstalledArtifactCapture,
+) (CodexCanaryTuple, error) {
+	artifacts, err := captureCodexInstalledArtifactsSafely(capture, required.ClientBuild)
+	if err != nil || !artifacts.valid() {
+		return CodexCanaryTuple{}, errors.New("current installed Codex artifacts unavailable")
+	}
+	required.installedArtifacts = artifacts
+	return BuildCodexCanaryTuple(required, marker)
+}
+
 func (recorder *CodexCanaryRecorder) persistLocked() error {
 	_, err := recorder.persistEnvelopeLocked()
 	return err

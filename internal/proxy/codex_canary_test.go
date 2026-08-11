@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -495,6 +497,24 @@ func TestBuildCodexCanaryTupleBindsCurrentReadinessMarker(t *testing.T) {
 	marker.ClientBuild = "stale-client"
 	if _, err := BuildCodexCanaryTuple(required, marker); err == nil {
 		t.Fatal("expected stale readiness marker rejection")
+	}
+}
+
+func TestBuildCurrentCodexCanaryTupleRejectsChangedInstalledArtifact(t *testing.T) {
+	required := testCodexRequirements(CodexRoutingHTTP)
+	marker := testCodexMarker(required)
+	changed := testCodexInstalledArtifacts
+	changed.cqExecutableSHA256 = sha256.Sum256([]byte("replacement CQ executable"))
+
+	_, err := buildCurrentCodexCanaryTupleWithArtifactCapture(
+		required,
+		marker,
+		func(context.Context, string) (codexInstalledArtifactRequirement, error) {
+			return changed, nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "CQ executable mismatch") {
+		t.Fatalf("error = %v, want current CQ executable mismatch", err)
 	}
 }
 
