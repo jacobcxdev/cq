@@ -106,11 +106,11 @@ func runCodexInstalledHTTPValidationListener(
 ) (returnErr error) {
 	localToken, err := newCodexInstalledHTTPValidationToken()
 	if err != nil {
-		return errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPValidationStageError("local authority")
 	}
 	corpus, err := loadCodexStage11CorpusBuildManifest(cqBuild, codexStage11CorpusBuildProvenanceSHA256)
 	if err != nil {
-		return errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPValidationStageError("build provenance")
 	}
 	core, err := newCodexInstalledHTTPValidationRuntimeCore(ctx)
 	if err != nil {
@@ -119,17 +119,17 @@ func runCodexInstalledHTTPValidationListener(
 	defer func() { returnErr = errors.Join(returnErr, core.close()) }()
 	routes, err := newCodexInstalledHTTPRouteAudit(clientBuild, localToken)
 	if err != nil {
-		return errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPValidationStageError("route audit")
 	}
 	protectedPaths, err := defaultCodexInstalledHTTPProtectedPaths(markerDir)
 	if err != nil {
-		return errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPValidationStageError("protected authority")
 	}
 	servingAttestor := NewServingAttestor()
 	required, _ := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
 	validation := CodexHTTPStartupValidationFunc(func(validationCtx context.Context, runtime CodexHTTPStartupValidationRuntime) error {
 		if runtime.ServingAttestor != servingAttestor {
-			return errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPValidationStageError("serving authority")
 		}
 		authority, err := newCodexInstalledListenerProcessAuthority(validationCtx, codexInstalledListenerProcessAuthorityConfig{
 			cqBuild:         cqBuild,
@@ -139,18 +139,18 @@ func runCodexInstalledHTTPValidationListener(
 			nativeHTTP:      core.nativeHTTPHandler(),
 		})
 		if err != nil {
-			return errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPValidationStageError("process authority")
 		}
 		outcome := &codexInstalledHTTPClientOutcome{}
 		installedClient, err := newCodexInstalledHTTPClientExercise(
 			runtime.ListenerAddress, authority.client.baseline, localToken, osCodexAcceptanceRunner{}, outcome,
 		)
 		if err != nil {
-			return errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPValidationStageError("client setup")
 		}
 		syntheticTraffic, err := core.installedListenerExercise(runtime.ListenerAddress, localToken)
 		if err != nil {
-			return errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPValidationStageError("synthetic setup")
 		}
 		exercise := &codexInstalledHTTPCompositeExercise{first: installedClient, second: syntheticTraffic}
 		audit := newCodexInstalledHTTPAuditAuthority(codexInstalledHTTPAuditAuthorityConfig{
@@ -174,6 +174,9 @@ func runCodexInstalledHTTPValidationListener(
 		_, err = harness.RunAndCommit(validationCtx, required, func(marker CodexReadinessMarker) error {
 			return saveCodexHTTPReadinessMarkerDurably(markerDir, marker)
 		})
+		if err != nil {
+			return err
+		}
 		return err
 	})
 
@@ -193,13 +196,17 @@ func runCodexInstalledHTTPValidationListener(
 	return server.ListenAndServe(ctx)
 }
 
+func codexInstalledHTTPValidationStageError(stage string) error {
+	return fmt.Errorf("%w: %s", errCodexInstalledListenerAcceptance, stage)
+}
+
 func defaultCodexInstalledHTTPProtectedPaths(markerDir string) ([]codexInstalledProtectedPath, error) {
 	home, err := os.UserHomeDir()
 	if err != nil || !filepath.IsAbs(home) || !filepath.IsAbs(markerDir) {
 		return nil, errCodexInstalledListenerAcceptance
 	}
 	paths := []codexInstalledProtectedPath{
-		{path: filepath.Join(home, ".codex", "auth.json")},
+		{path: filepath.Join(home, ".codex", "auth.json"), ownerControlledDirectory: true},
 		{path: filepath.Join(home, ".codex", "accounts", "registry.json")},
 		{path: filepath.Join(home, ".codex", "accounts"), directory: true},
 		{path: codexReadinessPath(markerDir, CodexRoutingHTTP)},
@@ -209,7 +216,7 @@ func defaultCodexInstalledHTTPProtectedPaths(markerDir string) ([]codexInstalled
 			return nil, errCodexInstalledListenerAcceptance
 		}
 		paths = append(paths,
-			codexInstalledProtectedPath{path: filepath.Join(codexHome, "auth.json")},
+			codexInstalledProtectedPath{path: filepath.Join(codexHome, "auth.json"), ownerControlledDirectory: true},
 			codexInstalledProtectedPath{path: filepath.Join(codexHome, "accounts", "registry.json")},
 			codexInstalledProtectedPath{path: filepath.Join(codexHome, "accounts"), directory: true},
 		)

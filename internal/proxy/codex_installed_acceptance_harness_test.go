@@ -169,13 +169,13 @@ func TestCodexInstalledListenerHarnessUsesExactSealedAuditModelRequestCount(t *t
 		authority:   testCodexInstalledListenerAuthority{lease: &testCodexInstalledListenerLease{binding: binding, probe: probe}},
 		clientBuild: &testCodexInstalledClientBuildProbe{build: required.ClientBuild},
 		exercise:    exercise,
-		audit:       testCodexInstalledHTTPAuditAuthority{modelRequests: 1},
+		audit:       testCodexInstalledHTTPAuditAuthority{modelRequests: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.Acceptance.InstalledModelRequests != 1 {
-		t.Fatalf("installed model-catalogue requests = %d, want sealed audit count 1", evidence.Acceptance.InstalledModelRequests)
+	if evidence.Acceptance.InstalledModelRequests != 2 {
+		t.Fatalf("installed model-catalogue requests = %d, want sealed audit count 2", evidence.Acceptance.InstalledModelRequests)
 	}
 }
 
@@ -481,7 +481,7 @@ func TestCodexInstalledListenerHarnessRejectsExtraModelRequest(t *testing.T) {
 		authority:   testCodexInstalledListenerAuthority{lease: lease},
 		clientBuild: &testCodexInstalledClientBuildProbe{build: required.ClientBuild},
 		exercise:    exercise,
-		audit:       testCodexInstalledHTTPAuditAuthority{modelRequests: 2},
+		audit:       testCodexInstalledHTTPAuditAuthority{modelRequests: 3},
 	})
 	if err == nil || evidence != (CodexHTTPReadinessEvidence{}) {
 		t.Fatalf("extra model request evidence = %#v, %v", evidence, err)
@@ -737,7 +737,7 @@ func (authority testCodexInstalledHTTPAuditAuthority) Begin(
 ) (codexInstalledHTTPAuditLease, error) {
 	modelRequests := authority.modelRequests
 	if modelRequests == 0 && !authority.missingModelRequests {
-		modelRequests = 1
+		modelRequests = 2
 	}
 	proof := codexInstalledHTTPSealedAuditProof{
 		tuple: tuple, binding: binding,
@@ -894,7 +894,7 @@ func testCodexInstalledHTTPProbeResult(required CodexTransportRequirements, bind
 			SelectorCalls:            20,
 			InstalledVersion:         required.ClientBuild,
 			InstalledRequests:        41,
-			InstalledModelRequests:   1,
+			InstalledModelRequests:   2,
 			InstalledAttempts:        43,
 			InstalledSelectorCalls:   20,
 			InstalledStrongKeys:      41,

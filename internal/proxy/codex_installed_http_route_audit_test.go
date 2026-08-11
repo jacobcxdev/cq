@@ -8,7 +8,7 @@ import (
 
 const testCodexInstalledLocalToken = "Qx9m0c9Yx6L-1wH2fBzE3pV8uN5kT7rS4aD6jG0lM2o"
 
-func TestCodexInstalledHTTPRouteAuditCountsOnlyExactInstalledClientCatalogueRoute(t *testing.T) {
+func TestCodexInstalledHTTPRouteAuditCountsAuthorisedInstalledClientCatalogueRoutes(t *testing.T) {
 	t.Parallel()
 	audit, err := newCodexInstalledHTTPRouteAudit("0.146.0", testCodexInstalledLocalToken)
 	if err != nil {
@@ -26,6 +26,7 @@ func TestCodexInstalledHTTPRouteAuditCountsOnlyExactInstalledClientCatalogueRout
 		httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, nil),
 		httptest.NewRequest(http.MethodPost, legacyCodexCompactResponsesPath, nil),
 		httptest.NewRequest(http.MethodGet, "/models?client_version=0.146.0", nil),
+		httptest.NewRequest(http.MethodGet, "/models?client_version=0.147.0-alpha.6.5&originator=codex_cli_rs", nil),
 	} {
 		request.Header.Set("Authorization", "Bearer "+testCodexInstalledLocalToken)
 		recorder := httptest.NewRecorder()
@@ -36,8 +37,8 @@ func TestCodexInstalledHTTPRouteAuditCountsOnlyExactInstalledClientCatalogueRout
 	}
 
 	models, unexpected := audit.snapshot()
-	if models != 1 || unexpected != 0 {
-		t.Fatalf("audit = models %d unexpected %d, want 1/0", models, unexpected)
+	if models != 2 || unexpected != 0 {
+		t.Fatalf("audit = models %d unexpected %d, want 2/0", models, unexpected)
 	}
 }
 
@@ -54,7 +55,6 @@ func TestCodexInstalledHTTPRouteAuditRejectsNearMatchAndExtraRoutes(t *testing.T
 	}))
 
 	for _, request := range []*http.Request{
-		httptest.NewRequest(http.MethodGet, "/models?client_version=0.146.1", nil),
 		httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.146.0", nil),
 		httptest.NewRequest(http.MethodPost, codexResponsesPath+"?extra=1", nil),
 		httptest.NewRequest(http.MethodGet, codexCompactResponsesPath, nil),
@@ -68,8 +68,8 @@ func TestCodexInstalledHTTPRouteAuditRejectsNearMatchAndExtraRoutes(t *testing.T
 	}
 
 	models, unexpected := audit.snapshot()
-	if models != 0 || unexpected != 4 {
-		t.Fatalf("audit = models %d unexpected %d, want 0/4", models, unexpected)
+	if models != 0 || unexpected != 3 {
+		t.Fatalf("audit = models %d unexpected %d, want 0/3", models, unexpected)
 	}
 	if nextCalls != 0 {
 		t.Fatalf("unexpected routes reached production mux %d times", nextCalls)

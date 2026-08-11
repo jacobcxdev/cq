@@ -188,9 +188,8 @@ func TestCodexCanaryProtectionsTrackOnlyDeclaredOwnedState(t *testing.T) {
 	}
 }
 
-func TestCodexCanaryProtectionsRejectUnsafeCodexBarManifest(t *testing.T) {
+func TestCodexCanaryProtectionSnapshotRejectsUnsafeCodexBarManifest(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "synthetic-home")
-	configDirectory := filepath.Join(t.TempDir(), "synthetic-config")
 	codexBarRoot := codexprov.DefaultCodexBarRoot(home)
 	if err := os.MkdirAll(codexBarRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -204,7 +203,7 @@ func TestCodexCanaryProtectionsRejectUnsafeCodexBarManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := codexCanaryProtections(home, configDirectory)
+	_, err := codexBarCanaryProtectionSnapshot(codexprov.NewCodexBarSource(codexBarRoot))
 	if !errors.Is(err, codexprov.ErrExternalUnsafePath) {
 		t.Fatalf("error = %v, want ErrExternalUnsafePath", err)
 	}

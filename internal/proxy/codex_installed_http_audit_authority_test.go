@@ -3,12 +3,15 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func TestCaptureCodexInstalledProtectedDigestDetectsManagedAccountNamespaceChanges(t *testing.T) {
@@ -51,12 +54,12 @@ func TestCaptureCodexInstalledProtectedDigestDetectsManagedAccountNamespaceChang
 			if err := os.WriteFile(filepath.Join(accounts, "first.auth.json"), []byte("first\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			before, err := captureCodexInstalledProtectedDigest(accounts)
+			before, err := captureCodexInstalledProtectedDigest(codexInstalledProtectedPath{path: accounts})
 			if err != nil {
 				t.Fatalf("capture before: %v", err)
 			}
 			test.mutate(t, accounts)
-			after, err := captureCodexInstalledProtectedDigest(accounts)
+			after, err := captureCodexInstalledProtectedDigest(codexInstalledProtectedPath{path: accounts})
 			if err != nil {
 				t.Fatalf("capture after: %v", err)
 			}
@@ -64,6 +67,25 @@ func TestCaptureCodexInstalledProtectedDigestDetectsManagedAccountNamespaceChang
 				t.Fatal("managed account namespace change was not detected")
 			}
 		})
+	}
+}
+
+func TestCodexInstalledHTTPProtectedFileAcceptsStandardCodexCoreDirectory(t *testing.T) {
+	coreDir := filepath.Join(t.TempDir(), ".codex")
+	if err := os.Mkdir(coreDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(coreDir, "auth.json")
+	if err := os.WriteFile(authPath, []byte("protected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protected := codexInstalledProtectedPath{path: authPath, ownerControlledDirectory: true}
+	if digest, err := captureCodexInstalledProtectedDigest(protected); err != nil || digest.absent || digest.directory {
+		t.Fatalf("standard Codex protected file = %+v, %v", digest, err)
+	}
+	protected.ownerControlledDirectory = false
+	if _, err := captureCodexInstalledProtectedDigest(protected); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+		t.Fatalf("strict private-directory audit error = %v, want unsafe path", err)
 	}
 }
 
@@ -151,9 +173,14 @@ func TestCodexInstalledHTTPAuditAuthoritySealsIndependentDeltas(t *testing.T) {
 	}
 	defer lease.Release()
 
-	modelRequest := httptest.NewRequest(http.MethodGet, "/models?client_version=0.147.0-alpha.6.5", nil)
-	modelRequest.Header.Set("Authorization", "Bearer "+testCodexInstalledLocalToken)
-	routes.guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), modelRequest)
+	for _, target := range []string{
+		"/models?client_version=0.147.0-alpha.6.5",
+		"/models?client_version=0.147.0-alpha.6.5&originator=codex_cli_rs",
+	} {
+		modelRequest := httptest.NewRequest(http.MethodGet, target, nil)
+		modelRequest.Header.Set("Authorization", "Bearer "+testCodexInstalledLocalToken)
+		routes.guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), modelRequest)
+	}
 	outcome.exactPong.Store(true)
 	proof, err := lease.Complete(context.Background())
 	if err != nil {
@@ -162,9 +189,9 @@ func TestCodexInstalledHTTPAuditAuthoritySealsIndependentDeltas(t *testing.T) {
 	if !proof.valid(readinessTuple(required), binding) {
 		t.Fatal("sealed audit proof is invalid")
 	}
-	if proof.modelRequests != 1 || proof.unexpectedRoutes != 0 || proof.rawIdentifierLeaks != 0 ||
+	if proof.modelRequests != 2 || proof.unexpectedRoutes != 0 || proof.rawIdentifierLeaks != 0 ||
 		proof.automaticAuthWrites != 0 || proof.egressAttempts != 0 || !proof.exactClientPong {
-		t.Fatalf("audit proof = %#v, want one model request and zero failures", proof)
+		t.Fatalf("audit proof = %#v, want two model requests and zero failures", proof)
 	}
 }
 

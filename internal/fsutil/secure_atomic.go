@@ -558,6 +558,62 @@ func ValidateSecureDirectory(fsys FileSystem, path string) error {
 	return validateSecureDirectoryInfo(inspector, info)
 }
 
+// ValidateOwnerControlledDirectory accepts private directories and the
+// standard owner-writable, world-readable directory mode used by Codex for
+// ~/.codex. Secret children still require their own strict file validation.
+func ValidateOwnerControlledDirectory(fsys FileSystem, path string) error {
+	inspector, ok := fsys.(SecurePathInspector)
+	if !ok {
+		return ErrSecureCapabilityUnavailable
+	}
+	info, err := inspector.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return validateOwnerControlledDirectoryInfo(inspector, info)
+}
+
+// OpenOwnerControlledDirectory retains an owner-controlled 0700 or 0755
+// directory without applying the stricter private-directory opener policy.
+func OpenOwnerControlledDirectory(fsys FileSystem, path string) (SecureDirectory, error) {
+	inspector, ok := fsys.(SecurePathInspector)
+	if !ok {
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	opener, ok := fsys.(DurableDirectoryOpener)
+	if !ok {
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	durable, err := opener.OpenDurableDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	directory, ok := durable.(SecureDirectory)
+	if !ok {
+		_ = durable.Close()
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	if err := ValidateOwnerControlledDirectoryHandle(inspector, directory, path); err != nil {
+		_ = directory.Close()
+		return nil, err
+	}
+	return directory, nil
+}
+
+func validateOwnerControlledDirectoryInfo(inspector SecurePathInspector, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%w: directory type", ErrUnsafeSecurePath)
+	}
+	permissions := info.Mode().Perm()
+	if permissions != 0o700 && permissions != 0o755 {
+		return fmt.Errorf("%w: directory mode %04o", ErrUnsafeSecurePath, permissions)
+	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("%w: directory special mode", ErrUnsafeSecurePath)
+	}
+	return validateSecureOwner(inspector, info)
+}
+
 func validateSecureDirectoryInfo(inspector SecurePathInspector, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("%w: directory type", ErrUnsafeSecurePath)
@@ -621,6 +677,14 @@ func ReadSecureFileInDirectory(inspector SecurePathInspector, directory SecureDi
 // same no-follow descriptor so callers can reject identical-byte replacement.
 func ReadSecureFileInDirectoryWithIdentity(inspector SecurePathInspector, directory SecureDirectory, name string, maxBytes int64) ([]byte, SecureFileIdentity, error) {
 	return readSecureFileInDirectory(inspector, directory, name, maxBytes, nil)
+}
+
+// ReadOwnerControlledFileInDirectoryWithIdentity reads a strict 0600 file
+// from a retained owner-controlled 0700 or 0755 directory.
+func ReadOwnerControlledFileInDirectoryWithIdentity(inspector SecurePathInspector, directory SecureDirectory, directoryPath, name string, maxBytes int64) ([]byte, SecureFileIdentity, error) {
+	return readSecureFileInDirectory(inspector, directory, name, maxBytes, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, directoryPath)
+	})
 }
 
 func readSecureFileInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, maxBytes int64, fence func() error) ([]byte, SecureFileIdentity, error) {
@@ -752,6 +816,31 @@ func validateSecureDirectoryHandle(inspector SecurePathInspector, directory Secu
 // still names the canonical no-follow path supplied by its caller.
 func ValidateSecureDirectoryHandle(inspector SecurePathInspector, directory SecureDirectory, path string) error {
 	return validateSecureDirectoryHandle(inspector, directory, path)
+}
+
+// ValidateOwnerControlledDirectoryHandle proves a retained 0700 or 0755
+// owner-controlled directory still names its canonical no-follow path.
+func ValidateOwnerControlledDirectoryHandle(inspector SecurePathInspector, directory SecureDirectory, path string) error {
+	heldInfo, err := directory.Stat()
+	if err != nil {
+		return err
+	}
+	pathInfo, err := inspector.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if err := validateOwnerControlledDirectoryInfo(inspector, heldInfo); err != nil {
+		return err
+	}
+	if err := validateOwnerControlledDirectoryInfo(inspector, pathInfo); err != nil {
+		return err
+	}
+	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
+	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
+	if !heldOK || !pathOK || !sameSecureObject(heldIdentity, pathIdentity) {
+		return fmt.Errorf("%w: directory path identity", ErrUnsafeSecurePath)
+	}
+	return nil
 }
 
 func validateSecureDirectoryDescriptor(inspector SecurePathInspector, directory SecureDirectory) error {

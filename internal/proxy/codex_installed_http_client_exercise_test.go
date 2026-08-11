@@ -224,6 +224,26 @@ func TestRunCodexInstalledVersionCommandUsesSandboxedRetainedExecutable(t *testi
 	}
 }
 
+func TestRunCodexInstalledVersionCommandUsesInstalledCodexExecutable(t *testing.T) {
+	if runtime.GOOS != "darwin" || os.Getenv("CQ_RUN_CODEX_INSTALLED_ACCEPTANCE") != "1" {
+		t.Skip("set CQ_RUN_CODEX_INSTALLED_ACCEPTANCE=1 on Darwin to exercise installed Codex")
+	}
+	const path = "/Applications/ChatGPT.app/Contents/Resources/codex"
+	proof, err := captureCodexInstalledExecutable(path)
+	if err != nil {
+		t.Fatalf("capture installed Codex executable: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexInstalledProcessProofTimeout)
+	defer cancel()
+	output, err := runCodexInstalledVersionCommand(ctx, path, proof)
+	if err != nil {
+		t.Fatalf("run retained installed Codex executable: %v", err)
+	}
+	if got, ok := parseCodexInstalledVersionOutput(output); !ok || got != "0.147.0-alpha.6.5" {
+		t.Fatalf("installed Codex version = %q/%v, want exact installed build", got, ok)
+	}
+}
+
 func TestCodexInstalledHTTPClientExerciseRejectsNonExactPong(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(executable, []byte("exact client"), 0o500); err != nil {

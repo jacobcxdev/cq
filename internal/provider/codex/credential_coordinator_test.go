@@ -207,15 +207,6 @@ func TestCredentialCoordinatorListRejectsUnsafeCoreCredentialPaths(t *testing.T)
 			},
 		},
 		{
-			name: "empty core directory permissive",
-			setup: func(t *testing.T, home string) {
-				coreDir := filepath.Join(home, ".codex")
-				if err := os.Mkdir(coreDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
 			name: "empty core directory symlink",
 			setup: func(t *testing.T, home string) {
 				target := filepath.Join(t.TempDir(), "codex")
@@ -290,6 +281,39 @@ func TestCredentialCoordinatorListRejectsUnsafeCoreCredentialPaths(t *testing.T)
 				t.Fatalf("List inventory/error = %+v/%v, want typed authority unavailable", inventory, err)
 			}
 		})
+	}
+}
+
+func TestCredentialCoordinatorListAcceptsStandardCodexCoreDirectoryPermissions(t *testing.T) {
+	home := t.TempDir()
+	coreDir := filepath.Join(home, ".codex")
+	if err := os.Mkdir(coreDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(coreDir, "auth.json"), codexAuthJSON("system-secret", "acct-1", fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	accountsDir := filepath.Join(coreDir, "accounts")
+	if err := os.Mkdir(accountsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewManagedStore(fixedHomeDurableFS{home: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCredentialCoordinator(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.ExternalSources = nil
+
+	inventory, err := coordinator.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v, want standard Codex directory accepted", err)
+	}
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
+		t.Fatalf("List() inventory = %+v, want one system credential", inventory)
 	}
 }
 

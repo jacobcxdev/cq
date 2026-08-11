@@ -26,7 +26,7 @@ const (
 	codexInstalledVersionOutputMaxBytes = 128
 	codexInstalledHealthMaxBytes        = 64 << 10
 	codexInstalledExecutableMaxBytes    = 1 << 30
-	codexInstalledProcessProofTimeout   = 3 * time.Second
+	codexInstalledProcessProofTimeout   = 15 * time.Second
 )
 
 var errCodexInstalledProcessAttestation = errors.New("Codex installed process attestation unavailable")

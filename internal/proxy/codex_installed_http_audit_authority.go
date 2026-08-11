@@ -40,8 +40,9 @@ type codexInstalledHTTPAuditAuthorityConfig struct {
 }
 
 type codexInstalledProtectedPath struct {
-	path      string
-	directory bool
+	path                     string
+	directory                bool
+	ownerControlledDirectory bool
 }
 
 type codexInstalledHTTPProductionAuditAuthority struct {
@@ -201,7 +202,7 @@ type codexInstalledProtectedDigest struct {
 func captureCodexInstalledProtectedDigests(paths []codexInstalledProtectedPath) ([]codexInstalledProtectedDigest, error) {
 	result := make([]codexInstalledProtectedDigest, 0, len(paths))
 	for _, protected := range paths {
-		digest, err := captureCodexInstalledProtectedDigest(protected.path)
+		digest, err := captureCodexInstalledProtectedDigest(protected)
 		if err != nil {
 			return nil, err
 		}
@@ -213,7 +214,8 @@ func captureCodexInstalledProtectedDigests(paths []codexInstalledProtectedPath) 
 	return result, nil
 }
 
-func captureCodexInstalledProtectedDigest(path string) (codexInstalledProtectedDigest, error) {
+func captureCodexInstalledProtectedDigest(protected codexInstalledProtectedPath) (codexInstalledProtectedDigest, error) {
+	path := protected.path
 	result := codexInstalledProtectedDigest{path: path}
 	inspector := fsutil.OSFileSystem{}
 	pathInfo, err := inspector.Lstat(path)
@@ -229,7 +231,7 @@ func captureCodexInstalledProtectedDigest(path string) (codexInstalledProtectedD
 		result.digest, err = captureCodexInstalledProtectedDirectoryDigest(inspector, path)
 		return result, err
 	}
-	data, identity, err := readCodexInstalledProtectedFile(inspector, path)
+	data, identity, err := readCodexInstalledProtectedFile(inspector, path, protected.ownerControlledDirectory)
 	if err != nil {
 		return result, err
 	}
@@ -241,23 +243,41 @@ func captureCodexInstalledProtectedDigest(path string) (codexInstalledProtectedD
 	return result, nil
 }
 
-func readCodexInstalledProtectedFile(inspector fsutil.SecurePathInspector, path string) ([]byte, fsutil.SecureFileIdentity, error) {
+func readCodexInstalledProtectedFile(inspector fsutil.SecurePathInspector, path string, ownerControlledDirectory bool) ([]byte, fsutil.SecureFileIdentity, error) {
 	directoryPath := filepath.Dir(path)
-	directory, err := (fsutil.OSFileSystem{}).OpenSecureDirectory(directoryPath)
+	var directory fsutil.SecureDirectory
+	var err error
+	if ownerControlledDirectory {
+		directory, err = fsutil.OpenOwnerControlledDirectory(fsutil.OSFileSystem{}, directoryPath)
+	} else {
+		directory, err = (fsutil.OSFileSystem{}).OpenSecureDirectory(directoryPath)
+	}
 	if err != nil {
 		return nil, fsutil.SecureFileIdentity{}, err
 	}
 	defer directory.Close()
-	if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, directoryPath); err != nil {
+	validateDirectory := fsutil.ValidateSecureDirectoryHandle
+	if ownerControlledDirectory {
+		validateDirectory = fsutil.ValidateOwnerControlledDirectoryHandle
+	}
+	if err := validateDirectory(inspector, directory, directoryPath); err != nil {
 		return nil, fsutil.SecureFileIdentity{}, err
 	}
-	data, identity, err := fsutil.ReadSecureFileInDirectoryWithIdentity(
-		inspector, directory, filepath.Base(path), codexInstalledProtectedFileMaxBytes,
-	)
+	var data []byte
+	var identity fsutil.SecureFileIdentity
+	if ownerControlledDirectory {
+		data, identity, err = fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(
+			inspector, directory, directoryPath, filepath.Base(path), codexInstalledProtectedFileMaxBytes,
+		)
+	} else {
+		data, identity, err = fsutil.ReadSecureFileInDirectoryWithIdentity(
+			inspector, directory, filepath.Base(path), codexInstalledProtectedFileMaxBytes,
+		)
+	}
 	if err != nil {
 		return nil, fsutil.SecureFileIdentity{}, err
 	}
-	if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, directoryPath); err != nil {
+	if err := validateDirectory(inspector, directory, directoryPath); err != nil {
 		clearBytes(data)
 		return nil, fsutil.SecureFileIdentity{}, err
 	}

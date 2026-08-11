@@ -531,7 +531,6 @@ func codexInstalledDarwinServiceIdentity(
 	writeCodexInstalledProcessBindingField(destination, []byte(target))
 	writeCodexInstalledProcessBindingField(destination, []byte(candidate.label))
 	writeCodexInstalledProcessBindingField(destination, []byte(candidate.kind))
-	writeCodexInstalledProcessBindingInt(destination, job.pid)
 	writeCodexInstalledProcessBindingField(destination, []byte(job.path))
 	writeCodexInstalledProcessBindingField(destination, []byte(job.program))
 	for _, argument := range job.arguments {

@@ -30,6 +30,35 @@ func TestOpenProxyCodexCanaryDoesNotUseOrdinaryPresenceRead(t *testing.T) {
 	}
 }
 
+func TestOpenProxyCodexCanaryIgnoresProtectedSourceWhenCanaryAbsent(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "synthetic-home")
+	codexBarRoot := filepath.Join(home, "Library", "Application Support", "CodexBar")
+	if err := os.MkdirAll(codexBarRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside-manifest.json")
+	writePrivateCanaryFixture(t, target, `{"version":3,"accounts":[]}`)
+	if err := os.Symlink(target, filepath.Join(codexBarRoot, "managed-codex-accounts.json")); err != nil {
+		t.Fatal(err)
+	}
+	fsys := &proxyCanaryHomeFS{MemFS: fsutil.NewMemFS(), home: home}
+	required, _ := proxy.DefaultCodexRoutingRequirements("synthetic-build", "synthetic-client")
+	recorder, err := openProxyCodexCanary(fsys, "/state/canary.json", required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder != nil {
+		t.Fatalf("recorder = %v, want nil", recorder)
+	}
+}
+
+type proxyCanaryHomeFS struct {
+	*fsutil.MemFS
+	home string
+}
+
+func (fsys *proxyCanaryHomeFS) UserHomeDir() (string, error) { return fsys.home, nil }
+
 type noOrdinaryCanaryReadFS struct {
 	*fsutil.MemFS
 	readFileCalls int

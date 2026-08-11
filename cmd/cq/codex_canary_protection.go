@@ -16,9 +16,6 @@ func codexCanaryProtections(home, configDirectory string) ([]proxy.CodexCanaryPr
 	managedDirectory := filepath.Join(codexDirectory, "accounts")
 	codexBarRoot := codexprov.DefaultCodexBarRoot(home)
 	codexBarSource := codexprov.NewCodexBarSource(codexBarRoot)
-	if _, err := codexBarSource.ProtectionSnapshot(); err != nil && !errors.Is(err, codexprov.ErrExternalUnavailable) {
-		return nil, codexCanaryProtectionSourceError(err)
-	}
 
 	return []proxy.CodexCanaryProtection{
 		proxy.CodexCanaryFileProtection(proxy.CodexCanarySystemAuth, filepath.Join(codexDirectory, "auth.json")),

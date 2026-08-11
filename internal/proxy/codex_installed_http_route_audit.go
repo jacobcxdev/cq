@@ -14,7 +14,6 @@ var codexInstalledHTTPClientBuildPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.
 // listener. It records aggregate route counts and never retains URL, query,
 // header, body, model, account, request, response, or credential material.
 type codexInstalledHTTPRouteAudit struct {
-	clientBuild      string
 	localToken       string
 	modelRequests    atomic.Uint64
 	unexpectedRoutes atomic.Uint64
@@ -24,7 +23,7 @@ func newCodexInstalledHTTPRouteAudit(clientBuild, localToken string) (*codexInst
 	if !codexInstalledHTTPClientBuildPattern.MatchString(clientBuild) || !validCodexInstalledHTTPValidationToken(localToken) {
 		return nil, errors.New("installed Codex client build is invalid")
 	}
-	return &codexInstalledHTTPRouteAudit{clientBuild: clientBuild, localToken: localToken}, nil
+	return &codexInstalledHTTPRouteAudit{localToken: localToken}, nil
 }
 
 func (audit *codexInstalledHTTPRouteAudit) guard(next http.Handler) http.Handler {
@@ -47,7 +46,11 @@ func (audit *codexInstalledHTTPRouteAudit) guard(next http.Handler) http.Handler
 			return
 		}
 		switch {
-		case request.Method == http.MethodGet && request.URL.Path == "/models" && request.URL.RawQuery == "client_version="+audit.clientBuild:
+		// Exact executable and client build authority is independently attested
+		// before and after this one-shot run. The client-version query is transport
+		// metadata and has changed between Codex releases, so it must not become a
+		// second, brittle identity authority. Token, method, and path remain exact.
+		case request.Method == http.MethodGet && request.URL.Path == "/models":
 			audit.modelRequests.Add(1)
 		case request.Method == http.MethodPost && request.URL.RawQuery == "" &&
 			(request.URL.Path == codexResponsesPath ||

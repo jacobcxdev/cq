@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,59 @@ func TestCaptureCodexInstalledServiceConfigurationRejectsSymlinkRetarget(t *test
 	})
 	if !errors.Is(err, errCodexInstalledProcessAttestation) {
 		t.Fatalf("retargeted service capture = %v", err)
+	}
+}
+
+func TestDarwinCodexInstalledProcessVerifierCapturesRunningSidecar(t *testing.T) {
+	executable := os.Getenv("CQ_TEST_INSTALLED_PROXY_EXECUTABLE")
+	pidText := os.Getenv("CQ_TEST_INSTALLED_PROXY_PID")
+	if executable == "" || pidText == "" {
+		t.Skip("set CQ_TEST_INSTALLED_PROXY_EXECUTABLE and CQ_TEST_INSTALLED_PROXY_PID")
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 1 {
+		t.Fatalf("invalid sidecar pid %q", pidText)
+	}
+	executableProof, err := captureCodexInstalledExecutable(executable)
+	if err != nil {
+		t.Fatalf("capture sidecar executable: %v", err)
+	}
+	if err := verifyCodexInstalledDarwinMappedExecutable(pid, executableProof); err != nil {
+		t.Fatalf("verify sidecar mapped executable: %v", err)
+	}
+	target := fmt.Sprintf("gui/%d/%s", os.Geteuid(), codexInstalledLaunchdServiceLabel)
+	output, err := runCodexInstalledLaunchctlPrint(context.Background(), target)
+	if err != nil {
+		t.Fatalf("print sidecar service: %v", err)
+	}
+	job, err := parseCodexInstalledDarwinLaunchctlJob(output, target, pid)
+	if err != nil {
+		t.Fatalf("parse sidecar service: %v", err)
+	}
+	configurationProof, configurationData, err := captureCodexInstalledServiceConfiguration(job.path)
+	if err != nil {
+		t.Fatalf("capture sidecar service configuration: %v", err)
+	}
+	configuration, err := parseCodexInstalledDarwinServiceConfiguration(configurationData)
+	if err != nil {
+		t.Fatalf("parse sidecar service configuration: %v", err)
+	}
+	if configuration.label != codexInstalledLaunchdServiceLabel || !configuration.keepAlive || !job.keepAlive ||
+		len(configuration.programArguments) != 3 || len(job.arguments) != 3 ||
+		!equalCodexInstalledStrings(configuration.programArguments, job.arguments) || configurationProof.sha256 == ([sha256.Size]byte{}) {
+		t.Fatalf("sidecar service binding mismatch: label=%q keepalive=%v/%v config_args=%d job_args=%d", configuration.label, configuration.keepAlive, job.keepAlive, len(configuration.programArguments), len(job.arguments))
+	}
+	verifier := newCodexInstalledDarwinProcessVerifier(codexInstalledDarwinProcessVerifierDependencies{
+		pid:            func() int { return pid },
+		uid:            os.Geteuid,
+		executablePath: func() (string, error) { return executable, nil },
+	})
+	proof, err := verifier.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("capture running sidecar: %v", err)
+	}
+	if !proof.valid() || proof.pid != pid {
+		t.Fatalf("running sidecar proof = %#v", proof)
 	}
 }
 
@@ -102,6 +156,15 @@ func TestDarwinCodexInstalledProcessVerifierAcceptsExactPersistentServiceOwner(t
 			}
 			if after != proof {
 				t.Fatal("private launchd environment changed fixed service identity")
+			}
+
+			pid++
+			restarted, err := verifier.Capture(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restarted.pid == proof.pid || restarted.serviceIdentitySHA256 != proof.serviceIdentitySHA256 {
+				t.Fatal("launchd restart changed persistent service identity")
 			}
 		})
 	}

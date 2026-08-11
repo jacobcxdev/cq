@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,41 +371,41 @@ func (harness *codexInstalledListenerHarness) run(
 	tuple := readinessTuple(required)
 	lease, err := harness.dependencies.authority.Acquire(ctx, tuple)
 	if err != nil || lease == nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("serving lease")
 	}
 	defer lease.Release()
 	binding := lease.Binding()
 	if !validCodexInstalledListenerProcessBinding(binding, required) {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("process binding")
 	}
 	boundRequired, err := bindCodexInstalledArtifacts(required, binding)
 	if err != nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("artifact binding")
 	}
 	manifest := harness.dependencies.corpus
 	if !manifest.valid(required) {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("corpus provenance")
 	}
 	auditLease, err := harness.dependencies.audit.Begin(ctx, tuple, binding)
 	if err != nil || auditLease == nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("audit lease")
 	}
 	defer auditLease.Release()
 
 	clientBuild, err := harness.dependencies.clientBuild.Probe(ctx)
 	if err != nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("client build before")
 	}
 	if err := ctx.Err(); err != nil {
 		return codexInstalledHTTPSealedProof{}, err
 	}
 	if clientBuild != required.ClientBuild {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("client build mismatch")
 	}
 	if commit != nil {
 		release, err := acquireCodexInstalledHTTPValidationGuard(harness.dependencies.guard)
 		if err != nil || releaseCodexInstalledHTTPValidationGuard(release) != nil {
-			return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("request guard before")
 		}
 	}
 
@@ -412,7 +413,7 @@ func (harness *codexInstalledListenerHarness) run(
 	admissionsBefore := harness.dependencies.admissions.nativeHTTPAdmissionSnapshot()
 	before, err := lease.Snapshot(ctx)
 	if err != nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("snapshot before")
 	}
 	exerciseErr := harness.dependencies.exercise.Run(ctx)
 	quiesceTimeout := harness.dependencies.quiesceTimeout
@@ -426,34 +427,37 @@ func (harness *codexInstalledListenerHarness) run(
 		if err := ctx.Err(); err != nil {
 			return codexInstalledHTTPSealedProof{}, err
 		}
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		if exerciseErr != nil {
+			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("client exercise")
+		}
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("native drain")
 	}
 	after, snapshotErr := lease.Snapshot(ctx)
 	runtimeAfter := harness.dependencies.runtime.snapshot()
 	admissionsAfter := harness.dependencies.admissions.nativeHTTPAdmissionSnapshot()
 	if revalidateErr := lease.Revalidate(ctx); revalidateErr != nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("process revalidation")
 	}
 	clientBuildAfter, clientBuildErr := harness.dependencies.clientBuild.Probe(ctx)
 	if snapshotErr != nil {
 		if err := ctx.Err(); err != nil {
 			return codexInstalledHTTPSealedProof{}, err
 		}
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("snapshot after")
 	}
 	if err := ctx.Err(); err != nil {
 		return codexInstalledHTTPSealedProof{}, err
 	}
 	if clientBuildErr != nil || clientBuildAfter != clientBuild {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("client build after")
 	}
 	auditProof, err := auditLease.Complete(ctx)
 	if err != nil || !auditProof.valid(tuple, binding) {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("audit completion")
 	}
 	result, err := deriveCodexInstalledHTTPProbeResult(before, after, binding, required.ClientBuild)
 	if err != nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("probe result")
 	}
 	result.Gates.Stage11CorpusTurns = manifest.caseCount
 	result.Gates.RawIdentifierLeaks = auditProof.rawIdentifierLeaks
@@ -462,10 +466,19 @@ func (harness *codexInstalledListenerHarness) run(
 	result.Acceptance.InstalledModelRequests = auditProof.modelRequests
 	result.Acceptance.UnexpectedRoutes = auditProof.unexpectedRoutes
 	result.Acceptance.PongVerified = auditProof.exactClientPong
-	if !validCodexInstalledHTTPProbeResult(result, binding, required) ||
-		!validCodexInstalledRuntimeObservability(runtimeBefore, runtimeAfter, result.Diagnostics) ||
-		!validCodexInstalledNativeHTTPAdmissions(admissionsBefore, admissionsAfter) {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+	if !validCodexInstalledHTTPProbeResult(result, binding, required) {
+		return codexInstalledHTTPSealedProof{}, fmt.Errorf(
+			"%w: request evidence vector: handler=%d responses=%d compact=%d turns=%d gates=%+v acceptance=%+v diagnostics=%+v",
+			errCodexInstalledListenerAcceptance,
+			result.ProductionHandlerRequests, result.NativeResponsesRequests, result.NativeCompactRequests, result.StrongTurns,
+			result.Gates, result.Acceptance, result.Diagnostics,
+		)
+	}
+	if !validCodexInstalledRuntimeObservability(runtimeBefore, runtimeAfter, result.Diagnostics) {
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("runtime evidence vector")
+	}
+	if !validCodexInstalledNativeHTTPAdmissions(admissionsBefore, admissionsAfter) {
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("admission evidence vector")
 	}
 
 	evidence := CodexHTTPReadinessEvidence{
@@ -478,12 +491,12 @@ func (harness *codexInstalledListenerHarness) run(
 	proof := codexInstalledHTTPSealedProof{evidence: evidence, binding: binding, observedAt: observedAt}
 	proof.seal = &codexInstalledHTTPProofSeal{evidence: evidence, binding: binding, observedAt: observedAt}
 	if err := proof.validate(required); err != nil {
-		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+		return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("sealed proof")
 	}
 	if commit != nil {
 		release, err := acquireCodexInstalledHTTPValidationGuard(harness.dependencies.guard)
 		if err != nil {
-			return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("request guard final")
 		}
 		marker, err := buildCodexHTTPReadinessMarker(evidence, boundRequired, observedAt)
 		commitErr := err
@@ -492,10 +505,14 @@ func (harness *codexInstalledListenerHarness) run(
 		}
 		releaseErr := releaseCodexInstalledHTTPValidationGuard(release)
 		if commitErr != nil || releaseErr != nil {
-			return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("marker commit")
 		}
 	}
 	return proof, nil
+}
+
+func codexInstalledHarnessStageError(stage string) error {
+	return fmt.Errorf("%w: %s", errCodexInstalledListenerAcceptance, stage)
 }
 
 func acquireCodexInstalledHTTPValidationGuard(guard CodexInstalledHTTPValidationGuard) (release func(), returnErr error) {
@@ -578,7 +595,7 @@ func validCodexInstalledHTTPProbeResult(result codexInstalledHTTPProbeResult, bi
 			SelectorCalls:            20,
 			InstalledVersion:         required.ClientBuild,
 			InstalledRequests:        41,
-			InstalledModelRequests:   1,
+			InstalledModelRequests:   2,
 			InstalledAttempts:        43,
 			InstalledSelectorCalls:   20,
 			InstalledStrongKeys:      41,
