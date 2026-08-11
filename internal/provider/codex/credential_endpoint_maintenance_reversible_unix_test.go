@@ -839,8 +839,15 @@ func TestConcurrentActivatedMaintenanceOpenersElectOnePublisher(t *testing.T) {
 	for range contenders {
 		go func() {
 			<-start
-			control, err := openCredentialControlPrepared(context.Background(), path, coordinator, false, nil, nil, nil)
-			results <- result{control: control, err: err}
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				control, err := openCredentialControlPrepared(context.Background(), path, coordinator, false, nil, nil, nil)
+				if !errors.Is(err, ErrCredentialEndpointMaintenancePending) || time.Now().After(deadline) {
+					results <- result{control: control, err: err}
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
 		}()
 	}
 	close(start)

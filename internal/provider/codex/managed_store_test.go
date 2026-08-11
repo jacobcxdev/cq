@@ -376,6 +376,7 @@ func TestManagedStoreLoadsLegacyWithoutRewrite(t *testing.T) {
 }
 
 func TestManagedStoreAdvancesCompatibilityEpochBeforeCommit(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
 	fs := &managedStoreSecureFS{MemFS: fsutil.NewMemFS(), home: "/fake/home"}
 	store, err := NewManagedStore(fs)
 	if err != nil {

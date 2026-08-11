@@ -34,14 +34,15 @@ func TestCaptureCodexInstalledProtectedDigestDetectsManagedAccountNamespaceChang
 		{name: "replacement with identical bytes", mutate: func(t *testing.T, accounts string) {
 			t.Helper()
 			path := filepath.Join(accounts, "first.auth.json")
+			replacementPath := path + ".replacement"
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Remove(path); err != nil {
+			if err := os.WriteFile(replacementPath, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, data, 0o600); err != nil {
+			if err := os.Rename(replacementPath, path); err != nil {
 				t.Fatal(err)
 			}
 		}},

@@ -533,19 +533,20 @@ func TestPrepareLegacyCredentialEndpointTransitionRejectsSourceReplacementBefore
 		if assertions != 5 {
 			return nil
 		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+		replacementPath := path + ".replacement"
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: replacementPath, Net: "unix"})
 		if err != nil {
 			return err
 		}
 		listener.SetUnlinkOnClose(false)
-		if err := os.Chmod(path, 0o600); err != nil {
+		if err := os.Chmod(replacementPath, 0o600); err != nil {
 			_ = listener.Close()
 			return err
 		}
-		return listener.Close()
+		if err := listener.Close(); err != nil {
+			return err
+		}
+		return os.Rename(replacementPath, path)
 	})
 	transition, err := PrepareLegacyCredentialEndpointTransition(context.Background(), path, snapshot, authority)
 	if transition != nil {

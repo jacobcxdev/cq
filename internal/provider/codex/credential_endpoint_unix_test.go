@@ -755,19 +755,22 @@ func TestCredentialEndpointLiveOwnerRejectsLockedReplacementIdentity(t *testing.
 	path := filepath.Join(shortEndpointDir(t), "credential.sock")
 	cleanup := startVersionedCredentialEndpoint(t, path, "generation-1", true, 0o600)
 	defer cleanup()
-	if err := os.Remove(credentialEndpointLockPath(path)); err != nil {
-		t.Fatal(err)
-	}
-	replacementLock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, credentialEndpointLockPath(path))
+	lockPath := credentialEndpointLockPath(path)
+	replacementPath := lockPath + ".replacement"
+	replacementLock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, replacementPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer replacementLock.Close()
+	defer os.Remove(replacementPath)
 	beforeLock, err := replacementLock.Stat()
 	if err != nil {
 		t.Fatal(err)
 	}
 	beforeIdentity := beforeLock.Sys().(*syscall.Stat_t)
+	if err := os.Rename(replacementPath, lockPath); err != nil {
+		t.Fatal(err)
+	}
 	beforeSidecar, err := os.ReadFile(credentialEndpointSidecarPath(path))
 	if err != nil {
 		t.Fatal(err)
@@ -780,7 +783,7 @@ func TestCredentialEndpointLiveOwnerRejectsLockedReplacementIdentity(t *testing.
 	if control != nil || !errors.Is(openErr, ErrCredentialOwnerStale) {
 		t.Fatalf("OpenCredentialControl = %v, %v, want lock identity failure", control, openErr)
 	}
-	afterLock, err := os.Lstat(credentialEndpointLockPath(path))
+	afterLock, err := os.Lstat(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
