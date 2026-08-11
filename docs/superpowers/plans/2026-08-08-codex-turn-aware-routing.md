@@ -684,7 +684,7 @@ Read-only live evidence later on 2026-08-09 invalidated installed acceptance for
 
 ## Final completion audit
 
-- [ ] Read complete diff from Stage 1 base to Stage 15 head.
+- [x] Read complete diff from Stage 1 base to current source head. Stage 15 live evidence remains incomplete, so there is no honest Stage 15 promotion head yet.
 - [x] Trace every system-auth/registry/managed writer to coordinator capability. Trace every native/translated/Live route to explicit account executor.
 - [x] Prove HTTP and WS share one lease manager and namespace; prove journal restart resolves account by opaque `AccountKey` and never token/path/email.
 - [x] Prove `response.completed` only changes sampling state; changed unseen turn ID after drained work is successor boundary; retained history blocks stale traffic.
@@ -698,6 +698,8 @@ Read-only live evidence later on 2026-08-09 invalidated installed acceptance for
 - [x] Run pre-Stage-12A full commands on the then-clean tree for commit `0cde1a8` with Go `go1.26.5 darwin/arm64` and Desktop `0.147.0-alpha.6.5`. This is historical evidence only.
 - [ ] After Stage 12A and every outstanding regression addendum, rerun all full/focused race gates on a clean tree and record exact commit, Go version, client/Desktop build, fixture hash, and revised installed-service marker.
 - [x] Do not push or open PR without explicit user approval.
+
+Current source audit closed the complete 329-file Stage 1-base delta through `a0a067b`. It combined the pinned full-branch review, remediation-specific independent reviews, Stage 11 through Stage 14 correction reports, installed-harness hash-bound review, task-affinity policy reviews, and a final late-delta writer/route/privacy scan. Fresh `go test -race -count=1 ./...`, `go vet ./...`, `go build ./...`, and `git diff --check` passed with Go `go1.26.5 darwin/arm64`; the proxy race package completed in 177.612 seconds. This proves current source gates only. It does not substitute for a revised installed-service marker, exact current client/service proof, WebSocket pre-101 authority, or seven-day canary evidence.
 
 Final audit found HTTP enforcement and WebSocket observation initially shared only a journal and namespace, not live lease state. Mode-specific views now share one synchronised lease-map core, while retaining independent mode epochs and authority flags. A 100-run race test proves WS-observed exact-turn state remains on its first account when traffic crosses to HTTP enforcement. Existing restart tests resolve freshly discovered opaque `AccountKey` values from HMAC journal fields and assert raw session, thread, turn, account, response, and turn-state values never persist.
 
