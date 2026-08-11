@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -1427,7 +1428,11 @@ func TestCredentialEndpointNoReplacePublicationMakesSocketConnectable(t *testing
 
 func shortEndpointDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/private/tmp", "cqe-")
+	tempRoot := os.TempDir()
+	if runtime.GOOS == "darwin" {
+		tempRoot = "/private/tmp"
+	}
+	dir, err := os.MkdirTemp(tempRoot, "cqe-")
 	if err != nil {
 		t.Fatal(err)
 	}
