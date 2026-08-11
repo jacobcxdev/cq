@@ -11,15 +11,16 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
-const codexCanaryRollbackReceiptVersion = 2
+const codexCanaryRollbackReceiptVersion = 3
 
 type codexCanaryScenarioName string
 
 const (
 	codexCanaryScenarioLongTurnQuotaDepletion          codexCanaryScenarioName = "long_turn_quota_depletion"
 	codexCanaryScenarioParallelShortTurns              codexCanaryScenarioName = "parallel_short_turns"
-	codexCanaryScenarioNextTurnAffinityReuse           codexCanaryScenarioName = "next_turn_affinity_reuse"
-	codexCanaryScenarioNecessaryReselection            codexCanaryScenarioName = "necessary_reselection"
+	codexCanaryScenarioTaskAffinityBeforeFloor         codexCanaryScenarioName = "task_affinity_before_floor"
+	codexCanaryScenarioTaskAffinityFloorFallback       codexCanaryScenarioName = "task_affinity_floor_fallback"
+	codexCanaryScenarioSoftUnboundHard429Escape        codexCanaryScenarioName = "soft_unbound_hard_429_escape"
 	codexCanaryScenarioSameLaneSupersession            codexCanaryScenarioName = "same_lane_supersession"
 	codexCanaryScenarioTerminalRoutingDefault          codexCanaryScenarioName = "terminal_routing_default"
 	codexCanaryScenarioLateSameTurn429NoAlternate      codexCanaryScenarioName = "late_same_turn_hard_429_no_alternate"
@@ -31,8 +32,9 @@ const (
 var requiredCodexCanaryScenarios = [...]codexCanaryScenarioName{
 	codexCanaryScenarioLongTurnQuotaDepletion,
 	codexCanaryScenarioParallelShortTurns,
-	codexCanaryScenarioNextTurnAffinityReuse,
-	codexCanaryScenarioNecessaryReselection,
+	codexCanaryScenarioTaskAffinityBeforeFloor,
+	codexCanaryScenarioTaskAffinityFloorFallback,
+	codexCanaryScenarioSoftUnboundHard429Escape,
 	codexCanaryScenarioSameLaneSupersession,
 	codexCanaryScenarioTerminalRoutingDefault,
 	codexCanaryScenarioLateSameTurn429NoAlternate,

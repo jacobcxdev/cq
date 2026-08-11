@@ -202,6 +202,33 @@ func TestCodexCanaryRollbackReceiptRequiresExactScenarioSetAndActivation(t *test
 	}
 }
 
+func TestCodexCanaryRollbackReceiptRequiresStage12ATaskAffinityScenarios(t *testing.T) {
+	want := []codexCanaryScenarioName{
+		codexCanaryScenarioLongTurnQuotaDepletion,
+		codexCanaryScenarioParallelShortTurns,
+		codexCanaryScenarioTaskAffinityBeforeFloor,
+		codexCanaryScenarioTaskAffinityFloorFallback,
+		codexCanaryScenarioSoftUnboundHard429Escape,
+		codexCanaryScenarioSameLaneSupersession,
+		codexCanaryScenarioTerminalRoutingDefault,
+		codexCanaryScenarioLateSameTurn429NoAlternate,
+		codexCanaryScenarioQuiescentRestart,
+		codexCanaryScenarioCodexBarObserveNoSwitch,
+		codexCanaryScenarioExplicitSwitchActivationReceipt,
+	}
+	if codexCanaryRollbackReceiptVersion != 3 {
+		t.Fatalf("rollback receipt version = %d, want 3", codexCanaryRollbackReceiptVersion)
+	}
+	if len(requiredCodexCanaryScenarios) != len(want) {
+		t.Fatalf("required scenarios = %v, want %v", requiredCodexCanaryScenarios, want)
+	}
+	for index, scenario := range want {
+		if requiredCodexCanaryScenarios[index] != scenario {
+			t.Fatalf("required scenario %d = %q, want %q", index, requiredCodexCanaryScenarios[index], scenario)
+		}
+	}
+}
+
 func codexCanaryPromotionTestState(t *testing.T) (time.Time, CodexTransportRequirements, CodexReadinessMarker, CodexCanaryState) {
 	t.Helper()
 	required := testCodexRequirements(CodexRoutingHTTP)

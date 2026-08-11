@@ -574,6 +574,8 @@ git diff --check
 
 Code-only revalidation on 2026-08-11 used commit `48d6b0d26f3f6d6a680d466057374d6e6489ff46`, Go `go1.26.5 darwin/arm64`, and installed CLI `0.146.0` at SHA-256 `ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02`. Stage 3's exact 100-run gate passed in 9.310s/8.011s, Stage 4's in 66.169s/7.398s, Stage 9's in 572.615s/4.109s, and Stage 12A's in 1510.924s/6.482s for proxy/CLI respectively. The integrated full repository race suite, vet, build, and diff checks also passed before this documentation-only update. No installed client, listener, service, credential, auth file, or readiness marker was invoked or mutated. The revised-marker item remains unchecked until the exact installed one-shot authority runs it.
 
+Focused completion revalidation on 2026-08-11 proved admitted hard-bound requests surface an exact hard 429 after one dispatch, with no alternate/default, across 100 race-enabled trials (`internal/proxy`, 35.368s). Isolated credential-endpoint recovery also passed 100 race-enabled trials (`internal/provider/codex`, 40.000s): exact orphan recovery requires the owner lock and pre-mutation recorder, lock contention delegates without unlinking, failed recording prevents mutation, and concurrent recovery yields one owner.
+
 ## Stage 13: WebSocket resynchronisation proof
 
 **Files:**
@@ -594,7 +596,7 @@ Code-only revalidation on 2026-08-11 used commit `48d6b0d26f3f6d6a680d466057374d
 - [x] Never transparently replay incremental frame or open replacement upstream behind same downstream socket. Same-account reconnect also invalidates predecessor response ID.
 - [ ] Run 100 trials for each explicitly supported CLI/Desktop build and retry budget 0, 1, exhausted. Prove error -> client invalidation -> new WS generation or HTTP crossover -> full portable request before replacement dispatch.
 - [x] Test full new-turn rotation trigger separately. Keep unsupported trigger account-affine/fail-closed until fixture proves signal.
-- [ ] Keep later-request hard-429 migration disabled for every previously admitted turn. If the user separately approves it, add a distinct spec/plan stage and installed fixtures proving portable full-request recovery without lost context, duplicate output, repeated tool side effects, or retry amplification; do not fold it into the current resync proof.
+- [x] Keep later-request hard-429 migration disabled for every previously admitted turn. If the user separately approves it, add a distinct spec/plan stage and installed fixtures proving portable full-request recovery without lost context, duplicate output, repeated tool side effects, or retry amplification; do not fold it into the current resync proof.
 - [x] Record proof result but keep WS `observe`; no WS readiness marker yet.
 - [x] Commit Stage 13 proof with unsupported-build blocker recorded.
 
@@ -636,11 +638,13 @@ Code-only revalidation on 2026-08-11 used commit `48d6b0d26f3f6d6a680d466057374d
 - Modify related docs/help/tests.
 
 - [ ] Before every installed mutation, capture privacy-safe listener PID/binary hash, launchd label/state, coordinator socket metadata and owner, and active proxy-session count. If an iTerm/CLI proxy is serving an affected task or ownership is ambiguous, stop without unlinking, restarting, installing, or changing credentials.
-- [ ] Validate stale-endpoint recovery only in isolated state first: recovery/owner lock acquired, no owner/listener proved, one process unlinks/binds, competitors delegate. Live-owner and unverifiable-owner cases must return typed authority failure with zero mutation.
+- [x] Validate stale-endpoint recovery only in isolated state first: recovery/owner lock acquired, no owner/listener proved, one process unlinks/binds, competitors delegate. Live-owner and unverifiable-owner cases must return typed authority failure with zero mutation.
 - [ ] Re-run installed acceptance for fresh-Codex-Bar/stale-CQ same-identity fetch and zstd model/headroom extraction before resuming elapsed canary credit.
 - [x] Add privacy-safe canary recorder: admitted-turn count, keyed mismatch count, automatic auth/registry hash-change count, secret-leak count, unexplained lifecycle count, start/end time, build/schema/marker tuple. No raw identifiers or credentials.
 - [ ] Run installed service for seven consecutive days and at least 100 admitted turns. Include long turn past quota depletion, parallel short turns, next-turn warm-affinity reuse and necessary reselection, same-lane supersession, restart during quiescence, explicit switch, and Codex Bar observation.
 - [ ] Extend the canary after Stage 12A: same-lane successors before the `gpt-5.6-sol` 30-minute floor retain task affinity despite a higher-headroom alternate; the exact boundary permits deterministic fallback; authoritative hard quota permits early escape only for a soft/unbound provisional lease; every-ordinary-route-zero invokes the configured routing default once; a later same-turn or hard-bound 429 never dispatches an alternate.
+
+The rollback receipt protocol now fails closed on an exact Stage 12A scenario set: pre-floor affinity, floor-boundary fallback, soft/unbound hard-429 escape, terminal routing default, and later hard-bound hard-429 rejection. The item remains unchecked because the installed serving process still has no authority path that records those scenario digests and the explicit-switch activation receipt; test-only receipt construction is not promotion evidence.
 - [ ] Verify automatic activity leaves system-auth and registry hashes unchanged; explicit switch alone changes system hash.
 - [ ] Verify explicit Codex Bar/system account switching changes only the Desktop/system identity projection. It does not rewrite `codex_routing_default_account_key`, lane affinity, or an admitted route; configuring the routing default changes no system-auth hash.
 - [x] Rehearse rollback in deterministic restart tests: transition `enforce -> off`, retain exact authoritative account fence, route unseen turns through legacy path, and prove shadow epochs never promote. Installed-service drain remains part of soak acceptance.
