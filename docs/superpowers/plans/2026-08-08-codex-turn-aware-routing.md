@@ -626,6 +626,8 @@ Focused completion revalidation on 2026-08-11 proved admitted hard-bound request
 
 **Promotion blocker:** deterministic/local-fake acceptance has one admitted turn on one observed day. Promotion still requires seven consecutively observed UTC days, at least 100 admitted installed-service turns, and all zero-failure counters.
 
+Read-only re-audit on 2026-08-11 found no current promotion evidence. The loaded Homebrew service remained crash-looping because its installed binary predates the persisted compatibility floor, while a separate Go-cache proxy from 2026-08-10 still owned the live listener. Persisted HTTP readiness and canary files remained on the superseded schema/build; the stale canary recorded 18 admitted turns on one observed day. No service restart, install, listener drain, credential mutation, marker write, or canary mutation was authorised or performed.
+
 **Files:**
 
 - Create: `docs/operations/codex-routing-canary.md`
