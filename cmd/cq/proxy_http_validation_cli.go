@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -119,7 +120,7 @@ func cancelInstalledHTTPValidationRequest(store installedHTTPValidationRequestSt
 	if err := fsutil.ValidateSecureDirectoryHandle(store.fs, directory, directoryPath); err != nil {
 		return installedHTTPValidationCancellationMissing, fmt.Errorf("fence installed HTTP validation cancellation directory: %w", err)
 	}
-	lock, err := fsutil.AcquireExclusiveLockInDirectory(store.fs, directory, installedHTTPValidationLockName)
+	lock, err := acquireInstalledHTTPValidationCancellationLock(store, directory)
 	if err != nil {
 		return installedHTTPValidationCancellationMissing, fmt.Errorf("lock installed HTTP validation request store: %w", err)
 	}
@@ -153,6 +154,16 @@ func cancelInstalledHTTPValidationRequest(store installedHTTPValidationRequestSt
 		return installedHTTPValidationCancellationMissing, fmt.Errorf("inspect cancelled installed HTTP validation request: %w", err)
 	}
 	return installedHTTPValidationCancellationMissing, nil
+}
+
+func acquireInstalledHTTPValidationCancellationLock(store installedHTTPValidationRequestStore, directory fsutil.SecureDirectory) (fsutil.ExclusiveLock, error) {
+	for {
+		lock, err := fsutil.AcquireExclusiveLockInDirectory(store.fs, directory, installedHTTPValidationLockName)
+		if !errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+			return lock, err
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func runInstalledHTTPValidationStartupIfRequested(

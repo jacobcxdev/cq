@@ -581,6 +581,65 @@ func TestRunProxyValidateHTTPInvalidatesMarkerWhenCommitWinsCancellationLock(t *
 	}
 }
 
+func TestRunProxyValidateHTTPWaitsForCommitFenceBeforeCancellation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 10, 11, 12, 13, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "private", "request.json")
+	store := installedHTTPValidationTestStore(t, path, now, validInstalledHTTPValidationServiceBinding())
+	guardHeld := make(chan struct{})
+	releaseGuard := make(chan struct{})
+	result := make(chan error, 1)
+	deps := proxyValidateHTTPDependencies{
+		store: store,
+		restart: func() error {
+			intent, err := consumeInstalledHTTPValidationRequestWithIntent(store, "cq-build-42")
+			if err != nil || intent == nil {
+				return fmt.Errorf("consume request in restarted service: %w", err)
+			}
+			release, err := intent.Acquire()
+			if err != nil {
+				return fmt.Errorf("acquire final commit fence: %w", err)
+			}
+			close(guardHeld)
+			go func() {
+				<-releaseGuard
+				release()
+			}()
+			return errors.New("launch service reported failure while commit fence held")
+		},
+		invalidate: func() error { return nil },
+	}
+
+	go func() {
+		result <- runProxyValidateHTTP(nil, deps, "cq-build-42")
+	}()
+	<-guardHeld
+	select {
+	case err := <-result:
+		close(releaseGuard)
+		t.Fatalf("validation returned before commit fence release: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseGuard)
+	if err := <-result; err == nil {
+		t.Fatal("runProxyValidateHTTP error = nil")
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "cancelled-") {
+			cancelled++
+		}
+	}
+	if cancelled != 1 {
+		t.Fatalf("cancelled poison count = %d, entries %v", cancelled, entryNames(entries))
+	}
+}
+
 func TestRunProxyValidateHTTPCancelsRequestWhenKickstartPanics(t *testing.T) {
 	t.Parallel()
 
