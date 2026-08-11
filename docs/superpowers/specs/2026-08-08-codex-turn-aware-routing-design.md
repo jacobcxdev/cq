@@ -595,7 +595,7 @@ HTTP `/responses` and unary `/responses/compact` become admitted on accepted 2xx
 
 Admission is monotonic for the whole logical turn lease, not reset for each sampling request. After any request admits a lease, a later request in that same turn remains governed by the admitted account even if the later request itself receives an immediate hard 429 before its own response headers or body. That response updates future capacity and is surfaced; it does not make the turn provisional again.
 
-A non-empty upstream WebSocket 101 `x-codex-turn-state` is also stateful acceptance. Before sending downstream 101, CQ binds and journals the account/socket reservation, attaching strong handshake turn identity when available. Otherwise the first matching `response.create` promotes that socket-scoped reservation. Other handshake metadata is non-admitting.
+A non-empty upstream WebSocket 101 `x-codex-turn-state` is also stateful acceptance. CQ already has strong identity from the buffered first frame before it opens that upstream generation, so it binds and journals the account/socket reservation before forwarding the frame. Without stateful 101 evidence, the first admitting upstream event promotes the provisional turn. Other handshake metadata is non-admitting.
 
 WebSocket admission occurs on the first of:
 
@@ -676,7 +676,7 @@ The conservative request decision algorithm is:
 8. After ordinary alternatives are absent or exhausted, dispatch the configured routing default once even when capacity says zero, but only if it is compatible with the frozen effective model. If it was already attempted, do not dispatch it again; surface its retained bounded terminal response. If it cannot be resolved compatibly, return the typed capacity/authority failure.
 9. On first admission, final surfaced response/error, or cancellation, release credential material, close/drain rejected responses as appropriate, and destroy the replay envelope.
 
-Replayable HTTP may therefore perform bounded credential/account attempts before accepted 2xx headers. An established downstream WebSocket never swaps upstream invisibly: before downstream 101, same-identity handshake recovery is safe, while cross-account recovery requires verified model plus dynamic lane/turn identity in the handshake. After downstream 101, a pre-admission 401/403 or hard-429 frame can record a resynchronisation intent but cannot cause hidden upstream replacement or frame replay. If the client cannot safely reconnect and resend a portable full request, CQ surfaces the original error. After WS admission, any transport failure invalidates the socket pair and the same bound account must be used after full-request reconnect.
+Replayable HTTP may therefore perform bounded credential/account attempts before accepted 2xx headers. For WebSocket, CQ is a terminating protocol broker rather than a transparent handshake proxy. Downstream 101 accepts only the local Codex-to-CQ transport; it is not provider admission. CQ then buffers one bounded `response.create`, derives dynamic lane/turn/model authority from that frame, selects the durable route, and opens or reuses the account-bound upstream connection. Before any admitting upstream signal or downstream response byte, a portable full frame may use same-identity credential recovery and exact-hard-429 account failover under the same never-admitted soft-affinity rules as HTTP. CQ may replace that provisional upstream generation behind the still-open downstream socket. It never replays incremental input, encrypted state, ambiguous outcomes, or any request from an admitted turn to another account. Terminal upstream handshake rejection is converted to the equivalent bounded Codex WebSocket error event and close semantics because downstream HTTP 101 has already completed.
 
 ### Bounded replay envelope
 
@@ -717,26 +717,27 @@ Replace the blind two-pump `/responses` relay with a supervised frame broker.
 Responsibilities:
 
 - inspect every client `response.create`, not only first frame;
-- require verified model and dynamic lane/turn handshake data before model-aware WS enforcement, and require the first frame to match both; otherwise retain connection-scoped affinity in `observe/off` and do not bind a quota-selected account before the route identity is known;
+- treat bounded strong frame metadata and frame model as routing authority; handshake metadata is only an optional consistency hint;
 - support prewarm and repeated sampling requests for one turn;
 - parse wrapped 401/403/429 errors before admission;
 - parse and forward `codex.rate_limits`;
 - forward required `OpenAI-Beta`, subprotocol, and semantic request headers upstream;
-- dial the selected upstream before completing the downstream upgrade, then preserve upstream 101 semantics including `x-reasoning-included`, `x-models-etag`, `openai-model`, and first `x-codex-turn-state` in the downstream 101 response;
-- before downstream upgrade, apply bounded same-account candidate recovery to upstream 401/403 and permit cross-account recovery only for exact hard 429; if exhausted, pass final status, safe headers, and body through unchanged;
-- pass final upstream 426 through without upgrading so Codex owns its HTTP fallback;
+- complete downstream 101, read and retain at most one bounded `response.create`, then acquire the durable lease before any upstream dispatch;
+- open or reuse one account-bound upstream generation, consume safe upstream 101 headers internally, and journal non-empty `x-codex-turn-state` before forwarding the buffered frame;
+- before frame admission or downstream response bytes, apply bounded same-account candidate recovery to 401/403 and permit cross-account recovery only for exact hard 429 on a never-admitted soft/unbound turn;
+- convert exhausted upstream handshake 401/403/429/426 status and bounded safe body into canonical Codex WebSocket error-event and close semantics; never expose credentials, cookies, or hop-by-hop headers;
 - negotiate permessage-deflate on each leg and preserve logical message payloads after decompression; physical WebSocket frames need not be byte-identical;
 - keep one reader and one serialised writer per Gorilla connection;
 - propagate close codes, downstream loss, request-context cancellation, deadlines, and server shutdown;
 - recover panics in every relay goroutine and join both pumps;
 - fence upstream generations so late close/events cannot alter a newer turn;
-- keep a one-to-one downstream/upstream socket generation; never hide an upstream replacement behind an existing downstream socket;
-- treat the configured 60-minute upstream lifetime and every WebSocket reconnect as a new generation that requires downstream reconnect and a new handshake; HTTP fallback is a transport crossover consuming the same intent;
-- at a changed-turn successor boundary after the predecessor attempt drains, record rotation intent; account change becomes effective only after verified downstream reconnect.
+- keep one active upstream generation per downstream connection, but permit generation replacement while no request is active or while the sole buffered portable request remains definitely unadmitted;
+- treat the configured 60-minute upstream lifetime and every upstream reconnect as a new fenced generation; downstream connection may survive when no incremental continuation depends on the extinct generation;
+- at a changed-turn successor boundary after predecessor work drains, run ordinary lane affinity/capacity selection and replace upstream only when selected account/generation differs and the successor frame is portable.
 
-For a later turn whose frame model changes, CQ may compute a new `RouteChoice` but cannot apply it behind the existing socket. It records intent and requires a new model-and-turn-bearing handshake through the verified reconnect path. If the client cannot provide both model and dynamic turn identity before stateful 101 admission, WS account rotation stays disabled for that client build.
+For a later turn whose frame model changes, CQ computes a new `RouteChoice` from that frame after predecessor work drains. It reuses the current upstream only when account, effective model policy, and continuation generation remain compatible. Otherwise it opens a new upstream generation before forwarding the frame. A frame carrying `previous_response_id`, encrypted provider state, or another generation-bound continuation cannot cross generations and fails closed.
 
-The transport boundary is the downstream 101. Before CQ sends it, same-identity upstream handshake recovery can remain invisible; a cross-account choice is permitted only when a verified model-and-turn-bearing handshake makes the full request route knowable. After CQ sends downstream 101, no upstream replacement is transparent even when an error frame precedes every WebSocket admitting event. CQ may persist only keyed intent identity, socket/mode generations, and bounded counters; it never persists a `response.create` body or frame. The harness must resend a portable full request on a new WebSocket generation or HTTP crossover, after which CQ destroys the old frame buffer. Current default clients lack this handshake. Codex CLI `0.146.0` custom-provider configuration can inject a fixed model header, but not dynamic session/thread/turn identity; this path therefore remains observation/proof work rather than enforcement.
+Downstream 101 is not a lease admission boundary. Upstream admission remains the first durable stateful 101 turn-state value or authoritative admitting event already defined by the lease state machine. CQ keeps the buffered frame only in bounded process memory and destroys it on admission, terminal error, cancellation, or successful handoff. Journal state contains keyed lease identity, account and socket generations, admission evidence, and counters only; it never contains request/frame bytes. This terminating-broker model deliberately trades byte-identical upstream HTTP-handshake propagation for Codex protocol equivalence, which installed tests must prove for each supported client build.
 
 Ordinary Codex application cancellation is not a Responses wire event. If the downstream socket remains open, CQ keeps the sole active broker-local attempt generation and drains upstream through terminal/error before accepting another `response.create`. Generations are local counters, never inferred from response IDs or headers.
 
@@ -744,16 +745,17 @@ If a different turn arrives while earlier selection, retry, or sampling-attempt 
 
 ### Cross-account continuation reset
 
-When an exact live upstream generation cannot be reused, including same-account reconnect, connection lifetime expiry, or cross-account rotation:
+When an exact live upstream generation cannot be reused, including same-account reconnect, connection lifetime expiry, or a successor-turn account change:
 
-1. do not forward the triggering request to a replacement upstream;
-2. retain a provisional reconnect/rotation intent containing keyed identity and generations only, never request/frame content;
-3. emit at most one version-gated reconnect signal for that intent: for incremental input, the exact wrapped `previous_response_not_found` error without upstream dispatch; full-request cross-account rotation on an existing downstream socket remains forbidden until a separate signal is fixture-proven;
-4. verify the client invalidates the old socket and sends the same turn's portable full request either on a new model-bearing WebSocket handshake/generation or over HTTP `/responses`; no graceful close handshake is required;
-5. consume the stored intent once and dispatch that full request to the lease's immutable account, or to the selected new account only when this is a never-admitted provisional turn;
-6. if resynchronisation fails, keep the same live upstream generation when still available or surface a typed continuity error. Never drop history or guess.
+1. classify the sole pending `response.create` before dispatch;
+2. reject generation-bound incremental input without opening a replacement upstream;
+3. for a portable full request, acquire the durable lease and freeze the frame in bounded memory;
+4. open the selected upstream generation and forward only after route and generation commits succeed;
+5. on definite pre-admission auth rejection, recover only same-identity candidates; on exact hard 429, change accounts only for a never-admitted soft/unbound turn;
+6. on successful admission, destroy the frame buffer and pin the turn/account/generation;
+7. on exhausted or ambiguous failure, relay a canonical bounded error and close or retain the downstream according to fixture-proven client behaviour. Never drop history or guess.
 
-Codex source maps the nested `previous_response_not_found` error to a retryable full-request path, but CQ must prove exact end-to-end behaviour for each supported client, including current Codex Desktop and `stream_max_retries` values 0, 1, and exhausted fallback. Error event, client invalidation, new WebSocket generation or HTTP crossover, and portable full request remain an acceptance test, not an assumed contract.
+`previous_response_not_found` remains the client-facing recovery signal for genuinely extinct incremental state, including downstream reconnect or CQ restart. It is no longer required for safe replacement of a still-buffered portable full request behind a live downstream socket. CQ must still prove exact end-to-end behaviour for current Codex CLI/Desktop and retry budgets 0, 1, and exhausted fallback.
 
 ## Observability and privacy
 
@@ -1153,13 +1155,13 @@ Unresolved approval before exceptional same-turn migration:
 Blocking gates before WebSocket enforcement:
 
 1. Prove current Codex Desktop emits compatible per-frame turn metadata.
-2. Prove version-gated reconnect/resync causes a new WS generation or HTTP crossover with a portable full logical retry before any replacement-upstream dispatch, for both incremental and full new-turn triggers.
+2. Prove terminating-broker rotation replays only a bounded portable full frame before admission, while incremental/extinct-state recovery produces a new WS generation or HTTP crossover before replacement dispatch.
 3. Confirm live `codex.rate_limits` bucket names map to CQ's canonical model buckets.
 4. Achieve zero shadow account/turn mismatches and zero unknown lifecycle events in the supported path.
-5. Prove upstream 101 semantics, beta header, subprotocol, and compression survive the two-leg broker.
+5. Prove beta header, subprotocol, compression, safe upstream-handshake consumption, and terminal error translation across the two-leg broker.
 6. Pass default-zstd and unary-compaction fixtures for every supported build.
 7. Prove remote-compaction opaque state is portable across two real account identities, or keep its predecessor-affinity block permanent.
-8. Prove each WS-enforced client supplies model plus dynamic lane/turn handshake data before any stateful 101 binding and that the first frame matches both.
+8. Prove each WS-enforced client supplies model plus dynamic lane/turn authority in the bounded first `response.create` before upstream dispatch.
 
 If a gate fails, CQ retains predecessor/connection affinity or fails closed. It never trades conversation correctness for faster account rotation.
 
