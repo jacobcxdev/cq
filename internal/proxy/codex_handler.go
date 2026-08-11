@@ -40,7 +40,7 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	streaming := extractStream(body)
 	// Normalise [1m] suffix for response translation (effort suffixes are not stripped).
 	model := ParseModel(rawModel)
-	fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=codex protocol=anthropic-messages translated_upstream=/responses stream=%t\n", r.Method, r.URL.Path, rawModel, streaming)
+	fmt.Fprintf(os.Stderr, "cq: route %s %s model_family=%s provider=codex protocol=anthropic-messages translated_upstream=/responses stream=%t\n", r.Method, r.URL.Path, projectCodexDiagnosticsModel(rawModel), streaming)
 
 	// Build upstream request.
 	upstreamURL := s.Config.CodexUpstream + "/responses"

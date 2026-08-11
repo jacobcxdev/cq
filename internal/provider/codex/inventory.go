@@ -288,7 +288,7 @@ func discoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, aut
 			inventory.ExternalSources = append(inventory.ExternalSources, status)
 			continue
 		}
-		candidates, err := source.List(ctx)
+		candidates, err := safeExternalSourceList(ctx, source)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Inventory{}, ctxErr
 		}
@@ -636,10 +636,76 @@ func snapshotExternalSourceNames(sources []ExternalCredentialSource) ([]string, 
 		if source == nil {
 			continue
 		}
-		names[index] = source.Name()
+		names[index] = safeExternalSourceName(source)
 		counts[names[index]]++
 	}
 	return names, counts
+}
+
+func safeExternalSourceName(source ExternalCredentialSource) (name string) {
+	defer func() {
+		if recover() != nil {
+			name = ""
+		}
+	}()
+	return source.Name()
+}
+
+func safeExternalSourceList(ctx context.Context, source ExternalCredentialSource) (candidates []ExternalCandidate, err error) {
+	defer func() {
+		if recover() != nil {
+			candidates = nil
+			err = ErrExternalInvalid
+		}
+	}()
+	candidates, err = source.List(ctx)
+	if err == nil {
+		return candidates, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	sanitised := sanitiseExternalSourceError(err)
+	if sanitised == ErrExternalInvalid && !errors.Is(err, ErrExternalInvalid) {
+		return nil, errors.New("external credential source fetch failed")
+	}
+	return nil, sanitised
+}
+
+func safeExternalSourceResolve(ctx context.Context, source ExternalCredentialSource, ref ExternalCandidateRef) (material CredentialMaterial, err error) {
+	defer func() {
+		if recover() != nil {
+			material = CredentialMaterial{}
+			err = ErrExternalInvalid
+		}
+	}()
+	material, err = source.Resolve(ctx, ref)
+	if err == nil {
+		return material, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return CredentialMaterial{}, ctxErr
+	}
+	return CredentialMaterial{}, sanitiseExternalSourceError(err)
+}
+
+func sanitiseExternalSourceError(err error) error {
+	switch {
+	case errors.Is(err, errExternalNotConfigured):
+		return errors.Join(ErrExternalUnavailable, errExternalNotConfigured)
+	case errors.Is(err, ErrExternalUnavailable):
+		return ErrExternalUnavailable
+	case errors.Is(err, ErrExternalUnsafePath):
+		return ErrExternalUnsafePath
+	case errors.Is(err, ErrStaleRevision):
+		return ErrStaleRevision
+	case errors.Is(err, ErrExternalIdentityMismatch):
+		return ErrExternalIdentityMismatch
+	case errors.Is(err, ErrExternalFingerprintMismatch):
+		return ErrExternalFingerprintMismatch
+	default:
+		return ErrExternalInvalid
+	}
 }
 
 func externalSourceErrorCode(err error) string {

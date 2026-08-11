@@ -13,12 +13,13 @@ import (
 )
 
 var (
-	ErrCredentialOwnerStale           = errors.New("credential coordinator endpoint exists but is unreachable")
-	ErrCredentialControlDisabled      = errors.New("credential coordinator control unavailable on this platform")
-	ErrCredentialControlNotOwner      = errors.New("credential control does not own coordinator authority")
-	ErrCredentialOwnerRevoked         = errors.New("credential coordinator owner authority revoked")
-	ErrCredentialAuthorityUnavailable = errors.New("credential authority unavailable")
-	ErrCredentialInventoryDegraded    = errors.New("credential inventory degraded")
+	ErrCredentialOwnerStale                 = errors.New("credential coordinator endpoint exists but is unreachable")
+	ErrCredentialControlDisabled            = errors.New("credential coordinator control unavailable on this platform")
+	ErrCredentialControlNotOwner            = errors.New("credential control does not own coordinator authority")
+	ErrCredentialOwnerRevoked               = errors.New("credential coordinator owner authority revoked")
+	ErrCredentialAuthorityUnavailable       = errors.New("credential authority unavailable")
+	ErrCredentialInventoryDegraded          = errors.New("credential inventory degraded")
+	ErrCredentialEndpointRecoveryUnrecorded = errors.New("credential endpoint recovery observation failed")
 )
 
 type CredentialControl struct {
@@ -42,6 +43,24 @@ type CredentialOwnerCapability interface {
 // CredentialOwnerInitializer prepares durable credential state before a new
 // owner starts serving coordinator RPCs.
 type CredentialOwnerInitializer func(context.Context, *CredentialCoordinator, CredentialOwnerCapability) error
+
+// CredentialEndpointRecoveryRecorder records that supervised startup is about
+// to mutate an exactly proved crash-recovery endpoint. The callback receives no
+// credential, account, endpoint, or filesystem identifiers.
+type CredentialEndpointRecoveryRecorder interface {
+	RecordCredentialEndpointRecovery() error
+}
+
+// CredentialEndpointRecoveryRecorderFunc adapts a privacy-safe callback to a
+// CredentialEndpointRecoveryRecorder.
+type CredentialEndpointRecoveryRecorderFunc func() error
+
+func (record CredentialEndpointRecoveryRecorderFunc) RecordCredentialEndpointRecovery() error {
+	if record == nil {
+		return ErrCredentialEndpointRecoveryUnrecorded
+	}
+	return record()
+}
 
 // CredentialOwnerOperation keeps owner authority live until Release.
 type CredentialOwnerOperation struct {
@@ -109,6 +128,17 @@ func OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifier(ctx con
 		return nil, err
 	}
 	return OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, coordinator, initialiseCredentialOwner, verifier)
+}
+
+// OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifierAndRecoveryRecorder
+// is the supervised default-endpoint opener whose exact crash-recovery path is
+// gated by a privacy-safe durable observation.
+func OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(ctx context.Context, fs fsutil.DurableFileSystem, verifier LegacyMaintenanceFinaliseVerifier, recorder CredentialEndpointRecoveryRecorder, exchanges ...RefreshExchange) (*CredentialControl, error) {
+	coordinator, path, err := newDefaultCredentialCoordinator(fs, exchanges...)
+	if err != nil {
+		return nil, err
+	}
+	return OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(ctx, path, coordinator, initialiseCredentialOwner, verifier, recorder)
 }
 
 func newDefaultCredentialCoordinator(fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialCoordinator, string, error) {

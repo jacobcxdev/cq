@@ -104,6 +104,12 @@ type Server struct {
 	Headroom                  *HeadroomBridge
 	Diag                      *DiagnosticsWriter
 	PayloadDiag               *PayloadWriter
+	// CodexCanary enforces the always-on Codex diagnostics privacy boundary
+	// even when route diagnostics persistence is disabled.
+	CodexCanary *CodexCanaryRecorder
+	// CodexCanaryStop is non-nil only while one active canary is owned by this
+	// exact serving process.
+	CodexCanaryStop CodexCanaryStopFunc
 	// ServingAttestor binds maintenance finalise proof authority to the exact
 	// pre-bound loopback listener passed to http.Server.Serve.
 	ServingAttestor *ServingAttestor
@@ -179,7 +185,7 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 		}
 		return errors.New("proxy server listener is unavailable")
 	}
-	if s.CodexHTTPStartupValidation != nil && s.ServingAttestor == nil {
+	if (s.CodexHTTPStartupValidation != nil || s.CodexCanaryStop != nil) && s.ServingAttestor == nil {
 		_ = listener.Close()
 		return errors.New("Codex HTTP startup validation requires a serving attestor")
 	}
@@ -196,13 +202,12 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 			return err
 		}
 	}
-	var startupReady <-chan struct{}
-	if s.CodexHTTPStartupValidation != nil {
+	var servingReady <-chan struct{}
+	if s.CodexHTTPStartupValidation != nil || s.CodexCanaryStop != nil {
 		readyListener := newCodexHTTPStartupReadyListener(serveListener)
 		serveListener = readyListener
-		startupReady = readyListener.ready
+		servingReady = readyListener.ready
 	}
-
 	srv := &http.Server{
 		Addr:              listener.Addr().String(),
 		Handler:           handler,
@@ -214,10 +219,34 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 	defer stop()
 	var startupValidation codexHTTPStartupValidationRun
 	if s.CodexHTTPStartupValidation != nil {
-		startupValidation = runCodexHTTPStartupValidation(ctx, stop, startupReady, CodexHTTPStartupValidationRuntime{
+		startupValidation = runCodexHTTPStartupValidation(ctx, stop, servingReady, CodexHTTPStartupValidationRuntime{
 			ListenerAddress: listener.Addr().String(),
 			ServingAttestor: s.ServingAttestor,
 		}, s.CodexHTTPStartupValidation)
+	}
+	var canaryStopResult <-chan error
+	if s.CodexCanaryStop != nil {
+		result := make(chan error, 1)
+		canaryStopResult = result
+		go func() {
+			var stopErr error
+			defer func() {
+				if recover() != nil {
+					stopErr = ErrCodexCanaryStopUnavailable
+				}
+				result <- stopErr
+				stop()
+			}()
+			select {
+			case <-servingReady:
+				stopErr = s.CodexCanaryStop(ctx, CodexCanaryStopRuntime{
+					ListenerAddress: listener.Addr().String(),
+					ServingAttestor: s.ServingAttestor,
+				})
+			case <-ctx.Done():
+				stopErr = ctx.Err()
+			}
+		}()
 	}
 
 	shutdownResult := make(chan error, 1)
@@ -260,6 +289,11 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 	}
 	if shutdownErr != nil {
 		return shutdownErr
+	}
+	if canaryStopResult != nil {
+		if stopErr := <-canaryStopResult; stopErr != nil && !errors.Is(stopErr, context.Canceled) && !errors.Is(stopErr, context.DeadlineExceeded) {
+			return errors.Join(errors.New("Codex canary stop failed"), stopErr)
+		}
 	}
 	if s.CodexHTTPStartupValidation != nil {
 		if err := codexHTTPStartupValidationResult(startupValidation); err != nil {
@@ -1380,8 +1414,13 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 		}
 
 		routeProvider = RouteRequestWithCatalog(r.Method, r.URL.Path, routeModel, s.Catalog)
-		fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
-			r.Method, r.URL.Path, routeModel, providerName(routeProvider))
+		if routeProvider == ProviderCodex {
+			fmt.Fprintf(os.Stderr, "cq: route %s %s model_family=%s provider=codex\n",
+				r.Method, r.URL.Path, projectCodexDiagnosticsModel(routeModel))
+		} else {
+			fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
+				r.Method, r.URL.Path, routeModel, providerName(routeProvider))
+		}
 		if routeProvider == ProviderCodex {
 			s.handleCodex(w, r, buf)
 			return
@@ -1452,7 +1491,19 @@ func (s *Server) wrapDiagnosticsResponseWriter(w http.ResponseWriter) (http.Resp
 }
 
 func (s *Server) emitDiagnostics(event RouteEvent) {
-	if s == nil || s.Diag == nil {
+	if s == nil {
+		return
+	}
+	event = projectCodexDiagnostics(event)
+	recorder := s.CodexCanary
+	if recorder == nil {
+		recorder = s.Diag.codexCanary()
+	}
+	if err := rejectUnsafeCodexDiagnostics(event, recorder); err != nil {
+		fmt.Fprintln(os.Stderr, "cq: diagnostics: dropped unsafe Codex event")
+		return
+	}
+	if s.Diag == nil {
 		return
 	}
 	if event.Time.IsZero() {

@@ -128,7 +128,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	if enforce && protocolRequest.Model != "" {
 		model = protocolRequest.Model
 	}
-	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=codex (native compact)\n", requestPath, model)
+	fmt.Fprintf(os.Stderr, "cq: route POST %s model_family=%s provider=codex (native compact)\n", requestPath, projectCodexDiagnosticsModel(model))
 
 	// Emit payload diagnostics before forwarding.
 	if s.PayloadDiag != nil {

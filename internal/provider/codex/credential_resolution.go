@@ -161,7 +161,7 @@ func (c *CredentialCoordinator) ResolveExact(ctx context.Context, planned Planne
 				}
 				for index, source := range c.ExternalSources {
 					if source != nil && sourceNames[index] == candidate.externalRef.Source {
-						material, err := source.Resolve(ctx, *candidate.externalRef)
+						material, err := safeExternalSourceResolve(ctx, source, *candidate.externalRef)
 						if err != nil {
 							if ctxErr := ctx.Err(); ctxErr != nil {
 								return CredentialMaterial{}, ctxErr

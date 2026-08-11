@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -305,7 +306,7 @@ func TestCodexHTTPEnforcerCanaryRecordsUnknownLifecycleEvent(t *testing.T) {
 	}
 }
 
-func TestCodexHTTPEnforcerCanaryWriteFailureDoesNotCutAdmittedStream(t *testing.T) {
+func TestLegacyCodexHTTPEnforcerDoesNotTouchCanaryDuringAdmittedStream(t *testing.T) {
 	canaryFS := &failingDurableFS{MemFS: fsutil.NewMemFS()}
 	canary := testCodexCanary(t, canaryFS)
 	canaryFS.failWrite = true
@@ -325,12 +326,15 @@ func TestCodexHTTPEnforcerCanaryWriteFailureDoesNotCutAdmittedStream(t *testing.
 	if err != nil || !bytes.Contains(data, []byte(`response.completed`)) {
 		t.Fatalf("stream data=%q error=%v", data, err)
 	}
-	if health := enforcer.Observer.Health(); health.CanaryErrors != 1 {
+	if health := enforcer.Observer.Health(); health.CanaryErrors != 0 {
 		t.Fatalf("health = %+v", health)
+	}
+	if state := canary.State(); state.AdmittedTurns != 0 {
+		t.Fatalf("legacy enforcer credited canary: %+v", state)
 	}
 }
 
-func TestCodexHTTPEnforcerCanaryCountsUniqueTurnsAcrossSamplingRequests(t *testing.T) {
+func TestLegacyCodexHTTPEnforcerDoesNotCreditCanaryAdmissions(t *testing.T) {
 	fsys := fsutil.NewMemFS()
 	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
 		"one": {
@@ -359,7 +363,7 @@ func TestCodexHTTPEnforcerCanaryCountsUniqueTurnsAcrossSamplingRequests(t *testi
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
-	if state := canary.State(); state.AdmittedTurns != 2 {
+	if state := canary.State(); state.AdmittedTurns != 0 {
 		t.Fatalf("canary state = %+v", state)
 	}
 }
@@ -983,11 +987,14 @@ func testHTTPEnforcer(t *testing.T, chooser CodexRouteChooser, executor Explicit
 func testCodexCanary(t *testing.T, fsys fsutil.DurableFileSystem) *CodexCanaryRecorder {
 	t.Helper()
 	canary, err := StartCodexCanary(fsys, "/state/canary.json", nil, CodexCanaryTuple{
-		CQBuild:      "build",
-		ClientBuild:  "client",
-		ParserSchema: 1,
-		LeaseSchema:  1,
-		FixtureHash:  "fixture",
+		CQBuild:              "build",
+		ClientBuild:          "client",
+		ParserSchema:         1,
+		LeaseSchema:          1,
+		SemanticsRevision:    "semantics",
+		RetryBudget:          1,
+		FixtureHash:          "fixture",
+		ReadinessFingerprint: strings.Repeat("a", 64),
 	}, time.Now())
 	if err != nil {
 		t.Fatal(err)

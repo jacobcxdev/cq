@@ -1,6 +1,10 @@
 package proxy
 
-import "sync/atomic"
+import (
+	"errors"
+	"sync/atomic"
+	"time"
+)
 
 // codexNativeHTTPAdmissionObservation contains only durable journal-owned
 // generations. It cannot carry route, account, request, response, credential,
@@ -18,6 +22,17 @@ type codexNativeHTTPAdmissionSink interface {
 type codexNativeHTTPAdmissionOwner struct {
 	sink    codexNativeHTTPAdmissionSink
 	blocked atomic.Bool
+}
+
+type codexCanaryNativeHTTPAdmissionSink struct {
+	recorder *CodexCanaryRecorder
+}
+
+func (sink codexCanaryNativeHTTPAdmissionSink) observeCodexNativeHTTPFirstAdmission(codexNativeHTTPAdmissionObservation) error {
+	if sink.recorder == nil {
+		return errors.New("Codex canary admission authority unavailable")
+	}
+	return sink.recorder.RecordAdmitted(time.Now())
 }
 
 type codexInstalledNativeHTTPAdmissionCounter struct {

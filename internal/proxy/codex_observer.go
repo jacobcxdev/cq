@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -98,17 +97,6 @@ func (observer *CodexTurnObserver) SetCanary(canary *CodexCanaryRecorder) {
 func (observer *CodexTurnObserver) BindCapacity(capacity *CodexCapacityLedger) {
 	if observer != nil {
 		observer.capacity.Store(capacity)
-	}
-}
-
-func (observer *CodexTurnObserver) recordCanaryAdmitted(now time.Time) {
-	if observer == nil {
-		return
-	}
-	if canary := observer.canary.Load(); canary != nil {
-		if err := canary.RecordAdmitted(now); err != nil {
-			observer.canaryErrors.Add(1)
-		}
 	}
 }
 
@@ -627,15 +615,10 @@ func (handle *CodexTurnObservation) observeEventLocked(observation CodexSSEObser
 }
 
 func safeCodexEventReason(eventType string) string {
-	if eventType == "" || len(eventType) > 128 {
+	if eventType == "" {
 		return "response_event_invalid"
 	}
-	for _, char := range eventType {
-		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '.' && char != '_' && char != '-' {
-			return "response_event_invalid"
-		}
-	}
-	return "response_event_" + strings.ReplaceAll(eventType, ".", "_")
+	return "response_event_unknown"
 }
 
 func (handle *CodexTurnObservation) prewarmCorrelation() string {

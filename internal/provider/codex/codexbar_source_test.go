@@ -145,6 +145,24 @@ type growingDuringReadCodexBarFile struct {
 	growthErr error
 }
 
+type recordingCodexBarReadFileSystem struct {
+	osCodexBarReadFileSystem
+	opened []string
+}
+
+type panickingCodexBarReadFileSystem struct {
+	osCodexBarReadFileSystem
+}
+
+func (panickingCodexBarReadFileSystem) Lstat(string) (os.FileInfo, error) {
+	panic("private CodexBar protection panic")
+}
+
+func (f *recordingCodexBarReadFileSystem) OpenNoFollow(root, path string) (codexBarReadFile, error) {
+	f.opened = append(f.opened, path)
+	return f.osCodexBarReadFileSystem.OpenNoFollow(root, path)
+}
+
 func (r *growingCodexBarReader) Read(data []byte) (int, error) {
 	for i := range data {
 		data[i] = 'x'
@@ -284,6 +302,168 @@ func TestCodexBarSourceListsMetadataAndResolvesExactRevision(t *testing.T) {
 	}
 	if _, err := source.Resolve(context.Background(), candidate.Ref); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("Resolve after rotation error = %v, want ErrStaleRevision", err)
+	}
+}
+
+func TestCodexBarProtectionSnapshotReturnsOnlyDigestsAndCount(t *testing.T) {
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+	undeclared := filepath.Join(root, "undeclared", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(undeclared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(undeclared, []byte("private-undeclared-fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := NewCodexBarSource(root)
+	fileSystem := &recordingCodexBarReadFileSystem{}
+	source.fs = fileSystem
+
+	snapshot, err := source.ProtectionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DeclaredAuthFiles != 1 {
+		t.Fatalf("declared auth file count = %d, want 1", snapshot.DeclaredAuthFiles)
+	}
+	if snapshot.ManifestDigest == ([sha256.Size]byte{}) || snapshot.AuthDigest == ([sha256.Size]byte{}) {
+		t.Fatal("protection snapshot returned an empty digest")
+	}
+	if len(fileSystem.opened) != 2 || fileSystem.opened[0] != filepath.Join(root, "managed-codex-accounts.json") || fileSystem.opened[1] != codexBarAuthPath(root) {
+		t.Fatalf("opened paths = %q, want only manifest and declared auth", fileSystem.opened)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{root, "synthetic-record", "private-undeclared-fixture", "synthetic-access"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("snapshot exposed private source material %q", private)
+		}
+	}
+}
+
+func TestCodexBarProtectionSnapshotPanicFailsClosedPrivately(t *testing.T) {
+	source := NewCodexBarSource(t.TempDir())
+	source.fs = panickingCodexBarReadFileSystem{}
+
+	_, err := source.ProtectionSnapshot()
+	if !errors.Is(err, ErrExternalInvalid) {
+		t.Fatalf("ProtectionSnapshot error = %v, want ErrExternalInvalid", err)
+	}
+	if strings.Contains(err.Error(), "private CodexBar protection panic") {
+		t.Fatalf("ProtectionSnapshot error disclosed panic value: %v", err)
+	}
+}
+
+func TestCodexBarProtectionSnapshotNeverReadsUnsafeDeclaredAuth(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string) string
+	}{
+		{
+			name: "escaped home",
+			setup: func(t *testing.T, root string) string {
+				outside := t.TempDir()
+				path := filepath.Join(outside, "auth.json")
+				if err := os.WriteFile(path, []byte("private-escaped-fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeCodexBarFixture(t, root, 0o600, func(record map[string]any) {
+					record["managedHomePath"] = outside
+				})
+				return path
+			},
+		},
+		{
+			name: "auth symlink",
+			setup: func(t *testing.T, root string) string {
+				writeCodexBarFixture(t, root, 0o600, nil)
+				path := codexBarAuthPath(root)
+				target := filepath.Join(t.TempDir(), "private-target.json")
+				if err := os.WriteFile(target, []byte("private-symlink-fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+				return path
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			unsafePath := test.setup(t, root)
+			source := NewCodexBarSource(root)
+			fileSystem := &recordingCodexBarReadFileSystem{}
+			source.fs = fileSystem
+
+			_, err := source.ProtectionSnapshot()
+			if !errors.Is(err, ErrExternalUnsafePath) {
+				t.Fatalf("ProtectionSnapshot error = %v, want ErrExternalUnsafePath", err)
+			}
+			for _, opened := range fileSystem.opened {
+				if opened == unsafePath {
+					t.Fatalf("unsafe declared auth was opened: %q", opened)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexBarProtectionSnapshotChangesForRotationAndTopology(t *testing.T) {
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+	source := NewCodexBarSource(root)
+
+	initial, err := source.ProtectionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedAuth := inventoryAuth(
+		"rotated-access",
+		"acct-1",
+		fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"),
+		time.Now().Add(2*time.Hour).UnixMilli(),
+	)
+	writeCodexBarAuthAndFingerprint(t, root, rotatedAuth)
+	rotated, err := source.ProtectionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.ManifestDigest == rotated.ManifestDigest || initial.AuthDigest == rotated.AuthDigest {
+		t.Fatal("declared credential rotation did not change both protection digests")
+	}
+
+	movedHome := filepath.Join(root, "managed-codex-homes", "moved-record")
+	if err := os.MkdirAll(movedHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(movedHome, "auth.json"), rotatedAuth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCodexBarRecord(t, root, func(record map[string]any) {
+		record["managedHomePath"] = movedHome
+	})
+	moved, err := source.ProtectionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.ManifestDigest == moved.ManifestDigest || rotated.AuthDigest == moved.AuthDigest {
+		t.Fatal("declared credential topology change did not change both protection digests")
+	}
+	if moved.DeclaredAuthFiles != 1 {
+		t.Fatalf("declared auth file count after topology change = %d, want 1", moved.DeclaredAuthFiles)
+	}
+}
+
+func TestCodexBarProtectionSnapshotKeepsOptionalAbsenceTyped(t *testing.T) {
+	_, err := NewCodexBarSource(t.TempDir()).ProtectionSnapshot()
+	if !errors.Is(err, ErrExternalUnavailable) || !errors.Is(err, errExternalNotConfigured) {
+		t.Fatalf("ProtectionSnapshot error = %v, want unavailable optional absence", err)
 	}
 }
 

@@ -576,6 +576,7 @@ func TestServerDiagnosticsClaudeRouteReadsLiveSelectorPin(t *testing.T) {
 }
 
 func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
+	const privateModel = "gpt-private-native-model"
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
 	if err != nil {
@@ -608,9 +609,9 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 		t.Fatalf("handler() error = %v", err)
 	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"`+privateModel+`","input":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(w, req)
+	stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202, body: %s", w.Code, w.Body.String())
@@ -629,8 +630,8 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	if ev.RouteKind != "codex_native" {
 		t.Fatalf("RouteKind = %q, want codex_native", ev.RouteKind)
 	}
-	if ev.Model != "gpt-5.4" {
-		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	if ev.Model != codexDiagnosticsModelGPT {
+		t.Fatalf("Model = %q, want %q", ev.Model, codexDiagnosticsModelGPT)
 	}
 	if ev.StatusCode != http.StatusAccepted {
 		t.Fatalf("StatusCode = %d, want 202", ev.StatusCode)
@@ -645,6 +646,10 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-user@test.com")
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-account-secret")
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
+	assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+	if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+		t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+	}
 }
 
 func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
@@ -721,6 +726,64 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-token")
 }
 
+func TestServerDiagnosticsTranslatedCodexRouteProjectsRequestModel(t *testing.T) {
+	const privateModel = "gpt-private-anthropic-model"
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "local-tok",
+		},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body: io.NopCloser(strings.NewReader(
+						"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n" +
+							"data: [DONE]\n\n",
+					)),
+				}, nil
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"`+privateModel+`","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	stderr := captureStderr(t, func() { handler(w, req) })
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Provider != "codex" || ev.RouteKind != "anthropic_messages" || ev.Model != codexDiagnosticsModelGPT {
+		t.Fatalf("translated event = %+v", ev)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+	if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+		t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+	}
+}
+
 func TestServerDiagnosticsCodexNoTransportEmitsSafeError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
@@ -775,7 +838,7 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 		wantBody     string
 	}{
 		{name: "claude", model: "claude-sonnet-4-6", wantProvider: "claude", wantBody: `{"input_tokens":321}`},
-		{name: "codex", model: "gpt-5.4", wantProvider: "codex", wantBody: `{"input_tokens":123}`},
+		{name: "codex", model: "gpt-private-count-tokens-model", wantProvider: "codex", wantBody: `{"input_tokens":123}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "routes.jsonl")
@@ -830,7 +893,7 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(body))
 			req.Header.Set("Authorization", "Bearer local-tok")
 			req.Header.Set("Content-Type", "application/json")
-			handler(w, req)
+			stderr := captureStderr(t, func() { handler(w, req) })
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
@@ -852,18 +915,29 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 			if ev.RouteKind != "anthropic_count_tokens" {
 				t.Fatalf("RouteKind = %q, want anthropic_count_tokens", ev.RouteKind)
 			}
-			if ev.Model != tc.model {
-				t.Fatalf("Model = %q, want %s", ev.Model, tc.model)
+			wantDiagnosticModel := tc.model
+			if tc.wantProvider == "codex" {
+				wantDiagnosticModel = codexDiagnosticsModelGPT
+			}
+			if ev.Model != wantDiagnosticModel {
+				t.Fatalf("Model = %q, want %q", ev.Model, wantDiagnosticModel)
 			}
 			if ev.StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
 			}
 			assertDiagnosticsLogDoesNotContain(t, path, "local-tok")
+			if tc.wantProvider == "codex" {
+				assertDiagnosticsLogDoesNotContain(t, path, tc.model)
+				if strings.Contains(stderr, tc.model) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+					t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+				}
+			}
 		})
 	}
 }
 
 func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
+	const privateModel = "gpt-private-legacy-model"
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
 	if err != nil {
@@ -898,10 +972,10 @@ func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
 		t.Fatalf("handler() error = %v", err)
 	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(`{"model":"`+privateModel+`","input":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+localToken)
-	handler.ServeHTTP(w, req)
+	stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201, body: %s", w.Code, w.Body.String())
@@ -923,13 +997,17 @@ func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
 	if ev.RouteKind != "codex_native" {
 		t.Fatalf("RouteKind = %q, want codex_native", ev.RouteKind)
 	}
-	if ev.Model != "gpt-5.4" {
-		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	if ev.Model != codexDiagnosticsModelGPT {
+		t.Fatalf("Model = %q, want %q", ev.Model, codexDiagnosticsModelGPT)
 	}
 	if ev.StatusCode != http.StatusCreated {
 		t.Fatalf("StatusCode = %d, want 201", ev.StatusCode)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, localToken)
+	assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+	if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+		t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+	}
 }
 
 func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
@@ -1204,6 +1282,7 @@ func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testi
 }
 
 func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
+	const privateModel = "gpt-private-compact-model"
 	for _, tc := range []struct {
 		name string
 		path string
@@ -1245,9 +1324,9 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 				t.Fatalf("handler() error = %v", err)
 			}
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"model":"gpt-5.4","previous_response_id":"resp_abc"}`))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"model":"`+privateModel+`","previous_response_id":"resp_abc"}`))
 			req.Header.Set("Content-Type", "application/json")
-			handler.ServeHTTP(w, req)
+			stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
@@ -1269,11 +1348,15 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 			if ev.RouteKind != "codex_compact" {
 				t.Fatalf("RouteKind = %q, want codex_compact", ev.RouteKind)
 			}
-			if ev.Model != "gpt-5.4" {
-				t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+			if ev.Model != codexDiagnosticsModelGPT {
+				t.Fatalf("Model = %q, want %q", ev.Model, codexDiagnosticsModelGPT)
 			}
 			if ev.StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
+			}
+			assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+			if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+				t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
 			}
 		})
 	}

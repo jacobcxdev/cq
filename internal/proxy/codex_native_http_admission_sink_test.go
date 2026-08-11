@@ -6,9 +6,80 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestCodexCanaryLeaseRuntimeCreditsOnlyDurableFirstAdmission(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	canaryFS := fsutil.NewMemFS()
+	recorder, err := StartCodexCanary(canaryFS, "/canary/state.json", nil, canaryTestTuple(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeLease, err := NewCodexCanaryLeaseRuntime(
+		coordinator,
+		func(context.Context, codex.AccountKey) error { return nil },
+		recorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := codexLeaseRuntimeTestPlan("canary-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.AdmitHTTP2xx(); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.State().AdmittedTurns; got != 1 {
+		t.Fatalf("admitted turns = %d, want 1", got)
+	}
+	if runtimeLease.nativeHTTPAdmissionPromotionBlocked() {
+		t.Fatal("successful canary credit blocked promotion")
+	}
+}
+
+func TestCodexCanaryLeaseRuntimeBlocksPromotionWhenCreditCannotPersist(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	recorder, err := StartCodexCanary(fsutil.NewMemFS(), "/canary/state.json", nil, canaryTestTuple(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtimeLease, err := NewCodexCanaryLeaseRuntime(coordinator, func(context.Context, codex.AccountKey) error { return nil }, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("failed-canary-credit", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := handle.AdmitHTTP2xx()
+	if err != nil || admitted == nil || !admitted.EverAdmitted() {
+		t.Fatalf("durable admission = %#v, %v", admitted, err)
+	}
+	if !runtimeLease.nativeHTTPAdmissionPromotionBlocked() {
+		t.Fatal("failed canary credit did not block promotion")
+	}
+}
 
 func TestCodexNativeHTTPAdmissionSinkRunsAfterFirstDurableAuthoritativeCommit(t *testing.T) {
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

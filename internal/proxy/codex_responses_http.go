@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -208,8 +207,7 @@ func (enforcer *CodexHTTPEnforcer) do(ctx context.Context, requirements CodexRou
 			return response, choice, attempt, nil
 		}
 		if failure == CodexPinnedAccepted {
-			firstAdmission := lease.State == LeaseProvisional
-			if err := enforcer.admitOrFinish(ctx, key, choice, response, request, compact, firstAdmission); err != nil {
+			if err := enforcer.admitOrFinish(ctx, key, choice, response, request, compact); err != nil {
 				closeResponse(response)
 				return nil, choice, attempt, err
 			}
@@ -248,7 +246,7 @@ func (enforcer *CodexHTTPEnforcer) do(ctx context.Context, requirements CodexRou
 	}
 }
 
-func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseKey, choice RouteChoice, response *http.Response, request CodexProtocolRequest, compact, firstAdmission bool) error {
+func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseKey, choice RouteChoice, response *http.Response, request CodexProtocolRequest, compact bool) error {
 	if response == nil {
 		enforcer.finishUnadmitted(key)
 		return errors.New("Codex HTTP attempt returned no response")
@@ -270,9 +268,6 @@ func (enforcer *CodexHTTPEnforcer) admitOrFinish(ctx context.Context, key LeaseK
 	_ = enforcer.Leases.ReleaseRouting(key)
 	if err != nil {
 		return err
-	}
-	if firstAdmission {
-		enforcer.Observer.recordCanaryAdmitted(time.Now())
 	}
 	handle := &CodexTurnObservation{
 		observer:        enforcer.Observer,

@@ -111,6 +111,16 @@ func NewCodexLeaseRuntime(coordinator *CodexContinuityCoordinator, revalidate Co
 	return newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(coordinator, revalidate, nil)
 }
 
+// NewCodexCanaryLeaseRuntime binds first durable authoritative admissions to
+// the serving process's active canary. Sink failures cannot undo admission;
+// they permanently block promotion for this runtime.
+func NewCodexCanaryLeaseRuntime(coordinator *CodexContinuityCoordinator, revalidate CodexLeaseAccountRevalidator, recorder *CodexCanaryRecorder) (*CodexLeaseRuntime, error) {
+	if recorder == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	return newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(coordinator, revalidate, codexCanaryNativeHTTPAdmissionSink{recorder: recorder})
+}
+
 func newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(
 	coordinator *CodexContinuityCoordinator,
 	revalidate CodexLeaseAccountRevalidator,

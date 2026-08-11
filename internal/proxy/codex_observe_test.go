@@ -384,13 +384,13 @@ func TestCodexObserveRecordsValidatedUnknownEventType(t *testing.T) {
 	handle.ObserveBytes([]byte("data: {\"type\":\"future.event\"}\n\n"))
 	event := RouteEvent{}
 	event.applyRouteDiagnostics(diag)
-	if event.Reason != "response_event_future_event" {
+	if event.Reason != "response_event_unknown" {
 		t.Fatalf("reason = %q", event.Reason)
 	}
 
 	handle.ObserveBytes([]byte("data: {\"type\":\"secret@example.com\\nraw\"}\n\n"))
 	event.applyRouteDiagnostics(diag)
-	if event.Reason != "response_event_invalid" {
+	if event.Reason != "response_event_unknown" {
 		t.Fatalf("reason = %q", event.Reason)
 	}
 }

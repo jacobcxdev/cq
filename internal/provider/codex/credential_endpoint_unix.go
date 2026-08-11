@@ -101,30 +101,40 @@ const (
 )
 
 type credentialEndpoint struct {
-	fs              fsutil.OSFileSystem
-	listener        *net.UnixListener
-	lock            fsutil.ExclusiveLock
-	secureDirectory fsutil.SecureDirectory
-	directoryFD     int
-	directory       string
-	directoryID     fsutil.SecureFileIdentity
-	path            string
-	finalName       string
-	generation      string
-	identity        credentialEndpointIdentity
-	lockIdentity    fsutil.SecureFileIdentity
-	sidecar         credentialEndpointSidecar
-	sidecarCAS      *credentialEndpointSidecarCAS
-	hook            credentialEndpointPhaseHook
-	writeHook       func(credentialEndpointSidecar) error
-	maintenanceMu   sync.Mutex
-	maintenanceGate credentialEndpointMaintenanceOpenGate
-	closeOnce       sync.Once
-	closeErr        error
-	releaseOnce     sync.Once
+	fs                     fsutil.OSFileSystem
+	listener               *net.UnixListener
+	lock                   fsutil.ExclusiveLock
+	secureDirectory        fsutil.SecureDirectory
+	directoryFD            int
+	directory              string
+	directoryID            fsutil.SecureFileIdentity
+	path                   string
+	finalName              string
+	generation             string
+	identity               credentialEndpointIdentity
+	lockIdentity           fsutil.SecureFileIdentity
+	sidecar                credentialEndpointSidecar
+	sidecarCAS             *credentialEndpointSidecarCAS
+	hook                   credentialEndpointPhaseHook
+	writeHook              func(credentialEndpointSidecar) error
+	maintenanceMu          sync.Mutex
+	maintenanceGate        credentialEndpointMaintenanceOpenGate
+	recoveryRecorder       CredentialEndpointRecoveryRecorder
+	recoveryRecordRequired bool
+	closeOnce              sync.Once
+	closeErr               error
+	releaseOnce            sync.Once
 }
 
 func openCredentialEndpoint(path string, allowRecovery bool, hook credentialEndpointPhaseHook) (*credentialEndpoint, *rpc.Client, error) {
+	return openCredentialEndpointWithRecoveryObservation(path, allowRecovery, hook, nil, false)
+}
+
+func openCredentialEndpointWithRecoveryRecorder(path string, allowRecovery bool, hook credentialEndpointPhaseHook, recorder CredentialEndpointRecoveryRecorder) (*credentialEndpoint, *rpc.Client, error) {
+	return openCredentialEndpointWithRecoveryObservation(path, allowRecovery, hook, recorder, true)
+}
+
+func openCredentialEndpointWithRecoveryObservation(path string, allowRecovery bool, hook credentialEndpointPhaseHook, recorder CredentialEndpointRecoveryRecorder, recoveryRecordRequired bool) (*credentialEndpoint, *rpc.Client, error) {
 	directory, finalName, err := validateCredentialEndpointPath(path)
 	if err != nil {
 		return nil, nil, err
@@ -157,6 +167,7 @@ func openCredentialEndpoint(path string, allowRecovery bool, hook credentialEndp
 		fs: fsys, secureDirectory: secureDirectory, directoryFD: directoryFD,
 		directory: directory, directoryID: directoryID,
 		path: path, finalName: finalName, hook: hook,
+		recoveryRecorder: recorder, recoveryRecordRequired: recoveryRecordRequired,
 	}
 	if err := endpoint.validateDirectoryNamespace(); err != nil {
 		endpoint.release()
@@ -1075,6 +1086,9 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 	if err := e.rejectMaintenanceJournal(); err != nil {
 		return nil, err
 	}
+	if err := e.recordEndpointRecovery(); err != nil {
+		return nil, err
+	}
 	if err := e.recover(sidecar, finalIdentity, finalExists); err != nil {
 		return nil, err
 	}
@@ -1082,6 +1096,24 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 		return nil, e.preserveUnboundMaintenancePublication(err)
 	}
 	return nil, nil
+}
+
+func (e *credentialEndpoint) recordEndpointRecovery() (result error) {
+	if !e.recoveryRecordRequired {
+		return nil
+	}
+	if e.recoveryRecorder == nil {
+		return ErrCredentialEndpointRecoveryUnrecorded
+	}
+	defer func() {
+		if recover() != nil {
+			result = ErrCredentialEndpointRecoveryUnrecorded
+		}
+	}()
+	if err := e.recoveryRecorder.RecordCredentialEndpointRecovery(); err != nil {
+		return ErrCredentialEndpointRecoveryUnrecorded
+	}
+	return nil
 }
 
 func (e *credentialEndpoint) preserveUnboundMaintenancePublication(cause error) error {

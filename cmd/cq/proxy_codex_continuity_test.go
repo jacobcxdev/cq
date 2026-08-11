@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,36 @@ func TestOpenProxyCodexContinuityOrdersFreshAuthorityBeforeRuntime(t *testing.T)
 	}
 	if !sameProxyCodexContinuityOptions(gotInitialiseOptions, gotOpenOptions) || gotInitialiseOwner != authority || gotOpenOwner != authority {
 		t.Fatal("initialise and open did not receive identical options and owner")
+	}
+}
+
+func TestOpenProxyCodexContinuityInjectsCanaryAdmissionAuthority(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	canary, err := proxy.StartCodexCanary(fsys, "/state/canary.json", nil, proxy.CodexCanaryTuple{
+		CQBuild: "build", ClientBuild: "client", ParserSchema: 1, LeaseSchema: 3,
+		SemanticsRevision: "semantics", RetryBudget: 1, FixtureHash: "fixture", ReadinessFingerprint: strings.Repeat("a", 64),
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotCanary *proxy.CodexCanaryRecorder
+	result, err := openProxyCodexContinuity(proxyCodexContinuityDependencies{
+		FS: fsys, StateDir: "/state", Routing: &proxy.CodexRoutingRuntime{HTTP: proxy.CodexModeStatus{
+			Effective: proxy.CodexRoutingEnforce, ModeEpoch: 4, AuthoritativeEpoch: 4,
+		}}, Retention: time.Hour, Now: time.Now, Authority: &proxyCodexContinuityTestAuthority{}, Canary: canary,
+		operations: proxyCodexContinuityOperations{
+			initialise: func(proxy.CodexContinuityOpenOptions, proxy.CodexLeaseWriterAuthority) error { return nil },
+			open: func(proxy.CodexContinuityOpenOptions, proxy.CodexLeaseWriterAuthority) (*proxy.CodexContinuityCoordinator, error) {
+				return &proxy.CodexContinuityCoordinator{}, nil
+			},
+			newCanaryRuntime: func(_ *proxy.CodexContinuityCoordinator, _ proxy.CodexLeaseAccountRevalidator, recorder *proxy.CodexCanaryRecorder) (*proxy.CodexLeaseRuntime, error) {
+				gotCanary = recorder
+				return &proxy.CodexLeaseRuntime{}, nil
+			},
+		},
+	})
+	if err != nil || result == nil || gotCanary != canary {
+		t.Fatalf("canary continuity = %#v, canary %p, error %v", result, gotCanary, err)
 	}
 }
 

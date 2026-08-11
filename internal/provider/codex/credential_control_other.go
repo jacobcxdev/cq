@@ -27,3 +27,7 @@ func OpenRecoveringCredentialControlPrepared(context.Context, string, *Credentia
 func OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifier(context.Context, string, *CredentialCoordinator, CredentialOwnerInitializer, LegacyMaintenanceFinaliseVerifier) (*CredentialControl, error) {
 	return nil, ErrCredentialControlDisabled
 }
+
+func OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(context.Context, string, *CredentialCoordinator, CredentialOwnerInitializer, LegacyMaintenanceFinaliseVerifier, CredentialEndpointRecoveryRecorder) (*CredentialControl, error) {
+	return nil, ErrCredentialControlDisabled
+}

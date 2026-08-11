@@ -24,14 +24,16 @@ type proxyCodexContinuityDependencies struct {
 	Retention time.Duration
 	Now       func() time.Time
 	Authority proxyCodexContinuityAuthority
+	Canary    *proxy.CodexCanaryRecorder
 
 	operations proxyCodexContinuityOperations
 }
 
 type proxyCodexContinuityOperations struct {
-	initialise func(proxy.CodexContinuityOpenOptions, proxy.CodexLeaseWriterAuthority) error
-	open       func(proxy.CodexContinuityOpenOptions, proxy.CodexLeaseWriterAuthority) (*proxy.CodexContinuityCoordinator, error)
-	newRuntime func(*proxy.CodexContinuityCoordinator, proxy.CodexLeaseAccountRevalidator) (*proxy.CodexLeaseRuntime, error)
+	initialise       func(proxy.CodexContinuityOpenOptions, proxy.CodexLeaseWriterAuthority) error
+	open             func(proxy.CodexContinuityOpenOptions, proxy.CodexLeaseWriterAuthority) (*proxy.CodexContinuityCoordinator, error)
+	newRuntime       func(*proxy.CodexContinuityCoordinator, proxy.CodexLeaseAccountRevalidator) (*proxy.CodexLeaseRuntime, error)
+	newCanaryRuntime func(*proxy.CodexContinuityCoordinator, proxy.CodexLeaseAccountRevalidator, *proxy.CodexCanaryRecorder) (*proxy.CodexLeaseRuntime, error)
 }
 
 type proxyCodexContinuity struct {
@@ -209,6 +211,9 @@ func openProxyCodexContinuity(deps proxyCodexContinuityDependencies) (*proxyCode
 	if operations.newRuntime == nil {
 		operations.newRuntime = proxy.NewCodexLeaseRuntime
 	}
+	if operations.newCanaryRuntime == nil {
+		operations.newCanaryRuntime = proxy.NewCodexCanaryLeaseRuntime
+	}
 	if (!keyExists || !journalExists) && authorityNeeded {
 		if err := operations.initialise(options, deps.Authority); err != nil {
 			return nil, fmt.Errorf("initialise Codex continuity authority: %w", err)
@@ -219,7 +224,13 @@ func openProxyCodexContinuity(deps proxyCodexContinuityDependencies) (*proxyCode
 	if err != nil {
 		return nil, fmt.Errorf("open Codex continuity authority: %w", err)
 	}
-	runtime, err := operations.newRuntime(coordinator, newProxyCodexContinuityAccountRevalidator(deps.Authority))
+	revalidate := newProxyCodexContinuityAccountRevalidator(deps.Authority)
+	var runtime *proxy.CodexLeaseRuntime
+	if deps.Canary != nil {
+		runtime, err = operations.newCanaryRuntime(coordinator, revalidate, deps.Canary)
+	} else {
+		runtime, err = operations.newRuntime(coordinator, revalidate)
+	}
 	if err != nil {
 		closeErr := coordinator.Close()
 		return nil, errors.Join(

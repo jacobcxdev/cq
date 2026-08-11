@@ -76,6 +76,13 @@ func OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx co
 	return openCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, coordinator, true, nil, initializer, nil, verifier)
 }
 
+// OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder
+// is the supervised recovery variant whose exact crash-recovery mutation is
+// gated by a privacy-safe recorder.
+func OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(ctx context.Context, path string, coordinator *CredentialCoordinator, initializer CredentialOwnerInitializer, verifier LegacyMaintenanceFinaliseVerifier, recorder CredentialEndpointRecoveryRecorder) (*CredentialControl, error) {
+	return openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObservation(ctx, path, coordinator, true, nil, initializer, nil, verifier, recorder, true)
+}
+
 func openCredentialControl(path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook) (*CredentialControl, error) {
 	return openCredentialControlPrepared(context.Background(), path, coordinator, allowRecovery, phaseHook, nil, nil)
 }
@@ -85,7 +92,18 @@ func openCredentialControlPrepared(ctx context.Context, path string, coordinator
 }
 
 func openCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx context.Context, path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook, initializer CredentialOwnerInitializer, beforeAccept func(), verifier LegacyMaintenanceFinaliseVerifier) (*CredentialControl, error) {
-	endpoint, client, err := openCredentialEndpoint(path, allowRecovery, phaseHook)
+	return openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObservation(ctx, path, coordinator, allowRecovery, phaseHook, initializer, beforeAccept, verifier, nil, false)
+}
+
+func openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObservation(ctx context.Context, path string, coordinator *CredentialCoordinator, allowRecovery bool, phaseHook credentialEndpointPhaseHook, initializer CredentialOwnerInitializer, beforeAccept func(), verifier LegacyMaintenanceFinaliseVerifier, recorder CredentialEndpointRecoveryRecorder, recoveryRecordRequired bool) (*CredentialControl, error) {
+	var endpoint *credentialEndpoint
+	var client *rpc.Client
+	var err error
+	if recoveryRecordRequired {
+		endpoint, client, err = openCredentialEndpointWithRecoveryRecorder(path, allowRecovery, phaseHook, recorder)
+	} else {
+		endpoint, client, err = openCredentialEndpoint(path, allowRecovery, phaseHook)
+	}
 	if err != nil {
 		return nil, err
 	}

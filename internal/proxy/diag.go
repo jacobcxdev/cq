@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -442,7 +444,75 @@ func (w *jsonlWriter) close() error {
 
 // DiagnosticsWriter writes RouteEvents to a JSONL file.
 type DiagnosticsWriter struct {
-	w *jsonlWriter
+	w      *jsonlWriter
+	canary atomic.Pointer[CodexCanaryRecorder]
+}
+
+var ErrUnsafeCodexDiagnostics = errors.New("unsafe Codex diagnostics event")
+
+const (
+	codexDiagnosticsModelGPT       = "model_family_gpt"
+	codexDiagnosticsModelCodex     = "model_family_codex"
+	codexDiagnosticsModelReasoning = "model_family_reasoning"
+	codexDiagnosticsModelUnknown   = "model_family_unknown"
+
+	codexDiagnosticsBucketBase        = "capacity_base"
+	codexDiagnosticsBucketModelScoped = "capacity_model_scoped"
+	codexDiagnosticsBucketUnknown     = "capacity_unknown"
+)
+
+// projectCodexDiagnostics removes caller-controlled model and capacity-bucket
+// bytes before a Codex route event reaches the diagnostics writer. The writer
+// deliberately does not call this helper: callers must project trusted runtime
+// observations explicitly, while a direct writer bypass remains fail closed.
+func projectCodexDiagnostics(event RouteEvent) RouteEvent {
+	if event.Provider != "codex" {
+		return event
+	}
+	event.Model = projectCodexDiagnosticsModel(event.Model)
+	event.Bucket = projectCodexDiagnosticsBucket(event.Bucket)
+	return event
+}
+
+func projectCodexDiagnosticsModel(value string) string {
+	switch value {
+	case "":
+		return ""
+	case codexDiagnosticsModelGPT,
+		codexDiagnosticsModelCodex,
+		codexDiagnosticsModelReasoning,
+		codexDiagnosticsModelUnknown:
+		return value
+	}
+	if strings.HasPrefix(value, "gpt-") {
+		return codexDiagnosticsModelGPT
+	}
+	if strings.HasPrefix(value, "codex-") {
+		return codexDiagnosticsModelCodex
+	}
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if value == prefix || strings.HasPrefix(value, prefix+"-") {
+			return codexDiagnosticsModelReasoning
+		}
+	}
+	return codexDiagnosticsModelUnknown
+}
+
+func projectCodexDiagnosticsBucket(value string) string {
+	switch value {
+	case "":
+		return ""
+	case codexDiagnosticsBucketBase,
+		codexDiagnosticsBucketModelScoped,
+		codexDiagnosticsBucketUnknown:
+		return value
+	case string(CapacityBucketBase):
+		return codexDiagnosticsBucketBase
+	}
+	if strings.HasPrefix(value, capacityBucketModelPrefix) {
+		return codexDiagnosticsBucketModelScoped
+	}
+	return codexDiagnosticsBucketUnknown
 }
 
 func OpenDiagnosticsWriter(path string) (*DiagnosticsWriter, error) {
@@ -453,11 +523,267 @@ func OpenDiagnosticsWriter(path string) (*DiagnosticsWriter, error) {
 	return &DiagnosticsWriter{w: jw}, nil
 }
 
+// SetCodexCanary attaches the active canary recorder to the final diagnostics
+// output boundary. The writer retains no event values when validation fails.
+func (w *DiagnosticsWriter) SetCodexCanary(recorder *CodexCanaryRecorder) {
+	if w == nil {
+		return
+	}
+	w.canary.Store(recorder)
+}
+
+func (w *DiagnosticsWriter) codexCanary() *CodexCanaryRecorder {
+	if w == nil {
+		return nil
+	}
+	return w.canary.Load()
+}
+
 func (w *DiagnosticsWriter) Write(event RouteEvent) error {
 	if w == nil || w.w == nil {
 		return nil
 	}
+	if err := rejectUnsafeCodexDiagnostics(event, w.canary.Load()); err != nil {
+		return err
+	}
 	return w.w.encode(event)
+}
+
+func rejectUnsafeCodexDiagnostics(event RouteEvent, recorder *CodexCanaryRecorder) error {
+	if event.Provider != "codex" || safeCodexRouteEvent(event) {
+		return nil
+	}
+	if recorder != nil {
+		if err := recorder.RecordSecretLeak(); err != nil {
+			return errors.Join(ErrUnsafeCodexDiagnostics, errors.New("record Codex canary leak counter"))
+		}
+	}
+	return ErrUnsafeCodexDiagnostics
+}
+
+func safeCodexRouteEvent(event RouteEvent) bool {
+	return safeCodexDiagnosticsMethod(event.Method) &&
+		safeCodexRouteKind(event.RouteKind) &&
+		safeCodexAccountHint(event.AccountHint) &&
+		safeCodexSessionCorrelation(event.SessionKey, event.SessionSource) &&
+		safeHashedHint(event.TurnHint, "turn") &&
+		safeCodexRequestKind(event.RequestKind) &&
+		safeCodexLeasePhase(event.LeasePhase) &&
+		safeCodexDecision(event.Decision) &&
+		safeCodexReason(event.Reason) &&
+		safeCodexBucket(event.Bucket) &&
+		safeCodexContinuity(event.Continuity) &&
+		safeCodexDiagnosticsError(event.Error) &&
+		safeCodexModel(event.Model) &&
+		safeCodexDiagnosticsPath(event.Path)
+}
+
+func safeCodexDiagnosticsMethod(value string) bool {
+	switch value {
+	case "", http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodHead:
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexRouteKind(value string) bool {
+	switch value {
+	case "", "anthropic_count_tokens", "anthropic_messages", "codex_app_server", "codex_compact", "codex_images", "codex_legacy_websocket", "codex_live_call", "codex_live_sideband", "codex_native", "codex_search", "codex_websocket_frame", "openai_unsupported":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexAccountHint(value string) bool {
+	return value == "" || safeHashedHint(value, "codex")
+}
+
+func safeCodexSessionCorrelation(key, source string) bool {
+	if key == "" {
+		return source == "" || source == "none"
+	}
+	switch source {
+	case "x-claude-code-session-id":
+		return safeHashedHint(key, "claude-session")
+	case "session_id":
+		return safeHashedHint(key, "codex-session")
+	case "x-codex-window-id":
+		return safeHashedHint(key, "codex-window")
+	case "unknown-client":
+		return safeHashedHint(key, "unknown-client")
+	case "body:conversation_id", "body:thread_id", "body:session_id", "body:response_id", "body:previous_response_id", "body:parent_response_id":
+		return safeHashedHint(key, "body-session")
+	default:
+		return false
+	}
+}
+
+func safeCodexRequestKind(value string) bool {
+	switch value {
+	case "", string(CodexRequestTurn), string(CodexRequestPrewarm), string(CodexRequestCompaction), string(CodexRequestMemory):
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexLeasePhase(value string) bool {
+	switch value {
+	case "", "reserving", "provisional", "bound_active", "continuation_pending", "bound_quiescent", "orphaned", "superseded", "expired", "failed_unadmitted":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexDecision(value string) bool {
+	switch value {
+	case "", "affinity_reuse", "fairness_select", "terminal_default", "shadow_unknown", "shadow_parsed", "shadow_rejected", "shadow_selected", "shadow_continuity_error", "shadow_admitted", "shadow_sampling_complete", "shadow_unadmitted":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexReason(value string) bool {
+	switch value {
+	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "upstream_rejected", "unadmitted_end":
+		return true
+	}
+	if suffix, ok := strings.CutPrefix(value, "candidate_attempt_"); ok {
+		return safePositiveDecimal(suffix, 10)
+	}
+	return false
+}
+
+func safeCodexBucket(value string) bool {
+	switch value {
+	case "", codexDiagnosticsBucketBase, codexDiagnosticsBucketModelScoped, codexDiagnosticsBucketUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexContinuity(value string) bool {
+	switch value {
+	case "", "fail_closed_if_enforced", "pinned":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexDiagnosticsError(value string) bool {
+	if value == "" {
+		return true
+	}
+	errType, code, hasCode := strings.Cut(value, ":")
+	switch errType {
+	case "api_error", "authentication_error", "internal_error", "invalid_request_error":
+	default:
+		return false
+	}
+	if !hasCode {
+		return true
+	}
+	if code == "" || strings.Contains(code, ":") {
+		return false
+	}
+	switch code {
+	case "invalid_proxy_token",
+		"no_codex_accounts",
+		"unsupported_websocket_transport",
+		"unsupported_openai_endpoint",
+		"websocket_upgrade_required",
+		"method_not_allowed",
+		"invalid_codex_upstream",
+		"invalid_upstream",
+		"codex_upstream_error",
+		"request_translation_failed",
+		"read_request_body",
+		"request_body_too_large",
+		"invalid_route_model",
+		"stream_collection_failed",
+		"response_assembly_failed",
+		"decode_count_tokens_response",
+		"model_registry_refresher_not_configured",
+		"model_registry_not_configured",
+		"registry_refresh_failed",
+		"upstream_error":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexModel(value string) bool {
+	switch value {
+	case "", codexDiagnosticsModelGPT, codexDiagnosticsModelCodex, codexDiagnosticsModelReasoning, codexDiagnosticsModelUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexDiagnosticsPath(value string) bool {
+	switch value {
+	case "",
+		"/v1/responses", "/responses",
+		"/v1/responses/compact", "/responses/compact",
+		"/app-server",
+		"/v1/images/generations", "/images/generations",
+		"/alpha/search",
+		"/live", "/v1/live",
+		"/realtime/calls", "/v1/realtime/calls",
+		"/realtime", "/v1/realtime",
+		"/v1/messages", "/v1/messages/count_tokens",
+		"/v1/chat/completions", "/chat/completions",
+		"/v1/completions", "/completions",
+		"/v1/embeddings", "/embeddings",
+		"/v1/moderations", "/moderations",
+		"/v1/files", "/files",
+		"/v1/uploads", "/uploads",
+		"/v1/vector_stores", "/vector_stores",
+		"/v1/batches", "/batches",
+		"/v1/assistants", "/assistants",
+		"/v1/threads", "/threads",
+		"/v1/evals", "/evals",
+		"/v1/containers", "/containers",
+		"/v1/conversations", "/conversations":
+		return true
+	}
+	return false
+}
+
+func safePositiveDecimal(value string, maxLength int) bool {
+	if value == "" || len(value) > maxLength || value[0] == '0' {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func safeHashedHint(value, prefix string) bool {
+	if value == "" {
+		return true
+	}
+	wantPrefix := prefix + ":"
+	if !strings.HasPrefix(value, wantPrefix) || len(value) != len(wantPrefix)+12 {
+		return false
+	}
+	for _, char := range value[len(wantPrefix):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *DiagnosticsWriter) Close() error {

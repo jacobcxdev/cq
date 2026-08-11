@@ -424,6 +424,42 @@ func TestCredentialCoordinatorResolveReadsSystemCandidateWithoutWriting(t *testi
 	}
 }
 
+func TestCredentialCoordinatorExternalResolvePanicFailsClosedPrivately(t *testing.T) {
+	for _, operation := range []string{"resolve_panic", "resolve_error"} {
+		t.Run(operation, func(t *testing.T) {
+			externalRef := ExternalCandidateRef{
+				Source: "panicking-external", RecordID: "synthetic-record", Revision: "synthetic-revision",
+			}
+			coordinator, _ := testCoordinator(t)
+			coordinator.ExternalSources = []ExternalCredentialSource{panickingExternalCredentialSource{
+				operation: operation,
+				candidates: []ExternalCandidate{{
+					Ref: externalRef,
+					Identity: AccountIdentity{
+						AccountID: "synthetic-account", UserID: "synthetic-user", RecordKey: "synthetic-user::synthetic-account",
+					},
+					Routable: true,
+				}},
+			}}
+			inventory, err := coordinator.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
+				t.Fatalf("inventory = %+v", inventory)
+			}
+
+			_, err = coordinator.Resolve(context.Background(), inventory.Accounts[0].Candidates[0].Ref)
+			if !errors.Is(err, ErrExternalInvalid) {
+				t.Fatalf("resolve error = %v, want ErrExternalInvalid", err)
+			}
+			if strings.Contains(err.Error(), "private external source") {
+				t.Fatalf("resolve error disclosed external detail: %v", err)
+			}
+		})
+	}
+}
+
 func TestCredentialCoordinatorRepeatedLoginRotatesSameCandidateAndPreservesUnknownFields(t *testing.T) {
 	coordinator, fs := testCoordinator(t)
 	credential := testLoginCredential()

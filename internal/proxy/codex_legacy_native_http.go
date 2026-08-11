@@ -68,7 +68,7 @@ func (handler *legacyCodexNativeHTTPHandler) Handle(w http.ResponseWriter, r *ht
 	if enforce && protocolRequest.Model != "" {
 		model = protocolRequest.Model
 	}
-	fmt.Fprintf(os.Stderr, "cq: route POST /responses model=%q provider=codex (native)\n", model)
+	fmt.Fprintf(os.Stderr, "cq: route POST /responses model_family=%s provider=codex (native)\n", projectCodexDiagnosticsModel(model))
 
 	// Emit payload diagnostics before any body rewrite.
 	if s.PayloadDiag != nil {

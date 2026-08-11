@@ -3,6 +3,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -966,6 +969,167 @@ func TestCredentialEndpointDirectoryReplacementBeforeLockCreatesNoArtifacts(t *t
 	}
 }
 
+func TestCredentialEndpointRecoveryRecorderRunsOnceBeforeNamespaceMutation(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	makeExactCredentialEndpointOrphan(t, path, "orphan-generation")
+	before := snapshotCredentialEndpointRecoveryArtifacts(t, path)
+
+	var calls atomic.Int32
+	recorder := CredentialEndpointRecoveryRecorderFunc(func() error {
+		calls.Add(1)
+		if got := snapshotCredentialEndpointRecoveryArtifacts(t, path); !reflect.DeepEqual(got, before) {
+			t.Fatalf("endpoint artifacts changed before recovery record: got %+v, want %+v", got, before)
+		}
+		return nil
+	})
+	owner, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil, recorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if !owner.Owner() {
+		t.Fatal("recorded recovery did not produce an owner")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("recovery recorder calls = %d, want 1", got)
+	}
+}
+
+func TestCredentialEndpointRecoveryRecorderFailurePreventsMutation(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	makeExactCredentialEndpointOrphan(t, path, "orphan-generation")
+	before := snapshotCredentialEndpointRecoveryArtifacts(t, path)
+
+	const privateDetail = "synthetic-private-recorder-detail"
+	var calls atomic.Int32
+	control, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil,
+		CredentialEndpointRecoveryRecorderFunc(func() error {
+			calls.Add(1)
+			return errors.New(privateDetail)
+		}),
+	)
+	if control != nil || !errors.Is(err, ErrCredentialEndpointRecoveryUnrecorded) {
+		t.Fatalf("recovery with failed recorder = %v, %v, want observation failure", control, err)
+	}
+	if strings.Contains(err.Error(), privateDetail) || strings.Contains(err.Error(), path) {
+		t.Fatalf("recovery error disclosed private recorder data: %q", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("recovery recorder calls = %d, want 1", got)
+	}
+	if after := snapshotCredentialEndpointRecoveryArtifacts(t, path); !reflect.DeepEqual(after, before) {
+		t.Fatalf("failed recovery recorder mutated endpoint: got %+v, want %+v", after, before)
+	}
+
+	owner, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil,
+		CredentialEndpointRecoveryRecorderFunc(func() error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("recovery after recorder failure: %v", err)
+	}
+	defer owner.Close()
+	if !owner.Owner() {
+		t.Fatal("recorder failure retained the endpoint lock")
+	}
+}
+
+func TestCredentialEndpointRecoveryRecorderMissingPreventsMutation(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	makeExactCredentialEndpointOrphan(t, path, "orphan-generation")
+	before := snapshotCredentialEndpointRecoveryArtifacts(t, path)
+
+	control, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil, nil,
+	)
+	if control != nil || !errors.Is(err, ErrCredentialEndpointRecoveryUnrecorded) {
+		t.Fatalf("recovery without recorder = %v, %v, want observation failure", control, err)
+	}
+	if after := snapshotCredentialEndpointRecoveryArtifacts(t, path); !reflect.DeepEqual(after, before) {
+		t.Fatalf("missing recovery recorder mutated endpoint: got %+v, want %+v", after, before)
+	}
+}
+
+func TestCredentialEndpointRecoveryRecorderPanicPreventsMutation(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	makeExactCredentialEndpointOrphan(t, path, "orphan-generation")
+	before := snapshotCredentialEndpointRecoveryArtifacts(t, path)
+
+	const privateDetail = "synthetic-private-recorder-panic"
+	var control *CredentialControl
+	var err error
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		control, err = OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+			context.Background(), path, coordinator, nil, nil,
+			CredentialEndpointRecoveryRecorderFunc(func() error { panic(privateDetail) }),
+		)
+	}()
+	if recovered != nil {
+		t.Fatal("recovery recorder panic escaped privacy boundary")
+	}
+	if control != nil || !errors.Is(err, ErrCredentialEndpointRecoveryUnrecorded) {
+		t.Fatalf("recovery with panicking recorder = %v, %v, want observation failure", control, err)
+	}
+	if strings.Contains(err.Error(), privateDetail) || strings.Contains(err.Error(), path) {
+		t.Fatalf("recovery panic error disclosed private recorder data: %q", err)
+	}
+	if after := snapshotCredentialEndpointRecoveryArtifacts(t, path); !reflect.DeepEqual(after, before) {
+		t.Fatalf("panicking recovery recorder mutated endpoint: got %+v, want %+v", after, before)
+	}
+
+	owner, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil,
+		CredentialEndpointRecoveryRecorderFunc(func() error { return nil }),
+	)
+	if err != nil {
+		t.Fatalf("recovery after recorder panic: %v", err)
+	}
+	defer owner.Close()
+	if !owner.Owner() {
+		t.Fatal("recorder panic retained the endpoint lock")
+	}
+}
+
+func TestCredentialEndpointRecoveryRecorderSkipsFreshAndLiveEndpoints(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	var calls atomic.Int32
+	recorder := CredentialEndpointRecoveryRecorderFunc(func() error {
+		calls.Add(1)
+		return nil
+	})
+
+	owner, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil, recorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	delegate, err := OpenRecoveringCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), path, coordinator, nil, nil, recorder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delegate.Close()
+	if !owner.Owner() || delegate.Owner() {
+		t.Fatalf("fresh/live authority = %t/%t, want owner/delegate", owner.Owner(), delegate.Owner())
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("non-recovery recorder calls = %d, want 0", got)
+	}
+}
+
 func TestCredentialEndpointConcurrentVerifiedRecoveryHasOneOwner(t *testing.T) {
 	coordinator, _ := testCoordinator(t)
 	path := filepath.Join(shortEndpointDir(t), "credential.sock")
@@ -1317,6 +1481,57 @@ func makeExactCredentialEndpointOrphan(t *testing.T, path, generation string) {
 	if err := os.Remove(temporaryPath); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type credentialEndpointRecoveryArtifactSnapshot struct {
+	Names     []string
+	Artifacts []credentialEndpointRecoveryArtifact
+}
+
+type credentialEndpointRecoveryArtifact struct {
+	Name  string
+	Mode  os.FileMode
+	Size  int64
+	Dev   uint64
+	Inode uint64
+	Links uint64
+	Data  string
+}
+
+func snapshotCredentialEndpointRecoveryArtifacts(t *testing.T, path string) credentialEndpointRecoveryArtifactSnapshot {
+	t.Helper()
+	directory := filepath.Dir(path)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := credentialEndpointRecoveryArtifactSnapshot{Names: make([]string, 0, len(entries))}
+	for _, entry := range entries {
+		snapshot.Names = append(snapshot.Names, entry.Name())
+	}
+	for _, artifactPath := range []string{path, credentialEndpointSidecarPath(path), credentialEndpointLockPath(path)} {
+		info, err := os.Lstat(artifactPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatal("endpoint artifact has no syscall identity")
+		}
+		artifact := credentialEndpointRecoveryArtifact{
+			Name: filepath.Base(artifactPath), Mode: info.Mode(), Size: info.Size(),
+			Dev: uint64(stat.Dev), Inode: uint64(stat.Ino), Links: uint64(stat.Nlink),
+		}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(artifactPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifact.Data = string(data)
+		}
+		snapshot.Artifacts = append(snapshot.Artifacts, artifact)
+	}
+	return snapshot
 }
 
 func startVersionedCredentialEndpoint(t *testing.T, path, generation string, createLock bool, lockMode os.FileMode) func() {

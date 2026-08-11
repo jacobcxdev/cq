@@ -81,6 +81,15 @@ func OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifier(
 	})
 }
 
+// OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder
+// forwards the privacy-safe exact-recovery gate through the refresh-control
+// facade used by supervised proxy startup.
+func OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer, verifier LegacyMaintenanceFinaliseVerifier, recorder CredentialEndpointRecoveryRecorder) (*CredentialControl, error) {
+	return openDefaultCredentialRefreshControl(ctx, fs, client, func(ctx context.Context, fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialControl, error) {
+		return OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(ctx, fs, verifier, recorder, exchanges...)
+	})
+}
+
 type defaultCredentialControlOpener func(context.Context, fsutil.DurableFileSystem, ...RefreshExchange) (*CredentialControl, error)
 
 func openDefaultCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer, open defaultCredentialControlOpener) (*CredentialControl, error) {

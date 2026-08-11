@@ -3,7 +3,10 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,6 +20,45 @@ type fakeExternalCredentialSource struct {
 	resolveRef   ExternalCandidateRef
 	listCalls    int
 	resolves     int
+}
+
+type panickingExternalCredentialSource struct {
+	operation  string
+	candidates []ExternalCandidate
+}
+
+type panickingExternalSourceError struct{}
+
+func (panickingExternalSourceError) Error() string {
+	return "private external source list error"
+}
+
+func (panickingExternalSourceError) Is(error) bool {
+	panic("private external source error classification panic")
+}
+
+func (s panickingExternalCredentialSource) Name() string {
+	if s.operation == "name" {
+		panic("private external source name panic")
+	}
+	return "panicking-external"
+}
+
+func (s panickingExternalCredentialSource) List(context.Context) ([]ExternalCandidate, error) {
+	if s.operation == "list" {
+		panic("private external source list panic")
+	}
+	if s.operation == "list_error" {
+		return nil, panickingExternalSourceError{}
+	}
+	return append([]ExternalCandidate(nil), s.candidates...), nil
+}
+
+func (s panickingExternalCredentialSource) Resolve(context.Context, ExternalCandidateRef) (CredentialMaterial, error) {
+	if s.operation == "resolve_error" {
+		return CredentialMaterial{}, errors.New("private external source resolve error")
+	}
+	panic("private external source resolve panic")
 }
 
 func (s *fakeExternalCredentialSource) Name() string {
@@ -55,6 +97,22 @@ func TestInventoryRejectsExternalCandidateSourceMismatch(t *testing.T) {
 	}
 	if len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "invalid" || inventory.ExternalSources[0].CandidateCount != 0 {
 		t.Fatalf("external source status = %+v, want invalid with zero candidates", inventory.ExternalSources)
+	}
+}
+
+func TestInventoryExternalSourcePanicsFailClosedPrivately(t *testing.T) {
+	for _, operation := range []string{"name", "list", "list_error"} {
+		t.Run(operation, func(t *testing.T) {
+			inventory := DiscoverInventoryWithSources(
+				context.Background(), newFakeFS(), panickingExternalCredentialSource{operation: operation},
+			)
+			if len(inventory.Accounts) != 0 || len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "invalid" {
+				t.Fatalf("inventory after %s panic = %+v", operation, inventory)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", inventory), "private external source") {
+				t.Fatalf("inventory disclosed %s panic", operation)
+			}
+		})
 	}
 }
 

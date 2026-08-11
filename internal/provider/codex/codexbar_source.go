@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/auth"
@@ -78,6 +79,30 @@ type codexBarManifestRecord struct {
 	AuthFingerprint    string `json:"authFingerprint"`
 }
 
+// CodexBarProtectionSnapshot is a privacy-safe, point-in-time digest of the
+// validated CodexBar manifest and only its declared credential files. It never
+// exposes external paths, record identifiers, or credential contents.
+type CodexBarProtectionSnapshot struct {
+	ManifestDigest    [sha256.Size]byte
+	AuthDigest        [sha256.Size]byte
+	DeclaredAuthFiles uint64
+}
+
+type validatedCodexBarManifest struct {
+	value      codexBarManifest
+	path       string
+	data       []byte
+	generation externalFileGeneration
+}
+
+type validatedCodexBarRecord struct {
+	account    CodexAccount
+	revision   Revision
+	path       string
+	data       []byte
+	generation externalFileGeneration
+}
+
 func NewCodexBarSource(root string) *CodexBarSource {
 	return &CodexBarSource{
 		root: filepath.Clean(root), fs: osCodexBarReadFileSystem{},
@@ -90,6 +115,85 @@ func DefaultCodexBarRoot(home string) string {
 }
 
 func (s *CodexBarSource) Name() string { return codexBarSourceName }
+
+// ProtectionSnapshot returns fixed-size digests for the validated manifest and
+// its exact declared auth files. Every call reopens the declared files with
+// no-follow semantics and revalidates their authority and generation before
+// returning.
+func (s *CodexBarSource) ProtectionSnapshot() (snapshot CodexBarProtectionSnapshot, err error) {
+	defer func() {
+		if recover() != nil {
+			snapshot = CodexBarProtectionSnapshot{}
+			err = ErrExternalInvalid
+		}
+	}()
+	loaded, err := s.loadValidatedManifest()
+	if err != nil {
+		return CodexBarProtectionSnapshot{}, err
+	}
+	records := make([]validatedCodexBarRecord, 0, len(loaded.value.Accounts))
+	authDigests := make([][sha256.Size]byte, 0, len(loaded.value.Accounts))
+	for _, record := range loaded.value.Accounts {
+		validated, err := s.readValidatedRecord(record, "")
+		if err != nil {
+			return CodexBarProtectionSnapshot{}, err
+		}
+		records = append(records, validated)
+		authDigests = append(authDigests, codexBarProtectionDigest(
+			"cq-codexbar-protected-auth-v1", []byte(filepath.Clean(validated.path)), validated.data,
+		))
+	}
+
+	if err := validateExternalFile(s.fs, s.ownsFile, s.root, true); err != nil {
+		return CodexBarProtectionSnapshot{}, fmt.Errorf("%w: root generation", ErrExternalUnsafePath)
+	}
+	for index, validated := range records {
+		confirmedPath, err := s.authPath(loaded.value.Accounts[index].ManagedHomePath, ErrExternalUnsafePath)
+		if err != nil || confirmedPath != validated.path {
+			return CodexBarProtectionSnapshot{}, ErrExternalUnsafePath
+		}
+		if err := s.confirmExternalFileGeneration(validated.path, validated.generation, ErrExternalUnsafePath); err != nil {
+			return CodexBarProtectionSnapshot{}, err
+		}
+	}
+	if err := s.confirmExternalFileGeneration(loaded.path, loaded.generation, ErrExternalUnsafePath); err != nil {
+		return CodexBarProtectionSnapshot{}, err
+	}
+
+	sort.Slice(authDigests, func(i, j int) bool {
+		return bytes.Compare(authDigests[i][:], authDigests[j][:]) < 0
+	})
+	authHash := sha256.New()
+	authHash.Write([]byte("cq-codexbar-protected-auth-set-v1\x00"))
+	var count [8]byte
+	binary.LittleEndian.PutUint64(count[:], uint64(len(authDigests)))
+	authHash.Write(count[:])
+	for _, digest := range authDigests {
+		authHash.Write(digest[:])
+	}
+	var authDigest [sha256.Size]byte
+	copy(authDigest[:], authHash.Sum(nil))
+
+	return CodexBarProtectionSnapshot{
+		ManifestDigest: codexBarProtectionDigest("cq-codexbar-protected-manifest-v1", loaded.data),
+		AuthDigest:     authDigest, DeclaredAuthFiles: uint64(len(authDigests)),
+	}, nil
+}
+
+func codexBarProtectionDigest(domain string, parts ...[]byte) [sha256.Size]byte {
+	hash := sha256.New()
+	hash.Write([]byte(domain))
+	hash.Write([]byte{0})
+	var size [8]byte
+	for _, part := range parts {
+		binary.LittleEndian.PutUint64(size[:], uint64(len(part)))
+		hash.Write(size[:])
+		hash.Write(part)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
+}
 
 func (s *CodexBarSource) List(ctx context.Context) ([]ExternalCandidate, error) {
 	manifest, err := s.loadManifest()
@@ -145,44 +249,56 @@ func (s *CodexBarSource) Resolve(ctx context.Context, ref ExternalCandidateRef) 
 }
 
 func (s *CodexBarSource) loadManifest() (codexBarManifest, error) {
+	loaded, err := s.loadValidatedManifest()
+	return loaded.value, err
+}
+
+func (s *CodexBarSource) loadValidatedManifest() (validatedCodexBarManifest, error) {
 	if s == nil || s.root == "" || !filepath.IsAbs(s.root) {
-		return codexBarManifest{}, fmt.Errorf("%w: root", ErrExternalUnsafePath)
+		return validatedCodexBarManifest{}, fmt.Errorf("%w: root", ErrExternalUnsafePath)
 	}
 	if err := validateExternalFile(s.fs, s.ownsFile, s.root, true); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return codexBarManifest{}, errors.Join(ErrExternalUnavailable, errExternalNotConfigured)
+			return validatedCodexBarManifest{}, errors.Join(ErrExternalUnavailable, errExternalNotConfigured)
 		}
-		return codexBarManifest{}, err
+		return validatedCodexBarManifest{}, err
 	}
 	path := filepath.Join(s.root, "managed-codex-accounts.json")
 	read, err := s.readValidatedFile(path, errors.Join(ErrExternalUnavailable, errExternalNotConfigured), ErrExternalUnsafePath)
 	if err != nil {
-		return codexBarManifest{}, err
+		return validatedCodexBarManifest{}, err
 	}
 	if err := validateExternalFile(s.fs, s.ownsFile, s.root, true); err != nil {
 		if errors.Is(err, ErrExternalUnsafePath) {
-			return codexBarManifest{}, err
+			return validatedCodexBarManifest{}, err
 		}
-		return codexBarManifest{}, fmt.Errorf("%w: root generation", ErrExternalUnsafePath)
+		return validatedCodexBarManifest{}, fmt.Errorf("%w: root generation", ErrExternalUnsafePath)
 	}
 	if err := s.confirmExternalFileGeneration(path, read.generation, ErrExternalUnsafePath); err != nil {
-		return codexBarManifest{}, err
+		return validatedCodexBarManifest{}, err
 	}
 	var manifest codexBarManifest
 	if json.Unmarshal(read.data, &manifest) != nil || manifest.Version != codexBarManifestVersion || manifest.Accounts == nil {
-		return codexBarManifest{}, fmt.Errorf("%w: manifest", ErrExternalInvalid)
+		return validatedCodexBarManifest{}, fmt.Errorf("%w: manifest", ErrExternalInvalid)
 	}
 	seen := make(map[string]bool, len(manifest.Accounts))
 	for _, record := range manifest.Accounts {
 		if record.ID == "" || seen[record.ID] {
-			return codexBarManifest{}, fmt.Errorf("%w: duplicate or empty record", ErrExternalInvalid)
+			return validatedCodexBarManifest{}, fmt.Errorf("%w: duplicate or empty record", ErrExternalInvalid)
 		}
 		seen[record.ID] = true
 	}
-	return manifest, nil
+	return validatedCodexBarManifest{
+		value: manifest, path: path, data: read.data, generation: read.generation,
+	}, nil
 }
 
 func (s *CodexBarSource) readRecord(record codexBarManifestRecord, expected Revision) (CodexAccount, Revision, error) {
+	validated, err := s.readValidatedRecord(record, expected)
+	return validated.account, validated.revision, err
+}
+
+func (s *CodexBarSource) readValidatedRecord(record codexBarManifestRecord, expected Revision) (validatedCodexBarRecord, error) {
 	missingErr := error(ErrExternalInvalid)
 	changedErr := error(ErrExternalUnsafePath)
 	if expected != "" {
@@ -191,48 +307,51 @@ func (s *CodexBarSource) readRecord(record codexBarManifestRecord, expected Revi
 	}
 	authPath, err := s.authPath(record.ManagedHomePath, missingErr)
 	if err != nil {
-		return CodexAccount{}, "", err
+		return validatedCodexBarRecord{}, err
 	}
 	read, err := s.readValidatedFile(authPath, missingErr, changedErr)
 	if err != nil {
-		return CodexAccount{}, "", err
+		return validatedCodexBarRecord{}, err
 	}
 	confirmedPath, err := s.authPath(record.ManagedHomePath, changedErr)
 	if err != nil {
-		return CodexAccount{}, "", err
+		return validatedCodexBarRecord{}, err
 	}
 	if confirmedPath != authPath {
-		return CodexAccount{}, "", changedErr
+		return validatedCodexBarRecord{}, changedErr
 	}
 	if err := s.confirmExternalFileGeneration(authPath, read.generation, changedErr); err != nil {
-		return CodexAccount{}, "", err
+		return validatedCodexBarRecord{}, err
 	}
 	revision := externalCredentialRevision(read.data, authPath, read.generation)
 	if expected != "" && revision != expected {
-		return CodexAccount{}, "", ErrStaleRevision
+		return validatedCodexBarRecord{}, ErrStaleRevision
 	}
 	if err := validateCodexBarFingerprint(record.AuthFingerprint, read.data); err != nil {
-		return CodexAccount{}, "", err
+		return validatedCodexBarRecord{}, err
 	}
 	account, ok := parseAccountData(read.data, "")
 	if !ok || account.AccountID == "" || account.RecordKey == "" {
-		return CodexAccount{}, "", fmt.Errorf("%w: credential identity", ErrExternalInvalid)
+		return validatedCodexBarRecord{}, fmt.Errorf("%w: credential identity", ErrExternalInvalid)
 	}
 	claims := auth.DecodeCodexClaims(account.IDToken)
 	claimRecordKey := claims.RecordKey()
 	if claims.AccountID == "" || claims.UserID == "" || claimRecordKey == "" {
-		return CodexAccount{}, "", fmt.Errorf("%w: credential claims", ErrExternalInvalid)
+		return validatedCodexBarRecord{}, fmt.Errorf("%w: credential claims", ErrExternalInvalid)
 	}
 	if account.AccountID != claims.AccountID || account.UserID != claims.UserID || account.RecordKey != claimRecordKey {
-		return CodexAccount{}, "", ErrExternalIdentityMismatch
+		return validatedCodexBarRecord{}, ErrExternalIdentityMismatch
 	}
 	if record.ProviderAccountID == "" || record.WorkspaceAccountID == "" {
-		return CodexAccount{}, "", fmt.Errorf("%w: manifest identity", ErrExternalInvalid)
+		return validatedCodexBarRecord{}, fmt.Errorf("%w: manifest identity", ErrExternalInvalid)
 	}
 	if record.ProviderAccountID != claims.AccountID || record.WorkspaceAccountID != claims.UserID {
-		return CodexAccount{}, "", ErrExternalIdentityMismatch
+		return validatedCodexBarRecord{}, ErrExternalIdentityMismatch
 	}
-	return account, revision, nil
+	return validatedCodexBarRecord{
+		account: account, revision: revision, path: authPath,
+		data: read.data, generation: read.generation,
+	}, nil
 }
 
 func (s *CodexBarSource) authPath(managedHome string, missingErr error) (string, error) {

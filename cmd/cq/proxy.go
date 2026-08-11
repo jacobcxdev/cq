@@ -316,8 +316,25 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	fsys := fsutil.OSFileSystem{}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
 	servingAttestor := proxy.NewServingAttestor()
+	httpRequirements, _ := proxy.DefaultCodexRoutingRequirements(version, codexClientBuild)
+	activeCanary, err := openProxyCodexCanary(fsys, proxy.DefaultCodexCanaryPath(), httpRequirements)
+	if err != nil {
+		return fmt.Errorf("Codex canary startup: %w", err)
+	}
+	if activeCanary != nil {
+		if err := validateCodexCanaryStartConfig(cfg); err != nil {
+			_ = activeCanary.Close()
+			return err
+		}
+		defer func() {
+			returnErr = errors.Join(returnErr, activeCanary.Close())
+		}()
+	}
 	legacyFinaliseVerifier := newProxyLegacyMaintenanceFinaliseVerifier(version, codexClientBuild, cfg.Port, servingAttestor)
-	credentialControl, err := codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifier(context.Background(), fsys, refreshClient, legacyFinaliseVerifier)
+	credentialControl, err := codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+		context.Background(), fsys, refreshClient, legacyFinaliseVerifier,
+		codexprov.CredentialEndpointRecoveryRecorderFunc(codexCanaryEndpointRecoveryRecorder(activeCanary)),
+	)
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
@@ -330,6 +347,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("Codex routing modes: %w", err)
 	}
+	if err := validateProxyCodexCanaryRuntime(activeCanary, codexRouting); err != nil {
+		return err
+	}
 	codexContinuity, err := openProxyCodexContinuity(proxyCodexContinuityDependencies{
 		FS:        fsys,
 		StateDir:  filepath.Dir(proxy.DefaultCodexCanaryPath()),
@@ -337,6 +357,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Retention: time.Duration(cfg.CodexLeaseRetentionDays) * 24 * time.Hour,
 		Now:       time.Now,
 		Authority: credentialControl,
+		Canary:    activeCanary,
 	})
 	if err != nil {
 		return fmt.Errorf("Codex continuity: %w", err)
@@ -405,6 +426,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("Codex turn observer: %w", err)
 	}
+	codexObserver.SetCanary(activeCanary)
 	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
@@ -550,6 +572,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("Codex native HTTP routing: %w", err)
 	}
+	codexCanaryStop, err := newProxyCodexCanaryStop(activeCanary, codexContinuity, codexNativeHTTP)
+	if err != nil {
+		return err
+	}
 
 	var diagnostics *proxy.DiagnosticsWriter
 	if cfg.DiagnosticsLog != "" {
@@ -564,6 +590,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 				}
 			}()
 		}
+	}
+	if diagnostics != nil {
+		diagnostics.SetCodexCanary(activeCanary)
 	}
 
 	var payloadDiag *proxy.PayloadWriter
@@ -601,6 +630,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		CodexWebSocketObserver:           codexWebSocketObserver,
 		CodexWebSocketObserverConfigured: true,
 		CodexPrimer:                      codexPrimer,
+		CodexCanary:                      activeCanary,
+		CodexCanaryStop:                  codexCanaryStop,
 		HeadroomMode:                     resolvedMode,
 		Catalog:                          catalog,
 		Refresher:                        proxyRefresher,

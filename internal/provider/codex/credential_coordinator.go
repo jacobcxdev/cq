@@ -237,8 +237,8 @@ func (c *CredentialCoordinator) Resolve(ctx context.Context, ref CandidateRef) (
 			}
 			if candidate.Source == SourceExternal && candidate.externalRef != nil {
 				for _, source := range c.ExternalSources {
-					if source != nil && source.Name() == candidate.externalRef.Source {
-						return source.Resolve(ctx, *candidate.externalRef)
+					if source != nil && safeExternalSourceName(source) == candidate.externalRef.Source {
+						return safeExternalSourceResolve(ctx, source, *candidate.externalRef)
 					}
 				}
 				return CredentialMaterial{}, ErrStaleRevision
