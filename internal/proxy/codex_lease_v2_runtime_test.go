@@ -870,6 +870,23 @@ func TestCodexLeaseRuntimeCreatesSuccessorAndNeverResurrectsPredecessor(t *testi
 	}
 }
 
+func TestCodexLeaseRuntimeCreatesThirdSuccessorAfterDrainedChain(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	completeCodexLeaseRuntimeTurn(t, runtimeLease, codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-1", Kind: CodexAttemptSlotDirect}}))
+	completeCodexLeaseRuntimeTurn(t, runtimeLease, codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-2", Kind: CodexAttemptSlotDirect}}))
+
+	third, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-3", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-3", Kind: CodexAttemptSlotDirect}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.State() != LeaseProvisional || third.AccountKey() != "account-a" || third.record.PredecessorTurnHash == "" {
+		t.Fatalf("third successor = %#v", third.record)
+	}
+}
+
 func TestCodexLeaseRuntimeRejectsSuccessorUntilPredecessorDrains(t *testing.T) {
 	tests := []struct {
 		name    string

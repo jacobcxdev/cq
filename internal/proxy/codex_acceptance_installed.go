@@ -255,7 +255,7 @@ func codexAcceptanceSandboxLoopbackAddress(rawURL string) (string, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return "", errCodexInstalledListenerAcceptance
 	}
-	return net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port)), nil
+	return net.JoinHostPort("localhost", strconv.Itoa(port)), nil
 }
 
 func openCodexInstalledAcceptanceExecutable(expected codexInstalledExecutableProof) (*os.File, error) {

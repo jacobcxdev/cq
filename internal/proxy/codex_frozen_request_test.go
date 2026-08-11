@@ -381,6 +381,21 @@ func TestInspectCodexNativeRequestReconcilesStrongMetadataSources(t *testing.T) 
 	} else {
 		assertFrozenRequestErrorCode(t, err, CodexFrozenRequestMetadataAuthority)
 	}
+
+	partialFlat := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","x-codex-window-id":"window","x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","window_id":"window","request_kind":"turn"}},"input":[]}`)
+	partialHeader := `{"session_id":"session","thread_id":"thread","turn_id":"turn","window_id":"window","request_kind":"turn"}`
+	inspection, err = InspectCodexNativeRequest(context.Background(), partialFlat, http.Header{"X-Codex-Turn-Metadata": {partialHeader}})
+	if err != nil {
+		t.Fatalf("matching partial flat mirror: %v", err)
+	}
+	inspection.Release()
+	conflictingPartial := bytes.Replace(partialFlat, []byte(`"session_id":"session"`), []byte(`"session_id":"other"`), 1)
+	if inspection, err := InspectCodexNativeRequest(context.Background(), conflictingPartial, http.Header{"X-Codex-Turn-Metadata": {partialHeader}}); err == nil {
+		inspection.Release()
+		t.Fatal("conflicting partial flat mirror accepted")
+	} else {
+		assertFrozenRequestErrorCode(t, err, CodexFrozenRequestMetadataAuthority)
+	}
 }
 
 func TestInspectCodexNativeRequestParsesFlatCompactionObject(t *testing.T) {

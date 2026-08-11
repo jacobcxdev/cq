@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -154,14 +153,12 @@ func (handler *legacyCodexNativeHTTPHandler) Handle(w http.ResponseWriter, r *ht
 		_, failover := routeDiag.fields()
 		observation.Selected(choice, failover)
 		if err := observation.PrepareV2Response(resp); err != nil {
-			closeErr := closeCodexHTTPResponseBody(resp.Body)
-			observation.Finish(errors.Join(err, closeErr))
+			observation.Finish(err)
 			fmt.Fprintf(os.Stderr, "cq: Codex v2 observation: %v\n", err)
-			writeError(w, http.StatusBadGateway, "api_error", "codex continuity observation failed")
-			return model
+		} else {
+			observation.Response(resp)
+			observeCodexResponseBody(resp, observation)
 		}
-		observation.Response(resp)
-		observeCodexResponseBody(resp, observation)
 	}
 	defer closeCodexHTTPResponseBody(resp.Body)
 

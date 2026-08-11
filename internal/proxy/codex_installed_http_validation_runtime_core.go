@@ -474,12 +474,20 @@ type codexInstalledHTTPValidationUpstream struct {
 	scenarioByTurn map[string]codexInstalledHTTPValidationScenario
 	requestsByTurn map[string]uint64
 	turns          map[string]struct{}
+	routes         []codexInstalledHTTPValidationRoute
+	nextHardReplay bool
 	requests       uint64
 	responses      uint64
 	compact        uint64
 	models         uint64
 	closeOnce      sync.Once
 	closeErr       error
+}
+
+type codexInstalledHTTPValidationRoute struct {
+	Metadata  CodexTurnMetadata
+	AccountID string
+	Status    int
 }
 
 func startCodexInstalledHTTPValidationUpstream() (*codexInstalledHTTPValidationUpstream, error) {
@@ -561,6 +569,11 @@ func (upstream *codexInstalledHTTPValidationUpstream) serveHTTP(writer http.Resp
 	}
 
 	upstream.mu.Lock()
+	_, turnSeen := upstream.turns[turnKey]
+	if !turnSeen && upstream.nextHardReplay {
+		upstream.scenarioByTurn[turnKey] = codexInstalledHTTPValidationScenarioHardReplay
+		upstream.nextHardReplay = false
+	}
 	upstream.requests++
 	upstream.models++
 	upstream.turns[turnKey] = struct{}{}
@@ -584,11 +597,13 @@ func (upstream *codexInstalledHTTPValidationUpstream) serveHTTP(writer http.Resp
 		reject = requestOrdinal >= 2
 	}
 	if reject {
+		upstream.recordRoute(protocol.Metadata.Metadata, accountID, http.StatusTooManyRequests)
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(writer, `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`)
 		return
 	}
+	upstream.recordRoute(protocol.Metadata.Metadata, accountID, http.StatusOK)
 	if request.URL.Path == "/responses/compact" {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(writer, `{"id":"validation-response","output":[{"type":"compaction","encrypted_content":"validation-state"}]}`)
@@ -599,6 +614,38 @@ func (upstream *codexInstalledHTTPValidationUpstream) serveHTTP(writer http.Resp
 	_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"validation-response\"}}\n\n")
 	_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"validation-message\",\"content\":[{\"type\":\"output_text\",\"text\":\"PONG\"}]}}\n\n")
 	_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"validation-response\",\"end_turn\":true,\"usage\":{\"input_tokens\":0,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":0}}}\n\n")
+}
+
+func (upstream *codexInstalledHTTPValidationUpstream) recordRoute(metadata CodexTurnMetadata, accountID string, status int) {
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	upstream.routes = append(upstream.routes, codexInstalledHTTPValidationRoute{
+		Metadata:  metadata,
+		AccountID: accountID,
+		Status:    status,
+	})
+}
+
+func (upstream *codexInstalledHTTPValidationUpstream) armNextNewTurnHardReplay() error {
+	if upstream == nil {
+		return errors.New("arm Codex validation hard-limit replay")
+	}
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	if upstream.nextHardReplay {
+		return errors.New("Codex validation hard-limit replay already armed")
+	}
+	upstream.nextHardReplay = true
+	return nil
+}
+
+func (upstream *codexInstalledHTTPValidationUpstream) routeHistory() []codexInstalledHTTPValidationRoute {
+	if upstream == nil {
+		return nil
+	}
+	upstream.mu.Lock()
+	defer upstream.mu.Unlock()
+	return append([]codexInstalledHTTPValidationRoute(nil), upstream.routes...)
 }
 
 func (upstream *codexInstalledHTTPValidationUpstream) setScenario(metadata CodexTurnMetadata, scenario codexInstalledHTTPValidationScenario) error {

@@ -284,7 +284,7 @@ func TestCodexV2ObserverClosePanicIsPrivateAndDrainsIndeterminate(t *testing.T) 
 	assertCodexV2ObserverIndeterminateDrained(t, codexV2ObserverTestRecord(t, coordinator, handle.key, policy))
 }
 
-func TestCodexV2ObserverHandlersSafelyClosePanickingBodyAfterPrepareFailure(t *testing.T) {
+func TestCodexV2ObserverPrepareFailureDoesNotChangeUpstreamResponse(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
@@ -327,11 +327,11 @@ func TestCodexV2ObserverHandlersSafelyClosePanickingBodyAfterPrepareFailure(t *t
 				server.handleNativeCodex(response, request)
 			}
 
-			if response.Code != http.StatusBadGateway {
-				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusBadGateway, response.Body.String())
+			if response.Code != http.StatusOK || response.Body.String() != "response" {
+				t.Fatalf("status/body = %d/%q, want %d/%q", response.Code, response.Body.String(), http.StatusOK, "response")
 			}
 			if !closed {
-				t.Fatal("PrepareV2Response failure did not close the raw response body")
+				t.Fatal("relayed upstream response body was not closed")
 			}
 			if strings.Contains(response.Body.String(), "private close panic") {
 				t.Fatalf("handler exposed private close panic: %s", response.Body.String())

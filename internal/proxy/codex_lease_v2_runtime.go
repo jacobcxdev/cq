@@ -999,7 +999,16 @@ func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account 
 	lane.LastCacheAdmittedAt = time.Time{}
 	lane.LastCacheEffectiveModel = ""
 	lane.LastObservedAt = time.Time{}
-	fence, err := restored.MutationFence(restored.Fence.Last, restored.RequestedIdentity)
+	fenceIdentities := []CodexJournalRecordIdentity{restored.Fence.Last, restored.RequestedIdentity}
+	if predecessorCurrent == restored.Fence.Last && predecessor.Record.PredecessorTurnHash != "" {
+		fenceIdentities = append(fenceIdentities, CodexJournalRecordIdentity{
+			LaneDigest:    restored.Fence.Last.LaneDigest,
+			TurnDigest:    predecessor.Record.PredecessorTurnHash,
+			ModeEpoch:     predecessor.Record.PredecessorModeEpoch,
+			Authoritative: predecessor.Record.PredecessorAuthoritative,
+		})
+	}
+	fence, err := restored.MutationFence(fenceIdentities...)
 	if err != nil {
 		return err
 	}

@@ -302,7 +302,7 @@ func newProxyCodexContinuityAccountRevalidator(authority interface {
 				continue
 			}
 			matches++
-			if logical.Unstable || !logical.Routable {
+			if !logical.Routable {
 				continue
 			}
 			for _, candidate := range logical.Candidates {
@@ -313,7 +313,7 @@ func newProxyCodexContinuityAccountRevalidator(authority interface {
 			}
 		}
 		if matches != 1 || !routable {
-			return fmt.Errorf("%w: account is not stably routable", proxy.ErrCodexContinuity)
+			return fmt.Errorf("%w: account is not uniquely routable", proxy.ErrCodexContinuity)
 		}
 		return nil
 	}

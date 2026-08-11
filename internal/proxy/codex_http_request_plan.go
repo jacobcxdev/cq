@@ -163,15 +163,42 @@ type CodexHTTPRequestPlanFactory struct {
 	operations codexHTTPRequestPlanFactoryOperations
 }
 
+const (
+	codexHTTPRequestSuccessorDrainRetryInterval = 2 * time.Millisecond
+	codexHTTPRequestSuccessorDrainWait          = 250 * time.Millisecond
+)
+
 // Build prepares one immutable native HTTP request and commits its first
 // prepared attempt. Success transfers Frozen and Lifecycle ownership.
 func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.Now().Add(codexHTTPRequestSuccessorDrainWait)
+	for {
+		result, err := factory.buildOnce(ctx, input)
+		if !errors.Is(err, ErrCodexConcurrentTurn) {
+			return result, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return result, err
+		}
+		wait := min(remaining, codexHTTPRequestSuccessorDrainRetryInterval)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
 	var result CodexPreparedHTTPRequest
 	if factory == nil || factory.Inventory == nil || factory.Routes == nil || factory.Runtime == nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanUnavailable, nil)
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	inspection, err := factory.inspect(ctx, input.Encoded, input.Headers)

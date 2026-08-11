@@ -678,7 +678,12 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 			err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestMetadataAuthority, err: parseErr}
 			return codexFrozenAuthority{}, CodexFrozenRequestMetadataAuthority, err
 		}
-		metadataResults = append(metadataResults, CodexTurnMetadataResult{Metadata: metadata, Source: CodexTurnMetadataFlat, Found: true, Strong: true})
+		if len(metadataResults) == 0 {
+			metadataResults = append(metadataResults, CodexTurnMetadataResult{Metadata: metadata, Source: CodexTurnMetadataFlat, Found: true, Strong: true})
+		} else if validateErr := validateCodexFrozenPartialMetadata(result.flatFields, metadata, metadataResults[0].Metadata); validateErr != nil {
+			err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestMetadataAuthority, err: validateErr}
+			return codexFrozenAuthority{}, CodexFrozenRequestMetadataAuthority, err
+		}
 		metadataSources |= codexFrozenMetadataFlatSource
 	}
 	if len(metadataResults) == 0 {
@@ -715,6 +720,26 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 		previous:        previousAuthority,
 		metadataSources: metadataSources,
 	}, "", nil
+}
+
+func validateCodexFrozenPartialMetadata(fields codexFrozenMetadataFields, got, expected CodexTurnMetadata) error {
+	for _, field := range []struct {
+		present  bool
+		got      string
+		expected string
+	}{
+		{fields.sessionID.present, got.SessionID, expected.SessionID},
+		{fields.threadID.present, got.ThreadID, expected.ThreadID},
+		{fields.turnID.present, got.TurnID, expected.TurnID},
+		{fields.windowID.present, got.WindowID, expected.WindowID},
+		{fields.requestKind.present, string(got.RequestKind), string(expected.RequestKind)},
+		{fields.compaction.present || fields.compactionPhase.present, string(got.CompactionPhase), string(expected.CompactionPhase)},
+	} {
+		if field.present && field.got != field.expected {
+			return errors.New("conflicting strong turn metadata")
+		}
+	}
+	return nil
 }
 
 func validateCodexFrozenPreparedAuthority(prepared codexFrozenAuthority, source CodexProtocolRequest, sourceModel codexFrozenModelAuthority, sourcePrevious codexFrozenPreviousAuthority, sourceMetadata codexFrozenMetadataSources, effectiveModel string) (CodexFrozenRequestErrorCode, error) {

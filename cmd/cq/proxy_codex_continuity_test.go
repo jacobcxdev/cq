@@ -193,7 +193,6 @@ func TestProxyCodexContinuityAccountRevalidatorFailsClosed(t *testing.T) {
 	}{
 		{name: "inventory unavailable", err: errors.New("private inventory failure"), want: codexprov.ErrCredentialAuthorityUnavailable},
 		{name: "missing", inventory: codexprov.Inventory{}, want: proxy.ErrCodexContinuity},
-		{name: "unstable", inventory: proxyCodexContinuityInventory(account, true, true, false), want: proxy.ErrCodexContinuity},
 		{name: "unroutable", inventory: proxyCodexContinuityInventory(account, false, false, false), want: proxy.ErrCodexContinuity},
 		{name: "dispatch blocked", inventory: proxyCodexContinuityInventory(account, true, false, true), want: proxy.ErrCodexContinuity},
 	}
@@ -211,6 +210,10 @@ func TestProxyCodexContinuityAccountRevalidatorFailsClosed(t *testing.T) {
 	authority := &proxyCodexContinuityTestAuthority{inventory: proxyCodexContinuityInventory(account, true, false, false)}
 	if err := newProxyCodexContinuityAccountRevalidator(authority)(context.Background(), account); err != nil {
 		t.Fatalf("routable stable account rejected: %v", err)
+	}
+	authority.inventory = proxyCodexContinuityInventory(account, true, true, false)
+	if err := newProxyCodexContinuityAccountRevalidator(authority)(context.Background(), account); err != nil {
+		t.Fatalf("uniquely matched generation-local account rejected: %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

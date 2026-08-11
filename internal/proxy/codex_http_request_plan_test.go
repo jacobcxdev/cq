@@ -454,6 +454,30 @@ func TestCodexHTTPRequestPlanFactoryReleasesFrozenOnBeginFailure(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryRetriesSuccessorWhilePredecessorDrains(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{
+		handle: &CodexLeaseRequestHandle{account: "account"},
+		errs:   []error{ErrCodexConcurrentTurn, nil},
+	}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatalf("build after %d calls: %v", runtime.calls, err)
+	}
+	if runtime.calls != 2 {
+		t.Fatalf("begin calls = %d, want 2", runtime.calls)
+	}
+	if result.Frozen == nil || result.Lifecycle == nil {
+		t.Fatalf("prepared result = %#v", result)
+	}
+	result.Frozen.Release()
+}
+
 func TestCodexHTTPRequestPlanFactoryAbandonsCommittedHandleAfterCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -679,6 +703,7 @@ func (snapshotter *codexHTTPRequestPlanTestSnapshotter) LoadRouteSnapshot(_ cont
 type codexHTTPRequestPlanTestRuntime struct {
 	handle       *CodexLeaseRequestHandle
 	err          error
+	errs         []error
 	calls        int
 	plan         CodexLeaseRequestPlan
 	events       *[]string
@@ -694,7 +719,16 @@ func (runtime *codexHTTPRequestPlanTestRuntime) BeginRequestContext(_ context.Co
 	if runtime.beforeReturn != nil {
 		runtime.beforeReturn()
 	}
-	return runtime.handle, runtime.err
+	err := runtime.err
+	sequenced := len(runtime.errs) > 0
+	if len(runtime.errs) > 0 {
+		err = runtime.errs[0]
+		runtime.errs = runtime.errs[1:]
+	}
+	if sequenced && err != nil {
+		return nil, err
+	}
+	return runtime.handle, err
 }
 
 func codexHTTPRequestPlanTestFactory(runtime CodexHTTPRequestPlanRuntime) *CodexHTTPRequestPlanFactory {

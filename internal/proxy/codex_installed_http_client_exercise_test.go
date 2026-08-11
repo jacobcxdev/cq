@@ -97,12 +97,12 @@ func TestCodexAcceptanceSandboxProfilePermitsOnlyExactRunAuthority(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, exact := range []string{`(deny network*)`, `(deny file-write*)`, `127.0.0.1:43123`, `127.0.0.1:43124`, root} {
+	for _, exact := range []string{`(deny network*)`, `(deny file-write*)`, `localhost:43123`, `localhost:43124`, root} {
 		if !strings.Contains(profile, exact) {
 			t.Fatalf("sandbox profile missing %q: %s", exact, profile)
 		}
 	}
-	for _, broad := range []string{"localhost:*", "127.0.0.1:*", filepath.Join(filepath.Dir(root), "other")} {
+	for _, broad := range []string{"localhost:*", "127.0.0.1:", filepath.Join(filepath.Dir(root), "other")} {
 		if strings.Contains(profile, broad) {
 			t.Fatalf("sandbox profile contains broad authority %q: %s", broad, profile)
 		}
