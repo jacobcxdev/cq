@@ -160,6 +160,77 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryPlansPrewarmWithoutDurableAuthority(t *testing.T) {
+	t.Parallel()
+	runtime := &codexHTTPRequestPlanTestRuntime{}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	snapshotter := factory.Routes.(*codexHTTPRequestPlanTestSnapshotter)
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+
+	dispatch, err := factory.planWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account" {
+		t.Fatalf("dispatch = %#v", accounts)
+	}
+	if runtime.calls != 0 || snapshotter.calls != 0 {
+		t.Fatalf("durable calls = runtime %d snapshot %d", runtime.calls, snapshotter.calls)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
+	t.Parallel()
+	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	account := frozenDispatchTestLogicalAccount("account-a",
+		frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory:         &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{account}}},
+		Routes:            coordinator,
+		Runtime:           runtimeLease,
+		DefaultAccountKey: "account-a",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
+		Now:               func() time.Time { return *now },
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	dispatch, err := factory.planWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: prewarm})
+	if err != nil || len(dispatch.Accounts()) != 1 {
+		t.Fatalf("prewarm dispatch = %#v, %v", dispatch.Accounts(), err)
+	}
+	reservation, err := factory.beginWebSocketPrewarm(CodexHTTPRequestPlanInput{Encoded: prewarm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err = factory.bindWebSocketPrewarm(reservation, "account-a", 41, 43)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err = factory.readyWebSocketPrewarm(reservation, "prewarm-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"prewarm-a","client_metadata":{"x-codex-turn-metadata":{"session_id":"session-a","thread_id":"thread-a","turn_id":"turn-a","request_kind":"turn"}},"input":[]}`)
+	prepared, err := factory.adoptWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: turn}, reservation, func(_ context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
+		if account != "account-a" || fence.ReservationGeneration != reservation.Generation || fence.DownstreamSocketGeneration != 41 || fence.UpstreamSocketGeneration != 43 {
+			t.Fatalf("adoption fence = %q/%#v", account, fence)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	if prepared.leaseHandle == nil || !prepared.leaseHandle.record.AdoptedPrewarm || prepared.leaseHandle.AccountKey() != "account-a" {
+		t.Fatalf("adopted request = %#v", prepared.leaseHandle)
+	}
+	if prepared.leaseHandle.record.CorrelationHash != coordinator.store.hash("correlation", "prewarm-a") {
+		t.Fatal("adopted response anchor was not bound")
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *testing.T) {
 	t.Parallel()
 

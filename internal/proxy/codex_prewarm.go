@@ -135,6 +135,23 @@ func (manager *CodexPrewarmManager) Disconnect(lane LaneKey) error {
 	return nil
 }
 
+func (manager *CodexPrewarmManager) cancel(lane LaneKey, correlation string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	reservation := manager.reservations[lane]
+	if reservation == nil || reservation.Correlation != correlation ||
+		(reservation.State != CodexPrewarmCreating && reservation.State != CodexPrewarmBoundActive && reservation.State != CodexPrewarmReady) {
+		return errors.New("prewarm cannot cancel")
+	}
+	reservation.State = CodexPrewarmCancelled
+	reservation.SocketGeneration = 0
+	reservation.DownstreamSocketGeneration = 0
+	reservation.UpstreamSocketGeneration = 0
+	reservation.Generation++
+	reservation.LastSeen = manager.now()
+	return nil
+}
+
 // Adopt is retained only as a fail-closed compatibility seam. Durable
 // promotion must use CodexContinuityCoordinator.AdoptPrewarm.
 func (manager *CodexPrewarmManager) Adopt(LeaseKey, string) (CodexTurnLease, error) {

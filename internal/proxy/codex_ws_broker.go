@@ -71,6 +71,15 @@ type codexWSUpstreamDialer interface {
 	Dial(context.Context, RouteChoice, CandidateAttempt, string, http.Header) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error)
 }
 
+type codexWebSocketPrewarmPlanner interface {
+	planWebSocketPrewarm(context.Context, CodexHTTPRequestPlanInput) (CodexFrozenDispatchPlan, error)
+	beginWebSocketPrewarm(CodexHTTPRequestPlanInput) (CodexPrewarmReservation, error)
+	bindWebSocketPrewarm(CodexPrewarmReservation, codex.AccountKey, uint64, uint64) (CodexPrewarmReservation, error)
+	readyWebSocketPrewarm(CodexPrewarmReservation, string, string) (CodexPrewarmReservation, error)
+	cancelWebSocketPrewarm(CodexPrewarmReservation) error
+	adoptWebSocketPrewarm(context.Context, CodexHTTPRequestPlanInput, CodexPrewarmReservation, CodexPrewarmAdoptionRevalidator) (CodexPreparedHTTPRequest, error)
+}
+
 type codexExplicitWSUpstreamDialer struct {
 	executor ExplicitWebSocketExecutor
 }
@@ -101,6 +110,7 @@ type codexWSActiveUpstream struct {
 	conn       websocketRelayConn
 	account    codex.AccountKey
 	generation uint64
+	prewarm    CodexPrewarmReservation
 }
 
 type codexWSDialResult struct {
@@ -131,6 +141,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		if active.conn != nil {
 			_ = active.conn.Close()
 		}
+		broker.cancelActivePrewarm(&active)
 	}()
 	for {
 		messageType, encoded, err := readCodexWSMessage(ctx, downstream)
@@ -156,11 +167,33 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 }
 
 func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, active *codexWSActiveUpstream) error {
-	prepared, err := broker.config.Plans.Build(ctx, CodexHTTPRequestPlanInput{
+	if pending.prewarm {
+		return broker.servePrewarm(ctx, downstream, pending, active)
+	}
+	input := CodexHTTPRequestPlanInput{
 		Encoded:          pending.encoded,
-		Headers:          broker.config.Headers,
 		AcceptedRevision: broker.config.AcceptedRevision,
-	})
+	}
+	var prepared CodexPreparedHTTPRequest
+	var err error
+	if active.prewarm.State == CodexPrewarmReady {
+		planner, ok := broker.config.Plans.(codexWebSocketPrewarmPlanner)
+		if !ok {
+			return ErrCodexLeaseWriterUnavailable
+		}
+		prepared, err = planner.adoptWebSocketPrewarm(ctx, input, active.prewarm, func(ctx context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
+			if active.conn == nil || active.account != account || active.generation != fence.UpstreamSocketGeneration ||
+				broker.config.DownstreamGeneration != fence.DownstreamSocketGeneration || active.prewarm.Generation != fence.ReservationGeneration {
+				return ErrCodexContinuity
+			}
+			return ctx.Err()
+		})
+		if err == nil {
+			active.prewarm = CodexPrewarmReservation{}
+		}
+	} else {
+		prepared, err = broker.config.Plans.Build(ctx, input)
+	}
 	if err != nil {
 		return err
 	}
@@ -228,6 +261,182 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		}
 		prepared.leaseHandle = lifecycle.handle
 	}
+}
+
+func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, active *codexWSActiveUpstream) error {
+	planner, ok := broker.config.Plans.(codexWebSocketPrewarmPlanner)
+	if !ok {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	dispatch, err := planner.planWebSocketPrewarm(ctx, CodexHTTPRequestPlanInput{
+		Encoded:          pending.encoded,
+		AcceptedRevision: broker.config.AcceptedRevision,
+	})
+	if err != nil {
+		return err
+	}
+	accounts := dispatch.Accounts()
+	if len(accounts) == 0 {
+		return dispatch.TerminalError()
+	}
+	reservation, err := planner.beginWebSocketPrewarm(CodexHTTPRequestPlanInput{
+		Encoded:          pending.encoded,
+		AcceptedRevision: broker.config.AcceptedRevision,
+	})
+	if err != nil {
+		return err
+	}
+	active.prewarm = reservation
+	for accountIndex, account := range accounts {
+		dial := broker.connectPrewarm(ctx, account, active)
+		if active.conn == nil {
+			canRotate := accountIndex+1 < len(accounts) && (dial.wrapped.HardUsageLimit || dial.wrapped.AuthFailure)
+			if canRotate {
+				continue
+			}
+			broker.cancelActivePrewarm(active)
+			frame, status := canonicalCodexWSHandshakeError(dial.response, dial.wrapped)
+			if err := writeCodexWSMessage(ctx, downstream, websocket.TextMessage, frame); err != nil {
+				return fmt.Errorf("Codex downstream WebSocket write failed")
+			}
+			_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, http.StatusText(status)))
+			return nil
+		}
+		if err := writeCodexWSMessage(ctx, active.conn, pending.messageType, pending.encoded); err != nil {
+			_ = active.conn.Close()
+			broker.cancelActivePrewarm(active)
+			*active = codexWSActiveUpstream{}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("Codex upstream WebSocket write failed")
+		}
+		rotate, err := broker.readPrewarmResponse(ctx, downstream, planner, accountIndex+1 < len(accounts), active)
+		if err != nil {
+			return err
+		}
+		if !rotate {
+			return nil
+		}
+	}
+	return ErrCodexLeaseWriterUnavailable
+}
+
+func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {
+	choice := account.Choice()
+	if active.conn != nil && active.account == choice.AccountKey {
+		return codexWSDialResult{response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}}
+	}
+	if active.conn != nil {
+		_ = active.conn.Close()
+		active.conn = nil
+		active.account = ""
+		active.generation = 0
+	}
+	var last codexWSDialResult
+	for _, attempt := range account.Attempts() {
+		broker.upstreamGeneration++
+		generation := broker.upstreamGeneration
+		conn, response, body, _, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers)
+		if dialErr == nil && conn != nil {
+			active.conn = conn
+			active.account = choice.AccountKey
+			active.generation = generation
+			return codexWSDialResult{response: response}
+		}
+		wrapped, parseErr := codexWSDialError(response, body)
+		last = codexWSDialResult{wrapped: wrapped, response: response, body: append([]byte(nil), body...), err: errors.Join(dialErr, parseErr)}
+		if !wrapped.AuthFailure {
+			break
+		}
+	}
+	return last
+}
+
+func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx context.Context, downstream websocketRelayConn, planner codexWebSocketPrewarmPlanner, canRotate bool, active *codexWSActiveUpstream) (bool, error) {
+	relayed := false
+	responseAnchor := ""
+	turnState := ""
+	for {
+		messageType, frame, err := readCodexWSMessage(ctx, active.conn)
+		if err != nil {
+			_ = active.conn.Close()
+			broker.cancelActivePrewarm(active)
+			*active = codexWSActiveUpstream{}
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			return false, fmt.Errorf("Codex upstream WebSocket prewarm failed")
+		}
+		if messageType != websocket.TextMessage {
+			_ = active.conn.Close()
+			broker.cancelActivePrewarm(active)
+			*active = codexWSActiveUpstream{}
+			return false, ErrCodexWSInvalidFrame
+		}
+		observation := classifyCodexSSEData(frame)
+		if observation.Kind == CodexSSEError && !relayed && canRotate && (observation.Error.HardUsageLimit || observation.Error.AuthFailure) {
+			_ = active.conn.Close()
+			active.conn = nil
+			active.account = ""
+			active.generation = 0
+			return true, nil
+		}
+		if observation.Kind == CodexSSEMalformed || observation.Kind == CodexSSEUnknown {
+			_ = active.conn.Close()
+			broker.cancelActivePrewarm(active)
+			*active = codexWSActiveUpstream{}
+			return false, ErrCodexWSInvalidFrame
+		}
+		if observation.Kind != CodexSSEError && active.prewarm.State == CodexPrewarmCreating {
+			reservation, bindErr := planner.bindWebSocketPrewarm(active.prewarm, active.account, broker.config.DownstreamGeneration, active.generation)
+			if bindErr != nil {
+				_ = active.conn.Close()
+				broker.cancelActivePrewarm(active)
+				*active = codexWSActiveUpstream{}
+				return false, bindErr
+			}
+			active.prewarm = reservation
+		}
+		if observation.ResponseID != "" {
+			responseAnchor = observation.ResponseID
+		}
+		if observation.TurnState != "" {
+			turnState = observation.TurnState
+		}
+		if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
+			return false, fmt.Errorf("Codex downstream WebSocket write failed")
+		}
+		relayed = true
+		if observation.Kind == CodexSSECompleted {
+			reservation, readyErr := planner.readyWebSocketPrewarm(active.prewarm, responseAnchor, turnState)
+			if readyErr != nil {
+				_ = active.conn.Close()
+				broker.cancelActivePrewarm(active)
+				*active = codexWSActiveUpstream{}
+				return false, readyErr
+			}
+			active.prewarm = reservation
+			return false, nil
+		}
+		if observation.Kind == CodexSSEError {
+			_ = active.conn.Close()
+			broker.cancelActivePrewarm(active)
+			*active = codexWSActiveUpstream{}
+			return false, nil
+		}
+	}
+}
+
+func (broker *codexTerminatingWSBroker) cancelActivePrewarm(active *codexWSActiveUpstream) {
+	if broker == nil || active == nil || active.prewarm.Lane == (LaneKey{}) || active.prewarm.Correlation == "" || active.prewarm.State == CodexPrewarmAdopted || active.prewarm.State == CodexPrewarmCancelled {
+		return
+	}
+	planner, ok := broker.config.Plans.(codexWebSocketPrewarmPlanner)
+	if ok {
+		_ = planner.cancelWebSocketPrewarm(active.prewarm)
+	}
+	active.prewarm = CodexPrewarmReservation{}
 }
 
 func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *CodexLeaseRequestHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {

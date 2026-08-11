@@ -289,6 +289,35 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	return handle, nil
 }
 
+func (runtime *CodexLeaseRuntime) adoptWebSocketPrewarmContext(ctx context.Context, accounts []codex.AccountKey, request CodexPrewarmAdoptionRequest) (*CodexLeaseRequestHandle, error) {
+	if runtime == nil || runtime.coordinator == nil || runtime.store == nil || runtime.revalidateAccount == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil prewarm adoption context", ErrCodexLeaseInvalidMutation)
+	}
+	callerRevalidate := request.Revalidate
+	if callerRevalidate == nil {
+		return nil, fmt.Errorf("%w: missing prewarm socket revalidation", ErrCodexLeaseInvalidMutation)
+	}
+	request.Revalidate = func(ctx context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
+		if err := runtime.revalidateAccountForCommit(ctx, account); err != nil {
+			return err
+		}
+		return callerRevalidate(ctx, account, fence)
+	}
+	result, err := runtime.coordinator.AdoptPrewarm(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := runtime.committedRequestHandle(request.Key, accounts, request.Policy, result.Record.Identity(), result.Fence, result.Record, true, 1)
+	if err != nil {
+		return nil, err
+	}
+	handle.newTurn = true
+	return handle, nil
+}
+
 func (handle *CodexLeaseRequestHandle) State() LeaseState {
 	if handle == nil {
 		return 0

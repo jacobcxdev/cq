@@ -54,6 +54,40 @@ func TestCodexWSPendingFrameRejectsInvalidAuthorityAndBounds(t *testing.T) {
 	}
 }
 
+func TestCodexWSPendingFrameAcceptsInstalledPrewarmWithoutLeaseKey(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+	if !pending.prewarm || pending.key != (LeaseKey{}) || pending.request.Metadata.Metadata.RequestKind != CodexRequestPrewarm {
+		t.Fatalf("prewarm authority = %+v", pending)
+	}
+}
+
+func TestCodexWSPendingFrameRejectsInvalidPrewarmGenerateAuthority(t *testing.T) {
+	metadata := `"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"","request_kind":"prewarm"}}`
+	for _, test := range []struct {
+		name     string
+		generate string
+	}{
+		{name: "missing"},
+		{name: "true", generate: `,"generate":true`},
+		{name: "null", generate: `,"generate":null`},
+		{name: "string", generate: `,"generate":"false"`},
+		{name: "duplicate", generate: `,"generate":false,"generate":false`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol"` + test.generate + `,` + metadata + `}`)
+			pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+			if pending != nil || !errors.Is(err, ErrCodexWSInvalidFrame) {
+				t.Fatalf("pending=%+v error=%v", pending, err)
+			}
+		})
+	}
+}
+
 func TestCodexWSPendingFrameOwnsAndReleasesPortableBytes(t *testing.T) {
 	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
 	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)

@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"slices"
@@ -21,6 +23,10 @@ type CodexHTTPRequestRouteSnapshotter interface {
 // factory after every other fallible preparation step has completed.
 type CodexHTTPRequestPlanRuntime interface {
 	BeginRequestContext(context.Context, CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error)
+}
+
+type codexWebSocketPrewarmRuntime interface {
+	adoptWebSocketPrewarmContext(context.Context, []codex.AccountKey, CodexPrewarmAdoptionRequest) (*CodexLeaseRequestHandle, error)
 }
 
 // CodexHTTPRequestPlanInput contains caller-owned native request bytes and the
@@ -307,6 +313,189 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		})
 		result.Lifecycle = trace.wrapLifecycle(result.Lifecycle)
 	}
+	return result, nil
+}
+
+// planWebSocketPrewarm selects one memory-only account order. Prewarm carries
+// no turn identity and therefore must not create or mutate durable lease state.
+func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Context, input CodexHTTPRequestPlanInput) (CodexFrozenDispatchPlan, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if factory == nil || factory.Inventory == nil {
+		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanUnavailable, nil)
+	}
+	protocol, err := ParseCodexProtocolRequest(input.Encoded, "", nil)
+	if err != nil {
+		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+	}
+	protocol, err = validateCodexWSPrewarmRequest(input.Encoded, protocol)
+	if err != nil {
+		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+	}
+	inventory, err := factory.Inventory.List(ctx)
+	if err != nil {
+		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
+	}
+	now := time.Now()
+	if factory.Now != nil {
+		now = factory.Now()
+	}
+	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
+		Inventory:         inventory,
+		Capacity:          factory.Capacity,
+		Requirements:      codexHTTPRequestPlanRequirements(protocol),
+		DefaultAccountKey: factory.DefaultAccountKey,
+		AcceptedRevision:  input.AcceptedRevision,
+		Now:               now,
+	})
+	if err != nil {
+		return dispatch, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+	}
+	if len(dispatch.Accounts()) == 0 {
+		return dispatch, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, dispatch.TerminalError())
+	}
+	return dispatch, nil
+}
+
+func (factory *CodexHTTPRequestPlanFactory) beginWebSocketPrewarm(input CodexHTTPRequestPlanInput) (CodexPrewarmReservation, error) {
+	if factory == nil {
+		return CodexPrewarmReservation{}, ErrCodexLeaseWriterUnavailable
+	}
+	coordinator, ok := factory.Routes.(*CodexContinuityCoordinator)
+	if !ok || coordinator == nil || coordinator.prewarms == nil {
+		return CodexPrewarmReservation{}, ErrCodexLeaseWriterUnavailable
+	}
+	protocol, err := ParseCodexProtocolRequest(input.Encoded, "", nil)
+	if err != nil {
+		return CodexPrewarmReservation{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+	}
+	protocol, err = validateCodexWSPrewarmRequest(input.Encoded, protocol)
+	if err != nil {
+		return CodexPrewarmReservation{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+	}
+	digest := sha256.Sum256(input.Encoded)
+	return coordinator.prewarms.Create(protocol.Metadata.Metadata, hex.EncodeToString(digest[:]))
+}
+
+func (factory *CodexHTTPRequestPlanFactory) bindWebSocketPrewarm(reservation CodexPrewarmReservation, account codex.AccountKey, downstreamGeneration, upstreamGeneration uint64) (CodexPrewarmReservation, error) {
+	if factory == nil {
+		return CodexPrewarmReservation{}, ErrCodexLeaseWriterUnavailable
+	}
+	coordinator, ok := factory.Routes.(*CodexContinuityCoordinator)
+	if !ok || coordinator == nil || coordinator.prewarms == nil || reservation.State != CodexPrewarmCreating {
+		return CodexPrewarmReservation{}, ErrCodexLeaseWriterUnavailable
+	}
+	return coordinator.prewarms.BindSockets(reservation.Lane, account, downstreamGeneration, upstreamGeneration)
+}
+
+func (factory *CodexHTTPRequestPlanFactory) readyWebSocketPrewarm(reservation CodexPrewarmReservation, responseAnchor, turnState string) (CodexPrewarmReservation, error) {
+	if factory == nil {
+		return CodexPrewarmReservation{}, ErrCodexLeaseWriterUnavailable
+	}
+	coordinator, ok := factory.Routes.(*CodexContinuityCoordinator)
+	if !ok || coordinator == nil || coordinator.prewarms == nil || reservation.State != CodexPrewarmBoundActive {
+		return CodexPrewarmReservation{}, ErrCodexLeaseWriterUnavailable
+	}
+	return coordinator.prewarms.Ready(reservation.Lane, responseAnchor, turnState)
+}
+
+func (factory *CodexHTTPRequestPlanFactory) cancelWebSocketPrewarm(reservation CodexPrewarmReservation) error {
+	if factory == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	coordinator, ok := factory.Routes.(*CodexContinuityCoordinator)
+	if !ok || coordinator == nil || coordinator.prewarms == nil || reservation.Lane == (LaneKey{}) || reservation.Correlation == "" {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	return coordinator.prewarms.cancel(reservation.Lane, reservation.Correlation)
+}
+
+func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Context, input CodexHTTPRequestPlanInput, reservation CodexPrewarmReservation, revalidate CodexPrewarmAdoptionRevalidator) (CodexPreparedHTTPRequest, error) {
+	var result CodexPreparedHTTPRequest
+	if factory == nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanUnavailable, nil)
+	}
+	runtime, ok := factory.Runtime.(codexWebSocketPrewarmRuntime)
+	if factory.Inventory == nil || !ok || runtime == nil || reservation.State != CodexPrewarmReady || revalidate == nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanUnavailable, nil)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	inspection, err := factory.inspect(ctx, input.Encoded, input.Headers)
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+	}
+	defer inspection.Release()
+	protocol, err := inspection.Protocol()
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+	}
+	metadata := protocol.Metadata.Metadata
+	key := NewCodexLeaseKey(metadata)
+	if !protocol.Metadata.Strong || key.Lane != reservation.Lane || protocol.PreviousResponseID != reservation.ResponseAnchor ||
+		(metadata.RequestKind != CodexRequestTurn && !(metadata.RequestKind == CodexRequestCompaction && metadata.CompactionPhase == CodexCompactionPreTurn)) {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexContinuity)
+	}
+	inventory, err := factory.Inventory.List(ctx)
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
+	}
+	accounts := codexHTTPRequestPlanAccountKeys(inventory)
+	now := time.Now()
+	if factory.Now != nil {
+		now = factory.Now()
+	}
+	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
+		Inventory:         inventory,
+		Capacity:          factory.Capacity,
+		Requirements:      codexHTTPRequestPlanRequirements(protocol),
+		DefaultAccountKey: factory.DefaultAccountKey,
+		BoundAccountKey:   reservation.AccountKey,
+		AcceptedRevision:  input.AcceptedRevision,
+		Now:               now,
+	})
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+	}
+	dispatchAccounts := dispatch.Accounts()
+	if len(dispatchAccounts) != 1 || dispatchAccounts[0].Choice().AccountKey != reservation.AccountKey {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexContinuity)
+	}
+	choice := dispatchAccounts[0].Choice()
+	frozen, err := factory.freeze(ctx, inspection, choice)
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanFreeze, err)
+	}
+	httpSlots := CodexHTTPAttemptSlots(dispatch)
+	slots := make([]CodexPrewarmAttemptSlot, len(httpSlots))
+	for index, slot := range httpSlots {
+		slots[index] = CodexPrewarmAttemptSlot{AccountKey: slot.AccountKey, CandidateID: slot.CandidateID, Kind: slot.Kind}
+	}
+	handle, err := runtime.adoptWebSocketPrewarmContext(ctx, accounts, CodexPrewarmAdoptionRequest{
+		Key:                        key,
+		Policy:                     factory.Authority,
+		Choice:                     choice,
+		AttemptSlots:               slots,
+		RequestKind:                metadata.RequestKind,
+		CompactionPhase:            metadata.CompactionPhase,
+		Correlation:                reservation.Correlation,
+		ResponseAnchor:             reservation.ResponseAnchor,
+		TurnState:                  reservation.TurnState,
+		ReservationGeneration:      reservation.Generation,
+		DownstreamSocketGeneration: reservation.DownstreamSocketGeneration,
+		UpstreamSocketGeneration:   reservation.UpstreamSocketGeneration,
+		Revalidate:                 revalidate,
+	})
+	if err != nil || handle == nil {
+		frozen.Release()
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
+	}
+	result.Dispatch = dispatch
+	result.Frozen = frozen
+	result.leaseHandle = handle
+	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
 	return result, nil
 }
 

@@ -71,6 +71,72 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	}
 }
 
+func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey:  "account-a",
+			CandidateID: "candidate-a",
+			Kind:        CodexAttemptSlotDirect,
+		}},
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	turn := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"prewarm-a"`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: prewarm},
+		{messageType: websocket.TextMessage, payload: turn},
+		{err: io.EOF},
+	}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-a","end_turn":true}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		Headers:              http.Header{"X-Codex-Turn-Metadata": {`{"session_id":"session-a","thread_id":"thread-a","turn_id":"","request_kind":"prewarm"}`}},
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if planner.prewarmCalls != 1 || planner.adoptionCalls != 1 || planner.buildCalls != 0 {
+		t.Fatalf("planner calls = prewarm %d adoption %d build %d, want 1/1/0", planner.prewarmCalls, planner.adoptionCalls, planner.buildCalls)
+	}
+	if planner.prewarmHeaders.Get(codexTurnMetadataKey) != "" || planner.buildHeaders.Get(codexTurnMetadataKey) != "" {
+		t.Fatalf("connection metadata reached per-frame planner: prewarm=%v build=%v", planner.prewarmHeaders, planner.buildHeaders)
+	}
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("dial accounts = %#v", got)
+	}
+	if got := upstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{prewarm, turn}) {
+		t.Fatalf("upstream writes = %#v", got)
+	}
+	if got := downstream.writtenPayloads(); len(got) != 4 {
+		t.Fatalf("downstream writes = %#v", got)
+	}
+	restored, err := coordinator.store.LoadLane(
+		LeaseKey{Lane: LaneKey{Session: "session-a", Thread: "thread-a", Namespace: CodexResponsesNamespace}, Turn: "turn-a"},
+		[]codex.AccountKey{"account-a"},
+		CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm {
+		t.Fatalf("durable prewarm adoption = %#v", restored.ResolvedRecords)
+	}
+}
+
 func TestServerCodexWebSocketEnforceUsesTerminatingBroker(t *testing.T) {
 	t.Parallel()
 	broker := &codexWebSocketRoutingHandlerStub{}
@@ -415,12 +481,19 @@ func codexWSBrokerHard429() []byte {
 }
 
 type codexWSBrokerPlannerStub struct {
-	runtime  *CodexLeaseRuntime
-	slots    []CodexLeaseAttemptSlotPlan
-	attempts map[codex.AccountKey]int
+	runtime        *CodexLeaseRuntime
+	slots          []CodexLeaseAttemptSlotPlan
+	attempts       map[codex.AccountKey]int
+	prewarmCalls   int
+	adoptionCalls  int
+	buildCalls     int
+	prewarmHeaders http.Header
+	buildHeaders   http.Header
 }
 
 func (planner *codexWSBrokerPlannerStub) Build(_ context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
+	planner.buildCalls++
+	planner.buildHeaders = input.Headers.Clone()
 	request, err := ParseCodexProtocolRequest(input.Encoded, "", nil)
 	if err != nil {
 		return CodexPreparedHTTPRequest{}, err
@@ -446,6 +519,84 @@ func (planner *codexWSBrokerPlannerStub) Build(_ context.Context, input CodexHTT
 		Lifecycle:   NewCodexHTTPRequestLifecycle(handle),
 		leaseHandle: handle,
 	}, nil
+}
+
+func (planner *codexWSBrokerPlannerStub) planWebSocketPrewarm(_ context.Context, input CodexHTTPRequestPlanInput) (CodexFrozenDispatchPlan, error) {
+	planner.prewarmCalls++
+	planner.prewarmHeaders = input.Headers.Clone()
+	request, err := ParseCodexProtocolRequest(input.Encoded, "", nil)
+	if err != nil {
+		return CodexFrozenDispatchPlan{}, err
+	}
+	accounts := make([]CodexFrozenDispatchAccount, 0, len(planner.slots))
+	for _, slot := range planner.slots {
+		accounts = append(accounts, CodexFrozenDispatchAccount{
+			choice:   RouteChoice{AccountKey: slot.AccountKey, RequestedModel: request.Model, EffectiveModel: request.Model, RequiredBuckets: []CapacityBucket{CapacityBucketBase}},
+			attempts: []CandidateAttempt{{AccountKey: slot.AccountKey, Candidate: codex.CandidateRef{AccountKey: slot.AccountKey, CandidateID: codex.CandidateID(slot.CandidateID)}, Revision: "revision-1", Ordinal: 1}},
+		})
+	}
+	return CodexFrozenDispatchPlan{accounts: accounts, status: CodexRoutePlanReady}, nil
+}
+
+func (planner *codexWSBrokerPlannerStub) beginWebSocketPrewarm(input CodexHTTPRequestPlanInput) (CodexPrewarmReservation, error) {
+	request, err := ParseCodexProtocolRequest(input.Encoded, "", nil)
+	if err != nil {
+		return CodexPrewarmReservation{}, err
+	}
+	return planner.runtime.coordinator.prewarms.Create(request.Metadata.Metadata, "stub-prewarm-correlation")
+}
+
+func (planner *codexWSBrokerPlannerStub) bindWebSocketPrewarm(reservation CodexPrewarmReservation, account codex.AccountKey, downstreamGeneration, upstreamGeneration uint64) (CodexPrewarmReservation, error) {
+	return planner.runtime.coordinator.prewarms.BindSockets(reservation.Lane, account, downstreamGeneration, upstreamGeneration)
+}
+
+func (planner *codexWSBrokerPlannerStub) readyWebSocketPrewarm(reservation CodexPrewarmReservation, responseAnchor, turnState string) (CodexPrewarmReservation, error) {
+	return planner.runtime.coordinator.prewarms.Ready(reservation.Lane, responseAnchor, turnState)
+}
+
+func (planner *codexWSBrokerPlannerStub) cancelWebSocketPrewarm(reservation CodexPrewarmReservation) error {
+	return planner.runtime.coordinator.prewarms.cancel(reservation.Lane, reservation.Correlation)
+}
+
+func (planner *codexWSBrokerPlannerStub) adoptWebSocketPrewarm(ctx context.Context, input CodexHTTPRequestPlanInput, reservation CodexPrewarmReservation, revalidate CodexPrewarmAdoptionRevalidator) (CodexPreparedHTTPRequest, error) {
+	planner.adoptionCalls++
+	request, err := ParseCodexProtocolRequest(input.Encoded, "", nil)
+	if err != nil {
+		return CodexPreparedHTTPRequest{}, err
+	}
+	var selected CodexLeaseAttemptSlotPlan
+	for _, slot := range planner.slots {
+		if slot.AccountKey == reservation.AccountKey {
+			selected = slot
+			break
+		}
+	}
+	if selected.AccountKey == "" || request.PreviousResponseID != reservation.ResponseAnchor {
+		return CodexPreparedHTTPRequest{}, ErrCodexContinuity
+	}
+	choice := RouteChoice{AccountKey: selected.AccountKey, RequestedModel: request.Model, EffectiveModel: request.Model, RequiredBuckets: []CapacityBucket{CapacityBucketBase}}
+	handle, err := planner.runtime.adoptWebSocketPrewarmContext(ctx, []codex.AccountKey{selected.AccountKey}, CodexPrewarmAdoptionRequest{
+		Key:                        NewCodexLeaseKey(request.Metadata.Metadata),
+		Policy:                     CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
+		Choice:                     choice,
+		AttemptSlots:               []CodexPrewarmAttemptSlot{{AccountKey: selected.AccountKey, CandidateID: codex.CandidateID(selected.CandidateID), Kind: selected.Kind}},
+		RequestKind:                request.Metadata.Metadata.RequestKind,
+		Correlation:                reservation.Correlation,
+		ResponseAnchor:             reservation.ResponseAnchor,
+		TurnState:                  reservation.TurnState,
+		ReservationGeneration:      reservation.Generation,
+		DownstreamSocketGeneration: reservation.DownstreamSocketGeneration,
+		UpstreamSocketGeneration:   reservation.UpstreamSocketGeneration,
+		Revalidate:                 revalidate,
+	})
+	if err != nil {
+		return CodexPreparedHTTPRequest{}, err
+	}
+	dispatch := CodexFrozenDispatchPlan{accounts: []CodexFrozenDispatchAccount{{
+		choice:   choice,
+		attempts: []CandidateAttempt{{AccountKey: selected.AccountKey, Candidate: codex.CandidateRef{AccountKey: selected.AccountKey, CandidateID: codex.CandidateID(selected.CandidateID)}, Revision: "revision-1", Ordinal: 1}},
+	}}, status: CodexRoutePlanReady}
+	return CodexPreparedHTTPRequest{Dispatch: dispatch, Lifecycle: NewCodexHTTPRequestLifecycle(handle), leaseHandle: handle}, nil
 }
 
 type codexWSBrokerRead struct {
