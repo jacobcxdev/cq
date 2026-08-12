@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -56,6 +57,7 @@ type Config struct {
 	CodexTurnRouting              CodexRoutingMode         `json:"codex_turn_routing"`
 	CodexWSTurnRouting            CodexRoutingMode         `json:"codex_ws_turn_routing"`
 	CodexRoutingDefaultAccountKey codex.AccountKey         `json:"codex_routing_default_account_key,omitempty"`
+	CodexRoutingAccountKeys       []codex.AccountKey       `json:"codex_routing_account_keys,omitempty"`
 	CodexLeaseRetentionDays       int                      `json:"codex_lease_retention_days"`
 	CodexContinuityStateDir       string                   `json:"codex_continuity_state_dir,omitempty"`
 	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
@@ -70,6 +72,7 @@ var configKnownFields = map[string]bool{
 	"payload_diagnostics_log": true, "codex_turn_routing": true,
 	"codex_ws_turn_routing": true, "codex_lease_retention_days": true,
 	"codex_routing_default_account_key": true,
+	"codex_routing_account_keys":        true,
 	"codex_continuity_state_dir":        true,
 	"codex_window_priming":              true,
 }
@@ -192,6 +195,16 @@ func (c *Config) validate() error {
 		if !filepath.IsAbs(c.CodexContinuityStateDir) || clean != c.CodexContinuityStateDir || clean == string(filepath.Separator) {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
 		}
+	}
+	seenRoutingAccounts := make(map[codex.AccountKey]bool, len(c.CodexRoutingAccountKeys))
+	for _, accountKey := range c.CodexRoutingAccountKeys {
+		if accountKey == "" || seenRoutingAccounts[accountKey] {
+			return errors.New("invalid codex_routing_account_keys: keys must be non-empty and unique")
+		}
+		seenRoutingAccounts[accountKey] = true
+	}
+	if len(seenRoutingAccounts) != 0 && c.CodexRoutingDefaultAccountKey != "" && !seenRoutingAccounts[c.CodexRoutingDefaultAccountKey] {
+		return errors.New("invalid codex_routing_default_account_key: account is not allowed for routing")
 	}
 	for scope, modelID := range c.CodexWindowPriming.ModelOverrides {
 		if strings.TrimSpace(scope) == "" || strings.TrimSpace(modelID) == "" {

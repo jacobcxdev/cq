@@ -38,7 +38,12 @@ func codexCanaryProtections(home, configDirectory string) ([]proxy.CodexCanaryPr
 			copy(result[8:], snapshot.AuthDigest[:])
 			return result, nil
 		}),
-		proxy.CodexCanaryJSONFieldProtection(proxy.CodexCanaryRoutingDefault, filepath.Join(configDirectory, "proxy.json"), "codex_routing_default_account_key"),
+		proxy.CodexCanaryRoutingPolicyProtection(
+			proxy.CodexCanaryRoutingDefault,
+			filepath.Join(configDirectory, "proxy.json"),
+			"codex_routing_default_account_key",
+			"codex_routing_account_keys",
+		),
 	}, nil
 }
 
