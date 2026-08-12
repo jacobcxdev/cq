@@ -217,7 +217,10 @@ func captureCodexInstalledProtectedDigests(paths []codexInstalledProtectedPath) 
 func captureCodexInstalledProtectedDigest(protected codexInstalledProtectedPath) (codexInstalledProtectedDigest, error) {
 	path := protected.path
 	result := codexInstalledProtectedDigest{path: path}
-	inspector := fsutil.OSFileSystem{}
+	_, inspector, _, ok := codexInstalledSecureOSFileSystem()
+	if !ok {
+		return result, fsutil.ErrSecureCapabilityUnavailable
+	}
 	pathInfo, err := inspector.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		result.absent = true
@@ -406,6 +409,10 @@ func cloneCodexInstalledPrivacyNeedles(needles [][]byte) [][]byte {
 }
 
 func countCodexInstalledPrivacyLeaks(root string, needles [][]byte) (uint64, error) {
+	_, _, opener, ok := codexInstalledSecureOSFileSystem()
+	if !ok {
+		return 0, fsutil.ErrSecureCapabilityUnavailable
+	}
 	var leaks uint64
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -427,7 +434,7 @@ func countCodexInstalledPrivacyLeaks(root string, needles [][]byte) (uint64, err
 		if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > codexInstalledPrivacyFileMaxBytes {
 			return fsutil.ErrUnsafeSecurePath
 		}
-		file, err := (fsutil.OSFileSystem{}).OpenNoFollow(path)
+		file, err := opener.OpenNoFollow(path)
 		if err != nil {
 			return err
 		}

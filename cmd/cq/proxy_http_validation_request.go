@@ -435,8 +435,12 @@ func defaultInstalledHTTPValidationRequestStore() (installedHTTPValidationReques
 	if err != nil {
 		return installedHTTPValidationRequestStore{}, fmt.Errorf("resolve user cache directory: %w", err)
 	}
+	fsys, ok := any(fsutil.OSFileSystem{}).(installedHTTPValidationFileSystem)
+	if !ok {
+		return installedHTTPValidationRequestStore{}, fmt.Errorf("installed HTTP validation request store: %w", fsutil.ErrSecureCapabilityUnavailable)
+	}
 	return installedHTTPValidationRequestStore{
-		fs:             fsutil.OSFileSystem{},
+		fs:             fsys,
 		path:           filepath.Join(cacheDir, "cq", "installed-http-validation", "request.json"),
 		now:            time.Now,
 		random:         rand.Reader,
