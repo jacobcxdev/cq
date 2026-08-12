@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 )
@@ -86,13 +87,22 @@ func NewCodexRequestHeadroomAdapter(bridge *HeadroomBridge) CodexRequestHeadroom
 }
 
 func (adapter codexRequestHeadroomAdapter) CompressResponses(ctx context.Context, body []byte, mode HeadroomMode) ([]byte, int, error) {
+	var transformed []byte
+	var saved int
+	var err error
 	if mode == HeadroomModeCache {
-		return adapter.bridge.CompressResponsesCacheContext(ctx, body)
+		transformed, saved, err = adapter.bridge.CompressResponsesCacheContext(ctx, body)
+	} else {
+		transformed, saved, err = adapter.bridge.CompressResponsesContext(ctx, body, mode)
 	}
-	return adapter.bridge.CompressResponsesContext(ctx, body, mode)
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return transformed, saved, err
+	}
+	fmt.Fprintln(os.Stderr, "cq: headroom: compression unavailable")
+	return bytes.Clone(body), 0, nil
 }
 
-// CodexFrozenRequestInspection owns one bounded decoded view until Freeze or
+// CodexFrozenRequestInspection owns one decoded view until Freeze or
 // Release consumes it. Source metadata and model authority are parsed once.
 type CodexFrozenRequestInspection struct {
 	state         *codexFrozenRequestInspectionState
@@ -126,7 +136,7 @@ type codexFrozenRequestState struct {
 	released        bool
 }
 
-// InspectCodexNativeRequest performs bounded content decoding and strict source
+// InspectCodexNativeRequest performs content decoding and strict source
 // authority parsing without dispatching, transforming, or retaining secrets.
 func InspectCodexNativeRequest(ctx context.Context, encoded []byte, headers http.Header) (*CodexFrozenRequestInspection, error) {
 	codexInstalledHTTPTraceFromContext(ctx).recordInspect()
@@ -139,7 +149,7 @@ func InspectCodexNativeRequest(ctx context.Context, encoded []byte, headers http
 		clear(replayHeaders)
 		return nil, classifyCodexFrozenCodecError(err, false)
 	}
-	limits := codexTransportRewriteLimits()
+	limits := codexHTTPZstdLimits()
 	decodedRequest, err := DecodeCodexRequest(encoded, encoding, limits)
 	if err != nil {
 		clear(replayHeaders)
@@ -261,11 +271,6 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 			}
 			return nil, newCodexFrozenRequestError(CodexFrozenRequestTransformFailed, transformErr)
 		}
-		if len(transformed) > maxCodexRequestEnvelopeBytes {
-			clearBytes(transformed)
-			clearBytes(headroomInput)
-			return nil, newCodexFrozenRequestError(CodexFrozenRequestDecodedLimit, errors.New("transformed decoded request exceeds limit"))
-		}
 		transformedCopy := bytes.Clone(transformed)
 		headroomChanged = !bytes.Equal(transformedCopy, preparedDecoded)
 		clearBytes(transformed)
@@ -306,7 +311,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 		clearBytes(preparedEncoded)
 		preparedEncoded = nil
 		trace.recordEncode()
-		preparedEncoded, err = inspection.encode(preparedDecoded, encoding, codexTransportRewriteLimits())
+		preparedEncoded, err = inspection.encode(preparedDecoded, encoding, codexHTTPZstdLimits())
 		if err != nil {
 			return nil, classifyCodexFrozenCodecError(err, true)
 		}
@@ -597,10 +602,6 @@ func codexFrozenAuthorityFailureCode(err error) CodexFrozenRequestErrorCode {
 }
 
 func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetadataPresent bool, headers http.Header) (codexFrozenAuthority, CodexFrozenRequestErrorCode, error) {
-	if len(body) > maxCodexRequestEnvelopeBytes {
-		err := errors.New("decoded native request exceeds limit")
-		return codexFrozenAuthority{}, CodexFrozenRequestDecodedLimit, err
-	}
 	scanner := codexFrozenJSONScanner{source: body}
 	result, err := scanner.scanRequest()
 	if err != nil {
@@ -630,7 +631,7 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 	if err != nil {
 		return codexFrozenAuthority{}, codexFrozenAuthorityFailureCode(err), err
 	}
-	modelName, err := decodeCodexFrozenString(model.value.bytes(body), maxCodexRequestEnvelopeBytes, "native request model")
+	modelName, err := decodeCodexFrozenString(model.value.bytes(body), len(body), "native request model")
 	if err != nil || modelName == "" {
 		if err == nil {
 			err = errors.New("native request model must be non-empty")
@@ -653,7 +654,7 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 	metadataResults := make([]CodexTurnMetadataResult, 0, 3)
 	metadataSources := codexFrozenMetadataSources(0)
 	if result.nestedMetadata.present {
-		metadata, parseErr := parseCodexFrozenMetadataValue(body, result.nestedMetadata, &result.nestedFields, maxCodexRequestEnvelopeBytes)
+		metadata, parseErr := parseCodexFrozenMetadataValue(body, result.nestedMetadata, &result.nestedFields, len(body))
 		if parseErr != nil {
 			err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestMetadataAuthority, err: parseErr}
 			return codexFrozenAuthority{}, CodexFrozenRequestMetadataAuthority, err
@@ -761,13 +762,14 @@ func rewriteCodexFrozenModel(body []byte, authority codexFrozenModelAuthority, e
 		return nil, newCodexFrozenRequestError(CodexFrozenRequestModelAuthority, err)
 	}
 	oldLength := authority.value.end - authority.value.start
-	newLength := len(body) - oldLength + len(rawModel)
 	if !authority.value.present || authority.value.start < 0 || authority.value.end > len(body) || oldLength < 0 {
 		return nil, newCodexFrozenRequestError(CodexFrozenRequestModelAuthority, errors.New("model rewrite authority unavailable"))
 	}
-	if newLength > maxCodexRequestEnvelopeBytes {
-		return nil, newCodexFrozenRequestError(CodexFrozenRequestDecodedLimit, errors.New("model rewrite exceeds decoded request limit"))
+	baseLength := len(body) - oldLength
+	if len(rawModel) > int(^uint(0)>>1)-baseLength {
+		return nil, newCodexFrozenRequestError(CodexFrozenRequestEncodeFailed, errors.New("model rewrite size overflow"))
 	}
+	newLength := baseLength + len(rawModel)
 	rewritten := make([]byte, 0, newLength)
 	rewritten = append(rewritten, body[:authority.value.start]...)
 	rewritten = append(rewritten, rawModel...)
@@ -821,7 +823,7 @@ func decodeCodexFrozenOptionalString(raw []byte, limit int, subject string) (str
 
 func decodeCodexFrozenString(raw []byte, limit int, subject string) (string, error) {
 	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || len(trimmed) > maxCodexRequestEnvelopeBytes {
+	if len(trimmed) == 0 {
 		return "", fmt.Errorf("%s is invalid", subject)
 	}
 	var value string

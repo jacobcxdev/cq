@@ -25,6 +25,21 @@ func TestCodexZstdDecodeAndReplay(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPZstdLimitsAcceptBodyOverLegacyLimit(t *testing.T) {
+	decoded := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	encoded, err := EncodeCodexRequest(decoded, "zstd", codexHTTPZstdLimits())
+	if err != nil {
+		t.Fatalf("encode over legacy limit: %v", err)
+	}
+	request, err := DecodeCodexRequest(encoded, "zstd", codexHTTPZstdLimits())
+	if err != nil {
+		t.Fatalf("decode over legacy limit: %v", err)
+	}
+	if !bytes.Equal(request.Decoded(), decoded) {
+		t.Fatal("decoded request changed")
+	}
+}
+
 func TestCodexZstdBoundsAndMalformed(t *testing.T) {
 	t.Parallel()
 	decoded := []byte(strings.Repeat("a", 32<<10))
@@ -273,7 +288,7 @@ func TestCodexZstdEncodeDeterministicAndBounded(t *testing.T) {
 		encoding string
 		limits   CodexZstdLimits
 	}{
-		{name: "invalid limits", body: decoded, encoding: "zstd", limits: CodexZstdLimits{}},
+		{name: "invalid limits", body: decoded, encoding: "zstd", limits: CodexZstdLimits{MaxEncodedBytes: -1}},
 		{name: "unsupported encoding", body: decoded, encoding: "gzip", limits: DefaultCodexZstdLimits},
 		{name: "decoded over limit", body: decoded, encoding: "zstd", limits: CodexZstdLimits{MaxEncodedBytes: 1 << 20, MaxDecodedBytes: len(decoded) - 1, MaxExpansion: 128}},
 		{name: "encoded output over limit", body: decoded, encoding: "zstd", limits: CodexZstdLimits{MaxEncodedBytes: 1, MaxDecodedBytes: 1 << 20, MaxExpansion: 128}},

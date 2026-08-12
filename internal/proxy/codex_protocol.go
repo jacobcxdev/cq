@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	codexProtocolMaxBytes        = 8 << 20
-	codexProtocolRequestMaxBytes = maxRequestBody
+	codexProtocolMaxBytes = 8 << 20
 )
 
 type CodexProtocolRequest struct {
@@ -26,10 +25,18 @@ type CodexProtocolRequest struct {
 }
 
 func ParseCodexProtocolRequest(body []byte, directMetadata string, handshake *CodexTurnMetadata) (CodexProtocolRequest, error) {
-	if len(body) > codexProtocolRequestMaxBytes {
+	return parseCodexProtocolRequest(body, directMetadata, handshake, codexHTTPRequestMaxBytes)
+}
+
+func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *CodexTurnMetadata, maxBytes int) (CodexProtocolRequest, error) {
+	if codexLimitExceeded(len(body), maxBytes) {
 		return CodexProtocolRequest{}, errors.New("Codex protocol request exceeds limit")
 	}
-	metadata, err := parseCodexTurnMetadataWithNestedLimit(body, directMetadata, handshake, codexProtocolRequestMaxBytes)
+	nestedLimit := maxBytes
+	if nestedLimit == 0 {
+		nestedLimit = len(body)
+	}
+	metadata, err := parseCodexTurnMetadataWithNestedLimit(body, directMetadata, handshake, nestedLimit)
 	if err != nil {
 		return CodexProtocolRequest{}, err
 	}

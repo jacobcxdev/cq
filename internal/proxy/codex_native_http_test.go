@@ -16,6 +16,18 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
+func TestReadCodexNativeHTTPRequestAcceptsBodyOverLegacyLimit(t *testing.T) {
+	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	request, err := http.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readCodexNativeHTTPRequest(request)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("read = %d bytes, %v; want %d bytes", len(got), err, len(body))
+	}
+}
+
 func TestServerNativeCodexDurablyAdmitsBeforeStreaming(t *testing.T) {
 	choice := codexHTTPSessionChoice("account-a")
 	attempt := codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)

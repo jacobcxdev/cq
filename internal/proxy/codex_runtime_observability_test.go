@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -549,15 +548,21 @@ func TestCodexRequestEnvelopeConcurrentOwnershipReturnsToBaseline(t *testing.T) 
 	}
 }
 
-func TestCodexRequestEnvelopeFailureDoesNotAcquireOwnership(t *testing.T) {
+func TestCodexRequestEnvelopeLargeOwnershipIsReleased(t *testing.T) {
 	before := codexProcessRuntimeObservability.snapshot()
-	oversize := bytes.Repeat([]byte{'x'}, maxCodexRequestEnvelopeBytes+1)
-	if _, err := NewCodexRequestEnvelope(oversize, nil, nil, "gpt-5.4"); !errors.Is(err, ErrCodexRequestEnvelopeEncodedTooLarge) {
-		t.Fatalf("NewCodexRequestEnvelope error = %v", err)
+	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	envelope, err := NewCodexRequestEnvelope(body, nil, nil, "gpt-5.4")
+	if err != nil {
+		t.Fatal(err)
 	}
-	after := codexProcessRuntimeObservability.snapshot()
-	if after.CurrentReplayBytes != before.CurrentReplayBytes || after.PeakReplayBytes != before.PeakReplayBytes {
-		t.Fatalf("failed construction changed current/peak = %d/%d, want %d/%d", after.CurrentReplayBytes, after.PeakReplayBytes, before.CurrentReplayBytes, before.PeakReplayBytes)
+	afterOwn := codexProcessRuntimeObservability.snapshot()
+	if got := afterOwn.CurrentReplayBytes - before.CurrentReplayBytes; got != uint64(len(body)) {
+		t.Fatalf("owned byte delta = %d, want %d", got, len(body))
+	}
+	envelope.Release()
+	afterRelease := codexProcessRuntimeObservability.snapshot()
+	if afterRelease.CurrentReplayBytes != before.CurrentReplayBytes {
+		t.Fatalf("released current bytes = %d, want %d", afterRelease.CurrentReplayBytes, before.CurrentReplayBytes)
 	}
 }
 

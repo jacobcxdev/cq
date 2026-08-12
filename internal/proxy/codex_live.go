@@ -188,7 +188,7 @@ func (s *Server) handleCodexLiveSideband(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer upstreamConn.Close()
-	upstreamConn.SetReadLimit(maxRequestBody)
+	upstreamConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
 	var selectedSubprotocol []string
 	if subprotocol := upstreamConn.Subprotocol(); subprotocol != "" {
@@ -204,7 +204,7 @@ func (s *Server) handleCodexLiveSideband(w http.ResponseWriter, r *http.Request)
 	}
 	statusCode = http.StatusSwitchingProtocols
 	defer clientConn.Close()
-	clientConn.SetReadLimit(maxRequestBody)
+	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
 	_ = relayWebSocketPair(r.Context(), clientConn, upstreamConn)
 }

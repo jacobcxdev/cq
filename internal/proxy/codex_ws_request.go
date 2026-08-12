@@ -21,10 +21,10 @@ type codexWSPendingFrame struct {
 }
 
 func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFrame, error) {
-	if messageType != websocket.TextMessage || len(payload) == 0 || len(payload) > maxRequestBody {
+	if messageType != websocket.TextMessage || len(payload) == 0 || codexLimitExceeded(len(payload), codexWebSocketMessageMaxBytes) {
 		return nil, ErrCodexWSInvalidFrame
 	}
-	request, err := ParseCodexProtocolRequest(payload, "", nil)
+	request, err := parseCodexProtocolRequest(payload, "", nil, codexWebSocketMessageMaxBytes)
 	if err != nil {
 		return nil, errors.Join(ErrCodexWSInvalidFrame, err)
 	}

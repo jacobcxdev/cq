@@ -436,7 +436,7 @@ func TestCodexTokenTransportAcceptsLowExpansionFrameWithLargeWindow(t *testing.T
 	}
 }
 
-func TestCodexTokenTransportRejectsLargeWindowExpansionBeforeDispatch(t *testing.T) {
+func TestCodexTokenTransportAcceptsHighExpansionFrame(t *testing.T) {
 	body := codexLargeWindowRewriteBody(2 << 20)
 	encoded := encodeCodexZstdStreamingWindow(t, body, 2<<20)
 	if len(body) <= len(encoded)*DefaultCodexZstdLimits.MaxExpansion {
@@ -446,17 +446,18 @@ func TestCodexTokenTransportRejectsLargeWindowExpansionBeforeDispatch(t *testing
 	upstreamCalls := 0
 	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		upstreamCalls++
-		return nil, errors.New("unexpected upstream dispatch")
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
 	})}
 	request := makeCodexBytesRequest(encoded)
 	request.Header.Set("Content-Encoding", "zstd")
 	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
-	_, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"})
-	if err == nil || !strings.Contains(err.Error(), "Codex zstd expansion ratio exceeds limit") {
-		t.Fatalf("error = %v, want expansion limit", err)
+	response, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"})
+	if err != nil {
+		t.Fatalf("high-expansion request rejected: %v", err)
 	}
-	if upstreamCalls != 0 {
-		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	response.Body.Close()
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
 	}
 }
 
@@ -485,9 +486,8 @@ func assertCodexLargeWindowFixture(t *testing.T, encoded, decoded []byte) {
 	if header.HasFCS || header.WindowSize != 2<<20 {
 		t.Fatalf("frame FCS=%v window=%d, want false/%d", header.HasFCS, header.WindowSize, 2<<20)
 	}
-	decodeLimit, ratioLimited := codexZstdDecodeLimit(len(encoded), codexTransportRewriteLimits())
-	if !ratioLimited || len(decoded) > decodeLimit || decodeLimit >= int(header.WindowSize) {
-		t.Fatalf("fixture encoded=%d decoded=%d decode_limit=%d window=%d", len(encoded), len(decoded), decodeLimit, header.WindowSize)
+	if len(decoded) <= len(encoded) {
+		t.Fatalf("fixture encoded=%d decoded=%d, want expansion", len(encoded), len(decoded))
 	}
 }
 
@@ -584,6 +584,32 @@ func TestCodexTokenTransportIdentityRewriteUpdatesFraming(t *testing.T) {
 	}
 }
 
+func TestCodexTokenTransportRewritesBodyOverLegacyLimit(t *testing.T) {
+	original := []byte(`{"model":"gpt-5.3-codex-spark","input":"` + strings.Repeat("x", maxRequestBody+1) + `"}`)
+	request := makeCodexBytesRequest(original)
+	request.Header.Set("Content-Encoding", "identity")
+	var gotBody []byte
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(out *http.Request) (*http.Response, error) {
+		var err error
+		gotBody, err = io.ReadAll(out.Body)
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, err
+	})}
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	if _, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"}); err != nil {
+		t.Fatalf("rewrite over legacy limit: %v", err)
+	}
+	var payload struct {
+		Model string `json:"model"`
+		Input string `json:"input"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Model != codexFallbackModel || len(payload.Input) != maxRequestBody+1 {
+		t.Fatalf("rewritten model/input = %q/%d", payload.Model, len(payload.Input))
+	}
+}
+
 func TestCodexTokenTransportStopsBeforeInnerOnRewriteFailure(t *testing.T) {
 	malformedZstd := []byte("not a zstd frame")
 	tests := []struct {
@@ -598,13 +624,6 @@ func TestCodexTokenTransportStopsBeforeInnerOnRewriteFailure(t *testing.T) {
 		{name: "malformed JSON", body: []byte(`{"model":`), encoding: "identity"},
 		{name: "missing model", body: []byte(`{"input":[]}`), encoding: "identity"},
 		{name: "non-string model", body: []byte(`{"model":42}`), encoding: "identity"},
-		{name: "encoded over handler limit", body: bytes.Repeat([]byte("x"), maxRequestBody+1), encoding: "identity", wantErr: "Codex encoded request exceeds limit"},
-		{
-			name:     "rewritten body exceeds handler limit",
-			body:     []byte(`{"model":"gpt-5.3-codex-spark","input":"` + strings.Repeat("&", maxRequestBody/6+1) + `"}`),
-			encoding: "identity",
-			wantErr:  "prepare Codex model rewrite: Codex decoded request exceeds limit",
-		},
 		{name: "duplicate identity encoding", body: []byte(`{"model":"gpt-5.3-codex-spark"}`), encoding: "identity", mutate: func(req *http.Request) {
 			req.Header.Add("Content-Encoding", "identity")
 		}},

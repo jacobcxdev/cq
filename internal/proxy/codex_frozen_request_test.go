@@ -275,9 +275,8 @@ func TestCodexFrozenRequestTransformsModelAndHeadroomBeforeSingleZstdEncode(t *t
 	}
 }
 
-func TestInspectCodexNativeRequestEnforcesTypedAuthorityAndLimits(t *testing.T) {
+func TestInspectCodexNativeRequestEnforcesTypedAuthority(t *testing.T) {
 	valid := frozenRequestBody("gpt-5.4", CodexRequestTurn, "input")
-	overDecoded := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
 	tests := []struct {
 		name    string
 		body    []byte
@@ -286,8 +285,6 @@ func TestInspectCodexNativeRequestEnforcesTypedAuthorityAndLimits(t *testing.T) 
 		private string
 	}{
 		{name: "unsupported encoding", body: valid, header: http.Header{"Content-Encoding": {"gzip"}}, want: CodexFrozenRequestUnsupportedEncoding},
-		{name: "encoded over limit", body: bytes.Repeat([]byte{'x'}, maxRequestBody+1), want: CodexFrozenRequestEncodedLimit},
-		{name: "decoded over limit", body: encodeCodexZstd(t, overDecoded), header: http.Header{"Content-Encoding": {"zstd"}}, want: CodexFrozenRequestDecodedLimit},
 		{name: "duplicate model", body: []byte(`{"type":"response.create","model":"private-a","model":"private-b","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`), want: CodexFrozenRequestModelAuthority, private: "private-a"},
 		{name: "non-string model", body: []byte(`{"type":"response.create","model":42,"client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`), want: CodexFrozenRequestModelAuthority},
 		{name: "missing model", body: []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"s","thread_id":"t","turn_id":"u","request_kind":"turn"}}}`), want: CodexFrozenRequestModelAuthority},
@@ -630,15 +627,15 @@ func TestCodexFrozenRequestRewritesParamsModelAuthority(t *testing.T) {
 	}
 }
 
-func TestCodexFrozenRequestTenMiBBoundary(t *testing.T) {
-	exact := codexProtocolRequestBodyAtSize(t, maxRequestBody)
-	inspection, err := InspectCodexNativeRequest(context.Background(), exact, nil)
+func TestCodexFrozenRequestAcceptsBodyOverLegacyLimit(t *testing.T) {
+	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	inspection, err := InspectCodexNativeRequest(context.Background(), body, nil)
 	if err != nil {
-		t.Fatalf("exact 10 MiB inspection: %v", err)
+		t.Fatalf("inspection over legacy limit: %v", err)
 	}
 	frozen, err := inspection.Freeze(context.Background(), frozenRequestChoice("gpt-5", "gpt-5"), nil, HeadroomModeCache)
 	if err != nil {
-		t.Fatalf("exact 10 MiB freeze: %v", err)
+		t.Fatalf("freeze over legacy limit: %v", err)
 	}
 	defer frozen.Release()
 	replay, err := frozen.Replay()
@@ -646,12 +643,12 @@ func TestCodexFrozenRequestTenMiBBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer replay.Release()
-	if length, err := replay.ContentLength(); err != nil || length != maxRequestBody {
+	if length, err := replay.ContentLength(); err != nil || length != int64(len(body)) {
 		t.Fatalf("length = %d, error %v", length, err)
 	}
 }
 
-func TestCodexFrozenRequestRejectsChoiceMismatchAndOversizedTransformBeforeReplay(t *testing.T) {
+func TestCodexFrozenRequestRejectsChoiceMismatchBeforeReplay(t *testing.T) {
 	tests := []struct {
 		name     string
 		choice   RouteChoice
@@ -661,9 +658,6 @@ func TestCodexFrozenRequestRejectsChoiceMismatchAndOversizedTransformBeforeRepla
 		{name: "requested model mismatch", choice: frozenRequestChoice("gpt-other", "gpt-other"), want: CodexFrozenRequestChoiceInvalid},
 		{name: "missing effective model", choice: frozenRequestChoice("gpt-5.4", ""), want: CodexFrozenRequestChoiceInvalid},
 		{name: "missing buckets", choice: RouteChoice{AccountKey: "account", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}, want: CodexFrozenRequestChoiceInvalid},
-		{name: "oversized transform", choice: frozenRequestChoice("gpt-5.4", "gpt-5.4"), headroom: CodexRequestHeadroomFunc(func(context.Context, []byte, HeadroomMode) ([]byte, int, error) {
-			return bytes.Repeat([]byte{'x'}, maxRequestBody+1), 1, nil
-		}), want: CodexFrozenRequestDecodedLimit},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -680,6 +674,35 @@ func TestCodexFrozenRequestRejectsChoiceMismatchAndOversizedTransformBeforeRepla
 				t.Fatalf("failed freeze retained inspection: %v", replayErr)
 			}
 		})
+	}
+}
+
+func TestCodexFrozenRequestAcceptsLargeHeadroomTransform(t *testing.T) {
+	source := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private")
+	transformed := make([]byte, 0, maxRequestBody+1)
+	transformed = append(transformed, source[:len(source)-1]...)
+	transformed = append(transformed, bytes.Repeat([]byte{' '}, maxRequestBody+1-len(source))...)
+	transformed = append(transformed, '}')
+	wantTransformed := bytes.Clone(transformed)
+	inspection, err := InspectCodexNativeRequest(context.Background(), source, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := inspection.Freeze(context.Background(), frozenRequestChoice("gpt-5.4", "gpt-5.4"), CodexRequestHeadroomFunc(func(context.Context, []byte, HeadroomMode) ([]byte, int, error) {
+		return transformed, 1, nil
+	}), HeadroomModeCache)
+	if err != nil {
+		t.Fatalf("large transform rejected: %v", err)
+	}
+	defer frozen.Release()
+	replay, err := frozen.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Release()
+	got, err := replay.DecodedBody()
+	if err != nil || !bytes.Equal(got, wantTransformed) {
+		t.Fatalf("transformed replay = %d bytes, %v; want %d bytes", len(got), err, len(wantTransformed))
 	}
 }
 
@@ -902,6 +925,21 @@ func TestCodexFrozenRequestBridgeAdapterPropagatesDispatchedCancellation(t *test
 		}
 	case <-time.After(time.Second):
 		t.Fatal("dispatched cancellation did not unblock preparation")
+	}
+}
+
+func TestCodexFrozenRequestBridgeAdapterFailsOpenWithoutPrivateError(t *testing.T) {
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Exit: true}
+	})
+	body := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private-headroom-input")
+	adapter := NewCodexRequestHeadroomAdapter(bridge)
+	got, saved, err := adapter.CompressResponses(context.Background(), body, HeadroomModeToken)
+	if err != nil {
+		t.Fatalf("bridge failure was not fail-open: %v", err)
+	}
+	if saved != 0 || !bytes.Equal(got, body) {
+		t.Fatalf("fail-open result = %d bytes/%d saved, want %d/0", len(got), saved, len(body))
 	}
 }
 

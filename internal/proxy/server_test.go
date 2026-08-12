@@ -3553,8 +3553,9 @@ func TestServer_NativeCodex_MalformedZstdFailsClosed(t *testing.T) {
 	}
 }
 
-func TestServer_NativeCodex_ZstdHeadroomEncodeFailureFailsBeforeDispatch(t *testing.T) {
+func TestServer_NativeCodex_LargeZstdHeadroomTransformForwards(t *testing.T) {
 	upstreamCalled := false
+	var upstreamBody []byte
 	expandedInput, err := json.Marshal([]map[string]string{{"role": "user", "content": strings.Repeat("a", 32<<10)}})
 	if err != nil {
 		t.Fatal(err)
@@ -3563,9 +3564,14 @@ func TestServer_NativeCodex_ZstdHeadroomEncodeFailureFailsBeforeDispatch(t *test
 		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
 		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
-			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			Inner: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				upstreamCalled = true
-				return nil, fmt.Errorf("unexpected upstream request")
+				upstreamBody, _ = io.ReadAll(request.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+				}, nil
 			}),
 		},
 		Headroom: fakeBridgeRaw(t, func(_ []byte) []byte {
@@ -3584,22 +3590,19 @@ func TestServer_NativeCodex_ZstdHeadroomEncodeFailureFailsBeforeDispatch(t *test
 
 	srv.handleNativeCodex(response, request)
 
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500, body: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
 	}
-	if upstreamCalled {
-		t.Fatal("failed zstd re-encoding reached upstream")
+	if !upstreamCalled {
+		t.Fatal("original request did not reach upstream")
 	}
-	var payload struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+	decodedUpstream, err := DecodeCodexRequest(upstreamBody, "zstd", codexHTTPZstdLimits())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Error.Type != "api_error" {
-		t.Fatalf("error type = %q, want api_error", payload.Error.Type)
+	decodedBody := decodedUpstream.Decoded()
+	if !bytes.Contains(decodedBody, bytes.Repeat([]byte{'a'}, 32<<10)) {
+		t.Fatal("upstream body omitted large Headroom transform")
 	}
 }
 
@@ -3681,10 +3684,7 @@ func TestServer_NativeCodex_RewritesHandlerAcceptedLargeBodies(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
 			}
-			limits := DefaultCodexZstdLimits
-			limits.MaxEncodedBytes = maxRequestBody
-			limits.MaxDecodedBytes = maxRequestBody
-			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, limits)
+			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, codexHTTPZstdLimits())
 			if err != nil {
 				t.Fatalf("decode upstream request: %v", err)
 			}

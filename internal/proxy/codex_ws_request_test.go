@@ -40,7 +40,7 @@ func TestCodexWSPendingFrameRejectsInvalidAuthorityAndBounds(t *testing.T) {
 		payload     []byte
 	}{
 		{name: "binary", messageType: websocket.BinaryMessage, payload: valid},
-		{name: "oversize", messageType: websocket.TextMessage, payload: bytes.Repeat([]byte{'x'}, maxRequestBody+1)},
+		{name: "oversize", messageType: websocket.TextMessage, payload: bytes.Repeat([]byte{'x'}, codexWebSocketMessageMaxBytes+1)},
 		{name: "wrong type", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.cancel","model":"gpt-5.6-sol"}`)},
 		{name: "missing metadata", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol"}`)},
 		{name: "missing model", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)},
@@ -52,6 +52,15 @@ func TestCodexWSPendingFrameRejectsInvalidAuthorityAndBounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodexWSPendingFrameAcceptsInstalledLimit(t *testing.T) {
+	payload := codexProtocolRequestBodyAtSize(t, codexWebSocketMessageMaxBytes)
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatalf("installed limit rejected: %v", err)
+	}
+	pending.Release()
 }
 
 func TestCodexWSPendingFrameAcceptsInstalledPrewarmWithoutLeaseKey(t *testing.T) {

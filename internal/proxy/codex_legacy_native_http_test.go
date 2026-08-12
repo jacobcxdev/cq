@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func TestServerNativeCodexUsesInjectedLegacyFallbackWithoutRoutingHandler(t *testing.T) {
@@ -129,6 +131,57 @@ func TestServerNativeCodexEnforcementClaimsWithoutLegacyFallback(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "private-enforcement-plan-error") {
 		t.Fatalf("response disclosed private error: %q", response.Body.String())
+	}
+}
+
+func TestLegacyNativeHTTPRelaysBodyOverLegacyLimit(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","input":"` + strings.Repeat("x", maxRequestBody+1) + `"}`)
+	var upstreamBody []byte
+	server := &Server{
+		Config: &Config{CodexUpstream: "https://codex.example"},
+		CodexRequests: testCodexRequestRouter(&fakeCodexSelector{account: &codex.CodexAccount{
+			AccessToken: "codex-token",
+			AccountID:   "account-a",
+		}}, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var err error
+			upstreamBody, err = io.ReadAll(request.Body)
+			return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{"X-Upstream": {"large"}}, Body: io.NopCloser(strings.NewReader("accepted"))}, err
+		})),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	server.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusCreated || response.Body.String() != "accepted" || response.Header().Get("X-Upstream") != "large" {
+		t.Fatalf("response = %d/%q/%q", response.Code, response.Body.String(), response.Header().Get("X-Upstream"))
+	}
+	if !bytes.Equal(upstreamBody, body) {
+		t.Fatalf("upstream body = %d bytes, want %d", len(upstreamBody), len(body))
+	}
+}
+
+func TestLegacyNativeHTTPRelaysUpstreamPayloadTooLarge(t *testing.T) {
+	server := &Server{
+		Config: &Config{CodexUpstream: "https://codex.example"},
+		CodexRequests: testCodexRequestRouter(&fakeCodexSelector{account: &codex.CodexAccount{
+			AccessToken: "codex-token",
+			AccountID:   "account-a",
+		}}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusRequestEntityTooLarge,
+				Header:     http.Header{"X-Upstream-Limit": {"backend"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"backend limit"}}`)),
+			}, nil
+		})),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"gpt-5.4"}`))
+	response := httptest.NewRecorder()
+
+	server.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge || response.Header().Get("X-Upstream-Limit") != "backend" || response.Body.String() != `{"error":{"message":"backend limit"}}` {
+		t.Fatalf("response = %d/%q/%q", response.Code, response.Header().Get("X-Upstream-Limit"), response.Body.String())
 	}
 }
 

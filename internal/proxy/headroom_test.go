@@ -1201,6 +1201,20 @@ func fakeBridgeRaw(t *testing.T, responder func(req []byte) []byte) *HeadroomBri
 	return bridge
 }
 
+func TestHeadroomBridgeAcceptsResponseOverLegacyLimit(t *testing.T) {
+	want := bytes.Repeat([]byte{'x'}, maxRequestBody+1)
+	bridge := fakeBridgeRaw(t, func([]byte) []byte {
+		return want
+	})
+	got, err := bridge.exchange(context.Background(), []byte(`{}`), nil)
+	if err != nil {
+		t.Fatalf("large bridge response: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("bridge response = %d bytes, want %d", len(got), len(want))
+	}
+}
+
 type headroomTestAction struct {
 	Response []byte
 	Respond  bool

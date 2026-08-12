@@ -460,21 +460,21 @@ func TestCodexRequestEnvelopeDropsUnknownHeaders(t *testing.T) {
 	}
 }
 
-func TestCodexRequestEnvelopeEnforcesIndependentTenMiBLimits(t *testing.T) {
-	const limit = 10 << 20
-	exact := bytes.Repeat([]byte{'x'}, limit)
-	envelope, err := NewCodexRequestEnvelope(exact, exact, nil, "gpt-5.4")
+func TestCodexRequestEnvelopeAcceptsBodyOverLegacyLimit(t *testing.T) {
+	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	envelope, err := NewCodexRequestEnvelope(body, body, nil, "gpt-5")
 	if err != nil {
-		t.Fatalf("exact limits rejected: %v", err)
+		t.Fatalf("body over legacy limit rejected: %v", err)
 	}
-	envelope.Release()
-
-	over := make([]byte, limit+1)
-	if _, err := NewCodexRequestEnvelope(over, nil, nil, "gpt-5.4"); !errors.Is(err, ErrCodexRequestEnvelopeEncodedTooLarge) {
-		t.Fatalf("encoded over-limit error = %v", err)
+	defer envelope.Release()
+	replay, err := envelope.Replay()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := NewCodexRequestEnvelope(nil, over, nil, "gpt-5.4"); !errors.Is(err, ErrCodexRequestEnvelopeDecodedTooLarge) {
-		t.Fatalf("decoded over-limit error = %v", err)
+	defer replay.Release()
+	got, err := replay.DecodedBody()
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("decoded replay = %d bytes, %v; want %d bytes", len(got), err, len(body))
 	}
 }
 

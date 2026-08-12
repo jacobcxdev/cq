@@ -92,15 +92,10 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Buffer request body.
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
-	r.Body.Close()
+	// Buffer request body using the native HTTP transport contract.
+	body, err := readCodexNativeHTTPRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
-		return
-	}
-	if len(body) > maxRequestBody {
-		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body exceeds 10 MiB")
 		return
 	}
 
@@ -109,9 +104,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	inspectionLimits := DefaultCodexZstdLimits
-	inspectionLimits.MaxEncodedBytes = maxRequestBody
-	inspectionLimits.MaxDecodedBytes = maxRequestBody
+	inspectionLimits := codexHTTPZstdLimits()
 	decodedRequest, err := DecodeCodexRequest(body, contentEncoding, inspectionLimits)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())

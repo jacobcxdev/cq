@@ -82,6 +82,33 @@ func TestServer_CodexCompactPaths_ForwardToCompactEndpointWithCodexAuth(t *testi
 	}
 }
 
+func TestServerCodexCompactRelaysBodyOverLegacyLimit(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","input":"` + strings.Repeat("x", maxRequestBody+1) + `"}`)
+	var upstreamBody []byte
+	server := &Server{
+		Config: &Config{CodexUpstream: "https://codex.example"},
+		CodexRequests: testCodexRequestRouter(&fakeCodexSelector{account: &codex.CodexAccount{
+			AccessToken: "codex-token",
+			AccountID:   "account-a",
+		}}, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var err error
+			upstreamBody, err = io.ReadAll(request.Body)
+			return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{"X-Upstream": {"large"}}, Body: io.NopCloser(strings.NewReader("accepted"))}, err
+		})),
+	}
+	request := httptest.NewRequest(http.MethodPost, legacyCodexCompactResponsesPath, bytes.NewReader(body))
+	response := httptest.NewRecorder()
+
+	server.handleNativeCodexCompact(response, request, legacyCodexCompactResponsesPath)
+
+	if response.Code != http.StatusCreated || response.Body.String() != "accepted" || response.Header().Get("X-Upstream") != "large" {
+		t.Fatalf("response = %d/%q/%q", response.Code, response.Body.String(), response.Header().Get("X-Upstream"))
+	}
+	if !bytes.Equal(upstreamBody, body) {
+		t.Fatalf("upstream body = %d bytes, want %d", len(upstreamBody), len(body))
+	}
+}
+
 // TestServer_CodexCompact_NoTransport verifies that POST /responses/compact
 // with nil CodexTransport returns 503.
 func TestServer_CodexCompact_NoTransport(t *testing.T) {
@@ -468,10 +495,7 @@ func TestServer_CodexCompact_RewritesHandlerAcceptedLargeBodies(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
 			}
-			limits := DefaultCodexZstdLimits
-			limits.MaxEncodedBytes = maxRequestBody
-			limits.MaxDecodedBytes = maxRequestBody
-			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, limits)
+			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, codexHTTPZstdLimits())
 			if err != nil {
 				t.Fatalf("decode upstream request: %v", err)
 			}
