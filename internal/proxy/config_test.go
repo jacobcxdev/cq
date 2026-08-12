@@ -228,6 +228,32 @@ func TestConfigRejectsUnsafeCodexContinuityStateDirectory(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsInvalidCodexRoutingAccountKeys(t *testing.T) {
+	for _, keys := range [][]codex.AccountKey{{""}, {"account-a", "account-a"}} {
+		cfg := Config{
+			LocalToken:              "token",
+			ClaudeUpstream:          DefaultUpstream,
+			CodexUpstream:           DefaultCodexUpstream,
+			CodexLeaseRetentionDays: 7,
+			CodexRoutingAccountKeys: keys,
+		}
+		if err := cfg.validate(); err == nil {
+			t.Fatalf("validate accepted invalid routing account keys %#v", keys)
+		}
+	}
+	cfg := Config{
+		LocalToken:                    "token",
+		ClaudeUpstream:                DefaultUpstream,
+		CodexUpstream:                 DefaultCodexUpstream,
+		CodexLeaseRetentionDays:       7,
+		CodexRoutingDefaultAccountKey: "account-c",
+		CodexRoutingAccountKeys:       []codex.AccountKey{"account-a", "account-b"},
+	}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("validate accepted routing default outside allowlist")
+	}
+}
+
 func TestConfigRejectsInvalidCodexRoutingMode(t *testing.T) {
 	for _, field := range []string{"codex_turn_routing", "codex_ws_turn_routing"} {
 		t.Run(field, func(t *testing.T) {

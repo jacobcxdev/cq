@@ -268,6 +268,48 @@ func CodexCanaryJSONFieldProtection(kind CodexCanaryProtectionKind, path, field 
 	}
 }
 
+// CodexCanaryRoutingPolicyProtection snapshots the complete account-routing
+// authority. Account order is canonical because allowlist order has no routing
+// meaning.
+func CodexCanaryRoutingPolicyProtection(kind CodexCanaryProtectionKind, path, defaultField, accountsField string) CodexCanaryProtection {
+	path = filepath.Clean(path)
+	return CodexCanaryProtection{
+		Kind:            kind,
+		optionalAbsence: true,
+		snapshot: func(fsys fsutil.FileSystem) ([]byte, error) {
+			data, err := fsutil.ReadSecureFile(fsys, path, codexCanaryStateMaxBytes)
+			if err != nil {
+				return nil, err
+			}
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(data, &object); err != nil {
+				return nil, errors.New("invalid protected JSON")
+			}
+			type routingPolicySnapshot struct {
+				DefaultPresent  bool     `json:"default_present"`
+				Default         string   `json:"default,omitempty"`
+				AccountsPresent bool     `json:"accounts_present"`
+				Accounts        []string `json:"accounts,omitempty"`
+			}
+			var snapshot routingPolicySnapshot
+			if value, ok := object[defaultField]; ok {
+				snapshot.DefaultPresent = true
+				if err := json.Unmarshal(value, &snapshot.Default); err != nil {
+					return nil, errors.New("invalid protected routing default")
+				}
+			}
+			if value, ok := object[accountsField]; ok {
+				snapshot.AccountsPresent = true
+				if err := json.Unmarshal(value, &snapshot.Accounts); err != nil {
+					return nil, errors.New("invalid protected routing accounts")
+				}
+				sort.Strings(snapshot.Accounts)
+			}
+			return json.Marshal(snapshot)
+		},
+	}
+}
+
 func StartCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []CodexCanaryProtection, tuple CodexCanaryTuple, now time.Time) (*CodexCanaryRecorder, error) {
 	protected, err := prepareCodexCanaryProtection(protected)
 	if fsys == nil || path == "" || !completeCodexCanaryTuple(tuple) || err != nil {

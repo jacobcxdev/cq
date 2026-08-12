@@ -447,8 +447,13 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("Codex credential inventory: %w", err)
 	}
+	codexRoutingInventory := newProxyCodexRoutingInventory(credentialControl, cfg.CodexRoutingAccountKeys)
+	codexInventory, err = codexRoutingInventory.List(context.Background())
+	if err != nil {
+		return fmt.Errorf("Codex routing inventory: %w", err)
+	}
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
-		return errors.New("Codex HTTP enforcement has no stable dispatchable account")
+		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
@@ -461,14 +466,14 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return fmt.Errorf("Codex turn observer: %w", err)
 	}
 	codexObserver.SetCanary(activeCanary)
-	codexSelector := proxy.NewCodexInventorySelector(credentialControl, codexQuotaCache)
+	codexSelector := proxy.NewCodexInventorySelector(codexRoutingInventory, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
-	codexHealthTracker := newCodexHealthTracker(credentialControl, cfg.CodexRoutingDefaultAccountKey, codexHealthFromInventory(codexInventory))
+	codexHealthTracker := newCodexHealthTracker(codexRoutingInventory, cfg.CodexRoutingDefaultAccountKey, codexHealthFromInventory(codexInventory))
 
 	codexRequestScope := &proxy.CodexRequestScope{
 		Chooser:   codexSelector,
-		Inventory: credentialControl,
+		Inventory: codexRoutingInventory,
 	}
 	codexAttemptExecutor := &proxy.CodexAttemptExecutor{
 		Inventory: credentialControl,
@@ -591,7 +596,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status:            codexRouting.HTTP,
-		Inventory:         credentialControl,
+		Inventory:         codexRoutingInventory,
 		Capacity:          codexCapacity,
 		Routes:            codexRoutes,
 		Runtime:           codexPlanRuntime,
@@ -608,7 +613,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexWebSocketBroker, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
 		Status:            codexRouting.WebSocket,
-		Inventory:         credentialControl,
+		Inventory:         codexRoutingInventory,
 		Capacity:          codexCapacity,
 		Routes:            codexRoutes,
 		Runtime:           codexPlanRuntime,

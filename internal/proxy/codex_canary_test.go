@@ -23,7 +23,7 @@ func TestCodexCanaryPersistsNamedPrivacySafeProtectedDigests(t *testing.T) {
 		"/home/.codex/accounts/one.auth.json":     "managed-secret",
 		"/external/managed-codex-accounts.json":   "manifest-private",
 		"/external/managed/account-one/auth.json": "external-secret",
-		"/config/proxy.json":                      `{"codex_routing_default_account_key":"opaque-private-default","other":"ignored"}`,
+		"/config/proxy.json":                      `{"codex_routing_default_account_key":"opaque-private-default","codex_routing_account_keys":["opaque-a","opaque-b"],"other":"ignored"}`,
 	}
 	for path, value := range files {
 		if err := fsys.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -41,7 +41,7 @@ func TestCodexCanaryPersistsNamedPrivacySafeProtectedDigests(t *testing.T) {
 		CodexCanaryOptionalSnapshotProtection(CodexCanaryCodexBarAuth, func() ([]byte, error) {
 			return fsutil.ReadSecureFile(fsys, "/external/managed/account-one/auth.json", codexCanaryStateMaxBytes)
 		}),
-		CodexCanaryJSONFieldProtection(CodexCanaryRoutingDefault, "/config/proxy.json", "codex_routing_default_account_key"),
+		CodexCanaryRoutingPolicyProtection(CodexCanaryRoutingDefault, "/config/proxy.json", "codex_routing_default_account_key", "codex_routing_account_keys"),
 	}
 	start := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	recorder, err := StartCodexCanary(fsys, "/state/canary.json", protected, canaryTestTuple(), start)
