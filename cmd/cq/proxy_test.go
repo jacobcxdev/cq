@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -23,6 +24,13 @@ type deadlineCodexHealthInventory struct{ sawDeadline bool }
 func (i *deadlineCodexHealthInventory) List(ctx context.Context) (codexprov.Inventory, error) {
 	_, i.sawDeadline = ctx.Deadline()
 	return codexprov.Inventory{}, errors.New("coordinator unavailable")
+}
+
+type blockingCodexHealthInventory struct{}
+
+func (blockingCodexHealthInventory) List(ctx context.Context) (codexprov.Inventory, error) {
+	<-ctx.Done()
+	return codexprov.Inventory{}, ctx.Err()
 }
 
 func TestCodexInventoryStatusDiagnosticsArePrivacySafe(t *testing.T) {
@@ -231,6 +239,20 @@ func TestCodexHealthTrackerBoundsCoordinatorList(t *testing.T) {
 
 	if !inventory.sawDeadline {
 		t.Fatal("coordinator List context has no deadline")
+	}
+}
+
+func TestCodexHealthTrackerReturnsBeforeWatchdogBudget(t *testing.T) {
+	tracker := newCodexHealthTracker(blockingCodexHealthInventory{}, "", codexHealthFromInventory(codexprov.Inventory{}))
+	started := time.Now()
+
+	health := tracker.Health(context.Background())
+
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("health inventory timeout = %s, want under 1s watchdog margin", elapsed)
+	}
+	if health.HealthCode != "stale" {
+		t.Fatalf("health code = %q, want stale", health.HealthCode)
 	}
 }
 

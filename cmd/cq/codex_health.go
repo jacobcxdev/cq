@@ -9,7 +9,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-const codexHealthInventoryTimeout = 2 * time.Second
+const codexHealthInventoryTimeout = 250 * time.Millisecond
 
 type codexHealthInventory interface {
 	List(context.Context) (codexprov.Inventory, error)
