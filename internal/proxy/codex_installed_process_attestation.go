@@ -31,6 +31,13 @@ const (
 
 var errCodexInstalledProcessAttestation = errors.New("Codex installed process attestation unavailable")
 
+func codexInstalledSecureOSFileSystem() (fsutil.OSFileSystem, fsutil.SecurePathInspector, fsutil.NoFollowFileOpener, bool) {
+	fsys := fsutil.OSFileSystem{}
+	inspector, inspectorOK := any(fsys).(fsutil.SecurePathInspector)
+	opener, openerOK := any(fsys).(fsutil.NoFollowFileOpener)
+	return fsys, inspector, opener, inspectorOK && openerOK
+}
+
 var (
 	codexInstalledClientBuildPattern   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
 	codexInstalledVersionOutputPattern = regexp.MustCompile(`^codex-cli ([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)\n?$`)
@@ -631,8 +638,11 @@ func captureCodexInstalledExecutableWithResolver(path string, resolve func(strin
 	if !filepath.IsAbs(resolved) {
 		return codexInstalledExecutableProof{}, errCodexInstalledProcessAttestation
 	}
-	inspector := fsutil.OSFileSystem{}
-	opened, err := inspector.OpenNoFollow(resolved)
+	_, inspector, opener, ok := codexInstalledSecureOSFileSystem()
+	if !ok {
+		return codexInstalledExecutableProof{}, errCodexInstalledProcessAttestation
+	}
+	opened, err := opener.OpenNoFollow(resolved)
 	if err != nil {
 		return codexInstalledExecutableProof{}, errCodexInstalledProcessAttestation
 	}

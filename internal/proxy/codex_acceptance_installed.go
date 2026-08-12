@@ -146,7 +146,10 @@ func materialiseCodexAcceptanceExecutable(
 	if err != nil || resolvedExecutionRoot != executionRoot {
 		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
 	}
-	fsys := fsutil.OSFileSystem{}
+	fsys, inspector, _, ok := codexInstalledSecureOSFileSystem()
+	if !ok {
+		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
+	}
 	directory, err := fsys.OpenSecureDirectory(executionRoot)
 	if err != nil {
 		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
@@ -157,7 +160,7 @@ func materialiseCodexAcceptanceExecutable(
 			_ = directory.Close()
 		}
 	}()
-	if err := fsutil.ValidateSecureDirectoryHandle(fsys, directory, executionRoot); err != nil {
+	if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, executionRoot); err != nil {
 		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
 	}
 	const name = ".cq-installed-client"
@@ -196,7 +199,7 @@ func materialiseCodexAcceptanceExecutable(
 	if err := directory.Sync(); err != nil {
 		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
 	}
-	if err := fsutil.ValidateSecureDirectoryHandle(fsys, directory, executionRoot); err != nil {
+	if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, executionRoot); err != nil {
 		return codexInstalledExecutableProof{}, nil, errCodexInstalledProcessAttestation
 	}
 	executionProof, err := captureCodexInstalledExecutable(filepath.Join(executionRoot, name))
@@ -207,7 +210,7 @@ func materialiseCodexAcceptanceExecutable(
 	closeDirectory = false
 	removeExecutionRoot = false
 	cleanup := func() error {
-		if err := fsutil.ValidateSecureDirectoryHandle(fsys, directory, executionRoot); err != nil {
+		if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, executionRoot); err != nil {
 			_ = directory.Close()
 			return errCodexInstalledProcessAttestation
 		}
@@ -262,8 +265,11 @@ func openCodexInstalledAcceptanceExecutable(expected codexInstalledExecutablePro
 	if !expected.valid() {
 		return nil, errCodexInstalledProcessAttestation
 	}
-	inspector := fsutil.OSFileSystem{}
-	opened, err := inspector.OpenNoFollow(expected.path)
+	_, inspector, opener, ok := codexInstalledSecureOSFileSystem()
+	if !ok {
+		return nil, errCodexInstalledProcessAttestation
+	}
+	opened, err := opener.OpenNoFollow(expected.path)
 	if err != nil {
 		return nil, errCodexInstalledProcessAttestation
 	}
