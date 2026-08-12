@@ -928,6 +928,21 @@ func TestCodexFrozenRequestBridgeAdapterPropagatesDispatchedCancellation(t *test
 	}
 }
 
+func TestCodexFrozenRequestBridgeAdapterFailsOpenWithoutPrivateError(t *testing.T) {
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Exit: true}
+	})
+	body := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private-headroom-input")
+	adapter := NewCodexRequestHeadroomAdapter(bridge)
+	got, saved, err := adapter.CompressResponses(context.Background(), body, HeadroomModeToken)
+	if err != nil {
+		t.Fatalf("bridge failure was not fail-open: %v", err)
+	}
+	if saved != 0 || !bytes.Equal(got, body) {
+		t.Fatalf("fail-open result = %d bytes/%d saved, want %d/0", len(got), saved, len(body))
+	}
+}
+
 func TestCodexFrozenRequestHeadroomFailureIsTypedAndClearsReturnedBytes(t *testing.T) {
 	inspection, err := InspectCodexNativeRequest(context.Background(), frozenRequestBody("gpt-5.4", CodexRequestTurn, "private"), nil)
 	if err != nil {

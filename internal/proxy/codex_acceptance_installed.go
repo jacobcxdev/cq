@@ -458,30 +458,32 @@ type codexAcceptanceHeadroomMonitor struct {
 func newCodexAcceptanceHeadroom() (*HeadroomBridge, *codexAcceptanceHeadroomMonitor, func()) {
 	requestReader, requestWriter := io.Pipe()
 	responseReader, responseWriter := io.Pipe()
-	responseScanner := bufio.NewScanner(responseReader)
-	responseScanner.Buffer(make([]byte, 0, 64<<10), maxRequestBody)
+	responseBuffer := bufio.NewReader(responseReader)
 	monitor := &codexAcceptanceHeadroomMonitor{done: make(chan struct{})}
 	go func() {
 		defer close(monitor.done)
 		defer requestReader.Close()
 		defer responseWriter.Close()
-		scanner := bufio.NewScanner(requestReader)
-		scanner.Buffer(make([]byte, 0, 64<<10), maxRequestBody)
-		for scanner.Scan() {
+		requestBuffer := bufio.NewReader(requestReader)
+		for {
+			line, err := requestBuffer.ReadBytes('\n')
+			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					monitor.parseErrors.Add(1)
+				}
+				break
+			}
 			monitor.requests.Add(1)
 			var request headroomResponsesRequest
-			if err := json.Unmarshal(scanner.Bytes(), &request); err != nil ||
+			if err := json.Unmarshal(bytes.TrimSuffix(line, []byte{'\n'}), &request); err != nil ||
 				request.Operation != "compress_responses" || request.Model == "" ||
 				len(request.Input) == 0 || !json.Valid(request.Input) {
 				monitor.parseErrors.Add(1)
 			}
 			_, _ = io.WriteString(responseWriter, "{\"ok\":false,\"reason\":\"acceptance_skip\",\"input\":null,\"instructions\":null,\"clear_instructions\":false,\"tokens_saved\":0,\"compression_ratio\":1}\n")
 		}
-		if err := scanner.Err(); err != nil {
-			monitor.parseErrors.Add(1)
-		}
 	}()
-	bridge := &HeadroomBridge{stdin: requestWriter, stdout: responseScanner}
+	bridge := &HeadroomBridge{stdin: requestWriter, stdout: responseBuffer}
 	closeBridge := func() {
 		_ = requestWriter.Close()
 		<-monitor.done

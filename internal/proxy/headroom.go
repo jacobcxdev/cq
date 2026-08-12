@@ -160,7 +160,7 @@ type HeadroomBridge struct {
 	process       headroomProcess
 	stdin         io.WriteCloser
 	stdoutPipe    io.ReadCloser
-	stdout        *bufio.Scanner
+	stdout        *bufio.Reader
 	stderrPipe    io.ReadCloser
 	initOnce      sync.Once
 	operationGate chan struct{}
@@ -200,14 +200,11 @@ func newHeadroomBridge(
 	stdoutPipe io.ReadCloser,
 	stderrPipe io.ReadCloser,
 ) *HeadroomBridge {
-	scanner := bufio.NewScanner(stdoutPipe)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
-
 	bridge := &HeadroomBridge{
 		process:    process,
 		stdin:      stdin,
 		stdoutPipe: stdoutPipe,
-		stdout:     scanner,
+		stdout:     bufio.NewReader(stdoutPipe),
 		stderrPipe: stderrPipe,
 	}
 	bridge.ensureLifecycle()
@@ -482,14 +479,15 @@ func (b *HeadroomBridge) exchange(ctx context.Context, request []byte, validate 
 
 	var response []byte
 	if operationErr == nil {
-		if !b.stdout.Scan() {
-			if err := b.stdout.Err(); err != nil {
-				operationErr = fmt.Errorf("read from bridge: %w", err)
-			} else {
+		response, operationErr = b.stdout.ReadBytes('\n')
+		if operationErr != nil {
+			if errors.Is(operationErr, io.EOF) && len(response) == 0 {
 				operationErr = errors.New("bridge process exited unexpectedly")
+			} else {
+				operationErr = fmt.Errorf("read from bridge: %w", operationErr)
 			}
 		} else {
-			response = bytes.Clone(b.stdout.Bytes())
+			response = bytes.TrimSuffix(response, []byte{'\n'})
 		}
 	}
 
@@ -716,7 +714,7 @@ func spliceResponsesFields(body []byte, input json.RawMessage, compressedInstr *
 
 func (b *HeadroomBridge) drainStderr(r io.Reader) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxRequestBody)
+	scanner.Buffer(make([]byte, 0, 64*1024), codexDiagnosticLineMaxBytes)
 	var traceback bytes.Buffer
 	capturingTraceback := false
 

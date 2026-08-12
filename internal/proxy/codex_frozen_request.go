@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 )
@@ -86,10 +87,19 @@ func NewCodexRequestHeadroomAdapter(bridge *HeadroomBridge) CodexRequestHeadroom
 }
 
 func (adapter codexRequestHeadroomAdapter) CompressResponses(ctx context.Context, body []byte, mode HeadroomMode) ([]byte, int, error) {
+	var transformed []byte
+	var saved int
+	var err error
 	if mode == HeadroomModeCache {
-		return adapter.bridge.CompressResponsesCacheContext(ctx, body)
+		transformed, saved, err = adapter.bridge.CompressResponsesCacheContext(ctx, body)
+	} else {
+		transformed, saved, err = adapter.bridge.CompressResponsesContext(ctx, body, mode)
 	}
-	return adapter.bridge.CompressResponsesContext(ctx, body, mode)
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return transformed, saved, err
+	}
+	fmt.Fprintln(os.Stderr, "cq: headroom: compression unavailable")
+	return bytes.Clone(body), 0, nil
 }
 
 // CodexFrozenRequestInspection owns one decoded view until Freeze or
