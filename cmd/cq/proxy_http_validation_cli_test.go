@@ -35,7 +35,7 @@ func TestRunProxyValidateHTTPRequestsConfiguredCandidateService(t *testing.T) {
 	restarts := 0
 	restartInstalledHTTPValidationCandidateFn = func(label string) error {
 		restarts++
-		if label != homebrewProxyAgentLabel {
+		if label != "homebrew.mxcl.cq" {
 			t.Fatalf("candidate label = %q", label)
 		}
 		return nil
