@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,11 +48,12 @@ type CodexNativeHTTPRoutingHandler interface {
 // CodexNativeHTTPHandler is the authoritative native Responses HTTP vertical.
 // A Server uses it only when startup readiness selected HTTP enforcement.
 type CodexNativeHTTPHandler struct {
-	planner        CodexNativeHTTPRequestPlanner
-	session        CodexNativeHTTPRequestSession
-	upstream       url.URL
-	requests       *codexNativeHTTPRequestGate
-	installedProbe atomic.Pointer[codexInstalledHTTPGateProbe]
+	planner           CodexNativeHTTPRequestPlanner
+	session           CodexNativeHTTPRequestSession
+	upstream          url.URL
+	requests          *codexNativeHTTPRequestGate
+	installedProbe    atomic.Pointer[codexInstalledHTTPGateProbe]
+	reportPlanFailure func(CodexHTTPRequestPlanErrorCode)
 }
 
 func (handler *CodexNativeHTTPHandler) installCodexInstalledHTTPGateProbe(probe *codexInstalledHTTPGateProbe) (func(), error) {
@@ -75,8 +78,30 @@ func NewCodexNativeHTTPHandler(planner CodexNativeHTTPRequestPlanner, session Co
 	}
 	return &CodexNativeHTTPHandler{
 		planner: planner, session: session, upstream: *parsed,
-		requests: newCodexNativeHTTPRequestGate(),
+		requests:          newCodexNativeHTTPRequestGate(),
+		reportPlanFailure: reportCodexNativeHTTPPlanFailure,
 	}, nil
+}
+
+func reportCodexNativeHTTPPlanFailure(code CodexHTTPRequestPlanErrorCode) {
+	fmt.Fprintf(os.Stderr, "cq: Codex native HTTP plan failed: %s\n", code)
+}
+
+const codexHTTPRequestPlanUnknown CodexHTTPRequestPlanErrorCode = "unknown"
+
+func safeCodexHTTPRequestPlanErrorCode(code CodexHTTPRequestPlanErrorCode) CodexHTTPRequestPlanErrorCode {
+	switch code {
+	case CodexHTTPRequestPlanUnavailable,
+		CodexHTTPRequestPlanInspect,
+		CodexHTTPRequestPlanInventory,
+		CodexHTTPRequestPlanRouteSnapshot,
+		CodexHTTPRequestPlanDispatch,
+		CodexHTTPRequestPlanFreeze,
+		CodexHTTPRequestPlanBegin:
+		return code
+	default:
+		return codexHTTPRequestPlanUnknown
+	}
 }
 
 // CloseAndDrain permanently closes native request admission and waits until
@@ -135,10 +160,15 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		errorType := "api_error"
 		message := "Codex native HTTP routing unavailable"
 		var planErr *CodexHTTPRequestPlanError
-		if errors.As(err, &planErr) && planErr.Code == CodexHTTPRequestPlanInspect {
-			status = http.StatusBadRequest
-			errorType = "invalid_request_error"
-			message = "invalid Codex Responses request"
+		if errors.As(err, &planErr) {
+			if handler.reportPlanFailure != nil {
+				handler.reportPlanFailure(safeCodexHTTPRequestPlanErrorCode(planErr.Code))
+			}
+			if planErr.Code == CodexHTTPRequestPlanInspect {
+				status = http.StatusBadRequest
+				errorType = "invalid_request_error"
+				message = "invalid Codex Responses request"
+			}
 		}
 		writeError(writer, status, errorType, message)
 		return true, ""
