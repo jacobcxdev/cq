@@ -115,8 +115,17 @@ func requireInstalledHTTPValidationListenerPID(output []byte, expectedPID int) e
 		return errors.New("installed candidate listener is unavailable")
 	}
 	want := "p" + strconv.Itoa(expectedPID)
-	lines := strings.Fields(string(output))
-	if len(lines) != 1 || lines[0] != want {
+	seenPID := 0
+	for _, line := range strings.Fields(string(output)) {
+		if !strings.HasPrefix(line, "p") {
+			continue
+		}
+		seenPID++
+		if line != want {
+			return errors.New("installed candidate listener pid mismatch")
+		}
+	}
+	if seenPID != 1 {
 		return errors.New("installed candidate listener pid mismatch")
 	}
 	return nil
