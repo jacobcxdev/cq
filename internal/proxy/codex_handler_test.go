@@ -19,29 +19,28 @@ type fakeCodexSelector struct {
 	err     error
 }
 
-func (f *fakeCodexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
+func (f *fakeCodexSelector) Select(_ context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	if f.account == nil {
 		return nil, fmt.Errorf("no codex accounts available")
 	}
-	excludeSet := make(map[string]bool, len(exclude))
-	for _, e := range exclude {
-		excludeSet[e] = true
+	excludedAccounts := make(map[codex.AccountKey]bool, len(exclude))
+	excludedCandidates := make(map[codex.CandidateID]bool, len(exclude))
+	for _, exclusion := range exclude {
+		excludedAccounts[exclusion.AccountKey] = true
+		excludedCandidates[exclusion.CandidateID] = true
 	}
-	if codexAcctExcluded(f.account, excludeSet) {
+	if codexAcctExcluded(f.account, excludedAccounts, excludedCandidates) {
 		return nil, fmt.Errorf("no codex accounts available")
 	}
 	result := *f.account
 	return &result, nil
 }
 
-func newCodexTransport(sel CodexSelector) *CodexTokenTransport {
-	return &CodexTokenTransport{
-		Selector: sel,
-		Inner:    http.DefaultTransport,
-	}
+func newCodexTransport(sel CodexSelector) *CodexRequestRouter {
+	return testCodexRequestRouter(sel, http.DefaultTransport)
 }
 
 func TestHandleCodex_NonStreaming(t *testing.T) {
@@ -96,7 +95,7 @@ func TestHandleCodex_NonStreaming(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-123",
@@ -177,7 +176,7 @@ func TestHandleCodex_Streaming(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-123",
@@ -228,7 +227,7 @@ func TestHandleCodex_NoTransport(t *testing.T) {
 			CodexUpstream:  "https://api.openai.com",
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: nil,
+		CodexRequests: nil,
 	}
 
 	w := httptest.NewRecorder()
@@ -249,7 +248,7 @@ func TestHandleCodex_SelectorError(t *testing.T) {
 			CodexUpstream:  "https://api.openai.com",
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{err: fmt.Errorf("no accounts")}),
+		CodexRequests: newCodexTransport(&fakeCodexSelector{err: fmt.Errorf("no accounts")}),
 	}
 
 	w := httptest.NewRecorder()
@@ -319,7 +318,7 @@ func TestHandleCodex_ModelValidationProbe(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct",
@@ -384,7 +383,7 @@ func TestHandleCodex_RejectsClaudeModel(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "tok",
 				AccountID:   "acct",
@@ -422,7 +421,7 @@ func TestHandleCodex_UpstreamError(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "tok",
 				AccountID:   "acct",
@@ -448,7 +447,7 @@ func TestHandleCodexCountTokens_SelectorError(t *testing.T) {
 			CodexUpstream:  "https://api.openai.com",
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{err: fmt.Errorf("no accounts")}),
+		CodexRequests: newCodexTransport(&fakeCodexSelector{err: fmt.Errorf("no accounts")}),
 	}
 
 	w := httptest.NewRecorder()
@@ -475,7 +474,7 @@ func TestHandleCodexCountTokens_Upstream429(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{AccessToken: "tok", AccountID: "acct"},
 		}),
 	}
@@ -503,7 +502,7 @@ func TestHandleCodexCountTokens_RejectsClaudeModel(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "test-tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{AccessToken: "tok", AccountID: "acct"},
 		}),
 	}
@@ -604,7 +603,7 @@ func TestServer_GPTCountTokensRoutesToCodex(t *testing.T) {
 			LocalToken:     "tok",
 		},
 		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"},
 		}),
 	}
@@ -656,7 +655,7 @@ func TestServer_ClaudeCountTokensStillRoutesToClaude(t *testing.T) {
 			LocalToken:     "tok",
 		},
 		Transport: &TokenTransport{Selector: sel, Inner: http.DefaultTransport},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"},
 		}),
 	}
@@ -694,32 +693,29 @@ func TestServer_ClaudeCodeOpenAIRequestsUseResponsesNotCompactEndpoint(t *testin
 			t.Fatal("claude upstream should not be called for Codex model")
 			return nil, fmt.Errorf("unexpected claude upstream request")
 		}),
-		CodexTransport: &CodexTokenTransport{
-			Selector: &fakeCodexSelector{
-				account: &codex.CodexAccount{AccessToken: "codex-tok"},
-			},
-			Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				gotPath = r.URL.Path
-				if got := r.Header.Get("Authorization"); got != "Bearer codex-tok" {
-					t.Fatalf("upstream auth = %q, want Bearer codex-tok", got)
-				}
-				body := strings.Join([]string{
-					`data: {"type":"response.created","response":{"id":"resp_123"}}`,
-					`data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant"}}`,
-					`data: {"type":"response.content_part.added","part":{"type":"output_text"}}`,
-					`data: {"type":"response.output_text.delta","delta":"ok"}`,
-					`data: {"type":"response.content_part.done","part":{"type":"output_text"}}`,
-					`data: {"type":"response.output_item.done","item":{"type":"message"}}`,
-					`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
-					`data: [DONE]`,
-				}, "\n\n")
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-					Body:       io.NopCloser(strings.NewReader(body)),
-				}, nil
-			}),
-		},
+		CodexRequests: testCodexRequestRouter(&fakeCodexSelector{
+			account: &codex.CodexAccount{AccessToken: "codex-tok"},
+		}, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotPath = r.URL.Path
+			if got := r.Header.Get("Authorization"); got != "Bearer codex-tok" {
+				t.Fatalf("upstream auth = %q, want Bearer codex-tok", got)
+			}
+			body := strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_123"}}`,
+				`data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant"}}`,
+				`data: {"type":"response.content_part.added","part":{"type":"output_text"}}`,
+				`data: {"type":"response.output_text.delta","delta":"ok"}`,
+				`data: {"type":"response.content_part.done","part":{"type":"output_text"}}`,
+				`data: {"type":"response.output_item.done","item":{"type":"message"}}`,
+				`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+				`data: [DONE]`,
+			}, "\n\n")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})),
 	}
 
 	handler, err := srv.handler()
@@ -776,7 +772,7 @@ func TestServer_CodexRouting(t *testing.T) {
 			CodexUpstream:  codexUpstream.URL,
 			LocalToken:     "tok",
 		},
-		CodexTransport: newCodexTransport(&fakeCodexSelector{
+		CodexRequests: newCodexTransport(&fakeCodexSelector{
 			account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct",

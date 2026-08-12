@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -15,8 +16,8 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
-	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 // testDoer is an httputil.Doer stub for refresh tests.
@@ -188,8 +189,8 @@ func TestRunRefreshSkipsAnonymousExpiredReauth(t *testing.T) {
 	newHTTPClientFn = func(timeout time.Duration, version string) httputil.Doer {
 		return testDoer(func(req *http.Request) (*http.Response, error) { return nil, nil })
 	}
-	refreshCodexAccountsFn = func(ctx context.Context, client httputil.Doer, nowMs int64) bool {
-		return false
+	refreshCodexAccountsFn = func(ctx context.Context, client httputil.Doer, nowMs int64) (bool, error) {
+		return false, nil
 	}
 	invalidateProviderCacheFn = func(id provider.ID) {}
 	isStdinTerminalFn = func() bool { return false }
@@ -324,7 +325,7 @@ func TestInvalidateProviderCacheRemovesCodexFile(t *testing.T) {
 	}
 }
 
-func TestRunRefreshDoesCodexPassWithoutClaudeAccounts(t *testing.T) {
+func TestRunRefreshUsesBrokeredCodexRefreshPass(t *testing.T) {
 	origDiscover := discoverClaudeAccountsFn
 	origNewClient := newHTTPClientFn
 	origRefreshCodex := refreshCodexAccountsFn
@@ -337,15 +338,17 @@ func TestRunRefreshDoesCodexPassWithoutClaudeAccounts(t *testing.T) {
 	}()
 
 	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth { return nil }
-	newHTTPClientFn = func(timeout time.Duration, version string) httputil.Doer { return testDoer(func(req *http.Request) (*http.Response, error) {
-		return nil, nil
-	}) }
+	newHTTPClientFn = func(timeout time.Duration, version string) httputil.Doer {
+		return testDoer(func(req *http.Request) (*http.Response, error) {
+			return nil, nil
+		})
+	}
 
 	codexCalled := false
 	cacheInvalidated := false
-	refreshCodexAccountsFn = func(ctx context.Context, client httputil.Doer, nowMs int64) bool {
+	refreshCodexAccountsFn = func(ctx context.Context, client httputil.Doer, nowMs int64) (bool, error) {
 		codexCalled = true
-		return true
+		return true, nil
 	}
 	invalidateProviderCacheFn = func(id provider.ID) {
 		if id == provider.Codex {
@@ -357,14 +360,184 @@ func TestRunRefreshDoesCodexPassWithoutClaudeAccounts(t *testing.T) {
 		t.Fatalf("runRefresh returned error: %v", err)
 	}
 	if !codexCalled {
-		t.Fatal("expected Codex refresh pass to run without Claude accounts")
+		t.Fatal("Codex refresh pass did not run")
 	}
 	if !cacheInvalidated {
-		t.Fatal("expected Codex cache invalidation after Codex refresh change")
+		t.Fatal("Codex cache was not invalidated after brokered credential change")
+	}
+}
+
+func TestRunRefreshReturnsTypedCodexAuthorityErrorWithoutInvalidatingCache(t *testing.T) {
+	origDiscover := discoverClaudeAccountsFn
+	origNewClient := newHTTPClientFn
+	origRefreshCodex := refreshCodexAccountsFn
+	origInvalidate := invalidateProviderCacheFn
+	defer func() {
+		discoverClaudeAccountsFn = origDiscover
+		newHTTPClientFn = origNewClient
+		refreshCodexAccountsFn = origRefreshCodex
+		invalidateProviderCacheFn = origInvalidate
+	}()
+
+	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth { return nil }
+	newHTTPClientFn = func(time.Duration, string) httputil.Doer { return nil }
+	refreshCodexAccountsFn = func(context.Context, httputil.Doer, int64) (bool, error) {
+		return false, codexprov.ErrCredentialAuthorityUnavailable
+	}
+	cacheInvalidated := false
+	invalidateProviderCacheFn = func(id provider.ID) {
+		if id == provider.Codex {
+			cacheInvalidated = true
+		}
+	}
+
+	err := runRefresh()
+
+	if !errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable) {
+		t.Fatalf("runRefresh error = %T %v, want typed credential authority unavailable", err, err)
+	}
+	if cacheInvalidated {
+		t.Fatal("Codex cache was invalidated after credential authority failure")
+	}
+}
+
+type testCodexRefreshAuthority struct {
+	inventory codexprov.Inventory
+	listErr   error
+	calls     []testCodexRefreshCall
+}
+
+type testCodexRefreshCall struct {
+	ref      codexprov.CandidateRef
+	revision codexprov.Revision
+}
+
+func (a *testCodexRefreshAuthority) List(context.Context) (codexprov.Inventory, error) {
+	return a.inventory, a.listErr
+}
+
+func (a *testCodexRefreshAuthority) Refresh(_ context.Context, ref codexprov.CandidateRef, revision codexprov.Revision) (codexprov.RefreshResult, error) {
+	a.calls = append(a.calls, testCodexRefreshCall{ref: ref, revision: revision})
+	return codexprov.RefreshResult{}, nil
+}
+
+func TestRefreshManagedCodexAuthorityFailsClosedWhenListUnavailable(t *testing.T) {
+	authority := &testCodexRefreshAuthority{listErr: errors.New("read /secret/path: authority failed")}
+
+	changed, err := refreshManagedCodexAuthority(context.Background(), authority, time.Now())
+
+	if changed {
+		t.Fatal("refresh pass reported a change after List failed")
+	}
+	if !errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable) {
+		t.Fatalf("refresh error = %T %v, want typed credential authority unavailable", err, err)
+	}
+	if got := err.Error(); got != codexprov.ErrCredentialAuthorityUnavailable.Error() {
+		t.Fatalf("refresh error = %q, want sanitised %q", got, codexprov.ErrCredentialAuthorityUnavailable)
+	}
+	if len(authority.calls) != 0 {
+		t.Fatalf("Refresh calls = %d, want 0 after List failed", len(authority.calls))
+	}
+}
+
+func TestRefreshManagedCodexAuthorityUsesSanitisedExpiryForManagedCandidateOnly(t *testing.T) {
+	now := time.Now()
+	inventory := codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Candidates: []codexprov.CredentialCandidate{
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
+				Revision: "managed-revision", Source: codexprov.SourceManaged,
+				AccessExpiresAt: now.Add(-time.Minute),
+			},
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "system", CandidateID: "system-candidate"},
+				Revision: "system-revision", Source: codexprov.SourceSystem,
+				AccessExpiresAt: now.Add(-time.Minute),
+			},
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "external", CandidateID: "external-candidate"},
+				Revision: "external-revision", Source: codexprov.SourceExternal,
+				AccessExpiresAt: now.Add(-time.Minute),
+			},
+			{
+				Ref:      codexprov.CandidateRef{AccountKey: "fresh", CandidateID: "fresh-candidate"},
+				Revision: "fresh-revision", Source: codexprov.SourceManaged,
+				AccessExpiresAt: now.Add(time.Hour),
+			},
+		},
+	}}}
+	authority := &testCodexRefreshAuthority{inventory: inventory}
+
+	changed, err := refreshManagedCodexAuthority(context.Background(), authority, now)
+
+	if err != nil {
+		t.Fatalf("refresh error = %v", err)
+	}
+	if !changed {
+		t.Fatal("refresh pass reported no change")
+	}
+	if len(authority.calls) != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", len(authority.calls))
+	}
+	if got := authority.calls[0]; got.ref != inventory.Accounts[0].Candidates[0].Ref || got.revision != "managed-revision" {
+		t.Fatalf("Refresh call = %+v, want managed ref with revision fence", got)
+	}
+}
+
+func TestRefreshManagedCodexAuthorityFailsClosedWhenConfiguredInventoryDegraded(t *testing.T) {
+	now := time.Now()
+	authority := &testCodexRefreshAuthority{inventory: codexprov.Inventory{
+		Accounts: []codexprov.LogicalAccount{{Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
+			Revision: "managed-revision", Source: codexprov.SourceManaged, AccessExpiresAt: now.Add(-time.Minute),
+		}}}},
+		ExternalSources: []codexprov.ExternalSourceStatus{{Name: "configured", ErrorCode: "unavailable"}},
+	}}
+
+	changed, err := refreshManagedCodexAuthority(context.Background(), authority, now)
+
+	if changed {
+		t.Fatal("refresh pass reported a change for degraded configured inventory")
+	}
+	if !errors.Is(err, codexprov.ErrCredentialInventoryDegraded) {
+		t.Fatalf("refresh error = %T %v, want typed credential inventory degraded", err, err)
+	}
+	if got := err.Error(); got != codexprov.ErrCredentialInventoryDegraded.Error() {
+		t.Fatalf("refresh error = %q, want sanitised %q", got, codexprov.ErrCredentialInventoryDegraded)
+	}
+	if len(authority.calls) != 0 {
+		t.Fatalf("Refresh calls = %d, want 0 for degraded configured inventory", len(authority.calls))
+	}
+}
+
+func TestRefreshManagedCodexAuthorityAllowsOptionalAbsentExternalInventory(t *testing.T) {
+	now := time.Now()
+	managed := codexprov.CredentialCandidate{
+		Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
+		Revision: "managed-revision", Source: codexprov.SourceManaged, AccessExpiresAt: now.Add(-time.Minute),
+	}
+	authority := &testCodexRefreshAuthority{inventory: codexprov.Inventory{
+		Accounts: []codexprov.LogicalAccount{{Candidates: []codexprov.CredentialCandidate{managed}}},
+		ExternalSources: []codexprov.ExternalSourceStatus{{
+			Name: "optional", ErrorCode: "unavailable", OptionalAbsent: true,
+		}},
+	}}
+
+	changed, err := refreshManagedCodexAuthority(context.Background(), authority, now)
+
+	if err != nil {
+		t.Fatalf("refresh error = %v, want optional absence to remain non-degraded", err)
+	}
+	if !changed {
+		t.Fatal("refresh pass reported no change with only an optional absent source")
+	}
+	if len(authority.calls) != 1 || authority.calls[0].ref != managed.Ref || authority.calls[0].revision != managed.Revision {
+		t.Fatalf("Refresh calls = %+v, want one revision-fenced managed refresh", authority.calls)
 	}
 }
 
 func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing.T) {
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	now := time.Now()
 	expiredIDToken := fakeRefreshCodexJWT("refresh@example.com", "acct-1", "user-1", now.Add(-time.Hour))
 	accountPath := "/fake/home/.codex/accounts/user-1::acct-1.auth.json"
@@ -396,9 +569,13 @@ func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing
 	client := newHTTPClientFn(10*time.Second, version)
 	origFS := codexRefreshFSFactory
 	defer func() { codexRefreshFSFactory = origFS }()
-	codexRefreshFSFactory = func() fsutil.FileSystem { return fs }
+	codexRefreshFSFactory = func() fsutil.DurableFileSystem { return fs }
 
-	if !refreshCodexAccounts(context.Background(), client, now.UnixMilli()) {
+	changed, err := refreshCodexAccounts(context.Background(), client, now.UnixMilli())
+	if err != nil {
+		t.Fatalf("refreshCodexAccounts error = %v", err)
+	}
+	if !changed {
 		t.Fatal("expected refreshCodexAccounts to report changed=true")
 	}
 
@@ -412,6 +589,7 @@ func TestRefreshCodexAccountsWithoutIDTokenKeepsDiscoveredExpiryFresh(t *testing
 }
 
 func TestRefreshCodexAccountsWithIDTokenMissingExpFallsBackToExpiresIn(t *testing.T) {
+	t.Skip("legacy direct shared-credential refresh contract is permanently retired")
 	now := time.Now()
 	expiredIDToken := fakeRefreshCodexJWT("refresh@example.com", "acct-1", "user-1", now.Add(-time.Hour))
 	refreshedBody, _ := json.Marshal(map[string]any{
@@ -451,9 +629,13 @@ func TestRefreshCodexAccountsWithIDTokenMissingExpFallsBackToExpiresIn(t *testin
 	client := newHTTPClientFn(10*time.Second, version)
 	origFS := codexRefreshFSFactory
 	defer func() { codexRefreshFSFactory = origFS }()
-	codexRefreshFSFactory = func() fsutil.FileSystem { return fs }
+	codexRefreshFSFactory = func() fsutil.DurableFileSystem { return fs }
 
-	if !refreshCodexAccounts(context.Background(), client, now.UnixMilli()) {
+	changed, err := refreshCodexAccounts(context.Background(), client, now.UnixMilli())
+	if err != nil {
+		t.Fatalf("refreshCodexAccounts error = %v", err)
+	}
+	if !changed {
 		t.Fatal("expected refreshCodexAccounts to report changed=true")
 	}
 
@@ -483,14 +665,14 @@ func (f *refreshCodexFS) Stat(name string) (os.FileInfo, error) {
 // refreshFileInfo is a minimal os.FileInfo implementation for refreshCodexFS.
 type refreshFileInfo struct{ name string }
 
-func (fi refreshFileInfo) Name() string      { return fi.name }
-func (fi refreshFileInfo) Size() int64       { return 0 }
-func (fi refreshFileInfo) Mode() os.FileMode { return 0o600 }
-func (fi refreshFileInfo) ModTime() time.Time { return time.Time{} }
-func (fi refreshFileInfo) IsDir() bool       { return false }
-func (fi refreshFileInfo) Sys() any          { return nil }
-func (f *refreshCodexFS) MkdirAll(path string, perm os.FileMode) error          { return nil }
-func (f *refreshCodexFS) UserHomeDir() (string, error)                          { return f.home, nil }
+func (fi refreshFileInfo) Name() string                                { return fi.name }
+func (fi refreshFileInfo) Size() int64                                 { return 0 }
+func (fi refreshFileInfo) Mode() os.FileMode                           { return 0o600 }
+func (fi refreshFileInfo) ModTime() time.Time                          { return time.Time{} }
+func (fi refreshFileInfo) IsDir() bool                                 { return false }
+func (fi refreshFileInfo) Sys() any                                    { return nil }
+func (f *refreshCodexFS) MkdirAll(path string, perm os.FileMode) error { return nil }
+func (f *refreshCodexFS) UserHomeDir() (string, error)                 { return f.home, nil }
 func (f *refreshCodexFS) ReadDir(name string) ([]os.DirEntry, error) {
 	entries, ok := f.dirEntries[name]
 	if !ok {
@@ -523,6 +705,9 @@ func (f *refreshCodexFS) Remove(name string) error {
 	delete(f.files, name)
 	return nil
 }
+func (f *refreshCodexFS) Chmod(name string, mode os.FileMode) error { return nil }
+func (f *refreshCodexFS) SyncFile(name string) error                { return nil }
+func (f *refreshCodexFS) SyncDir(name string) error                 { return nil }
 
 type refreshDirEntry struct{ name string }
 
@@ -555,4 +740,3 @@ func TestRefreshCodexFSStatIsHermetic(t *testing.T) {
 		t.Fatalf("Stat absent file: got %v, want ErrNotExist", err)
 	}
 }
-

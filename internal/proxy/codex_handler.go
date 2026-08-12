@@ -13,7 +13,7 @@ import (
 // It translates the Anthropic-format request body, forwards it with Codex credentials,
 // and translates the response back to Anthropic format.
 func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte) {
-	if s.CodexTransport == nil {
+	if !s.codexHTTPAvailable() {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "no codex accounts configured")
 		return
 	}
@@ -40,7 +40,7 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 	streaming := extractStream(body)
 	// Normalise [1m] suffix for response translation (effort suffixes are not stripped).
 	model := ParseModel(rawModel)
-	fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=codex protocol=anthropic-messages translated_upstream=/responses stream=%t\n", r.Method, r.URL.Path, rawModel, streaming)
+	fmt.Fprintf(os.Stderr, "cq: route %s %s model_family=%s provider=codex protocol=anthropic-messages translated_upstream=/responses stream=%t\n", r.Method, r.URL.Path, projectCodexDiagnosticsModel(rawModel), streaming)
 
 	// Build upstream request.
 	upstreamURL := s.Config.CodexUpstream + "/responses"
@@ -59,8 +59,7 @@ func (s *Server) handleCodex(w http.ResponseWriter, r *http.Request, body []byte
 		return io.NopCloser(bytes.NewReader(translated)), nil
 	}
 
-	// Send to upstream — transport handles auth injection and account rotation.
-	resp, err := s.CodexTransport.RoundTrip(upReq)
+	resp, _, _, err := s.doCodexRequest(r.Context(), rawModel, upReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
@@ -135,7 +134,7 @@ func (s *Server) handleCodexCountTokens(w http.ResponseWriter, r *http.Request, 
 		return io.NopCloser(bytes.NewReader(translated)), nil
 	}
 
-	resp, err := s.CodexTransport.RoundTrip(upReq)
+	resp, _, _, err := s.doCodexRequest(r.Context(), rawModel, upReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return

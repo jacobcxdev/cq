@@ -9,7 +9,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
-func TestCodexSelector_PrefersActive(t *testing.T) {
+func TestCodexSelector_DoesNotPreferSystemActive(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
 			{Email: "inactive@test.com", AccessToken: "tok-1", IsActive: false},
@@ -21,11 +21,11 @@ func TestCodexSelector_PrefersActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acct.Email != "active@test.com" {
-		t.Errorf("email = %q, want active@test.com", acct.Email)
+	if acct.Email != "inactive@test.com" {
+		t.Errorf("email = %q, want inactive@test.com", acct.Email)
 	}
-	if acct.AccessToken != "tok-2" {
-		t.Errorf("token = %q, want tok-2", acct.AccessToken)
+	if acct.AccessToken != "tok-1" {
+		t.Errorf("token = %q, want tok-1", acct.AccessToken)
 	}
 }
 
@@ -54,6 +54,81 @@ func TestCodexSelector_NoAccounts(t *testing.T) {
 	_, err := sel.Select(context.Background())
 	if err == nil {
 		t.Fatal("expected error for no accounts")
+	}
+}
+
+func TestCodexInventorySelectorDoesNotReceiveCredentialMaterial(t *testing.T) {
+	accountKey := codex.AccountKey("logical-account")
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key:      accountKey,
+		Identity: codex.AccountIdentity{AccountID: "account", UserID: "user", Email: "user@test.com", PlanType: "pro"},
+		Routable: true,
+		Candidates: []codex.CredentialCandidate{{
+			Ref:        codex.CandidateRef{AccountKey: accountKey, CandidateID: "candidate"},
+			Credential: codex.CodexAccount{AccessToken: "must-not-cross-boundary"},
+			Routable:   true,
+		}},
+	}}}}
+	chooser := NewCodexInventorySelector(inventory, nil)
+	choice, err := chooser.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != accountKey {
+		t.Fatalf("choice = %+v", choice)
+	}
+	routeAccounts, err := chooser.(*codexSelector).routeAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routeAccounts) != 1 || routeAccounts[0].accountID != "account" {
+		t.Fatalf("route inventory received credential material: %+v", routeAccounts)
+	}
+}
+
+func TestCodexInventorySelectorSkipsIncompleteStrongIdentity(t *testing.T) {
+	weakKey := codex.AccountKey("weak-account")
+	strongKey := codex.AccountKey("strong-account")
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+		{
+			Key: weakKey, Identity: codex.AccountIdentity{AccountID: "weak"}, Routable: true,
+			Candidates: []codex.CredentialCandidate{{
+				Ref: codex.CandidateRef{AccountKey: weakKey, CandidateID: "weak-candidate"}, Routable: true,
+			}},
+		},
+		{
+			Key: strongKey, Identity: codex.AccountIdentity{AccountID: "strong", UserID: "user"}, Routable: true,
+			Candidates: []codex.CredentialCandidate{{
+				Ref: codex.CandidateRef{AccountKey: strongKey, CandidateID: "strong-candidate"}, Routable: true,
+			}},
+		},
+	}}}
+	chooser := NewCodexInventorySelector(inventory, nil)
+	choice, err := chooser.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != strongKey {
+		t.Fatalf("selected account = %q, want complete strong identity %q", choice.AccountKey, strongKey)
+	}
+}
+
+func TestCodexInventorySelectorSkipsUnroutableCandidate(t *testing.T) {
+	accountKey := codex.AccountKey("logical-account")
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key: accountKey, Identity: codex.AccountIdentity{AccountID: "account", UserID: "user"}, Routable: true,
+		Candidates: []codex.CredentialCandidate{
+			{Ref: codex.CandidateRef{AccountKey: accountKey, CandidateID: "unroutable"}},
+			{Ref: codex.CandidateRef{AccountKey: accountKey, CandidateID: "ready"}, Routable: true},
+		},
+	}}}}
+	chooser := NewCodexInventorySelector(inventory, nil)
+	accounts, err := chooser.(*codexSelector).routeAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].candidateID != "ready" {
+		t.Fatalf("route accounts = %+v", accounts)
 	}
 }
 
@@ -90,15 +165,15 @@ func TestCodexSelector_ReturnsCopy(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_ExcludeByEmail(t *testing.T) {
+func TestCodexSelector_ExcludeByAccountKey(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{Email: "a@test.com", AccessToken: "tok-a", IsActive: true},
-			{Email: "b@test.com", AccessToken: "tok-b", IsActive: false},
+			{AccountKey: "account-a", Email: "a@test.com", AccessToken: "tok-a", IsActive: true},
+			{AccountKey: "account-b", Email: "b@test.com", AccessToken: "tok-b", IsActive: false},
 		}
 	}, nil)
 
-	acct, err := sel.Select(context.Background(), "a@test.com")
+	acct, err := sel.Select(context.Background(), codex.SelectionExclusion{AccountKey: "account-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,15 +182,15 @@ func TestCodexSelector_ExcludeByEmail(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_ExcludeByAccountID(t *testing.T) {
+func TestCodexSelector_ExcludeByCandidateID(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1", IsActive: true},
-			{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2", IsActive: false},
+			{AccountKey: "account-a", CandidateID: "candidate-a", Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1", IsActive: true},
+			{AccountKey: "account-b", CandidateID: "candidate-b", Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2", IsActive: false},
 		}
 	}, nil)
 
-	acct, err := sel.Select(context.Background(), "acct-1")
+	acct, err := sel.Select(context.Background(), codex.SelectionExclusion{CandidateID: "candidate-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,37 +199,37 @@ func TestCodexSelector_ExcludeByAccountID(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_ExcludeByRecordKey(t *testing.T) {
+func TestCodexSelector_ExclusionDoesNotUseEmailAlias(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{Email: "a@test.com", AccessToken: "tok-a", RecordKey: "uid1::acct1", IsActive: true},
-			{Email: "b@test.com", AccessToken: "tok-b", RecordKey: "uid2::acct2", IsActive: false},
+			{AccountKey: "account-a", Email: "same@test.com", AccessToken: "tok-a", IsActive: true},
+			{AccountKey: "account-b", Email: "same@test.com", AccessToken: "tok-b", IsActive: false},
 		}
 	}, nil)
 
-	acct, err := sel.Select(context.Background(), "uid1::acct1")
+	acct, err := sel.Select(context.Background(), codex.SelectionExclusion{AccountKey: "account-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acct.Email != "b@test.com" {
-		t.Errorf("email = %q, want b@test.com", acct.Email)
+	if acct.AccountKey != "account-b" {
+		t.Errorf("account key = %q, want account-b", acct.AccountKey)
 	}
 }
 
 func TestCodexSelector_ExcludeAll(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{Email: "a@test.com", AccessToken: "tok-a", IsActive: true},
+			{AccountKey: "account-a", Email: "a@test.com", AccessToken: "tok-a", IsActive: true},
 		}
 	}, nil)
 
-	_, err := sel.Select(context.Background(), "a@test.com")
+	_, err := sel.Select(context.Background(), codex.SelectionExclusion{AccountKey: "account-a"})
 	if err == nil {
 		t.Fatal("expected error when all accounts are excluded")
 	}
 }
 
-func TestCodexSelector_SkipsExhaustedAccounts(t *testing.T) {
+func TestCodexSelector_PrefersPositiveOverAdvisoryZero(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
 		"dead": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
@@ -198,7 +273,7 @@ func TestCodexSelector_PrefersHigherQuotaOverActiveLowQuota(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
+func TestCodexSelector_KeepsAdvisoryZeroAccountsEligible(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
 		"dead-a": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}}, FetchedAt: now},
@@ -212,8 +287,21 @@ func TestCodexSelector_DoesNotSwitchWhenAllAccountsExhausted(t *testing.T) {
 	}, quotaReader)
 
 	acct, err := sel.Select(context.Background())
-	if err == nil || acct != nil {
-		t.Fatalf("expected no eligible accounts, got acct=%v err=%v", acct, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct == nil || acct.Email != "a@test.com" {
+		t.Fatalf("account = %+v, want stable first advisory account", acct)
+	}
+}
+
+func TestCodexAccountIdentityNeverFallsBackToAccessToken(t *testing.T) {
+	acct := &codex.CodexAccount{AccessToken: "synthetic-secret-token"}
+	if got := codexAcctIdentifier(acct); got != "" {
+		t.Fatalf("codexAcctIdentifier = %q, want empty", got)
+	}
+	if got := codexAccountHint(acct); got != "" {
+		t.Fatalf("codexAccountHint = %q, want empty", got)
 	}
 }
 
@@ -367,7 +455,7 @@ func TestCodexSelector_FallsBackToNonProWhenNoProAvailableForSparkModel(t *testi
 	}
 }
 
-func TestCodexSelector_FallsBackToNonProWhenProHasNoQuotaForSparkModel(t *testing.T) {
+func TestCodexSelector_PrefersPositiveNonProOverAdvisoryZeroPro(t *testing.T) {
 	now := time.Now()
 	quotaReader := stubQuotaReader{
 		"plus": {Result: quota.Result{Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 42}}}, FetchedAt: now},

@@ -19,7 +19,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 ## Architecture
 
 - **Two phases:** Fetch (provider APIs → quota results) and Render (results → TTY or JSON)
-- **Three providers:** Claude (multi-account), Codex (single-account), Gemini (single-account)
+- **Three providers:** Claude and Codex (multi-account), Gemini (single-account)
 - **Concurrent fetch:** Each provider runs in its own goroutine with panic recovery
 - **Aggregate layer:** Weighted pace, correction-deadline gauge, and burndown across 2+ accounts
 
@@ -30,7 +30,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 | `cmd/cq` | CLI entry point (kong), wires providers/cache/renderer | [AGENTS.md](cmd/cq/AGENTS.md) |
 | `internal/provider` | Provider interface + ID constants | [AGENTS.md](internal/provider/AGENTS.md) |
 | `internal/provider/claude` | Multi-account, OAuth refresh, parallel profile+usage | [AGENTS.md](internal/provider/claude/AGENTS.md) |
-| `internal/provider/codex` | Single account, no refresh (shared credentials) | [AGENTS.md](internal/provider/codex/AGENTS.md) |
+| `internal/provider/codex` | Multi-account, automatic reads only (shared system credentials) | [AGENTS.md](internal/provider/codex/AGENTS.md) |
 | `internal/provider/gemini` | Single account, no refresh (shared credentials) | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
 | `internal/app` | Runner (concurrent fetch), Report types, account management | [AGENTS.md](internal/app/AGENTS.md) |
 | `internal/output` | TTY renderer (lipgloss), JSON renderer | [AGENTS.md](internal/output/AGENTS.md) |
@@ -72,7 +72,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 
 ## Gotchas
 
-- Claude has **multi-account** support; Codex/Gemini are single-account
+- Claude and Codex have **multi-account** support; Gemini is single-account
 - `keyring.DiscoverClaudeAccounts()` calls real keychain — tests must mock at provider level
 - `mergeAnonymousFresh` uses token affinity (`sameStoredAccount`) to match anonymous entries — never merges blindly
 - `dedup` in Claude parser prefers usable results over errors on key collision

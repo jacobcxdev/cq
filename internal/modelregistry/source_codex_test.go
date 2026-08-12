@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -181,6 +183,45 @@ func TestCodexSource_TokenFuncError(t *testing.T) {
 	}
 	if called {
 		t.Error("HTTP server should not have been called when token func fails")
+	}
+}
+
+func TestCodexSourceUsesAuthenticatedRequestBoundary(t *testing.T) {
+	requests := 0
+	tokenCalls := 0
+	src := &CodexSource{
+		BaseURL: "https://codex.example",
+		Token: func(context.Context) (string, error) {
+			tokenCalls++
+			return "must-not-be-used", nil
+		},
+		AuthenticatedDo: func(_ context.Context, req *http.Request) (*http.Response, error) {
+			requests++
+			if req.Method != http.MethodGet || req.URL.String() != "https://codex.example/models?client_version=1.2.3" {
+				t.Fatalf("request = %s %s, want exact models request", req.Method, req.URL)
+			}
+			if got := req.Header.Get("Authorization"); got != "" {
+				t.Fatalf("base request Authorization = %q, want credential-free request boundary", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"models":[{"slug":"gpt-5.5"}]}`)),
+				Request:    req,
+			}, nil
+		},
+		ClientVersion: "1.2.3",
+	}
+
+	result, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if requests != 1 || tokenCalls != 0 {
+		t.Fatalf("authenticated requests/token calls = %d/%d, want 1/0", requests, tokenCalls)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].ID != "gpt-5.5" {
+		t.Fatalf("entries = %+v, want authenticated catalogue result", result.Entries)
 	}
 }
 

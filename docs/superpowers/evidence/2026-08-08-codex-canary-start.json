@@ -1,0 +1,27 @@
+{
+  "stage": 15,
+  "status": "started",
+  "cq_build": "dev",
+  "client_build": "0.146.0",
+  "parser_schema": 1,
+  "lease_schema": 1,
+  "fixture_hash": "618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1",
+  "installed_listener": {
+    "effective_http_mode": "enforce",
+    "effective_websocket_mode": "observe",
+    "admitted_turns": 1,
+    "consecutive_calendar_days": 1,
+    "keyed_mismatches": 0,
+    "automatic_auth_registry_hash_changes": 0,
+    "secret_leaks": 0,
+    "unexplained_lifecycles": 0,
+    "provider_requests": 0,
+    "upstream": "local-fake"
+  },
+  "promotion_gate": {
+    "required_days": 7,
+    "day_observation_policy": "one admitted turn or status heartbeat per UTC day; gaps reset streak",
+    "required_admitted_turns": 100,
+    "passed": false
+  }
+}

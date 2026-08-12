@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/app"
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -28,7 +28,7 @@ var (
 	newHTTPClientFn           = func(timeout time.Duration, version string) httputil.Doer { return httputil.NewClient(timeout, version) }
 	refreshCodexAccountsFn    = refreshCodexAccounts
 	invalidateProviderCacheFn = invalidateProviderCache
-	codexRefreshFSFactory     = func() fsutil.FileSystem { return fsutil.OSFileSystem{} }
+	codexRefreshFSFactory     = func() fsutil.DurableFileSystem { return fsutil.OSFileSystem{} }
 	persistRefreshedTokenFn   = keyring.PersistRefreshedToken
 	storeCQAccountFn          = keyring.StoreCQAccount
 	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
@@ -106,9 +106,10 @@ func runRefresh() error {
 	if claudeChanged {
 		invalidateProviderCacheFn(provider.Claude)
 	}
-
-	// Codex refresh pass.
-	codexChanged := refreshCodexAccountsFn(ctx, httpClient, now)
+	codexChanged, err := refreshCodexAccountsFn(ctx, httpClient, now)
+	if err != nil {
+		return err
+	}
 	if codexChanged {
 		invalidateProviderCacheFn(provider.Codex)
 	}
@@ -155,68 +156,62 @@ func runRefresh() error {
 	return nil
 }
 
-// refreshCodexAccounts iterates over all locally discovered Codex accounts and
-// proactively refreshes those whose tokens expire within refreshMarginMs.
-// Returns true if any credential was updated (caller should invalidate cache).
-func refreshCodexAccounts(ctx context.Context, client httputil.Doer, nowMs int64) bool {
+func refreshCodexAccounts(ctx context.Context, client httputil.Doer, nowMs int64) (bool, error) {
 	fs := codexRefreshFSFactory()
-	accounts := codexprov.DiscoverAccounts(fs)
-	if len(accounts) == 0 {
-		return false
-	}
-
-	home, err := fs.UserHomeDir()
+	control, err := codexprov.OpenDefaultCredentialRefreshControl(ctx, fs, client)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: codex refresh: home dir: %v\n", err)
-		return false
+		return false, codexRefreshAuthorityError(err)
+	}
+	defer control.Close()
+	return refreshManagedCodexAuthority(ctx, control, time.UnixMilli(nowMs))
+}
+
+type codexRefreshAuthority interface {
+	codexprov.CredentialInventory
+	codexprov.CredentialRefreshBroker
+}
+
+func refreshManagedCodexAuthority(ctx context.Context, authority codexRefreshAuthority, now time.Time) (bool, error) {
+	if authority == nil {
+		return false, codexprov.ErrCredentialAuthorityUnavailable
+	}
+	inventory, err := authority.List(ctx)
+	if err != nil {
+		return false, codexRefreshAuthorityError(err)
+	}
+	for _, source := range inventory.ExternalSources {
+		if source.ErrorCode != "" && !source.OptionalAbsent {
+			return false, codexprov.ErrCredentialInventoryDegraded
+		}
 	}
 
-	threshold := nowMs + refreshMarginMs
+	threshold := now.Add(time.Duration(refreshMarginMs) * time.Millisecond)
 	changed := false
-
-	for _, acct := range accounts {
-		if acct.RefreshToken == "" {
-			continue
+	for _, logical := range inventory.Accounts {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
+			if candidate.Source != codexprov.SourceManaged || candidate.AccessExpiresAt.IsZero() || candidate.AccessExpiresAt.After(threshold) {
+				continue
+			}
+			if _, err := authority.Refresh(ctx, candidate.Ref, candidate.Revision); err != nil {
+				continue
+			}
+			changed = true
 		}
-		if acct.ExpiresAt == 0 || acct.ExpiresAt > threshold {
-			continue // unknown expiry or still fresh
-		}
-
-		label := acct.Email
-		if label == "" {
-			label = acct.AccountID
-		}
-
-		tokens, err := auth.RefreshCodexToken(ctx, client, acct.RefreshToken)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "cq: codex refresh %s: %v\n", label, err)
-			continue
-		}
-
-		acct.AccessToken = tokens.AccessToken
-		if tokens.RefreshToken != "" {
-			acct.RefreshToken = tokens.RefreshToken
-		}
-		if tokens.IDToken != "" {
-			acct.IDToken = tokens.IDToken
-		}
-		claims := auth.DecodeCodexClaims(tokens.IDToken)
-		if claims.ExpiresAt > 0 {
-			acct.ExpiresAt = claims.ExpiresAt * 1000
-		} else {
-			acct.ExpiresAt = nowMs + tokens.ExpiresIn*1000
-		}
-
-		if err := codexprov.PersistCodexAccount(fs, acct, home); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: codex persist %s: %v\n", label, err)
-			continue
-		}
-
-		changed = true
-		fmt.Fprintf(os.Stderr, "cq: refreshed codex %s\n", label)
 	}
+	return changed, nil
+}
 
-	return changed
+func codexRefreshAuthorityError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, codexprov.ErrCredentialInventoryDegraded):
+		return codexprov.ErrCredentialInventoryDegraded
+	default:
+		return codexprov.ErrCredentialAuthorityUnavailable
+	}
 }
 
 // syncAnonymousToIdentified resolves anonymous keychain entries via the

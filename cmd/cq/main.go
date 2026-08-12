@@ -11,6 +11,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/cache"
+	"github.com/jacobcxdev/cq/internal/compat"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -77,12 +78,16 @@ type AgentUninstallCmd struct{}
 
 // ProxyCmd groups local proxy commands.
 type ProxyCmd struct {
-	Start     ProxyStartCmd     `cmd:"" help:"Start local Claude and Codex proxy"`
-	Install   ProxyInstallCmd   `cmd:"" help:"Install proxy launch agent"`
-	Uninstall ProxyUninstallCmd `cmd:"" help:"Uninstall proxy launch agent"`
-	Restart   ProxyRestartCmd   `cmd:"" help:"Restart proxy launch agent"`
-	Status    ProxyStatusCmd    `cmd:"" help:"Show proxy health"`
-	Pin       ProxyPinCmd       `cmd:"" help:"Pin Claude proxy routing"`
+	Start        ProxyStartCmd        `cmd:"" help:"Start local Claude and Codex proxy"`
+	Install      ProxyInstallCmd      `cmd:"" help:"Install proxy launch agent"`
+	Uninstall    ProxyUninstallCmd    `cmd:"" help:"Uninstall proxy launch agent"`
+	Restart      ProxyRestartCmd      `cmd:"" help:"Restart proxy launch agent"`
+	Status       ProxyStatusCmd       `cmd:"" help:"Show proxy health"`
+	ValidateHTTP ProxyValidateHTTPCmd `cmd:"" name:"validate-http" help:"Request one-shot installed HTTP validation"`
+	Pin          ProxyPinCmd          `cmd:"" help:"Pin Claude proxy routing"`
+	CodexDefault ProxyCodexDefaultCmd `cmd:"" name:"codex-default" help:"Configure Codex routing default"`
+	Prime        ProxyPrimeCmd        `cmd:"" help:"Manage Codex quota-window priming"`
+	Endpoint     ProxyEndpointCmd     `cmd:"" help:"Inspect or transition the credential endpoint"`
 }
 
 type ProxyStartCmd struct {
@@ -92,6 +97,7 @@ type ProxyStartCmd struct {
 type ProxyInstallCmd struct{}
 type ProxyUninstallCmd struct{}
 type ProxyRestartCmd struct{}
+type ProxyValidateHTTPCmd struct{}
 
 type ProxyStatusCmd struct {
 	Port int `help:"Override health-check port" placeholder:"PORT"`
@@ -101,6 +107,23 @@ type ProxyPinCmd struct {
 	Clear bool   `help:"Clear active Claude account pin"`
 	Value string `arg:"" optional:"" name:"email-or-account-uuid" help:"Claude account email or UUID to pin"`
 }
+
+type ProxyCodexDefaultCmd struct {
+	Clear     bool   `help:"Clear the Codex routing default"`
+	Reference string `arg:"" optional:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
+}
+
+type ProxyPrimeCmd struct {
+	Status  ProxyPrimeStatusCmd  `cmd:"" help:"Show Codex window priming configuration"`
+	Enable  ProxyPrimeEnableCmd  `cmd:"" help:"Enable Codex window priming"`
+	Disable ProxyPrimeDisableCmd `cmd:"" help:"Disable Codex window priming"`
+}
+
+type ProxyPrimeStatusCmd struct{}
+type ProxyPrimeEnableCmd struct{}
+type ProxyPrimeDisableCmd struct{}
+
+type ProxyEndpointCmd struct{}
 
 // ModelsCmd groups local model registry commands.
 type ModelsCmd struct {
@@ -165,6 +188,19 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	// Legacy endpoint inspection is deliberately read-only. It must bypass
+	// compatibility initialisation because that path may create or update files.
+	if isReadOnlyLegacyEndpointInspectCommand(os.Args[1:]) {
+		if err := runProxy(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := ensureCompatibilityEpoch(); err != nil {
+		fmt.Fprintf(os.Stderr, "cq: compatibility: %v\n", err)
+		os.Exit(1)
+	}
 	// Handle commands that conflict with kong's default:"withargs" on CheckCmd.
 	// Kong validates the enum constraint on providers before trying command
 	// matching, so "refresh" and "agent" must be intercepted first.
@@ -194,6 +230,21 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "codex":
+			if len(os.Args) > 2 && os.Args[2] == "validate" {
+				if err := runCodexValidate(os.Args[3:]); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+			if len(os.Args) > 2 && os.Args[2] == "canary" {
+				if err := runCodexCanary(os.Args[3:]); err != nil {
+					fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
 		}
 	}
 
@@ -204,6 +255,15 @@ func main() {
 		os.Exit(1)
 	}
 	ensureAgent()
+}
+
+func ensureCompatibilityEpoch() error {
+	fs := fsutil.OSFileSystem{}
+	path, err := compat.DefaultEpochPath(fs, os.Getenv)
+	if err != nil {
+		return err
+	}
+	return compat.EnsureEpoch(fs, path, compat.CurrentEpoch)
 }
 
 func runAgent(args []string) error {

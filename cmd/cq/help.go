@@ -43,14 +43,19 @@ Commands:
   proxy install       Install proxy launch agent
   proxy uninstall     Uninstall proxy launch agent
   proxy restart       Restart proxy launch agent
+  proxy validate-http Request one-shot installed HTTP validation
   proxy pin           Pin Claude proxy routing
+  proxy codex-default Configure Codex routing default
+  proxy prime         Manage Codex quota-window priming
+  proxy endpoint      Explicitly inspect or transition the credential endpoint
 `,
-	"proxy start": `Usage: cq proxy start [--port PORT]
+	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
 
 Start local Claude and Codex proxy.
 
 Options:
-  --port PORT         Override configured listen port for this run
+  --port PORT                    Override configured listen port for this run
+  --migrate-legacy-managed       Explicitly add routing identity metadata to legacy CQ-managed records
 `,
 	"proxy status": `Usage: cq proxy status [--port PORT]
 
@@ -71,6 +76,13 @@ Uninstall the proxy launch agent for the current user.
 
 Restart the proxy launch agent for the current user.
 `,
+	"proxy validate-http": `Usage: cq proxy validate-http
+
+Request one-shot installed HTTP validation from the installed proxy service.
+The command writes only an expiring private request and restarts the service.
+The serving process owns validation and does not write readiness evidence until
+every installed acceptance gate and process attestation succeeds.
+`,
 	"proxy pin": `Usage: cq proxy pin [--clear | <email-or-account-uuid>]
 
 Pin Claude proxy routing to a specific account, show the current pin, or clear it.
@@ -80,6 +92,68 @@ Examples:
   cq proxy pin user@example.com
   cq proxy pin 550e8400-e29b-41d4-a716-446655440000
   cq proxy pin --clear
+`,
+	"proxy codex-default": `Usage: cq proxy codex-default [--clear | <account-reference>]
+
+Show, set, or clear CQ-owned Codex routing default.
+An account reference may be a unique email, CQ alias, or opaque AccountKey.
+CQ resolves it once and stores only opaque AccountKey.
+
+The stored opaque account key is independent of Codex Desktop/system identity.
+This command changes only CQ proxy configuration and never mutates Codex Bar or system authentication.
+The running proxy keeps its startup value. Restart proxy to apply change.
+
+Options:
+  --clear            Clear the Codex routing default
+`,
+	"proxy prime": `Usage: cq proxy prime <command>
+
+Manage automatic Codex backend quota-window priming.
+
+Commands:
+  prime status        Show current priming configuration
+  prime enable        Enable priming after proxy restart
+  prime disable       Disable priming after proxy restart
+`,
+	"proxy prime status": `Usage: cq proxy prime status
+
+Show current Codex window priming configuration.
+`,
+	"proxy prime enable": `Usage: cq proxy prime enable
+
+Enable automatic Codex window priming. Restart proxy to apply.
+`,
+	"proxy prime disable": `Usage: cq proxy prime disable
+
+Disable automatic Codex window priming. Restart proxy to apply.
+`,
+	"proxy endpoint": `Usage: cq proxy endpoint <command>
+
+Explicitly inspect or transition the fixed default Codex credential endpoint.
+Ordinary cq and proxy startup never invoke legacy endpoint maintenance.
+
+Commands:
+  endpoint inspect-legacy      Read a refused legacy socket or pending transition
+  endpoint transition-legacy   Run an explicit stopped-and-drained transition
+`,
+	"proxy endpoint inspect-legacy": `Usage: cq proxy endpoint inspect-legacy
+
+Read the fixed default Codex credential endpoint without creating or changing
+any endpoint, compatibility, authentication, or account state. Output is JSON.
+`,
+	"proxy endpoint transition-legacy": `Usage: cq proxy endpoint transition-legacy <prepare|resume|activate|finalise|rollback> [options]
+
+Explicitly transition the fixed default legacy credential endpoint. Prepare,
+resume, activate, and rollback require the proxy to remain stopped and drained.
+Finalise requires the exact live candidate to pass its in-owner runtime verifier.
+The deprecated commit action is unavailable and never removes rollback state.
+
+Options:
+  --snapshot-file FILE              Strict 0600 snapshot input for prepare
+  --ticket-file FILE                Strict 0600 ticket input for other actions
+  --confirm-stopped-and-drained      Required for prepare/resume/activate/rollback
+  --confirm-candidate-healthy        Required for finalise
+  --non-interactive                  Skip the TTY phrase prompt
 `,
 	"models": `Usage: cq models <command>
 

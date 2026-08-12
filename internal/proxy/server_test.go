@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,12 +12,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	claude "github.com/jacobcxdev/cq/internal/provider/claude"
@@ -29,6 +33,29 @@ func mustParseURL(s string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+type codexWebSocketExecutorFunc func(context.Context, RouteChoice, CandidateAttempt, string, http.Header) (*websocket.Conn, *http.Response, []byte, error)
+
+func (f codexWebSocketExecutorFunc) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+	return f(ctx, choice, attempt, upstreamURL, header)
+}
+
+type codexWebSocketDispatchExecutorFunc func(context.Context, RouteChoice, CandidateAttempt, string, http.Header, func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error)
+
+func (f codexWebSocketDispatchExecutorFunc) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+	conn, response, body, _, err := f(ctx, choice, attempt, upstreamURL, header, nil)
+	return conn, response, body, err
+}
+
+func (f codexWebSocketDispatchExecutorFunc) dialOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
+	return f(ctx, choice, attempt, upstreamURL, header, onDispatch)
+}
+
+type codexRequestScoperFunc func(context.Context, CodexRouteRequirements, codex.Revision, ...codex.SelectionExclusion) (CodexRequestPlan, error)
+
+func (f codexRequestScoperFunc) Plan(ctx context.Context, requirements CodexRouteRequirements, accepted codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
+	return f(ctx, requirements, accepted, exclude...)
 }
 
 func TestServer_HealthEndpoint(t *testing.T) {
@@ -61,6 +88,83 @@ func TestServer_HealthEndpoint(t *testing.T) {
 	accounts := resp["accounts"].(map[string]any)
 	if accounts["claude"].(float64) != 2 {
 		t.Errorf("claude accounts = %v, want 2", accounts["claude"])
+	}
+}
+
+func TestServerHealthReportsConfiguredEffectiveCodexModes(t *testing.T) {
+	srv := &Server{
+		CodexRouting: &CodexRoutingRuntime{
+			HTTP: CodexModeStatus{
+				Configured:       CodexRoutingEnforce,
+				Effective:        CodexRoutingObserve,
+				InhibitionReason: "readiness marker missing",
+				ModeEpoch:        7,
+				ShadowEpoch:      7,
+			},
+			WebSocket: CodexModeStatus{
+				Configured: CodexRoutingOff,
+				Effective:  CodexRoutingOff,
+				ModeEpoch:  8,
+			},
+		},
+	}
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var response struct {
+		HTTP CodexModeStatus `json:"codex_turn_routing"`
+		WS   CodexModeStatus `json:"codex_ws_turn_routing"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.HTTP.Configured != CodexRoutingEnforce || response.HTTP.Effective != CodexRoutingObserve || response.HTTP.InhibitionReason != "readiness marker missing" || response.HTTP.ModeEpoch != 7 {
+		t.Fatalf("HTTP health = %+v", response.HTTP)
+	}
+	if response.WS.Configured != CodexRoutingOff || response.WS.Effective != CodexRoutingOff {
+		t.Fatalf("WS health = %+v", response.WS)
+	}
+}
+
+func TestServerCodexWebSocketObserverHonoursExplicitOff(t *testing.T) {
+	httpObserver := &CodexTurnObserver{}
+	wsObserver := &CodexTurnObserver{}
+
+	if got := (&Server{CodexObserver: httpObserver}).codexWebSocketObserver(); got != httpObserver {
+		t.Fatalf("compatibility observer = %p, want %p", got, httpObserver)
+	}
+	if got := (&Server{CodexObserver: httpObserver, CodexWebSocketObserverConfigured: true}).codexWebSocketObserver(); got != nil {
+		t.Fatalf("explicitly disabled WebSocket observer = %p, want nil", got)
+	}
+	if got := (&Server{CodexObserver: httpObserver, CodexWebSocketObserver: wsObserver, CodexWebSocketObserverConfigured: true}).codexWebSocketObserver(); got != wsObserver {
+		t.Fatalf("explicit WebSocket observer = %p, want %p", got, wsObserver)
+	}
+}
+
+func TestServerHealthReportsPrivacySafeCodexPrimerSummary(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe("secret-account", testPrimerTarget()); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		Config:      &Config{CodexWindowPriming: CodexWindowPrimingConfig{Enabled: true}},
+		CodexPrimer: &CodexPrimer{Store: store},
+	}
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if strings.Contains(w.Body.String(), "secret-account") || strings.Contains(w.Body.String(), "backend-scope-secret") {
+		t.Fatalf("health leaked primer identity: %s", w.Body.String())
+	}
+	var response struct {
+		Primer CodexPrimerHealth `json:"codex_window_priming"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Primer.Configured || !response.Primer.Owner || response.Primer.Counts[PrimerStateObserved] != 1 {
+		t.Fatalf("primer health = %+v", response.Primer)
 	}
 }
 
@@ -472,6 +576,7 @@ func TestServerDiagnosticsClaudeRouteReadsLiveSelectorPin(t *testing.T) {
 }
 
 func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
+	const privateModel = "gpt-private-native-model"
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
 	if err != nil {
@@ -486,7 +591,7 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
 			LocalToken:     "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codexAccount},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -504,9 +609,9 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 		t.Fatalf("handler() error = %v", err)
 	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, codexResponsesPath, strings.NewReader(`{"model":"`+privateModel+`","input":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(w, req)
+	stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202, body: %s", w.Code, w.Body.String())
@@ -525,14 +630,15 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	if ev.RouteKind != "codex_native" {
 		t.Fatalf("RouteKind = %q, want codex_native", ev.RouteKind)
 	}
-	if ev.Model != "gpt-5.4" {
-		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	if ev.Model != codexDiagnosticsModelGPT {
+		t.Fatalf("Model = %q, want %q", ev.Model, codexDiagnosticsModelGPT)
 	}
 	if ev.StatusCode != http.StatusAccepted {
 		t.Fatalf("StatusCode = %d, want 202", ev.StatusCode)
 	}
-	if ev.AccountHint != codexAccountHint(&codexAccount) {
-		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, codexAccountHint(&codexAccount))
+	wantHint := redactedAccountHint("codex", string(codexRoutingAccountKey(&codexAccount)))
+	if ev.AccountHint != wantHint {
+		t.Fatalf("AccountHint = %q, want redacted hint %q", ev.AccountHint, wantHint)
 	}
 	if ev.Failover {
 		t.Fatal("Failover = true, want false")
@@ -540,6 +646,10 @@ func TestServerDiagnosticsCodexRouteEmitsEvent(t *testing.T) {
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-user@test.com")
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-account-secret")
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
+	assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+	if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+		t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+	}
 }
 
 func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
@@ -560,12 +670,12 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
 			LocalToken:     "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &multiCodexSelector{accounts: accounts},
 			Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				switch req.Header.Get("Authorization") {
 				case "Bearer primary-codex-token":
-					return makeResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+					return makeResponse(http.StatusTooManyRequests, `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`), nil
 				case "Bearer fallback-codex-token":
 					return &http.Response{
 						StatusCode: http.StatusOK,
@@ -601,8 +711,9 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
 	ev := events[0]
-	if ev.AccountHint != codexAccountHint(&accounts[1]) {
-		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, codexAccountHint(&accounts[1]))
+	wantHint := redactedAccountHint("codex", string(codexRoutingAccountKey(&accounts[1])))
+	if ev.AccountHint != wantHint {
+		t.Fatalf("AccountHint = %q, want fallback hint %q", ev.AccountHint, wantHint)
 	}
 	if !ev.Failover {
 		t.Fatal("Failover = false, want true")
@@ -613,6 +724,64 @@ func TestServerDiagnosticsCodexRouteRecordsFailover(t *testing.T) {
 	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-account")
 	assertDiagnosticsLogDoesNotContain(t, path, "primary-codex-token")
 	assertDiagnosticsLogDoesNotContain(t, path, "fallback-codex-token")
+}
+
+func TestServerDiagnosticsTranslatedCodexRouteProjectsRequestModel(t *testing.T) {
+	const privateModel = "gpt-private-anthropic-model"
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diag, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatalf("OpenDiagnosticsWriter: %v", err)
+	}
+	defer diag.Close()
+
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  "https://chatgpt.com/backend-api/codex",
+			LocalToken:     "local-tok",
+		},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body: io.NopCloser(strings.NewReader(
+						"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n" +
+							"data: [DONE]\n\n",
+					)),
+				}, nil
+			}),
+		},
+		Diag: diag,
+	}
+
+	handler := srv.proxyHandler(mustParseURL(srv.Config.ClaudeUpstream))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"`+privateModel+`","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer local-tok")
+	req.Header.Set("Content-Type", "application/json")
+	stderr := captureStderr(t, func() { handler(w, req) })
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if err := diag.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Provider != "codex" || ev.RouteKind != "anthropic_messages" || ev.Model != codexDiagnosticsModelGPT {
+		t.Fatalf("translated event = %+v", ev)
+	}
+	assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+	if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+		t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+	}
 }
 
 func TestServerDiagnosticsCodexNoTransportEmitsSafeError(t *testing.T) {
@@ -669,7 +838,7 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 		wantBody     string
 	}{
 		{name: "claude", model: "claude-sonnet-4-6", wantProvider: "claude", wantBody: `{"input_tokens":321}`},
-		{name: "codex", model: "gpt-5.4", wantProvider: "codex", wantBody: `{"input_tokens":123}`},
+		{name: "codex", model: "gpt-private-count-tokens-model", wantProvider: "codex", wantBody: `{"input_tokens":123}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "routes.jsonl")
@@ -679,7 +848,7 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 			}
 			defer diag.Close()
 
-			codexTransport := &CodexTokenTransport{
+			codexTransport := &legacyCodexTokenTransport{
 				Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
 				Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					if tc.wantProvider != "codex" {
@@ -724,7 +893,7 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, countTokensPath, strings.NewReader(body))
 			req.Header.Set("Authorization", "Bearer local-tok")
 			req.Header.Set("Content-Type", "application/json")
-			handler(w, req)
+			stderr := captureStderr(t, func() { handler(w, req) })
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
@@ -746,18 +915,29 @@ func TestServerDiagnosticsCountTokensRouteEmitsEvents(t *testing.T) {
 			if ev.RouteKind != "anthropic_count_tokens" {
 				t.Fatalf("RouteKind = %q, want anthropic_count_tokens", ev.RouteKind)
 			}
-			if ev.Model != tc.model {
-				t.Fatalf("Model = %q, want %s", ev.Model, tc.model)
+			wantDiagnosticModel := tc.model
+			if tc.wantProvider == "codex" {
+				wantDiagnosticModel = codexDiagnosticsModelGPT
+			}
+			if ev.Model != wantDiagnosticModel {
+				t.Fatalf("Model = %q, want %q", ev.Model, wantDiagnosticModel)
 			}
 			if ev.StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
 			}
 			assertDiagnosticsLogDoesNotContain(t, path, "local-tok")
+			if tc.wantProvider == "codex" {
+				assertDiagnosticsLogDoesNotContain(t, path, tc.model)
+				if strings.Contains(stderr, tc.model) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+					t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+				}
+			}
 		})
 	}
 }
 
 func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
+	const privateModel = "gpt-private-legacy-model"
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
 	if err != nil {
@@ -773,7 +953,7 @@ func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
 			CodexUpstream:  "https://chatgpt.com",
 			LocalToken:     localToken,
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				gotPath = r.URL.Path
@@ -792,10 +972,10 @@ func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
 		t.Fatalf("handler() error = %v", err)
 	}
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(`{"model":"`+privateModel+`","input":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+localToken)
-	handler.ServeHTTP(w, req)
+	stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201, body: %s", w.Code, w.Body.String())
@@ -817,13 +997,17 @@ func TestServerDiagnosticsLegacyCodexRouteEmitsEvent(t *testing.T) {
 	if ev.RouteKind != "codex_native" {
 		t.Fatalf("RouteKind = %q, want codex_native", ev.RouteKind)
 	}
-	if ev.Model != "gpt-5.4" {
-		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	if ev.Model != codexDiagnosticsModelGPT {
+		t.Fatalf("Model = %q, want %q", ev.Model, codexDiagnosticsModelGPT)
 	}
 	if ev.StatusCode != http.StatusCreated {
 		t.Fatalf("StatusCode = %d, want 201", ev.StatusCode)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, localToken)
+	assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+	if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+		t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
+	}
 }
 
 func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
@@ -868,7 +1052,7 @@ func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "local-tok",
 		},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -952,7 +1136,7 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-codex"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1006,6 +1190,7 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 }
 
 func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	path := filepath.Join(t.TempDir(), "payloads.jsonl")
 	payloadDiag, err := OpenPayloadWriter(path)
 	if err != nil {
@@ -1037,7 +1222,7 @@ func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testi
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-codex"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1097,6 +1282,7 @@ func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testi
 }
 
 func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
+	const privateModel = "gpt-private-compact-model"
 	for _, tc := range []struct {
 		name string
 		path string
@@ -1119,7 +1305,7 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 					CodexUpstream:  "https://chatgpt.com",
 					LocalToken:     "tok",
 				},
-				CodexTransport: &CodexTokenTransport{
+				CodexTransport: &legacyCodexTokenTransport{
 					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 					Inner: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 						gotPath = r.URL.Path
@@ -1138,9 +1324,9 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 				t.Fatalf("handler() error = %v", err)
 			}
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"model":"gpt-5.4","previous_response_id":"resp_abc"}`))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"model":"`+privateModel+`","previous_response_id":"resp_abc"}`))
 			req.Header.Set("Content-Type", "application/json")
-			handler.ServeHTTP(w, req)
+			stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
@@ -1162,11 +1348,15 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 			if ev.RouteKind != "codex_compact" {
 				t.Fatalf("RouteKind = %q, want codex_compact", ev.RouteKind)
 			}
-			if ev.Model != "gpt-5.4" {
-				t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+			if ev.Model != codexDiagnosticsModelGPT {
+				t.Fatalf("Model = %q, want %q", ev.Model, codexDiagnosticsModelGPT)
 			}
 			if ev.StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
+			}
+			assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+			if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
+				t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
 			}
 		})
 	}
@@ -1198,8 +1388,8 @@ func TestServerDiagnosticsLegacyCodexAppServerNonUpgradeRejectionEmitsEvent(t *t
 	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUpgradeRequired {
-		t.Fatalf("status = %d, want 426, body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410, body: %s", w.Code, w.Body.String())
 	}
 	if err := diag.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1215,16 +1405,16 @@ func TestServerDiagnosticsLegacyCodexAppServerNonUpgradeRejectionEmitsEvent(t *t
 	if ev.RouteKind != "codex_app_server" {
 		t.Fatalf("RouteKind = %q, want codex_app_server", ev.RouteKind)
 	}
-	if ev.StatusCode != http.StatusUpgradeRequired {
-		t.Fatalf("StatusCode = %d, want 426", ev.StatusCode)
+	if ev.StatusCode != http.StatusGone {
+		t.Fatalf("StatusCode = %d, want 410", ev.StatusCode)
 	}
-	if ev.Error != "invalid_request_error:websocket_upgrade_required" {
-		t.Fatalf("Error = %q, want websocket upgrade error code", ev.Error)
+	if ev.Error != "invalid_request_error" {
+		t.Fatalf("Error = %q, want invalid_request_error", ev.Error)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, localToken)
 }
 
-func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing.T) {
+func TestServerDiagnosticsCodexAppServerRetirementIgnoresUpstream(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diag, err := OpenDiagnosticsWriter(path)
 	if err != nil {
@@ -1238,7 +1428,7 @@ func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing
 			CodexUpstream:  "ftp://chatgpt.example",
 			LocalToken:     "local-token-secret",
 		},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{Email: "codex@test.com", AccountID: "codex-account", AccessToken: "codex-token"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1255,8 +1445,8 @@ func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing
 	req.Header.Set("Upgrade", "websocket")
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500, body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410, body: %s", w.Code, w.Body.String())
 	}
 	if err := diag.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -1266,11 +1456,11 @@ func TestServerDiagnosticsCodexAppServerInvalidUpstreamEmitsSafeError(t *testing
 		t.Fatalf("events = %d, want 1", len(events))
 	}
 	ev := events[0]
-	if ev.Error != "api_error:invalid_codex_upstream" {
-		t.Fatalf("Error = %q, want invalid upstream code", ev.Error)
+	if ev.Error != "invalid_request_error" {
+		t.Fatalf("Error = %q, want retirement error", ev.Error)
 	}
-	if ev.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("StatusCode = %d, want 500", ev.StatusCode)
+	if ev.StatusCode != http.StatusGone {
+		t.Fatalf("StatusCode = %d, want 410", ev.StatusCode)
 	}
 	assertDiagnosticsLogDoesNotContain(t, path, "local-token-secret")
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-token")
@@ -1619,7 +1809,7 @@ func TestServer_HeadroomPreservesOriginalModelRouting(t *testing.T) {
 				TokensSaved: 123,
 			}
 		}),
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1806,7 +1996,7 @@ func TestServer_NativeCodex_ForwardsWithAuth(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-1",
@@ -1855,7 +2045,7 @@ func TestServer_Handler_CodexResponsesPath_ForwardsWithAuth(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-1"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -1923,7 +2113,7 @@ func TestServer_Handler_CodexImagesPath_ForwardsWithoutProxyToken(t *testing.T) 
 
 			srv := &Server{
 				Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-				CodexTransport: &CodexTokenTransport{
+				CodexTransport: &legacyCodexTokenTransport{
 					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok", AccountID: "acct-1"}},
 					Inner:    http.DefaultTransport,
 				},
@@ -2043,7 +2233,7 @@ func TestServer_Handler_LegacyCodexResponsesPost_Compatibility(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2083,12 +2273,278 @@ func TestServer_Handler_CodexResponsesRejectsWebsocket(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), codexAppServerPath) {
-		t.Errorf("body = %q, want mention of %s", w.Body.String(), codexAppServerPath)
+	if !strings.Contains(w.Body.String(), legacyCodexResponsesPath) {
+		t.Errorf("body = %q, want mention of %s", w.Body.String(), legacyCodexResponsesPath)
 	}
 }
 
-func TestServer_Handler_AppServerRequiresWebsocket(t *testing.T) {
+func TestServerCodexWebSocketBeforeDownstreamUpgradeHard429FailoverAuthority(t *testing.T) {
+	legacyBody := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
+	tests := []struct {
+		name         string
+		encodings    []string
+		body         string
+		uncompressed bool
+		wantFailover bool
+	}{
+		{name: "zstd", encodings: []string{"zstd"}, body: legacyBody},
+		{name: "duplicate identity", encodings: []string{"identity", "identity"}, body: legacyBody},
+		{name: "conflicting encoding", encodings: []string{"identity", "zstd"}, body: legacyBody},
+		{name: "transparent decompression", body: codexLiveUsageLimitBody, uncompressed: true},
+		{name: "live transport-authorised", body: codexLiveUsageLimitBody, wantFailover: true},
+		{name: "legacy status", encodings: []string{"identity"}, body: legacyBody, wantFailover: true},
+		{name: "legacy status alias", encodings: []string{"identity"}, body: `{"type":"error","status_code":429,"error":{"type":"usage_limit_reached"}}`, wantFailover: true},
+		{name: "zero status", body: `{"type":"error","status":0,"status_code":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "null status", body: `{"type":"error","status":null,"status_code":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "conflicting status", body: `{"type":"error","status":400,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate status", body: `{"type":"error","status":400,"status":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate status alias", body: `{"type":"error","status_code":400,"status_code":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate top-level type", body: `{"type":"response.failed","type":"error","status":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "duplicate nested type", body: `{"type":"error","status":429,"error":{"type":"rate_limit_exceeded","type":"usage_limit_reached"}}`},
+		{name: "duplicate nested code", body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"first","code":"second"}}`},
+		{name: "wrong nested type", body: `{"error":{"type":"rate_limit_exceeded"}}`},
+		{name: "malformed", body: `{`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := requestPlan("one", "first")
+			second := requestPlan("two", "second")
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{first, second}}
+			var calls []codex.CandidateID
+			executor := codexWebSocketExecutorFunc(func(_ context.Context, _ RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+				calls = append(calls, attempt.Candidate.CandidateID)
+				if attempt.Candidate.CandidateID == "second" {
+					return new(websocket.Conn), nil, nil, nil
+				}
+				header := make(http.Header)
+				for _, value := range test.encodings {
+					header.Add("Content-Encoding", value)
+				}
+				return nil, &http.Response{
+					Status:       "429 Too Many Requests",
+					StatusCode:   http.StatusTooManyRequests,
+					Header:       header,
+					Body:         http.NoBody,
+					Uncompressed: test.uncompressed,
+				}, []byte(test.body), fmt.Errorf("websocket: bad handshake")
+			})
+			server := &Server{
+				CodexRequests:          &CodexRequestRouter{Scope: scope},
+				CodexWebSocketExecutor: executor,
+			}
+
+			connection, choice, attempt, err := server.dialCodexWebSocket(context.Background(), "wss://upstream.test/responses", nil, "gpt-5.4")
+			if test.wantFailover {
+				if connection == nil || err != nil || choice.AccountKey != "two" || attempt.Candidate.CandidateID != "second" {
+					t.Fatalf("connection=%p choice=%q attempt=%q error=%v", connection, choice.AccountKey, attempt.Candidate.CandidateID, err)
+				}
+				if scope.calls != 2 || !slices.Equal(calls, []codex.CandidateID{"first", "second"}) {
+					t.Fatalf("scope calls=%d attempts=%v", scope.calls, calls)
+				}
+				return
+			}
+			if connection != nil || err == nil || !strings.Contains(err.Error(), "429 Too Many Requests") {
+				t.Fatalf("connection=%p error=%v", connection, err)
+			}
+			if choice.AccountKey != "one" || attempt.Candidate.CandidateID != "first" || scope.calls != 1 || !slices.Equal(calls, []codex.CandidateID{"first"}) {
+				t.Fatalf("choice=%q attempt=%q scope calls=%d attempts=%v", choice.AccountKey, attempt.Candidate.CandidateID, scope.calls, calls)
+			}
+		})
+	}
+}
+
+func TestServerCodexWebSocketPost101PinsFirstCandidateAcrossDialFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "network error"},
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "hard usage limit", status: http.StatusTooManyRequests, body: codexLiveUsageLimitBody},
+		{name: "server error", status: http.StatusInternalServerError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := requestPlan("one", "first", "same-identity-second")
+			second := requestPlan("two", "other-account")
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{first, second}}
+			var calls []codex.CandidateID
+			executor := codexWebSocketExecutorFunc(func(_ context.Context, _ RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+				calls = append(calls, attempt.Candidate.CandidateID)
+				if attempt.Candidate.CandidateID != "first" {
+					return new(websocket.Conn), nil, nil, nil
+				}
+				if test.status == 0 {
+					return nil, nil, nil, errors.New("dial failed")
+				}
+				return nil, &http.Response{
+					Status:     fmt.Sprintf("%d %s", test.status, http.StatusText(test.status)),
+					StatusCode: test.status,
+					Header:     make(http.Header),
+					Body:       http.NoBody,
+				}, []byte(test.body), errors.New("websocket: bad handshake")
+			})
+			server := &Server{
+				CodexRequests:          &CodexRequestRouter{Scope: scope},
+				CodexWebSocketExecutor: executor,
+			}
+
+			connection, choice, attempt, _, err := server.dialCodexWebSocketWithCapacity(
+				context.Background(), "wss://upstream.test/responses", nil, "gpt-5.4",
+			)
+			if connection != nil || err == nil {
+				t.Fatalf("connection=%p error=%v", connection, err)
+			}
+			if choice.AccountKey != "one" || attempt.Candidate.CandidateID != "first" {
+				t.Fatalf("choice=%q attempt=%q", choice.AccountKey, attempt.Candidate.CandidateID)
+			}
+			if scope.calls != 1 || !slices.Equal(calls, []codex.CandidateID{"first"}) {
+				t.Fatalf("scope calls=%d attempts=%v", scope.calls, calls)
+			}
+		})
+	}
+}
+
+func TestServerCodexWebSocketProductionPost101Characterisation(t *testing.T) {
+	first := requestPlan("one", "first", "same-identity-second")
+	routes := make(chan CodexRouteRequirements, 2)
+	scope := codexRequestScoperFunc(func(_ context.Context, requirements CodexRouteRequirements, _ codex.Revision, exclude ...codex.SelectionExclusion) (CodexRequestPlan, error) {
+		routes <- requirements
+		if len(exclude) != 0 {
+			return CodexRequestPlan{}, fmt.Errorf("unexpected WebSocket account exclusion: %+v", exclude)
+		}
+		return first, nil
+	})
+	type dispatch struct {
+		account        codex.AccountKey
+		candidate      codex.CandidateID
+		requestedModel string
+		effectiveModel string
+	}
+	dispatches := make(chan dispatch, 4)
+	executor := codexWebSocketExecutorFunc(func(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+		dispatches <- dispatch{
+			account:        choice.AccountKey,
+			candidate:      attempt.Candidate.CandidateID,
+			requestedModel: choice.RequestedModel,
+			effectiveModel: choice.EffectiveModel,
+		}
+		header := make(http.Header)
+		header.Set("Retry-After", "30")
+		header.Set("X-Request-Id", "upstream-request")
+		return nil, &http.Response{
+			Status:     "429 Too Many Requests",
+			StatusCode: http.StatusTooManyRequests,
+			Header:     header,
+			Body:       http.NoBody,
+		}, []byte(codexLiveUsageLimitBody), errors.New("websocket: bad handshake")
+	})
+	server := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://claude.test",
+			CodexUpstream:  "https://codex.test",
+			LocalToken:     "local-token",
+		},
+		CodexRequests:          &CodexRequestRouter{Scope: scope},
+		CodexWebSocketExecutor: executor,
+	}
+	handler, err := server.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	client, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxy.URL, "http")+legacyCodexResponsesPath, nil)
+	if err != nil {
+		t.Fatalf("downstream WebSocket upgrade: %v", err)
+	}
+	defer client.Close()
+	if response == nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("downstream upgrade response = %v, want 101", response)
+	}
+	if got := response.Header.Get("Retry-After"); got != "" {
+		t.Fatalf("downstream 101 projected later upstream Retry-After = %q", got)
+	}
+	select {
+	case route := <-routes:
+		t.Fatalf("route selected before first frame: %+v", route)
+	case attempt := <-dispatches:
+		t.Fatalf("upstream dispatched before first frame: %+v", attempt)
+	default:
+	}
+
+	// Production consumes exactly the first frame. This characterises model-aware
+	// routing only when that first frame is itself model-bearing.
+	if err := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-5.4"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseInternalServerErr) {
+		t.Fatalf("downstream read error = %v, want close 1011", err)
+	}
+
+	select {
+	case route := <-routes:
+		if route.RequestedModel != "gpt-5.4" {
+			t.Fatalf("route model = %q, want gpt-5.4", route.RequestedModel)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("model-aware route was not selected after first frame")
+	}
+	select {
+	case attempt := <-dispatches:
+		want := dispatch{account: "one", candidate: "first", requestedModel: "gpt-5.4", effectiveModel: "gpt-5.4"}
+		if attempt != want {
+			t.Fatalf("upstream dispatch = %+v, want %+v", attempt, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pinned upstream attempt was not dispatched after first frame")
+	}
+	select {
+	case route := <-routes:
+		t.Fatalf("additional route selected after upstream rejection: %+v", route)
+	case attempt := <-dispatches:
+		t.Fatalf("additional upstream attempt after rejection: %+v", attempt)
+	default:
+	}
+}
+
+func TestServerCodexWebSocketPost101ReturnsActualRelistedRevision(t *testing.T) {
+	plan := requestPlan("one", "candidate")
+	actual := plan.Attempts[0]
+	actual.Revision = "revision-new"
+	executor := codexWebSocketDispatchExecutorFunc(func(_ context.Context, _ RouteChoice, _ CandidateAttempt, _ string, _ http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
+		if onDispatch != nil {
+			onDispatch(actual)
+		}
+		return new(websocket.Conn), nil, nil, actual, nil
+	})
+	observer := &CodexTurnObserver{}
+	server := &Server{
+		CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}},
+		CodexWebSocketExecutor: executor,
+	}
+
+	connection, choice, returned, _, err := server.dialCodexWebSocketWithCapacity(
+		withCodexObservation(context.Background(), observer),
+		"wss://upstream.test/responses", nil, "gpt-5.4",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection == nil || choice.AccountKey != plan.Choice.AccountKey || returned != actual {
+		t.Fatalf("connection = %p, choice = %+v, returned = %+v", connection, choice, returned)
+	}
+	if observer.attempts.Load() != 1 {
+		t.Fatalf("observed attempts = %d, want 1", observer.attempts.Load())
+	}
+}
+
+func TestServer_Handler_AppServerIsRetired(t *testing.T) {
 	srv := &Server{Config: &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"}}
 	handler, err := srv.handler()
 	if err != nil {
@@ -2099,15 +2555,16 @@ func TestServer_Handler_AppServerRequiresWebsocket(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, codexAppServerPath, nil)
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUpgradeRequired {
-		t.Fatalf("status = %d, want 426", w.Code)
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410", w.Code)
 	}
-	if got := w.Header().Get("Upgrade"); got != "websocket" {
-		t.Errorf("Upgrade header = %q, want websocket", got)
+	if !strings.Contains(w.Body.String(), "retired") || !strings.Contains(w.Body.String(), legacyCodexResponsesPath) {
+		t.Fatalf("body = %q, want retirement guidance", w.Body.String())
 	}
 }
 
 func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	var gotModel string
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2148,7 +2605,7 @@ func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2185,6 +2642,7 @@ func TestServer_AppServerDowngradesSparkForPlusAccount(t *testing.T) {
 }
 
 func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	var gotModel string
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2218,7 +2676,7 @@ func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2255,6 +2713,7 @@ func TestServer_AppServerDowngradesSparkSuffixForPlusAccount(t *testing.T) {
 }
 
 func TestServer_AppServerPrefersProAccountForSpark(t *testing.T) {
+	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	var gotModel, gotAuth string
 	upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2289,7 +2748,7 @@ func TestServer_AppServerPrefersProAccountForSpark(t *testing.T) {
 
 	srv := &Server{
 		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: upstream.URL, LocalToken: "tok"},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: NewCodexSelector(func() []codex.CodexAccount {
 				return []codex.CodexAccount{
 					{Email: "plus@test.com", AccessToken: "plus-tok", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
@@ -2586,7 +3045,7 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 				AccountID:   "acct-1",
@@ -2622,6 +3081,72 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 	}
 }
 
+func TestServer_NativeCodex_ExhaustedResponsePassthrough(t *testing.T) {
+	hard429Prefix := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
+	oversized429 := hard429Prefix + strings.Repeat(" ", codexAttemptResponseLimit+1) + "\nopaque-429-suffix"
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		headerVals []string
+	}{
+		{name: "terminal 401", status: http.StatusUnauthorized, body: "upstream-401-sentinel: exact bytes\n", headerVals: []string{"auth-401-a", "auth-401-b"}},
+		{name: "terminal 403", status: http.StatusForbidden, body: "upstream-403-sentinel: exact bytes\n", headerVals: []string{"auth-403-a", "auth-403-b"}},
+		{name: "oversized unknown 429", status: http.StatusTooManyRequests, body: oversized429, headerVals: []string{"quota-429-a", "quota-429-b"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackingReadCloser{Reader: strings.NewReader(test.body)}
+			upstream := &http.Response{
+				Status:     fmt.Sprintf("%d exact upstream terminal", test.status),
+				StatusCode: test.status,
+				Header: http.Header{
+					"Content-Type":  {"application/x-cq-sentinel"},
+					"X-Cq-Upstream": test.headerVals,
+				},
+				Body:          body,
+				ContentLength: int64(len(test.body)),
+			}
+			executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"one-candidate": {{resp: upstream}},
+			}}
+			enforcer := testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{
+				AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4",
+			}}}, executor, fsutil.NewMemFS())
+			srv := &Server{
+				Config:            &Config{CodexUpstream: "https://upstream.invalid"},
+				CodexRequests:     &CodexRequestRouter{}, // Any enforcement bypass must fail.
+				CodexHTTPEnforcer: enforcer,
+			}
+			requestBody := fmt.Sprintf(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread-%d","turn_id":"turn-%d","request_kind":"turn"}}}`, test.status, test.status)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(requestBody))
+			request.Header.Set("Content-Type", "application/json")
+
+			srv.handleNativeCodex(recorder, request)
+
+			if recorder.Code != test.status {
+				t.Fatalf("status = %d, want %d; body = %q", recorder.Code, test.status, recorder.Body.String())
+			}
+			if values := recorder.Header().Values("X-Cq-Upstream"); !slices.Equal(values, test.headerVals) {
+				t.Fatalf("X-Cq-Upstream = %v, want %v", values, test.headerVals)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/x-cq-sentinel" {
+				t.Fatalf("Content-Type = %q, want application/x-cq-sentinel", got)
+			}
+			if got := recorder.Body.String(); got != test.body {
+				t.Fatalf("body length = %d, want %d; suffix present = %v", len(got), len(test.body), strings.HasSuffix(got, "opaque-429-suffix"))
+			}
+			if body.closeCalls != 1 {
+				t.Fatalf("body close calls = %d, want 1", body.closeCalls)
+			}
+			if !slices.Equal(executor.calls, []codex.CandidateID{"one-candidate"}) {
+				t.Fatalf("attempts = %v, want [one-candidate]", executor.calls)
+			}
+		})
+	}
+}
+
 func TestServer_NativeCodex_NoTransport(t *testing.T) {
 	srv := &Server{
 		Config: &Config{
@@ -2652,7 +3177,7 @@ func TestServer_NativeCodex_NoProxyTokenRequired(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "secret-proxy-token",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{
 				AccessToken: "codex-tok",
 			}},
@@ -2719,7 +3244,7 @@ func TestServer_NativeCodex_HeadroomCompressesBody(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2748,6 +3273,428 @@ func TestServer_NativeCodex_HeadroomCompressesBody(t *testing.T) {
 	}
 }
 
+func TestServer_NativeCodex_ZstdHeadroomCompressesDecodedBody(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":"short"}]`)
+	bridgeRequests := make(chan headroomResponsesRequest, 1)
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloadDiag, err := OpenPayloadWriter(payloadPath)
+	if err != nil {
+		t.Fatalf("OpenPayloadWriter: %v", err)
+	}
+	defer payloadDiag.Close()
+
+	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
+		var request headroomResponsesRequest
+		if err := json.Unmarshal(requestBody, &request); err != nil {
+			return []byte(`{"ok":false}`)
+		}
+		bridgeRequests <- request
+		response, _ := json.Marshal(headroomResponsesResponse{
+			OK:          true,
+			Input:       compressedInput,
+			TokensSaved: 42,
+		})
+		return response
+	})
+
+	var upstreamBody []byte
+	var upstreamHeader http.Header
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		upstreamHeader = request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compressed"}`)),
+		}, nil
+	})
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    transport,
+		},
+		Headroom:    bridge,
+		PayloadDiag: payloadDiag,
+	}
+
+	originalJSON := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"long input"}],"conversation_id":"conversation-zstd"}`)
+	encoded := encodeCodexZstd(t, originalJSON)
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(encoded)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	request.Header.Set("X-Codex-Test", "preserved")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	select {
+	case got := <-bridgeRequests:
+		if got.Model != "gpt-5.4" {
+			t.Fatalf("bridge model = %q, want gpt-5.4", got.Model)
+		}
+	default:
+		t.Fatal("headroom bridge was not called with decoded request")
+	}
+	if upstreamHeader.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("upstream Content-Encoding = %q, want zstd", upstreamHeader.Get("Content-Encoding"))
+	}
+	if upstreamHeader.Get("Content-Length") != fmt.Sprint(len(upstreamBody)) {
+		t.Fatalf("upstream Content-Length = %q, want %d", upstreamHeader.Get("Content-Length"), len(upstreamBody))
+	}
+	if upstreamHeader.Get("X-Codex-Test") != "preserved" {
+		t.Fatalf("upstream X-Codex-Test = %q, want preserved", upstreamHeader.Get("X-Codex-Test"))
+	}
+	decoded, err := DecodeCodexRequest(upstreamBody, upstreamHeader.Get("Content-Encoding"), DefaultCodexZstdLimits)
+	if err != nil {
+		t.Fatalf("decode upstream request: %v", err)
+	}
+	var upstreamPayload map[string]json.RawMessage
+	if err := json.Unmarshal(decoded.Decoded(), &upstreamPayload); err != nil {
+		t.Fatalf("decode upstream JSON: %v", err)
+	}
+	if string(upstreamPayload["model"]) != `"gpt-5.4"` {
+		t.Fatalf("upstream model = %s, want gpt-5.4", upstreamPayload["model"])
+	}
+	if string(upstreamPayload["input"]) != string(compressedInput) {
+		t.Fatalf("upstream input = %s, want %s", upstreamPayload["input"], compressedInput)
+	}
+	if err := payloadDiag.Close(); err != nil {
+		t.Fatalf("close payload diagnostics: %v", err)
+	}
+	events := readPayloadEvents(t, payloadPath)
+	if len(events) != 1 {
+		t.Fatalf("payload events = %d, want 1", len(events))
+	}
+	if events[0].Model != "gpt-5.4" {
+		t.Fatalf("payload model = %q, want gpt-5.4", events[0].Model)
+	}
+	if events[0].SessionSource != "body:conversation_id" || events[0].SessionKey == "" {
+		t.Fatalf("payload session = %q/%q, want body conversation identity", events[0].SessionSource, events[0].SessionKey)
+	}
+	if events[0].BodyBytes != len(encoded) {
+		t.Fatalf("payload body bytes = %d, want original encoded length %d", events[0].BodyBytes, len(encoded))
+	}
+}
+
+func TestServer_NativeCodex_EnforcementPreparesHeadroomBodyOncePerRequest(t *testing.T) {
+	compressedInput := json.RawMessage(`[{"role":"user","content":"short"}]`)
+	bridgeRequests := make(chan headroomResponsesRequest, 2)
+	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
+		var request headroomResponsesRequest
+		if err := json.Unmarshal(requestBody, &request); err != nil {
+			t.Errorf("decode Headroom request: %v", err)
+			return []byte(`{"ok":false}`)
+		}
+		bridgeRequests <- request
+		response, _ := json.Marshal(headroomResponsesResponse{
+			OK:          true,
+			Input:       compressedInput,
+			TokensSaved: 42,
+		})
+		return response
+	})
+
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{
+		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+		{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+	}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"one": {{status: http.StatusTooManyRequests, body: codexLiveUsageLimitBody}},
+		"two": {{status: http.StatusOK, body: completedSSE("response-two")}},
+	}}
+	srv := &Server{
+		Config:            &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexRequests:     &CodexRequestRouter{},
+		CodexHTTPEnforcer: testHTTPEnforcer(t, chooser, executor, fsutil.NewMemFS()),
+		Headroom:          bridge,
+	}
+
+	originalInput := json.RawMessage(`[{"role":"user","content":"long input"}]`)
+	originalJSON := []byte(`{"type":"response.create","model":"gpt-5.4","input":` + string(originalInput) + `,"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread-headroom","turn_id":"turn-headroom","request_kind":"turn"}}}`)
+	encoded := encodeCodexZstd(t, originalJSON)
+	request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(encoded))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if calls := len(bridgeRequests); calls != 1 {
+		t.Fatalf("Headroom calls = %d, want 1", calls)
+	}
+	bridgeRequest := <-bridgeRequests
+	if bridgeRequest.Model != "gpt-5.4" || string(bridgeRequest.Input) != string(originalInput) {
+		t.Fatalf("Headroom request model/input = %q/%s, want original decoded %q/%s", bridgeRequest.Model, bridgeRequest.Input, "gpt-5.4", originalInput)
+	}
+	if chooser.lastRequirements.RequestedModel != "gpt-5.4" {
+		t.Fatalf("routing model = %q, want original model gpt-5.4", chooser.lastRequirements.RequestedModel)
+	}
+	if !slices.Equal(executor.accounts, []codex.AccountKey{"one", "two"}) {
+		t.Fatalf("attempt accounts = %v, want [one two]", executor.accounts)
+	}
+	if len(executor.bodies) != 2 || !bytes.Equal(executor.bodies[0], executor.bodies[1]) {
+		t.Fatalf("attempt body count/equality = %d/%v, want 2/true", len(executor.bodies), len(executor.bodies) == 2 && bytes.Equal(executor.bodies[0], executor.bodies[1]))
+	}
+	for index, header := range executor.headers {
+		if header.Get("Content-Encoding") != "zstd" {
+			t.Fatalf("attempt %d Content-Encoding = %q, want zstd", index+1, header.Get("Content-Encoding"))
+		}
+		if header.Get("Content-Length") != fmt.Sprint(len(executor.bodies[index])) {
+			t.Fatalf("attempt %d Content-Length = %q, want %d", index+1, header.Get("Content-Length"), len(executor.bodies[index]))
+		}
+	}
+	decoded, err := DecodeCodexRequest(executor.bodies[0], "zstd", DefaultCodexZstdLimits)
+	if err != nil {
+		t.Fatalf("decode prepared body: %v", err)
+	}
+	var prepared map[string]json.RawMessage
+	if err := json.Unmarshal(decoded.Decoded(), &prepared); err != nil {
+		t.Fatalf("decode prepared JSON: %v", err)
+	}
+	if string(prepared["input"]) != string(compressedInput) {
+		t.Fatalf("prepared input = %s, want %s", prepared["input"], compressedInput)
+	}
+}
+
+func TestServer_NativeCodex_ZstdHeadroomNoRewritePreservesFrame(t *testing.T) {
+	bridgeCalled := false
+	bridge := fakeBridgeRaw(t, func(requestBody []byte) []byte {
+		bridgeCalled = true
+		var request headroomResponsesRequest
+		if err := json.Unmarshal(requestBody, &request); err != nil {
+			return []byte(`{"ok":false}`)
+		}
+		response, _ := json.Marshal(headroomResponsesResponse{OK: false})
+		return response
+	})
+
+	var upstreamBody []byte
+	var upstreamHeader http.Header
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		upstreamHeader = request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_unchanged"}`)),
+		}, nil
+	})
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner:    transport,
+		},
+		Headroom: bridge,
+	}
+
+	encoded := encodeCodexZstd(t, []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"unchanged"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(encoded)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("Content-Length", fmt.Sprint(len(encoded)))
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if !bridgeCalled {
+		t.Fatal("headroom bridge was not called with decoded request")
+	}
+	if string(upstreamBody) != string(encoded) {
+		t.Fatal("no-op headroom request did not preserve original zstd frame")
+	}
+	if upstreamHeader.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("upstream Content-Encoding = %q, want zstd", upstreamHeader.Get("Content-Encoding"))
+	}
+	if upstreamHeader.Get("Content-Length") != fmt.Sprint(len(encoded)) {
+		t.Fatalf("upstream Content-Length = %q, want %d", upstreamHeader.Get("Content-Length"), len(encoded))
+	}
+}
+
+func TestServer_NativeCodex_MalformedZstdFailsClosed(t *testing.T) {
+	upstreamCalled := false
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				upstreamCalled = true
+				return nil, fmt.Errorf("unexpected upstream request")
+			}),
+		},
+		Headroom: fakeBridgeRaw(t, func(_ []byte) []byte {
+			t.Error("headroom bridge must not receive malformed encoded request")
+			return nil
+		}),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader("not-zstd"))
+	request.Header.Set("Content-Encoding", "zstd")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body: %s", response.Code, response.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("malformed zstd request reached upstream")
+	}
+}
+
+func TestServer_NativeCodex_ZstdHeadroomEncodeFailureFailsBeforeDispatch(t *testing.T) {
+	upstreamCalled := false
+	expandedInput, err := json.Marshal([]map[string]string{{"role": "user", "content": strings.Repeat("a", 32<<10)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				upstreamCalled = true
+				return nil, fmt.Errorf("unexpected upstream request")
+			}),
+		},
+		Headroom: fakeBridgeRaw(t, func(_ []byte) []byte {
+			response, _ := json.Marshal(headroomResponsesResponse{
+				OK:          true,
+				Input:       expandedInput,
+				TokensSaved: 1,
+			})
+			return response
+		}),
+	}
+	original := encodeCodexZstd(t, []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"compress me"}]}`))
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(original)))
+	request.Header.Set("Content-Encoding", "zstd")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body: %s", response.Code, response.Body.String())
+	}
+	if upstreamCalled {
+		t.Fatal("failed zstd re-encoding reached upstream")
+	}
+	var payload struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Type != "api_error" {
+		t.Fatalf("error type = %q, want api_error", payload.Error.Type)
+	}
+}
+
+func TestServer_NativeCodex_PlainBodyOverProtocolEncodingLimitStillForwards(t *testing.T) {
+	originalBody := []byte(`{"model":"gpt-5.4","input":"` + strings.Repeat("x", DefaultCodexZstdLimits.MaxEncodedBytes) + `"}`)
+	var upstreamBody []byte
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+	srv := &Server{
+		Config: &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+		CodexTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+			Inner: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				upstreamBody, _ = io.ReadAll(request.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"resp_large"}`)),
+				}, nil
+			}),
+		},
+		CodexObserver: observer,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(string(originalBody)))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	srv.handleNativeCodex(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+	}
+	if string(upstreamBody) != string(originalBody) {
+		t.Fatal("plain request within native body limit changed before upstream")
+	}
+	if health := observer.Health(); health.RequestDecodeErrors != 0 {
+		t.Fatalf("observer request decode errors = %d, want 0 for shared decoded view", health.RequestDecodeErrors)
+	}
+}
+
+func TestServer_NativeCodex_RewritesHandlerAcceptedLargeBodies(t *testing.T) {
+	identityBody, zstdBody := handlerAcceptedRewriteFixtures(t)
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+	}{
+		{name: "identity", body: identityBody, encoding: "identity"},
+		{name: "zstd", body: zstdBody, encoding: "zstd"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var upstreamBody []byte
+			var upstreamEncoding string
+			router := testCodexRequestRouter(
+				&fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
+				roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					upstreamBody, _ = io.ReadAll(request.Body)
+					upstreamEncoding = request.Header.Get("Content-Encoding")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"id":"resp_large_rewritten"}`)),
+					}, nil
+				}),
+			)
+			router.Scope.(*legacySelectorScope).effective = codexFallbackModel
+			srv := &Server{
+				Config:        &Config{CodexUpstream: "https://chatgpt.com/backend-api/codex", LocalToken: "tok"},
+				CodexRequests: router,
+			}
+			request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Content-Encoding", test.encoding)
+			request.Header.Set("Content-Length", fmt.Sprint(len(test.body)))
+			response := httptest.NewRecorder()
+
+			srv.handleNativeCodex(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
+			}
+			limits := DefaultCodexZstdLimits
+			limits.MaxEncodedBytes = maxRequestBody
+			limits.MaxDecodedBytes = maxRequestBody
+			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, limits)
+			if err != nil {
+				t.Fatalf("decode upstream request: %v", err)
+			}
+			if model := extractModel(decoded.Decoded()); model != codexFallbackModel {
+				t.Fatalf("upstream model = %q, want %q", model, codexFallbackModel)
+			}
+		})
+	}
+}
+
 // TestServer_NativeCodex_HeadroomBridgeError_FallsBackToOriginal verifies that
 // when the bridge returns an error, handleNativeCodex sends the original body.
 func TestServer_NativeCodex_HeadroomBridgeError_FallsBackToOriginal(t *testing.T) {
@@ -2771,7 +3718,7 @@ func TestServer_NativeCodex_HeadroomBridgeError_FallsBackToOriginal(t *testing.T
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2823,7 +3770,7 @@ func TestServer_NativeCodex_HeadroomSkipsPreviousResponseID(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -2865,7 +3812,7 @@ func TestServer_NativeCodex_HeadroomCanonicalAndLegacyPathBehaveTheSame(t *testi
 					CodexUpstream: upstream.URL,
 					LocalToken:    "tok",
 				},
-				CodexTransport: &CodexTokenTransport{
+				CodexTransport: &legacyCodexTokenTransport{
 					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 					Inner:    http.DefaultTransport,
 				},
@@ -2957,7 +3904,7 @@ func TestServer_NativeCodex_CacheModeUsesCacheSemantics(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -3041,7 +3988,7 @@ func TestServer_NativeCodex_TokenModeUsesTokenSemantics(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -3380,7 +4327,7 @@ func TestServerPayloadDiagnosticsNativeCodexEmitsEvent(t *testing.T) {
 			CodexUpstream: "https://chatgpt.com/backend-api/codex",
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -3439,7 +4386,7 @@ func TestServerPayloadDiagnosticsCompactEmitsEvent(t *testing.T) {
 			CodexUpstream: "https://chatgpt.com/backend-api/codex",
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -3509,7 +4456,7 @@ func TestServerPayloadDiagnosticsNoEventForBinaryWebSocketFrame(t *testing.T) {
 			CodexUpstream:  upstream.URL,
 			LocalToken:     "local-tok",
 		},
-		CodexUpgradeTransport: &CodexTokenTransport{
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},
@@ -3783,7 +4730,7 @@ func TestServer_NativeCodex_HeadroomNil_NoCompression(t *testing.T) {
 			CodexUpstream: upstream.URL,
 			LocalToken:    "tok",
 		},
-		CodexTransport: &CodexTokenTransport{
+		CodexTransport: &legacyCodexTokenTransport{
 			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-tok"}},
 			Inner:    http.DefaultTransport,
 		},

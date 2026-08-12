@@ -1,0 +1,19 @@
+{
+  "stage": 15,
+  "scope": "deterministic restart rehearsal",
+  "result": "passed",
+  "transition": "enforce -> off",
+  "proof": {
+    "exact_authoritative_turn_reused_original_account": true,
+    "account_selector_not_called_for_exact_turn": true,
+    "unseen_turn_returned_to_legacy_route": true,
+    "shadow_epoch_promoted": false,
+    "retained_record_written_as_system_auth": false
+  },
+  "automated": {
+    "test": "TestCodexHTTPRollbackKeepsExactAuthorityFence",
+    "race_count": 100,
+    "result": "passed"
+  },
+  "installed_service_drain": "pending seven-day soak"
+}

@@ -6,8 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -16,6 +15,9 @@ import (
 
 // CodexAccount holds parsed credentials from a Codex auth.json file.
 type CodexAccount struct {
+	AccountKey   AccountKey
+	CandidateID  CandidateID
+	Revision     Revision
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
@@ -31,8 +33,8 @@ type CodexAccount struct {
 
 // codexAuthFile is the on-disk format shared with Codex CLI and codex-auth.
 type codexAuthFile struct {
-	AuthMode    string `json:"auth_mode"`
-	Tokens      struct {
+	AuthMode string `json:"auth_mode"`
+	Tokens   struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		IDToken      string `json:"id_token"`
@@ -46,59 +48,17 @@ type codexAuthFile struct {
 // 1. ~/.codex/auth.json (active account)
 // 2. ~/.codex/accounts/*.auth.json (additional accounts, codex-auth interop)
 func DiscoverAccounts(fs fsutil.FileSystem) []CodexAccount {
-	home, err := fs.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-
-	var accounts []CodexAccount
-	seen := make(map[string]int) // recordKey -> index in accounts
-
-	// 1. Read active account from ~/.codex/auth.json
-	activeFile := filepath.Join(home, ".codex", "auth.json")
-	if acct, ok := parseAccountFile(fs, activeFile); ok {
-		acct.IsActive = true
-		if acct.RecordKey != "" {
-			seen[acct.RecordKey] = len(accounts)
-		}
-		accounts = append(accounts, acct)
-	}
-
-	// 2. Read additional accounts from ~/.codex/accounts/*.auth.json
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-	entries, err := fs.ReadDir(accountsDir)
-	if err != nil {
-		return accounts
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
+	inventory := DiscoverInventory(fs)
+	accounts := make([]CodexAccount, 0, len(inventory.Accounts))
+	for _, logical := range inventory.Accounts {
+		candidates := ResolveCandidate(logical, "", time.Now())
+		if len(candidates) == 0 {
 			continue
 		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".auth.json") {
-			continue
-		}
-		path := filepath.Join(accountsDir, name)
-		acct, ok := parseAccountFile(fs, path)
-		if !ok {
-			continue
-		}
-		if acct.RecordKey != "" {
-			if idx, exists := seen[acct.RecordKey]; exists {
-				// Already discovered from auth.json. Prefer the stored accounts/
-				// copy so future reads keep using the canonical persisted tokens.
-				if accounts[idx].IsActive {
-					acct.IsActive = true
-					acct.FilePath = path
-					accounts[idx] = acct
-				}
-				continue
-			}
-			seen[acct.RecordKey] = len(accounts)
-		}
-		accounts = append(accounts, acct)
+		account := candidates[0].Credential
+		account.IsActive = logical.Active
+		accounts = append(accounts, account)
 	}
-
 	return accounts
 }
 
@@ -143,7 +103,8 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 
 // Accounts implements provider.AccountManager for Codex.
 type Accounts struct {
-	FS fsutil.FileSystem
+	FS    fsutil.FileSystem
+	Admin CredentialAdmin
 }
 
 func (a *Accounts) ProviderID() provider.ID { return provider.Codex }
@@ -164,226 +125,91 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 	return out, nil
 }
 
-// Switch sets the active Codex account by copying the matching account's
-// auth file to ~/.codex/auth.json and updating codex-auth's registry.
-// Before overwriting, it adopts the current auth.json into ~/.codex/accounts/
-// if it's not already stored there (preserves accounts created by codex login).
-func (a *Accounts) Switch(_ context.Context, identifier string) (provider.Account, error) {
-	accts := DiscoverAccounts(a.FS)
-
-	home, err := a.FS.UserHomeDir()
-	if err != nil {
-		return provider.Account{}, fmt.Errorf("home dir: %w", err)
+// Switch requires the credential coordinator for all system mutations.
+func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Account, error) {
+	if a.Admin == nil {
+		return provider.Account{}, errors.New("Codex credential coordinator required")
 	}
-
-	// Adopt the current active account into accounts/ before overwriting.
-	adoptActiveAccount(a.FS, home, accts)
-
-	for _, acct := range accts {
-		if acct.Email != identifier {
-			continue
-		}
-		if acct.FilePath == "" {
-			return provider.Account{}, fmt.Errorf("no stored auth file for %q", identifier)
-		}
-
-		// Read the account file to copy it
-		data, err := a.FS.ReadFile(acct.FilePath)
-		if err != nil {
-			return provider.Account{}, fmt.Errorf("read account file: %w", err)
-		}
-
-		// Atomic write to ~/.codex/auth.json
-		dest := filepath.Join(home, ".codex", "auth.json")
-		tmp := dest + ".tmp"
-		if err := a.FS.WriteFile(tmp, data, 0o600); err != nil {
-			return provider.Account{}, fmt.Errorf("write tmp: %w", err)
-		}
-		if err := a.FS.Rename(tmp, dest); err != nil {
-			a.FS.Remove(tmp)
-			return provider.Account{}, fmt.Errorf("rename: %w", err)
-		}
-
-		// Update codex-auth registry if it exists
-		updateRegistryActiveKey(a.FS, home, acct.RecordKey)
-
-		return provider.Account{
-			AccountID: acct.AccountID,
-			Email:     acct.Email,
-			Label:     acct.PlanType,
-			Active:    true,
-			SwitchID:  acct.Email,
-		}, nil
-	}
-	return provider.Account{}, fmt.Errorf("no account found with email %q", identifier)
+	return a.switchThroughCoordinator(ctx, identifier)
 }
 
-func (a *Accounts) Remove(_ context.Context, identifier string) error {
-	accts := DiscoverAccounts(a.FS)
-	home, err := a.FS.UserHomeDir()
+func (a *Accounts) switchThroughCoordinator(ctx context.Context, identifier string) (provider.Account, error) {
+	logical, err := matchingLogicalAccount(DiscoverInventory(a.FS), identifier)
 	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
+		return provider.Account{}, err
 	}
-
-	authPath := filepath.Join(home, ".codex", "auth.json")
-	recordKeys := make(map[string]bool)
-	found := false
-	for _, acct := range accts {
-		if acct.Email != identifier {
+	if logical.Active {
+		return providerAccount(logical, true), nil
+	}
+	for _, candidate := range logical.Candidates {
+		if candidate.Source != SourceManaged {
 			continue
 		}
-		found = true
-		if acct.RecordKey != "" {
-			recordKeys[acct.RecordKey] = true
+		result, err := a.Admin.Activate(ctx, candidate.Ref, candidate.Revision)
+		if err != nil {
+			return provider.Account{}, err
 		}
-		if acct.FilePath != "" && acct.FilePath != authPath {
-			if err := a.FS.Remove(acct.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove stored auth file: %w", err)
-			}
+		if result.ProjectionError != nil {
+			fmt.Fprintf(os.Stderr, "cq: Codex active projection: %v\n", result.ProjectionError)
 		}
-		if acct.IsActive {
-			if err := a.FS.Remove(authPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("remove active auth file: %w", err)
-			}
+		return providerAccount(logical, true), nil
+	}
+	return provider.Account{}, errors.New("Codex account has no managed activation candidate")
+}
+
+// Remove requires the credential coordinator for all managed/system mutations.
+func (a *Accounts) Remove(ctx context.Context, identifier string) error {
+	if a.Admin == nil {
+		return errors.New("Codex credential coordinator required")
+	}
+	return a.removeThroughCoordinator(ctx, identifier)
+}
+
+func (a *Accounts) removeThroughCoordinator(ctx context.Context, identifier string) error {
+	logical, err := matchingLogicalAccount(DiscoverInventory(a.FS), identifier)
+	if err != nil {
+		return err
+	}
+	revisions := make(RevisionSet)
+	for _, candidate := range logical.Candidates {
+		if candidate.Source == SourceManaged {
+			revisions[candidate.Ref.CandidateID] = candidate.Revision
 		}
 	}
-	if !found {
-		return fmt.Errorf("no account found with email %q", identifier)
+	result, err := a.Admin.RemoveManaged(ctx, logical.Key, revisions, false)
+	if err != nil {
+		return err
 	}
-	removeRegistryAccounts(a.FS, home, recordKeys)
+	if result.ProjectionError != nil {
+		fmt.Fprintf(os.Stderr, "cq: Codex inactive projection: %v\n", result.ProjectionError)
+	}
+	if result.PendingRecovery {
+		return errors.New("Codex account removal requires recovery")
+	}
 	return nil
 }
 
-// adoptActiveAccount saves the current ~/.codex/auth.json into
-// ~/.codex/accounts/{record_key}.auth.json if it isn't already stored there.
-// This preserves accounts originally created by `codex login` (Codex CLI)
-// so they aren't lost when Switch overwrites auth.json.
-func adoptActiveAccount(fs fsutil.FileSystem, home string, accts []CodexAccount) {
-	authPath := filepath.Join(home, ".codex", "auth.json")
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-
-	for _, acct := range accts {
-		if !acct.IsActive {
-			continue
+func matchingLogicalAccount(inventory Inventory, identifier string) (LogicalAccount, error) {
+	var matches []LogicalAccount
+	for _, logical := range inventory.Accounts {
+		if logical.Identity.Email == identifier {
+			matches = append(matches, logical)
 		}
-		if acct.RecordKey == "" {
-			break // can't adopt without a record key
-		}
-		// If FilePath already points into accounts/, it's already stored.
-		if acct.FilePath != authPath {
-			break
-		}
-		// Active account only lives in auth.json — adopt it.
-		data, err := fs.ReadFile(authPath)
-		if err != nil {
-			break
-		}
-		if err := fs.MkdirAll(accountsDir, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: adopt account: mkdir: %v\n", err)
-			break
-		}
-		dest := filepath.Join(accountsDir, acct.RecordKey+".auth.json")
-		tmp := dest + ".tmp"
-		if err := fs.WriteFile(tmp, data, 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: adopt account: write: %v\n", err)
-			break
-		}
-		if err := fs.Rename(tmp, dest); err != nil {
-			fs.Remove(tmp)
-			fmt.Fprintf(os.Stderr, "cq: adopt account: rename: %v\n", err)
-		}
-		break
 	}
+	if len(matches) == 0 {
+		return LogicalAccount{}, fmt.Errorf("no account found with email %q", identifier)
+	}
+	if len(matches) != 1 {
+		return LogicalAccount{}, fmt.Errorf("email %q matches multiple Codex accounts", identifier)
+	}
+	return matches[0], nil
 }
 
-// updateRegistryActiveKey updates active_account_key in codex-auth's registry.json.
-// Best-effort: errors are logged to stderr and swallowed.
-func updateRegistryActiveKey(fs fsutil.FileSystem, home, recordKey string) {
-	if recordKey == "" {
-		return
+func providerAccount(logical LogicalAccount, active bool) provider.Account {
+	return provider.Account{
+		AccountID: logical.Identity.AccountID, Email: logical.Identity.Email,
+		Label: logical.Identity.PlanType, Active: active, SwitchID: logical.Identity.Email,
 	}
-	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
-	data, err := fs.ReadFile(regPath)
-	if err != nil {
-		return // registry doesn't exist, nothing to update
-	}
-
-	var reg map[string]any
-	if json.Unmarshal(data, &reg) != nil {
-		return
-	}
-
-	reg["active_account_key"] = recordKey
-	updated, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return
-	}
-
-	tmp := regPath + ".tmp"
-	if err := fs.WriteFile(tmp, updated, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: update registry: write: %v\n", err)
-		return
-	}
-	if err := fs.Rename(tmp, regPath); err != nil {
-		fs.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: update registry: rename: %v\n", err)
-	}
-}
-
-// PersistCodexAccount atomically rewrites the account's on-disk auth.json file
-// (and ~/.codex/auth.json when IsActive) with updated tokens. The write follows
-// the same tmp+rename pattern used throughout this package.
-func PersistCodexAccount(fs fsutil.FileSystem, acct CodexAccount, home string) error {
-	data, err := fs.ReadFile(acct.FilePath)
-	if err != nil {
-		return fmt.Errorf("read account file: %w", err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return fmt.Errorf("parse account file: %w", err)
-	}
-	if doc == nil {
-		doc = make(map[string]any)
-	}
-
-	tokens, _ := doc["tokens"].(map[string]any)
-	if tokens == nil {
-		tokens = make(map[string]any)
-	}
-	tokens["access_token"] = acct.AccessToken
-	if acct.RefreshToken != "" {
-		tokens["refresh_token"] = acct.RefreshToken
-	}
-	if acct.IDToken != "" {
-		tokens["id_token"] = acct.IDToken
-	}
-	if acct.AccountID != "" {
-		tokens["account_id"] = acct.AccountID
-	}
-	doc["tokens"] = tokens
-	if acct.ExpiresAt > 0 {
-		doc["cq_expires_at"] = acct.ExpiresAt
-	} else {
-		delete(doc, "cq_expires_at")
-	}
-
-	updated, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("marshal account file: %w", err)
-	}
-
-	if err := atomicWrite(fs, acct.FilePath, updated); err != nil {
-		return fmt.Errorf("write account file: %w", err)
-	}
-
-	// If active, also update ~/.codex/auth.json.
-	if acct.IsActive {
-		activeFile := filepath.Join(home, ".codex", "auth.json")
-		if err := atomicWrite(fs, activeFile, updated); err != nil {
-			return fmt.Errorf("write active auth file: %w", err)
-		}
-	}
-	return nil
 }
 
 // atomicWrite writes data to path using a tmp+rename pattern.
@@ -397,52 +223,4 @@ func atomicWrite(fs fsutil.FileSystem, path string, data []byte) error {
 		return err
 	}
 	return nil
-}
-
-func removeRegistryAccounts(fs fsutil.FileSystem, home string, recordKeys map[string]bool) {
-	if len(recordKeys) == 0 {
-		return
-	}
-	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
-	data, err := fs.ReadFile(regPath)
-	if err != nil {
-		return
-	}
-
-	var reg map[string]any
-	if json.Unmarshal(data, &reg) != nil {
-		return
-	}
-	if active, ok := reg["active_account_key"].(string); ok && recordKeys[active] {
-		reg["active_account_key"] = ""
-	}
-	if rawAccounts, ok := reg["accounts"].([]any); ok {
-		filtered := make([]any, 0, len(rawAccounts))
-		for _, raw := range rawAccounts {
-			acctMap, ok := raw.(map[string]any)
-			if !ok {
-				filtered = append(filtered, raw)
-				continue
-			}
-			key, _ := acctMap["account_key"].(string)
-			if recordKeys[key] {
-				continue
-			}
-			filtered = append(filtered, raw)
-		}
-		reg["accounts"] = filtered
-	}
-	updated, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := regPath + ".tmp"
-	if err := fs.WriteFile(tmp, updated, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: update registry: write: %v\n", err)
-		return
-	}
-	if err := fs.Rename(tmp, regPath); err != nil {
-		fs.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: update registry: rename: %v\n", err)
-	}
 }

@@ -85,6 +85,14 @@ The generated formula service runs `cq proxy start` and writes logs to `~/Librar
 
 Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain available for manual macOS workflows, but they are no longer the supported Homebrew path.
 
+For local development rollouts, never overwrite the running executable in place
+with `cp`, `install`, or shell redirection. macOS can kill the mapped process with
+`SIGKILL (Code Signature Invalid)` while its inode changes. Build and validate a
+new executable under a unique name in the destination directory, preserve the
+old executable as a rollback, atomically rename the new executable into place,
+then restart and health-check the service. The rename must stay on the same
+filesystem; a cross-filesystem move can degrade to a copy.
+
 ### Required Secret
 
 The release workflow needs a `HOMEBREW_TAP_TOKEN` repository secret — a GitHub PAT with `repo` scope on `jacobcxdev/homebrew-tap`.

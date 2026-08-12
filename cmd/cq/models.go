@@ -162,6 +162,7 @@ func defaultLocalRegistryRefresh() error {
 	if err != nil {
 		return err
 	}
+	defer reg.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	diag, err := reg.Refresher.Refresh(ctx)

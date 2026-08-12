@@ -8,7 +8,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+type CodexWindowPrimingConfig struct {
+	Enabled        bool              `json:"enabled"`
+	ModelOverrides map[string]string `json:"model_overrides,omitempty"`
+}
 
 const (
 	// DefaultPort is the default proxy listen port.
@@ -44,6 +52,65 @@ type Config struct {
 	// inputs, system prompts, compact summaries, and message content. Do not
 	// share without review. Requires a proxy restart to take effect.
 	PayloadDiagnosticsLog string `json:"payload_diagnostics_log,omitempty"`
+	// CodexTurnRouting and CodexWSTurnRouting apply only after proxy restart.
+	CodexTurnRouting              CodexRoutingMode         `json:"codex_turn_routing"`
+	CodexWSTurnRouting            CodexRoutingMode         `json:"codex_ws_turn_routing"`
+	CodexRoutingDefaultAccountKey codex.AccountKey         `json:"codex_routing_default_account_key,omitempty"`
+	CodexLeaseRetentionDays       int                      `json:"codex_lease_retention_days"`
+	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
+
+	unknownFields map[string]json.RawMessage
+}
+
+var configKnownFields = map[string]bool{
+	"port": true, "claude_upstream": true, "codex_upstream": true,
+	"local_token": true, "headroom": true, "headroom_mode": true,
+	"pinned_claude_account": true, "diagnostics_log": true,
+	"payload_diagnostics_log": true, "codex_turn_routing": true,
+	"codex_ws_turn_routing": true, "codex_lease_retention_days": true,
+	"codex_routing_default_account_key": true,
+	"codex_window_priming":              true,
+}
+
+// UnmarshalJSON retains fields unknown to this build for N/N-1 safe writes.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type wireConfig Config
+	var known wireConfig
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	unknown := make(map[string]json.RawMessage)
+	for key, value := range raw {
+		if !configKnownFields[key] {
+			unknown[key] = append(json.RawMessage(nil), value...)
+		}
+	}
+	*c = Config(known)
+	c.unknownFields = unknown
+	return nil
+}
+
+// MarshalJSON merges preserved future fields with fields known to this build.
+func (c Config) MarshalJSON() ([]byte, error) {
+	type wireConfig Config
+	knownData, err := json.Marshal(wireConfig(c))
+	if err != nil {
+		return nil, err
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(knownData, &merged); err != nil {
+		return nil, err
+	}
+	for key, value := range c.unknownFields {
+		if !configKnownFields[key] {
+			merged[key] = append(json.RawMessage(nil), value...)
+		}
+	}
+	return json.Marshal(merged)
 }
 
 // ResolvedHeadroomMode returns the effective HeadroomMode for this config.
@@ -74,6 +141,15 @@ func (c *Config) setDefaults() {
 	if c.CodexUpstream == "" {
 		c.CodexUpstream = DefaultCodexUpstream
 	}
+	if c.CodexTurnRouting == "" {
+		c.CodexTurnRouting = CodexRoutingOff
+	}
+	if c.CodexWSTurnRouting == "" {
+		c.CodexWSTurnRouting = CodexRoutingOff
+	}
+	if c.CodexLeaseRetentionDays == 0 {
+		c.CodexLeaseRetentionDays = 7
+	}
 }
 
 func (c *Config) validate() error {
@@ -91,6 +167,20 @@ func (c *Config) validate() error {
 		// valid
 	default:
 		return fmt.Errorf("invalid headroom_mode %q: must be \"token\" or \"cache\"", c.HeadroomMode)
+	}
+	if err := c.CodexTurnRouting.validate("codex_turn_routing"); err != nil {
+		return err
+	}
+	if err := c.CodexWSTurnRouting.validate("codex_ws_turn_routing"); err != nil {
+		return err
+	}
+	if c.CodexLeaseRetentionDays < 1 || c.CodexLeaseRetentionDays > 365 {
+		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
+	}
+	for scope, modelID := range c.CodexWindowPriming.ModelOverrides {
+		if strings.TrimSpace(scope) == "" || strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("invalid Codex window priming model override %q", scope)
+		}
 	}
 	return nil
 }
@@ -122,9 +212,13 @@ func generateDefaultConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
-		Port:           DefaultPort,
-		ClaudeUpstream: DefaultUpstream,
-		LocalToken:     token,
+		Port:                    DefaultPort,
+		ClaudeUpstream:          DefaultUpstream,
+		CodexUpstream:           DefaultCodexUpstream,
+		LocalToken:              token,
+		CodexTurnRouting:        CodexRoutingOff,
+		CodexWSTurnRouting:      CodexRoutingOff,
+		CodexLeaseRetentionDays: 7,
 	}
 	if err := saveConfig(path, cfg); err != nil {
 		return nil, err

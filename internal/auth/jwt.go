@@ -38,6 +38,9 @@ type CodexClaims struct {
 
 // RecordKey returns the codex-auth-compatible account key: "{UserID}::{AccountID}".
 func (c CodexClaims) RecordKey() string {
+	if c.UserID == "" || c.AccountID == "" {
+		return ""
+	}
 	return c.UserID + "::" + c.AccountID
 }
 

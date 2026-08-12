@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func TestDiagnosticsWriterCreatesAndAppendsJSONL(t *testing.T) {
@@ -46,7 +49,7 @@ func TestDiagnosticsWriterCreatesAndAppendsJSONL(t *testing.T) {
 		Path:       "/responses",
 		Provider:   "codex",
 		RouteKind:  "codex_native",
-		Model:      "gpt-5.4",
+		Model:      "model_family_gpt",
 		StatusCode: 201,
 		LatencyMS:  34,
 	}); err != nil {
@@ -151,7 +154,292 @@ func TestDiagnosticsWriterCloseSafeAndStopsWrites(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsWriterDropsUnsafeCodexCorrelationAndRecordsLeak(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	writer, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	recorder, err := StartCodexCanary(
+		fsutil.NewMemFS(),
+		"/state/canary.json",
+		nil,
+		codexDiagnosticsTestTuple(),
+		time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SetCodexCanary(recorder)
+
+	unsafeFixture := "raw-private-fixture"
+	err = writer.Write(RouteEvent{
+		Provider:    "codex",
+		AccountHint: unsafeFixture,
+		SessionKey:  "codex-session:0123456789ab",
+		TurnHint:    "turn:abcdef012345",
+	})
+	if !errors.Is(err, ErrUnsafeCodexDiagnostics) {
+		t.Fatalf("write error = %v, want ErrUnsafeCodexDiagnostics", err)
+	}
+	if strings.Contains(err.Error(), unsafeFixture) {
+		t.Fatalf("error retained unsafe value: %v", err)
+	}
+	if got := recorder.State().SecretLeaks; got != 1 {
+		t.Fatalf("secret leaks = %d, want 1", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 || strings.Contains(string(data), unsafeFixture) {
+		t.Fatalf("unsafe event reached diagnostics: %q", data)
+	}
+}
+
+func TestDiagnosticsWriterAcceptsStructurallySafeCodexCorrelation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	writer, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	recorder, err := StartCodexCanary(
+		fsutil.NewMemFS(),
+		"/state/canary.json",
+		nil,
+		codexDiagnosticsTestTuple(),
+		time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SetCodexCanary(recorder)
+
+	if err := writer.Write(RouteEvent{
+		Provider:      "codex",
+		AccountHint:   "codex:0123456789ab",
+		SessionKey:    "codex-session:abcdef012345",
+		SessionSource: "session_id",
+		TurnHint:      "turn:0123456789ab",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.State().SecretLeaks; got != 0 {
+		t.Fatalf("secret leaks = %d, want 0", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"account_hint":"codex:0123456789ab"`) {
+		t.Fatalf("safe event missing: %q", data)
+	}
+}
+
 // ── sessionCorrelation tests ─────────────────────────────────────────────────
+
+func TestDiagnosticsWriterRejectsEveryUnsafeCodexFreeFormField(t *testing.T) {
+	unsafeFixture := "raw-private-fixture"
+	tests := []struct {
+		name   string
+		mutate func(*RouteEvent)
+	}{
+		{name: "method", mutate: func(event *RouteEvent) { event.Method = unsafeFixture }},
+		{name: "route kind", mutate: func(event *RouteEvent) { event.RouteKind = unsafeFixture }},
+		{name: "account hint", mutate: func(event *RouteEvent) { event.AccountHint = unsafeFixture }},
+		{name: "session key", mutate: func(event *RouteEvent) { event.SessionKey = unsafeFixture }},
+		{name: "session source", mutate: func(event *RouteEvent) { event.SessionSource = unsafeFixture }},
+		{name: "turn hint", mutate: func(event *RouteEvent) { event.TurnHint = unsafeFixture }},
+		{name: "request kind", mutate: func(event *RouteEvent) { event.RequestKind = unsafeFixture }},
+		{name: "lease phase", mutate: func(event *RouteEvent) { event.LeasePhase = unsafeFixture }},
+		{name: "decision", mutate: func(event *RouteEvent) { event.Decision = unsafeFixture }},
+		{name: "reason", mutate: func(event *RouteEvent) { event.Reason = unsafeFixture }},
+		{name: "bucket", mutate: func(event *RouteEvent) { event.Bucket = unsafeFixture }},
+		{name: "continuity", mutate: func(event *RouteEvent) { event.Continuity = unsafeFixture }},
+		{name: "error", mutate: func(event *RouteEvent) { event.Error = unsafeFixture }},
+		{name: "model", mutate: func(event *RouteEvent) { event.Model = unsafeFixture }},
+		{name: "model with supported prefix", mutate: func(event *RouteEvent) { event.Model = "gpt-privatefixture123" }},
+		{name: "model-scoped bucket with supported prefix", mutate: func(event *RouteEvent) { event.Bucket = "model:gpt-privatefixture123" }},
+		{name: "path", mutate: func(event *RouteEvent) { event.Path = unsafeFixture }},
+		{name: "well formed raw live call path", mutate: func(event *RouteEvent) { event.Path = "/v1/realtime/calls/call_privatefixture123" }},
+		{name: "well formed unknown event reason", mutate: func(event *RouteEvent) { event.Reason = "response_event_privatefixture123" }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			writer, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
+			recorder := newCodexDiagnosticsTestCanary(t)
+			writer.SetCodexCanary(recorder)
+
+			event := structurallySafeCodexRouteEvent()
+			test.mutate(&event)
+			err = writer.Write(event)
+			if !errors.Is(err, ErrUnsafeCodexDiagnostics) {
+				t.Fatalf("write error = %v, want ErrUnsafeCodexDiagnostics", err)
+			}
+			if strings.Contains(err.Error(), unsafeFixture) {
+				t.Fatalf("error retained unsafe value: %v", err)
+			}
+			if got := recorder.State().SecretLeaks; got != 1 {
+				t.Fatalf("secret leaks = %d, want 1", got)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(data) != 0 || strings.Contains(string(data), unsafeFixture) {
+				t.Fatalf("unsafe event reached diagnostics: %q", data)
+			}
+		})
+	}
+}
+
+func TestProjectCodexDiagnosticsUsesClosedModelAndBucketValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		bucket     string
+		wantModel  string
+		wantBucket string
+	}{
+		{name: "absent", wantModel: "", wantBucket: ""},
+		{name: "gpt family", model: "gpt-privatefixture123", bucket: "model:gpt-privatefixture123", wantModel: "model_family_gpt", wantBucket: "capacity_model_scoped"},
+		{name: "codex family", model: "codex-privatefixture123", bucket: "base", wantModel: "model_family_codex", wantBucket: "capacity_base"},
+		{name: "o1 family", model: "o1-privatefixture123", bucket: "unexpected-privatefixture123", wantModel: "model_family_reasoning", wantBucket: "capacity_unknown"},
+		{name: "o3 family", model: "o3-privatefixture123", wantModel: "model_family_reasoning", wantBucket: ""},
+		{name: "o4 family", model: "o4-privatefixture123", wantModel: "model_family_reasoning", wantBucket: ""},
+		{name: "unknown", model: "privatefixture123", wantModel: "model_family_unknown", wantBucket: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := projectCodexDiagnostics(RouteEvent{
+				Provider: "codex",
+				Model:    test.model,
+				Bucket:   test.bucket,
+			})
+			if event.Model != test.wantModel || event.Bucket != test.wantBucket {
+				t.Fatalf("projection = model %q bucket %q, want model %q bucket %q", event.Model, event.Bucket, test.wantModel, test.wantBucket)
+			}
+			if strings.Contains(event.Model, "privatefixture123") || strings.Contains(event.Bucket, "privatefixture123") {
+				t.Fatalf("projection retained caller bytes: %#v", event)
+			}
+		})
+	}
+}
+
+func TestProjectCodexDiagnosticsIsIdempotentAndLeavesOtherProvidersAlone(t *testing.T) {
+	projected := projectCodexDiagnostics(RouteEvent{
+		Provider: "codex",
+		Model:    "model_family_gpt",
+		Bucket:   "capacity_model_scoped",
+	})
+	if projected.Model != "model_family_gpt" || projected.Bucket != "capacity_model_scoped" {
+		t.Fatalf("projected closed values changed: %#v", projected)
+	}
+
+	nonCodex := RouteEvent{Provider: "claude", Model: "claude-privatefixture123", Bucket: "privatefixture123"}
+	if got := projectCodexDiagnostics(nonCodex); got != nonCodex {
+		t.Fatalf("non-Codex event changed: got %#v, want %#v", got, nonCodex)
+	}
+}
+
+func TestDiagnosticsWriterPreservesNonCodexEvents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	writer, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	recorder := newCodexDiagnosticsTestCanary(t)
+	writer.SetCodexCanary(recorder)
+
+	publicFixture := "non-codex-route-value"
+	if err := writer.Write(RouteEvent{
+		Provider:      "claude",
+		Path:          publicFixture,
+		Model:         publicFixture,
+		AccountHint:   publicFixture,
+		SessionKey:    publicFixture,
+		SessionSource: publicFixture,
+		TurnHint:      publicFixture,
+		RequestKind:   publicFixture,
+		LeasePhase:    publicFixture,
+		Decision:      publicFixture,
+		Reason:        publicFixture,
+		Bucket:        publicFixture,
+		Continuity:    publicFixture,
+		Error:         publicFixture,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.State().SecretLeaks; got != 0 {
+		t.Fatalf("secret leaks = %d, want 0", got)
+	}
+	if data, err := os.ReadFile(path); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(data), publicFixture) {
+		t.Fatalf("non-Codex event was dropped: %q", data)
+	}
+}
+
+func structurallySafeCodexRouteEvent() RouteEvent {
+	return RouteEvent{
+		Method:          http.MethodPost,
+		Path:            "/v1/responses",
+		Provider:        "codex",
+		RouteKind:       "codex_native",
+		Model:           "model_family_gpt",
+		AccountHint:     "codex:0123456789ab",
+		StatusCode:      http.StatusOK,
+		SessionKey:      "codex-session:abcdef012345",
+		SessionSource:   "session_id",
+		TurnHint:        "turn:0123456789ab",
+		RequestKind:     "turn",
+		LeasePhase:      "bound_active",
+		LeaseGeneration: 1,
+		Decision:        "shadow_admitted",
+		Reason:          "candidate_attempt_1",
+		Bucket:          "capacity_model_scoped",
+		Continuity:      "pinned",
+		Error:           "api_error:no_codex_accounts",
+	}
+}
+
+func newCodexDiagnosticsTestCanary(t *testing.T) *CodexCanaryRecorder {
+	t.Helper()
+	recorder, err := StartCodexCanary(
+		fsutil.NewMemFS(),
+		"/state/canary.json",
+		nil,
+		codexDiagnosticsTestTuple(),
+		time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recorder
+}
+
+func codexDiagnosticsTestTuple() CodexCanaryTuple {
+	return CodexCanaryTuple{
+		CQBuild:              "build",
+		ClientBuild:          "client",
+		ParserSchema:         1,
+		LeaseSchema:          1,
+		SemanticsRevision:    "semantics",
+		RetryBudget:          1,
+		FixtureHash:          strings.Repeat("1", 64),
+		ReadinessFingerprint: strings.Repeat("2", 64),
+	}
+}
 
 func TestSessionCorrelationClaudeSessionId(t *testing.T) {
 	h := http.Header{}

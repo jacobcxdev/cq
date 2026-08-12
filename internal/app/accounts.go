@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +13,10 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
-	"github.com/jacobcxdev/cq/internal/fsutil"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -99,141 +101,66 @@ func RunLogin(ctx context.Context, client httputil.Doer, activate bool) error {
 // RunCodexLogin performs the Codex OAuth PKCE login flow via Auth0.
 // After login, it stores the account to ~/.codex/accounts/ for codex-auth interop.
 func RunCodexLogin(ctx context.Context, client httputil.Doer, activate bool) error {
-	tokens, claims, err := auth.CodexLogin(ctx, client)
+	fs := fsutil.OSFileSystem{}
+	control, err := codexprov.OpenDefaultCredentialControl(ctx, fs)
 	if err != nil {
 		return err
 	}
+	defer control.Close()
+	return runCodexLoginWithAdmin(ctx, client, activate, auth.CodexLogin, time.Now, os.Stdout, control)
+}
 
+type codexLoginFunc func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error)
+
+func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs fsutil.FileSystem, login codexLoginFunc, now func() time.Time, stdout io.Writer) error {
+	durable, ok := fs.(fsutil.DurableFileSystem)
+	if !ok {
+		return errors.New("durable credential storage unavailable")
+	}
+	store, err := codexprov.NewManagedStore(durable)
+	if err != nil {
+		return err
+	}
+	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	if err != nil {
+		return err
+	}
+	return runCodexLoginWithAdmin(ctx, client, activate, login, now, stdout, coordinator)
+}
+
+func runCodexLoginWithAdmin(ctx context.Context, client httputil.Doer, activate bool, login codexLoginFunc, now func() time.Time, stdout io.Writer, admin codexprov.CredentialAdmin) error {
+	tokens, claims, err := login(ctx, client)
+	if err != nil {
+		return err
+	}
 	if claims.AccountID == "" || claims.UserID == "" {
 		return fmt.Errorf("login succeeded but JWT missing account or user ID")
 	}
-
-	// Build the standard auth.json format
-	authFile := map[string]any{
-		"auth_mode":    "chatgpt",
-		"OPENAI_API_KEY": nil,
-		"tokens": map[string]any{
-			"id_token":      tokens.IDToken,
-			"access_token":  tokens.AccessToken,
-			"refresh_token": tokens.RefreshToken,
-			"account_id":    claims.AccountID,
-		},
-		"last_refresh": time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	data, err := json.MarshalIndent(authFile, "", "  ")
+	ref, revision, err := admin.SaveLogin(ctx, codexprov.LoginCredential{
+		Tokens: *tokens, Claims: *claims, CreatedAt: now().UTC(),
+	})
 	if err != nil {
-		return fmt.Errorf("marshal auth: %w", err)
+		return err
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
-	}
-
-	// Ensure accounts directory exists
-	accountsDir := filepath.Join(home, ".codex", "accounts")
-	if err := os.MkdirAll(accountsDir, 0o700); err != nil {
-		return fmt.Errorf("create accounts dir: %w", err)
-	}
-
-	// Write to ~/.codex/accounts/{record_key}.auth.json
-	recordKey := claims.RecordKey()
-	accountPath := filepath.Join(accountsDir, recordKey+".auth.json")
-	tmp := accountPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write account file: %w", err)
-	}
-	if err := os.Rename(tmp, accountPath); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("rename account file: %w", err)
-	}
-
-	// Update codex-auth registry for interop
-	updateCodexRegistry(home, recordKey, claims)
-
 	if activate {
-		dest := filepath.Join(home, ".codex", "auth.json")
-		tmp := dest + ".tmp"
-		if err := os.WriteFile(tmp, data, 0o600); err != nil {
-			return fmt.Errorf("write active auth: %w", err)
+		result, err := admin.Activate(ctx, ref, revision)
+		if err != nil {
+			return err
 		}
-		if err := os.Rename(tmp, dest); err != nil {
-			os.Remove(tmp)
-			return fmt.Errorf("rename active auth: %w", err)
+		if result.ProjectionError != nil {
+			return fmt.Errorf("system auth activated; registry projection failed: %w", result.ProjectionError)
 		}
 	}
-
 	if claims.Email != "" {
-		fmt.Printf("Logged in as %s", claims.Email)
+		fmt.Fprintf(stdout, "Logged in as %s", claims.Email)
 		if claims.PlanType != "" {
-			fmt.Printf(" (%s)", claims.PlanType)
+			fmt.Fprintf(stdout, " (%s)", claims.PlanType)
 		}
-		fmt.Println()
+		fmt.Fprintln(stdout)
 	} else {
-		fmt.Println("Login successful.")
+		fmt.Fprintln(stdout, "Login successful.")
 	}
 	return nil
-}
-
-// updateCodexRegistry upserts an account record in codex-auth's registry.json.
-// Best-effort: errors are logged to stderr and swallowed.
-func updateCodexRegistry(home, recordKey string, claims *auth.CodexClaims) {
-	regPath := filepath.Join(home, ".codex", "accounts", "registry.json")
-	var reg map[string]any
-
-	data, err := os.ReadFile(regPath)
-	if err != nil {
-		// No existing registry — create one
-		reg = map[string]any{
-			"schema_version": 3,
-		}
-	} else if json.Unmarshal(data, &reg) != nil {
-		return
-	}
-
-	// Build account record
-	record := map[string]any{
-		"account_key":         recordKey,
-		"chatgpt_account_id":  claims.AccountID,
-		"chatgpt_user_id":     claims.UserID,
-		"email":               claims.Email,
-		"alias":               "",
-		"plan":                claims.PlanType,
-		"auth_mode":           "chatgpt",
-		"created_at":          time.Now().Unix(),
-	}
-
-	// Upsert in accounts array
-	accounts, _ := reg["accounts"].([]any)
-	found := false
-	for i, a := range accounts {
-		if m, ok := a.(map[string]any); ok {
-			if m["account_key"] == recordKey {
-				accounts[i] = record
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		accounts = append(accounts, record)
-	}
-	reg["accounts"] = accounts
-	reg["active_account_key"] = recordKey
-
-	updated, err := json.MarshalIndent(reg, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := regPath + ".tmp"
-	if err := os.WriteFile(tmp, updated, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: update codex registry: %v\n", err)
-		return
-	}
-	if err := os.Rename(tmp, regPath); err != nil {
-		os.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: update codex registry: %v\n", err)
-	}
 }
 
 // RunAccounts lists discovered accounts for the given provider.
@@ -259,12 +186,23 @@ func RunAccounts(id provider.ID) error {
 
 // RunSwitch switches the active account for the given provider.
 func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
+	ctx := context.Background()
 	mgr := AccountManager(id, client)
+	var control *codexprov.CredentialControl
+	if id == provider.Codex {
+		var err error
+		control, err = codexprov.OpenDefaultCredentialControl(ctx, fsutil.OSFileSystem{})
+		if err != nil {
+			return err
+		}
+		defer control.Close()
+		mgr = &codexprov.Accounts{FS: fsutil.OSFileSystem{}, Admin: control}
+	}
 	if mgr == nil {
 		return fmt.Errorf("account switching not supported for %s", id)
 	}
 
-	acct, err := mgr.Switch(context.Background(), email)
+	acct, err := mgr.Switch(ctx, email)
 	if err != nil {
 		return err
 	}
@@ -274,11 +212,22 @@ func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
 
 // RunRemove removes the matching account for the given provider.
 func RunRemove(id provider.ID, email string, client httputil.Doer) error {
+	ctx := context.Background()
 	mgr := AccountManager(id, client)
+	var control *codexprov.CredentialControl
+	if id == provider.Codex {
+		var err error
+		control, err = codexprov.OpenDefaultCredentialControl(ctx, fsutil.OSFileSystem{})
+		if err != nil {
+			return err
+		}
+		defer control.Close()
+		mgr = &codexprov.Accounts{FS: fsutil.OSFileSystem{}, Admin: control}
+	}
 	if mgr == nil {
 		return fmt.Errorf("account removal not supported for %s", id)
 	}
-	if err := mgr.Remove(context.Background(), email); err != nil {
+	if err := mgr.Remove(ctx, email); err != nil {
 		return err
 	}
 	fmt.Printf("Removed %s\n", email)

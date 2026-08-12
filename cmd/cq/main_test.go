@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -8,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func TestCacheTTL(t *testing.T) {
@@ -217,13 +221,57 @@ func TestCLIParsesRemoveCommands(t *testing.T) {
 	}
 }
 
+func TestCLIParsesProxyCodexDefault(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantClear     bool
+		wantReference string
+	}{
+		{name: "status", args: []string{"proxy", "codex-default"}},
+		{name: "clear", args: []string{"proxy", "codex-default", "--clear"}, wantClear: true},
+		{name: "reference", args: []string{"proxy", "codex-default", "person@example.test"}, wantReference: "person@example.test"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cli CLI
+			kctx, err := kong.New(&cli,
+				kong.Writers(io.Discard, io.Discard),
+				kong.Exit(func(int) {}),
+			)
+			if err != nil {
+				t.Fatalf("kong.New: %v", err)
+			}
+
+			parsed, err := kctx.Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse(%v): %v", tt.args, err)
+			}
+			if got := parsed.Command(); !strings.HasPrefix(got, "proxy codex-default") ||
+				(tt.wantReference != "" && !strings.Contains(got, "<account-reference>")) {
+				t.Fatalf("Command() = %q, want proxy codex-default command for %q", got, tt.wantReference)
+			}
+			if cli.Proxy.CodexDefault.Clear != tt.wantClear {
+				t.Fatalf("Clear = %t, want %t", cli.Proxy.CodexDefault.Clear, tt.wantClear)
+			}
+			if cli.Proxy.CodexDefault.Reference != tt.wantReference {
+				t.Fatalf("Reference = %q, want %q", cli.Proxy.CodexDefault.Reference, tt.wantReference)
+			}
+		})
+	}
+}
+
 func TestParseProxyCommandOptionsPort(t *testing.T) {
-	opts, err := parseProxyCommandOptions([]string{"--port", "19281"})
+	opts, err := parseProxyCommandOptions([]string{"--port", "19281", "--migrate-legacy-managed"})
 	if err != nil {
 		t.Fatalf("parseProxyCommandOptions() error = %v", err)
 	}
 	if opts.Port != 19281 {
 		t.Fatalf("Port = %d, want 19281", opts.Port)
+	}
+	if !opts.MigrateLegacyManaged {
+		t.Fatal("MigrateLegacyManaged = false")
 	}
 }
 
@@ -242,6 +290,43 @@ func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
 	}
 	if !hasIdentifier(body, "activeClaudeEmailFn") {
 		t.Fatal("runProxyStart should use activeClaudeEmailFn")
+	}
+}
+
+func TestListProxyCodexStartupInventoryPreservesCandidates(t *testing.T) {
+	want := proxyCodexStartupInventoryFixture()
+	source := &staticProxyCodexStartupInventory{inventory: proxyCodexStartupInventoryFixture()}
+
+	got, err := listProxyCodexStartupInventory(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 1 {
+		t.Fatalf("inventory List calls = %d, want 1", source.calls)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("startup inventory = %+v, want distinct system and managed candidates %+v", got, want)
+	}
+}
+
+func TestRunProxyStartDoesNotReachCodexCredentialMutators(t *testing.T) {
+	file := parseGoFile(t, "proxy.go")
+	body := findFuncBody(t, file, "runProxyStart")
+
+	for _, selector := range codexCredentialMutationSelectors(body) {
+		t.Errorf("runProxyStart must not reference Codex credential mutation selector %s", selector)
+	}
+	if !hasIdentifier(body, "listProxyCodexStartupInventory") {
+		t.Fatal("runProxyStart should discover Codex candidates through the read-only startup inventory boundary")
+	}
+}
+
+func TestRunProxyStartDoesNotLogLocalToken(t *testing.T) {
+	file := parseGoFile(t, "proxy.go")
+	body := findFuncBody(t, file, "runProxyStart")
+
+	if hasQualifiedSelector(body, "cfg", "LocalToken") || hasStringLiteral(body, "cq: proxy token: %s\n") {
+		t.Fatal("runProxyStart must not print the local proxy token")
 	}
 }
 
@@ -298,6 +383,64 @@ func hasIdentifier(body *ast.BlockStmt, name string) bool {
 		return true
 	})
 	return found
+}
+
+func codexCredentialMutationSelectors(body *ast.BlockStmt) []string {
+	var found []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		selector, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch selector.Sel.Name {
+		case "IntentAdopt", "NewFileSystemActivator", "SaveLogin", "Adopt", "Activate", "RemoveManaged", "RefreshReference":
+			found = append(found, selector.Sel.Name)
+		case "Refresh":
+			receiver, ok := selector.X.(*ast.Ident)
+			if !ok || receiver.Name != "registryRefresher" {
+				found = append(found, selector.Sel.Name)
+			}
+		}
+		return true
+	})
+	return found
+}
+
+type staticProxyCodexStartupInventory struct {
+	inventory codexprov.Inventory
+	calls     int
+}
+
+func (source *staticProxyCodexStartupInventory) List(context.Context) (codexprov.Inventory, error) {
+	source.calls++
+	return source.inventory, nil
+}
+
+func proxyCodexStartupInventoryFixture() codexprov.Inventory {
+	const accountKey = codexprov.AccountKey("account-key")
+	return codexprov.Inventory{
+		Accounts: []codexprov.LogicalAccount{{
+			Key: accountKey,
+			Candidates: []codexprov.CredentialCandidate{
+				{
+					Ref: codexprov.CandidateRef{
+						AccountKey: accountKey, CandidateID: "system-candidate",
+					},
+					Revision: "system-revision", Source: codexprov.SourceSystem, Routable: true,
+				},
+				{
+					Ref: codexprov.CandidateRef{
+						AccountKey: accountKey, CandidateID: "managed-candidate",
+					},
+					Revision: "managed-revision", Source: codexprov.SourceManaged, Routable: true,
+				},
+			},
+		}},
+		Intents: []codexprov.InventoryIntent{{
+			Kind: codexprov.IntentAdopt, AccountKey: accountKey,
+			Candidates: []codexprov.CandidateID{"system-candidate"},
+		}},
+	}
 }
 
 func hasStringLiteral(body *ast.BlockStmt, value string) bool {

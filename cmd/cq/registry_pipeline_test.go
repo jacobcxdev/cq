@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
@@ -149,223 +148,50 @@ func TestNewRegistryPipelineToleratesCrossProviderDuplicateInSeed(t *testing.T) 
 	}
 }
 
-// TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenTriggersRefresh verifies that
-// an active account with no access token still uses its RefreshToken.
-func TestFirstCodexAccessTokenWithRefresh_ActiveAccountEmptyTokenTriggersRefresh(t *testing.T) {
-	accounts := []codexprov.CodexAccount{
-		{
-			AccessToken:  "",
-			RefreshToken: "refresh-tok",
-			FilePath:     "/home/test/.codex/auth.json",
-			IsActive:     true,
-		},
-	}
+type testCodexRefreshBroker struct {
+	calls  int
+	result codexprov.RefreshResult
+	err    error
+}
 
-	refreshCalled := false
-	refreshedToken := "refreshed-access-token"
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		refreshCalled = true
-		return &auth.CodexTokenResponse{
-			AccessToken:  refreshedToken,
-			RefreshToken: "new-refresh-tok",
-			ExpiresIn:    3600,
-		}, nil
-	}
-	persistCalled := false
-	persistFn := func(_ fsutil.FileSystem, acct codexprov.CodexAccount, home string) error {
-		persistCalled = true
-		if acct.AccessToken != refreshedToken {
-			t.Errorf("persist: AccessToken = %q, want %q", acct.AccessToken, refreshedToken)
-		}
-		return nil
-	}
+func (b *testCodexRefreshBroker) Refresh(context.Context, codexprov.CandidateRef, codexprov.Revision) (codexprov.RefreshResult, error) {
+	b.calls++
+	return b.result, b.err
+}
 
-	fsys := fsutil.NewMemFS()
-	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsys, "/home/test", persistFn)
+func TestFirstCodexAccessTokenFromInventoryUsesBrokerForStaleManagedCandidate(t *testing.T) {
+	ref := codexprov.CandidateRef{AccountKey: "account", CandidateID: "candidate"}
+	inventory := codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Key: "account",
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref: ref, Revision: "revision", Source: codexprov.SourceManaged,
+			Credential: codexprov.CodexAccount{AccessToken: "stale", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()},
+		}},
+	}}}
+	broker := &testCodexRefreshBroker{result: codexprov.RefreshResult{Material: codexprov.CredentialMaterial{AccessToken: "brokered"}}}
+	token, err := firstCodexAccessTokenFromInventory(context.Background(), inventory, broker)
 	if err != nil {
-		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
+		t.Fatal(err)
 	}
-	if tok != refreshedToken {
-		t.Errorf("token = %q, want %q", tok, refreshedToken)
-	}
-	if !refreshCalled {
-		t.Error("refresh function was not called for active account with empty token")
-	}
-	if !persistCalled {
-		t.Error("persist function was not called after successful refresh")
+	if token != "brokered" || broker.calls != 1 {
+		t.Fatalf("token = %q, broker calls = %d", token, broker.calls)
 	}
 }
 
-func TestFirstCodexAccessTokenWithRefresh_NoActiveTokenTriggersRefresh(t *testing.T) {
-	staleMs := time.Now().Add(-time.Hour).UnixMilli() // expired one hour ago
-	accounts := []codexprov.CodexAccount{
-		{
-			AccessToken:  "stale-token",
-			RefreshToken: "refresh-tok",
-			ExpiresAt:    staleMs,
-			FilePath:     "/home/test/.codex/auth.json",
-		},
-	}
-
-	refreshCalled := false
-	refreshedToken := "refreshed-access-token"
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		refreshCalled = true
-		return &auth.CodexTokenResponse{
-			AccessToken:  refreshedToken,
-			RefreshToken: "new-refresh-tok",
-			ExpiresIn:    3600,
-		}, nil
-	}
-
-	fsys := fsutil.NewMemFS()
-	_ = fsys.WriteFile("/home/test/.codex/auth.json", []byte(`{"auth_mode":"oauth","tokens":{"access_token":"stale-token","refresh_token":"refresh-tok"}}`), 0o600)
-
-	persistCalled := false
-	persistFn := func(_ fsutil.FileSystem, acct codexprov.CodexAccount, home string) error {
-		persistCalled = true
-		if acct.AccessToken != refreshedToken {
-			t.Errorf("persist: AccessToken = %q, want %q", acct.AccessToken, refreshedToken)
-		}
-		return nil
-	}
-
-	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsys, "/home/test", persistFn)
+func TestFirstCodexAccessTokenFromInventorySkipsBrokerForFreshCandidate(t *testing.T) {
+	inventory := codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Candidates: []codexprov.CredentialCandidate{{
+			Source:     codexprov.SourceManaged,
+			Credential: codexprov.CodexAccount{AccessToken: "fresh", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		}},
+	}}}
+	broker := &testCodexRefreshBroker{err: errors.New("unexpected")}
+	token, err := firstCodexAccessTokenFromInventory(context.Background(), inventory, broker)
 	if err != nil {
-		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
+		t.Fatal(err)
 	}
-	if tok != refreshedToken {
-		t.Errorf("token = %q, want %q", tok, refreshedToken)
-	}
-	if !refreshCalled {
-		t.Error("refresh function was not called for stale account")
-	}
-	if !persistCalled {
-		t.Error("persist function was not called after successful refresh")
-	}
-}
-
-// TestFirstCodexAccessTokenWithRefresh_FreshTokenSkipsRefresh verifies that
-// when an account already has a fresh access token, refresh is not attempted.
-func TestFirstCodexAccessTokenWithRefresh_FreshTokenSkipsRefresh(t *testing.T) {
-	freshMs := time.Now().Add(time.Hour).UnixMilli()
-	accounts := []codexprov.CodexAccount{
-		{
-			AccessToken:  "fresh-token",
-			RefreshToken: "refresh-tok",
-			ExpiresAt:    freshMs,
-		},
-	}
-
-	refreshCalled := false
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		refreshCalled = true
-		return nil, errors.New("should not be called")
-	}
-	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error { return nil }
-
-	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsutil.NewMemFS(), "/home/test", persistFn)
-	if err != nil {
-		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
-	}
-	if tok != "fresh-token" {
-		t.Errorf("token = %q, want fresh-token", tok)
-	}
-	if refreshCalled {
-		t.Error("refresh function was called for already-fresh account")
-	}
-}
-
-// TestFirstCodexAccessTokenWithRefresh_PrefersActiveFreshToken verifies that
-// the active account wins over an inactive account with a later expiry.
-func TestFirstCodexAccessTokenWithRefresh_PrefersActiveFreshToken(t *testing.T) {
-	now := time.Now()
-	accounts := []codexprov.CodexAccount{
-		{
-			AccessToken: "active-token",
-			ExpiresAt:   now.Add(time.Hour).UnixMilli(),
-			IsActive:    true,
-		},
-		{
-			AccessToken: "inactive-later-token",
-			ExpiresAt:   now.Add(2 * time.Hour).UnixMilli(),
-		},
-	}
-
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		return nil, errors.New("should not be called")
-	}
-	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error { return nil }
-
-	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsutil.NewMemFS(), "/home/test", persistFn)
-	if err != nil {
-		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
-	}
-	if tok != "active-token" {
-		t.Errorf("token = %q, want active-token", tok)
-	}
-}
-
-func TestFirstCodexAccessTokenWithRefresh_PrefersActiveTokenWithStaleMetadata(t *testing.T) {
-	now := time.Now()
-	accounts := []codexprov.CodexAccount{
-		{
-			AccessToken: "active-token",
-			ExpiresAt:   now.Add(-time.Hour).UnixMilli(),
-			IsActive:    true,
-		},
-		{
-			AccessToken: "inactive-fresh-token",
-			ExpiresAt:   now.Add(time.Hour).UnixMilli(),
-		},
-	}
-
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		return nil, errors.New("should not be called")
-	}
-	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error { return nil }
-
-	tok, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsutil.NewMemFS(), "/home/test", persistFn)
-	if err != nil {
-		t.Fatalf("firstCodexAccessTokenWithRefresh() error = %v", err)
-	}
-	if tok != "active-token" {
-		t.Errorf("token = %q, want active-token", tok)
-	}
-}
-
-func TestFirstCodexAccessTokenWithRefresh_NoAccountsErrors(t *testing.T) {
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		return nil, errors.New("should not be called")
-	}
-	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error { return nil }
-
-	_, err := firstCodexAccessTokenWithRefresh(context.Background(), nil, refreshFn, fsutil.NewMemFS(), "/home/test", persistFn)
-	if err == nil {
-		t.Fatal("expected error for empty accounts, got nil")
-	}
-}
-
-// TestFirstCodexAccessTokenWithRefresh_RefreshFailsNoToken verifies that when
-// all accounts are stale and refresh fails, the function returns an error.
-func TestFirstCodexAccessTokenWithRefresh_RefreshFailsNoToken(t *testing.T) {
-	staleMs := time.Now().Add(-time.Hour).UnixMilli()
-	accounts := []codexprov.CodexAccount{
-		{
-			AccessToken:  "",
-			RefreshToken: "refresh-tok",
-			ExpiresAt:    staleMs,
-		},
-	}
-
-	refreshFn := func(_ context.Context, _ string) (*auth.CodexTokenResponse, error) {
-		return nil, errors.New("refresh server unreachable")
-	}
-	persistFn := func(_ fsutil.FileSystem, _ codexprov.CodexAccount, _ string) error { return nil }
-
-	_, err := firstCodexAccessTokenWithRefresh(context.Background(), accounts, refreshFn, fsutil.NewMemFS(), "/home/test", persistFn)
-	if err == nil {
-		t.Fatal("expected error when refresh fails, got nil")
+	if token != "fresh" || broker.calls != 0 {
+		t.Fatalf("token = %q, broker calls = %d", token, broker.calls)
 	}
 }
 
@@ -385,43 +211,43 @@ func TestBetterTokenCandidate(t *testing.T) {
 		wantExpires    int64
 	}{
 		{
-			name: "empty next returns current",
+			name:         "empty next returns current",
 			currentToken: "cur", currentExpires: future,
 			nextToken: "", nextExpires: farFuture,
 			wantToken: "cur", wantExpires: future,
 		},
 		{
-			name: "stale next is skipped",
+			name:         "stale next is skipped",
 			currentToken: "cur", currentExpires: future,
 			nextToken: "next", nextExpires: nowMs - 1,
 			wantToken: "cur", wantExpires: future,
 		},
 		{
-			name: "empty current accepts next",
+			name:         "empty current accepts next",
 			currentToken: "", currentExpires: 0,
 			nextToken: "next", nextExpires: future,
 			wantToken: "next", wantExpires: future,
 		},
 		{
-			name: "unknown current expiry prefers known-fresh next",
+			name:         "unknown current expiry prefers known-fresh next",
 			currentToken: "cur", currentExpires: 0,
 			nextToken: "next", nextExpires: future,
 			wantToken: "next", wantExpires: future,
 		},
 		{
-			name: "both unknown expiry returns current",
+			name:         "both unknown expiry returns current",
 			currentToken: "cur", currentExpires: 0,
 			nextToken: "next", nextExpires: 0,
 			wantToken: "cur", wantExpires: 0,
 		},
 		{
-			name: "later expiry wins",
+			name:         "later expiry wins",
 			currentToken: "cur", currentExpires: future,
 			nextToken: "next", nextExpires: farFuture,
 			wantToken: "next", wantExpires: farFuture,
 		},
 		{
-			name: "current has later expiry",
+			name:         "current has later expiry",
 			currentToken: "cur", currentExpires: farFuture,
 			nextToken: "next", nextExpires: future,
 			wantToken: "cur", wantExpires: farFuture,

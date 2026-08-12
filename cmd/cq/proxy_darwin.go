@@ -10,7 +10,10 @@ import (
 	"text/template"
 )
 
-const proxyAgentLabel = "dev.jacobcx.cq.proxy"
+const (
+	proxyAgentLabel         = "dev.jacobcx.cq.proxy"
+	homebrewProxyAgentLabel = "homebrew.mxcl.cq"
+)
 
 var proxyPlistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -115,8 +118,15 @@ func installProxyAgent() error {
 
 func restartProxyAgent() error {
 	uid := os.Getuid()
-	if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel)); err != nil {
+	err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel))
+	if err == nil {
+		return nil
+	}
+	if exitErr, ok := err.(interface{ ExitCode() int }); !ok || exitErr.ExitCode() != 113 {
 		return fmt.Errorf("launchctl kickstart: %w", err)
+	}
+	if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
+		return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
 	}
 	return nil
 }

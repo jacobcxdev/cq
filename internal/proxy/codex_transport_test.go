@@ -1,32 +1,44 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
+	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
-	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
-	"github.com/jacobcxdev/cq/internal/quota"
+	"github.com/klauspost/compress/zstd"
 )
 
-// multiCodexSelector supports exclude filtering across multiple accounts.
+type codexTransportRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f codexTransportRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// multiCodexSelector supports exclusion filtering in legacy handler tests.
 type multiCodexSelector struct {
 	accounts []codex.CodexAccount
 }
 
-func (s *multiCodexSelector) Select(_ context.Context, exclude ...string) (*codex.CodexAccount, error) {
-	excludeSet := make(map[string]bool, len(exclude))
-	for _, e := range exclude {
-		excludeSet[e] = true
+func (s *multiCodexSelector) Select(_ context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
+	excludedAccounts := make(map[codex.AccountKey]bool, len(exclude))
+	excludedCandidates := make(map[codex.CandidateID]bool, len(exclude))
+	for _, exclusion := range exclude {
+		excludedAccounts[exclusion.AccountKey] = true
+		excludedCandidates[exclusion.CandidateID] = true
 	}
 	for i := range s.accounts {
 		a := &s.accounts[i]
-		if codexAcctExcluded(a, excludeSet) || a.AccessToken == "" {
+		if codexAcctExcluded(a, excludedAccounts, excludedCandidates) || a.AccessToken == "" {
 			continue
 		}
 		result := *a
@@ -36,832 +48,714 @@ func (s *multiCodexSelector) Select(_ context.Context, exclude ...string) (*code
 }
 
 func makeCodexRequest(body string) *http.Request {
-	buf := []byte(body)
-	req, _ := http.NewRequest("POST", "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(body))
 	req.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader(body)), nil
 	}
-	req.ContentLength = int64(len(buf))
+	req.ContentLength = int64(len(body))
 	return req
 }
 
-func codexQuotaCacheWithSnapshot(id string, remainingPct int, age time.Duration) *QuotaCache {
-	now := time.Now()
-	return &QuotaCache{
-		nowFunc: func() time.Time { return now },
-		snapshots: map[string]QuotaSnapshot{
-			id: {
-				Result: quota.Result{
-					AccountID: id,
-					Status:    quota.StatusOK,
-					Windows: map[quota.WindowName]quota.Window{
-						quota.Window5Hour: {RemainingPct: remainingPct},
-					},
-				},
-				FetchedAt: now.Add(-age),
-			},
-		},
-		cooldowns: make(map[string]time.Time),
+func makeCodexBytesRequest(body []byte) *http.Request {
+	original := bytes.Clone(body)
+	req, _ := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader(original))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(original)), nil
 	}
+	req.ContentLength = int64(len(original))
+	return req
 }
 
-func TestCodexTokenTransport_HappyPath(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-	}}
+var (
+	handlerAcceptedRewriteOnce sync.Once
+	handlerAcceptedRewriteBody []byte
+	handlerAcceptedRewriteZstd []byte
+)
 
-	var gotAuth, gotAcctID string
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			gotAuth = req.Header.Get("Authorization")
-			gotAcctID = req.Header.Get("ChatGPT-Account-ID")
-			return makeResponse(200, `{"ok":true}`), nil
-		}),
+func handlerAcceptedRewriteFixtures(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	handlerAcceptedRewriteOnce.Do(func() {
+		prefix := []byte(`{"model":"gpt-5.3-codex-spark","input":"`)
+		suffix := []byte(`"}`)
+		decodedBytes := DefaultCodexZstdLimits.MaxDecodedBytes + 1024
+		noise := make([]byte, decodedBytes-len(prefix)-len(suffix))
+		const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+		state := uint64(0x9e3779b97f4a7c15)
+		for index := range noise {
+			state ^= state << 13
+			state ^= state >> 7
+			state ^= state << 17
+			noise[index] = alphabet[state&63]
+		}
+		handlerAcceptedRewriteBody = append(prefix, noise...)
+		handlerAcceptedRewriteBody = append(handlerAcceptedRewriteBody, suffix...)
+		handlerAcceptedRewriteZstd = encodeCodexZstd(t, handlerAcceptedRewriteBody)
+	})
+	if len(handlerAcceptedRewriteBody) <= DefaultCodexZstdLimits.MaxDecodedBytes || len(handlerAcceptedRewriteBody) > maxRequestBody {
+		t.Fatalf("decoded fixture bytes = %d, want (%d, %d]", len(handlerAcceptedRewriteBody), DefaultCodexZstdLimits.MaxDecodedBytes, maxRequestBody)
 	}
+	if len(handlerAcceptedRewriteZstd) <= DefaultCodexZstdLimits.MaxEncodedBytes || len(handlerAcceptedRewriteZstd) > maxRequestBody {
+		t.Fatalf("zstd fixture bytes = %d, want (%d, %d]", len(handlerAcceptedRewriteZstd), DefaultCodexZstdLimits.MaxEncodedBytes, maxRequestBody)
+	}
+	return handlerAcceptedRewriteBody, handlerAcceptedRewriteZstd
+}
 
+func TestCodexTokenTransportInjectsExplicitMaterial(t *testing.T) {
+	var gotAuth, gotAccount, gotAPIKey string
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotAuth = req.Header.Get("Authorization")
+		gotAccount = req.Header.Get("ChatGPT-Account-ID")
+		gotAPIKey = req.Header.Get("x-api-key")
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	})}
 	req := makeCodexRequest(`{"model":"gpt-5.4"}`)
-	req.Header.Set("Authorization", "Bearer original-should-be-replaced")
-
-	resp, err := transport.RoundTrip(req)
+	req.Header.Set("Authorization", "Bearer caller")
+	req.Header.Set("x-api-key", "caller-key")
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}
+	_, err := transport.Do(req, choice, codex.CredentialMaterial{AccessToken: "secret", AccountID: "account"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	if gotAuth != "Bearer secret" || gotAccount != "account" || gotAPIKey != "" {
+		t.Fatalf("headers auth=%q account=%q api-key=%q", gotAuth, gotAccount, gotAPIKey)
 	}
-	if gotAuth != "Bearer tok-a" {
-		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer tok-a")
-	}
-	if gotAcctID != "acct-1" {
-		t.Errorf("ChatGPT-Account-ID = %q, want %q", gotAcctID, "acct-1")
+	if req.Header.Get("Authorization") != "Bearer caller" || req.Header.Get("x-api-key") != "caller-key" {
+		t.Fatal("caller request was mutated")
 	}
 }
 
-func TestCodexTokenTransport_NoAccountIDHeader(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a"},
-	}}
-
-	var gotAcctID string
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			gotAcctID = req.Header.Get("ChatGPT-Account-ID")
-			return makeResponse(200, `{"ok":true}`), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
+func TestCodexTokenTransportConsumesRouteModel(t *testing.T) {
+	var body string
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		data, _ := io.ReadAll(req.Body)
+		body = string(data)
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	})}
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	_, err := transport.Do(makeCodexRequest(`{"model":"gpt-5.3-codex-spark","input":[]}`), choice, codex.CredentialMaterial{AccessToken: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-	if gotAcctID != "" {
-		t.Errorf("ChatGPT-Account-ID = %q, want empty (no account ID)", gotAcctID)
+	if !strings.Contains(body, `"model":"gpt-5.3-codex"`) {
+		t.Fatalf("body = %s", body)
 	}
 }
 
-func TestCodexTokenTransport_401Failover(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
+func TestCodexTokenTransportFrozenPreservesPreparedRequest(t *testing.T) {
+	original := []byte("{\n  \"model\": \"gpt-5.3-codex-spark\",\n  \"input\": []\n}\n")
+	req := makeCodexBytesRequest(original)
+	req.Header.Set("Authorization", "Bearer caller")
+	req.Header.Set("ChatGPT-Account-ID", "caller-account")
+	req.Header.Set("x-api-key", "caller-key")
+	req.Header["authorization"] = []string{"Bearer raw-caller"}
+	req.Header["CHATGPT-ACCOUNT-ID"] = []string{"raw-caller-account"}
+	req.Header["X-API-KEY"] = []string{"raw-caller-key"}
+	req.Header.Set("Content-Length", strconv.Itoa(len(original)))
 
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Header.Get("Authorization") == "Bearer tok-a" {
-				return makeResponse(401, "unauthorized"), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-	transport.suppressFailoverForKey = "stale-suppression"
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (failover to b)", resp.StatusCode)
-	}
-	if transport.suppressFailoverForKey != "" {
-		t.Errorf("suppression = %q, want cleared after successful 401 failover", transport.suppressFailoverForKey)
-	}
-}
-
-func TestCodexTokenTransport_401Failover_RewritesSparkForPlusAlternate(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro"},
-		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
-	}}
-
-	models := make([]string, 0, 2)
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			models = append(models, extractModel(body))
-			if req.Header.Get("Authorization") == "Bearer tok-pro" {
-				return makeResponse(401, "unauthorized"), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200 after failover", resp.StatusCode)
-	}
-	if len(models) != 2 {
-		t.Fatalf("models seen = %d, want 2", len(models))
-	}
-	if models[0] != "gpt-5.3-codex-spark" {
-		t.Fatalf("initial model = %q, want gpt-5.3-codex-spark", models[0])
-	}
-	if models[1] != "gpt-5.3-codex" {
-		t.Fatalf("failover model = %q, want gpt-5.3-codex", models[1])
-	}
-}
-
-func TestCodexTokenTransport_429InsufficientQuota_RewritesSparkSuffixForPlusAlternate(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro"},
-		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
-	}}
-
-	models := make([]string, 0, 2)
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			models = append(models, extractModel(body))
-			if req.Header.Get("Authorization") == "Bearer tok-pro" {
-				return makeResponse(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded"}}`), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark-high"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200 after failover", resp.StatusCode)
-	}
-	if len(models) != 2 {
-		t.Fatalf("models seen = %d, want 2", len(models))
-	}
-	if models[0] != "gpt-5.3-codex-spark-high" {
-		t.Fatalf("initial model = %q, want gpt-5.3-codex-spark-high", models[0])
-	}
-	if models[1] != "gpt-5.3-codex-high" {
-		t.Fatalf("failover model = %q, want gpt-5.3-codex-high", models[1])
-	}
-}
-
-func TestCodexTokenTransport_PrefersProAccountForInitialSparkRequest(t *testing.T) {
-	sel := NewCodexSelector(func() []codex.CodexAccount {
-		return []codex.CodexAccount{
-			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
-			{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro", IsActive: false},
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(out *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(out.Body)
+		if err != nil {
+			return nil, err
 		}
-	}, nil)
-
-	var gotAuth, gotModel string
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			gotAuth = req.Header.Get("Authorization")
-			gotModel = extractModel(body)
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if gotAuth != "Bearer tok-pro" {
-		t.Fatalf("authorization = %q, want Bearer tok-pro", gotAuth)
-	}
-	if gotModel != "gpt-5.3-codex-spark" {
-		t.Fatalf("model = %q, want gpt-5.3-codex-spark", gotModel)
-	}
-}
-
-func TestCodexTokenTransport_RewritesSparkForInitialPlusSelection(t *testing.T) {
-	sel := NewCodexSelector(func() []codex.CodexAccount {
-		return []codex.CodexAccount{
-			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+		replay, err := out.GetBody()
+		if err != nil {
+			return nil, err
 		}
-	}, nil)
-
-	var gotAuth, gotModel string
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			gotAuth = req.Header.Get("Authorization")
-			gotModel = extractModel(body)
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if gotAuth != "Bearer tok-plus" {
-		t.Fatalf("authorization = %q, want Bearer tok-plus", gotAuth)
-	}
-	if gotModel != "gpt-5.3-codex" {
-		t.Fatalf("model = %q, want gpt-5.3-codex", gotModel)
-	}
-}
-
-func TestCodexTokenTransport_RewritesSparkSuffixForInitialPlusSelection(t *testing.T) {
-	sel := NewCodexSelector(func() []codex.CodexAccount {
-		return []codex.CodexAccount{
-			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+		replayed, err := io.ReadAll(replay)
+		_ = replay.Close()
+		if err != nil {
+			return nil, err
 		}
-	}, nil)
-
-	var gotModel string
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			gotModel = extractModel(body)
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark-high"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if gotModel != "gpt-5.3-codex-high" {
-		t.Fatalf("model = %q, want gpt-5.3-codex-high", gotModel)
-	}
-}
-
-func TestCodexTokenTransport_RewritesSparkWithOneMSuffixForInitialPlusSelection(t *testing.T) {
-	sel := NewCodexSelector(func() []codex.CodexAccount {
-		return []codex.CodexAccount{
-			{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus", IsActive: true},
+		if !bytes.Equal(body, original) || !bytes.Equal(replayed, original) {
+			t.Fatalf("prepared body changed: body=%q replay=%q", body, replayed)
 		}
-	}, nil)
-
-	var gotModel string
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			gotModel = extractModel(body)
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark[1m]"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if gotModel != "gpt-5.3-codex" {
-		t.Fatalf("model = %q, want gpt-5.3-codex", gotModel)
-	}
-}
-
-func TestCodexTokenTransport_401NoAlternate(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a"},
-	}}
-
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return makeResponse(401, "unauthorized"), nil
-		}),
-	}
-
-	_, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err == nil {
-		t.Fatal("expected error with no alternate account")
-	}
-	if !strings.Contains(err.Error(), "no alternate") {
-		t.Errorf("error = %v, want mention of no alternate", err)
-	}
-}
-
-// --- immediate 429 replay tests (new behavior) ---
-
-// TestCodexTokenTransport_429ImmediateReplayToSecondAccount verifies that the
-// first Codex 429 immediately replays to the second account.
-func TestCodexTokenTransport_429ImmediateReplayToSecondAccount(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
-
-	var calls int
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			calls++
-			if req.Header.Get("Authorization") == "Bearer tok-a" {
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded","type":"requests"}}`), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (immediate replay to alternate)", resp.StatusCode)
-	}
-	if calls != 2 {
-		t.Errorf("calls = %d, want 2 (initial + one replay)", calls)
-	}
-}
-
-// TestCodexTokenTransport_429WalksMultipleAlternates verifies that the transport
-// walks through multiple alternates until one succeeds.
-func TestCodexTokenTransport_429WalksMultipleAlternates(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-		{Email: "c@test.com", AccessToken: "tok-c", AccountID: "acct-3"},
-	}}
-
-	var calls int
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			calls++
-			auth := req.Header.Get("Authorization")
-			if auth == "Bearer tok-a" || auth == "Bearer tok-b" {
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (walk to third account)", resp.StatusCode)
-	}
-	if calls != 3 {
-		t.Errorf("calls = %d, want 3 (a→b→c)", calls)
-	}
-}
-
-// TestCodexTokenTransport_429InsufficientQuota_PersistsSwitch verifies that an
-// insufficient_quota 429 persists a real switch.
-func TestCodexTokenTransport_429InsufficientQuota_PersistsSwitch(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
-
-	switchDone := make(chan string, 1)
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Switcher: func(_ context.Context, email string) error {
-			switchDone <- email
-			return nil
-		},
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Header.Get("Authorization") == "Bearer tok-a" {
-				return makeResponse(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded"}}`), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (failover on insufficient_quota)", resp.StatusCode)
-	}
-
-	select {
-	case email := <-switchDone:
-		if email != "b@test.com" {
-			t.Errorf("switched to %q, want b@test.com", email)
+		if out.ContentLength != int64(len(original)) || out.Header.Get("Content-Length") != strconv.Itoa(len(original)) {
+			t.Fatalf("framing = %d/%q", out.ContentLength, out.Header.Get("Content-Length"))
 		}
-	case <-time.After(time.Second):
-		t.Error("expected switch to be persisted for insufficient_quota")
-	}
-}
-
-// TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch verifies
-// that when fresh quota shows remaining capacity, replay happens but no switch
-// is persisted.
-func TestCodexTokenTransport_429InsufficientQuota_RewritesSparkForPlusAlternate(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "pro@test.com", AccessToken: "tok-pro", AccountID: "acct-pro", PlanType: "pro"},
-		{Email: "plus@test.com", AccessToken: "tok-plus", AccountID: "acct-plus", PlanType: "plus"},
-	}}
-
-	switchDone := make(chan string, 1)
-	models := make([]string, 0, 2)
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Switcher: func(_ context.Context, email string) error {
-			switchDone <- email
-			return nil
-		},
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			models = append(models, extractModel(body))
-			if req.Header.Get("Authorization") == "Bearer tok-pro" {
-				return makeResponse(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded"}}`), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{"model":"gpt-5.3-codex-spark"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200 after failover", resp.StatusCode)
-	}
-	if len(models) != 2 {
-		t.Fatalf("models seen = %d, want 2", len(models))
-	}
-	if models[0] != "gpt-5.3-codex-spark" {
-		t.Fatalf("initial model = %q, want gpt-5.3-codex-spark", models[0])
-	}
-	if models[1] != "gpt-5.3-codex" {
-		t.Fatalf("failover model = %q, want gpt-5.3-codex", models[1])
-	}
-
-	select {
-	case email := <-switchDone:
-		if email != "plus@test.com" {
-			t.Errorf("switched to %q, want plus@test.com", email)
+		if got := out.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Fatalf("Authorization = %q", got)
 		}
-	case <-time.After(time.Second):
-		t.Error("expected switch to be persisted for insufficient_quota")
-	}
-}
-
-func TestCodexTokenTransport_429FreshQuotaWithCapacity_ReplaysNoSwitch(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
-
-	switchCh := make(chan string, 1)
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Quota:    codexQuotaCacheWithSnapshot("acct-1", 80, 0),
-		Switcher: func(_ context.Context, email string) error {
-			switchCh <- email
-			return nil
-		},
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Header.Get("Authorization") == "Bearer tok-a" {
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+		if got := out.Header.Get("ChatGPT-Account-ID"); got != "exact-account" {
+			t.Fatalf("ChatGPT-Account-ID = %q", got)
+		}
+		if got := out.Header.Get("x-api-key"); got != "" {
+			t.Fatalf("x-api-key = %q", got)
+		}
+		foldedValues := func(name string) []string {
+			var values []string
+			for key, current := range out.Header {
+				if strings.EqualFold(key, name) {
+					values = append(values, current...)
+				}
 			}
-			return makeResponse(200, "ok"), nil
-		}),
-	}
+			return values
+		}
+		if got := foldedValues("Authorization"); !reflect.DeepEqual(got, []string{"Bearer secret"}) {
+			t.Fatalf("folded Authorization = %q", got)
+		}
+		if got := foldedValues("ChatGPT-Account-ID"); !reflect.DeepEqual(got, []string{"exact-account"}) {
+			t.Fatalf("folded ChatGPT-Account-ID = %q", got)
+		}
+		if got := foldedValues("x-api-key"); len(got) != 0 {
+			t.Fatalf("folded x-api-key = %q", got)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	})}
 
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
+	response, err := transport.DoFrozen(req, codex.CredentialMaterial{AccessToken: "secret", AccountID: "exact-account"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (replayed to alternate)", resp.StatusCode)
-	}
-
-	select {
-	case email := <-switchCh:
-		t.Errorf("unexpected switch to %q — fresh quota shows 80%% remaining, no switch should be persisted", email)
-	case <-time.After(50 * time.Millisecond):
-		// good: no switch persisted
+	response.Body.Close()
+	if req.Header.Get("Authorization") != "Bearer caller" || req.Header.Get("ChatGPT-Account-ID") != "caller-account" || req.Header.Get("x-api-key") != "caller-key" {
+		t.Fatal("caller request was mutated")
 	}
 }
 
-// TestCodexTokenTransport_429StaleSnapshot_TriesAlternates verifies that
-// stale/missing snapshot (unknown status) still causes alternates to be tried
-// before surfacing a final 429.
-func TestCodexTokenTransport_429StaleSnapshot_TriesAlternates(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
-
-	// Stale quota snapshot (10 minutes old) — unknown status.
-	var calls int
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Quota:    codexQuotaCacheWithSnapshot("acct-1", 80, 10*time.Minute),
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			calls++
-			if req.Header.Get("Authorization") == "Bearer tok-a" {
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-			}
-			return makeResponse(200, "ok"), nil
-		}),
+func TestCodexAttemptExecutorFrozenPropagatesOperationContext(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
 	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (alternates tried for stale/unknown quota)", resp.StatusCode)
-	}
-	if calls < 2 {
-		t.Errorf("calls = %d, want >= 2 (initial + replay to alternate)", calls)
-	}
-}
-
-// TestCodexTokenTransport_429AllAccountsExhausted_Surfaces429AfterTryingAll
-// verifies that when all accounts return 429, the client sees 429 only after all
-// candidates have been tried.
-func TestCodexTokenTransport_429AllAccountsExhausted_Surfaces429AfterTryingAll(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-		{Email: "c@test.com", AccessToken: "tok-c", AccountID: "acct-3"},
-	}}
-
-	var calls int
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			calls++
-			return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 429 {
-		t.Errorf("status = %d, want 429 (all accounts exhausted)", resp.StatusCode)
-	}
-	// Should have tried all 3 accounts: initial + 2 alternates.
-	if calls != 3 {
-		t.Errorf("calls = %d, want 3 (tried all accounts before surfacing 429)", calls)
-	}
-}
-
-// TestCodexTokenTransport_429BodyPreserved verifies that the buffered 429 body
-// is preserved when the response is forwarded to the client.
-func TestCodexTokenTransport_429BodyPreserved(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok"},
-	}}
-
-	errBody := `{"error":{"code":"rate_limit_exceeded","message":"slow down"}}`
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return makeResponse(429, errBody), nil
-		}),
-	}
-
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != errBody {
-		t.Errorf("body = %q, want %q", string(body), errBody)
-	}
-}
-
-// TestCodexTokenTransport_429FailoverSuppression_SetAfterFullWalk verifies that
-// failover suppression is set after all accounts have been tried and all returned 429.
-func TestCodexTokenTransport_429FailoverSuppression_SetAfterFullWalk(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
-
-	var switchCount atomic.Int32
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Switcher: func(_ context.Context, _ string) error {
-			switchCount.Add(1)
-			return nil
-		},
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-		}),
-	}
-
-	// First request: walks a→b, both 429 → suppression set.
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 429 {
-		t.Errorf("status = %d, want 429", resp.StatusCode)
-	}
-
-	if transport.suppressFailoverForKey == "" {
-		t.Error("expected failover suppression to be set after full walk")
-	}
-
-	// Second request: suppressed — no replay, just forward 429.
-	var calls int
-	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		calls++
-		return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-	})
-	resp, err = transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 429 {
-		t.Errorf("status = %d, want 429 (suppressed)", resp.StatusCode)
-	}
-	if calls != 1 {
-		t.Errorf("calls = %d, want 1 (suppressed, no replay)", calls)
-	}
-}
-
-// TestCodexTokenTransport_429WalkContinuesPastAlternateFailure verifies that
-// the replay walk continues past a non-429 alternate failure and can still
-// succeed on a later account.
-func TestCodexTokenTransport_429WalkContinuesPastAlternateFailure(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-		{Email: "c@test.com", AccessToken: "tok-c", AccountID: "acct-3"},
-	}}
-
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch req.Header.Get("Authorization") {
-			case "Bearer tok-a":
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-			case "Bearer tok-b":
-				return makeResponse(500, "server error"), nil
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor := &CodexAttemptExecutor{
+		Secrets: &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision": testExactCredentialMaterial(identity, "secret"),
+		}},
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			select {
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
 			default:
-				return makeResponse(200, "ok"), nil
+				return nil, errors.New("operation context was not propagated")
 			}
-		}),
+		})},
 	}
 
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (walk past 500 on b, succeed on c)", resp.StatusCode)
+	_, _, err := executor.doFrozenOnDispatch(
+		ctx,
+		RouteChoice{AccountKey: "identity"},
+		attempt,
+		makeCodexRequest(`{"model":"gpt-5.4"}`),
+		func(CandidateAttempt) { cancel() },
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
 
-// TestCodexTokenTransport_429WalkNonSuccessReturnedWhenAllFail verifies that
-// when no account succeeds and at least one returned a non-429 failure, the
-// last non-429 failure is returned even if a later alternate returns 429.
-func TestCodexTokenTransport_429WalkNonSuccessReturnedWhenAllFail(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-		{Email: "c@test.com", AccessToken: "tok-c", AccountID: "acct-3"},
-	}}
-
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch req.Header.Get("Authorization") {
-			case "Bearer tok-a":
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-			case "Bearer tok-b":
-				return makeResponse(503, "service unavailable"), nil
-			default:
-				return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+func TestCodexAttemptExecutorFrozenDispatchesAfterExactResolution(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	original := []byte(`{"model":"gpt-5.3-codex-spark","input":[]}`)
+	dispatched := false
+	executor := &CodexAttemptExecutor{
+		Secrets: &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision": testExactCredentialMaterial(identity, "secret"),
+		}},
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if !dispatched {
+				t.Fatal("request reached transport before dispatch callback")
 			}
-		}),
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				return nil, err
+			}
+			if !bytes.Equal(body, original) {
+				t.Fatalf("prepared body changed: %q", body)
+			}
+			if got := request.Header.Get("Authorization"); got != "Bearer secret" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		})},
 	}
 
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
+	response, actual, err := executor.doFrozenOnDispatch(
+		context.Background(),
+		RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel},
+		attempt,
+		makeCodexBytesRequest(original),
+		func(resolved CandidateAttempt) {
+			dispatched = true
+			if resolved != attempt {
+				t.Fatalf("resolved attempt = %+v, want %+v", resolved, attempt)
+			}
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 503 {
-		t.Errorf("status = %d, want 503 (preserve the last non-429 failure)", resp.StatusCode)
-	}
-	if transport.suppressFailoverForKey != "" {
-		t.Errorf("suppression = %q, want empty when a non-429 failure was seen", transport.suppressFailoverForKey)
+	response.Body.Close()
+	if actual != attempt {
+		t.Fatalf("actual attempt = %+v, want %+v", actual, attempt)
 	}
 }
 
-// TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess verifies
-// that failover suppression is cleared after a later non-429 success.
-func TestCodexTokenTransport_429FailoverSuppression_ClearedAfterSuccess(t *testing.T) {
-	sel := &multiCodexSelector{accounts: []codex.CodexAccount{
-		{Email: "a@test.com", AccessToken: "tok-a", AccountID: "acct-1"},
-		{Email: "b@test.com", AccessToken: "tok-b", AccountID: "acct-2"},
-	}}
+func TestCodexTokenTransportRewritesEncodedEffectiveModel(t *testing.T) {
+	originalJSON := []byte("{\n  \"input\" : [{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}],\n  \"model\" : \"gpt-5.3-codex-spark\",\n  \"metadata\" : {\"trace\":\"kept\"},\n  \"include\" : [\"reasoning.encrypted_content\"]\n}\n")
+	encoded := encodeCodexZstd(t, originalJSON)
+	req := makeCodexBytesRequest(encoded)
+	req.Header.Set("Content-Encoding", "zstd")
+	req.Header.Set("Content-Length", strconv.Itoa(len(encoded)))
 
-	transport := &CodexTokenTransport{
-		Selector: sel,
-		Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
-		}),
+	type capturedRequest struct {
+		body                []byte
+		getBody             []byte
+		contentEncoding     string
+		contentLength       int64
+		headerContentLength string
 	}
-
-	// Walk all accounts → suppression set.
-	transport.RoundTrip(makeCodexRequest(`{}`)) //nolint:errcheck
-
-	if transport.suppressFailoverForKey == "" {
-		t.Fatal("suppression should be set before testing clear")
-	}
-
-	// A successful response clears suppression.
-	transport.Inner = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		return makeResponse(200, "ok"), nil
-	})
-	resp, err := transport.RoundTrip(makeCodexRequest(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-
-	if transport.suppressFailoverForKey != "" {
-		t.Error("expected failover suppression to be cleared after success")
-	}
-
-	// Next 429 should replay again (suppression is gone).
-	var calls int
-	transport.Inner = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		if req.Header.Get("Authorization") == "Bearer tok-a" {
-			return makeResponse(429, `{"error":{"code":"rate_limit_exceeded"}}`), nil
+	var captured []capturedRequest
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(out *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(out.Body)
+		if err != nil {
+			return nil, err
 		}
-		return makeResponse(200, "ok"), nil
-	})
-	resp, err = transport.RoundTrip(makeCodexRequest(`{}`))
+		replay, err := out.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		getBody, err := io.ReadAll(replay)
+		_ = replay.Close()
+		if err != nil {
+			return nil, err
+		}
+		captured = append(captured, capturedRequest{
+			body:                body,
+			getBody:             getBody,
+			contentEncoding:     out.Header.Get("Content-Encoding"),
+			contentLength:       out.ContentLength,
+			headerContentLength: out.Header.Get("Content-Length"),
+		})
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	})}
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	for range 2 {
+		if _, err := transport.Do(req, choice, codex.CredentialMaterial{AccessToken: "secret"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(captured))
+	}
+	for i, got := range captured {
+		if got.contentEncoding != "zstd" {
+			t.Errorf("attempt %d Content-Encoding = %q", i, got.contentEncoding)
+		}
+		if got.contentLength != int64(len(got.body)) {
+			t.Errorf("attempt %d ContentLength = %d, body = %d", i, got.contentLength, len(got.body))
+		}
+		if got.headerContentLength != strconv.Itoa(len(got.body)) {
+			t.Errorf("attempt %d Content-Length = %q, body = %d", i, got.headerContentLength, len(got.body))
+		}
+		if !bytes.Equal(got.getBody, got.body) {
+			t.Errorf("attempt %d GetBody differs from Body", i)
+		}
+		decoded, err := DecodeCodexRequest(got.body, got.contentEncoding, DefaultCodexZstdLimits)
+		if err != nil {
+			t.Fatalf("attempt %d decode: %v", i, err)
+		}
+		var wantPayload, gotPayload map[string]any
+		if err := json.Unmarshal(originalJSON, &wantPayload); err != nil {
+			t.Fatal(err)
+		}
+		wantPayload["model"] = codexFallbackModel
+		if err := json.Unmarshal(decoded.Decoded(), &gotPayload); err != nil {
+			t.Fatalf("attempt %d JSON: %v", i, err)
+		}
+		if !reflect.DeepEqual(gotPayload, wantPayload) {
+			t.Errorf("attempt %d payload = %#v, want %#v", i, gotPayload, wantPayload)
+		}
+	}
+	if !bytes.Equal(captured[0].body, captured[1].body) {
+		t.Fatal("encoded retries differ")
+	}
+	callerBody, err := io.ReadAll(req.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200 (replay resumed after suppression cleared)", resp.StatusCode)
+	callerReplay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Errorf("calls = %d, want 2 (initial + replay)", calls)
+	callerGetBody, err := io.ReadAll(callerReplay)
+	_ = callerReplay.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(callerBody, encoded) || !bytes.Equal(callerGetBody, encoded) {
+		t.Fatal("caller body or GetBody was mutated")
+	}
+	if req.ContentLength != int64(len(encoded)) || req.Header.Get("Content-Length") != strconv.Itoa(len(encoded)) || req.Header.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("caller framing changed: ContentLength=%d headers=%v", req.ContentLength, req.Header)
+	}
+}
+
+func TestCodexTokenTransportAcceptsLowExpansionFrameWithLargeWindow(t *testing.T) {
+	body := codexLargeWindowRewriteBody(23 << 10)
+	encoded := encodeCodexZstdStreamingWindow(t, body, 2<<20)
+	assertCodexLargeWindowFixture(t, encoded, body)
+
+	upstreamCalls := 0
+	var upstreamBody []byte
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		var err error
+		upstreamBody, err = io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+	})}
+	request := makeCodexBytesRequest(encoded)
+	request.Header.Set("Content-Encoding", "zstd")
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	response, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", upstreamCalls)
+	}
+	decoded, err := DecodeCodexRequest(upstreamBody, "zstd", codexTransportRewriteLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(decoded.Decoded(), []byte(`"model":"`+codexFallbackModel+`"`)) {
+		t.Fatal("upstream model was not rewritten")
+	}
+}
+
+func TestCodexTokenTransportRejectsLargeWindowExpansionBeforeDispatch(t *testing.T) {
+	body := codexLargeWindowRewriteBody(2 << 20)
+	encoded := encodeCodexZstdStreamingWindow(t, body, 2<<20)
+	if len(body) <= len(encoded)*DefaultCodexZstdLimits.MaxExpansion {
+		t.Fatalf("fixture expansion = %d/%d, want over %d", len(body), len(encoded), DefaultCodexZstdLimits.MaxExpansion)
+	}
+
+	upstreamCalls := 0
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return nil, errors.New("unexpected upstream dispatch")
+	})}
+	request := makeCodexBytesRequest(encoded)
+	request.Header.Set("Content-Encoding", "zstd")
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	_, err := transport.Do(request, choice, codex.CredentialMaterial{AccessToken: "secret"})
+	if err == nil || !strings.Contains(err.Error(), "Codex zstd expansion ratio exceeds limit") {
+		t.Fatalf("error = %v, want expansion limit", err)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+}
+
+func codexLargeWindowRewriteBody(repeatedBytes int) []byte {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	noise := make([]byte, 13<<10)
+	state := uint64(0x9e3779b97f4a7c15)
+	for index := range noise {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		noise[index] = alphabet[state&63]
+	}
+	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"`)
+	body = append(body, noise...)
+	body = append(body, bytes.Repeat([]byte("x"), repeatedBytes)...)
+	return append(body, []byte(`"}`)...)
+}
+
+func assertCodexLargeWindowFixture(t *testing.T, encoded, decoded []byte) {
+	t.Helper()
+	var header zstd.Header
+	if err := header.Decode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if header.HasFCS || header.WindowSize != 2<<20 {
+		t.Fatalf("frame FCS=%v window=%d, want false/%d", header.HasFCS, header.WindowSize, 2<<20)
+	}
+	decodeLimit, ratioLimited := codexZstdDecodeLimit(len(encoded), codexTransportRewriteLimits())
+	if !ratioLimited || len(decoded) > decodeLimit || decodeLimit >= int(header.WindowSize) {
+		t.Fatalf("fixture encoded=%d decoded=%d decode_limit=%d window=%d", len(encoded), len(decoded), decodeLimit, header.WindowSize)
+	}
+}
+
+func TestCodexTokenTransportPreservesIdentityBodyWithoutRewrite(t *testing.T) {
+	original := []byte(" { \"model\" : \"gpt-5.4\", \"input\" : [ ] } \n")
+	req := makeCodexBytesRequest(original)
+	req.Header.Set("Content-Encoding", "identity")
+	req.Header.Set("Content-Length", "caller-length")
+	var gotBody, gotReplay []byte
+	var gotEncoding, gotHeaderLength string
+	var gotLength int64
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(out *http.Request) (*http.Response, error) {
+		var err error
+		gotBody, err = io.ReadAll(out.Body)
+		if err != nil {
+			return nil, err
+		}
+		replay, err := out.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		gotReplay, err = io.ReadAll(replay)
+		_ = replay.Close()
+		gotEncoding = out.Header.Get("Content-Encoding")
+		gotHeaderLength = out.Header.Get("Content-Length")
+		gotLength = out.ContentLength
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, err
+	})}
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}
+	if _, err := transport.Do(req, choice, codex.CredentialMaterial{AccessToken: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotBody, original) || !bytes.Equal(gotReplay, original) {
+		t.Fatal("identity no-rewrite body changed")
+	}
+	if gotEncoding != "identity" || gotLength != int64(len(original)) || gotHeaderLength != "caller-length" {
+		t.Fatalf("framing = encoding %q ContentLength %d Content-Length %q", gotEncoding, gotLength, gotHeaderLength)
+	}
+	callerBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(callerBody, original) || req.Header.Get("Content-Length") != "caller-length" {
+		t.Fatal("caller request changed")
+	}
+}
+
+func TestCodexTokenTransportIdentityRewriteUpdatesFraming(t *testing.T) {
+	original := []byte(`{"model":"gpt-5.3-codex-spark","input":[]}`)
+	req := makeCodexBytesRequest(original)
+	req.Header.Set("Content-Encoding", "identity")
+	req.Header.Set("Content-Length", strconv.Itoa(len(original)))
+	var gotBody, gotReplay []byte
+	var gotHeaderLength string
+	var gotLength int64
+	transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(out *http.Request) (*http.Response, error) {
+		var err error
+		gotBody, err = io.ReadAll(out.Body)
+		if err != nil {
+			return nil, err
+		}
+		replay, err := out.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		gotReplay, err = io.ReadAll(replay)
+		_ = replay.Close()
+		gotHeaderLength = out.Header.Get("Content-Length")
+		gotLength = out.ContentLength
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, err
+	})}
+	choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+	if _, err := transport.Do(req, choice, codex.CredentialMaterial{AccessToken: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotBody, gotReplay) {
+		t.Fatal("rewritten Body and GetBody differ")
+	}
+	if gotLength != int64(len(gotBody)) || gotHeaderLength != strconv.Itoa(len(gotBody)) {
+		t.Fatalf("framing = ContentLength %d Content-Length %q body %d", gotLength, gotHeaderLength, len(gotBody))
+	}
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil || payload.Model != codexFallbackModel {
+		t.Fatalf("payload = %q error=%v", gotBody, err)
+	}
+	callerBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(callerBody, original) || req.ContentLength != int64(len(original)) || req.Header.Get("Content-Length") != strconv.Itoa(len(original)) {
+		t.Fatal("caller request changed")
+	}
+}
+
+func TestCodexTokenTransportStopsBeforeInnerOnRewriteFailure(t *testing.T) {
+	malformedZstd := []byte("not a zstd frame")
+	tests := []struct {
+		name     string
+		body     []byte
+		encoding string
+		mutate   func(*http.Request)
+		wantErr  string
+	}{
+		{name: "unsupported encoding", body: []byte(`{"model":"gpt-5.3-codex-spark"}`), encoding: "gzip"},
+		{name: "malformed zstd", body: malformedZstd, encoding: "zstd"},
+		{name: "malformed JSON", body: []byte(`{"model":`), encoding: "identity"},
+		{name: "missing model", body: []byte(`{"input":[]}`), encoding: "identity"},
+		{name: "non-string model", body: []byte(`{"model":42}`), encoding: "identity"},
+		{name: "encoded over handler limit", body: bytes.Repeat([]byte("x"), maxRequestBody+1), encoding: "identity", wantErr: "Codex encoded request exceeds limit"},
+		{
+			name:     "rewritten body exceeds handler limit",
+			body:     []byte(`{"model":"gpt-5.3-codex-spark","input":"` + strings.Repeat("&", maxRequestBody/6+1) + `"}`),
+			encoding: "identity",
+			wantErr:  "prepare Codex model rewrite: Codex decoded request exceeds limit",
+		},
+		{name: "duplicate identity encoding", body: []byte(`{"model":"gpt-5.3-codex-spark"}`), encoding: "identity", mutate: func(req *http.Request) {
+			req.Header.Add("Content-Encoding", "identity")
+		}},
+		{name: "conflicting encodings", body: []byte(`{"model":"gpt-5.3-codex-spark"}`), encoding: "identity", mutate: func(req *http.Request) {
+			req.Header.Add("Content-Encoding", "zstd")
+		}},
+		{name: "GetBody error", body: []byte(`{"model":"gpt-5.3-codex-spark"}`), encoding: "identity", mutate: func(req *http.Request) {
+			req.GetBody = func() (io.ReadCloser, error) { return nil, errors.New("replay failed") }
+		}},
+		{name: "body is not replayable", body: []byte(`{"model":"gpt-5.3-codex-spark"}`), encoding: "identity", mutate: func(req *http.Request) {
+			req.GetBody = nil
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := makeCodexBytesRequest(tc.body)
+			req.Header.Set("Content-Encoding", tc.encoding)
+			if tc.mutate != nil {
+				tc.mutate(req)
+			}
+			innerCalls := 0
+			transport := &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				innerCalls++
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+			})}
+			choice := RouteChoice{AccountKey: "identity", RequestedModel: codexSparkModel, EffectiveModel: codexFallbackModel}
+			_, err := transport.Do(req, choice, codex.CredentialMaterial{AccessToken: "secret"})
+			if err == nil {
+				t.Fatal("expected rewrite error")
+			}
+			if tc.wantErr != "" && err.Error() != tc.wantErr {
+				t.Fatalf("error = %q, want %q", err, tc.wantErr)
+			}
+			if innerCalls != 0 {
+				t.Fatalf("inner calls = %d, want 0", innerCalls)
+			}
+		})
+	}
+}
+
+func TestCodexAttemptExecutorRejectsIdentityMismatchBeforeSecretResolution(t *testing.T) {
+	resolver := &testSecretResolver{materials: map[codex.CandidateID]codex.CredentialMaterial{"candidate": {AccessToken: "secret"}}}
+	executor := &CodexAttemptExecutor{Secrets: resolver, Transport: &CodexTokenTransport{}}
+	_, err := executor.Do(context.Background(), RouteChoice{AccountKey: "one"}, CandidateAttempt{
+		AccountKey: "two",
+		Candidate:  codex.CandidateRef{AccountKey: "two", CandidateID: "candidate"},
+	}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("err = %v", err)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("secret resolutions = %d", resolver.calls)
+	}
+}
+
+func TestCodexAttemptExecutorRelistsSameIdentityRevisionBeforeDispatch(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	inventory := staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{
+		Key: "identity", Identity: identity, Routable: true,
+		Candidates: []codex.CredentialCandidate{{
+			Ref: ref, Revision: "revision-new", Source: codex.SourceSystem, Routable: true,
+		}},
+	}}}}
+	resolver := &testExactSecretResolver{
+		errors: map[codex.Revision]error{"revision-old": codex.ErrStaleRevision},
+		materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision-new": testExactCredentialMaterial(identity, "rotated-secret"),
+		},
+	}
+	var authorization string
+	executor := &CodexAttemptExecutor{
+		Inventory: inventory,
+		Secrets:   resolver,
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			authorization = request.Header.Get("Authorization")
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		})},
+	}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision-old",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	var dispatched CandidateAttempt
+	response, actual, err := executor.doOnDispatch(
+		context.Background(), RouteChoice{AccountKey: "identity"}, attempt,
+		makeCodexRequest(`{"model":"gpt-5.4"}`),
+		func(resolved CandidateAttempt) { dispatched = resolved },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if authorization != "Bearer rotated-secret" {
+		t.Fatalf("authorization = %q", authorization)
+	}
+	if actual.Revision != "revision-new" || dispatched.Revision != "revision-new" {
+		t.Fatalf("actual revision = %q, dispatched revision = %q", actual.Revision, dispatched.Revision)
+	}
+	if actual.Candidate != ref || actual.Source != codex.SourceSystem || actual.Identity != identity || actual.Ordinal != attempt.Ordinal {
+		t.Fatalf("actual attempt = %+v", actual)
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	if len(resolver.plans) != 2 || resolver.plans[0].Revision != "revision-old" || resolver.plans[1].Revision != "revision-new" {
+		t.Fatalf("resolved plans = %+v", resolver.plans)
+	}
+}
+
+func TestCodexAttemptExecutorRejectsUnsafeRelistBeforeDispatch(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	ref := codex.CandidateRef{AccountKey: "identity", CandidateID: "candidate"}
+	attempt := CandidateAttempt{
+		AccountKey: "identity", Candidate: ref, Revision: "revision-old",
+		Source: codex.SourceSystem, Identity: identity, Ordinal: 1,
+	}
+	for name, inventory := range testRejectedReplanInventories(ref, identity) {
+		t.Run(name, func(t *testing.T) {
+			resolver := &testExactSecretResolver{
+				errors:    map[codex.Revision]error{"revision-old": codex.ErrStaleRevision},
+				materials: make(map[codex.Revision]codex.CredentialMaterial),
+			}
+			upstreamCalls := 0
+			executor := &CodexAttemptExecutor{
+				Inventory: staticCredentialInventory{inventory: inventory},
+				Secrets:   resolver,
+				Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					upstreamCalls++
+					return nil, errors.New("unexpected upstream dispatch")
+				})},
+			}
+			_, err := executor.Do(context.Background(), RouteChoice{AccountKey: "identity"}, attempt, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			if !errors.Is(err, codex.ErrStaleRevision) {
+				t.Fatalf("error = %v, want ErrStaleRevision", err)
+			}
+			if upstreamCalls != 0 {
+				t.Fatalf("upstream calls = %d", upstreamCalls)
+			}
+			resolver.mu.Lock()
+			plans := len(resolver.plans)
+			resolver.mu.Unlock()
+			if plans != 1 {
+				t.Fatalf("exact resolutions = %d, want 1", plans)
+			}
+		})
+	}
+}
+
+func TestRewriteCodexModelNamePreservesSuffix(t *testing.T) {
+	got, ok := rewriteCodexModelName("gpt-5.3-codex-spark-high")
+	if !ok || got != "gpt-5.3-codex-high" {
+		t.Fatalf("rewrite = %q, %v", got, ok)
 	}
 }

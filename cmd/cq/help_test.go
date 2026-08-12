@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,7 +36,10 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 		"proxy uninstall",
 		"proxy restart",
 		"proxy status",
+		"proxy validate-http",
 		"proxy pin",
+		"proxy prime",
+		"proxy codex-default",
 		"models list",
 		"models refresh",
 		"models overlay add",
@@ -66,12 +71,37 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 		{
 			name: "proxy start",
 			path: []string{"proxy", "start"},
-			want: []string{"Usage: cq proxy start [--port PORT]", "Start local Claude and Codex proxy"},
+			want: []string{"Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]", "Start local Claude and Codex proxy", "--migrate-legacy-managed"},
+		},
+		{
+			name: "proxy validate HTTP",
+			path: []string{"proxy", "validate-http"},
+			want: []string{
+				"Usage: cq proxy validate-http",
+				"one-shot installed HTTP validation",
+				"does not write readiness evidence",
+			},
 		},
 		{
 			name: "proxy pin",
 			path: []string{"proxy", "pin"},
 			want: []string{"Usage: cq proxy pin [--clear | <email-or-account-uuid>]", "Pin Claude proxy routing"},
+		},
+		{
+			name: "proxy prime",
+			path: []string{"proxy", "prime"},
+			want: []string{"Usage: cq proxy prime <command>", "prime enable", "prime disable", "prime status"},
+		},
+		{
+			name: "proxy codex default",
+			path: []string{"proxy", "codex-default"},
+			want: []string{
+				"Usage: cq proxy codex-default [--clear | <account-reference>]",
+				"unique email, CQ alias, or opaque AccountKey",
+				"independent of Codex Desktop/system identity",
+				"never mutates Codex Bar or system authentication",
+				"Restart proxy to apply change.",
+			},
 		},
 		{
 			name: "models list",
@@ -100,6 +130,26 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunProxyCodexDefaultHelpDoesNotCreateConfig(t *testing.T) {
+	configHome := filepath.Join(t.TempDir(), "config")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	for _, args := range [][]string{
+		{"codex-default", "--help"},
+		{"codex-default", "-h"},
+		{"help", "codex-default"},
+	} {
+		if err := runProxy(args); err != nil {
+			t.Fatalf("runProxy(%v) error = %v", args, err)
+		}
+	}
+
+	path := filepath.Join(configHome, "cq", "proxy.json")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("help config stat error = %v, want not exist", err)
 	}
 }
 

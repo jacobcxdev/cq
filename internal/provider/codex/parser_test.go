@@ -54,6 +54,63 @@ func TestParseUsageNormal(t *testing.T) {
 	}
 }
 
+func TestParseUsageObservationPreservesBackendWindowDescriptors(t *testing.T) {
+	body := []byte(`{
+		"plan_type":"plus",
+		"rate_limit":{
+			"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":1774051200},
+			"secondary_window":{"used_percent":10,"limit_window_seconds":604800,"reset_at":1774569600}
+		},
+		"additional_rate_limits":[{
+			"limit_name":"GPT-5.3-Codex-Spark",
+			"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_at":"2026-03-27T00:00:00Z"}}
+		}]
+	}`)
+
+	observation := ParseUsageObservation(body, "user@example.test", "acct-1")
+	if !observation.Result.IsUsable() {
+		t.Fatalf("result = %+v", observation.Result)
+	}
+	if len(observation.Windows) != 3 {
+		t.Fatalf("descriptors = %+v, want 3", observation.Windows)
+	}
+	shared := observation.Windows[0]
+	if shared.RawLimitName != "primary_window" || shared.WindowName != quota.Window5Hour || shared.Period != 5*time.Hour || shared.ScopeKind != WindowScopeShared || !shared.ResetAt.Equal(time.Unix(1774051200, 0)) || shared.RemainingPct != 100 {
+		t.Fatalf("shared descriptor = %+v", shared)
+	}
+	scoped := observation.Windows[2]
+	if scoped.RawLimitName != "GPT-5.3-Codex-Spark" || scoped.WindowName != quota.WindowName("7d:GPT-5.3-Codex-Spark") || scoped.ScopeKind != WindowScopeModelFamily || scoped.Scope != "GPT-5.3-Codex-Spark" || scoped.RemainingPct != 80 {
+		t.Fatalf("scoped descriptor = %+v", scoped)
+	}
+}
+
+func TestParseUsageObservationPreservesExactDescriptorPercentage(t *testing.T) {
+	observation := ParseUsageObservation([]byte(`{
+		"rate_limit":{"primary_window":{"used_percent":0.4,"limit_window_seconds":604800,"reset_at":1774051200}}
+	}`), "", "")
+	if len(observation.Windows) != 1 {
+		t.Fatalf("descriptors = %+v", observation.Windows)
+	}
+	if observation.Windows[0].RemainingPct != 99.6 {
+		t.Fatalf("descriptor remaining = %v", observation.Windows[0].RemainingPct)
+	}
+	if observation.Result.Windows[quota.Window7Day].RemainingPct != 100 {
+		t.Fatalf("display remaining = %v", observation.Result.Windows[quota.Window7Day].RemainingPct)
+	}
+}
+
+func TestParseUsageObservationExcludesDescriptorWithoutResetEpoch(t *testing.T) {
+	body := []byte(`{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800}}}`)
+
+	observation := ParseUsageObservation(body, "", "acct-1")
+	if len(observation.Result.Windows) != 1 {
+		t.Fatalf("display windows = %+v, want preserved quota window", observation.Result.Windows)
+	}
+	if len(observation.Windows) != 0 {
+		t.Fatalf("schedulable descriptors = %+v, want none", observation.Windows)
+	}
+}
+
 func TestParseUsageExhausted(t *testing.T) {
 	exhaustedJSON := []byte(`{
 		"plan_type": "plus",

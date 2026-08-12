@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -79,85 +79,34 @@ func firstCodexAccessToken(accounts []codexprov.CodexAccount) (string, error) {
 	return best, nil
 }
 
-// codexRefreshFunc is the signature for a Codex token refresh function.
-// It matches auth.RefreshCodexToken so real callers can pass it directly.
-type codexRefreshFunc func(ctx context.Context, refreshToken string) (*auth.CodexTokenResponse, error)
-
-// codexPersistFunc is the signature for persisting an updated CodexAccount.
-// It matches codexprov.PersistCodexAccount so real callers can pass it directly.
-type codexPersistFunc func(fs fsutil.FileSystem, acct codexprov.CodexAccount, home string) error
-
-// firstCodexAccessTokenWithRefresh returns the best available Codex access token
-// from accounts. The active account's access token is returned optimistically
-// when present because upstream may still accept it despite stale local expiry
-// metadata. Otherwise, fresh fallback tokens are preferred before refreshFn is
-// used to obtain and persist new tokens from a RefreshToken.
-func firstCodexAccessTokenWithRefresh(
-	ctx context.Context,
-	accounts []codexprov.CodexAccount,
-	refreshFn codexRefreshFunc,
-	fs fsutil.FileSystem,
-	home string,
-	persistFn codexPersistFunc,
-) (string, error) {
-	if len(accounts) == 0 {
+func firstCodexAccessTokenFromInventory(ctx context.Context, inventory codexprov.Inventory, broker codexprov.CredentialRefreshBroker) (string, error) {
+	if len(inventory.Accounts) == 0 {
 		return "", fmt.Errorf("no codex accounts")
 	}
 	now := time.Now()
-
-	// First pass: try the active account token optimistically. Codex access tokens
-	// can remain accepted by upstream even when local expiry metadata is stale.
-	for _, account := range accounts {
-		if account.IsActive && account.AccessToken != "" {
-			return account.AccessToken, nil
-		}
-	}
-
-	// Second pass: pick the best already-fresh fallback token.
 	best, bestExpires := "", int64(0)
-	for _, account := range accounts {
-		best, bestExpires = betterTokenCandidate(best, bestExpires, account.AccessToken, account.ExpiresAt, now)
+	for _, logical := range inventory.Accounts {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
+			best, bestExpires = betterTokenCandidate(best, bestExpires, candidate.Credential.AccessToken, candidate.Credential.ExpiresAt, now)
+		}
 	}
 	if best != "" {
 		return best, nil
 	}
-
-	// Third pass: attempt refresh for accounts that have a RefreshToken.
-	// We try each in order and return the first successful refreshed token.
-	for _, account := range accounts {
-		if account.RefreshToken == "" {
-			continue
-		}
-		tokens, err := refreshFn(ctx, account.RefreshToken)
-		if err != nil {
-			continue
-		}
-		if tokens.AccessToken == "" {
-			continue
-		}
-		// Update account fields with refreshed tokens.
-		account.AccessToken = tokens.AccessToken
-		if tokens.RefreshToken != "" {
-			account.RefreshToken = tokens.RefreshToken
-		}
-		if tokens.IDToken != "" {
-			account.IDToken = tokens.IDToken
-		}
-		claims := auth.DecodeCodexClaims(tokens.IDToken)
-		if claims.ExpiresAt > 0 {
-			account.ExpiresAt = claims.ExpiresAt * 1000
-		} else {
-			account.ExpiresAt = now.UnixMilli() + tokens.ExpiresIn*1000
-		}
-		// Persist if the account has a file path.
-		if account.FilePath != "" && persistFn != nil {
-			if err := persistFn(fs, account, home); err != nil {
-				fmt.Fprintf(nilSafeStderr(nil), "cq: persist codex tokens (registry): %v\n", err)
+	if broker == nil {
+		return "", fmt.Errorf("no codex account with token")
+	}
+	for _, logical := range inventory.Accounts {
+		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
+			if candidate.Source != codexprov.SourceManaged {
+				continue
+			}
+			result, err := broker.Refresh(ctx, candidate.Ref, candidate.Revision)
+			if err == nil && result.Material.AccessToken != "" {
+				return result.Material.AccessToken, nil
 			}
 		}
-		return tokens.AccessToken, nil
 	}
-
 	return "", fmt.Errorf("no codex account with token")
 }
 
@@ -187,16 +136,18 @@ func firstClaudeAccessTokenFromAccounts(accounts []keyring.ClaudeOAuth) func() (
 }
 
 type registryPipelineOptions struct {
-	FS                 fsutil.FileSystem
-	HomeDir            string
-	ClaudeUpstream     string
-	CodexUpstream      string
-	HTTPClient         httputil.Doer
-	CodexClientVersion string
-	ClaudeToken        func() (string, error)
-	CodexToken         func() (string, error)
-	Env                func(string) string
-	Stderr             io.Writer
+	FS                   fsutil.FileSystem
+	HomeDir              string
+	ClaudeUpstream       string
+	CodexUpstream        string
+	HTTPClient           httputil.Doer
+	CodexClientVersion   string
+	ClaudeToken          func() (string, error)
+	CodexToken           func() (string, error)
+	CodexTokenContext    func(context.Context) (string, error)
+	CodexAuthenticatedDo func(context.Context, *http.Request) (*http.Response, error)
+	Env                  func(string) string
+	Stderr               io.Writer
 }
 
 func snapshotHasProvider(snap modelregistry.Snapshot, provider modelregistry.Provider) bool {
@@ -241,7 +192,7 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	if opts.ClaudeToken == nil {
 		return nil, fmt.Errorf("registry pipeline: missing Claude token provider")
 	}
-	if opts.CodexToken == nil {
+	if opts.CodexToken == nil && opts.CodexTokenContext == nil && opts.CodexAuthenticatedDo == nil {
 		return nil, fmt.Errorf("registry pipeline: missing Codex token provider")
 	}
 	if opts.Env == nil {
@@ -264,10 +215,16 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 			},
 		},
 		Codex: &modelregistry.CodexSource{
-			Client:        opts.HTTPClient,
-			BaseURL:       opts.CodexUpstream,
-			Token:         func(ctx context.Context) (string, error) { return opts.CodexToken() },
-			ClientVersion: opts.CodexClientVersion,
+			Client:  opts.HTTPClient,
+			BaseURL: opts.CodexUpstream,
+			Token: func(ctx context.Context) (string, error) {
+				if opts.CodexTokenContext != nil {
+					return opts.CodexTokenContext(ctx)
+				}
+				return opts.CodexToken()
+			},
+			AuthenticatedDo: opts.CodexAuthenticatedDo,
+			ClientVersion:   opts.CodexClientVersion,
 		},
 		Overlays: modelregistry.FileOverlayStore{
 			FS:   opts.FS,
@@ -328,4 +285,16 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	}
 
 	return p, nil
+}
+
+func newRegistryPipelineWithCodexAuthority(opts registryPipelineOptions, authority codexRegistryCredentialAuthority) (*registryPipeline, error) {
+	if authority == nil {
+		return nil, fmt.Errorf("registry pipeline: %w", errCodexRegistryCredentialAuthorityUnavailable)
+	}
+	opts.CodexToken = nil
+	opts.CodexTokenContext = nil
+	opts.CodexAuthenticatedDo = func(ctx context.Context, req *http.Request) (*http.Response, error) {
+		return codexRegistryModelsRequest(ctx, authority, opts.HTTPClient, time.Now(), req)
+	}
+	return newRegistryPipeline(opts)
 }

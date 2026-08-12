@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -200,5 +201,15 @@ func TestRefreshCodexTokenNormalisesExplicitZeroExpiresIn(t *testing.T) {
 	// to DefaultExpiresInSec (same as when the field is omitted).
 	if got := field.Int(); got != DefaultExpiresInSec {
 		t.Fatalf("ExpiresIn = %d, want %d (server explicit 0 must be normalised)", got, DefaultExpiresInSec)
+	}
+}
+
+func TestRefreshCodexTokenClassifiesHTTPRejection(t *testing.T) {
+	_, err := RefreshCodexToken(context.Background(), stubDoer(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	}), "synthetic-refresh")
+	var tokenErr *CodexTokenHTTPError
+	if !errors.As(err, &tokenErr) || !tokenErr.RefreshDefinitive() {
+		t.Fatalf("error = %v, want definitive token HTTP error", err)
 	}
 }

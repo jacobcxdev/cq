@@ -3,13 +3,16 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
@@ -78,6 +81,7 @@ func fakeBridge(t *testing.T, responder func(req headroomRequest) headroomRespon
 
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
+	process := newHeadroomTestProcess()
 
 	t.Cleanup(func() {
 		stdinW.Close()
@@ -86,6 +90,7 @@ func fakeBridge(t *testing.T, responder func(req headroomRequest) headroomRespon
 	})
 
 	go func() {
+		defer process.exit()
 		scanner := bufio.NewScanner(stdinR)
 		for scanner.Scan() {
 			var req headroomRequest
@@ -100,10 +105,697 @@ func fakeBridge(t *testing.T, responder func(req headroomRequest) headroomRespon
 		stdoutW.Close()
 	}()
 
-	return &HeadroomBridge{
-		cmd:    exec.Command("true"), // placeholder — never waited on in tests
-		stdin:  stdinW,
-		stdout: bufio.NewScanner(stdoutR),
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, nil)
+	t.Cleanup(bridge.Stop)
+	return bridge
+}
+
+func TestHeadroomProbeConfirmsLiveCacheBridge(t *testing.T) {
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		return validHeadroomProbeResponse(reqBytes)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bridge.Probe(ctx); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+}
+
+func TestHeadroomPingKeepsTokenModeAvailableWithoutResponsesConverter(t *testing.T) {
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		var operation struct {
+			Operation string `json:"operation"`
+			RequestID string `json:"request_id"`
+		}
+		if err := json.Unmarshal(reqBytes, &operation); err != nil {
+			return []byte(`not-json`)
+		}
+		if operation.Operation == "probe" {
+			response, _ := json.Marshal(headroomProbeResponse{
+				Operation: "probe",
+				RequestID: operation.RequestID,
+				Protocol:  1,
+				OK:        true,
+				CacheMode: false,
+			})
+			return response
+		}
+		response, _ := json.Marshal(headroomResponse{Messages: json.RawMessage(`[]`)})
+		return response
+	})
+
+	if err := bridge.ping(); err != nil {
+		t.Fatalf("ping rejected token-only bridge: %v", err)
+	}
+}
+
+func TestHeadroomProbeRequiresDeadline(t *testing.T) {
+	bridge := fakeBridgeRaw(t, func(reqBytes []byte) []byte {
+		return validHeadroomProbeResponse(reqBytes)
+	})
+
+	if err := bridge.Probe(context.Background()); err == nil {
+		t.Fatal("Probe succeeded without a context deadline")
+	}
+}
+
+func TestHeadroomProbeRejectsNilBridge(t *testing.T) {
+	var bridge *HeadroomBridge
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bridge.Probe(ctx); !errors.Is(err, errHeadroomProbeUnavailable) {
+		t.Fatalf("Probe error = %v, want unavailable", err)
+	}
+}
+
+func TestHeadroomProbeRejectsStoppedBridge(t *testing.T) {
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Response: []byte(`{}`), Respond: true}
+	})
+	bridge.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bridge.Probe(ctx); !errors.Is(err, errHeadroomProbeUnavailable) {
+		t.Fatalf("Probe error = %v, want unavailable", err)
+	}
+}
+
+func TestHeadroomProbeRejectsExitedBridge(t *testing.T) {
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Exit: true}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := bridge.Probe(ctx); !errors.Is(err, errHeadroomProbeUnavailable) {
+		t.Fatalf("Probe error = %v, want unavailable", err)
+	}
+}
+
+func TestHeadroomProbeDeadlineInterruptsHungResponse(t *testing.T) {
+	requestSeen := make(chan struct{})
+	var seenOnce sync.Once
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		seenOnce.Do(func() { close(requestSeen) })
+		return headroomTestAction{}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- bridge.Probe(ctx) }()
+
+	select {
+	case <-requestSeen:
+	case <-time.After(time.Second):
+		t.Fatal("probe request was not dispatched")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Probe error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Probe did not return after its context deadline")
+	}
+}
+
+func TestHeadroomExchangeKeepsDeadlineActiveThroughValidation(t *testing.T) {
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Response: []byte(`{}`), Respond: true}
+	})
+	validationStarted := make(chan struct{})
+	releaseValidation := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseValidation:
+		default:
+			close(releaseValidation)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := bridge.exchange(ctx, []byte(`{}`), func([]byte) error {
+			close(validationStarted)
+			<-releaseValidation
+			return nil
+		})
+		result <- err
+	}()
+
+	select {
+	case <-validationStarted:
+	case <-time.After(time.Second):
+		t.Fatal("validation did not start")
+	}
+	<-ctx.Done()
+	close(releaseValidation)
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("exchange error = %v, want deadline exceeded", err)
+	}
+
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer probeCancel()
+	if err := bridge.Probe(probeCtx); !errors.Is(err, errHeadroomProbeUnavailable) {
+		t.Fatalf("Probe after validation deadline = %v, want unavailable", err)
+	}
+}
+
+func TestHeadroomProbeRejectsInvalidResponses(t *testing.T) {
+	tests := []struct {
+		name     string
+		response func([]byte) []byte
+	}{
+		{name: "malformed", response: func([]byte) []byte { return []byte(`not-json`) }},
+		{name: "trailing_json", response: func(req []byte) []byte { return append(validHeadroomProbeResponse(req), []byte(` {}`)...) }},
+		{name: "wrong_operation", response: mutateHeadroomProbeResponse("operation", "compress_messages")},
+		{name: "empty_request_id", response: mutateHeadroomProbeResponse("request_id", "")},
+		{name: "wrong_request_id", response: mutateHeadroomProbeResponse("request_id", "not-the-request")},
+		{name: "wrong_protocol", response: mutateHeadroomProbeResponse("protocol", 2)},
+		{name: "not_ok", response: mutateHeadroomProbeResponse("ok", false)},
+		{name: "no_cache_mode", response: mutateHeadroomProbeResponse("cache_mode", false)},
+		{name: "unknown_field", response: mutateHeadroomProbeResponse("unexpected", true)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			bridge := headroomTestBridge(t, func(req []byte) headroomTestAction {
+				calls++
+				if calls == 1 {
+					return headroomTestAction{Response: tt.response(req), Respond: true}
+				}
+				return headroomTestAction{Response: validHeadroomProbeResponse(req), Respond: true}
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := bridge.Probe(ctx); !errors.Is(err, errHeadroomProbeInvalid) {
+				t.Fatalf("first Probe error = %v, want invalid response", err)
+			}
+			if err := bridge.Probe(ctx); !errors.Is(err, errHeadroomProbeUnavailable) {
+				t.Fatalf("second Probe error = %v, want retired bridge", err)
+			}
+		})
+	}
+}
+
+func TestHeadroomProbeDoesNotExposeMalformedResponse(t *testing.T) {
+	const privateMarker = "private-response-marker"
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Response: []byte(`{"` + privateMarker + `"`), Respond: true}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := bridge.Probe(ctx)
+	if err == nil {
+		t.Fatal("Probe succeeded with malformed response")
+	}
+	if strings.Contains(err.Error(), privateMarker) {
+		t.Fatalf("Probe error exposed response bytes: %v", err)
+	}
+}
+
+func TestHeadroomProbeSerialisesWithCompress(t *testing.T) {
+	compressSeen := make(chan struct{})
+	releaseCompress := make(chan struct{})
+	probeSeen := make(chan struct{})
+	var compressOnce, probeOnce sync.Once
+	bridge := headroomTestBridge(t, func(reqBytes []byte) headroomTestAction {
+		var operation struct {
+			Operation string `json:"operation"`
+		}
+		_ = json.Unmarshal(reqBytes, &operation)
+		if operation.Operation == "probe" {
+			probeOnce.Do(func() { close(probeSeen) })
+			return headroomTestAction{Response: validHeadroomProbeResponse(reqBytes), Respond: true}
+		}
+
+		compressOnce.Do(func() { close(compressSeen) })
+		<-releaseCompress
+		var req headroomRequest
+		_ = json.Unmarshal(reqBytes, &req)
+		response, _ := json.Marshal(headroomResponse{Messages: req.Messages})
+		return headroomTestAction{Response: response, Respond: true}
+	})
+	defer func() {
+		select {
+		case <-releaseCompress:
+		default:
+			close(releaseCompress)
+		}
+	}()
+
+	compressResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.Compress([]byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`))
+		compressResult <- err
+	}()
+	select {
+	case <-compressSeen:
+	case <-time.After(time.Second):
+		t.Fatal("Compress was not dispatched")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	probeResult := make(chan error, 1)
+	go func() { probeResult <- bridge.Probe(ctx) }()
+	select {
+	case <-probeSeen:
+		t.Fatal("Probe was dispatched before Compress completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseCompress)
+
+	if err := <-compressResult; err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if err := <-probeResult; err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+}
+
+func TestHeadroomProbeQueuedCancellationDoesNotRetireBridge(t *testing.T) {
+	compressSeen := make(chan struct{})
+	releaseCompress := make(chan struct{})
+	var compressOnce sync.Once
+	bridge := headroomTestBridge(t, func(reqBytes []byte) headroomTestAction {
+		var operation struct {
+			Operation string `json:"operation"`
+		}
+		_ = json.Unmarshal(reqBytes, &operation)
+		if operation.Operation == "probe" {
+			return headroomTestAction{Response: validHeadroomProbeResponse(reqBytes), Respond: true}
+		}
+
+		compressOnce.Do(func() { close(compressSeen) })
+		<-releaseCompress
+		var req headroomRequest
+		_ = json.Unmarshal(reqBytes, &req)
+		response, _ := json.Marshal(headroomResponse{Messages: req.Messages})
+		return headroomTestAction{Response: response, Respond: true}
+	})
+	defer func() {
+		select {
+		case <-releaseCompress:
+		default:
+			close(releaseCompress)
+		}
+	}()
+
+	compressResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.Compress([]byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`))
+		compressResult <- err
+	}()
+	select {
+	case <-compressSeen:
+	case <-time.After(time.Second):
+		t.Fatal("Compress was not dispatched")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	probeResult := make(chan error, 1)
+	go func() { probeResult <- bridge.Probe(ctx) }()
+	select {
+	case err := <-probeResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("queued Probe error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("queued Probe ignored context deadline")
+	}
+
+	close(releaseCompress)
+	if err := <-compressResult; err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer probeCancel()
+	if err := bridge.Probe(probeCtx); err != nil {
+		t.Fatalf("Probe after queued cancellation: %v", err)
+	}
+}
+
+func TestHeadroomCompressResponsesContextRejectsPreCanceledOperation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(*HeadroomBridge, context.Context, []byte) ([]byte, int, error)
+	}{
+		{name: "token", call: func(bridge *HeadroomBridge, ctx context.Context, body []byte) ([]byte, int, error) {
+			return bridge.CompressResponsesContext(ctx, body, HeadroomModeToken)
+		}},
+		{name: "cache", call: func(bridge *HeadroomBridge, ctx context.Context, body []byte) ([]byte, int, error) {
+			return bridge.CompressResponsesCacheContext(ctx, body)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatched := make(chan struct{}, 1)
+			bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+				dispatched <- struct{}{}
+				return headroomTestAction{}
+			})
+			body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			out, saved, err := test.call(bridge, ctx, body)
+			if !errors.Is(err, context.Canceled) || saved != 0 || !bytes.Equal(out, body) {
+				t.Fatalf("output/saved/error = %q/%d/%v", out, saved, err)
+			}
+			select {
+			case <-dispatched:
+				t.Fatal("pre-canceled compression dispatched")
+			default:
+			}
+		})
+	}
+}
+
+func TestHeadroomCompressResponsesContextQueuedCancellationKeepsBridgeUsable(t *testing.T) {
+	firstSeen := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstOnce sync.Once
+	bridge := headroomTestBridge(t, func(request []byte) headroomTestAction {
+		firstOnce.Do(func() {
+			close(firstSeen)
+			<-releaseFirst
+		})
+		var parsed headroomResponsesRequest
+		_ = json.Unmarshal(request, &parsed)
+		response, _ := json.Marshal(headroomResponsesResponse{OK: true, Input: parsed.Input})
+		return headroomTestAction{Response: response, Respond: true}
+	})
+	defer func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	}()
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`)
+	firstResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.CompressResponsesContext(context.Background(), body, HeadroomModeToken)
+		firstResult <- err
+	}()
+	select {
+	case <-firstSeen:
+	case <-time.After(time.Second):
+		t.Fatal("first compression was not dispatched")
+	}
+
+	queuedCtx, queuedCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer queuedCancel()
+	queuedResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.CompressResponsesContext(queuedCtx, body, HeadroomModeToken)
+		queuedResult <- err
+	}()
+	select {
+	case err := <-queuedResult:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("queued compression error = %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("queued compression ignored context deadline")
+	}
+
+	close(releaseFirst)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first compression: %v", err)
+	}
+	usableCtx, usableCancel := context.WithTimeout(context.Background(), time.Second)
+	defer usableCancel()
+	if _, _, err := bridge.CompressResponsesContext(usableCtx, body, HeadroomModeToken); err != nil {
+		t.Fatalf("compression after queued cancellation: %v", err)
+	}
+}
+
+func TestHeadroomCompressResponsesCacheContextDispatchedCancellationRetiresBridge(t *testing.T) {
+	dispatched := make(chan struct{})
+	var dispatchedOnce sync.Once
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		dispatchedOnce.Do(func() { close(dispatched) })
+		return headroomTestAction{}
+	})
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"hello"}]}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	result := make(chan struct {
+		body  []byte
+		saved int
+		err   error
+	}, 1)
+	go func() {
+		out, saved, err := bridge.CompressResponsesCacheContext(ctx, body)
+		result <- struct {
+			body  []byte
+			saved int
+			err   error
+		}{body: out, saved: saved, err: err}
+	}()
+	select {
+	case <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("cache compression was not dispatched")
+	}
+	select {
+	case got := <-result:
+		if !errors.Is(got.err, context.DeadlineExceeded) || got.saved != 0 || !bytes.Equal(got.body, body) {
+			t.Fatalf("output/saved/error = %q/%d/%v", got.body, got.saved, got.err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("dispatched cache compression ignored context deadline")
+	}
+	usableCtx, usableCancel := context.WithTimeout(context.Background(), time.Second)
+	defer usableCancel()
+	if _, _, err := bridge.CompressResponsesCacheContext(usableCtx, body); !errors.Is(err, errHeadroomProbeUnavailable) {
+		t.Fatalf("compression after dispatched cancellation = %v, want unavailable", err)
+	}
+}
+
+func TestHeadroomProbeConcurrentStopReturnsPromptly(t *testing.T) {
+	probeSeen := make(chan struct{})
+	var probeOnce sync.Once
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		probeOnce.Do(func() { close(probeSeen) })
+		return headroomTestAction{}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	probeResult := make(chan error, 1)
+	go func() { probeResult <- bridge.Probe(ctx) }()
+	select {
+	case <-probeSeen:
+	case <-time.After(time.Second):
+		t.Fatal("Probe was not dispatched")
+	}
+
+	stopResult := make(chan struct{})
+	go func() {
+		bridge.Stop()
+		close(stopResult)
+	}()
+	select {
+	case <-stopResult:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop deadlocked with Probe")
+	}
+	select {
+	case err := <-probeResult:
+		if !errors.Is(err, errHeadroomProbeUnavailable) {
+			t.Fatalf("Probe error = %v, want unavailable", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Probe remained blocked after Stop")
+	}
+}
+
+func TestHeadroomStopUnblocksHungCompress(t *testing.T) {
+	compressSeen := make(chan struct{})
+	var compressOnce sync.Once
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		compressOnce.Do(func() { close(compressSeen) })
+		return headroomTestAction{}
+	})
+
+	compressResult := make(chan error, 1)
+	go func() {
+		_, _, err := bridge.Compress([]byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`))
+		compressResult <- err
+	}()
+	select {
+	case <-compressSeen:
+	case <-time.After(time.Second):
+		t.Fatal("Compress was not dispatched")
+	}
+
+	stopResult := make(chan struct{})
+	go func() {
+		bridge.Stop()
+		close(stopResult)
+	}()
+	select {
+	case <-stopResult:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop deadlocked with Compress")
+	}
+	select {
+	case err := <-compressResult:
+		if err == nil {
+			t.Fatal("Compress succeeded after bridge Stop")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Compress remained blocked after Stop")
+	}
+}
+
+func TestHeadroomStopIsSafeForConcurrentCallers(t *testing.T) {
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		return headroomTestAction{Exit: true}
+	})
+
+	const callers = 8
+	done := make(chan struct{}, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			bridge.Stop()
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("concurrent Stop call did not return")
+		}
+	}
+}
+
+func TestHeadroomStopReturnsAfterStderrReaderPanic(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	process := newHeadroomTestProcess()
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, panickingHeadroomReadCloser{})
+	t.Cleanup(func() {
+		_ = stdinR.Close()
+		_ = stdoutW.Close()
+	})
+
+	stopResult := make(chan struct{})
+	go func() {
+		bridge.Stop()
+		close(stopResult)
+	}()
+	select {
+	case <-stopResult:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop blocked after stderr reader panic")
+	}
+}
+
+func TestHeadroomStopReturnsAfterProcessWaitPanic(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	bridge := newHeadroomBridge(panickingHeadroomProcess{}, stdinW, stdoutR, nil)
+	t.Cleanup(func() {
+		_ = stdinR.Close()
+		_ = stdoutW.Close()
+	})
+
+	stopResult := make(chan struct{})
+	go func() {
+		bridge.Stop()
+		close(stopResult)
+	}()
+	select {
+	case <-stopResult:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop blocked after process Wait panic")
+	}
+}
+
+func TestHeadroomDefersProcessWaitUntilReadersRetire(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	process := newHeadroomTestProcess()
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, nil)
+	t.Cleanup(func() {
+		bridge.Stop()
+		_ = stdinR.Close()
+		_ = stdoutW.Close()
+	})
+
+	select {
+	case <-process.waitStarted:
+		t.Fatal("process Wait started before bridge readers retired")
+	case <-time.After(20 * time.Millisecond):
+	}
+	bridge.Stop()
+	select {
+	case <-process.waitStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("process Wait did not start during bridge retirement")
+	}
+}
+
+func TestHeadroomProbeDeadlineKillsAndReapsHungProcess(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	process := newHeadroomTestProcess()
+	requestSeen := make(chan struct{})
+	var requestOnce sync.Once
+	go func() {
+		defer stdoutW.Close()
+		scanner := bufio.NewScanner(stdinR)
+		if scanner.Scan() {
+			requestOnce.Do(func() { close(requestSeen) })
+			<-process.killed
+		}
+	}()
+	t.Cleanup(func() {
+		_ = stdinR.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
+		_ = process.Kill()
+	})
+
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, stderrR)
+	t.Cleanup(bridge.Stop)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := bridge.Probe(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Probe error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-requestSeen:
+	case <-time.After(time.Second):
+		t.Fatal("Probe request was not dispatched")
+	}
+	select {
+	case <-process.killed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Probe cancellation did not kill process")
+	}
+	select {
+	case <-bridge.processDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Probe cancellation did not reap process")
+	}
+	select {
+	case <-bridge.stderrDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Probe cancellation did not join stderr drain")
 	}
 }
 
@@ -297,15 +989,15 @@ func TestCompress_ZeroSaved(t *testing.T) {
 
 func TestCompress_BridgeError_ReturnsOriginal(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	stdoutR, _ := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
 	stdinW.Close()
 	stdinR.Close()
+	stdoutW.Close()
+	process := newHeadroomTestProcess()
+	process.exit()
 
-	bridge := &HeadroomBridge{
-		cmd:    exec.Command("true"),
-		stdin:  stdinW,
-		stdout: bufio.NewScanner(stdoutR),
-	}
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, nil)
+	t.Cleanup(bridge.Stop)
 
 	body := []byte(`{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hello"}]}`)
 	compressed, saved, err := bridge.Compress(body)
@@ -485,6 +1177,7 @@ func fakeBridgeRaw(t *testing.T, responder func(req []byte) []byte) *HeadroomBri
 
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
+	process := newHeadroomTestProcess()
 
 	t.Cleanup(func() {
 		stdinW.Close()
@@ -493,6 +1186,7 @@ func fakeBridgeRaw(t *testing.T, responder func(req []byte) []byte) *HeadroomBri
 	})
 
 	go func() {
+		defer process.exit()
 		scanner := bufio.NewScanner(stdinR)
 		for scanner.Scan() {
 			resp := responder(scanner.Bytes())
@@ -502,10 +1196,126 @@ func fakeBridgeRaw(t *testing.T, responder func(req []byte) []byte) *HeadroomBri
 		stdoutW.Close()
 	}()
 
-	return &HeadroomBridge{
-		cmd:    exec.Command("true"),
-		stdin:  stdinW,
-		stdout: bufio.NewScanner(stdoutR),
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, nil)
+	t.Cleanup(bridge.Stop)
+	return bridge
+}
+
+type headroomTestAction struct {
+	Response []byte
+	Respond  bool
+	Exit     bool
+}
+
+type headroomTestProcess struct {
+	done        chan struct{}
+	killed      chan struct{}
+	waitStarted chan struct{}
+	exitOnce    sync.Once
+	killOnce    sync.Once
+	waitOnce    sync.Once
+}
+
+type panickingHeadroomReadCloser struct{}
+
+func (panickingHeadroomReadCloser) Read([]byte) (int, error) {
+	panic("stderr read panic")
+}
+
+func (panickingHeadroomReadCloser) Close() error { return nil }
+
+type panickingHeadroomProcess struct{}
+
+func (panickingHeadroomProcess) Wait() error { panic("process wait panic") }
+
+func (panickingHeadroomProcess) Kill() error { return nil }
+
+func newHeadroomTestProcess() *headroomTestProcess {
+	return &headroomTestProcess{
+		done:        make(chan struct{}),
+		killed:      make(chan struct{}),
+		waitStarted: make(chan struct{}),
+	}
+}
+
+func (p *headroomTestProcess) Wait() error {
+	p.waitOnce.Do(func() { close(p.waitStarted) })
+	<-p.done
+	return nil
+}
+
+func (p *headroomTestProcess) Kill() error {
+	p.killOnce.Do(func() { close(p.killed) })
+	p.exit()
+	return nil
+}
+
+func (p *headroomTestProcess) exit() {
+	p.exitOnce.Do(func() { close(p.done) })
+}
+
+// headroomTestBridge drives the real bridge pipe protocol without launching
+// Python. Returning Respond=false leaves the subprocess side alive but silent;
+// returning Exit=true closes its stdout as an exited subprocess would.
+func headroomTestBridge(t *testing.T, responder func([]byte) headroomTestAction) *HeadroomBridge {
+	t.Helper()
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	process := newHeadroomTestProcess()
+	t.Cleanup(func() {
+		_ = stdinW.Close()
+		_ = stdinR.Close()
+		_ = stdoutW.Close()
+		_ = stdoutR.Close()
+	})
+
+	go func() {
+		defer process.exit()
+		defer stdoutW.Close()
+		scanner := bufio.NewScanner(stdinR)
+		for scanner.Scan() {
+			action := responder(bytes.Clone(scanner.Bytes()))
+			if action.Exit {
+				return
+			}
+			if !action.Respond {
+				continue
+			}
+			response := append(bytes.Clone(action.Response), '\n')
+			if _, err := stdoutW.Write(response); err != nil {
+				return
+			}
+		}
+	}()
+
+	bridge := newHeadroomBridge(process, stdinW, stdoutR, nil)
+	t.Cleanup(bridge.Stop)
+	return bridge
+}
+
+func validHeadroomProbeResponse(reqBytes []byte) []byte {
+	var req headroomProbeRequest
+	if err := json.Unmarshal(reqBytes, &req); err != nil || req.Operation != "probe" || req.RequestID == "" {
+		return []byte(`{"operation":"invalid"}`)
+	}
+	response, _ := json.Marshal(headroomProbeResponse{
+		Operation: "probe",
+		RequestID: req.RequestID,
+		Protocol:  1,
+		OK:        true,
+		CacheMode: true,
+	})
+	return response
+}
+
+func mutateHeadroomProbeResponse(key string, value any) func([]byte) []byte {
+	return func(reqBytes []byte) []byte {
+		var response map[string]any
+		_ = json.Unmarshal(validHeadroomProbeResponse(reqBytes), &response)
+		response[key] = value
+		encoded, _ := json.Marshal(response)
+		return encoded
 	}
 }
 
@@ -634,7 +1444,7 @@ func TestCompressResponses_SplicesInputAndInstructions(t *testing.T) {
 	if string(result["max_tokens"]) != "1024" {
 		t.Errorf("max_tokens = %s, want preserved", result["max_tokens"])
 	}
-	}
+}
 
 func TestCompressResponses_KnownModel_IncludesModelLimit(t *testing.T) {
 	var captured struct {
@@ -1299,27 +2109,26 @@ func TestCompressResponsesCache_EmptyBridgeOutputReturnsOriginal(t *testing.T) {
 }
 
 func captureStderr(t *testing.T, fn func()) string {
-		t.Helper()
-		oldStderr := os.Stderr
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("pipe: %v", err)
-		}
-		os.Stderr = w
-		defer func() { os.Stderr = oldStderr }()
-
-		fn()
-
-		if err := w.Close(); err != nil {
-			t.Fatalf("close writer: %v", err)
-		}
-		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, r); err != nil {
-			t.Fatalf("read stderr: %v", err)
-		}
-		if err := r.Close(); err != nil {
-			t.Fatalf("close reader: %v", err)
-		}
-		return buf.String()
+	t.Helper()
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
 	}
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
 
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return buf.String()
+}

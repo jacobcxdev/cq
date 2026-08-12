@@ -17,9 +17,9 @@ import (
 
 const (
 	// CodexClientID is the OAuth client ID for Codex (Auth0/OpenAI).
-	CodexClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
-	codexIssuer      = "https://auth.openai.com"
-	codexPort        = 1455
+	CodexClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
+	codexIssuer       = "https://auth.openai.com"
+	codexPort         = 1455
 	codexCallbackPath = "/auth/callback"
 )
 
@@ -181,7 +181,7 @@ func RefreshCodexToken(ctx context.Context, client httputil.Doer, refreshToken s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("token refresh failed: HTTP %d", resp.StatusCode)
+		return nil, &CodexTokenHTTPError{StatusCode: resp.StatusCode}
 	}
 
 	body, err := httputil.ReadBody(resp.Body)
@@ -199,6 +199,18 @@ func RefreshCodexToken(ctx context.Context, client httputil.Doer, refreshToken s
 		tokens.ExpiresIn = DefaultExpiresInSec
 	}
 	return &tokens, nil
+}
+
+// CodexTokenHTTPError preserves whether the token endpoint definitively
+// rejected a refresh token. Transient and transport failures remain uncertain.
+type CodexTokenHTTPError struct{ StatusCode int }
+
+func (e *CodexTokenHTTPError) Error() string {
+	return fmt.Sprintf("token refresh failed: HTTP %d", e.StatusCode)
+}
+
+func (e *CodexTokenHTTPError) RefreshDefinitive() bool {
+	return e.StatusCode >= 400 && e.StatusCode < 500
 }
 
 // exchangeCodexCode exchanges an authorization code for tokens using
