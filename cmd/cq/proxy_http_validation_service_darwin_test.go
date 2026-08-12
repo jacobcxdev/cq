@@ -13,10 +13,17 @@ import (
 func TestValidateInstalledHTTPValidationCandidateBindsListenerToLoadedPID(t *testing.T) {
 	t.Parallel()
 	binding := validInstalledHTTPValidationServiceBinding()
+	binding.label = candidateProxyAgentLabel
+	binding.port = 29280
 	target := "gui/777/" + binding.label
 	validLaunchctl := []byte(target + " = {\n\tpid = 4242\n}\n")
 	validOps := installedHTTPValidationCandidateOperations{
-		resolveService: func(string) (installedHTTPValidationServiceBinding, error) { return binding, nil },
+		resolveService: func(label string) (installedHTTPValidationServiceBinding, error) {
+			if label != candidateProxyAgentLabel {
+				t.Fatalf("resolved label = %q", label)
+			}
+			return binding, nil
+		},
 		launchctlPrint: func(string) ([]byte, error) { return validLaunchctl, nil },
 		lsof:           func(int) ([]byte, error) { return []byte("p4242\nf15\n"), nil },
 		effectiveUID:   func() int { return 777 },
@@ -58,12 +65,65 @@ func TestRestartInstalledHTTPValidationCandidateTargetsExactLabel(t *testing.T) 
 		calls = append(calls, append([]string(nil), args...))
 		return nil
 	}
-	if err := restartInstalledHTTPValidationCandidate(homebrewProxyAgentLabel); err != nil {
+	if err := restartInstalledHTTPValidationCandidate(candidateProxyAgentLabel); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Geteuid(), homebrewProxyAgentLabel)}
+	want := []string{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Geteuid(), candidateProxyAgentLabel)}
 	if len(calls) != 1 || fmt.Sprint(calls[0]) != fmt.Sprint(want) {
 		t.Fatalf("candidate restart = %v, want %v", calls, want)
+	}
+}
+
+func TestResolveInstalledHTTPValidationCandidateBindsExactPortOverride(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "cq")
+	if err := os.WriteFile(executable, []byte("candidate cq binary\n"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	plist := filepath.Join(dir, candidateProxyAgentLabel+".plist")
+	data := `<?xml version="1.0"?><plist version="1.0"><dict>
+<key>Label</key><string>` + candidateProxyAgentLabel + `</string>
+<key>ProgramArguments</key><array><string>` + executable + `</string><string>proxy</string><string>start</string><string>--port</string><string>29280</string></array>
+<key>KeepAlive</key><true/></dict></plist>`
+	if err := os.WriteFile(plist, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := installedHTTPValidationServiceOperations{
+		executable: func() (string, error) { return executable, nil },
+		plistPath:  func(string) (string, error) { return plist, nil },
+		launchctlPrint: func(label string) error {
+			if label == candidateProxyAgentLabel {
+				return nil
+			}
+			return errors.New("not loaded")
+		},
+	}
+	binding, err := resolveInstalledHTTPValidationServiceWithOperations(candidateProxyAgentLabel, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.label != candidateProxyAgentLabel || binding.port != 29280 {
+		t.Fatalf("candidate binding = %#v", binding)
+	}
+}
+
+func TestInstalledHTTPValidationServicePortRejectsUnsafeOverrides(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		label string
+		args  []string
+	}{
+		{label: proxyAgentLabel, args: []string{"/cq", "proxy", "start", "--port", "29280"}},
+		{label: homebrewProxyAgentLabel, args: []string{"/cq", "proxy", "start", "--port", "29280"}},
+		{label: candidateProxyAgentLabel, args: []string{"/cq", "proxy", "start"}},
+		{label: candidateProxyAgentLabel, args: []string{"/cq", "proxy", "start", "--port", "19280"}},
+		{label: candidateProxyAgentLabel, args: []string{"/cq", "proxy", "start", "--port", "0"}},
+		{label: candidateProxyAgentLabel, args: []string{"/cq", "proxy", "start", "--port", "29280", "extra"}},
+	} {
+		if port, ok := installedHTTPValidationServicePort(test.label, test.args); ok || port != 0 {
+			t.Fatalf("unsafe service accepted: label=%q args=%v port=%d", test.label, test.args, port)
+		}
 	}
 }
 
@@ -108,8 +168,8 @@ func TestResolveInstalledHTTPValidationServiceBindsLoadedPlistAndCurrentExecutab
 	if !isLowerHexSHA256(binding.serviceSHA256) {
 		t.Fatalf("service digest = %q, want lowercase SHA-256", binding.serviceSHA256)
 	}
-	if len(launchctlCalls) != 2 || launchctlCalls[0] != proxyAgentLabel || launchctlCalls[1] != homebrewProxyAgentLabel {
-		t.Fatalf("launchctl labels = %v, want [%s %s]", launchctlCalls, proxyAgentLabel, homebrewProxyAgentLabel)
+	if len(launchctlCalls) != 3 || launchctlCalls[0] != proxyAgentLabel || launchctlCalls[1] != homebrewProxyAgentLabel || launchctlCalls[2] != candidateProxyAgentLabel {
+		t.Fatalf("launchctl labels = %v, want [%s %s %s]", launchctlCalls, proxyAgentLabel, homebrewProxyAgentLabel, candidateProxyAgentLabel)
 	}
 
 	writeInstalledHTTPValidationPlist(t, plist, homebrewProxyAgentLabel, executable, "/tmp/changed.log")

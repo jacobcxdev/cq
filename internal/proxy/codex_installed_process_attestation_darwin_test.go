@@ -170,6 +170,65 @@ func TestDarwinCodexInstalledProcessVerifierAcceptsExactPersistentServiceOwner(t
 	}
 }
 
+func TestDarwinCodexInstalledProcessVerifierAcceptsIsolatedCandidatePort(t *testing.T) {
+	pid, uid := 4242, 501
+	binary, plist := writeTestCodexInstalledDarwinCandidateService(t, 29280)
+	target := fmt.Sprintf("gui/%d/%s", uid, codexInstalledCandidateServiceLabel)
+	verifier := newCodexInstalledDarwinProcessVerifier(codexInstalledDarwinProcessVerifierDependencies{
+		pid:                    func() int { return pid },
+		uid:                    func() int { return uid },
+		executablePath:         func() (string, error) { return binary, nil },
+		verifyMappedExecutable: testCodexInstalledMappedExecutable,
+		launchctlPrint: func(_ context.Context, got string) ([]byte, error) {
+			if got != target {
+				return nil, errors.New("service unavailable")
+			}
+			return []byte(testCodexInstalledLaunchctlJobWithArguments(target, pid, plist, binary, []string{binary, "proxy", "start", "--port", "29280"})), nil
+		},
+	})
+	proof, err := verifier.Capture(context.Background())
+	if err != nil || proof.serviceKind != codexInstalledListenerServiceLaunchd {
+		t.Fatalf("candidate proof = (%#v, %v)", proof, err)
+	}
+}
+
+func TestValidCodexInstalledServiceArgumentsRejectsUnsafeCandidateOverrides(t *testing.T) {
+	t.Parallel()
+	for _, arguments := range [][]string{
+		{"/cq", "proxy", "start"},
+		{"/cq", "proxy", "start", "--port", "19280"},
+		{"/cq", "proxy", "start", "--port", "0"},
+		{"/cq", "proxy", "start", "--port", "29280", "extra"},
+	} {
+		if validCodexInstalledServiceArguments(codexInstalledCandidateServiceLabel, "/cq", arguments) {
+			t.Fatalf("unsafe candidate arguments accepted: %v", arguments)
+		}
+	}
+	if validCodexInstalledServiceArguments(codexInstalledLaunchdServiceLabel, "/cq", []string{"/cq", "proxy", "start", "--port", "29280"}) {
+		t.Fatal("live service accepted candidate port override")
+	}
+}
+
+func writeTestCodexInstalledDarwinCandidateService(t *testing.T, port int) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "cq")
+	if err := os.WriteFile(binary, []byte("exact cq executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plist := filepath.Join(directory, codexInstalledCandidateServiceLabel+".plist")
+	data := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>Label</key><string>%s</string>
+<key>ProgramArguments</key><array><string>%s</string><string>proxy</string><string>start</string><string>--port</string><string>%d</string></array>
+<key>KeepAlive</key><true/><key>RunAtLoad</key><true/>
+</dict></plist>`, codexInstalledCandidateServiceLabel, binary, port)
+	if err := os.WriteFile(plist, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return binary, plist
+}
+
 func TestDarwinCodexInstalledProcessVerifierRejectsOwnershipNearMatches(t *testing.T) {
 	pid, uid := 4242, 501
 	label := codexInstalledLaunchdServiceLabel
@@ -345,4 +404,19 @@ func testCodexInstalledLaunchctlJob(target string, pid int, plist, binary, priva
 		PRIVATE_AUTHORITY = %s
 	}
 %s}`, target, plist, binary, binary, pid+100, privateValue, pidLine)
+}
+
+func testCodexInstalledLaunchctlJobWithArguments(target string, pid int, plist, binary string, arguments []string) string {
+	return fmt.Sprintf(`%s = {
+	active count = 1
+	path = %s
+	type = LaunchAgent
+	state = running
+	properties = keepalive | runatload
+	program = %s
+	arguments = {
+		%s
+	}
+	pid = %d
+}`, target, plist, binary, strings.Join(arguments, "\n\t\t"), pid)
 }
