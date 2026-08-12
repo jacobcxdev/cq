@@ -18,7 +18,7 @@ func TestValidateInstalledHTTPValidationCandidateBindsListenerToLoadedPID(t *tes
 	validOps := installedHTTPValidationCandidateOperations{
 		resolveService: func(string) (installedHTTPValidationServiceBinding, error) { return binding, nil },
 		launchctlPrint: func(string) ([]byte, error) { return validLaunchctl, nil },
-		lsof:           func(int) ([]byte, error) { return []byte("p4242\n"), nil },
+		lsof:           func(int) ([]byte, error) { return []byte("p4242\nf15\n"), nil },
 		effectiveUID:   func() int { return 777 },
 	}
 	authority, err := validateInstalledHTTPValidationCandidateWithOperations(29280, validOps)
