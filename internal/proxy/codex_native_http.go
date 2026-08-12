@@ -115,13 +115,7 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 	}
 	encoded, err := readCodexNativeHTTPRequest(request)
 	if err != nil {
-		status := http.StatusBadRequest
-		message := "failed to read request body"
-		if errors.Is(err, errCodexNativeHTTPRequestTooLarge) {
-			status = http.StatusRequestEntityTooLarge
-			message = "request body exceeds 10 MiB"
-		}
-		writeError(writer, status, "invalid_request_error", message)
+		writeError(writer, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
 		return true, ""
 	}
 
@@ -203,8 +197,6 @@ func (handler *CodexNativeHTTPHandler) requestTemplate(request *http.Request, co
 	}
 }
 
-var errCodexNativeHTTPRequestTooLarge = errors.New("Codex native HTTP request exceeds limit")
-
 func readCodexNativeHTTPRequest(request *http.Request) ([]byte, error) {
 	if request == nil || request.Body == nil {
 		return nil, nil
@@ -223,16 +215,12 @@ func readCodexNativeHTTPRequest(request *http.Request) ([]byte, error) {
 		})
 	}
 	stopCancelClose := context.AfterFunc(request.Context(), closeBody)
-	body, err := io.ReadAll(io.LimitReader(bodyReader, maxRequestBody+1))
+	body, err := io.ReadAll(bodyReader)
 	stopCancelClose()
 	closeBody()
 	if err != nil || closeErr != nil || request.Context().Err() != nil {
 		clearBytes(body)
 		return nil, errors.New("read Codex native HTTP request")
-	}
-	if len(body) > maxRequestBody {
-		clearBytes(body)
-		return nil, errCodexNativeHTTPRequestTooLarge
 	}
 	return body, nil
 }

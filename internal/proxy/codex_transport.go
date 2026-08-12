@@ -207,7 +207,7 @@ func rewriteCodexModelTo(req *http.Request, requestedModel, effectiveModel strin
 		return errors.New("Codex request body is unavailable for model rewrite")
 	}
 	limits := codexTransportRewriteLimits()
-	data, err := readBoundedCodexRequestBody(req.Body, limits.MaxEncodedBytes)
+	data, err := readCodexRequestBody(req.Body)
 	if err != nil {
 		return err
 	}
@@ -252,22 +252,14 @@ func rewriteCodexModelTo(req *http.Request, requestedModel, effectiveModel strin
 }
 
 func codexTransportRewriteLimits() CodexZstdLimits {
-	// Native and compact handlers admit encoded and decoded bodies up to
-	// maxRequestBody. Model rewriting must preserve that accepted envelope.
-	limits := DefaultCodexZstdLimits
-	limits.MaxEncodedBytes = maxRequestBody
-	limits.MaxDecodedBytes = maxRequestBody
-	return limits
+	return codexHTTPZstdLimits()
 }
 
-func readBoundedCodexRequestBody(body io.ReadCloser, limit int) ([]byte, error) {
+func readCodexRequestBody(body io.ReadCloser) ([]byte, error) {
 	defer body.Close()
-	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	data, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("read Codex request body for model rewrite: %w", err)
-	}
-	if len(data) > limit {
-		return nil, errors.New("Codex encoded request exceeds limit")
 	}
 	return data, nil
 }

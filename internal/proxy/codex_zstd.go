@@ -10,6 +10,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// CodexZstdLimits uses zero to disable each corresponding limit. Negative
+// values are invalid.
 type CodexZstdLimits struct {
 	MaxEncodedBytes int
 	MaxDecodedBytes int
@@ -61,15 +63,15 @@ func parseCodexContentEncoding(header http.Header) (string, error) {
 }
 
 func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLimits) (CodexDecodedRequest, error) {
-	if limits.MaxEncodedBytes <= 0 || limits.MaxDecodedBytes <= 0 || limits.MaxExpansion <= 0 {
+	if limits.MaxEncodedBytes < 0 || limits.MaxDecodedBytes < 0 || limits.MaxExpansion < 0 {
 		return CodexDecodedRequest{}, errors.New("invalid Codex zstd limits")
 	}
-	if len(body) > limits.MaxEncodedBytes {
+	if codexLimitExceeded(len(body), limits.MaxEncodedBytes) {
 		return CodexDecodedRequest{}, errors.New("Codex encoded request exceeds limit")
 	}
 	encoding := strings.TrimSpace(strings.ToLower(contentEncoding))
 	if encoding == "" || encoding == "identity" {
-		if len(body) > limits.MaxDecodedBytes {
+		if codexLimitExceeded(len(body), limits.MaxDecodedBytes) {
 			return CodexDecodedRequest{}, errors.New("Codex decoded request exceeds limit")
 		}
 		original := append([]byte(nil), body...)
@@ -84,20 +86,26 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		return CodexDecodedRequest{}, fmt.Errorf("decode Codex zstd header: %w", err)
 	}
 	if header.HasFCS {
-		if header.FrameContentSize > uint64(limits.MaxDecodedBytes) {
+		if limits.MaxDecodedBytes > 0 && header.FrameContentSize > uint64(limits.MaxDecodedBytes) {
 			return CodexDecodedRequest{}, errors.New("Codex decoded request exceeds limit")
 		}
 		if ratioLimited && header.FrameContentSize > uint64(decodeLimit) {
 			return CodexDecodedRequest{}, errors.New("Codex zstd expansion ratio exceeds limit")
 		}
 	}
-	decodeTarget := make([]byte, 0, decodeLimit)
+	decodeTarget := make([]byte, 0, codexZstdDecodeCapacity(len(body), limits))
 	decodeOptions := []zstd.DOption{
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(true),
-		zstd.WithDecoderMaxWindow(uint64(max(1024, limits.MaxDecodedBytes))),
-		zstd.WithDecoderMaxMemory(uint64(limits.MaxDecodedBytes)),
-		zstd.WithDecodeAllCapLimit(true),
+	}
+	if decodeLimit > 0 {
+		decodeOptions = append(decodeOptions, zstd.WithDecodeAllCapLimit(true))
+	}
+	if limits.MaxDecodedBytes > 0 {
+		decodeOptions = append(decodeOptions,
+			zstd.WithDecoderMaxWindow(uint64(max(1024, limits.MaxDecodedBytes))),
+			zstd.WithDecoderMaxMemory(uint64(limits.MaxDecodedBytes)),
+		)
 	}
 	decoder, err := zstd.NewReader(nil, decodeOptions...)
 	if err != nil {
@@ -116,7 +124,7 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		}
 		return CodexDecodedRequest{}, fmt.Errorf("decode Codex zstd request: %w", err)
 	}
-	if len(decoded) > limits.MaxDecodedBytes {
+	if codexLimitExceeded(len(decoded), limits.MaxDecodedBytes) {
 		return CodexDecodedRequest{}, errors.New("Codex decoded request exceeds limit")
 	}
 	if ratioLimited && len(decoded) > decodeLimit {
@@ -128,7 +136,16 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 
 func codexZstdDecodeLimit(encodedBytes int, limits CodexZstdLimits) (int, bool) {
 	decodeLimit := limits.MaxDecodedBytes
-	if encodedBytes <= limits.MaxDecodedBytes/limits.MaxExpansion {
+	if limits.MaxExpansion <= 0 {
+		return decodeLimit, false
+	}
+	if decodeLimit == 0 {
+		if encodedBytes <= int(^uint(0)>>1)/limits.MaxExpansion {
+			return encodedBytes * limits.MaxExpansion, true
+		}
+		return 0, false
+	}
+	if encodedBytes <= decodeLimit/limits.MaxExpansion {
 		expansionLimit := encodedBytes * limits.MaxExpansion
 		if expansionLimit < decodeLimit {
 			return expansionLimit, true
@@ -137,16 +154,25 @@ func codexZstdDecodeLimit(encodedBytes int, limits CodexZstdLimits) (int, bool) 
 	return decodeLimit, false
 }
 
+func codexZstdDecodeCapacity(encodedBytes int, limits CodexZstdLimits) int {
+	const initialCapacity = 64 << 10
+	capacity := min(max(encodedBytes, initialCapacity), 1<<20)
+	if limits.MaxDecodedBytes > 0 {
+		capacity = min(capacity, limits.MaxDecodedBytes)
+	}
+	return capacity
+}
+
 func EncodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLimits) ([]byte, error) {
-	if limits.MaxEncodedBytes <= 0 || limits.MaxDecodedBytes <= 0 || limits.MaxExpansion <= 0 {
+	if limits.MaxEncodedBytes < 0 || limits.MaxDecodedBytes < 0 || limits.MaxExpansion < 0 {
 		return nil, errors.New("invalid Codex zstd limits")
 	}
-	if len(body) > limits.MaxDecodedBytes {
+	if codexLimitExceeded(len(body), limits.MaxDecodedBytes) {
 		return nil, errors.New("Codex decoded request exceeds limit")
 	}
 	encoding := strings.TrimSpace(strings.ToLower(contentEncoding))
 	if encoding == "" || encoding == "identity" {
-		if len(body) > limits.MaxEncodedBytes {
+		if codexLimitExceeded(len(body), limits.MaxEncodedBytes) {
 			return nil, errors.New("Codex encoded request exceeds limit")
 		}
 		return bytes.Clone(body), nil
@@ -164,7 +190,7 @@ func EncodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 	}
 	defer encoder.Close()
 	encoded := encoder.EncodeAll(body, nil)
-	if len(encoded) > limits.MaxEncodedBytes {
+	if codexLimitExceeded(len(encoded), limits.MaxEncodedBytes) {
 		return nil, errors.New("Codex encoded request exceeds limit")
 	}
 	decodeLimit, ratioLimited := codexZstdDecodeLimit(len(encoded), limits)
@@ -172,4 +198,8 @@ func EncodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		return nil, errors.New("Codex zstd expansion ratio exceeds limit")
 	}
 	return bytes.Clone(encoded), nil
+}
+
+func codexHTTPZstdLimits() CodexZstdLimits {
+	return CodexZstdLimits{}
 }

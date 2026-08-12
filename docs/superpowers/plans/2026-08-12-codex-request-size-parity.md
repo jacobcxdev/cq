@@ -97,6 +97,8 @@ git commit -m "refactor: separated Codex request limits" -m $'- Split HTTP and W
 - Modify: `internal/proxy/codex_frozen_request_test.go`
 - Modify: `internal/proxy/codex_transport.go`
 - Modify: `internal/proxy/codex_transport_test.go`
+- Modify: `internal/proxy/codex_installed_http_probe_trace.go`
+- Modify: `internal/proxy/codex_runtime_observability_test.go`
 
 - [ ] **Step 1: Write failing HTTP parity tests**
 
@@ -177,7 +179,7 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 
 - [ ] **Step 5: Remove replay and transform ceilings**
 
-Remove fixed-size rejection from `CodexRequestEnvelope`, frozen inspection, Headroom result acceptance, model splice, and transport rewrite. Retain integer-overflow checks and lifecycle accounting. Pass `codexHTTPZstdLimits()` through the HTTP freeze/rewrite path.
+Remove fixed-size rejection from `CodexRequestEnvelope`, frozen inspection, Headroom result acceptance, model splice, installed replay digest, and transport rewrite. Retain integer-overflow checks and lifecycle accounting. Pass `codexHTTPZstdLimits()` through the HTTP freeze/rewrite path. Update aggregate replay ownership proof so a large envelope acquires and releases its exact byte count.
 
 - [ ] **Step 6: Run focused tests and verify GREEN**
 
@@ -192,7 +194,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/proxy/codex_native_http.go internal/proxy/codex_native_http_test.go internal/proxy/codex_zstd.go internal/proxy/codex_zstd_test.go internal/proxy/codex_protocol.go internal/proxy/codex_protocol_test.go internal/proxy/codex_request_envelope.go internal/proxy/codex_request_envelope_test.go internal/proxy/codex_frozen_request.go internal/proxy/codex_frozen_request_test.go internal/proxy/codex_transport.go internal/proxy/codex_transport_test.go
+git add internal/proxy/codex_native_http.go internal/proxy/codex_native_http_test.go internal/proxy/codex_zstd.go internal/proxy/codex_zstd_test.go internal/proxy/codex_protocol.go internal/proxy/codex_protocol_test.go internal/proxy/codex_request_envelope.go internal/proxy/codex_request_envelope_test.go internal/proxy/codex_frozen_request.go internal/proxy/codex_frozen_request_test.go internal/proxy/codex_transport.go internal/proxy/codex_transport_test.go internal/proxy/codex_installed_http_probe_trace.go internal/proxy/codex_runtime_observability_test.go
 git commit -m "fix: removed native HTTP size ceiling" -m $'- Accepted full Codex HTTP request envelopes.\n- Preserved cancellation, codec validation, and replay ownership.\n- Avoided unbounded decoder preallocation.'
 ```
 

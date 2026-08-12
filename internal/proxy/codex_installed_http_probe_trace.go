@@ -405,14 +405,14 @@ func (trace *codexInstalledHTTPGateTrace) digestReplay(replay *CodexRequestRepla
 	if err != nil {
 		return zero, err
 	}
-	encoded, readErr := io.ReadAll(io.LimitReader(body, maxCodexRequestEnvelopeBytes+1))
+	encoded, readErr := io.ReadAll(body)
 	closeErr := body.Close()
 	defer clearBytes(encoded)
-	if readErr != nil || closeErr != nil || len(encoded) > maxCodexRequestEnvelopeBytes {
+	if readErr != nil || closeErr != nil {
 		return zero, errCodexInstalledListenerAcceptance
 	}
 	decoded, err := replay.DecodedBody()
-	if err != nil || len(decoded) > maxCodexRequestEnvelopeBytes {
+	if err != nil {
 		clearBytes(decoded)
 		return zero, errCodexInstalledListenerAcceptance
 	}

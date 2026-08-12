@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -11,15 +10,9 @@ import (
 	"sync"
 )
 
-const maxCodexRequestEnvelopeBytes = 10 << 20
-
 var (
 	// ErrCodexRequestEnvelopeReleased indicates that replay-owned state is no longer available.
 	ErrCodexRequestEnvelopeReleased = errors.New("Codex request envelope released")
-	// ErrCodexRequestEnvelopeEncodedTooLarge indicates that encoded bytes exceed the independent limit.
-	ErrCodexRequestEnvelopeEncodedTooLarge = errors.New("encoded Codex request exceeds 10 MiB")
-	// ErrCodexRequestEnvelopeDecodedTooLarge indicates that decoded bytes exceed the independent limit.
-	ErrCodexRequestEnvelopeDecodedTooLarge = errors.New("decoded Codex request exceeds 10 MiB")
 )
 
 // CodexRequestEnvelope owns the immutable request state shared by retry replays.
@@ -68,12 +61,6 @@ type codexRequestReplayBody struct {
 // NewCodexRequestEnvelope freezes independent copies of the encoded and decoded
 // request bodies, the effective model, and an exact allowlist of semantic headers.
 func NewCodexRequestEnvelope(encoded, decoded []byte, headers http.Header, effectiveModel string) (*CodexRequestEnvelope, error) {
-	if len(encoded) > maxCodexRequestEnvelopeBytes {
-		return nil, fmt.Errorf("%w: %d bytes", ErrCodexRequestEnvelopeEncodedTooLarge, len(encoded))
-	}
-	if len(decoded) > maxCodexRequestEnvelopeBytes {
-		return nil, fmt.Errorf("%w: %d bytes", ErrCodexRequestEnvelopeDecodedTooLarge, len(decoded))
-	}
 	envelope := &CodexRequestEnvelope{
 		encoded:        bytes.Clone(encoded),
 		decoded:        bytes.Clone(decoded),

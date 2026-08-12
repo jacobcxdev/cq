@@ -18,19 +18,14 @@ func TestCodexProtocolRequest(t *testing.T) {
 	}
 }
 
-func TestCodexProtocolRequestMatchesNativeBodyLimit(t *testing.T) {
-	exact := codexProtocolRequestBodyAtSize(t, maxRequestBody)
-	got, err := ParseCodexProtocolRequest(exact, "", nil)
+func TestCodexProtocolRequestAcceptsBodyOverLegacyLimit(t *testing.T) {
+	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
+	got, err := ParseCodexProtocolRequest(body, "", nil)
 	if err != nil {
-		t.Fatalf("exact native body limit rejected: %v", err)
+		t.Fatalf("body over legacy limit rejected: %v", err)
 	}
 	if got.Model != "gpt-5" || !got.Metadata.Strong || got.Metadata.Metadata.TurnID != "u" {
 		t.Fatalf("request = %#v", got)
-	}
-
-	over := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
-	if _, err := ParseCodexProtocolRequest(over, "", nil); err == nil || err.Error() != "Codex protocol request exceeds limit" {
-		t.Fatalf("native body limit plus one byte error = %v", err)
 	}
 }
 
