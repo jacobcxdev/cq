@@ -1,0 +1,7 @@
+{
+  "revision": "stage11-corpus-transcript-v2\n",
+  "transcript_sha256": "f457c633d18fb199a3fd6fa25209b3e7cebebcacaaa3569f8ef34501492dbf75",
+  "smoke_sha256": "d75adc9740ff14bc46949a129b002b4e7b02cc5162aa3c1fb4f349b96fbdde51",
+  "category_schema": "stage11-category-schema-v2\nsimple|http_enforce|durable_v2\ntool_loop|ws_observe|live_shadow|zero_ws_journal\nsuccession|http_enforce|durable_v2\nparallel|http_enforce|durable_v2\nsubagents|http_enforce|durable_v2\nprewarm|ws_observe_plus_http_enforce|live_prewarm_zero_ws_journal_plus_durable_v2\ncompaction|http_enforce|durable_v2\nreconnect|ws_observe|live_shadow|zero_ws_journal\ncross_protocol_observe_consistent|legacy_http_observe_plus_ws_observe|same_actual_account|zero_continuity_errors|zero_ws_journal\ndelayed_stale|http_enforce|durable_v2\nmalformed_metadata|http_enforce|durable_v2\ncapability|websocket_observe_only|ws_routing_enforcement_unavailable\n",
+  "case_count": 1000
+}

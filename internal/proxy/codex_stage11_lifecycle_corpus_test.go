@@ -54,6 +54,16 @@ const (
 	codexStage11CategorySchemaSHA256      = "2575392d98f1a492201ed1f5cbd7f07f7d63ec7d76d4457c0193ea39bb7f08f7"
 )
 
+func TestCodexStage11ReviewedManifestMatchesCorpusAuthority(t *testing.T) {
+	if codexStage11Reviewed.Revision != "stage11-corpus-transcript-v2\n" ||
+		codexStage11Reviewed.TranscriptSHA256 != codexStage11FixtureSHA256 ||
+		codexStage11Reviewed.SmokeSHA256 != codexStage11SmokeSHA256 ||
+		codexStage11Reviewed.CategorySchema != string(codexStage11CategorySchemaBytes()) ||
+		codexStage11Reviewed.CaseCount != 1000 {
+		t.Fatalf("reviewed manifest drifted from Stage 11 corpus authority: %#v", codexStage11Reviewed)
+	}
+}
+
 var codexStage11LifecycleCategories = []string{
 	"simple",
 	"tool_loop",

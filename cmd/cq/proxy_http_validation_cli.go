@@ -15,12 +15,13 @@ import (
 
 var (
 	defaultInstalledHTTPValidationRequestStoreFn   = defaultInstalledHTTPValidationRequestStore
-	restartInstalledHTTPValidationProxyAgentFn     = restartProxyAgent
 	runInstalledHTTPValidationStartupFn            = runProxyInstalledHTTPValidationStartup
 	runCodexInstalledHTTPValidationFn              = proxy.RunCodexInstalledHTTPValidation
 	installedHTTPValidationClientBuildFn           = defaultCodexRoutingClientBuild
 	invalidateInstalledHTTPValidationMarkerFn      = proxy.InvalidateDefaultCodexHTTPReadinessMarker
 	loadProxyStartConfigFn                         = proxy.LoadConfig
+	validateInstalledHTTPValidationCandidateFn     = validateInstalledHTTPValidationCandidate
+	restartInstalledHTTPValidationCandidateFn      = restartInstalledHTTPValidationCandidate
 	consumeInstalledHTTPValidationStartupRequestFn = func(build string) (*installedHTTPValidationConsumedRequest, error) {
 		store, err := defaultInstalledHTTPValidationRequestStoreFn()
 		if err != nil {
@@ -36,14 +37,59 @@ type proxyValidateHTTPDependencies struct {
 	invalidate func() error
 }
 
+type installedHTTPValidationCandidateAuthority struct {
+	binding installedHTTPValidationServiceBinding
+	pid     int
+}
+
 func runDefaultProxyValidateHTTP(args []string, build string) error {
+	opts, err := parseProxyCommandOptionsFor("proxy validate-http", args)
+	if err != nil {
+		return err
+	}
+	if opts.Port == 0 {
+		return errors.New("proxy validate-http: --port is required")
+	}
+	if opts.Port == proxy.DefaultPort {
+		return errors.New("proxy validate-http: live proxy port is forbidden")
+	}
+	cfg, err := loadProxyStartConfigFn()
+	if err != nil {
+		return err
+	}
+	if cfg == nil || cfg.Port != opts.Port {
+		return errors.New("proxy validate-http: --port must match configured candidate service port")
+	}
 	store, err := defaultInstalledHTTPValidationRequestStoreFn()
 	if err != nil {
 		return err
 	}
-	return runProxyValidateHTTP(args, proxyValidateHTTPDependencies{
-		store:      store,
-		restart:    restartInstalledHTTPValidationProxyAgentFn,
+	authority, err := validateInstalledHTTPValidationCandidateFn(opts.Port)
+	if err != nil {
+		return fmt.Errorf("proxy validate-http: candidate service unavailable: %w", err)
+	}
+	binding := authority.binding
+	resolveService := store.resolveService
+	store.resolveService = func(label string) (installedHTTPValidationServiceBinding, error) {
+		current, err := resolveService(binding.label)
+		if err != nil || current != binding {
+			return installedHTTPValidationServiceBinding{}, errors.New("installed candidate service binding changed")
+		}
+		return current, nil
+	}
+	return runProxyValidateHTTP(nil, proxyValidateHTTPDependencies{
+		store: store,
+		restart: func() error {
+			current, err := resolveService(binding.label)
+			if err != nil || current != binding {
+				return errors.New("installed candidate service binding changed")
+			}
+			revalidated, err := validateInstalledHTTPValidationCandidateFn(opts.Port)
+			if err != nil || revalidated != authority {
+				return errors.Join(err, errors.New("installed candidate listener authority changed"))
+			}
+			return restartInstalledHTTPValidationCandidateFn(binding.label)
+		},
 		invalidate: invalidateInstalledHTTPValidationMarkerFn,
 	}, build)
 }

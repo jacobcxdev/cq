@@ -14,36 +14,124 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-func TestRunProxyValidateHTTPDispatchesWithoutRuntimeEvidence(t *testing.T) {
-	now := time.Date(2026, time.August, 10, 11, 12, 13, 0, time.UTC)
-	path := filepath.Join(t.TempDir(), "private", "request.json")
+func TestRunProxyValidateHTTPRequestsConfiguredCandidateService(t *testing.T) {
+	oldLoad := loadProxyStartConfigFn
 	oldStore := defaultInstalledHTTPValidationRequestStoreFn
-	oldRestart := restartInstalledHTTPValidationProxyAgentFn
+	oldRestart := restartInstalledHTTPValidationCandidateFn
+	oldValidateCandidate := validateInstalledHTTPValidationCandidateFn
 	t.Cleanup(func() {
+		loadProxyStartConfigFn = oldLoad
 		defaultInstalledHTTPValidationRequestStoreFn = oldStore
-		restartInstalledHTTPValidationProxyAgentFn = oldRestart
+		restartInstalledHTTPValidationCandidateFn = oldRestart
+		validateInstalledHTTPValidationCandidateFn = oldValidateCandidate
 	})
-	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
-		return installedHTTPValidationTestStore(t, path, now, validInstalledHTTPValidationServiceBinding()), nil
+	loadProxyStartConfigFn = func() (*proxy.Config, error) {
+		return &proxy.Config{Port: 29280}, nil
 	}
-	restartCalls := 0
-	restartInstalledHTTPValidationProxyAgentFn = func() error {
-		restartCalls++
+	path := filepath.Join(t.TempDir(), "private", "request.json")
+	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
+		return installedHTTPValidationTestStore(t, path, time.Now().UTC(), validInstalledHTTPValidationServiceBinding()), nil
+	}
+	restarts := 0
+	restartInstalledHTTPValidationCandidateFn = func(label string) error {
+		restarts++
+		if label != homebrewProxyAgentLabel {
+			t.Fatalf("candidate label = %q", label)
+		}
 		return nil
 	}
+	validateInstalledHTTPValidationCandidateFn = func(port int) (installedHTTPValidationCandidateAuthority, error) {
+		if port != 29280 {
+			t.Fatalf("candidate port = %d", port)
+		}
+		return installedHTTPValidationCandidateAuthority{binding: validInstalledHTTPValidationServiceBinding(), pid: 4242}, nil
+	}
 
-	if err := runProxy([]string{"validate-http"}); err != nil {
+	if err := runProxy([]string{"validate-http", "--port", "29280"}); err != nil {
 		t.Fatalf("runProxy validate-http: %v", err)
 	}
-	if restartCalls != 1 {
-		t.Fatalf("restart calls = %d, want 1", restartCalls)
+	if restarts != 1 {
+		t.Fatalf("candidate restarts = %d, want 1", restarts)
 	}
-	data, err := readInstalledHTTPValidationTestRequest(path)
-	if err != nil {
-		t.Fatalf("read request: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("candidate validation request: %v", err)
 	}
-	if data.CQBuild != version {
-		t.Fatalf("request build = %q, want %q", data.CQBuild, version)
+}
+
+func TestRunProxyValidateHTTPDoesNotRestartAbsentCandidate(t *testing.T) {
+	oldLoad := loadProxyStartConfigFn
+	oldStore := defaultInstalledHTTPValidationRequestStoreFn
+	oldRestart := restartInstalledHTTPValidationCandidateFn
+	oldValidateCandidate := validateInstalledHTTPValidationCandidateFn
+	t.Cleanup(func() {
+		loadProxyStartConfigFn = oldLoad
+		defaultInstalledHTTPValidationRequestStoreFn = oldStore
+		restartInstalledHTTPValidationCandidateFn = oldRestart
+		validateInstalledHTTPValidationCandidateFn = oldValidateCandidate
+	})
+	loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 29280}, nil }
+	validateInstalledHTTPValidationCandidateFn = func(int) (installedHTTPValidationCandidateAuthority, error) {
+		return installedHTTPValidationCandidateAuthority{}, errors.New("candidate unavailable")
+	}
+	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
+		return installedHTTPValidationTestStore(t, filepath.Join(t.TempDir(), "request.json"), time.Now(), validInstalledHTTPValidationServiceBinding()), nil
+	}
+	restartInstalledHTTPValidationCandidateFn = func(string) error {
+		t.Fatal("absent candidate restarted service")
+		return nil
+	}
+	if err := runDefaultProxyValidateHTTP([]string{"--port", "29280"}, "cq-build-42"); err == nil {
+		t.Fatal("absent candidate accepted")
+	}
+}
+
+func TestRunProxyValidateHTTPCancelsWhenCandidateAuthorityChanges(t *testing.T) {
+	oldLoad := loadProxyStartConfigFn
+	oldStore := defaultInstalledHTTPValidationRequestStoreFn
+	oldRestart := restartInstalledHTTPValidationCandidateFn
+	oldValidateCandidate := validateInstalledHTTPValidationCandidateFn
+	oldInvalidate := invalidateInstalledHTTPValidationMarkerFn
+	t.Cleanup(func() {
+		loadProxyStartConfigFn = oldLoad
+		defaultInstalledHTTPValidationRequestStoreFn = oldStore
+		restartInstalledHTTPValidationCandidateFn = oldRestart
+		validateInstalledHTTPValidationCandidateFn = oldValidateCandidate
+		invalidateInstalledHTTPValidationMarkerFn = oldInvalidate
+	})
+	loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 29280}, nil }
+	path := filepath.Join(t.TempDir(), "private", "request.json")
+	binding := validInstalledHTTPValidationServiceBinding()
+	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
+		return installedHTTPValidationTestStore(t, path, time.Now().UTC(), binding), nil
+	}
+	checks := 0
+	validateInstalledHTTPValidationCandidateFn = func(int) (installedHTTPValidationCandidateAuthority, error) {
+		checks++
+		return installedHTTPValidationCandidateAuthority{binding: binding, pid: 4241 + checks}, nil
+	}
+	restartInstalledHTTPValidationCandidateFn = func(string) error {
+		t.Fatal("changed candidate authority restarted service")
+		return nil
+	}
+	invalidateInstalledHTTPValidationMarkerFn = func() error { return nil }
+
+	if err := runDefaultProxyValidateHTTP([]string{"--port", "29280"}, "cq-build-42"); err == nil {
+		t.Fatal("changed candidate authority accepted")
+	}
+	if checks != 2 {
+		t.Fatalf("candidate authority checks = %d, want 2", checks)
+	}
+	assertNoPendingInstalledHTTPValidationRequest(t, path)
+}
+
+func TestRunProxyValidateHTTPRejectsLiveMissingOrMismatchedPort(t *testing.T) {
+	oldLoad := loadProxyStartConfigFn
+	t.Cleanup(func() { loadProxyStartConfigFn = oldLoad })
+	loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 29280}, nil }
+	for _, args := range [][]string{nil, {"--port", "19280"}, {"--port", "29281"}} {
+		if err := runDefaultProxyValidateHTTP(args, "cq-build-42"); err == nil {
+			t.Fatalf("validate args %v unexpectedly accepted", args)
+		}
 	}
 }
 

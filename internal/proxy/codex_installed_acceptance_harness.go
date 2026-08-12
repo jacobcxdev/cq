@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -69,8 +71,6 @@ type CodexInstalledHTTPValidationGuard interface {
 	Acquire() (release func(), err error)
 }
 
-const codexStage11CorpusCaseCount = uint64(1_000)
-
 const codexInstalledHTTPValidationQuiesceTimeout = 5 * time.Second
 
 // codexStage11CorpusBuildProvenanceSHA256 is supplied only by the reviewed
@@ -78,26 +78,33 @@ const codexInstalledHTTPValidationQuiesceTimeout = 5 * time.Second
 // validation fails closed.
 var codexStage11CorpusBuildProvenanceSHA256 string
 
-const (
-	// Updated only with the exact full-corpus transcript emitted by the
-	// code-only Stage 11 regression on the release build.
-	codexStage11CorpusTranscriptRevision = "stage11-corpus-transcript-v2\n"
-	codexStage11CorpusTranscriptSHA256   = "f457c633d18fb199a3fd6fa25209b3e7cebebcacaaa3569f8ef34501492dbf75"
-	codexStage11CorpusSmokeSHA256        = "d75adc9740ff14bc46949a129b002b4e7b02cc5162aa3c1fb4f349b96fbdde51"
-	codexStage11CorpusCategorySchema     = "stage11-category-schema-v2\n" +
-		"simple|http_enforce|durable_v2\n" +
-		"tool_loop|ws_observe|live_shadow|zero_ws_journal\n" +
-		"succession|http_enforce|durable_v2\n" +
-		"parallel|http_enforce|durable_v2\n" +
-		"subagents|http_enforce|durable_v2\n" +
-		"prewarm|ws_observe_plus_http_enforce|live_prewarm_zero_ws_journal_plus_durable_v2\n" +
-		"compaction|http_enforce|durable_v2\n" +
-		"reconnect|ws_observe|live_shadow|zero_ws_journal\n" +
-		"cross_protocol_observe_consistent|legacy_http_observe_plus_ws_observe|same_actual_account|zero_continuity_errors|zero_ws_journal\n" +
-		"delayed_stale|http_enforce|durable_v2\n" +
-		"malformed_metadata|http_enforce|durable_v2\n" +
-		"capability|websocket_observe_only|ws_routing_enforcement_unavailable\n"
-)
+type codexStage11ReviewedManifest struct {
+	Revision         string `json:"revision"`
+	TranscriptSHA256 string `json:"transcript_sha256"`
+	SmokeSHA256      string `json:"smoke_sha256"`
+	CategorySchema   string `json:"category_schema"`
+	CaseCount        uint64 `json:"case_count"`
+}
+
+//go:embed testdata/codex_stage11_reviewed_manifest.json
+var codexStage11ReviewedManifestJSON []byte
+
+var codexStage11Reviewed = mustLoadCodexStage11ReviewedManifest()
+
+func mustLoadCodexStage11ReviewedManifest() codexStage11ReviewedManifest {
+	var manifest codexStage11ReviewedManifest
+	if err := json.Unmarshal(codexStage11ReviewedManifestJSON, &manifest); err != nil ||
+		manifest.Revision == "" || !isCodexStage11LowerHexSHA256(manifest.TranscriptSHA256) || !isCodexStage11LowerHexSHA256(manifest.SmokeSHA256) ||
+		manifest.CategorySchema == "" || manifest.CaseCount == 0 {
+		panic("invalid embedded Codex Stage 11 reviewed manifest")
+	}
+	return manifest
+}
+
+func isCodexStage11LowerHexSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
+}
 
 // codexStage11CorpusBuildManifest is immutable build provenance, not runtime
 // evidence. The corpus remains code-only; CI execution validates the frozen
@@ -122,15 +129,15 @@ type codexStage11CorpusBuildManifestSeal struct {
 }
 
 func (manifest codexStage11CorpusBuildManifest) valid(required CodexTransportRequirements) bool {
-	wantSchema := sha256.Sum256([]byte(codexStage11CorpusCategorySchema))
+	wantSchema := sha256.Sum256([]byte(codexStage11Reviewed.CategorySchema))
 	return manifest.seal != nil && manifest.cqBuild == manifest.seal.cqBuild &&
 		manifest.fixtureRevision == manifest.seal.fixtureRevision &&
 		manifest.transcriptSHA256 == manifest.seal.transcriptSHA256 && manifest.smokeSHA256 == manifest.seal.smokeSHA256 &&
 		manifest.caseCount == manifest.seal.caseCount &&
 		manifest.categorySchemaSHA256 == manifest.seal.categorySchemaSHA256 &&
-		manifest.cqBuild == required.CQBuild && manifest.fixtureRevision == codexStage11CorpusTranscriptRevision &&
-		manifest.transcriptSHA256 == codexStage11CorpusTranscriptSHA256 &&
-		manifest.smokeSHA256 == codexStage11CorpusSmokeSHA256 && manifest.caseCount == codexStage11CorpusCaseCount &&
+		manifest.cqBuild == required.CQBuild && manifest.fixtureRevision == codexStage11Reviewed.Revision &&
+		manifest.transcriptSHA256 == codexStage11Reviewed.TranscriptSHA256 &&
+		manifest.smokeSHA256 == codexStage11Reviewed.SmokeSHA256 && manifest.caseCount == codexStage11Reviewed.CaseCount &&
 		manifest.categorySchemaSHA256 == wantSchema
 }
 
@@ -142,15 +149,15 @@ func loadCodexStage11CorpusBuildManifest(cqBuild, proofSHA256 string) (codexStag
 	if err != nil || len(proof) != sha256.Size {
 		return codexStage11CorpusBuildManifest{}, errCodexInstalledListenerAcceptance
 	}
-	schemaSHA256 := sha256.Sum256([]byte(codexStage11CorpusCategorySchema))
+	schemaSHA256 := sha256.Sum256([]byte(codexStage11Reviewed.CategorySchema))
 	fields := []string{
 		"cq-codex-stage11-build-provenance-v1",
 		cqBuild,
-		codexStage11CorpusTranscriptRevision,
-		codexStage11CorpusTranscriptSHA256,
-		codexStage11CorpusSmokeSHA256,
+		codexStage11Reviewed.Revision,
+		codexStage11Reviewed.TranscriptSHA256,
+		codexStage11Reviewed.SmokeSHA256,
 		hex.EncodeToString(schemaSHA256[:]),
-		strconv.FormatUint(codexStage11CorpusCaseCount, 10),
+		strconv.FormatUint(codexStage11Reviewed.CaseCount, 10),
 	}
 	hash := sha256.New()
 	for index, field := range fields {
@@ -164,10 +171,10 @@ func loadCodexStage11CorpusBuildManifest(cqBuild, proofSHA256 string) (codexStag
 	}
 	manifest := codexStage11CorpusBuildManifest{
 		cqBuild:              cqBuild,
-		fixtureRevision:      codexStage11CorpusTranscriptRevision,
-		transcriptSHA256:     codexStage11CorpusTranscriptSHA256,
-		smokeSHA256:          codexStage11CorpusSmokeSHA256,
-		caseCount:            codexStage11CorpusCaseCount,
+		fixtureRevision:      codexStage11Reviewed.Revision,
+		transcriptSHA256:     codexStage11Reviewed.TranscriptSHA256,
+		smokeSHA256:          codexStage11Reviewed.SmokeSHA256,
+		caseCount:            codexStage11Reviewed.CaseCount,
 		categorySchemaSHA256: schemaSHA256,
 	}
 	manifest.seal = &codexStage11CorpusBuildManifestSeal{
@@ -579,7 +586,7 @@ func validCodexInstalledHTTPProbeResult(result codexInstalledHTTPProbeResult, bi
 		result.ProductionHandlerRequests != 41 || result.NativeResponsesRequests != 39 || result.NativeCompactRequests != 2 ||
 		result.StrongTurns != 20 ||
 		result.Gates != (CodexHTTPReadinessGateEvidence{
-			Stage11CorpusTurns:                  codexStage11CorpusCaseCount,
+			Stage11CorpusTurns:                  codexStage11Reviewed.CaseCount,
 			InstalledTurns:                      20,
 			FrozenSingleTransformEnvelopeCases:  2,
 			WarmAffinityCases:                   1,

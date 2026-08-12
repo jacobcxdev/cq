@@ -5,6 +5,10 @@ builds:
     binary: cq
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X github.com/jacobcxdev/cq/internal/proxy.codexStage11CorpusBuildProvenanceSHA256={{ .Env.CODEX_STAGE11_PROVENANCE_SHA256 }}
     goos:
       - darwin
       - linux

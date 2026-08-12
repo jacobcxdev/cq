@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -29,6 +30,110 @@ type installedHTTPValidationServiceOperations struct {
 	plistPath      func(string) (string, error)
 	launchctlPrint func(string) error
 	evalSymlinks   func(string) (string, error)
+}
+
+type installedHTTPValidationCandidateOperations struct {
+	resolveService func(string) (installedHTTPValidationServiceBinding, error)
+	launchctlPrint func(string) ([]byte, error)
+	lsof           func(int) ([]byte, error)
+	effectiveUID   func() int
+}
+
+func validateInstalledHTTPValidationCandidate(port int) (installedHTTPValidationCandidateAuthority, error) {
+	return validateInstalledHTTPValidationCandidateWithOperations(port, installedHTTPValidationCandidateOperations{
+		resolveService: resolveInstalledHTTPValidationService,
+		launchctlPrint: func(label string) ([]byte, error) {
+			target, err := installedHTTPValidationLaunchctlTarget(label, os.Geteuid)
+			if err != nil {
+				return nil, err
+			}
+			return exec.Command("launchctl", "print", target).Output()
+		},
+		lsof: func(port int) ([]byte, error) {
+			return exec.Command("/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", port), "-sTCP:LISTEN", "-Fp").Output()
+		},
+		effectiveUID: os.Geteuid,
+	})
+}
+
+func validateInstalledHTTPValidationCandidateWithOperations(port int, ops installedHTTPValidationCandidateOperations) (installedHTTPValidationCandidateAuthority, error) {
+	if port <= 0 || port > 65535 || ops.resolveService == nil || ops.launchctlPrint == nil || ops.lsof == nil || ops.effectiveUID == nil {
+		return installedHTTPValidationCandidateAuthority{}, errors.New("incomplete installed candidate authority")
+	}
+	binding, err := ops.resolveService("")
+	if err != nil || binding.validate() != nil {
+		return installedHTTPValidationCandidateAuthority{}, errors.Join(err, binding.validate())
+	}
+	launchctlOutput, err := ops.launchctlPrint(binding.label)
+	if err != nil {
+		return installedHTTPValidationCandidateAuthority{}, err
+	}
+	target, err := installedHTTPValidationLaunchctlTarget(binding.label, ops.effectiveUID)
+	if err != nil {
+		return installedHTTPValidationCandidateAuthority{}, err
+	}
+	pid, err := parseInstalledHTTPValidationLaunchctlPID(launchctlOutput, target)
+	if err != nil {
+		return installedHTTPValidationCandidateAuthority{}, err
+	}
+	lsofOutput, err := ops.lsof(port)
+	if err != nil {
+		return installedHTTPValidationCandidateAuthority{}, err
+	}
+	if err := requireInstalledHTTPValidationListenerPID(lsofOutput, pid); err != nil {
+		return installedHTTPValidationCandidateAuthority{}, err
+	}
+	return installedHTTPValidationCandidateAuthority{binding: binding, pid: pid}, nil
+}
+
+func parseInstalledHTTPValidationLaunchctlPID(output []byte, target string) (int, error) {
+	if len(output) == 0 || len(output) > installedHTTPValidationPlistMaxBytes || target == "" || !strings.HasPrefix(string(output), target+" = {\n") {
+		return 0, errors.New("invalid installed candidate launchd authority")
+	}
+	pid := 0
+	seen := 0
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "pid = ") {
+			continue
+		}
+		seen++
+		value, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "pid = ")))
+		if err != nil || value <= 1 {
+			return 0, errors.New("invalid installed candidate launchd pid")
+		}
+		pid = value
+	}
+	if seen != 1 {
+		return 0, errors.New("ambiguous installed candidate launchd pid")
+	}
+	return pid, nil
+}
+
+func requireInstalledHTTPValidationListenerPID(output []byte, expectedPID int) error {
+	if len(output) == 0 || len(output) > installedHTTPValidationPlistMaxBytes || expectedPID <= 1 {
+		return errors.New("installed candidate listener is unavailable")
+	}
+	want := "p" + strconv.Itoa(expectedPID)
+	lines := strings.Fields(string(output))
+	if len(lines) != 1 || lines[0] != want {
+		return errors.New("installed candidate listener pid mismatch")
+	}
+	return nil
+}
+
+func restartInstalledHTTPValidationCandidate(label string) error {
+	if label != proxyAgentLabel && label != homebrewProxyAgentLabel {
+		return errors.New("unsupported installed candidate service label")
+	}
+	target, err := installedHTTPValidationLaunchctlTarget(label, os.Geteuid)
+	if err != nil {
+		return err
+	}
+	if err := runProxyLaunchctl("kickstart", "-k", target); err != nil {
+		return fmt.Errorf("launchctl kickstart candidate: %w", err)
+	}
+	return nil
 }
 
 func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPValidationServiceBinding, error) {
