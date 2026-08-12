@@ -26,16 +26,20 @@ func TestRunProxyValidateHTTPRequestsConfiguredCandidateService(t *testing.T) {
 		validateInstalledHTTPValidationCandidateFn = oldValidateCandidate
 	})
 	loadProxyStartConfigFn = func() (*proxy.Config, error) {
-		return &proxy.Config{Port: 29280}, nil
+		t.Fatal("candidate validation read shared proxy config")
+		return nil, errors.New("unreachable")
 	}
 	path := filepath.Join(t.TempDir(), "private", "request.json")
+	binding := validInstalledHTTPValidationServiceBinding()
+	binding.label = candidateProxyAgentLabel
+	binding.port = 29280
 	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
-		return installedHTTPValidationTestStore(t, path, time.Now().UTC(), validInstalledHTTPValidationServiceBinding()), nil
+		return installedHTTPValidationTestStore(t, path, time.Now().UTC(), binding), nil
 	}
 	restarts := 0
 	restartInstalledHTTPValidationCandidateFn = func(label string) error {
 		restarts++
-		if label != "homebrew.mxcl.cq" {
+		if label != candidateProxyAgentLabel {
 			t.Fatalf("candidate label = %q", label)
 		}
 		return nil
@@ -44,7 +48,7 @@ func TestRunProxyValidateHTTPRequestsConfiguredCandidateService(t *testing.T) {
 		if port != 29280 {
 			t.Fatalf("candidate port = %d", port)
 		}
-		return installedHTTPValidationCandidateAuthority{binding: validInstalledHTTPValidationServiceBinding(), pid: 4242}, nil
+		return installedHTTPValidationCandidateAuthority{binding: binding, pid: 4242}, nil
 	}
 
 	if err := runProxy([]string{"validate-http", "--port", "29280"}); err != nil {
@@ -101,6 +105,8 @@ func TestRunProxyValidateHTTPCancelsWhenCandidateAuthorityChanges(t *testing.T) 
 	loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 29280}, nil }
 	path := filepath.Join(t.TempDir(), "private", "request.json")
 	binding := validInstalledHTTPValidationServiceBinding()
+	binding.label = candidateProxyAgentLabel
+	binding.port = 29280
 	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
 		return installedHTTPValidationTestStore(t, path, time.Now().UTC(), binding), nil
 	}
@@ -125,9 +131,14 @@ func TestRunProxyValidateHTTPCancelsWhenCandidateAuthorityChanges(t *testing.T) 
 }
 
 func TestRunProxyValidateHTTPRejectsLiveMissingOrMismatchedPort(t *testing.T) {
-	oldLoad := loadProxyStartConfigFn
-	t.Cleanup(func() { loadProxyStartConfigFn = oldLoad })
-	loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 29280}, nil }
+	oldValidateCandidate := validateInstalledHTTPValidationCandidateFn
+	t.Cleanup(func() { validateInstalledHTTPValidationCandidateFn = oldValidateCandidate })
+	validateInstalledHTTPValidationCandidateFn = func(port int) (installedHTTPValidationCandidateAuthority, error) {
+		binding := validInstalledHTTPValidationServiceBinding()
+		binding.label = candidateProxyAgentLabel
+		binding.port = 29280
+		return installedHTTPValidationCandidateAuthority{binding: binding, pid: 4242}, nil
+	}
 	for _, args := range [][]string{nil, {"--port", "19280"}, {"--port", "29281"}} {
 		if err := runDefaultProxyValidateHTTP(args, "cq-build-42"); err == nil {
 			t.Fatalf("validate args %v unexpectedly accepted", args)

@@ -79,7 +79,8 @@ Restart the proxy launch agent for the current user.
 	"proxy validate-http": `Usage: cq proxy validate-http --port PORT
 
 Request one-shot installed HTTP validation from a candidate proxy service.
-PORT must match the configured service port and cannot be live port 19280.
+PORT must match the candidate service's explicit --port and cannot be live port 19280.
+Shared proxy configuration is never changed by this command.
 The command writes only an expiring private request and restarts that service.
 The serving process owns validation and does not write readiness evidence until
 every installed acceptance gate and process attestation succeeds.

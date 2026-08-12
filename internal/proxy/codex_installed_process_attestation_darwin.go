@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	codexInstalledLaunchdServiceLabel  = "dev.jacobcx.cq.proxy"
-	codexInstalledHomebrewServiceLabel = "homebrew.mxcl.cq"
+	codexInstalledLaunchdServiceLabel   = "dev.jacobcx.cq.proxy"
+	codexInstalledHomebrewServiceLabel  = "homebrew.mxcl.cq"
+	codexInstalledCandidateServiceLabel = "dev.jacobcx.cq.proxy.candidate"
 
 	codexInstalledLaunchctlOutputMaxBytes = 256 << 10
 	codexInstalledServicePlistMaxBytes    = 256 << 10
@@ -140,6 +141,7 @@ func (verifier *codexInstalledDarwinProcessVerifier) Capture(ctx context.Context
 	candidates := []serviceCandidate{
 		{label: codexInstalledLaunchdServiceLabel, kind: codexInstalledListenerServiceLaunchd},
 		{label: codexInstalledHomebrewServiceLabel, kind: codexInstalledListenerServiceHomebrew},
+		{label: codexInstalledCandidateServiceLabel, kind: codexInstalledListenerServiceLaunchd},
 	}
 	matches := make([]codexInstalledProcessPlatformProof, 0, 1)
 	for _, candidate := range candidates {
@@ -161,8 +163,7 @@ func (verifier *codexInstalledDarwinProcessVerifier) Capture(ctx context.Context
 		}
 		configuration, err := parseCodexInstalledDarwinServiceConfiguration(configurationData)
 		if err != nil || configuration.label != candidate.label || !configuration.keepAlive || !job.keepAlive ||
-			len(configuration.programArguments) != 3 || len(job.arguments) != 3 ||
-			job.arguments[0] != job.program || job.arguments[1] != "proxy" || job.arguments[2] != "start" ||
+			!validCodexInstalledServiceArguments(candidate.label, job.program, job.arguments) ||
 			!equalCodexInstalledStrings(configuration.programArguments, job.arguments) ||
 			filepath.Base(job.path) != candidate.label+".plist" {
 			continue
@@ -196,6 +197,20 @@ func (verifier *codexInstalledDarwinProcessVerifier) Capture(ctx context.Context
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
 	return matches[0], nil
+}
+
+func validCodexInstalledServiceArguments(label, program string, arguments []string) bool {
+	if len(arguments) < 3 || arguments[0] != program || arguments[1] != "proxy" || arguments[2] != "start" {
+		return false
+	}
+	if label != codexInstalledCandidateServiceLabel {
+		return len(arguments) == 3
+	}
+	if len(arguments) != 5 || arguments[3] != "--port" {
+		return false
+	}
+	port, err := strconv.Atoi(arguments[4])
+	return err == nil && port > 0 && port <= 65535 && port != DefaultPort
 }
 
 func parseCodexInstalledDarwinLaunchctlJob(output []byte, target string, expectedPID int) (codexInstalledDarwinLaunchctlJob, error) {

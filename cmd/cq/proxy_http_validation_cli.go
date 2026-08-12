@@ -53,13 +53,6 @@ func runDefaultProxyValidateHTTP(args []string, build string) error {
 	if opts.Port == proxy.DefaultPort {
 		return errors.New("proxy validate-http: live proxy port is forbidden")
 	}
-	cfg, err := loadProxyStartConfigFn()
-	if err != nil {
-		return err
-	}
-	if cfg == nil || cfg.Port != opts.Port {
-		return errors.New("proxy validate-http: --port must match configured candidate service port")
-	}
 	store, err := defaultInstalledHTTPValidationRequestStoreFn()
 	if err != nil {
 		return err
@@ -69,6 +62,9 @@ func runDefaultProxyValidateHTTP(args []string, build string) error {
 		return fmt.Errorf("proxy validate-http: candidate service unavailable: %w", err)
 	}
 	binding := authority.binding
+	if binding.label != candidateProxyAgentLabel || binding.port != opts.Port {
+		return errors.New("proxy validate-http: candidate service port mismatch")
+	}
 	resolveService := store.resolveService
 	store.resolveService = func(label string) (installedHTTPValidationServiceBinding, error) {
 		current, err := resolveService(binding.label)

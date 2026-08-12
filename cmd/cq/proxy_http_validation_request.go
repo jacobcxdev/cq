@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 	installedHTTPValidationRequestMaxSize = 4 << 10
 	installedHTTPValidationClaimName      = "request.claimed"
 	installedHTTPValidationLockName       = "request.lock"
+	candidateProxyAgentLabel              = "dev.jacobcx.cq.proxy.candidate"
 )
 
 type installedHTTPValidationFileSystem interface {
@@ -37,6 +39,7 @@ type installedHTTPValidationServiceBinding struct {
 	label            string
 	executableSHA256 string
 	serviceSHA256    string
+	port             int
 }
 
 type installedHTTPValidationRequestStore struct {
@@ -418,6 +421,13 @@ func validateInstalledHTTPValidationRequestStore(store installedHTTPValidationRe
 func (binding installedHTTPValidationServiceBinding) validate() error {
 	if binding.label == "" || !isLowerHexSHA256(binding.executableSHA256) || !isLowerHexSHA256(binding.serviceSHA256) {
 		return errors.New("invalid installed proxy service binding")
+	}
+	if binding.label == candidateProxyAgentLabel {
+		if binding.port <= 0 || binding.port > 65535 || binding.port == proxy.DefaultPort {
+			return errors.New("invalid installed candidate proxy port")
+		}
+	} else if binding.port != 0 {
+		return errors.New("unexpected installed proxy service port override")
 	}
 	return nil
 }

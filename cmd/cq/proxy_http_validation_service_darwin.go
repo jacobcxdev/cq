@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"golang.org/x/sys/unix"
 )
 
@@ -60,9 +61,12 @@ func validateInstalledHTTPValidationCandidateWithOperations(port int, ops instal
 	if port <= 0 || port > 65535 || ops.resolveService == nil || ops.launchctlPrint == nil || ops.lsof == nil || ops.effectiveUID == nil {
 		return installedHTTPValidationCandidateAuthority{}, errors.New("incomplete installed candidate authority")
 	}
-	binding, err := ops.resolveService("")
+	binding, err := ops.resolveService(candidateProxyAgentLabel)
 	if err != nil || binding.validate() != nil {
 		return installedHTTPValidationCandidateAuthority{}, errors.Join(err, binding.validate())
+	}
+	if binding.label != candidateProxyAgentLabel || binding.port != port {
+		return installedHTTPValidationCandidateAuthority{}, errors.New("installed candidate service port mismatch")
 	}
 	launchctlOutput, err := ops.launchctlPrint(binding.label)
 	if err != nil {
@@ -132,7 +136,7 @@ func requireInstalledHTTPValidationListenerPID(output []byte, expectedPID int) e
 }
 
 func restartInstalledHTTPValidationCandidate(label string) error {
-	if label != proxyAgentLabel && label != homebrewProxyAgentLabel {
+	if label != candidateProxyAgentLabel {
 		return errors.New("unsupported installed candidate service label")
 	}
 	target, err := installedHTTPValidationLaunchctlTarget(label, os.Geteuid)
@@ -158,6 +162,12 @@ func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPV
 					return "", err
 				}
 				return filepath.Join(home, "Library", "LaunchAgents", homebrewProxyAgentLabel+".plist"), nil
+			case candidateProxyAgentLabel:
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return "", err
+				}
+				return filepath.Join(home, "Library", "LaunchAgents", candidateProxyAgentLabel+".plist"), nil
 			default:
 				return "", errors.New("unsupported installed proxy service label")
 			}
@@ -174,7 +184,7 @@ func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPV
 }
 
 func installedHTTPValidationLaunchctlTarget(label string, effectiveUID func() int) (string, error) {
-	if effectiveUID == nil || (label != proxyAgentLabel && label != homebrewProxyAgentLabel) {
+	if effectiveUID == nil || !supportedInstalledHTTPValidationServiceLabel(label) {
 		return "", errors.New("invalid installed proxy launchctl authority")
 	}
 	uid := effectiveUID()
@@ -191,9 +201,9 @@ func resolveInstalledHTTPValidationServiceWithOperations(expectedLabel string, o
 	if ops.evalSymlinks == nil {
 		ops.evalSymlinks = filepath.EvalSymlinks
 	}
-	labels := []string{proxyAgentLabel, homebrewProxyAgentLabel}
+	labels := []string{proxyAgentLabel, homebrewProxyAgentLabel, candidateProxyAgentLabel}
 	if expectedLabel != "" {
-		if expectedLabel != proxyAgentLabel && expectedLabel != homebrewProxyAgentLabel {
+		if !supportedInstalledHTTPValidationServiceLabel(expectedLabel) {
 			return installedHTTPValidationServiceBinding{}, errors.New("unsupported installed proxy service label")
 		}
 		labels = []string{expectedLabel}
@@ -220,7 +230,8 @@ func resolveInstalledHTTPValidationServiceWithOperations(expectedLabel string, o
 	if err != nil {
 		return installedHTTPValidationServiceBinding{}, fmt.Errorf("parse installed proxy service plist: %w", err)
 	}
-	if plistLabel != label || len(arguments) != 3 || arguments[1] != "proxy" || arguments[2] != "start" {
+	port, ok := installedHTTPValidationServicePort(label, arguments)
+	if plistLabel != label || !ok {
 		return installedHTTPValidationServiceBinding{}, errors.New("installed proxy service is not exact cq proxy start")
 	}
 	currentExecutable, err := ops.executable()
@@ -263,7 +274,34 @@ func resolveInstalledHTTPValidationServiceWithOperations(expectedLabel string, o
 		label:            label,
 		executableSHA256: executableDigest,
 		serviceSHA256:    hex.EncodeToString(serviceDigest[:]),
+		port:             port,
 	}, nil
+}
+
+func supportedInstalledHTTPValidationServiceLabel(label string) bool {
+	switch label {
+	case proxyAgentLabel, homebrewProxyAgentLabel, candidateProxyAgentLabel:
+		return true
+	default:
+		return false
+	}
+}
+
+func installedHTTPValidationServicePort(label string, arguments []string) (int, bool) {
+	if len(arguments) < 3 || arguments[1] != "proxy" || arguments[2] != "start" {
+		return 0, false
+	}
+	if label != candidateProxyAgentLabel {
+		return 0, len(arguments) == 3
+	}
+	if len(arguments) != 5 || arguments[3] != "--port" {
+		return 0, false
+	}
+	port, err := strconv.Atoi(arguments[4])
+	if err != nil || port <= 0 || port > 65535 || port == proxy.DefaultPort {
+		return 0, false
+	}
+	return port, true
 }
 
 func resolveInstalledHTTPValidationExecutablePath(path string, evalSymlinks func(string) (string, error)) (string, error) {
