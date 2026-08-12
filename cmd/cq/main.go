@@ -97,7 +97,9 @@ type ProxyStartCmd struct {
 type ProxyInstallCmd struct{}
 type ProxyUninstallCmd struct{}
 type ProxyRestartCmd struct{}
-type ProxyValidateHTTPCmd struct{}
+type ProxyValidateHTTPCmd struct {
+	Port int `help:"Candidate service port (required; 19280 forbidden)" placeholder:"PORT"`
+}
 
 type ProxyStatusCmd struct {
 	Port int `help:"Override health-check port" placeholder:"PORT"`

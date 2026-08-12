@@ -4,10 +4,68 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestValidateInstalledHTTPValidationCandidateBindsListenerToLoadedPID(t *testing.T) {
+	t.Parallel()
+	binding := validInstalledHTTPValidationServiceBinding()
+	target := "gui/777/" + binding.label
+	validLaunchctl := []byte(target + " = {\n\tpid = 4242\n}\n")
+	validOps := installedHTTPValidationCandidateOperations{
+		resolveService: func(string) (installedHTTPValidationServiceBinding, error) { return binding, nil },
+		launchctlPrint: func(string) ([]byte, error) { return validLaunchctl, nil },
+		lsof:           func(int) ([]byte, error) { return []byte("p4242\n"), nil },
+		effectiveUID:   func() int { return 777 },
+	}
+	authority, err := validateInstalledHTTPValidationCandidateWithOperations(29280, validOps)
+	if err != nil || authority.binding != binding || authority.pid != 4242 {
+		t.Fatalf("candidate authority = (%#v, %v)", authority, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*installedHTTPValidationCandidateOperations)
+	}{
+		{name: "live service owns different port", mutate: func(ops *installedHTTPValidationCandidateOperations) {
+			ops.lsof = func(int) ([]byte, error) { return []byte("p99735\n"), nil }
+		}},
+		{name: "candidate port has multiple owners", mutate: func(ops *installedHTTPValidationCandidateOperations) {
+			ops.lsof = func(int) ([]byte, error) { return []byte("p4242\np99735\n"), nil }
+		}},
+		{name: "loaded generation changed", mutate: func(ops *installedHTTPValidationCandidateOperations) {
+			ops.launchctlPrint = func(string) ([]byte, error) { return []byte(target + " = {\n\tpid = 4343\n}\n"), nil }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ops := validOps
+			test.mutate(&ops)
+			if _, err := validateInstalledHTTPValidationCandidateWithOperations(29280, ops); err == nil {
+				t.Fatal("unsafe candidate authority accepted")
+			}
+		})
+	}
+}
+
+func TestRestartInstalledHTTPValidationCandidateTargetsExactLabel(t *testing.T) {
+	oldRunner := runProxyLaunchctl
+	t.Cleanup(func() { runProxyLaunchctl = oldRunner })
+	var calls [][]string
+	runProxyLaunchctl = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+	if err := restartInstalledHTTPValidationCandidate(homebrewProxyAgentLabel); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Geteuid(), homebrewProxyAgentLabel)}
+	if len(calls) != 1 || fmt.Sprint(calls[0]) != fmt.Sprint(want) {
+		t.Fatalf("candidate restart = %v, want %v", calls, want)
+	}
+}
 
 func TestResolveInstalledHTTPValidationServiceBindsLoadedPlistAndCurrentExecutable(t *testing.T) {
 	t.Parallel()

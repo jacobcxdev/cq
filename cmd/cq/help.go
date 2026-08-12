@@ -76,10 +76,11 @@ Uninstall the proxy launch agent for the current user.
 
 Restart the proxy launch agent for the current user.
 `,
-	"proxy validate-http": `Usage: cq proxy validate-http
+	"proxy validate-http": `Usage: cq proxy validate-http --port PORT
 
-Request one-shot installed HTTP validation from the installed proxy service.
-The command writes only an expiring private request and restarts the service.
+Request one-shot installed HTTP validation from a candidate proxy service.
+PORT must match the configured service port and cannot be live port 19280.
+The command writes only an expiring private request and restarts that service.
 The serving process owns validation and does not write readiness evidence until
 every installed acceptance gate and process attestation succeeds.
 `,

@@ -77,8 +77,9 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 			name: "proxy validate HTTP",
 			path: []string{"proxy", "validate-http"},
 			want: []string{
-				"Usage: cq proxy validate-http",
+				"Usage: cq proxy validate-http --port PORT",
 				"one-shot installed HTTP validation",
+				"cannot be live port 19280",
 				"does not write readiness evidence",
 			},
 		},

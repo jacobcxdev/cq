@@ -33,7 +33,7 @@ func TestCodexInstalledListenerHarnessReturnsBoundTypedEvidence(t *testing.T) {
 		t.Fatalf("evidence identity = %#v", evidence)
 	}
 	want := testCodexInstalledHTTPProbeResult(required, binding)
-	want.Gates.Stage11CorpusTurns = codexStage11CorpusCaseCount
+	want.Gates.Stage11CorpusTurns = codexStage11Reviewed.CaseCount
 	if evidence.Gates != want.Gates || evidence.Acceptance != want.Acceptance {
 		t.Fatalf("evidence payload = %#v", evidence)
 	}
@@ -127,6 +127,18 @@ func TestCodexInstalledListenerHarnessRequiresExternalStage11BuildProvenance(t *
 	}
 	if manifest, err := loadCodexStage11CorpusBuildManifest("other-build", reviewedProof); err == nil || manifest.seal != nil {
 		t.Fatalf("cross-build proof loaded manifest=%#v error=%v", manifest, err)
+	}
+}
+
+func TestCodexStage11BuildProvenanceMatchesReviewedReleaseTuple(t *testing.T) {
+	const build = "0.21.3"
+	const reviewedProof = "bb44beba8777c53101f880e4d5c039cc976cf43d4f99cbd129850cddfc224969"
+	manifest, err := loadCodexStage11CorpusBuildManifest(build, reviewedProof)
+	if err != nil || !manifest.valid(func() CodexTransportRequirements {
+		required, _ := DefaultCodexRoutingRequirements(build, "0.146.0")
+		return required
+	}()) {
+		t.Fatalf("reviewed release proof was rejected: %v", err)
 	}
 }
 
@@ -834,11 +846,11 @@ func testCodexInstalledListenerRequirements() CodexTransportRequirements {
 func currentCodexStage11CorpusBuildManifest(cqBuild string) codexStage11CorpusBuildManifest {
 	manifest := codexStage11CorpusBuildManifest{
 		cqBuild:              cqBuild,
-		fixtureRevision:      codexStage11CorpusTranscriptRevision,
-		transcriptSHA256:     codexStage11CorpusTranscriptSHA256,
-		smokeSHA256:          codexStage11CorpusSmokeSHA256,
-		caseCount:            codexStage11CorpusCaseCount,
-		categorySchemaSHA256: sha256.Sum256([]byte(codexStage11CorpusCategorySchema)),
+		fixtureRevision:      codexStage11Reviewed.Revision,
+		transcriptSHA256:     codexStage11Reviewed.TranscriptSHA256,
+		smokeSHA256:          codexStage11Reviewed.SmokeSHA256,
+		caseCount:            codexStage11Reviewed.CaseCount,
+		categorySchemaSHA256: sha256.Sum256([]byte(codexStage11Reviewed.CategorySchema)),
 	}
 	manifest.seal = &codexStage11CorpusBuildManifestSeal{
 		cqBuild:              manifest.cqBuild,
