@@ -278,6 +278,51 @@ func TestCodexNativeHTTPPlanFailureIsClaimedAndPrivate(t *testing.T) {
 	}
 }
 
+func TestCodexNativeHTTPPlanFailureReportsSafeStage(t *testing.T) {
+	const private = "private-route-snapshot-error"
+	planner := &codexNativeHTTPPlannerStub{err: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, errors.New(private))}
+	handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{}, "https://codex.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported CodexHTTPRequestPlanErrorCode
+	handler.reportPlanFailure = func(code CodexHTTPRequestPlanErrorCode) { reported = code }
+	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", strings.NewReader(`{"input":"`+private+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := newCodexNativeHTTPOrderWriter(new([]string))
+
+	handler.TryServe(writer, request, false)
+
+	if reported != CodexHTTPRequestPlanRouteSnapshot {
+		t.Fatalf("reported stage = %q, want %q", reported, CodexHTTPRequestPlanRouteSnapshot)
+	}
+	if strings.Contains(writer.body.String(), private) {
+		t.Fatalf("private failure reached response: %q", writer.body.String())
+	}
+}
+
+func TestCodexNativeHTTPPlanFailureRedactsUnknownStage(t *testing.T) {
+	planner := &codexNativeHTTPPlannerStub{err: &CodexHTTPRequestPlanError{Code: "private-stage-value"}}
+	handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{}, "https://codex.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported CodexHTTPRequestPlanErrorCode
+	handler.reportPlanFailure = func(code CodexHTTPRequestPlanErrorCode) { reported = code }
+	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler.TryServe(newCodexNativeHTTPOrderWriter(new([]string)), request, false)
+
+	if reported != codexHTTPRequestPlanUnknown {
+		t.Fatalf("reported stage = %q, want %q", reported, codexHTTPRequestPlanUnknown)
+	}
+}
+
 func TestCodexNativeHTTPCancellationUnblocksRequestBody(t *testing.T) {
 	body := newCodexNativeHTTPBlockingBody()
 	planner := &codexNativeHTTPPlannerStub{}
