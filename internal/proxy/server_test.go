@@ -3684,10 +3684,7 @@ func TestServer_NativeCodex_RewritesHandlerAcceptedLargeBodies(t *testing.T) {
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200, body: %s", response.Code, response.Body.String())
 			}
-			limits := DefaultCodexZstdLimits
-			limits.MaxEncodedBytes = maxRequestBody
-			limits.MaxDecodedBytes = maxRequestBody
-			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, limits)
+			decoded, err := DecodeCodexRequest(upstreamBody, upstreamEncoding, codexHTTPZstdLimits())
 			if err != nil {
 				t.Fatalf("decode upstream request: %v", err)
 			}
