@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -384,7 +383,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexContinuity, err := openProxyCodexContinuity(proxyCodexContinuityDependencies{
 		FS:        fsys,
-		StateDir:  filepath.Dir(proxy.DefaultCodexCanaryPath()),
+		StateDir:  cfg.ResolvedCodexContinuityStateDir(),
 		Routing:   codexRouting,
 		Retention: time.Duration(cfg.CodexLeaseRetentionDays) * 24 * time.Hour,
 		Now:       time.Now,

@@ -943,6 +943,38 @@ func TestCodexFrozenRequestBridgeAdapterFailsOpenWithoutPrivateError(t *testing.
 	}
 }
 
+func TestCodexFrozenRequestInfersHeaderlessZstdBeforeHeadroom(t *testing.T) {
+	body := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private-zstd-input")
+	encoded := encodeCodexZstd(t, body)
+	inspection, err := InspectCodexNativeRequest(context.Background(), encoded, http.Header{"Content-Type": {"application/json"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headroom := CodexRequestHeadroomFunc(func(_ context.Context, got []byte, _ HeadroomMode) ([]byte, int, error) {
+		if !bytes.Equal(got, body) {
+			t.Fatalf("Headroom input = %q, want decoded JSON", got)
+		}
+		return got, 0, nil
+	})
+	frozen, err := inspection.Freeze(context.Background(), frozenRequestChoice("gpt-5.4", "gpt-5.4"), headroom, HeadroomModeCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer frozen.Release()
+	replay, err := frozen.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Release()
+	gotHeader, err := replay.Header()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHeader.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("replay Content-Encoding = %q, want zstd", gotHeader.Get("Content-Encoding"))
+	}
+}
+
 func TestCodexFrozenRequestHeadroomFailureIsTypedAndClearsReturnedBytes(t *testing.T) {
 	inspection, err := InspectCodexNativeRequest(context.Background(), frozenRequestBody("gpt-5.4", CodexRequestTurn, "private"), nil)
 	if err != nil {

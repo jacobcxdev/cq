@@ -70,6 +70,9 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		return CodexDecodedRequest{}, errors.New("Codex encoded request exceeds limit")
 	}
 	encoding := strings.TrimSpace(strings.ToLower(contentEncoding))
+	if encoding == "" && codexZstdFrame(body) {
+		encoding = "zstd"
+	}
 	if encoding == "" || encoding == "identity" {
 		if codexLimitExceeded(len(body), limits.MaxDecodedBytes) {
 			return CodexDecodedRequest{}, errors.New("Codex decoded request exceeds limit")
@@ -132,6 +135,10 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 	}
 	original := append([]byte(nil), body...)
 	return CodexDecodedRequest{original: original, decoded: bytes.Clone(decoded), encoding: encoding}, nil
+}
+
+func codexZstdFrame(body []byte) bool {
+	return len(body) >= 4 && body[0] == 0x28 && body[1] == 0xb5 && body[2] == 0x2f && body[3] == 0xfd
 }
 
 func codexZstdDecodeLimit(encodedBytes int, limits CodexZstdLimits) (int, bool) {
