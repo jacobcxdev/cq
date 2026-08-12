@@ -1098,7 +1098,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	statusCode = http.StatusSwitchingProtocols
 	defer clientConn.Close()
-	clientConn.SetReadLimit(maxRequestBody)
+	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
 	if webSocketEnforcing {
 		if err := s.CodexWebSocketBroker.Serve(r.Context(), clientConn, r.Header); err != nil {
@@ -1127,7 +1127,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer upstreamConn.Close()
-	upstreamConn.SetReadLimit(maxRequestBody)
+	upstreamConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 	observation := newCodexWSObservationSession(wsObserver, r.Context(), choice, capacity)
 	if observation != nil && messageType == websocket.TextMessage {
 		observation.ObserveClient(message)

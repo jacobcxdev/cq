@@ -63,7 +63,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 	if err != nil {
 		return err
 	}
-	downstream.SetReadLimit(maxRequestBody)
+	downstream.SetReadLimit(codexWebSocketMessageMaxBytes)
 	return broker.Serve(ctx, downstream)
 }
 
@@ -606,7 +606,7 @@ func codexWSPreparedPendingFrame(frozen *CodexFrozenRequest, original *codexWSPe
 	if err != nil {
 		return nil, err
 	}
-	encoded, readErr := ioReadBounded(body, maxRequestBody)
+	encoded, readErr := ioReadBounded(body, codexWebSocketMessageMaxBytes)
 	closeErr := body.Close()
 	if readErr != nil || closeErr != nil {
 		return nil, errors.Join(readErr, closeErr)
