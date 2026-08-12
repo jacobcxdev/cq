@@ -25,6 +25,20 @@ func TestCodexZstdDecodeAndReplay(t *testing.T) {
 	}
 }
 
+func TestCodexZstdInfersEncodingWhenHeaderOmitted(t *testing.T) {
+	t.Parallel()
+	original := []byte(`{"model":"gpt-5.6-sol","input":"hello"}`)
+	encoded := encodeCodexZstd(t, original)
+
+	got, err := DecodeCodexRequest(encoded, "", codexHTTPZstdLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Decoded(), original) || !bytes.Equal(got.Replay(), encoded) || got.Encoding() != "zstd" {
+		t.Fatalf("inferred decoded/replay/encoding mismatch: %q/%t/%q", got.Decoded(), bytes.Equal(got.Replay(), encoded), got.Encoding())
+	}
+}
+
 func TestCodexHTTPZstdLimitsAcceptBodyOverLegacyLimit(t *testing.T) {
 	decoded := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
 	encoded, err := EncodeCodexRequest(decoded, "zstd", codexHTTPZstdLimits())

@@ -197,6 +197,37 @@ func TestConfigRejectsInvalidCodexLeaseRetention(t *testing.T) {
 	}
 }
 
+func TestConfigResolvesCodexContinuityStateDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/config")
+
+	var defaults Config
+	if got := defaults.ResolvedCodexContinuityStateDir(); got != "/config/cq" {
+		t.Fatalf("default continuity state directory = %q, want /config/cq", got)
+	}
+
+	configured := Config{CodexContinuityStateDir: "/private/candidate-cq"}
+	if got := configured.ResolvedCodexContinuityStateDir(); got != "/private/candidate-cq" {
+		t.Fatalf("configured continuity state directory = %q", got)
+	}
+}
+
+func TestConfigRejectsUnsafeCodexContinuityStateDirectory(t *testing.T) {
+	for _, path := range []string{"relative", "/", "/private/../tmp/cq"} {
+		t.Run(path, func(t *testing.T) {
+			cfg := Config{
+				LocalToken:              "token",
+				ClaudeUpstream:          DefaultUpstream,
+				CodexUpstream:           DefaultCodexUpstream,
+				CodexLeaseRetentionDays: 7,
+				CodexContinuityStateDir: path,
+			}
+			if err := cfg.validate(); err == nil {
+				t.Fatalf("validate accepted unsafe continuity state directory %q", path)
+			}
+		})
+	}
+}
+
 func TestConfigRejectsInvalidCodexRoutingMode(t *testing.T) {
 	for _, field := range []string{"codex_turn_routing", "codex_ws_turn_routing"} {
 		t.Run(field, func(t *testing.T) {

@@ -57,6 +57,7 @@ type Config struct {
 	CodexWSTurnRouting            CodexRoutingMode         `json:"codex_ws_turn_routing"`
 	CodexRoutingDefaultAccountKey codex.AccountKey         `json:"codex_routing_default_account_key,omitempty"`
 	CodexLeaseRetentionDays       int                      `json:"codex_lease_retention_days"`
+	CodexContinuityStateDir       string                   `json:"codex_continuity_state_dir,omitempty"`
 	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
 
 	unknownFields map[string]json.RawMessage
@@ -69,6 +70,7 @@ var configKnownFields = map[string]bool{
 	"payload_diagnostics_log": true, "codex_turn_routing": true,
 	"codex_ws_turn_routing": true, "codex_lease_retention_days": true,
 	"codex_routing_default_account_key": true,
+	"codex_continuity_state_dir":        true,
 	"codex_window_priming":              true,
 }
 
@@ -131,6 +133,14 @@ func (c *Config) HeadroomEnabled() bool {
 	return c.Headroom || c.HeadroomMode != ""
 }
 
+// ResolvedCodexContinuityStateDir returns the process-owned continuity state directory.
+func (c *Config) ResolvedCodexContinuityStateDir() string {
+	if c != nil && c.CodexContinuityStateDir != "" {
+		return c.CodexContinuityStateDir
+	}
+	return configDir()
+}
+
 func (c *Config) setDefaults() {
 	if c.Port == 0 {
 		c.Port = DefaultPort
@@ -176,6 +186,12 @@ func (c *Config) validate() error {
 	}
 	if c.CodexLeaseRetentionDays < 1 || c.CodexLeaseRetentionDays > 365 {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
+	}
+	if c.CodexContinuityStateDir != "" {
+		clean := filepath.Clean(c.CodexContinuityStateDir)
+		if !filepath.IsAbs(c.CodexContinuityStateDir) || clean != c.CodexContinuityStateDir || clean == string(filepath.Separator) {
+			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
+		}
 	}
 	for scope, modelID := range c.CodexWindowPriming.ModelOverrides {
 		if strings.TrimSpace(scope) == "" || strings.TrimSpace(modelID) == "" {

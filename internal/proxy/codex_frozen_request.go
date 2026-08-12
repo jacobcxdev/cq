@@ -144,10 +144,19 @@ func InspectCodexNativeRequest(ctx context.Context, encoded []byte, headers http
 		return nil, err
 	}
 	replayHeaders := codexReplayHeaders(headers)
+	originalEncoding, err := parseCodexContentEncoding(headers)
+	if err != nil {
+		clear(replayHeaders)
+		return nil, classifyCodexFrozenCodecError(err, false)
+	}
 	encoding, err := parseCodexContentEncoding(replayHeaders)
 	if err != nil {
 		clear(replayHeaders)
 		return nil, classifyCodexFrozenCodecError(err, false)
+	}
+	if originalEncoding != "" && encoding == "" {
+		clear(replayHeaders)
+		return nil, newCodexFrozenRequestError(CodexFrozenRequestProtocolInvalid, errors.New("content encoding excluded by connection authority"))
 	}
 	limits := codexHTTPZstdLimits()
 	decodedRequest, err := DecodeCodexRequest(encoded, encoding, limits)
@@ -155,6 +164,8 @@ func InspectCodexNativeRequest(ctx context.Context, encoded []byte, headers http
 		clear(replayHeaders)
 		return nil, classifyCodexFrozenCodecError(err, false)
 	}
+	encoding = decodedRequest.Encoding()
+	normaliseCodexFrozenFraming(replayHeaders, encoding)
 	ownedEncoded := decodedRequest.original
 	ownedDecoded := decodedRequest.decoded
 	fail := func(code CodexFrozenRequestErrorCode, cause error) (*CodexFrozenRequestInspection, error) {
