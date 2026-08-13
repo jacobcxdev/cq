@@ -13,6 +13,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -1030,37 +1031,63 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 		return nil, nil
 	}
 
+	effectiveSidecar := sidecar
+	deviceRollover := false
 	if err := e.validateCrashState(sidecar, finalIdentity, finalExists); err != nil {
-		return nil, err
+		if !allowRecovery || !e.canRecoverDarwinDeviceRollover(sidecar, finalIdentity, finalExists) {
+			return nil, err
+		}
+		if e.hasBoundActivatedMaintenanceGate() {
+			return nil, ErrCredentialEndpointMaintenancePending
+		}
+		identity, digest, inspectErr := e.inspectSidecarCAS()
+		if inspectErr != nil {
+			return nil, errors.Join(ErrCredentialOwnerStale, inspectErr)
+		}
+		e.sidecarCAS = &credentialEndpointSidecarCAS{identity: identity, digest: digest}
+		if err := e.acquireLifetimeLock(nil); err != nil {
+			if errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+				return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld)
+			}
+			return nil, err
+		}
+		var rebaseErr error
+		effectiveSidecar, rebaseErr = e.rebaseDarwinDeviceRollover(sidecar, finalIdentity, finalExists, e.lockIdentity)
+		if rebaseErr != nil {
+			return nil, rebaseErr
+		}
+		deviceRollover = true
 	}
 	expectedLock := sidecar.lockFileIdentity()
-	heldErr := fsutil.ValidateExclusiveLockHeldInDirectory(e.fs, e.secureDirectory, filepath.Base(credentialEndpointLockPath(e.path)), expectedLock)
-	switch {
-	case heldErr == nil:
-		client, waitErr := e.waitForLiveOwner(credentialEndpointDialTimeout)
-		if client != nil || !errors.Is(waitErr, fsutil.ErrExclusiveLockNotHeld) {
-			return client, waitErr
-		}
-	case errors.Is(heldErr, fsutil.ErrExclusiveLockNotHeld):
-		// A proved but unlocked endpoint can only be changed by supervised
-		// recovery below.
-	default:
-		return nil, errors.Join(ErrCredentialOwnerStale, heldErr)
-	}
-	if e.hasBoundActivatedMaintenanceGate() {
-		return nil, ErrCredentialEndpointMaintenancePending
-	}
-	if !allowRecovery {
-		return nil, ErrCredentialOwnerStale
-	}
-	if err := e.acquireLifetimeLock(&expectedLock); err != nil {
-		if errors.Is(err, fsutil.ErrExclusiveLockHeld) {
-			if pendingErr := e.rejectMaintenanceJournal(); pendingErr != nil {
-				return nil, pendingErr
+	if !deviceRollover {
+		heldErr := fsutil.ValidateExclusiveLockHeldInDirectory(e.fs, e.secureDirectory, filepath.Base(credentialEndpointLockPath(e.path)), expectedLock)
+		switch {
+		case heldErr == nil:
+			client, waitErr := e.waitForLiveOwner(credentialEndpointDialTimeout)
+			if client != nil || !errors.Is(waitErr, fsutil.ErrExclusiveLockNotHeld) {
+				return client, waitErr
 			}
-			return e.waitForLiveOwner(credentialEndpointDialTimeout)
+		case errors.Is(heldErr, fsutil.ErrExclusiveLockNotHeld):
+			// A proved but unlocked endpoint can only be changed by supervised
+			// recovery below.
+		default:
+			return nil, errors.Join(ErrCredentialOwnerStale, heldErr)
 		}
-		return nil, err
+		if e.hasBoundActivatedMaintenanceGate() {
+			return nil, ErrCredentialEndpointMaintenancePending
+		}
+		if !allowRecovery {
+			return nil, ErrCredentialOwnerStale
+		}
+		if err := e.acquireLifetimeLock(&expectedLock); err != nil {
+			if errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+				if pendingErr := e.rejectMaintenanceJournal(); pendingErr != nil {
+					return nil, pendingErr
+				}
+				return e.waitForLiveOwner(credentialEndpointDialTimeout)
+			}
+			return nil, err
+		}
 	}
 	current, exists, err := e.readSidecar()
 	if err != nil || !exists || !credentialEndpointSidecarsEqual(current, sidecar) {
@@ -1070,7 +1097,16 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 	if err != nil {
 		return nil, errors.Join(ErrCredentialOwnerStale, err)
 	}
-	if err := e.validateCrashState(sidecar, finalIdentity, finalExists); err != nil {
+	if deviceRollover {
+		effectiveSidecar, err = e.rebaseDarwinDeviceRollover(sidecar, finalIdentity, finalExists, e.lockIdentity)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.validateSidecarCAS(*e.sidecarCAS); err != nil {
+			return nil, errors.Join(ErrCredentialOwnerStale, err)
+		}
+	}
+	if err := e.validateCrashState(effectiveSidecar, finalIdentity, finalExists); err != nil {
 		return nil, err
 	}
 	if finalExists {
@@ -1089,13 +1125,36 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 	if err := e.recordEndpointRecovery(); err != nil {
 		return nil, err
 	}
-	if err := e.recover(sidecar, finalIdentity, finalExists); err != nil {
+	if err := e.recover(effectiveSidecar, finalIdentity, finalExists); err != nil {
 		return nil, err
 	}
 	if err := e.bindActivatedMaintenanceOwner(); err != nil {
 		return nil, e.preserveUnboundMaintenancePublication(err)
 	}
 	return nil, nil
+}
+
+func (e *credentialEndpoint) canRecoverDarwinDeviceRollover(sidecar credentialEndpointSidecar, final credentialEndpointIdentity, finalExists bool) bool {
+	if runtime.GOOS != "darwin" || sidecar.State != credentialEndpointPublished || !finalExists {
+		return false
+	}
+	if sidecar.Device == 0 || sidecar.Device != sidecar.LockDevice || sidecar.Device == final.Device {
+		return false
+	}
+	expected := sidecar.credentialEndpointIdentity
+	expected.Device = final.Device
+	return final.Device == e.directoryID.Device && final == expected
+}
+
+func (e *credentialEndpoint) rebaseDarwinDeviceRollover(sidecar credentialEndpointSidecar, final credentialEndpointIdentity, finalExists bool, lock fsutil.SecureFileIdentity) (credentialEndpointSidecar, error) {
+	if !e.canRecoverDarwinDeviceRollover(sidecar, final, finalExists) ||
+		lock.Device != final.Device || lock.Inode != sidecar.LockInode || lock.Links != sidecar.LockLinks {
+		return credentialEndpointSidecar{}, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointIdentityChanged)
+	}
+	rebased := sidecar
+	rebased.Device = final.Device
+	rebased.LockDevice = lock.Device
+	return rebased, nil
 }
 
 func (e *credentialEndpoint) recordEndpointRecovery() (result error) {

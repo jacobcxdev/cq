@@ -486,6 +486,29 @@ func TestCredentialEndpointSupervisedOpenRecoversExactOrphan(t *testing.T) {
 	}
 }
 
+func TestCredentialEndpointSupervisedOpenRecoversRebootRenumberedOrphan(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin device rollover")
+	}
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	makeExactCredentialEndpointOrphan(t, path, "orphan-generation")
+	rewriteCredentialEndpointSidecar(t, path, func(sidecar *endpointSidecarFixture) {
+		oldDevice := sidecar.Device + 1
+		sidecar.Device = oldDevice
+		sidecar.LockDevice = oldDevice
+	})
+
+	owner, err := OpenRecoveringCredentialControl(path, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if !owner.Owner() {
+		t.Fatal("supervised open did not own reboot-renumbered endpoint")
+	}
+}
+
 func TestCredentialEndpointLockBusyNeverRecoversOrUnlinks(t *testing.T) {
 	coordinator, _ := testCoordinator(t)
 	path := filepath.Join(shortEndpointDir(t), "credential.sock")
@@ -1487,6 +1510,26 @@ func makeExactCredentialEndpointOrphan(t *testing.T, path, generation string) {
 		t.Fatal(err)
 	}
 	if err := os.Remove(temporaryPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rewriteCredentialEndpointSidecar(t *testing.T, path string, mutate func(*endpointSidecarFixture)) {
+	t.Helper()
+	data, err := os.ReadFile(credentialEndpointSidecarPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sidecar endpointSidecarFixture
+	if err := json.Unmarshal(data, &sidecar); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&sidecar)
+	data, err = json.Marshal(sidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credentialEndpointSidecarPath(path), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
