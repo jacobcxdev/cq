@@ -45,8 +45,16 @@ func parseTier(data []byte) string {
 		return "unknown"
 	}
 	var tier struct {
-		PaidTier    *struct{ ID string `json:"id"` } `json:"paidTier"`
-		CurrentTier *struct{ ID string `json:"id"` } `json:"currentTier"`
+		PaidTier *struct {
+			ID string `json:"id"`
+		} `json:"paidTier"`
+		CurrentTier *struct {
+			ID string `json:"id"`
+		} `json:"currentTier"`
+		AllowedTiers []struct {
+			ID        string `json:"id"`
+			IsDefault bool   `json:"isDefault"`
+		} `json:"allowedTiers"`
 	}
 	if json.Unmarshal(data, &tier) != nil {
 		return "unknown"
@@ -54,21 +62,29 @@ func parseTier(data []byte) string {
 	if tier.PaidTier != nil && tier.PaidTier.ID != "" {
 		return "paid"
 	}
+	tierID := ""
 	if tier.CurrentTier != nil {
-		switch tier.CurrentTier.ID {
-		case "standard-tier":
-			return "paid"
-		case "free-tier":
-			return "free"
-		case "legacy-tier":
-			return "legacy"
-		default:
-			if tier.CurrentTier.ID != "" {
-				return tier.CurrentTier.ID
+		tierID = tier.CurrentTier.ID
+	} else {
+		for _, allowed := range tier.AllowedTiers {
+			if allowed.IsDefault {
+				tierID = allowed.ID
+				break
 			}
 		}
 	}
-	return "unknown"
+	switch tierID {
+	case "standard-tier":
+		return "paid"
+	case "free-tier":
+		return "free"
+	case "legacy-tier":
+		return "legacy"
+	case "":
+		return "unknown"
+	default:
+		return tierID
+	}
 }
 
 // parseQuota decodes the retrieveUserQuota response body and returns a

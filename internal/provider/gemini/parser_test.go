@@ -125,6 +125,19 @@ func TestParseTierPaidTierField(t *testing.T) {
 	}
 }
 
+func TestParseTierDefaultAllowedTier(t *testing.T) {
+	allowedJSON := []byte(`{
+		"allowedTiers": [
+			{"id": "free-tier", "isDefault": false},
+			{"id": "standard-tier", "isDefault": true}
+		]
+	}`)
+	tier := parseTier(allowedJSON)
+	if tier != "paid" {
+		t.Errorf("tier = %q, want %q", tier, "paid")
+	}
+}
+
 func TestParseTierEmpty(t *testing.T) {
 	tier := parseTier([]byte{})
 	if tier != "unknown" {
