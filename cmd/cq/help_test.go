@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,29 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("root help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "cq")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	fixture := t.TempDir()
+	home := filepath.Join(fixture, "absent-home")
+	xdg := filepath.Join(fixture, "absent-xdg")
+	for _, args := range [][]string{{"--help"}, {"--version"}} {
+		command := exec.Command(binary, args...)
+		command.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+xdg)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("cq %v: %v\n%s", args, err, output)
+		}
+	}
+	for _, path := range []string{home, xdg} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("read-only command created %s: %v", path, err)
 		}
 	}
 }

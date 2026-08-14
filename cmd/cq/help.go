@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/alecthomas/kong"
 )
 
 var manualHelpByPath = map[string]string{
@@ -241,4 +243,31 @@ func helpRequested(args []string) bool {
 
 func isHelpToken(arg string) bool {
 	return arg == "--help" || arg == "-h" || arg == "help"
+}
+
+// runPureGlobalInspection handles global read-only commands before any
+// compatibility or configuration initialisation can create user state.
+func runPureGlobalInspection(args []string, stdout, stderr io.Writer) (bool, error) {
+	if len(args) != 1 {
+		return false, nil
+	}
+	switch args[0] {
+	case "--version", "-v":
+		_, err := fmt.Fprintln(stdout, version)
+		return true, err
+	case "--help", "-h", "help":
+		var cli CLI
+		options := append(cliKongOptions(),
+			kong.Writers(stdout, stderr),
+			kong.Exit(func(int) {}),
+		)
+		parser, err := kong.New(&cli, options...)
+		if err != nil {
+			return true, err
+		}
+		_, _ = parser.Parse([]string{"--help"})
+		return true, nil
+	default:
+		return false, nil
+	}
 }

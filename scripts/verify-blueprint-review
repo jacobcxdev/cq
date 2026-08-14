@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+exec go run ./internal/tools/proxycu blueprint-review \
+  docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md \
+  docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json

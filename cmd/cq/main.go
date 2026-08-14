@@ -190,6 +190,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if handled, err := runPureGlobalInspection(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Legacy endpoint inspection is deliberately read-only. It must bypass
 	// compatibility initialisation because that path may create or update files.
 	if isReadOnlyLegacyEndpointInspectCommand(os.Args[1:]) {
