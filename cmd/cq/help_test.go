@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -62,11 +63,31 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 	fixture := t.TempDir()
 	home := filepath.Join(fixture, "absent-home")
 	xdg := filepath.Join(fixture, "absent-xdg")
-	for _, args := range [][]string{{"--help"}, {"--version"}} {
-		command := exec.Command(binary, args...)
+	for _, tt := range []struct {
+		args     []string
+		exitCode int
+	}{
+		{args: []string{"--help"}},
+		{args: []string{"--version"}},
+		{args: []string{"--json", "--help"}},
+		{args: []string{"--refresh", "claude", "--help"}},
+		{args: []string{"claude", "--json", "login", "--help"}},
+		{args: []string{"refresh", "--help"}},
+		{args: []string{"agent", "install", "--help"}},
+		{args: []string{"agent", "help", "install"}},
+		{args: []string{"proxy", "start", "--help"}},
+		{args: []string{"proxy", "help", "start"}},
+		{args: []string{"models", "list", "--help"}},
+		{args: []string{"models", "help", "list"}},
+		{args: []string{"--json", "--version"}},
+		{args: []string{"help"}, exitCode: 80},
+		{args: []string{"claude"}, exitCode: 80},
+	} {
+		command := exec.Command(binary, tt.args...)
 		command.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+xdg)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("cq %v: %v\n%s", args, err, output)
+		output, err := command.CombinedOutput()
+		if got := command.ProcessState.ExitCode(); got != tt.exitCode {
+			t.Fatalf("cq %v exit = %d, want %d: %v\n%s", tt.args, got, tt.exitCode, err, output)
 		}
 	}
 	for _, path := range []string{home, xdg} {
@@ -75,6 +96,109 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobalHelpAndVersionPreserveAbsentHomeAndXDGEnvironment(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "cq")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	workingDirectory := t.TempDir()
+	environment := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "XDG_CONFIG_HOME=") {
+			environment = append(environment, entry)
+		}
+	}
+	for _, fixture := range []struct {
+		args     []string
+		exitCode int
+	}{
+		{args: []string{"--help"}},
+		{args: []string{"--version"}},
+		{args: []string{"--json", "--help"}},
+		{args: []string{"--refresh", "claude", "--help"}},
+		{args: []string{"claude", "--json", "login", "--help"}},
+		{args: []string{"refresh", "--help"}},
+		{args: []string{"agent", "install", "--help"}},
+		{args: []string{"agent", "help", "install"}},
+		{args: []string{"proxy", "start", "--help"}},
+		{args: []string{"proxy", "help", "start"}},
+		{args: []string{"models", "list", "--help"}},
+		{args: []string{"models", "help", "list"}},
+		{args: []string{"help"}, exitCode: 80},
+		{args: []string{"claude"}, exitCode: 80},
+	} {
+		command := exec.Command(binary, fixture.args...)
+		command.Dir = workingDirectory
+		command.Env = environment
+		output, err := command.CombinedOutput()
+		if got := command.ProcessState.ExitCode(); got != fixture.exitCode {
+			t.Fatalf("cq %v exit = %d, want %d: %v\n%s", fixture.args, got, fixture.exitCode, err, output)
+		}
+	}
+	entries, err := os.ReadDir(workingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("read-only command created working-directory state: %v", entries)
+	}
+}
+
+func TestPureGlobalInspectionPreservesBareHelpUsageError(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	handled, exitCode, err := runPureGlobalInspection([]string{"help"}, stdout, stderr)
+	if !pureInspectionErrorWasRendered(err) {
+		t.Fatalf("error = %v, want rendered Kong usage error", err)
+	}
+	if !handled || exitCode != 80 {
+		t.Fatalf("handled, exitCode = %v, %d; want true, 80", handled, exitCode)
+	}
+	if !strings.Contains(stdout.String(), "Usage: cq check") || !strings.Contains(stderr.String(), "cq: error:") {
+		t.Fatalf("bare help output changed:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+}
+
+func TestPureGlobalInspectionHandlesOrdinaryUsageBeforeCompatibility(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	handled, exitCode, err := runPureGlobalInspection([]string{"claude"}, stdout, stderr)
+	if !pureInspectionErrorWasRendered(err) {
+		t.Fatalf("error = %v, want rendered Kong usage error", err)
+	}
+	if !handled {
+		t.Fatal("ordinary usage error was not handled")
+	}
+	if exitCode != 80 {
+		t.Fatalf("exit code = %d, want 80", exitCode)
+	}
+	if !strings.Contains(stdout.String(), "Usage: cq claude <command>") {
+		t.Fatalf("usage output = %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "cq: error: expected one of") {
+		t.Fatalf("error output = %q", stderr.String())
+	}
+}
+
+func TestPureGlobalInspectionPropagatesHelpWriteError(t *testing.T) {
+	want := io.ErrClosedPipe
+	handled, exitCode, err := runPureGlobalInspection([]string{"--help"}, failingWriter{err: want}, io.Discard)
+	if !handled {
+		t.Fatal("global help was not handled")
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want %v", err, want)
+	}
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (writer failingWriter) Write([]byte) (int, error) { return 0, writer.err }
 
 func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 	for _, tt := range []struct {

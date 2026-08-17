@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -247,27 +248,132 @@ func isHelpToken(arg string) bool {
 
 // runPureGlobalInspection handles global read-only commands before any
 // compatibility or configuration initialisation can create user state.
-func runPureGlobalInspection(args []string, stdout, stderr io.Writer) (bool, error) {
-	if len(args) != 1 {
-		return false, nil
+func runPureGlobalInspection(args []string, stdout, stderr io.Writer) (bool, int, error) {
+	if path, ok := manualHelpInspectionPath(args); ok {
+		if err := writeManualHelp(stdout, path); err != nil {
+			return true, 1, err
+		}
+		return true, 0, nil
+	}
+	if isInterceptedCommand(args) {
+		return false, 0, nil
+	}
+	var cli CLI
+	exitCode := -1
+	stdoutRecorder := &errorRecordingWriter{writer: stdout}
+	stderrRecorder := &errorRecordingWriter{writer: stderr}
+	options := append(cliKongOptions(),
+		kong.Writers(stdoutRecorder, stderrRecorder),
+		kong.Exit(func(code int) { panic(pureInspectionExit(code)) }),
+	)
+	parser, err := kong.New(&cli, options...)
+	if err != nil {
+		return true, 1, err
+	}
+	err = parsePureInspection(parser, args, &exitCode)
+	if writeErr := errors.Join(stdoutRecorder.err, stderrRecorder.err); writeErr != nil {
+		return true, 1, writeErr
+	}
+	if err != nil {
+		var parseError *kong.ParseError
+		if !errors.As(err, &parseError) {
+			return true, 1, err
+		}
+		fatalPureInspection(parser, err, &exitCode)
+		if writeErr := errors.Join(stdoutRecorder.err, stderrRecorder.err); writeErr != nil {
+			return true, 1, writeErr
+		}
+		if exitCode < 0 {
+			exitCode = 1
+		}
+		return true, exitCode, err
+	}
+	if exitCode >= 0 {
+		return true, exitCode, nil
+	}
+	return false, 0, nil
+}
+
+func manualHelpInspectionPath(args []string) ([]string, bool) {
+	if len(args) == 0 || !helpRequested(args) {
+		return nil, false
+	}
+	path := append([]string(nil), args...)
+	for index, arg := range path {
+		switch arg {
+		case "--help", "-h":
+			path = path[:index]
+		case "help":
+			path = append(path[:index], path[index+1:]...)
+		}
+		if isHelpToken(arg) {
+			break
+		}
+	}
+	for len(path) > 0 {
+		if _, ok := manualHelp(path); ok {
+			return append([]string(nil), path...), true
+		}
+		path = path[:len(path)-1]
+	}
+	return nil, false
+}
+
+type errorRecordingWriter struct {
+	writer io.Writer
+	err    error
+}
+
+func (writer *errorRecordingWriter) Write(data []byte) (int, error) {
+	count, err := writer.writer.Write(data)
+	if err != nil && writer.err == nil {
+		writer.err = err
+	}
+	return count, err
+}
+
+func pureInspectionErrorWasRendered(err error) bool {
+	var parseError *kong.ParseError
+	return errors.As(err, &parseError)
+}
+
+type pureInspectionExit int
+
+func parsePureInspection(parser *kong.Kong, args []string, exitCode *int) (err error) {
+	defer catchPureInspectionExit(exitCode, &err)
+	_, err = parser.Parse(args)
+	return err
+}
+
+func fatalPureInspection(parser *kong.Kong, parseError error, exitCode *int) (err error) {
+	defer catchPureInspectionExit(exitCode, &err)
+	parser.FatalIfErrorf(parseError)
+	return nil
+}
+
+func catchPureInspectionExit(exitCode *int, err *error) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	code, ok := recovered.(pureInspectionExit)
+	if !ok {
+		panic(recovered)
+	}
+	*exitCode = int(code)
+	*err = nil
+}
+
+func isInterceptedCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
 	}
 	switch args[0] {
-	case "--version", "-v":
-		_, err := fmt.Fprintln(stdout, version)
-		return true, err
-	case "--help", "-h", "help":
-		var cli CLI
-		options := append(cliKongOptions(),
-			kong.Writers(stdout, stderr),
-			kong.Exit(func(int) {}),
-		)
-		parser, err := kong.New(&cli, options...)
-		if err != nil {
-			return true, err
-		}
-		_, _ = parser.Parse([]string{"--help"})
-		return true, nil
+	case "refresh", "agent", "proxy", "models":
+		return true
+	case "codex":
+		return len(args) > 1 && (args[1] == "validate" || args[1] == "canary")
 	default:
-		return false, nil
+		return false
 	}
 }

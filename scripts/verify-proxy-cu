@@ -3,4 +3,21 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
-exec go run ./internal/tools/proxycu "$@"
+exec /usr/bin/env -i \
+  CGO_ENABLED=1 \
+  GOCACHE="${GOCACHE:-${HOME:-/var/empty}/Library/Caches/go-build}" \
+  GOENV=off \
+  GOFLAGS= \
+  GOMODCACHE="${GOMODCACHE:-${HOME:-/var/empty}/go/pkg/mod}" \
+  GONOSUMDB='*' \
+  GOPATH="${GOPATH:-${HOME:-/var/empty}/go}" \
+  GOPROXY=off \
+  GOSUMDB=off \
+  GOTELEMETRY=off \
+  GOTOOLCHAIN=local \
+  GOWORK=off \
+  HOME="${HOME:-/var/empty}" \
+  LC_ALL=C \
+  PATH=/usr/bin:/bin \
+  TZ=UTC \
+  /opt/homebrew/bin/go run ./internal/tools/proxycu "$@"

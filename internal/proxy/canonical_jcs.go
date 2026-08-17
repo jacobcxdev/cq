@@ -52,16 +52,38 @@ var blueprintReviewLenses = [...]string{
 	"coverage_source_consistency",
 }
 
-// ParseBlueprintReviewResultV1 parses one complete bounded reviewer result.
-func ParseBlueprintReviewResultV1(reader io.Reader) (CQProxyBlueprintReviewResultV1, error) {
+// ParseBlueprintReviewResultV1 parses one complete bounded reviewer result for
+// the explicitly trusted blueprint and baseline authority.
+func ParseBlueprintReviewResultV1(reader io.Reader, expectedBlueprintSHA256, expectedBaselineCommit string) (CQProxyBlueprintReviewResultV1, error) {
+	return parseBlueprintReviewResultV1Instrumented(reader, expectedBlueprintSHA256, expectedBaselineCommit, nil)
+}
+
+type reviewResultInstrumentation struct {
+	Decodes           int
+	Canonicalisations int
+}
+
+func parseBlueprintReviewResultV1Instrumented(reader io.Reader, expectedBlueprintSHA256, expectedBaselineCommit string, instrumentation *reviewResultInstrumentation) (CQProxyBlueprintReviewResultV1, error) {
 	var result CQProxyBlueprintReviewResultV1
+	if !lowerHex64Pattern.MatchString(expectedBlueprintSHA256) {
+		return result, fmt.Errorf("invalid expected blueprint digest")
+	}
+	if !lowerHex40Pattern.MatchString(expectedBaselineCommit) {
+		return result, fmt.Errorf("invalid expected authority baseline commit")
+	}
 	data, err := readBoundedBytes(reader, maxReviewResultJCS)
 	if err != nil {
 		return result, fmt.Errorf("read blueprint review result: %w", err)
 	}
+	if instrumentation != nil {
+		instrumentation.Decodes++
+	}
 	decoded, err := decodeStrictJSON(data)
 	if err != nil {
 		return result, fmt.Errorf("decode blueprint review result: %w", err)
+	}
+	if instrumentation != nil {
+		instrumentation.Canonicalisations++
 	}
 	canonical, err := appendCanonicalJSON(make([]byte, 0, len(data)), decoded)
 	if err != nil {
@@ -75,6 +97,12 @@ func ParseBlueprintReviewResultV1(reader io.Reader) (CQProxyBlueprintReviewResul
 	}
 	if err := validateBlueprintReviewResult(&result); err != nil {
 		return result, err
+	}
+	if result.BlueprintSHA256 != expectedBlueprintSHA256 {
+		return result, fmt.Errorf("review result blueprint digest does not match expected authority")
+	}
+	if result.AuthorityBaselineCommit != expectedBaselineCommit {
+		return result, fmt.Errorf("review result baseline commit does not match expected authority")
 	}
 	return result, nil
 }
@@ -393,13 +421,18 @@ func appendCanonicalString(destination []byte, value string) []byte {
 
 func appendCanonicalNumber(destination []byte, number json.Number) ([]byte, error) {
 	representation := number.String()
-	if representation == "-0" {
-		representation = "0"
-	}
-	if _, err := strconv.ParseFloat(representation, 64); err != nil {
+	value, err := strconv.ParseFloat(representation, 64)
+	if err != nil {
 		return nil, fmt.Errorf("invalid JSON number %q: %w", representation, err)
 	}
-	return append(destination, representation...), nil
+	if value == 0 {
+		return append(destination, '0'), nil
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("serialise JSON number %q: %w", representation, err)
+	}
+	return append(destination, canonical...), nil
 }
 
 func lessUTF16(left, right string) bool {
@@ -483,6 +516,16 @@ func readStaticNoFollow(path string, limit int) ([]byte, error) {
 }
 
 func parseBlueprintReviewSiblingV1(reader io.Reader, expectedBlueprintSHA256, expectedBaseline string) (BlueprintReviewSiblingV1, error) {
+	return parseBlueprintReviewSiblingV1Instrumented(reader, expectedBlueprintSHA256, expectedBaseline, nil)
+}
+
+type reviewSiblingInstrumentation struct {
+	RecordsScanned    int
+	Decodes           int
+	Canonicalisations int
+}
+
+func parseBlueprintReviewSiblingV1Instrumented(reader io.Reader, expectedBlueprintSHA256, expectedBaseline string, instrumentation *reviewSiblingInstrumentation) (BlueprintReviewSiblingV1, error) {
 	var sibling BlueprintReviewSiblingV1
 	fileBytes, err := readBoundedBytes(reader, maxReviewSiblingFile)
 	if err != nil {
@@ -495,9 +538,18 @@ func parseBlueprintReviewSiblingV1(reader io.Reader, expectedBlueprintSHA256, ex
 	if len(jcs) > maxReviewSiblingJCS {
 		return sibling, fmt.Errorf("review sibling JCS exceeds %d bytes", maxReviewSiblingJCS)
 	}
+	if err := preflightReviewRecordBounds(jcs, instrumentation); err != nil {
+		return sibling, err
+	}
+	if instrumentation != nil {
+		instrumentation.Decodes++
+	}
 	decoded, err := decodeStrictJSON(jcs)
 	if err != nil {
 		return sibling, fmt.Errorf("decode review sibling: %w", err)
+	}
+	if instrumentation != nil {
+		instrumentation.Canonicalisations++
 	}
 	canonical, err := appendCanonicalJSON(make([]byte, 0, len(jcs)), decoded)
 	if err != nil {
@@ -506,24 +558,6 @@ func parseBlueprintReviewSiblingV1(reader io.Reader, expectedBlueprintSHA256, ex
 	if !bytes.Equal(canonical, jcs) {
 		return sibling, fmt.Errorf("review sibling is not canonical JCS")
 	}
-	var raw struct {
-		SchemaVersion           int               `json:"schema_version"`
-		Kind                    string            `json:"kind"`
-		BlueprintPath           string            `json:"blueprint_path"`
-		BlueprintSHA256         string            `json:"blueprint_sha256"`
-		AuthorityBaselineCommit string            `json:"authority_baseline_commit"`
-		Round                   uint64            `json:"round"`
-		Records                 []json.RawMessage `json:"records"`
-		AggregateSHA256         string            `json:"aggregate_sha256"`
-	}
-	if err := decodeClosedJSON(jcs, &raw); err != nil {
-		return sibling, fmt.Errorf("decode review sibling object: %w", err)
-	}
-	for index, record := range raw.Records {
-		if len(record) > maxReviewRecordJCS {
-			return sibling, fmt.Errorf("review record %d exceeds %d bytes", index, maxReviewRecordJCS)
-		}
-	}
 	if err := decodeClosedJSON(jcs, &sibling); err != nil {
 		return sibling, fmt.Errorf("decode review sibling schema: %w", err)
 	}
@@ -531,6 +565,88 @@ func parseBlueprintReviewSiblingV1(reader io.Reader, expectedBlueprintSHA256, ex
 		return sibling, err
 	}
 	return sibling, nil
+}
+
+func preflightReviewRecordBounds(jcs []byte, instrumentation *reviewSiblingInstrumentation) error {
+	const marker = `"records":[`
+	recordsStart := bytes.Index(jcs, []byte(marker))
+	if recordsStart < 0 || bytes.Index(jcs[recordsStart+len(marker):], []byte(marker)) >= 0 {
+		return fmt.Errorf("review sibling records array is absent or duplicated")
+	}
+	offset := recordsStart + len(marker)
+	for index := 0; ; index++ {
+		if offset >= len(jcs) {
+			return fmt.Errorf("review sibling records array is truncated")
+		}
+		if jcs[offset] == ']' {
+			return nil
+		}
+		if index >= len(blueprintReviewLenses) {
+			return fmt.Errorf("review sibling has more than %d records", len(blueprintReviewLenses))
+		}
+		if jcs[offset] != '{' {
+			return fmt.Errorf("review record %d is not an object", index)
+		}
+		end, err := scanJSONObjectEnd(jcs, offset)
+		if err != nil {
+			return fmt.Errorf("scan review record %d: %w", index, err)
+		}
+		if instrumentation != nil {
+			instrumentation.RecordsScanned++
+		}
+		if end-offset > maxReviewRecordJCS {
+			return fmt.Errorf("review record %d exceeds %d bytes", index, maxReviewRecordJCS)
+		}
+		offset = end
+		if offset >= len(jcs) {
+			return fmt.Errorf("review sibling records array is truncated")
+		}
+		switch jcs[offset] {
+		case ',':
+			offset++
+		case ']':
+			return nil
+		default:
+			return fmt.Errorf("review record %d has invalid delimiter", index)
+		}
+	}
+}
+
+func scanJSONObjectEnd(data []byte, start int) (int, error) {
+	depth := 0
+	inString := false
+	escaped := false
+	for offset := start; offset < len(data); offset++ {
+		character := data[offset]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch character {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return offset + 1, nil
+			}
+			if depth < 0 {
+				return 0, fmt.Errorf("unexpected object close")
+			}
+		}
+	}
+	return 0, fmt.Errorf("unterminated object")
 }
 
 func validateBlueprintReviewSibling(sibling *BlueprintReviewSiblingV1, expectedBlueprintSHA256, expectedBaseline string) error {

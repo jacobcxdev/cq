@@ -190,10 +190,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
-	if handled, err := runPureGlobalInspection(os.Args[1:], os.Stdout, os.Stderr); handled {
-		if err != nil {
+	if handled, exitCode, err := runPureGlobalInspection(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if err != nil && !pureInspectionErrorWasRendered(err) {
 			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
-			os.Exit(1)
+			exitCode = 1
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode)
 		}
 		return
 	}
