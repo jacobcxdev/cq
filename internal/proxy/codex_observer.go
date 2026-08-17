@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -850,7 +851,14 @@ func (session *codexWSObservationSession) ObserveUpstream(frame []byte) {
 		return
 	}
 	if session.capacity != nil {
-		if err := session.capacity.ObserveEvent(frame); err != nil {
+		wrapped, wrappedErr := ParseCodexWrappedError(frame)
+		if wrappedErr == nil && wrapped.HardUsageLimit {
+			model := session.choice.EffectiveModel
+			if model == "" {
+				model = session.choice.RequestedModel
+			}
+			session.capacity.ObserveHardLimit(CapacityBucketForModel(model), time.Time{})
+		} else if err := session.capacity.ObserveEvent(frame); err != nil {
 			if session.observer != nil {
 				session.observer.unknown.Add(1)
 			}
