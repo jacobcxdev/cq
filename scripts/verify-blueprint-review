@@ -1,25 +1,27 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ "$#" -ne 0 ]; then
+  echo "verify-blueprint-review: expected no arguments" >&2
+  exit 2
+fi
+
+repo_root=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && /bin/pwd -P)
 cd "$repo_root"
+approved_home=$(/usr/bin/id -P "$(/usr/bin/id -un)" | /usr/bin/awk -F: '{print $9}')
+case "$approved_home" in
+  /*) ;;
+  *) echo "verify-blueprint-review: approved home is unavailable" >&2; exit 1 ;;
+esac
+[ -d "$approved_home" ] || { echo "verify-blueprint-review: approved home is unavailable" >&2; exit 1; }
 exec /usr/bin/env -i \
-  CGO_ENABLED=1 \
-  GOCACHE="${GOCACHE:-${HOME:-/var/empty}/Library/Caches/go-build}" \
-  GOENV=off \
-  GOFLAGS= \
-  GOMODCACHE="${GOMODCACHE:-${HOME:-/var/empty}/go/pkg/mod}" \
-  GONOSUMDB='*' \
-  GOPATH="${GOPATH:-${HOME:-/var/empty}/go}" \
-  GOPROXY=off \
-  GOSUMDB=off \
-  GOTELEMETRY=off \
-  GOTOOLCHAIN=local \
-  GOWORK=off \
-  HOME="${HOME:-/var/empty}" \
-  LC_ALL=C \
-  PATH=/usr/bin:/bin \
-  TZ=UTC \
+  HOME="$approved_home" \
+  GOCACHE="$approved_home/Library/Caches/go-build" \
+  GOMODCACHE="$approved_home/go/pkg/mod" \
+  GOPATH="$approved_home/go" \
+  GOENV=off GOFLAGS= GONOSUMDB='*' GOPROXY=off GOSUMDB=off \
+  GOTELEMETRY=off GOTOOLCHAIN=local GOWORK=off \
+  LC_ALL=C PATH=/usr/bin:/bin TZ=UTC \
   /opt/homebrew/bin/go run ./internal/tools/proxycu blueprint-review \
   docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md \
   docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json

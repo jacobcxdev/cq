@@ -42,6 +42,12 @@ func TestAppendCanonicalJSONUsesECMAScriptNumberSerialisation(t *testing.T) {
 		"[1e20,1e21]":                "[100000000000000000000,1e+21]",
 		"[333333333.33333329]":       "[333333333.3333333]",
 		"[4.50,2e-3,0.000000000001]": "[4.5,0.002,1e-12]",
+		"[5e-324,1e-324]":            "[5e-324,0]",
+		"[9007199254740993]":         "[9007199254740992]",
+		"[-0.0,-0e+100]":             "[0,0]",
+		"[1e30,1e-27]":               "[1e+30,1e-27]",
+		"[1.7976931348623157e308]":   "[1.7976931348623157e+308]",
+		"[9.999999999999997e-7]":     "[9.999999999999997e-7]",
 	} {
 		decoded, err := decodeStrictJSON([]byte(input))
 		if err != nil {
@@ -328,8 +334,11 @@ func TestBlueprintReviewNegativeVectorMatrix(t *testing.T) {
 	resultVectors["oversized_finding_member"] = reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{invalidFinding})
 	invalidFinding = reviewFindingVector("_bad", "high")
 	resultVectors["invalid_finding_id"] = reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{invalidFinding})
+	resultVectors["unknown_nested_finding_member"] = bytes.Replace(oneFinding, []byte(`"correction":"fix"`), []byte(`"correction":"fix","unknown":true`), 1)
+	resultVectors["invalid_severity"] = reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{reviewFindingVector("A", "urgent")})
 	resultVectors["duplicate_finding_id"] = reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{reviewFindingVector("A", "high"), reviewFindingVector("A", "high")})
 	resultVectors["wrong_severity_order"] = reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{reviewFindingVector("A", "low"), reviewFindingVector("B", "critical")})
+	resultVectors["wrong_same_severity_id_order"] = reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{reviewFindingVector("B", "high"), reviewFindingVector("A", "high")})
 	resultVectors["finding_65"] = reviewResultVector(t, "not_clean", reviewFindingsVector(65, false))
 	for name, data := range resultVectors {
 		t.Run(name, func(t *testing.T) {
@@ -341,28 +350,32 @@ func TestBlueprintReviewNegativeVectorMatrix(t *testing.T) {
 
 	validSibling := buildReviewSiblingVector(t, []string{"a", "b", "c", "d", "e", "f", "g"}, 1)
 	for name, data := range map[string][]byte{
-		"round_zero":             buildReviewSiblingVector(t, []string{"a", "b", "c", "d", "e", "f", "g"}, 0),
-		"round_above_safe":       buildReviewSiblingVector(t, []string{"a", "b", "c", "d", "e", "f", "g"}, maxJCSSafeInteger+1),
-		"empty_task_label":       buildReviewSiblingVector(t, []string{"", "b", "c", "d", "e", "f", "g"}, 1),
-		"reused_task_label":      buildReviewSiblingVector(t, []string{"a", "a", "c", "d", "e", "f", "g"}, 1),
-		"task_label_257":         buildReviewSiblingVector(t, []string{strings.Repeat("a", 257), "b", "c", "d", "e", "f", "g"}, 1),
-		"invalid_task_grammar":   buildReviewSiblingVector(t, []string{"bad label", "b", "c", "d", "e", "f", "g"}, 1),
-		"digest_mismatch":        bytes.Replace(validSibling, []byte(`"aggregate_sha256":"`), []byte(`"aggregate_sha256":"0`), 1),
-		"schema_mismatch":        bytes.Replace(validSibling, []byte(`"schema_version":1`), []byte(`"schema_version":2`), 1),
-		"malformed_timestamp":    bytes.Replace(validSibling, []byte("2026-08-17T10:00:00Z"), []byte("2026-08-17T10:00:99Z"), 1),
-		"missing_final_lf":       bytes.TrimSuffix(validSibling, []byte("\n")),
-		"doubled_final_lf":       append(append([]byte(nil), validSibling...), '\n'),
-		"nonterminal_lf":         append([]byte("\n"), validSibling...),
-		"trailing_byte":          append(append([]byte(nil), validSibling...), 'x'),
-		"unicode_task_label":     buildReviewSiblingVector(t, []string{"é", "b", "c", "d", "e", "f", "g"}, 1),
-		"unicode_normalisation":  buildReviewSiblingVector(t, []string{"e\u0301", "b", "c", "d", "e", "f", "g"}, 1),
-		"BOM":                    append([]byte{0xef, 0xbb, 0xbf}, validSibling...),
-		"duplicate_member":       bytes.Replace(validSibling, []byte(`{"aggregate_sha256":`), []byte(`{"round":1,"aggregate_sha256":`), 1),
-		"key_order_variant":      noncanonicalSiblingKeyOrderVector(t, validSibling),
-		"uint64_endian_variant":  aggregateEncodingVariantVector(t, "little_endian"),
-		"ASCII_hex_variant":      aggregateEncodingVariantVector(t, "ascii_hex"),
-		"record_order_variant":   aggregateEncodingVariantVector(t, "record_order"),
-		"record_digest_mismatch": bytes.Replace(validSibling, []byte(`"record_sha256":"`), []byte(`"record_sha256":"0`), 1),
+		"round_non_integer":            bytes.Replace(validSibling, []byte(`"round":1`), []byte(`"round":1.5`), 1),
+		"round_zero":                   buildReviewSiblingVector(t, []string{"a", "b", "c", "d", "e", "f", "g"}, 0),
+		"round_above_safe":             buildReviewSiblingVector(t, []string{"a", "b", "c", "d", "e", "f", "g"}, maxJCSSafeInteger+1),
+		"empty_task_label":             buildReviewSiblingVector(t, []string{"", "b", "c", "d", "e", "f", "g"}, 1),
+		"reused_task_label":            buildReviewSiblingVector(t, []string{"a", "a", "c", "d", "e", "f", "g"}, 1),
+		"task_label_257":               buildReviewSiblingVector(t, []string{strings.Repeat("a", 257), "b", "c", "d", "e", "f", "g"}, 1),
+		"invalid_task_grammar":         buildReviewSiblingVector(t, []string{"bad label", "b", "c", "d", "e", "f", "g"}, 1),
+		"digest_mismatch":              bytes.Replace(validSibling, []byte(`"aggregate_sha256":"`), []byte(`"aggregate_sha256":"0`), 1),
+		"schema_mismatch":              bytes.Replace(validSibling, []byte(`"schema_version":1`), []byte(`"schema_version":2`), 1),
+		"malformed_timestamp":          bytes.Replace(validSibling, []byte("2026-08-17T10:00:00Z"), []byte("2026-08-17T10:00:99Z"), 1),
+		"missing_final_lf":             bytes.TrimSuffix(validSibling, []byte("\n")),
+		"doubled_final_lf":             append(append([]byte(nil), validSibling...), '\n'),
+		"nonterminal_lf":               append([]byte("\n"), validSibling...),
+		"trailing_byte":                append(append([]byte(nil), validSibling...), 'x'),
+		"unicode_task_label":           buildReviewSiblingVector(t, []string{"é", "b", "c", "d", "e", "f", "g"}, 1),
+		"unicode_normalisation":        buildReviewSiblingVector(t, []string{"e\u0301", "b", "c", "d", "e", "f", "g"}, 1),
+		"BOM":                          append([]byte{0xef, 0xbb, 0xbf}, validSibling...),
+		"duplicate_member":             bytes.Replace(validSibling, []byte(`{"aggregate_sha256":`), []byte(`{"round":1,"aggregate_sha256":`), 1),
+		"key_order_variant":            noncanonicalSiblingKeyOrderVector(t, validSibling),
+		"result_uint32_endian_variant": framedDigestEndianVariantVector(t, "result"),
+		"record_uint32_endian_variant": framedDigestEndianVariantVector(t, "record"),
+		"uint32_endian_variant":        aggregateEncodingVariantVector(t, "path_little_endian"),
+		"uint64_endian_variant":        aggregateEncodingVariantVector(t, "little_endian"),
+		"ASCII_hex_variant":            aggregateEncodingVariantVector(t, "ascii_hex"),
+		"record_order_variant":         aggregateEncodingVariantVector(t, "record_order"),
+		"record_digest_mismatch":       bytes.Replace(validSibling, []byte(`"record_sha256":"`), []byte(`"record_sha256":"0`), 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseBlueprintReviewSiblingV1(bytes.NewReader(data), frozenBlueprintSHA256, frozenReviewBaseline); err == nil {
@@ -391,6 +404,14 @@ func TestBlueprintReviewNegativeVectorMatrix(t *testing.T) {
 		for end := 0; end < len(validSibling); end++ {
 			if _, err := parseBlueprintReviewSiblingV1(bytes.NewReader(validSibling[:end]), frozenBlueprintSHA256, frozenReviewBaseline); err == nil {
 				t.Fatalf("accepted truncation at byte %d", end)
+			}
+		}
+	})
+	t.Run("result_every_truncation_boundary", func(t *testing.T) {
+		result := reviewResultVector(t, "not_clean", []BlueprintReviewFindingV1{reviewFindingVector("A", "high")})
+		for end := 0; end < len(result); end++ {
+			if _, err := ParseBlueprintReviewResultV1(bytes.NewReader(result[:end]), frozenBlueprintSHA256, frozenReviewBaseline); err == nil {
+				t.Fatalf("accepted result truncation at byte %d", end)
 			}
 		}
 	})
@@ -425,7 +446,7 @@ func TestBlueprintReviewCapOrderingVectors(t *testing.T) {
 		); err == nil {
 			t.Fatal("accepted result above cap")
 		}
-		if instrumentation.Decodes != 0 || instrumentation.Canonicalisations != 0 {
+		if instrumentation.Decodes != 0 || instrumentation.Canonicalisations != 0 || instrumentation.Hashes != 0 {
 			t.Fatalf("over-cap result reached JSON/JCS: %#v", instrumentation)
 		}
 	})
@@ -435,7 +456,7 @@ func TestBlueprintReviewCapOrderingVectors(t *testing.T) {
 		if _, err := parseBlueprintReviewSiblingV1Instrumented(bytes.NewReader(data), frozenBlueprintSHA256, frozenReviewBaseline, instrumentation); err == nil {
 			t.Fatal("accepted sibling above cap")
 		}
-		if instrumentation.Decodes != 0 || instrumentation.Canonicalisations != 0 || instrumentation.RecordsScanned != 0 {
+		if instrumentation.Decodes != 0 || instrumentation.Canonicalisations != 0 || instrumentation.Hashes != 0 || instrumentation.RecordsScanned != 0 {
 			t.Fatalf("over-cap sibling reached token/JSON/JCS: %#v", instrumentation)
 		}
 	})
@@ -446,7 +467,7 @@ func TestBlueprintReviewCapOrderingVectors(t *testing.T) {
 		if _, err := parseBlueprintReviewSiblingV1Instrumented(bytes.NewReader(buildReviewSiblingVector(t, labels, 1)), frozenBlueprintSHA256, frozenReviewBaseline, instrumentation); err == nil {
 			t.Fatal("accepted record above cap")
 		}
-		if instrumentation.RecordsScanned != len(blueprintReviewLenses) || instrumentation.Decodes != 0 || instrumentation.Canonicalisations != 0 {
+		if instrumentation.RecordsScanned != len(blueprintReviewLenses) || instrumentation.Decodes != 0 || instrumentation.Canonicalisations != 0 || instrumentation.Hashes != 0 {
 			t.Fatalf("over-cap record ordering = %#v", instrumentation)
 		}
 	})
@@ -621,7 +642,11 @@ func aggregateEncodingVariantVector(t *testing.T, variant string) []byte {
 	hash := sha256.New()
 	_, _ = io.WriteString(hash, "cq/proxy-blueprint-review/v1\x00")
 	var pathLength [4]byte
-	binary.BigEndian.PutUint32(pathLength[:], uint32(len(sibling.BlueprintPath)))
+	if variant == "path_little_endian" {
+		binary.LittleEndian.PutUint32(pathLength[:], uint32(len(sibling.BlueprintPath)))
+	} else {
+		binary.BigEndian.PutUint32(pathLength[:], uint32(len(sibling.BlueprintPath)))
+	}
 	_, _ = hash.Write(pathLength[:])
 	_, _ = io.WriteString(hash, sibling.BlueprintPath)
 	if variant == "ascii_hex" {
@@ -657,6 +682,62 @@ func aggregateEncodingVariantVector(t *testing.T, variant string) []byte {
 		t.Fatal(err)
 	}
 	return append(data, '\n')
+}
+
+func framedDigestEndianVariantVector(t *testing.T, variant string) []byte {
+	t.Helper()
+	sibling := buildReviewSiblingObjectVector(t, []string{"a", "b", "c", "d", "e", "f", "g"}, 1)
+	recordDigests := make([][]byte, 0, len(sibling.Records))
+	for index := range sibling.Records {
+		record := &sibling.Records[index]
+		result := CQProxyBlueprintReviewResultV1{
+			SchemaVersion: 1, Kind: "cq_proxy_blueprint_review_result_v1", Lens: record.Lens,
+			BlueprintSHA256: sibling.BlueprintSHA256, AuthorityBaselineCommit: sibling.AuthorityBaselineCommit,
+			Verdict: record.Verdict, Findings: record.Findings,
+		}
+		if variant == "result" {
+			record.ReviewResultSHA256 = littleEndianLengthDigestVector(t, "cq/proxy-blueprint-review-result/v1\x00", result)
+		}
+		recordWithoutDigest := struct {
+			Lens               string                     `json:"lens"`
+			ReviewerTaskID     string                     `json:"reviewer_task_id"`
+			ReviewedAt         string                     `json:"reviewed_at"`
+			Verdict            string                     `json:"verdict"`
+			Findings           []BlueprintReviewFindingV1 `json:"findings"`
+			ReviewResultSHA256 string                     `json:"review_result_sha256"`
+		}{record.Lens, record.ReviewerTaskID, record.ReviewedAt, record.Verdict, record.Findings, record.ReviewResultSHA256}
+		if variant == "record" {
+			record.RecordSHA256 = littleEndianLengthDigestVector(t, "cq/proxy-blueprint-review-record/v1\x00", recordWithoutDigest)
+		} else {
+			record.RecordSHA256 = independentFramedDigestVector(t, "cq/proxy-blueprint-review-record/v1\x00", recordWithoutDigest)
+		}
+		decoded, err := hex.DecodeString(record.RecordSHA256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recordDigests = append(recordDigests, decoded)
+	}
+	sibling.AggregateSHA256 = independentAggregateDigestBytesVector(t, sibling, recordDigests)
+	data, err := CanonicalJSONV1(sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(data, '\n')
+}
+
+func littleEndianLengthDigestVector(t *testing.T, domain string, value any) string {
+	t.Helper()
+	canonical, err := CanonicalJSONV1(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, domain)
+	var length [4]byte
+	binary.LittleEndian.PutUint32(length[:], uint32(len(canonical)))
+	_, _ = hash.Write(length[:])
+	_, _ = hash.Write(canonical)
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 type splitReader struct {

@@ -61,6 +61,7 @@ func ParseBlueprintReviewResultV1(reader io.Reader, expectedBlueprintSHA256, exp
 type reviewResultInstrumentation struct {
 	Decodes           int
 	Canonicalisations int
+	Hashes            int
 }
 
 func parseBlueprintReviewResultV1Instrumented(reader io.Reader, expectedBlueprintSHA256, expectedBaselineCommit string, instrumentation *reviewResultInstrumentation) (CQProxyBlueprintReviewResultV1, error) {
@@ -523,6 +524,7 @@ type reviewSiblingInstrumentation struct {
 	RecordsScanned    int
 	Decodes           int
 	Canonicalisations int
+	Hashes            int
 }
 
 func parseBlueprintReviewSiblingV1Instrumented(reader io.Reader, expectedBlueprintSHA256, expectedBaseline string, instrumentation *reviewSiblingInstrumentation) (BlueprintReviewSiblingV1, error) {
@@ -561,7 +563,7 @@ func parseBlueprintReviewSiblingV1Instrumented(reader io.Reader, expectedBluepri
 	if err := decodeClosedJSON(jcs, &sibling); err != nil {
 		return sibling, fmt.Errorf("decode review sibling schema: %w", err)
 	}
-	if err := validateBlueprintReviewSibling(&sibling, expectedBlueprintSHA256, expectedBaseline); err != nil {
+	if err := validateBlueprintReviewSibling(&sibling, expectedBlueprintSHA256, expectedBaseline, instrumentation); err != nil {
 		return sibling, err
 	}
 	return sibling, nil
@@ -649,7 +651,7 @@ func scanJSONObjectEnd(data []byte, start int) (int, error) {
 	return 0, fmt.Errorf("unterminated object")
 }
 
-func validateBlueprintReviewSibling(sibling *BlueprintReviewSiblingV1, expectedBlueprintSHA256, expectedBaseline string) error {
+func validateBlueprintReviewSibling(sibling *BlueprintReviewSiblingV1, expectedBlueprintSHA256, expectedBaseline string, instrumentation *reviewSiblingInstrumentation) error {
 	if sibling.SchemaVersion != 1 || sibling.Kind != "cq_proxy_blueprint_recursive_review" {
 		return fmt.Errorf("invalid review sibling schema or kind")
 	}
@@ -701,6 +703,9 @@ func validateBlueprintReviewSibling(sibling *BlueprintReviewSiblingV1, expectedB
 			Verdict:                 record.Verdict,
 			Findings:                record.Findings,
 		}
+		if instrumentation != nil {
+			instrumentation.Hashes++
+		}
 		resultDigest, err := canonicalFramedSHA256("cq/proxy-blueprint-review-result/v1\x00", result)
 		if err != nil {
 			return err
@@ -716,6 +721,9 @@ func validateBlueprintReviewSibling(sibling *BlueprintReviewSiblingV1, expectedB
 			Findings           []BlueprintReviewFindingV1 `json:"findings"`
 			ReviewResultSHA256 string                     `json:"review_result_sha256"`
 		}{record.Lens, record.ReviewerTaskID, record.ReviewedAt, record.Verdict, record.Findings, record.ReviewResultSHA256}
+		if instrumentation != nil {
+			instrumentation.Hashes++
+		}
 		recordDigest, err := canonicalFramedSHA256("cq/proxy-blueprint-review-record/v1\x00", recordWithoutDigest)
 		if err != nil {
 			return err
@@ -725,6 +733,9 @@ func validateBlueprintReviewSibling(sibling *BlueprintReviewSiblingV1, expectedB
 		}
 		decoded, _ := hex.DecodeString(recordDigest)
 		recordDigests = append(recordDigests, decoded)
+	}
+	if instrumentation != nil {
+		instrumentation.Hashes++
 	}
 	aggregate, err := blueprintReviewAggregateDigest(sibling, recordDigests)
 	if err != nil {
