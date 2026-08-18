@@ -16,8 +16,9 @@ type codexHealthInventory interface {
 }
 
 type codexHealthTracker struct {
-	inventory  codexHealthInventory
-	defaultKey codexprov.AccountKey
+	inventory               codexHealthInventory
+	routingDefaultInventory codexHealthInventory
+	defaultKey              codexprov.AccountKey
 
 	mu      sync.Mutex
 	last    proxy.CodexHealth
@@ -25,11 +26,16 @@ type codexHealthTracker struct {
 }
 
 func newCodexHealthTracker(inventory codexHealthInventory, defaultKey codexprov.AccountKey, last proxy.CodexHealth) *codexHealthTracker {
+	return newCodexHealthTrackerWithRoutingDefaultInventory(inventory, nil, defaultKey, last)
+}
+
+func newCodexHealthTrackerWithRoutingDefaultInventory(inventory, routingDefaultInventory codexHealthInventory, defaultKey codexprov.AccountKey, last proxy.CodexHealth) *codexHealthTracker {
 	return &codexHealthTracker{
-		inventory:  inventory,
-		defaultKey: codexprov.AccountKey(string(defaultKey)),
-		last:       cloneCodexHealth(last),
-		hasLast:    last.AccountCountKnown,
+		inventory:               inventory,
+		routingDefaultInventory: routingDefaultInventory,
+		defaultKey:              codexprov.AccountKey(string(defaultKey)),
+		last:                    cloneCodexHealth(last),
+		hasLast:                 last.AccountCountKnown,
 	}
 }
 
@@ -40,7 +46,15 @@ func (t *codexHealthTracker) Health(ctx context.Context) proxy.CodexHealth {
 	inventory, err := t.inventory.List(ctx)
 	if err == nil {
 		health := codexHealthFromInventory(inventory)
-		health.RoutingDefault = codexRoutingDefaultHealth(inventory, t.defaultKey)
+		routingDefaultInventory := inventory
+		if t.defaultKey != "" && t.routingDefaultInventory != nil {
+			routingDefaultInventory, err = t.routingDefaultInventory.List(ctx)
+		}
+		if err != nil {
+			health.RoutingDefault = proxy.CodexRoutingDefaultHealth{Configured: true, Status: proxy.CodexRoutingDefaultStatusUnknown}
+		} else {
+			health.RoutingDefault = codexRoutingDefaultHealth(routingDefaultInventory, t.defaultKey)
+		}
 		t.mu.Lock()
 		t.last = cloneCodexHealth(health)
 		t.hasLast = true

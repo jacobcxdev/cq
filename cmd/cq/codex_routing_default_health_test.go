@@ -20,6 +20,19 @@ func (i staticCodexHealthInventory) List(context.Context) (codexprov.Inventory, 
 	return i.inventory, i.err
 }
 
+func dispatchableCodexHealthAccount(key codexprov.AccountKey) codexprov.LogicalAccount {
+	return codexprov.LogicalAccount{
+		Key:      key,
+		Identity: codexprov.AccountIdentity{AccountID: "account-id", UserID: "user-id"},
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: key, CandidateID: "candidate-id"},
+			Revision: "revision",
+			Routable: true,
+		}},
+		Routable: true,
+	}
+}
+
 func TestCodexRoutingDefaultHealth(t *testing.T) {
 	key := codexprov.AccountKey("opaque-routing-default")
 	tests := []struct {
@@ -114,6 +127,37 @@ func TestCodexHealthTrackerRefreshesRoutingDefault(t *testing.T) {
 	}}, key, codexHealthFromInventory(codexprov.Inventory{}))
 
 	health := tracker.Health(context.Background())
+	want := proxy.CodexRoutingDefaultHealth{
+		Configured: true,
+		Resolved:   true,
+		Routable:   true,
+		Status:     proxy.CodexRoutingDefaultStatusResolved,
+	}
+	if health.RoutingDefault != want {
+		t.Fatalf("routing default = %+v, want %+v", health.RoutingDefault, want)
+	}
+}
+
+func TestCodexHealthTrackerResolvesDefaultOutsidePinnedSelection(t *testing.T) {
+	defaultKey := codexprov.AccountKey("account-a")
+	selection := staticCodexHealthInventory{inventory: codexprov.Inventory{Accounts: []codexprov.LogicalAccount{
+		dispatchableCodexHealthAccount("account-c"),
+	}}}
+	continuity := staticCodexHealthInventory{inventory: codexprov.Inventory{Accounts: []codexprov.LogicalAccount{
+		dispatchableCodexHealthAccount(defaultKey),
+		dispatchableCodexHealthAccount("account-c"),
+	}}}
+	tracker := newCodexHealthTrackerWithRoutingDefaultInventory(
+		selection,
+		continuity,
+		defaultKey,
+		codexHealthFromInventory(selection.inventory),
+	)
+
+	health := tracker.Health(context.Background())
+	if health.AccountCount != 1 || health.HealthCode != "ok" {
+		t.Fatalf("pinned selection health = %+v", health)
+	}
 	want := proxy.CodexRoutingDefaultHealth{
 		Configured: true,
 		Resolved:   true,

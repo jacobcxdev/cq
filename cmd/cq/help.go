@@ -44,7 +44,7 @@ Commands:
   proxy uninstall     Uninstall proxy launch agent
   proxy restart       Restart proxy launch agent
   proxy validate-http Request one-shot installed HTTP validation
-  proxy pin           Pin Claude proxy routing
+  proxy pin           Pin Claude or Codex proxy routing
   proxy codex-default Configure Codex routing default
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
@@ -85,15 +85,24 @@ The command writes only an expiring private request and restarts that service.
 The serving process owns validation and does not write readiness evidence until
 every installed acceptance gate and process attestation succeeds.
 `,
-	"proxy pin": `Usage: cq proxy pin [--clear | <email-or-account-uuid>]
+	"proxy pin": `Usage: cq proxy pin [<provider> [--clear | <account-reference>]]
 
-Pin Claude proxy routing to a specific account, show the current pin, or clear it.
+Show both proxy pins, or set and clear a pin for claude or codex.
+Claude accepts an account email or UUID and reloads the change automatically.
+Codex accepts a unique email, CQ alias, or opaque AccountKey.
+
+A Codex pin applies to new and unbound work and overrides the Codex routing default
+and allowlist while configured.
+Hard-bound Codex continuity remains on its existing account.
+Clearing the pin restores ordinary Codex load balancing.
+Restart proxy to apply a Codex pin change.
 
 Examples:
   cq proxy pin
-  cq proxy pin user@example.com
-  cq proxy pin 550e8400-e29b-41d4-a716-446655440000
-  cq proxy pin --clear
+  cq proxy pin claude user@example.com
+  cq proxy pin claude --clear
+  cq proxy pin codex user@example.com
+  cq proxy pin codex --clear
 `,
 	"proxy codex-default": `Usage: cq proxy codex-default [--clear | <account-reference>]
 

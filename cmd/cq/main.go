@@ -84,7 +84,7 @@ type ProxyCmd struct {
 	Restart      ProxyRestartCmd      `cmd:"" help:"Restart proxy launch agent"`
 	Status       ProxyStatusCmd       `cmd:"" help:"Show proxy health"`
 	ValidateHTTP ProxyValidateHTTPCmd `cmd:"" name:"validate-http" help:"Request one-shot installed HTTP validation"`
-	Pin          ProxyPinCmd          `cmd:"" help:"Pin Claude proxy routing"`
+	Pin          ProxyPinCmd          `cmd:"" help:"Pin Claude or Codex proxy routing"`
 	CodexDefault ProxyCodexDefaultCmd `cmd:"" name:"codex-default" help:"Configure Codex routing default"`
 	Prime        ProxyPrimeCmd        `cmd:"" help:"Manage Codex quota-window priming"`
 	Endpoint     ProxyEndpointCmd     `cmd:"" help:"Inspect or transition the credential endpoint"`
@@ -106,8 +106,18 @@ type ProxyStatusCmd struct {
 }
 
 type ProxyPinCmd struct {
+	Claude ProxyPinClaudeCmd `cmd:"" help:"Pin Claude proxy routing"`
+	Codex  ProxyPinCodexCmd  `cmd:"" help:"Pin Codex proxy routing"`
+}
+
+type ProxyPinClaudeCmd struct {
 	Clear bool   `help:"Clear active Claude account pin"`
 	Value string `arg:"" optional:"" name:"email-or-account-uuid" help:"Claude account email or UUID to pin"`
+}
+
+type ProxyPinCodexCmd struct {
+	Clear     bool   `help:"Clear active Codex account pin"`
+	Reference string `arg:"" optional:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
 }
 
 type ProxyCodexDefaultCmd struct {
