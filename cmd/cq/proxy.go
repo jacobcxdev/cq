@@ -466,13 +466,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return fmt.Errorf("Codex turn observer: %w", err)
 	}
 	codexObserver.SetCanary(activeCanary)
-	codexSelector := proxy.NewCodexInventorySelector(codexRoutingInventory, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
 	codexHealthTracker := newCodexHealthTracker(codexRoutingInventory, cfg.CodexRoutingDefaultAccountKey, codexHealthFromInventory(codexInventory))
 
 	codexRequestScope := &proxy.CodexRequestScope{
-		Chooser:   codexSelector,
 		Inventory: codexRoutingInventory,
 	}
 	codexAttemptExecutor := &proxy.CodexAttemptExecutor{
@@ -488,6 +486,12 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher: credentialControl,
 		Capacity:  codexCapacity,
 	}
+	codexCapacityRefresher, err := newProxyCodexRoutingCapacityRefresher(cfg.CodexUpstream, codexRequestRouter, codexCapacity)
+	if err != nil {
+		return err
+	}
+	codexSelector := proxy.NewCodexInventorySelector(codexRoutingInventory, codexQuotaCache, codexCapacityRefresher)
+	codexRequestScope.Chooser = codexSelector
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
@@ -703,6 +707,28 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		headroom.Stop()
 	}
 	return err
+}
+
+func newProxyCodexRoutingCapacityRefresher(
+	codexUpstream string,
+	router *proxy.CodexRequestRouter,
+	capacity *proxy.CodexCapacityLedger,
+) (*proxy.CodexRoutingCapacityRefresher, error) {
+	if router == nil || capacity == nil {
+		return nil, errors.New("Codex routing capacity refresh unavailable")
+	}
+	usageURL, err := proxy.CodexPrimerUsageURL(codexUpstream)
+	if err != nil {
+		return nil, fmt.Errorf("Codex routing capacity refresh: %w", err)
+	}
+	return &proxy.CodexRoutingCapacityRefresher{
+		Usage: &proxy.CodexPrimerUsageReader{
+			Router:   router,
+			UsageURL: usageURL,
+			Timeout:  5 * time.Second,
+		},
+		Capacity: capacity,
+	}, nil
 }
 
 func buildCodexPrimer(cfg *proxy.Config, owner bool, router *proxy.CodexRequestRouter, catalog *modelregistry.Catalog, fsys fsutil.DurableFileSystem) (*proxy.CodexPrimer, error) {

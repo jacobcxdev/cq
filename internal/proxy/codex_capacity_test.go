@@ -555,6 +555,78 @@ func TestCodexRouteChoicePrefersKnownPositiveAndIgnoresSystemActive(t *testing.T
 	}
 }
 
+type codexCapacityRefreshFunc func(context.Context, []codex.AccountKey) bool
+
+func (refresh codexCapacityRefreshFunc) Refresh(ctx context.Context, accounts []codex.AccountKey) bool {
+	return refresh(ctx, accounts)
+}
+
+func TestCodexRouteChoiceRefreshesUnknownCapacityBeforeTieBreak(t *testing.T) {
+	now := time.Unix(6_500, 0)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	var refreshCalls int
+	var refreshed []codex.AccountKey
+	refresh := codexCapacityRefreshFunc(func(_ context.Context, accounts []codex.AccountKey) bool {
+		refreshCalls++
+		refreshed = append(refreshed, accounts...)
+		ledger.ObserveQuotaSnapshot("depleted", QuotaSnapshot{
+			FetchedAt: now,
+			Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+				quota.Window7Day: {RemainingPct: 0},
+			}},
+		})
+		ledger.ObserveQuotaSnapshot("available", QuotaSnapshot{
+			FetchedAt: now,
+			Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+				quota.Window7Day: {RemainingPct: 27},
+			}},
+		})
+		return true
+	})
+	selector := newCodexSelectorWithCapacity(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{AccountKey: "depleted", AccessToken: "token-a"},
+			{AccountKey: "available", AccessToken: "token-b"},
+		}
+	}, nil, ledger, refresh)
+
+	choice, err := selector.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.6-sol"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != "available" {
+		t.Fatalf("account = %q, want available", choice.AccountKey)
+	}
+	if refreshCalls != 1 || len(refreshed) != 2 || refreshed[0] != "depleted" || refreshed[1] != "available" {
+		t.Fatalf("refresh calls/accounts = %d/%v, want 1/[depleted available]", refreshCalls, refreshed)
+	}
+}
+
+func TestCodexRouteChoiceDoesNotRefreshKnownPositiveCapacity(t *testing.T) {
+	now := time.Unix(6_750, 0)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	ledger.Observe(CapacityFact{AccountKey: "available", Bucket: CapacityBucketBase, Source: CapacitySourceUsageCache, Sequence: 1, RemainingPct: 27, ObservedAt: now, Confidence: CapacityConfidenceAdvisory})
+	refreshCalls := 0
+	refresh := codexCapacityRefreshFunc(func(context.Context, []codex.AccountKey) bool {
+		refreshCalls++
+		return true
+	})
+	selector := newCodexSelectorWithCapacity(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{AccountKey: "unknown", AccessToken: "token-a"},
+			{AccountKey: "available", AccessToken: "token-b"},
+		}
+	}, nil, ledger, refresh)
+
+	choice, err := selector.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.6-sol"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != "available" || refreshCalls != 0 {
+		t.Fatalf("choice/refresh calls = %q/%d, want available/0", choice.AccountKey, refreshCalls)
+	}
+}
+
 func TestCodexRouteChoiceUsesActiveLeaseCountOnlyAsTieBreak(t *testing.T) {
 	now := time.Unix(7_000, 0)
 	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)

@@ -37,6 +37,11 @@ type CodexRouteChooser interface {
 	Choose(ctx context.Context, requirements CodexRouteRequirements, exclude ...codex.SelectionExclusion) (RouteChoice, error)
 }
 
+// CodexCapacityRefresher updates capacity for an explicit account set.
+type CodexCapacityRefresher interface {
+	Refresh(context.Context, []codex.AccountKey) bool
+}
+
 type codexQuotaReader interface {
 	Snapshot(identifier string) (QuotaSnapshot, bool)
 }
@@ -59,13 +64,14 @@ type codexSelector struct {
 	discoverInventory func(context.Context) ([]codexRouteAccount, error)
 	quota             codexQuotaReader
 	capacity          *CodexCapacityLedger
+	capacityRefresher CodexCapacityRefresher
 	mu                sync.Mutex
 }
 
 // NewCodexInventorySelector creates a secret-free route chooser. Credential
 // material remains behind CredentialInventory and SecretResolver boundaries.
-func NewCodexInventorySelector(inventory codex.CredentialInventory, quota codexQuotaReader) CodexRouteChooser {
-	selector := newCodexSelectorWithCapacity(nil, quota, codexCapacityForQuota(quota))
+func NewCodexInventorySelector(inventory codex.CredentialInventory, quota codexQuotaReader, refresh ...CodexCapacityRefresher) CodexRouteChooser {
+	selector := newCodexSelectorWithCapacity(nil, quota, codexCapacityForQuota(quota), refresh...)
 	selector.discoverInventory = func(ctx context.Context) ([]codexRouteAccount, error) {
 		if inventory == nil {
 			return nil, fmt.Errorf("Codex credential inventory unavailable")
@@ -122,8 +128,12 @@ func codexCapacityForQuota(quota codexQuotaReader) *CodexCapacityLedger {
 	return NewCodexCapacityLedger(time.Now, transientQuotaMaxAge)
 }
 
-func newCodexSelectorWithCapacity(discover CodexDiscoverer, quota codexQuotaReader, capacity *CodexCapacityLedger) *codexSelector {
-	return &codexSelector{discover: discover, quota: quota, capacity: capacity}
+func newCodexSelectorWithCapacity(discover CodexDiscoverer, quota codexQuotaReader, capacity *CodexCapacityLedger, refresh ...CodexCapacityRefresher) *codexSelector {
+	selector := &codexSelector{discover: discover, quota: quota, capacity: capacity}
+	if len(refresh) != 0 {
+		selector.capacityRefresher = refresh[0]
+	}
+	return selector
 }
 
 func (s *codexSelector) Select(ctx context.Context, exclude ...codex.SelectionExclusion) (*codex.CodexAccount, error) {
@@ -170,74 +180,83 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 		leases    int
 		index     int
 	}
-	var best *candidate
-	hadZero := false
-	var zeroReset time.Time
-	validTokens := 0
+	for pass := 0; ; pass++ {
+		var best *candidate
+		hadZero := false
+		var zeroReset time.Time
+		validTokens := 0
+		var unknownAccounts []codex.AccountKey
 
-	for i := range accounts {
-		account := accounts[i]
-		if excludedAccounts[account.key] || excludedCandidates[account.candidateID] || !account.routable {
-			continue
-		}
-		validTokens++
-		key := account.key
-		if key == "" {
-			continue
-		}
-		s.observeSnapshot(key, &account)
-
-		effectiveModel := requestedModel
-		native := codexPlanSupportsModel(account.planType, requestedModel)
-		if !native {
-			if rewritten, ok := rewriteCodexModelName(requestedModel); ok {
-				effectiveModel = rewritten
-			} else {
+		for i := range accounts {
+			account := accounts[i]
+			if excludedAccounts[account.key] || excludedCandidates[account.candidateID] || !account.routable {
 				continue
 			}
-		}
-		buckets := routeBuckets(effectiveModel, requirements.RequiredModels, account.planType)
-		state, remaining, resetAt := s.routeCapacity(key, buckets)
-		if state == CapacityZero {
-			hadZero = true
-			if zeroReset.IsZero() || (!resetAt.IsZero() && resetAt.Before(zeroReset)) {
-				zeroReset = resetAt
+			validTokens++
+			key := account.key
+			if key == "" {
+				continue
 			}
-			continue
+			s.observeSnapshot(key, &account)
+
+			effectiveModel := requestedModel
+			native := codexPlanSupportsModel(account.planType, requestedModel)
+			if !native {
+				if rewritten, ok := rewriteCodexModelName(requestedModel); ok {
+					effectiveModel = rewritten
+				} else {
+					continue
+				}
+			}
+			buckets := routeBuckets(effectiveModel, requirements.RequiredModels, account.planType)
+			state, remaining, resetAt := s.routeCapacity(key, buckets)
+			if state == CapacityZero {
+				hadZero = true
+				if zeroReset.IsZero() || (!resetAt.IsZero() && resetAt.Before(zeroReset)) {
+					zeroReset = resetAt
+				}
+				continue
+			}
+			if state == CapacityUnknown {
+				unknownAccounts = append(unknownAccounts, key)
+			}
+			current := candidate{
+				choice: RouteChoice{
+					AccountKey:      key,
+					RequestedModel:  requestedModel,
+					EffectiveModel:  effectiveModel,
+					RequiredBuckets: buckets,
+				},
+				state:     state,
+				remaining: remaining,
+				resetAt:   resetAt,
+				native:    native,
+				leases:    s.capacity.ActiveLeases(key),
+				index:     i,
+			}
+			if best == nil || betterRoute(current, *best) {
+				copy := current
+				best = &copy
+			}
 		}
-		current := candidate{
-			choice: RouteChoice{
-				AccountKey:      key,
+		if best != nil {
+			if pass == 0 && best.state == CapacityUnknown && s.capacityRefresher != nil && s.capacityRefresher.Refresh(ctx, unknownAccounts) {
+				continue
+			}
+			return best.choice, nil
+		}
+		if hadZero {
+			return RouteChoice{}, &CachedUsageLimitError{
 				RequestedModel:  requestedModel,
-				EffectiveModel:  effectiveModel,
-				RequiredBuckets: buckets,
-			},
-			state:     state,
-			remaining: remaining,
-			resetAt:   resetAt,
-			native:    native,
-			leases:    s.capacity.ActiveLeases(key),
-			index:     i,
+				RequiredBuckets: routeBuckets(requestedModel, requirements.RequiredModels, "pro"),
+				ResetAt:         zeroReset,
+			}
 		}
-		if best == nil || betterRoute(current, *best) {
-			copy := current
-			best = &copy
+		if validTokens == 0 {
+			return RouteChoice{}, fmt.Errorf("no codex accounts with valid tokens")
 		}
+		return RouteChoice{}, fmt.Errorf("no codex accounts compatible with requested model")
 	}
-	if best != nil {
-		return best.choice, nil
-	}
-	if hadZero {
-		return RouteChoice{}, &CachedUsageLimitError{
-			RequestedModel:  requestedModel,
-			RequiredBuckets: routeBuckets(requestedModel, requirements.RequiredModels, "pro"),
-			ResetAt:         zeroReset,
-		}
-	}
-	if validTokens == 0 {
-		return RouteChoice{}, fmt.Errorf("no codex accounts with valid tokens")
-	}
-	return RouteChoice{}, fmt.Errorf("no codex accounts compatible with requested model")
 }
 
 func (s *codexSelector) routeAccounts(ctx context.Context) ([]codexRouteAccount, error) {
