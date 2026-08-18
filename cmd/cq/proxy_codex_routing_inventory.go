@@ -11,6 +11,29 @@ type proxyCodexRoutingInventory struct {
 	allowed map[codexprov.AccountKey]bool
 }
 
+func newProxyCodexRoutingInventories(source codexprov.CredentialInventory, allowed []codexprov.AccountKey, pinned codexprov.AccountKey) (codexprov.CredentialInventory, codexprov.CredentialInventory) {
+	if pinned == "" {
+		inventory := newProxyCodexRoutingInventory(source, allowed)
+		return inventory, inventory
+	}
+	selection := newProxyCodexRoutingInventory(source, []codexprov.AccountKey{pinned})
+	if len(allowed) == 0 {
+		return selection, source
+	}
+	continuityKeys := append([]codexprov.AccountKey(nil), allowed...)
+	found := false
+	for _, key := range continuityKeys {
+		if key == pinned {
+			found = true
+			break
+		}
+	}
+	if !found {
+		continuityKeys = append(continuityKeys, pinned)
+	}
+	return selection, newProxyCodexRoutingInventory(source, continuityKeys)
+}
+
 func newProxyCodexRoutingInventory(source codexprov.CredentialInventory, allowed []codexprov.AccountKey) codexprov.CredentialInventory {
 	if len(allowed) == 0 {
 		return source

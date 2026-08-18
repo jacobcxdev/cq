@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -251,6 +252,32 @@ func TestConfigRejectsInvalidCodexRoutingAccountKeys(t *testing.T) {
 	}
 	if err := cfg.validate(); err == nil {
 		t.Fatal("validate accepted routing default outside allowlist")
+	}
+}
+
+func TestConfigCodexRoutingPinOverridesWithoutMutatingPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.CodexRoutingAccountKeys = []codex.AccountKey{"account-a", "account-b"}
+	cfg.CodexRoutingDefaultAccountKey = "account-a"
+	cfg.CodexRoutingPinnedAccountKey = "account-c"
+
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CodexRoutingPinnedAccountKey != "account-c" {
+		t.Fatalf("Codex pin = %q, want account-c", got.CodexRoutingPinnedAccountKey)
+	}
+	if got.CodexRoutingDefaultAccountKey != "account-a" || !reflect.DeepEqual(got.CodexRoutingAccountKeys, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("routing policy changed: default=%q accounts=%q", got.CodexRoutingDefaultAccountKey, got.CodexRoutingAccountKeys)
 	}
 }
 

@@ -86,7 +86,13 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 		{
 			name: "proxy pin",
 			path: []string{"proxy", "pin"},
-			want: []string{"Usage: cq proxy pin [--clear | <email-or-account-uuid>]", "Pin Claude proxy routing"},
+			want: []string{
+				"Usage: cq proxy pin [<provider> [--clear | <account-reference>]]",
+				"claude or codex",
+				"Codex pin applies to new and unbound work",
+				"Hard-bound Codex continuity remains on its existing account",
+				"Restart proxy to apply a Codex pin change.",
+			},
 		},
 		{
 			name: "proxy prime",

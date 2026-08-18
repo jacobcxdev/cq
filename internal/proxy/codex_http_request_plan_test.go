@@ -160,6 +160,114 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryPinsUnboundRequest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	accounts := []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a",
+			frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-c",
+			frozenDispatchCandidate("account-c", "candidate-c", "revision-c", codex.SourceSystem, false, now.Add(time.Hour))),
+	}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-c"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory:         &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: accounts}},
+		Routes:            &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{JournalGeneration: 1}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		PinnedAccountKey:  "account-c",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	dispatch := result.Dispatch.Accounts()
+	if len(dispatch) != 1 || dispatch[0].Choice().AccountKey != "account-c" {
+		t.Fatalf("dispatch = %#v, want pinned account only", dispatch)
+	}
+	if len(runtime.plan.Slots) == 0 || runtime.plan.Slots[0].AccountKey != "account-c" {
+		t.Fatalf("durable slots = %#v, want pinned account", runtime.plan.Slots)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPreservesHardBoundAccountOverPin(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	accounts := []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a",
+			frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-c",
+			frozenDispatchCandidate("account-c", "candidate-c", "revision-c", codex.SourceSystem, false, now.Add(time.Hour))),
+	}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: accounts}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration: 1,
+			BoundAccountKey:   "account-a",
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		PinnedAccountKey:  "account-c",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	dispatch := result.Dispatch.Accounts()
+	if len(dispatch) != 1 || dispatch[0].Choice().AccountKey != "account-a" {
+		t.Fatalf("dispatch = %#v, want hard-bound account", dispatch)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPinOverridesSoftAffinity(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	accounts := []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a",
+			frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-c",
+			frozenDispatchCandidate("account-c", "candidate-c", "revision-c", codex.SourceSystem, false, now.Add(time.Hour))),
+	}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-c"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: accounts}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration:       1,
+			AffinityPresent:         true,
+			AffinityAccountKey:      "account-a",
+			AffinityCacheAdmittedAt: now.Add(-time.Minute),
+			AffinityEffectiveModel:  "gpt-5.6-sol",
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		PinnedAccountKey:  "account-c",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	dispatch := result.Dispatch.Accounts()
+	if len(dispatch) != 1 || dispatch[0].Choice().AccountKey != "account-c" {
+		t.Fatalf("dispatch = %#v, want pin to override soft affinity", dispatch)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryPlansPrewarmWithoutDurableAuthority(t *testing.T) {
 	t.Parallel()
 	runtime := &codexHTTPRequestPlanTestRuntime{}
@@ -177,6 +285,32 @@ func TestCodexHTTPRequestPlanFactoryPlansPrewarmWithoutDurableAuthority(t *testi
 	}
 	if runtime.calls != 0 || snapshotter.calls != 0 {
 		t.Fatalf("durable calls = runtime %d snapshot %d", runtime.calls, snapshotter.calls)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPinsWebSocketPrewarm(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a",
+				frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-c",
+				frozenDispatchCandidate("account-c", "candidate-c", "revision-c", codex.SourceSystem, false, now.Add(time.Hour))),
+		}}},
+		DefaultAccountKey: "account-a",
+		PinnedAccountKey:  "account-c",
+		Now:               func() time.Time { return now },
+	}
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+
+	dispatch, err := factory.planWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-c" {
+		t.Fatalf("dispatch = %#v, want pinned account only", accounts)
 	}
 }
 
