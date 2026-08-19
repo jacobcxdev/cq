@@ -196,21 +196,30 @@ func TestComputeGaugeInfoUnknown(t *testing.T) {
 
 func TestComputeGaugeInfoAllDry(t *testing.T) {
 	now := int64(1_000)
-	// Both accounts depleted, non-zero elapsed → all dry (position 0).
+	const resetIn int64 = 78_000 // 21h40m
+	// All accounts are depleted. The dry interval starts now and ends at the
+	// earliest reset, rather than starting at that reset and lasting until the
+	// end of the seven-day horizon.
 	accounts := []acctInfo{
 		{result: quota.Result{Windows: map[quota.WindowName]quota.Window{
-			quota.Window5Hour: {RemainingPct: 0, ResetAtUnix: now + 1_000},
+			quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now + resetIn},
 		}}},
 		{result: quota.Result{Windows: map[quota.WindowName]quota.Window{
-			quota.Window5Hour: {RemainingPct: 0, ResetAtUnix: now + 2_000},
+			quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now + resetIn + 3*60},
+		}}},
+		{result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now + resetIn + 4*60},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, 18_000, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window7Day, 604_800, now, nil)
 	if gi.Pos != 0 {
 		t.Errorf("Pos = %d, want 0 (all dry)", gi.Pos)
 	}
-	if gi.GapStart < 0 {
-		t.Error("expected GapStart >= 0 for all-dry scenario")
+	if gi.GapStart != 0 {
+		t.Errorf("GapStart = %v, want 0", gi.GapStart)
+	}
+	if gi.GapDuration != float64(resetIn) {
+		t.Errorf("GapDuration = %v, want %v", gi.GapDuration, resetIn)
 	}
 }
 

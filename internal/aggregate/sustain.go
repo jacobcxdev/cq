@@ -212,8 +212,8 @@ func computeGaugeInfo(
 	if allEmptyOrGated {
 		return GaugeInfo{
 			Pos:           0,
-			GapStart:      earliestGateOrReset,
-			GapDuration:   period - earliestGateOrReset,
+			GapStart:      0,
+			GapDuration:   earliestGateOrReset,
 			WasteDeadline: -1,
 		}
 	}
