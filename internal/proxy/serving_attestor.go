@@ -25,8 +25,9 @@ const (
 	servingAttestorEpochSize  = 32
 	servingAttestorNonceSize  = 32
 
-	defaultServingProofTTL     = 5 * time.Second
-	defaultServingPendingLimit = 32
+	defaultServingProofTTL          = 5 * time.Second
+	defaultServingPendingLimit      = 32
+	servingListenerGenerationDomain = "cq/serving-listener-generation/v1\x00"
 )
 
 var (
@@ -153,6 +154,29 @@ func (a *ServingAttestor) ActivateListener(listener *net.TCPListener) (net.Liste
 		return nil, err
 	}
 	return &servingAttestedTCP4Listener{Listener: listener, attestor: a}, nil
+}
+
+// ListenerGeneration returns a stable, non-secret identifier for the exact
+// activated listener generation. It is unavailable before activation and once
+// teardown begins.
+func (a *ServingAttestor) ListenerGeneration() ([sha256.Size]byte, error) {
+	if a == nil || a.state == nil {
+		return [sha256.Size]byte{}, ErrServingAttestorUnavailable
+	}
+	state := a.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.active || state.closing || state.aborted || state.listenerAddr == "" {
+		return [sha256.Size]byte{}, ErrServingAttestorUnavailable
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(servingListenerGenerationDomain))
+	_, _ = hash.Write([]byte(state.listenerAddr))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(state.epoch[:])
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest, nil
 }
 
 // Acquire reserves one one-shot challenge and holds the listener generation

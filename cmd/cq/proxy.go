@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +24,38 @@ import (
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+var runProxyRuntimeRoleFn = runProxyRuntimeRole
+var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
+	return nil, proxy.ErrRuntimeRoleUnavailable
+}
+var runProxyAdoptedRuntimeFn = func(context.Context, net.Listener, func(context.Context, net.Listener, http.Handler) error) error {
+	return proxy.ErrRuntimeRoleUnavailable
+}
+
+var adoptProxyListenerFn = func() (net.Listener, error) { return nil, nil }
+
+func runProxyRuntimeRole(ctx context.Context, manifest proxy.RuntimeRoleManifestV1) error {
+	files := proxy.RuntimeRoleFiles{
+		Lifecycle: os.NewFile(uintptr(manifest.LifecycleFD), "runtime-lifecycle"),
+		Control:   os.NewFile(uintptr(manifest.ControlFD), "runtime-control"),
+		Secret:    os.NewFile(uintptr(manifest.SecretFD), "runtime-secret"),
+	}
+	if manifest.Role == proxy.RuntimeRoleSupervisor {
+		_ = files.Close()
+		return proxy.ErrRuntimeRoleUnavailable
+	}
+	if manifest.Role != proxy.RuntimeRoleWorker {
+		_ = files.Close()
+		return proxy.ErrRuntimeRoleManifest
+	}
+	// ExtraFiles is sequential; the worker's reserved descriptor 3 is a sealed
+	// non-socket placeholder and is closed before role-local validation.
+	if reserved := os.NewFile(uintptr(proxy.RuntimeListenerFD), "runtime-reserved"); reserved != nil {
+		_ = reserved.Close()
+	}
+	return proxy.RunRuntimeWorkerRole(ctx, manifest, files)
+}
 
 func runProxy(args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
@@ -196,6 +230,7 @@ type proxyCommandOptions struct {
 	Port                 int
 	MigrateLegacyManaged bool
 	JSON                 bool
+	RuntimeRole          *proxy.RuntimeRoleManifestV1
 }
 
 type proxyRegistryDependencies struct {
@@ -292,6 +327,14 @@ func parseProxyCommandOptions(args []string) (proxyCommandOptions, error) {
 
 func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOptions, error) {
 	var opts proxyCommandOptions
+	if command == "proxy start" && len(args) > 0 && args[0] == "--runtime-role" {
+		manifest, err := proxy.ParseRuntimeRoleArguments(args)
+		if err != nil {
+			return opts, err
+		}
+		opts.RuntimeRole = &manifest
+		return opts, nil
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
@@ -326,6 +369,81 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 }
 
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
+	var supervisorRole *proxy.RuntimeRoleManifestV1
+	var workerRole *proxy.RuntimeRoleManifestV1
+	var workerFiles proxy.RuntimeRoleFiles
+	var supervisorFiles proxy.RuntimeRoleFiles
+	var supervisorHolder proxy.LifecycleHolderProof
+	var supervisorLauncher proxy.RuntimeWorkerLauncher
+	if opts.RuntimeRole != nil {
+		if opts.RuntimeRole.Role == proxy.RuntimeRoleWorker {
+			workerRole = opts.RuntimeRole
+			if reserved := os.NewFile(uintptr(proxy.RuntimeListenerFD), "runtime-reserved"); reserved != nil {
+				_ = reserved.Close()
+			}
+			workerFiles = proxy.RuntimeRoleFiles{
+				Lifecycle: os.NewFile(uintptr(workerRole.LifecycleFD), "runtime-lifecycle"),
+				Control:   os.NewFile(uintptr(workerRole.ControlFD), "runtime-control"),
+				Secret:    os.NewFile(uintptr(workerRole.SecretFD), "runtime-secret"),
+			}
+			if err := proxy.ValidateRuntimeRoleFiles(*workerRole, workerFiles); err != nil {
+				_ = workerFiles.Close()
+				return err
+			}
+			defer func() { returnErr = errors.Join(returnErr, workerFiles.Close()) }()
+		}
+		if opts.RuntimeRole.Role != proxy.RuntimeRoleSupervisor && opts.RuntimeRole.Role != proxy.RuntimeRoleWorker {
+			return proxy.ErrRuntimeRoleManifest
+		}
+		if opts.RuntimeRole.Role == proxy.RuntimeRoleSupervisor {
+			supervisorRole = opts.RuntimeRole
+			supervisorFiles = proxy.RuntimeRoleFiles{
+				Listener:  os.NewFile(uintptr(supervisorRole.ListenerFD), "runtime-listener"),
+				Lifecycle: os.NewFile(uintptr(supervisorRole.LifecycleFD), "runtime-lifecycle"),
+				Control:   os.NewFile(uintptr(supervisorRole.ControlFD), "runtime-control"),
+				Secret:    os.NewFile(uintptr(supervisorRole.SecretFD), "runtime-secret"),
+			}
+			if err := proxy.ValidateRuntimeRoleFiles(*supervisorRole, supervisorFiles); err != nil {
+				_ = supervisorFiles.Close()
+				return err
+			}
+			secret, err := proxy.ReadRuntimeSecret(supervisorFiles.Secret)
+			supervisorFiles.Secret = nil
+			if err != nil {
+				_ = supervisorFiles.Close()
+				return err
+			}
+			secret.Destroy()
+			var holderErr error
+			supervisorHolder, holderErr = proxy.RuntimeLifecycleHolder(supervisorFiles.Lifecycle, hex.EncodeToString(supervisorRole.LifecycleHolderIdentityDigest[:]))
+			if holderErr != nil {
+				_ = supervisorFiles.Close()
+				return holderErr
+			}
+			var launcherErr error
+			supervisorLauncher, launcherErr = newProxyRuntimeWorkerLauncherFn(*supervisorRole, supervisorHolder)
+			if launcherErr != nil {
+				_ = supervisorFiles.Close()
+				return launcherErr
+			}
+			defer func() { returnErr = errors.Join(returnErr, supervisorFiles.Close()) }()
+		}
+	}
+	var adoptedListener net.Listener
+	var err error
+	if supervisorRole == nil && workerRole == nil {
+		adoptedListener, err = adoptProxyListenerFn()
+	}
+	if err != nil {
+		return err
+	}
+	if adoptedListener != nil {
+		defer func() {
+			if adoptedListener != nil {
+				returnErr = errors.Join(returnErr, adoptedListener.Close())
+			}
+		}()
+	}
 	intent, err := claimInstalledHTTPValidationStartupRequest(
 		version,
 		consumeInstalledHTTPValidationStartupRequestFn,
@@ -702,7 +820,33 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return fmt.Errorf("legacy credential endpoint finalise verifier: %w", err)
 	}
 
-	err = srv.ListenAndServe(proxyCtx)
+	if workerRole != nil {
+		handler, handlerErr := srv.RuntimeHandler()
+		if handlerErr != nil {
+			return handlerErr
+		}
+		err = proxy.RunRuntimeWorkerRoleWithHandler(proxyCtx, *workerRole, workerFiles, handler)
+		workerFiles = proxy.RuntimeRoleFiles{}
+	} else if supervisorRole != nil {
+		err = proxy.RunValidatedRuntimeSupervisorRole(proxyCtx, *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
+			Files: supervisorFiles, SupervisorHolder: supervisorHolder, Launcher: supervisorLauncher,
+			Checkpoints:    &proxy.RuntimeHashCheckpointStore{},
+			WorkerManifest: proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(supervisorRole.ManifestDigest[:])},
+			Serve: func(ctx context.Context, listener net.Listener, handler http.Handler) error {
+				srv.RuntimeNormalHandler = handler
+				return srv.ServeAdoptedListener(ctx, listener)
+			},
+		})
+		supervisorFiles = proxy.RuntimeRoleFiles{}
+	} else if adoptedListener != nil {
+		err = runProxyAdoptedRuntimeFn(proxyCtx, adoptedListener, func(ctx context.Context, listener net.Listener, handler http.Handler) error {
+			srv.RuntimeNormalHandler = handler
+			return srv.ServeAdoptedListener(ctx, listener)
+		})
+		adoptedListener = nil
+	} else {
+		err = srv.ListenAndServe(proxyCtx)
+	}
 	proxyCancel()
 	if codexPrimerDone != nil {
 		<-codexPrimerDone

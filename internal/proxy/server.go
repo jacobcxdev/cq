@@ -82,10 +82,14 @@ type CodexHealth struct {
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	Config                 *Config
-	Selector               ClaudeSelector
-	Discover               ClaudeDiscoverer
-	Transport              http.RoundTripper
+	Config    *Config
+	Selector  ClaudeSelector
+	Discover  ClaudeDiscoverer
+	Transport http.RoundTripper
+	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
+	// public work to the selected private worker instead of running normal
+	// proxy semantics in the supervisor process.
+	RuntimeNormalHandler   http.Handler
 	CodexDiscover          CodexDiscoverer
 	CodexHealth            func() CodexHealth
 	CodexRequests          *CodexRequestRouter
@@ -181,7 +185,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	return s.serve(ctx, listener)
 }
 
-func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
+// ServeAdoptedListener serves an already-bound listener without rebinding it.
+// The caller retains lifecycle authority; Server closes only this inherited
+// descriptor when serving terminates.
+func (s *Server) ServeAdoptedListener(ctx context.Context, listener net.Listener) error {
+	return s.serve(ctx, listener)
+}
+
+func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 	if s == nil || listener == nil || ctx == nil {
 		if listener != nil {
 			_ = listener.Close()
@@ -199,7 +210,12 @@ func (s *Server) serve(ctx context.Context, listener *net.TCPListener) error {
 	}
 	serveListener := net.Listener(listener)
 	if s.ServingAttestor != nil {
-		serveListener, err = s.ServingAttestor.ActivateListener(listener)
+		tcpListener, ok := listener.(*net.TCPListener)
+		if !ok {
+			_ = listener.Close()
+			return ErrServingAttestorUnavailable
+		}
+		serveListener, err = s.ServingAttestor.ActivateListener(tcpListener)
 		if err != nil {
 			_ = listener.Close()
 			return err
@@ -329,6 +345,9 @@ func (l *servingAttestedTCP4Listener) Accept() (net.Conn, error) {
 }
 
 func (s *Server) handler() (http.Handler, error) {
+	if s.RuntimeNormalHandler != nil {
+		return s.RuntimeNormalHandler, nil
+	}
 	upstream, err := url.Parse(s.Config.ClaudeUpstream)
 	if err != nil {
 		return nil, fmt.Errorf("parse upstream URL: %w", err)
@@ -368,6 +387,12 @@ func (s *Server) handler() (http.Handler, error) {
 		return s.codexInstalledHTTPRouteAudit.guard(mux), nil
 	}
 	return mux, nil
+}
+
+// RuntimeHandler returns this process's complete normal proxy semantics for
+// execution by a private runtime worker.
+func (s *Server) RuntimeHandler() (http.Handler, error) {
+	return s.handler()
 }
 
 func bearerToken(r *http.Request) string {
