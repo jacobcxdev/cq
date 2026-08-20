@@ -5,8 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"time"
 
 	providerCodex "github.com/jacobcxdev/cq/internal/provider/codex"
+)
+
+var (
+	ErrSessionPolicyUnavailable = errors.New("session policy unavailable")
+	ErrSessionPolicyContinuity  = errors.New("session policy conflicts with continuity")
 )
 
 type PolicyDecisionStatus string
@@ -81,6 +88,60 @@ func (r *SessionPolicyResolver) Resolve(exactSession []byte, global []providerCo
 		decision.Status = PolicyDecisionSelected
 	}
 	return decision
+}
+
+// enforceSessionPolicy loads continuity first, then narrows global authority.
+// Unbound sessions preserve existing routing parity.
+func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, exactSession []byte, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
+	if resolver == nil {
+		return SessionPolicyDecision{Allowed: sortedAccountKeys(global), Status: PolicyDecisionUnbound}, nil
+	}
+	decision := resolver.Resolve(exactSession, global)
+	if decision.Status == PolicyDecisionUnbound {
+		decision.Allowed = sortedAccountKeys(global)
+		return decision, nil
+	}
+	if caller.Domain != NormalCallerLocal && caller.Domain != NormalCallerCodex {
+		return SessionPolicyDecision{}, ErrSessionPolicyUnavailable
+	}
+	if caller.Domain == NormalCallerCodex {
+		allowed := make(map[providerCodex.AccountKey]struct{})
+		matched := false
+		for _, delegation := range resolver.policy.Delegations {
+			if delegation.Caller != caller.SubjectID || !now.Before(delegation.ExpiresAt) {
+				continue
+			}
+			matched = true
+			for _, account := range delegation.Accounts {
+				allowed[account] = struct{}{}
+			}
+		}
+		if !matched {
+			return SessionPolicyDecision{}, ErrSessionPolicyUnavailable
+		}
+		filtered := decision.Allowed[:0]
+		for _, account := range decision.Allowed {
+			if _, ok := allowed[account]; ok {
+				filtered = append(filtered, account)
+			}
+		}
+		decision.Allowed = filtered
+		if len(decision.Allowed) == 0 {
+			decision.Status = PolicyDecisionNoAccount
+		}
+	}
+	if decision.Status != PolicyDecisionSelected {
+		return SessionPolicyDecision{}, ErrSessionPolicyUnavailable
+	}
+	if continuity != "" {
+		for _, account := range decision.Allowed {
+			if account == continuity {
+				return decision, nil
+			}
+		}
+		return SessionPolicyDecision{}, ErrSessionPolicyContinuity
+	}
+	return decision, nil
 }
 
 func keyedSessionDigest(key, exact []byte) string {

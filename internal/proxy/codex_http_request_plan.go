@@ -167,6 +167,8 @@ type CodexHTTPRequestPlanFactory struct {
 	Headroom          CodexRequestHeadroom
 	HeadroomMode      HeadroomMode
 	Now               func() time.Time
+	SessionPolicy     *SessionPolicyResolver
+	DispatchPermits   CallerDispatchPermitAuthority
 
 	operations codexHTTPRequestPlanFactoryOperations
 }
@@ -239,6 +241,17 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if factory.Now != nil {
 		now = factory.Now()
 	}
+	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), Status: PolicyDecisionUnbound}
+	if factory.SessionPolicy != nil {
+		caller, _ := runtimeCallerAuthority(ctx)
+		policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
+		if err != nil {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+		}
+		if policyDecision.Status == PolicyDecisionSelected {
+			inventory = filterCodexHTTPRequestInventory(inventory, policyDecision.Allowed)
+		}
+	}
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
 	if err != nil {
@@ -274,12 +287,29 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
-	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound, continuityAccountKey != "")
-
 	frozen, err := factory.freeze(ctx, inspection, choice)
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanFreeze, err)
 	}
+	permitDigest := ""
+	if policyDecision.Status == PolicyDecisionSelected {
+		caller, ok := runtimeCallerAuthority(ctx)
+		if !ok || factory.DispatchPermits == nil {
+			frozen.Release()
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCallerDispatchPermitInvalid)
+		}
+		permit, permitErr := factory.DispatchPermits.IssueAndConsume(ctx, CallerDispatchPermitRequestV1{
+			CallerAdmissionDigest: caller.ConsumptionDigest, CallerDomain: caller.Domain, CallerSubjectID: caller.SubjectID,
+			SessionDigest: policyDecision.SessionDigest, Pool: policyDecision.Pool, RoutingGeneration: policyDecision.PolicyRevision,
+			AllowedAccounts: policyDecision.Allowed, SelectedAccount: choice.AccountKey,
+		})
+		if permitErr != nil {
+			frozen.Release()
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, permitErr)
+		}
+		permitDigest = permit.Digest
+	}
+	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound, continuityAccountKey != "", permitDigest)
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
 		if handle != nil {
@@ -314,6 +344,21 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		result.Lifecycle = trace.wrapLifecycle(result.Lifecycle)
 	}
 	return result, nil
+}
+
+func filterCodexHTTPRequestInventory(inventory codex.Inventory, allowed []codex.AccountKey) codex.Inventory {
+	set := make(map[codex.AccountKey]struct{}, len(allowed))
+	for _, account := range allowed {
+		set[account] = struct{}{}
+	}
+	filtered := inventory
+	filtered.Accounts = nil
+	for _, account := range inventory.Accounts {
+		if _, ok := set[account.Key]; ok {
+			filtered.Accounts = append(filtered.Accounts, account)
+		}
+	}
+	return filtered
 }
 
 // planWebSocketPrewarm selects one memory-only account order. Prewarm carries
@@ -586,7 +631,7 @@ func cloneCodexHTTPRequestPlanProvisional(source map[codex.AccountKey]int) map[c
 	return clone
 }
 
-func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity bool) CodexLeaseRequestPlan {
+func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity bool, dispatchPermitDigest string) CodexLeaseRequestPlan {
 	httpSlots := CodexHTTPAttemptSlots(dispatch)
 	slots := make([]CodexLeaseAttemptSlotPlan, len(httpSlots))
 	for index, slot := range httpSlots {
@@ -615,6 +660,7 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		InitialSlot:               1,
 		ExpectedBound:             expectedClone,
 		RequiresAccountContinuity: requiresAccountContinuity,
+		DispatchPermitDigest:      dispatchPermitDigest,
 		Evidence: CodexLeaseRequestEvidence{
 			PreviousResponseID: protocol.PreviousResponseID,
 			TurnState:          protocol.TurnState,

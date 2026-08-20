@@ -1459,6 +1459,7 @@ func sameCodexLeaseSemantics(left, right CodexJournalRecordV2) bool {
 		left.AttemptRefs == right.AttemptRefs &&
 		left.ResponseObserverRefs == right.ResponseObserverRefs &&
 		left.RequestedModelHash == right.RequestedModelHash &&
+		left.DispatchPermitDigest == right.DispatchPermitDigest &&
 		left.EffectiveModel == right.EffectiveModel &&
 		slices.Equal(left.RequiredBuckets, right.RequiredBuckets) &&
 		left.HasEncryptedState == right.HasEncryptedState &&
@@ -1513,11 +1514,11 @@ func cloneCodexCurrentRequest(request CodexCurrentRequest) CodexCurrentRequest {
 }
 
 func codexCurrentRequestIsZero(request CodexCurrentRequest) bool {
-	return request.Generation == 0 && request.RequestKind == "" && request.CompactionPhase == "" && request.RequestedModelHash == "" && request.EffectiveModel == "" && len(request.RequiredBuckets) == 0 && codexAttemptEnvelopeIsZero(request.AttemptEnvelope) && request.CurrentAttemptGeneration == 0 && request.RoutingRefs == 0 && request.AttemptRefs == 0 && request.ResponseObserverRefs == 0 && len(request.Attempts) == 0
+	return request.Generation == 0 && request.RequestKind == "" && request.CompactionPhase == "" && request.RequestedModelHash == "" && request.DispatchPermitDigest == "" && request.EffectiveModel == "" && len(request.RequiredBuckets) == 0 && codexAttemptEnvelopeIsZero(request.AttemptEnvelope) && request.CurrentAttemptGeneration == 0 && request.RoutingRefs == 0 && request.AttemptRefs == 0 && request.ResponseObserverRefs == 0 && len(request.Attempts) == 0
 }
 
 func sameCodexCurrentRequestPlan(left, right CodexCurrentRequest) bool {
-	return left.Generation == right.Generation && left.RequestKind == right.RequestKind && left.CompactionPhase == right.CompactionPhase && sameCodexLeaseOptionalDigest(left.RequestedModelHash, right.RequestedModelHash) && left.EffectiveModel == right.EffectiveModel && slices.Equal(left.RequiredBuckets, right.RequiredBuckets) && sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
+	return left.Generation == right.Generation && left.RequestKind == right.RequestKind && left.CompactionPhase == right.CompactionPhase && sameCodexLeaseOptionalDigest(left.RequestedModelHash, right.RequestedModelHash) && sameCodexLeaseOptionalDigest(left.DispatchPermitDigest, right.DispatchPermitDigest) && left.EffectiveModel == right.EffectiveModel && slices.Equal(left.RequiredBuckets, right.RequiredBuckets) && sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
 }
 
 func sameCodexAttemptEnvelope(left, right CodexAttemptEnvelope) bool {

@@ -138,9 +138,15 @@ func (s *RoutingPolicyStore) Publish(policy RoutingPolicyV1) error {
 	return nil
 }
 
-func (s *RoutingPolicyStore) PublishDelegation(CallerDelegationV1) error {
-	// CU-7 activation is the authority boundary for delegation mutation.
-	return ErrRoutingFeatureInactive
+func (s *RoutingPolicyStore) PublishDelegation(delegation CallerDelegationV1) error {
+	current := s.Current()
+	if current.SchemaVersion != 1 {
+		return ErrRoutingFeatureInactive
+	}
+	current.AuthorityGeneration++
+	current.RoutingGeneration++
+	current.Delegations = append(current.Delegations, delegation)
+	return s.Publish(current)
 }
 
 func (s *RoutingPolicyStore) Current() RoutingPolicyV1 {
@@ -261,8 +267,25 @@ func validateRoutingPolicy(policy RoutingPolicyV1, prior *RoutingPolicyV1) error
 		}
 		evidence[item.AccountKey] = struct{}{}
 	}
-	if len(policy.Delegations) != 0 {
-		return ErrRoutingFeatureInactive
+	delegations := make(map[string]struct{}, len(policy.Delegations))
+	for _, delegation := range policy.Delegations {
+		if delegation.Caller == "" || len(delegation.Accounts) == 0 || delegation.ExpiresAt.IsZero() || !delegation.ExpiresAt.Equal(delegation.ExpiresAt.UTC()) {
+			return errors.New("invalid caller delegation")
+		}
+		if _, exists := delegations[delegation.Caller]; exists {
+			return errors.New("duplicate caller delegation")
+		}
+		delegations[delegation.Caller] = struct{}{}
+		seen := make(map[providerCodex.AccountKey]struct{}, len(delegation.Accounts))
+		for _, account := range delegation.Accounts {
+			if account == "" {
+				return errors.New("invalid caller delegation account")
+			}
+			if _, exists := seen[account]; exists {
+				return errors.New("duplicate caller delegation account")
+			}
+			seen[account] = struct{}{}
+		}
 	}
 	return nil
 }

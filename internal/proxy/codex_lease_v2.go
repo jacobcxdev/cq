@@ -118,6 +118,7 @@ type CodexCurrentRequest struct {
 	RequestKind              CodexRequestKind      `json:"request_kind,omitempty"`
 	CompactionPhase          CodexCompactionPhase  `json:"compaction_phase,omitempty"`
 	RequestedModelHash       string                `json:"requested_model_hash,omitempty"`
+	DispatchPermitDigest     string                `json:"dispatch_permit_digest,omitempty"`
 	EffectiveModel           string                `json:"effective_model,omitempty"`
 	RequiredBuckets          []CapacityBucket      `json:"required_buckets,omitempty"`
 	AttemptEnvelope          CodexAttemptEnvelope  `json:"attempt_envelope"`
@@ -1212,7 +1213,7 @@ func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelop
 	if !validCodexLeaseDigest(record.SessionHash) || !validCodexLeaseDigest(record.ThreadHash) || record.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) || !validCodexLeaseDigest(record.TurnHash) {
 		return errors.New("invalid record identity hash")
 	}
-	for _, digest := range []string{record.AccountHash, record.PredecessorTurnHash, record.CorrelationHash, record.TurnStateHash, record.RequestedModelHash} {
+	for _, digest := range []string{record.AccountHash, record.PredecessorTurnHash, record.CorrelationHash, record.TurnStateHash, record.RequestedModelHash, record.DispatchPermitDigest} {
 		if digest != "" && !validCodexLeaseDigest(digest) {
 			return errors.New("invalid optional record hash")
 		}
