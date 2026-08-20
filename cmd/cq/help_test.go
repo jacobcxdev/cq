@@ -641,6 +641,11 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 			want: []string{"Usage: cq agent <command>", "agent install", "agent uninstall"},
 		},
 		{
+			name: "operation",
+			path: []string{"operation"},
+			want: []string{"Usage: cq operation <command>", "operation status", "operation recover"},
+		},
+		{
 			name: "proxy start",
 			path: []string{"proxy", "start"},
 			want: []string{"Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]", "Start local Claude and Codex proxy", "--migrate-legacy-managed"},

@@ -40,6 +40,14 @@ routing are less likely to start from expired credentials.
 
 Uninstall the background quota refresh LaunchAgent.
 `,
+	"operation": `Usage: cq operation <command>
+
+Inspect or recover one durable proxy operation.
+
+Commands:
+  operation status   Inspect active or retained operation state
+  operation recover  Reconcile one exact durable operation
+`,
 	"proxy": `Usage: cq proxy <command>
 
 Run and configure the local Claude and Codex API proxy.
