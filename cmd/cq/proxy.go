@@ -19,11 +19,57 @@ import (
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func normalCallerCredentials(cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory) ([]proxy.NormalCallerCredentialV1, error) {
+	if cfg == nil || cfg.LocalToken == "" {
+		return nil, proxy.ErrNormalCallerAuthUnavailable
+	}
+	credentials := make([]proxy.NormalCallerCredentialV1, 0, 1+len(claudeAccounts)+len(codexInventory.Accounts))
+	appendCredential := func(domain proxy.NormalCallerDomain, bearer, identity string, expires time.Time) error {
+		if bearer == "" || identity == "" {
+			return nil
+		}
+		credentials = append(credentials, proxy.NormalCallerCredentialV1{Domain: domain, Bearer: bearer, SubjectID: identity, ValidUntil: expires})
+		return nil
+	}
+	if err := appendCredential(proxy.NormalCallerLocal, cfg.LocalToken, "local-owner", time.Time{}); err != nil {
+		return nil, err
+	}
+	for index, account := range claudeAccounts {
+		identity := account.AccountUUID
+		if identity == "" && account.TokenAccount != nil {
+			identity = account.TokenAccount.UUID
+		}
+		if identity == "" {
+			identity = account.Email
+		}
+		if identity == "" {
+			identity = fmt.Sprintf("anonymous-%d", index)
+		}
+		var expires time.Time
+		if account.ExpiresAt > 0 {
+			expires = time.UnixMilli(account.ExpiresAt)
+		}
+		if err := appendCredential(proxy.NormalCallerClaude, account.AccessToken, identity, expires); err != nil {
+			return nil, err
+		}
+	}
+	for _, account := range codexInventory.Accounts {
+		for _, candidate := range account.Candidates {
+			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision)
+			if err := appendCredential(proxy.NormalCallerCodex, candidate.Credential.AccessToken, identity, candidate.AccessExpiresAt); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return credentials, nil
+}
 
 var runProxyRuntimeRoleFn = runProxyRuntimeRole
 var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
@@ -443,6 +489,24 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 				returnErr = errors.Join(returnErr, adoptedListener.Close())
 			}
 		}()
+		err = runProxyAdoptedRuntimeFn(context.Background(), adoptedListener, serveRuntimeSupervisor)
+		adoptedListener = nil
+		return err
+	}
+	if supervisorRole != nil {
+		store, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.DefaultNormalCallerAdmissionPath())
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		err = proxy.RunValidatedRuntimeSupervisorRole(context.Background(), *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
+			Files: supervisorFiles, SupervisorHolder: supervisorHolder, Launcher: supervisorLauncher,
+			Checkpoints: &proxy.RuntimeHashCheckpointStore{}, CallerAdmissions: store,
+			WorkerManifest: proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(supervisorRole.ManifestDigest[:])},
+			Serve:          serveRuntimeSupervisor,
+		})
+		supervisorFiles = proxy.RuntimeRoleFiles{}
+		return err
 	}
 	intent, err := claimInstalledHTTPValidationStartupRequest(
 		version,
@@ -580,6 +644,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
 		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
+	}
+	runtimeCallerCredentials, err := normalCallerCredentials(cfg, accounts, codexInventory)
+	if err != nil {
+		return fmt.Errorf("normal caller index: %w", err)
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
@@ -815,6 +883,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		HeadroomMode:                     resolvedMode,
 		Catalog:                          catalog,
 		Refresher:                        proxyRefresher,
+		RuntimeCallerCredentials:         runtimeCallerCredentials,
 	}
 	if err := legacyFinaliseVerifier.bind(codexRouting, headroom, resolvedMode); err != nil {
 		return fmt.Errorf("legacy credential endpoint finalise verifier: %w", err)
@@ -825,25 +894,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		if handlerErr != nil {
 			return handlerErr
 		}
-		err = proxy.RunRuntimeWorkerRoleWithHandler(proxyCtx, *workerRole, workerFiles, handler)
+		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(proxyCtx, *workerRole, workerFiles, handler, runtimeCallerCredentials)
 		workerFiles = proxy.RuntimeRoleFiles{}
-	} else if supervisorRole != nil {
-		err = proxy.RunValidatedRuntimeSupervisorRole(proxyCtx, *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
-			Files: supervisorFiles, SupervisorHolder: supervisorHolder, Launcher: supervisorLauncher,
-			Checkpoints:    &proxy.RuntimeHashCheckpointStore{},
-			WorkerManifest: proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(supervisorRole.ManifestDigest[:])},
-			Serve: func(ctx context.Context, listener net.Listener, handler http.Handler) error {
-				srv.RuntimeNormalHandler = handler
-				return srv.ServeAdoptedListener(ctx, listener)
-			},
-		})
-		supervisorFiles = proxy.RuntimeRoleFiles{}
-	} else if adoptedListener != nil {
-		err = runProxyAdoptedRuntimeFn(proxyCtx, adoptedListener, func(ctx context.Context, listener net.Listener, handler http.Handler) error {
-			srv.RuntimeNormalHandler = handler
-			return srv.ServeAdoptedListener(ctx, listener)
-		})
-		adoptedListener = nil
 	} else {
 		err = srv.ListenAndServe(proxyCtx)
 	}
@@ -853,6 +905,29 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	if headroom != nil {
 		headroom.Stop()
+	}
+	return err
+}
+
+func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler http.Handler) error {
+	if ctx == nil || listener == nil || handler == nil {
+		return proxy.ErrRuntimeSupervisorUnavailable
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdown)
+		case <-done:
+		}
+	}()
+	err := server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return nil
 	}
 	return err
 }

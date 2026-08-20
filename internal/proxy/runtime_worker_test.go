@@ -112,17 +112,36 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := process.Boot(context.Background(), WorkerManifestV1{}); err != nil {
+	boot, err := process.Boot(context.Background(), WorkerManifestV1{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(boot.CallerAuthorityKey) != 32 || len(boot.CallerIndex.Entries) != 1 || boot.CallerIndex.Entries[0].Domain != NormalCallerCodex {
+		t.Fatalf("worker caller index = %#v", boot.CallerIndex)
+	}
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	authority, err := NewNormalCallerAuthorityFromIndex(boot.CallerAuthorityKey, boot.CallerIndex, consumer, time.Now, bytes.NewReader(bytes.Repeat([]byte{0x71}, 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityRequest, _ := http.NewRequest(http.MethodPost, "/responses", nil)
+	authorityRequest.Header.Set("Authorization", "Bearer worker-only-bearer")
+	authentication, err := authority.authenticate(authorityRequest, normalCallerRouteCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, err := authority.consume(context.Background(), authentication, authorityRequest)
+	if err != nil {
 		t.Fatal(err)
 	}
 	response, err := process.ExecuteHTTP(context.Background(), RuntimeHTTPRequestV1{
-		Method: http.MethodPost, RequestURI: "/worker-executed?exact=1",
-		Header: http.Header{"X-Request": {"private"}}, Body: []byte("payload"),
+		Method: http.MethodPost, RequestURI: "/responses",
+		Header: http.Header{"X-Request": {"private"}}, Body: []byte("payload"), Caller: caller,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusCreated || response.Header.Get("X-Worker") != "child" || string(response.Body) != "POST /worker-executed?exact=1 payload" {
+	if response.StatusCode != http.StatusCreated || response.Header.Get("X-Worker") != "child" || string(response.Body) != "Bearer worker-only-bearer" {
 		t.Fatalf("worker response = %#v", response)
 	}
 	if err := process.BeginDrain(context.Background(), TrafficModeDrain, 0); err != nil {
@@ -155,16 +174,15 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		os.Exit(93)
 	}
 	_ = unix.Close(RuntimeListenerFD)
-	err = RunRuntimeWorkerRoleWithHandler(context.Background(), manifest, RuntimeRoleFiles{
+	err = RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(context.Background(), manifest, RuntimeRoleFiles{
 		Lifecycle: os.NewFile(RuntimeLifecycleFD, "lifecycle"),
 		Control:   os.NewFile(RuntimeControlFD, "control"),
 		Secret:    os.NewFile(RuntimeSecretFD, "secret"),
 	}, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, _ := io.ReadAll(request.Body)
 		writer.Header().Set("X-Worker", "child")
 		writer.WriteHeader(http.StatusCreated)
-		_, _ = writer.Write([]byte(request.Method + " " + request.URL.RequestURI() + " " + string(body)))
-	}))
+		_, _ = writer.Write([]byte(request.Header.Get("Authorization")))
+	}), []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "worker-only-bearer", SubjectID: "codex-worker"}})
 	if err != nil {
 		os.Exit(94)
 	}

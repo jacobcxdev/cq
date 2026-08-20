@@ -302,10 +302,11 @@ type RuntimeQuiescenceAckV1 struct {
 }
 
 type RuntimeHTTPRequestV1 struct {
-	Method     string      `json:"method"`
-	RequestURI string      `json:"request_uri"`
-	Header     http.Header `json:"header,omitempty"`
-	Body       []byte      `json:"body,omitempty"`
+	Method     string                   `json:"method"`
+	RequestURI string                   `json:"request_uri"`
+	Header     http.Header              `json:"header,omitempty"`
+	Body       []byte                   `json:"body,omitempty"`
+	Caller     RuntimeCallerAuthorityV1 `json:"caller"`
 }
 
 type RuntimeHTTPResponseV1 struct {
@@ -323,6 +324,10 @@ type RuntimeBootAckV1 struct {
 	SchemaVersion int                  `json:"schema_version"`
 	Kind          string               `json:"kind"`
 	Holder        LifecycleHolderProof `json:"holder"`
+	CallerIndex   NormalCallerIndexV1  `json:"caller_index"`
+	// CallerAuthorityKey is derived independently by each endpoint from the
+	// private channel secret. It is never serialised into a control frame.
+	CallerAuthorityKey []byte `json:"-"`
 }
 
 type RuntimeControl interface {

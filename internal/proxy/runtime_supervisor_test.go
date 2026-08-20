@@ -47,11 +47,16 @@ type runtimeTestWorker struct {
 	holder   LifecycleHolderProof
 	events   *[]string
 	response RuntimeHTTPResponseV1
+	bootAck  RuntimeBootAckV1
 }
 
 func (w *runtimeTestWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
 	*w.events = append(*w.events, "boot:"+w.holder.DescriptionID)
-	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: w.holder}, nil
+	ack := w.bootAck
+	ack.SchemaVersion = 1
+	ack.Kind = "runtime_boot_ack_v1"
+	ack.Holder = w.holder
+	return ack, nil
 }
 func (w *runtimeTestWorker) BeginDrain(context.Context, TrafficMode, uint64) error {
 	*w.events = append(*w.events, "drain:"+w.holder.DescriptionID)
@@ -93,7 +98,14 @@ func TestRuntimeSupervisorForwardsNormalHTTPOnlyToSelectedWorker(t *testing.T) {
 	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := supervisor.SetCallerAuthority(testNormalCallerAuthority(t, []NormalCallerCredentialV1{{Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner"}}, &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)})); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerClassifier(NewNormalCallerBranchClassifier(nil)); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/normal?x=1", bytes.NewBufferString("body"))
+	request.Header.Set("Authorization", "Bearer local-token")
 	response := httptest.NewRecorder()
 	supervisor.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted || response.Header().Get("X-Worker") != "selected" || response.Body.String() != "from worker" {

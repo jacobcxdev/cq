@@ -27,6 +27,7 @@ import (
 	"text/template"
 	"unsafe"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"golang.org/x/sys/unix"
 )
@@ -116,7 +117,12 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
 	launcher := newDarwinRuntimeLauncher(executable, manifest, holder, path)
-	return proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}, serve)
+	admissions, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.DefaultNormalCallerAdmissionPath())
+	if err != nil {
+		return err
+	}
+	defer admissions.Close()
+	return proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}, serve)
 }
 
 func openDarwinRuntimeLifecycle(path, role string) (*os.File, proxy.LifecycleHolderProof, error) {

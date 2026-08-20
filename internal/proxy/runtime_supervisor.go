@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ type RuntimeSupervisorRoleDependencies struct {
 	SupervisorHolder LifecycleHolderProof
 	Launcher         RuntimeWorkerLauncher
 	Checkpoints      RuntimeHolderCheckpointStore
+	CallerAdmissions NormalCallerAdmissionConsumer
 	WorkerManifest   WorkerManifestV1
 	AdoptListener    func(*os.File) (net.Listener, error)
 	Serve            func(context.Context, net.Listener, http.Handler) error
@@ -62,16 +64,26 @@ func RunValidatedRuntimeSupervisorRole(ctx context.Context, manifest RuntimeRole
 	if err != nil {
 		return err
 	}
+	if dependencies.CallerAdmissions != nil {
+		if err := supervisor.SetCallerAdmissionConsumer(dependencies.CallerAdmissions); err != nil {
+			return err
+		}
+	}
 	if _, err := supervisor.Boot(ctx, dependencies.WorkerManifest); err != nil {
 		return err
 	}
 	return dependencies.Serve(ctx, listener, supervisor)
 }
 
-func RunAdoptedRuntimeSupervisor(ctx context.Context, listener net.Listener, holder LifecycleHolderProof, launcher RuntimeWorkerLauncher, checkpoints RuntimeHolderCheckpointStore, workerManifest WorkerManifestV1, serve func(context.Context, net.Listener, http.Handler) error) (returnErr error) {
+func RunAdoptedRuntimeSupervisor(ctx context.Context, listener net.Listener, holder LifecycleHolderProof, launcher RuntimeWorkerLauncher, checkpoints RuntimeHolderCheckpointStore, admissions NormalCallerAdmissionConsumer, workerManifest WorkerManifestV1, serve func(context.Context, net.Listener, http.Handler) error) (returnErr error) {
 	supervisor, err := NewRuntimeSupervisor(listener, holder, launcher, checkpoints)
 	if err != nil {
 		return err
+	}
+	if admissions != nil {
+		if err := supervisor.SetCallerAdmissionConsumer(admissions); err != nil {
+			return err
+		}
 	}
 	if _, err := supervisor.Boot(ctx, workerManifest); err != nil {
 		return err
@@ -188,6 +200,50 @@ type RuntimeSupervisor struct {
 	crashLoop        bool
 	recoveryPending  bool
 	pendingRelease   RuntimeWorkerReleaseV1
+	callerAuthority  *NormalCallerAuthority
+	callerClassifier NormalCallerBranchClassifier
+	callerAdmissions NormalCallerAdmissionConsumer
+}
+
+func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
+	if supervisor == nil || consumer == nil {
+		return ErrNormalCallerAuthUnavailable
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if supervisor.worker != nil || supervisor.admissionReady {
+		return ErrNormalCallerAuthUnavailable
+	}
+	supervisor.callerAdmissions = consumer
+	if supervisor.callerClassifier == nil {
+		supervisor.callerClassifier = NewNormalCallerBranchClassifier(nil)
+	}
+	return nil
+}
+
+func (supervisor *RuntimeSupervisor) SetCallerClassifier(classifier NormalCallerBranchClassifier) error {
+	if supervisor == nil || classifier == nil {
+		return ErrNormalCallerAuthUnavailable
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	supervisor.callerClassifier = classifier
+	return nil
+}
+
+// SetCallerAuthority installs the pre-body normal-route authentication gate.
+// It must be called before the adopted listener begins serving.
+func (supervisor *RuntimeSupervisor) SetCallerAuthority(authority *NormalCallerAuthority) error {
+	if supervisor == nil || authority == nil {
+		return ErrNormalCallerAuthUnavailable
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if supervisor.callerAuthority != nil {
+		return ErrNormalCallerAuthUnavailable
+	}
+	supervisor.callerAuthority = authority
+	return nil
 }
 
 func NewRuntimeSupervisor(listener net.Listener, supervisorHolder LifecycleHolderProof, launcher RuntimeWorkerLauncher, checkpoints RuntimeHolderCheckpointStore) (*RuntimeSupervisor, error) {
@@ -233,10 +289,57 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if request.Method == http.MethodGet && request.URL.EscapedPath() == "/health" {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, "{\"status\":\"ok\"}\n")
+		return
+	}
+	policy := normalCallerPolicy(request)
+	var caller RuntimeCallerAuthorityV1
+	var authentication normalCallerAuthentication
+	var authority *NormalCallerAuthority
+	if policy != normalCallerRoutePublic {
+		supervisor.mu.RLock()
+		authority = supervisor.callerAuthority
+		supervisor.mu.RUnlock()
+		var err error
+		authentication, err = authority.authenticate(request, policy)
+		if err != nil {
+			status := http.StatusServiceUnavailable
+			if errors.Is(err, ErrNormalCallerAuthRequired) {
+				status = http.StatusUnauthorized
+			} else if errors.Is(err, ErrNormalCallerAuthScope) {
+				status = http.StatusForbidden
+			}
+			http.Error(writer, http.StatusText(status), status)
+			return
+		}
+	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, RuntimeHTTPBodyLimit+1))
 	if err != nil || len(body) > RuntimeHTTPBodyLimit {
 		http.Error(writer, "runtime request exceeds private transport limit", http.StatusRequestEntityTooLarge)
 		return
+	}
+	if policy != normalCallerRoutePublic {
+		if policy == normalCallerRouteClassified {
+			supervisor.mu.RLock()
+			classifier := supervisor.callerClassifier
+			supervisor.mu.RUnlock()
+			if classifier == nil {
+				http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+				return
+			}
+			branch, classifyErr := classifier(request.Method, request.URL.RequestURI(), body)
+			if classifyErr != nil || !normalCallerAllowsBranch(authentication.domain, branch) {
+				http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				return
+			}
+		}
+		caller, err = authority.consume(request.Context(), authentication, request)
+		if err != nil {
+			http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
 	}
 	supervisor.mu.RLock()
 	defer supervisor.mu.RUnlock()
@@ -244,7 +347,10 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	response, err := supervisor.worker.ExecuteHTTP(request.Context(), RuntimeHTTPRequestV1{Method: request.Method, RequestURI: request.URL.RequestURI(), Header: request.Header.Clone(), Body: body})
+	header := request.Header.Clone()
+	header.Del("Authorization")
+	header.Del("Proxy-Authorization")
+	response, err := supervisor.worker.ExecuteHTTP(request.Context(), RuntimeHTTPRequestV1{Method: request.Method, RequestURI: request.URL.RequestURI(), Header: header, Body: body, Caller: caller})
 	if err != nil {
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
@@ -301,6 +407,18 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 		defer cancel()
 		_, _ = worker.StopAndReap(cleanupCtx)
 		return RuntimeBootAckV1{}, ErrLifecycleHolderConflict
+	}
+	if supervisor.callerAdmissions != nil {
+		authority, authorityErr := NewNormalCallerAuthorityFromIndex(ack.CallerAuthorityKey, ack.CallerIndex, supervisor.callerAdmissions, time.Now, rand.Reader)
+		zeroRuntimeBytes(ack.CallerAuthorityKey)
+		ack.CallerAuthorityKey = nil
+		if authorityErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = worker.StopAndReap(cleanupCtx)
+			return RuntimeBootAckV1{}, authorityErr
+		}
+		supervisor.callerAuthority = authority
 	}
 	checkpoint := RuntimeHolderCheckpointV1{
 		SchemaVersion:            1,

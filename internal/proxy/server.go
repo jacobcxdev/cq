@@ -89,11 +89,15 @@ type Server struct {
 	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
 	// public work to the selected private worker instead of running normal
 	// proxy semantics in the supervisor process.
-	RuntimeNormalHandler   http.Handler
-	CodexDiscover          CodexDiscoverer
-	CodexHealth            func() CodexHealth
-	CodexRequests          *CodexRequestRouter
-	CodexWebSocketExecutor ExplicitWebSocketExecutor
+	RuntimeNormalHandler http.Handler
+	// RuntimeCallerCredentials remain worker-local. The runtime handler uses
+	// safe caller subject IDs to restore only the credential authorised by the
+	// supervisor's consumed admission.
+	RuntimeCallerCredentials []NormalCallerCredentialV1
+	CodexDiscover            CodexDiscoverer
+	CodexHealth              func() CodexHealth
+	CodexRequests            *CodexRequestRouter
+	CodexWebSocketExecutor   ExplicitWebSocketExecutor
 	// CodexWebSocketBroker owns readiness-gated terminating WebSocket routing.
 	// Nil fails closed when WebSocket enforcement is effective.
 	CodexWebSocketBroker CodexWebSocketRoutingHandler

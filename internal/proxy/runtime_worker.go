@@ -72,6 +72,10 @@ func RunRuntimeWorkerRole(ctx context.Context, manifest RuntimeRoleManifestV1, f
 }
 
 func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleManifestV1, files RuntimeRoleFiles, handler http.Handler) error {
+	return RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(ctx, manifest, files, handler, nil)
+}
+
+func RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(ctx context.Context, manifest RuntimeRoleManifestV1, files RuntimeRoleFiles, handler http.Handler, credentials []NormalCallerCredentialV1) error {
 	defer files.Close()
 	if manifest.Role != RuntimeRoleWorker || ValidateRuntimeRoleFiles(manifest, files) != nil || handler == nil {
 		return ErrRuntimeRoleManifest
@@ -82,6 +86,20 @@ func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleMa
 		return err
 	}
 	defer secret.Destroy()
+	callerKey, err := normalCallerKeyFromRuntimeSecret(secret)
+	if err != nil {
+		return err
+	}
+	defer zeroRuntimeBytes(callerKey)
+	boundCredentials, err := bindRuntimeCallerCredentials(callerKey, credentials)
+	if err != nil {
+		return err
+	}
+	callerIndex, err := BuildNormalCallerIndexV1(callerKey, 1, boundCredentials)
+	if err != nil {
+		return err
+	}
+	handler = normalWorkerHandler(handler, boundCredentials)
 	connection, err := net.FileConn(files.Control)
 	if err != nil {
 		return err
@@ -110,9 +128,14 @@ func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleMa
 			return err
 		}
 		kind := ""
+		payload := json.RawMessage(`{}`)
 		switch frame.Kind {
 		case "hello":
 			kind = "ready"
+			payload, err = json.Marshal(callerIndex)
+			if err != nil {
+				return err
+			}
 		case "begin_drain":
 			kind = "draining"
 		case "await_quiescence":
@@ -128,7 +151,13 @@ func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleMa
 			if requestErr != nil {
 				return ErrRuntimeControlFrame
 			}
+			if normalCallerPolicy(httpRequest) != normalCallerRoutePublic && (!validRuntimeCallerAuthority(request.Caller, request.Method, request.RequestURI, time.Now()) || !validateRuntimeCallerAuthorityMAC(callerKey, request.Caller)) {
+				return ErrRuntimeControlFrame
+			}
 			httpRequest.Header = request.Header.Clone()
+			if request.Caller.SchemaVersion == 1 {
+				httpRequest = httpRequest.WithContext(withRuntimeCallerAuthority(httpRequest.Context(), request.Caller))
+			}
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, httpRequest)
 			result := recorder.Result()
@@ -149,7 +178,7 @@ func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleMa
 		default:
 			return ErrRuntimeControlFrame
 		}
-		if err := WriteRuntimeControlMessage(connection, secret, RuntimeControlFrameV1{SchemaVersion: 1, Sequence: sequence, Kind: kind, Payload: json.RawMessage(`{}`)}); err != nil {
+		if err := WriteRuntimeControlMessage(connection, secret, RuntimeControlFrameV1{SchemaVersion: 1, Sequence: sequence, Kind: kind, Payload: payload}); err != nil {
 			return err
 		}
 		sequence++
@@ -157,6 +186,28 @@ func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleMa
 			return nil
 		}
 	}
+}
+
+func normalCallerKeyFromRuntimeSecret(secret *RuntimeSecret) ([]byte, error) {
+	material, err := secret.key()
+	if err != nil {
+		return nil, err
+	}
+	defer zeroRuntimeBytes(material)
+	return DeriveNormalCallerAuthorityKey(material)
+}
+
+func bindRuntimeCallerCredentials(key []byte, credentials []NormalCallerCredentialV1) ([]NormalCallerCredentialV1, error) {
+	bound := make([]NormalCallerCredentialV1, 0, len(credentials))
+	for _, credential := range credentials {
+		subjectID, err := NormalCallerSubjectID(key, credential.Domain, credential.SubjectID)
+		if err != nil {
+			return nil, err
+		}
+		credential.SubjectID = subjectID
+		bound = append(bound, credential)
+	}
+	return bound, nil
 }
 
 type RuntimeProcessWorkerLauncher struct {
@@ -370,7 +421,16 @@ func (worker *runtimeProcessWorker) Boot(ctx context.Context, _ WorkerManifestV1
 	if err != nil || frame.Kind != "ready" {
 		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeWorkerUnavailable, err)
 	}
-	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder}, nil
+	var index NormalCallerIndexV1
+	if json.Unmarshal(frame.Payload, &index) != nil {
+		return RuntimeBootAckV1{}, ErrRuntimeControlFrame
+	}
+	key, err := normalCallerKeyFromRuntimeSecret(worker.secret)
+	if err != nil || !VerifyNormalCallerIndexV1(key, index) {
+		zeroRuntimeBytes(key)
+		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeControlFrame, err)
+	}
+	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerIndex: index, CallerAuthorityKey: key}, nil
 }
 func (worker *runtimeProcessWorker) BeginDrain(ctx context.Context, _ TrafficMode, _ uint64) error {
 	frame, err := worker.exchange(ctx, "begin_drain", nil)
