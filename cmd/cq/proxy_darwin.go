@@ -45,6 +45,14 @@ type proxyPlistData struct {
 	LogPath string
 }
 
+func init() {
+	defaultProxyInspectionTarget = darwinProxyInspectionTarget
+}
+
+// darwinProxyInspectionTarget is the CU-1 read-only platform boundary. It
+// deliberately exposes no live collectors until the CU that owns effects.
+func darwinProxyInspectionTarget() ProxyInspectionTarget { return ProxyInspectionTarget{} }
+
 func proxyAgentPlistPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

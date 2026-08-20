@@ -111,6 +111,13 @@ func TestRestartProxyAgentFallsBackToHomebrewLabel(t *testing.T) {
 	}
 }
 
+func TestDarwinProxyInspectionBoundaryHasNoLiveCollectorsInCU1(t *testing.T) {
+	target := darwinProxyInspectionTarget()
+	if target.Inspector != nil || target.Desired != nil || target.Service != nil || target.Listener != nil || target.Process != nil || target.Runtime != nil || target.DataPlane != nil {
+		t.Fatalf("CU-1 Darwin inspection target acquired a live collector: %+v", target)
+	}
+}
+
 type launchctlTestExitError int
 
 func (e launchctlTestExitError) Error() string { return fmt.Sprintf("exit status %d", e) }

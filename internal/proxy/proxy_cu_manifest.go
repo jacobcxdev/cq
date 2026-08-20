@@ -66,6 +66,9 @@ type CUTestPackageV1 struct {
 // construction unit. A later unit remains unavailable until it adds a
 // non-empty exact selection here.
 func CanonicalCUManifestV1(cuID string) ([]byte, error) {
+	if cuID == "CU-1" {
+		return canonicalCU1ManifestV1()
+	}
 	if cuID != "CU-0" {
 		return nil, fmt.Errorf("construction unit %q has no manifest", cuID)
 	}
@@ -548,6 +551,67 @@ func CanonicalCUManifestV1(cuID string) ([]byte, error) {
 		Unit:                             cuID,
 		RaceCount:                        1,
 		Packages:                         selections,
+	})
+}
+
+func canonicalCU1ManifestV1() ([]byte, error) {
+	cmdSelection := newCUTestPackage("./cmd/cq",
+		"TestDarwinProxyInspectionBoundaryHasNoLiveCollectorsInCU1",
+		"TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState",
+		"TestProxyCommandBuildsTypedArgumentsAndDeadlines",
+		"TestProxyCommandClassifiesCandidateReceiptLookupBeforeState",
+		"TestProxyCommandClassifiesModelsAndCodexAuxiliaryCatalogues",
+		"TestProxyCommandClassifiesRefreshAndOperatorRows",
+		"TestProxyCommandClassifiesThirteenOrdinaryRows",
+		"TestProxyCommandHelpAnywhereAndIgnoredRefreshTails",
+		"TestProxyCommandOperatorArgumentsAreTyped",
+		"TestProxyCommandParsesCacheTTL",
+		"TestProxyCommandPreservesOrdinaryEndOfFlags",
+		"TestProxyCommandUsesExactRefreshReadDeadlines",
+		"TestProxyDoctorChecksAreDerivedFromIndependentFacts",
+		"TestProxyInspectCollectsIndependentFactsAndNeverSynthesisesSuccess",
+		"TestProxyInspectHonoursCancelledContextWithoutCallingCollectors",
+		"TestProxyInspectNormalisesUnsafeCollectorFacts",
+		"TestProxyInspectPropagatesWriterErrors",
+		"TestProxyInspectRendersHumanJSONAndDoctorFacts",
+		"TestProxyStatusPreDispatchBoundaryUsesOnlyInjectedCollectors",
+		"TestProxyStatusPreDispatchPreservesFrozenBareStatus",
+	)
+	proxySelection := newCUTestPackage("./internal/proxy",
+		"TestProxySnapshotFactJSONPreservesUnknownState",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology",
+		"TestProxySnapshotInspectorSkewIsDescriptive",
+		"TestProxySnapshotReconcilesSupportedTopologies",
+		"TestProxySnapshotRejectsIdentityMismatchAndDoesNotTrustHealthAlone",
+		"TestProxySnapshotRejectsMalformedFactsAndUnknownVocabulary",
+	)
+	proxySelection.FullTestIDs = append(proxySelection.FullTestIDs,
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/data_plane_contradictory",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/data_plane_not_proven",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/desired_listener_mismatch",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/desired_manager_mismatch",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/listener_not_listening",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/process_identity_missing",
+		"TestProxySnapshotHealthyRequiresCoherentRunningTopology/service_stopped",
+		"TestProxySnapshotReconcilesSupportedTopologies/cq_healthy",
+		"TestProxySnapshotReconcilesSupportedTopologies/crash_looping",
+		"TestProxySnapshotReconcilesSupportedTopologies/foreign_listener",
+		"TestProxySnapshotReconcilesSupportedTopologies/homebrew_legacy",
+		"TestProxySnapshotReconcilesSupportedTopologies/manual_legacy",
+		"TestProxySnapshotReconcilesSupportedTopologies/required_collector_unavailable",
+		"TestProxySnapshotReconcilesSupportedTopologies/stopped",
+	)
+	sort.Strings(proxySelection.FullTestIDs)
+	proxySelection.MinimumPassCount = len(proxySelection.FullTestIDs)
+	return CanonicalJSONV1(CUManifestV1{
+		SchemaVersion:                    1,
+		Kind:                             "construction_unit_verification_manifest_v1",
+		BlueprintSHA256:                  frozenBlueprintSHA256,
+		ReviewAttestationAggregateSHA256: frozenReviewAggregateSHA256,
+		ReviewAuthorityBaselineCommit:    frozenReviewBaseline,
+		Unit:                             "CU-1",
+		RaceCount:                        1,
+		Packages:                         []CUTestPackageV1{cmdSelection, proxySelection},
 	})
 }
 

@@ -2,16 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 func TestRootHelpShowsFullCLISurface(t *testing.T) {
@@ -56,6 +60,15 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 }
 
 func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
+	if os.Getenv("CQ_TEST_BARE_PROXY_STATUS") == "1" {
+		proxyStatusGet = func(string) (*http.Response, error) {
+			return &http.Response{Body: io.NopCloser(strings.NewReader(`{"status":"ok"}`))}, nil
+		}
+		if err := runProxyStatus(proxyCommandOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	binary := filepath.Join(t.TempDir(), "cq")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -67,6 +80,7 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 	for _, tt := range []struct {
 		args     []string
 		exitCode int
+		helper   bool
 	}{
 		{args: []string{"--help"}},
 		{args: []string{"--version"}},
@@ -83,7 +97,10 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"agent", "install", "--help"}},
 		{args: []string{"agent", "install", "ignored", "--help"}},
 		{args: []string{"agent", "help", "install"}},
+		{args: []string{"agent", "unknown", "--help"}, exitCode: 1},
 		{args: []string{"proxy", "start", "--help"}},
+		{args: []string{"proxy", "status"}, helper: true},
+		{args: []string{"proxy", "status", "--json"}, exitCode: 4},
 		{args: []string{"proxy", "start", "--port", "29280", "--help"}},
 		{args: []string{"proxy", "help", "start"}},
 		{args: []string{"models", "list", "--help"}},
@@ -117,7 +134,13 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"codex", "canary", "unknown"}, exitCode: 1},
 	} {
 		command := exec.Command(binary, tt.args...)
+		if tt.helper {
+			command = exec.Command(os.Args[0], "-test.run=^TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState$")
+		}
 		command.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+xdg)
+		if tt.helper {
+			command.Env = append(command.Env, "CQ_TEST_BARE_PROXY_STATUS=1")
+		}
 		output, err := command.CombinedOutput()
 		if got := command.ProcessState.ExitCode(); got != tt.exitCode {
 			t.Fatalf("cq %v exit = %d, want %d: %v\n%s", tt.args, got, tt.exitCode, err, output)
@@ -126,6 +149,119 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 	for _, path := range []string{home, xdg} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("read-only command created %s: %v", path, err)
+		}
+	}
+}
+
+func TestProxyStatusPreDispatchBoundaryUsesOnlyInjectedCollectors(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "absent-home")
+	xdg := filepath.Join(root, "absent-xdg")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	calls := 0
+	deadlineSeen := false
+	target := ProxyInspectionTarget{
+		Inspector: func(ctx context.Context) proxy.Fact[proxy.InspectorIdentity] {
+			calls++
+			deadline, ok := ctx.Deadline()
+			remaining := time.Until(deadline)
+			deadlineSeen = ok && remaining > 9*time.Second && remaining <= 10*time.Second
+			return proxy.UnavailableFact[proxy.InspectorIdentity]("inspector_unavailable")
+		},
+		Desired: func(context.Context) proxy.Fact[proxy.DesiredProxyState] {
+			calls++
+			return proxy.UnavailableFact[proxy.DesiredProxyState]("config_unavailable")
+		},
+		Service: func(context.Context) proxy.Fact[proxy.ServiceState] {
+			calls++
+			return proxy.UnavailableFact[proxy.ServiceState]("service_unavailable")
+		},
+		Listener: func(context.Context) proxy.Fact[proxy.ListenerState] {
+			calls++
+			return proxy.UnavailableFact[proxy.ListenerState]("listener_unavailable")
+		},
+		Process: func(context.Context) proxy.Fact[proxy.ProcessState] {
+			calls++
+			return proxy.UnavailableFact[proxy.ProcessState]("process_unavailable")
+		},
+		Runtime: func(context.Context) proxy.Fact[proxy.RuntimeIdentity] {
+			calls++
+			return proxy.UnavailableFact[proxy.RuntimeIdentity]("runtime_unavailable")
+		},
+		DataPlane: func(context.Context) proxy.Fact[proxy.DataPlaneProof] {
+			calls++
+			return proxy.UnavailableFact[proxy.DataPlaneProof]("data_plane_unavailable")
+		},
+	}
+	var stdout bytes.Buffer
+	handled, exitCode, err := runPureGlobalInspectionWithTarget([]string{"proxy", "status", "--json"}, &stdout, io.Discard, target)
+	if err != nil || !handled || exitCode != 4 || calls != 7 || !deadlineSeen {
+		t.Fatalf("pre-dispatch status = handled %t exit %d calls %d err %v", handled, exitCode, calls, err)
+	}
+	if !strings.Contains(stdout.String(), `"kind":"proxy_snapshot"`) {
+		t.Fatalf("status output = %q", stdout.String())
+	}
+	for _, path := range []string{home, xdg} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("read-only status created %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestProxyStatusPreDispatchPreservesFrozenBareStatus(t *testing.T) {
+	authority, err := ClassifyProxyCommand([]string{"proxy", "status"})
+	if err != nil || authority.Row != "proxy_status_frozen" {
+		t.Fatalf("bare status authority = %+v, %v", authority, err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "absent-xdg"))
+	originalGet := proxyStatusGet
+	var requestedAddress string
+	proxyStatusGet = func(address string) (*http.Response, error) {
+		requestedAddress = address
+		return &http.Response{Body: io.NopCloser(strings.NewReader(`{"status":"ok"}`))}, nil
+	}
+	t.Cleanup(func() { proxyStatusGet = originalGet })
+	handled, exitCode, err := runPureGlobalInspectionWithTarget([]string{"proxy", "status"}, io.Discard, io.Discard, ProxyInspectionTarget{})
+	if err != nil || !handled || exitCode != 0 {
+		t.Fatalf("bare status pre-dispatch = handled %t exit %d err %v", handled, exitCode, err)
+	}
+	if requestedAddress != "http://127.0.0.1:19280/health" {
+		t.Fatalf("bare status address = %q", requestedAddress)
+	}
+	if _, statErr := os.Stat(os.Getenv("XDG_CONFIG_HOME")); !os.IsNotExist(statErr) {
+		t.Fatalf("bare status created config home: %v", statErr)
+	}
+
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if err := os.MkdirAll(filepath.Join(configHome, "cq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configHome, "cq", "proxy.json"), []byte(`{"port":1234}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requestedAddress = ""
+	handled, exitCode, err = runPureGlobalInspectionWithTarget([]string{"proxy", "status"}, io.Discard, io.Discard, ProxyInspectionTarget{})
+	if !handled || exitCode != 1 || err == nil || err.Error() != "load config: local_token is required" || requestedAddress != "" {
+		t.Fatalf("invalid existing config = handled %t exit %d address %q err %v", handled, exitCode, requestedAddress, err)
+	}
+
+	handled, exitCode, err = runPureGlobalInspectionWithTarget([]string{"proxy", "status", "--port", "invalid"}, io.Discard, io.Discard, ProxyInspectionTarget{})
+	if !handled || exitCode != 1 || err == nil || err.Error() != `proxy status: invalid port "invalid"` || requestedAddress != "" {
+		t.Fatalf("invalid frozen port = handled %t exit %d address %q err %v", handled, exitCode, requestedAddress, err)
+	}
+	for _, args := range [][]string{
+		{"proxy", "status", "--port", "1234", "--json"},
+		{"proxy", "status", "--port", "1234", "--human"},
+		{"proxy", "status", "--port", "1234", "--strict"},
+		{"proxy", "status", "--port", "1234", "--timeout", "5s"},
+		{"proxy", "status", "--port", "1234", "--instance-state-root", "/tmp/instance"},
+	} {
+		handled, exitCode, err = runPureGlobalInspectionWithTarget(args, io.Discard, io.Discard, ProxyInspectionTarget{})
+		if !handled || exitCode != 64 || err == nil || err.Error() != "proxy status usage" || requestedAddress != "" {
+			t.Fatalf("mixed status selectors %v = handled %t exit %d address %q err %v", args, handled, exitCode, requestedAddress, err)
 		}
 	}
 }

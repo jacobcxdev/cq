@@ -1441,8 +1441,8 @@ func TestVerifyReleaseGraphV1RejectsIncompleteGraph(t *testing.T) {
 func TestVerifyReleaseGraphV1RejectsUnavailableConstructionUnits(t *testing.T) {
 	graph := signedFloorReleaseGraph(t)
 	err := VerifyReleaseGraphAgainstApprovedAuthorityV1(graph, releaseAuthorityPinForTest(t, graph), releaseEvidenceForTest(t, graph))
-	if err == nil || !strings.Contains(err.Error(), "feature inactive") || !strings.Contains(err.Error(), "CU-1") {
-		t.Fatalf("release verification error = %v, want feature-inactive CU-1", err)
+	if err == nil || !strings.Contains(err.Error(), "feature inactive") || !strings.Contains(err.Error(), "CU-2") {
+		t.Fatalf("release verification error = %v, want feature-inactive CU-2", err)
 	}
 }
 
@@ -2259,11 +2259,7 @@ func releaseEnvironmentForTest() []BuildEnvironmentEntryV1 {
 
 func releaseCUManifestForTest(t *testing.T, cuID string) []byte {
 	t.Helper()
-	if cuID == "CU-0" {
-		data, err := CanonicalCUManifestV1(cuID)
-		if err != nil {
-			t.Fatal(err)
-		}
+	if data, err := CanonicalCUManifestV1(cuID); err == nil {
 		return data
 	}
 	data, err := CanonicalJSONV1(CUManifestV1{SchemaVersion: 1, Kind: "construction_unit_verification_manifest_v1", BlueprintSHA256: frozenBlueprintSHA256, ReviewAttestationAggregateSHA256: frozenReviewAggregateSHA256, ReviewAuthorityBaselineCommit: frozenReviewBaseline, Unit: cuID, RaceCount: 1, Packages: []CUTestPackageV1{{Package: "./internal/proxy", TopLevelTests: []string{"TestFixture"}, FullTestIDs: []string{"TestFixture"}, MinimumPassCount: 1}}})
@@ -2549,8 +2545,25 @@ func TestCanonicalCUManifestV1ProvidesPinnedCU0Selection(t *testing.T) {
 			t.Fatalf("CU-0 manifest package %s has %d tests, want %d", selection.Package, got, want)
 		}
 	}
-	if _, err := CanonicalCUManifestV1("CU-1"); err == nil {
-		t.Fatal("returned a manifest for absent CU-1")
+	cu1Data, err := CanonicalCUManifestV1("CU-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cu1, err := ParseCUManifestV1(strings.NewReader(string(cu1Data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCU1Counts := map[string]int{"./cmd/cq": 20, "./internal/proxy": 20}
+	if cu1.Unit != "CU-1" || len(cu1.Packages) != len(wantCU1Counts) {
+		t.Fatalf("CU-1 manifest = %#v", cu1)
+	}
+	for _, selection := range cu1.Packages {
+		if got, want := len(selection.FullTestIDs), wantCU1Counts[selection.Package]; got != want {
+			t.Fatalf("CU-1 manifest package %s has %d tests, want %d", selection.Package, got, want)
+		}
+	}
+	if _, err := CanonicalCUManifestV1("CU-2"); err == nil {
+		t.Fatal("returned a manifest for absent CU-2")
 	}
 }
 

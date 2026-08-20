@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -193,6 +195,7 @@ func runProxyPin(args []string) error {
 type proxyCommandOptions struct {
 	Port                 int
 	MigrateLegacyManaged bool
+	JSON                 bool
 }
 
 type proxyRegistryDependencies struct {
@@ -306,6 +309,11 @@ func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOpt
 				return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 			}
 			opts.MigrateLegacyManaged = true
+		case "--json":
+			if command != "proxy status" {
+				return opts, fmt.Errorf("%s: unknown argument", command)
+			}
+			opts.JSON = true
 		default:
 			return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 		}
@@ -790,17 +798,13 @@ func reloadProxyConfig(selector *proxy.PinnedClaudeSelector, routing *proxy.Code
 }
 
 func runProxyStatus(opts proxyCommandOptions) error {
-	cfg, err := proxy.LoadConfig()
+	port, err := loadProxyStatusPort(opts)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if opts.Port != 0 {
-		cfg.Port = opts.Port
-	}
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.Port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(addr)
+	addr := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	resp, err := proxyStatusGet(addr)
 	if err != nil {
 		return fmt.Errorf("proxy not running: %w", err)
 	}
@@ -814,4 +818,116 @@ func runProxyStatus(opts proxyCommandOptions) error {
 	data, _ := json.MarshalIndent(health, "", "  ")
 	fmt.Println(string(data))
 	return nil
+}
+
+var proxyStatusGet = func(addr string) (*http.Response, error) {
+	return (&http.Client{Timeout: 5 * time.Second}).Get(addr)
+}
+
+func loadProxyStatusPort(opts proxyCommandOptions) (int, error) {
+	if opts.Port != 0 {
+		return opts.Port, nil
+	}
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" || !filepath.IsAbs(configHome) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			configHome = filepath.Join(os.TempDir(), "cq-config")
+		} else {
+			configHome = filepath.Join(home, ".config")
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(configHome, "cq", "proxy.json"))
+	if os.IsNotExist(err) {
+		return proxy.DefaultPort, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read proxy config: %w", err)
+	}
+	var cfg proxy.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("parse proxy config: %w", err)
+	}
+	setProxyStatusConfigDefaults(&cfg)
+	if err := validateProxyStatusConfig(&cfg); err != nil {
+		return 0, err
+	}
+	return cfg.Port, nil
+}
+
+func setProxyStatusConfigDefaults(cfg *proxy.Config) {
+	if cfg.Port == 0 {
+		cfg.Port = proxy.DefaultPort
+	}
+	if cfg.ClaudeUpstream == "" {
+		cfg.ClaudeUpstream = proxy.DefaultUpstream
+	}
+	if cfg.CodexUpstream == "" {
+		cfg.CodexUpstream = proxy.DefaultCodexUpstream
+	}
+	if cfg.CodexTurnRouting == "" {
+		cfg.CodexTurnRouting = proxy.CodexRoutingOff
+	}
+	if cfg.CodexWSTurnRouting == "" {
+		cfg.CodexWSTurnRouting = proxy.CodexRoutingOff
+	}
+	if cfg.CodexLeaseRetentionDays == 0 {
+		cfg.CodexLeaseRetentionDays = 7
+	}
+}
+
+func validateProxyStatusConfig(cfg *proxy.Config) error {
+	if cfg.LocalToken == "" {
+		return errors.New("local_token is required")
+	}
+	if _, err := url.Parse(cfg.ClaudeUpstream); err != nil {
+		return fmt.Errorf("invalid claude_upstream URL: %w", err)
+	}
+	if _, err := url.Parse(cfg.CodexUpstream); err != nil {
+		return fmt.Errorf("invalid codex_upstream URL: %w", err)
+	}
+	if cfg.HeadroomMode != "" && cfg.HeadroomMode != "token" && cfg.HeadroomMode != "cache" {
+		return fmt.Errorf("invalid headroom_mode %q: must be \"token\" or \"cache\"", cfg.HeadroomMode)
+	}
+	if err := validateProxyStatusRoutingMode("codex_turn_routing", cfg.CodexTurnRouting); err != nil {
+		return err
+	}
+	if err := validateProxyStatusRoutingMode("codex_ws_turn_routing", cfg.CodexWSTurnRouting); err != nil {
+		return err
+	}
+	if cfg.CodexLeaseRetentionDays < 1 || cfg.CodexLeaseRetentionDays > 365 {
+		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", cfg.CodexLeaseRetentionDays)
+	}
+	if cfg.CodexContinuityStateDir != "" {
+		clean := filepath.Clean(cfg.CodexContinuityStateDir)
+		if !filepath.IsAbs(cfg.CodexContinuityStateDir) || clean != cfg.CodexContinuityStateDir || clean == string(filepath.Separator) {
+			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", cfg.CodexContinuityStateDir)
+		}
+	}
+	seenRoutingAccounts := make(map[string]bool, len(cfg.CodexRoutingAccountKeys))
+	for _, accountKey := range cfg.CodexRoutingAccountKeys {
+		key := string(accountKey)
+		if key == "" || seenRoutingAccounts[key] {
+			return errors.New("invalid codex_routing_account_keys: keys must be non-empty and unique")
+		}
+		seenRoutingAccounts[key] = true
+	}
+	if len(seenRoutingAccounts) != 0 && cfg.CodexRoutingDefaultAccountKey != "" && !seenRoutingAccounts[string(cfg.CodexRoutingDefaultAccountKey)] {
+		return errors.New("invalid codex_routing_default_account_key: account is not allowed for routing")
+	}
+	for scope, modelID := range cfg.CodexWindowPriming.ModelOverrides {
+		if strings.TrimSpace(scope) == "" || strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("invalid Codex window priming model override %q", scope)
+		}
+	}
+	return nil
+}
+
+func validateProxyStatusRoutingMode(field string, mode proxy.CodexRoutingMode) error {
+	switch mode {
+	case proxy.CodexRoutingOff, proxy.CodexRoutingObserve, proxy.CodexRoutingEnforce:
+		return nil
+	default:
+		return fmt.Errorf("invalid %s %q: must be \"off\", \"observe\", or \"enforce\"", field, mode)
+	}
 }

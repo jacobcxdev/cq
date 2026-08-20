@@ -508,8 +508,8 @@ func TestShellWrappersRejectArityBeforeGoOrTemporaryWork(t *testing.T) {
 	}{
 		{path: "scripts/build-proxy-release", want: "expected exactly one release-build manifest"},
 		{path: "scripts/verify-blueprint-review", args: []string{"extra"}, want: "expected no arguments"},
-		{path: "scripts/verify-proxy-cu", want: "expected exactly one CU-0 or --self-test argument"},
-		{path: "scripts/verify-proxy-cu", args: []string{"CU-0", "extra"}, want: "expected exactly one CU-0 or --self-test argument"},
+		{path: "scripts/verify-proxy-cu", want: "expected exactly one CU-0, CU-1, or --self-test argument"},
+		{path: "scripts/verify-proxy-cu", args: []string{"CU-0", "extra"}, want: "expected exactly one CU-0, CU-1, or --self-test argument"},
 	}
 	for _, fixture := range fixtures {
 		t.Run(strings.ReplaceAll(fixture.path+strings.Join(fixture.args, "_"), "/", "_"), func(t *testing.T) {
@@ -540,6 +540,18 @@ func TestVerifyProxyCUWrapperRunsCU0(t *testing.T) {
 	command.Dir = repositoryRoot
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("verify-proxy-cu CU-0: %v\n%s", err, output)
+	}
+}
+
+func TestVerifyProxyCUWrapperRunsCU1(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(filepath.Join(repositoryRoot, "scripts", "verify-proxy-cu"), "CU-1")
+	command.Dir = repositoryRoot
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("verify-proxy-cu CU-1: %v\n%s", err, output)
 	}
 }
 
@@ -676,9 +688,23 @@ func TestVerifyTestEventsRejectsCorruptEvidence(t *testing.T) {
 }
 
 func TestRunRejectsAbsentAndUnmanifestedCU(t *testing.T) {
-	for _, args := range [][]string{{"unit"}, {"unit", "CU-1"}, {"unit", "CU-0", "extra"}} {
+	for _, args := range [][]string{{"unit"}, {"unit", "CU-2"}, {"unit", "CU-0", "extra"}} {
 		if err := run(args, testDependencies{}); err == nil {
 			t.Fatalf("run(%v) accepted invalid unit invocation", args)
 		}
+	}
+}
+
+func TestRunAcceptsManifestedCU1(t *testing.T) {
+	var got string
+	err := run([]string{"CU-1"}, testDependencies{Unit: func(cuID string) error {
+		got = cuID
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "CU-1" {
+		t.Fatalf("unit = %q, want CU-1", got)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -252,6 +253,51 @@ func isHelpToken(arg string) bool {
 // runPureGlobalInspection handles global read-only commands before any
 // compatibility or configuration initialisation can create user state.
 func runPureGlobalInspection(args []string, stdout, stderr io.Writer) (bool, int, error) {
+	return runPureGlobalInspectionWithTarget(args, stdout, stderr, defaultProxyInspectionTarget())
+}
+
+func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, target ProxyInspectionTarget) (bool, int, error) {
+	authority, err := ClassifyProxyCommand(args)
+	if err != nil {
+		return true, 64, err
+	}
+	if authority.Catalogue == "proxy" && authority.Row == "proxy_status" && !authority.Terminating {
+		arguments, ok := authority.Arguments.(ProxyStatusArgumentsV1)
+		if !ok {
+			return true, 64, errors.New("proxy status usage")
+		}
+		mode := ProxyRenderHuman
+		if arguments.JSON {
+			mode = ProxyRenderJSON
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		snapshot := InspectProxy(ctx, target)
+		if err := RenderProxySnapshot(stdout, snapshot, mode); err != nil {
+			return true, 1, err
+		}
+		return true, snapshot.ExitCode, nil
+	}
+	if authority.Catalogue == "proxy" && authority.Row == "proxy_status_frozen" && !authority.Terminating {
+		opts, parseErr := parseProxyCommandOptionsFor("proxy status", args[2:])
+		if parseErr != nil {
+			return true, 1, parseErr
+		}
+		if statusErr := runProxyStatus(opts); statusErr != nil {
+			return true, 1, statusErr
+		}
+		return true, 0, nil
+	}
+	if len(args) >= 3 && args[0] == "proxy" && args[1] == "status" && args[2] == "--port" && authority.Row == "ordinary_usage_error" && !proxyStatusHasReconciledSelector(args[3:]) {
+		_, parseErr := parseProxyCommandOptionsFor("proxy status", args[2:])
+		if parseErr == nil {
+			parseErr = errors.New("proxy status usage")
+		}
+		return true, 1, parseErr
+	}
+	if len(args) >= 2 && args[0] == "proxy" && args[1] == "status" && authority.Row == "ordinary_usage_error" && (len(args) < 3 || args[2] != "--migrate-legacy-managed") {
+		return true, 64, errors.New("proxy status usage")
+	}
 	if result := classifyInterceptedInspection(args); result.handled {
 		if len(result.helpPath) > 0 {
 			writer := stdout
@@ -306,6 +352,16 @@ func runPureGlobalInspection(args []string, stdout, stderr io.Writer) (bool, int
 		return true, exitCode, nil
 	}
 	return false, 0, nil
+}
+
+func proxyStatusHasReconciledSelector(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "--json", "--human", "--strict", "--timeout", "--instance-state-root":
+			return true
+		}
+	}
+	return false
 }
 
 type interceptedInspectionResult struct {
