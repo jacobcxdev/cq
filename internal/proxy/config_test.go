@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,17 @@ import (
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestLoadExistingConfigDoesNotCreateMissingState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	if _, err := LoadExistingConfig(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cq")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config directory created: %v", err)
+	}
+}
 
 func TestConfigDiagnosticsLogJSONRoundTrip(t *testing.T) {
 	cfg := Config{

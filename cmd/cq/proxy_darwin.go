@@ -20,13 +20,16 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
 	"text/template"
+	"time"
 	"unsafe"
 
+	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"golang.org/x/sys/unix"
@@ -122,7 +125,57 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		return err
 	}
 	defer admissions.Close()
-	return proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}, serve)
+	workerManifest := proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}
+	cfg, err := proxy.LoadExistingConfig()
+	if errors.Is(err, os.ErrNotExist) || (err == nil && cfg.ResolvedProxyResilienceStateDir() == "") {
+		return proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, serve)
+	}
+	if err != nil {
+		return err
+	}
+	state, err := proxy.OpenProxyResilienceState(ctx, proxy.ProxyResilienceStateOptions{
+		FS: fsutil.OSFileSystem{}, Root: cfg.ResolvedProxyResilienceStateDir(), Random: rand.Reader, Now: time.Now,
+	})
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+	callerKey := make([]byte, sha256.Size)
+	if _, err := rand.Read(callerKey); err != nil {
+		return err
+	}
+	callerAuthority, err := proxy.NewNormalCallerAuthority(callerKey, 1, []proxy.NormalCallerCredentialV1{{
+		Domain: proxy.NormalCallerLocal, Bearer: cfg.LocalToken, SubjectID: "local-control",
+	}}, admissions, time.Now, rand.Reader)
+	for index := range callerKey {
+		callerKey[index] = 0
+	}
+	if err != nil {
+		return err
+	}
+	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
+	if err != nil {
+		return err
+	}
+	transport := &http.Client{
+		Transport: http.DefaultTransport,
+		Timeout:   60 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("rescue redirect refused")
+		},
+	}
+	return proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, func(supervisor *proxy.RuntimeSupervisor) error {
+		if err := supervisor.SetCallerAuthority(callerAuthority); err != nil {
+			return err
+		}
+		relay := &proxy.RescueRelay{
+			Transport: transport, DialWS: websocket.DefaultDialer, Origin: origin,
+			LoopbackHost: listener.Addr().String(), ForwardingAcknowledged: true,
+			DenyBearer: supervisor.DeniesNormalBearer, Budget: proxy.NewRescueBudget(time.Now, state.RescueFairnessKey()),
+			Admission: func(*http.Request) proxy.RescueIngressKind { return proxy.RescueIngressUnverified },
+		}
+		return supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode)
+	}, serve)
 }
 
 func openDarwinRuntimeLifecycle(path, role string) (*os.File, proxy.LifecycleHolderProof, error) {

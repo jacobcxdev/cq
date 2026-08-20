@@ -76,6 +76,10 @@ func RunValidatedRuntimeSupervisorRole(ctx context.Context, manifest RuntimeRole
 }
 
 func RunAdoptedRuntimeSupervisor(ctx context.Context, listener net.Listener, holder LifecycleHolderProof, launcher RuntimeWorkerLauncher, checkpoints RuntimeHolderCheckpointStore, admissions NormalCallerAdmissionConsumer, workerManifest WorkerManifestV1, serve func(context.Context, net.Listener, http.Handler) error) (returnErr error) {
+	return RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, checkpoints, admissions, workerManifest, nil, serve)
+}
+
+func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Listener, holder LifecycleHolderProof, launcher RuntimeWorkerLauncher, checkpoints RuntimeHolderCheckpointStore, admissions NormalCallerAdmissionConsumer, workerManifest WorkerManifestV1, configure func(*RuntimeSupervisor) error, serve func(context.Context, net.Listener, http.Handler) error) (returnErr error) {
 	supervisor, err := NewRuntimeSupervisor(listener, holder, launcher, checkpoints)
 	if err != nil {
 		return err
@@ -84,9 +88,6 @@ func RunAdoptedRuntimeSupervisor(ctx context.Context, listener net.Listener, hol
 		if err := supervisor.SetCallerAdmissionConsumer(admissions); err != nil {
 			return err
 		}
-	}
-	if _, err := supervisor.Boot(ctx, workerManifest); err != nil {
-		return err
 	}
 	defer func() {
 		supervisor.mu.Lock()
@@ -100,6 +101,28 @@ func RunAdoptedRuntimeSupervisor(ctx context.Context, listener net.Listener, hol
 			supervisor.worker = nil
 		}
 	}()
+	supervisor.mu.Lock()
+	supervisor.workerManifest = workerManifest
+	supervisor.mu.Unlock()
+	if configure != nil {
+		if err := configure(supervisor); err != nil {
+			return err
+		}
+	}
+	switch supervisor.TrafficMode() {
+	case TrafficModeNormal:
+		if _, err := supervisor.Boot(ctx, workerManifest); err != nil {
+			return err
+		}
+	case TrafficModeRescue:
+		// Durable rescue mode intentionally starts without a normal worker.
+	case TrafficModeRescueDraining, TrafficModeRescueExitDraining:
+		if err := supervisor.ReconcileRescue(ctx, workerManifest); err != nil {
+			return err
+		}
+	default:
+		return ErrRuntimeSupervisorUnavailable
+	}
 	return serve(ctx, listener, supervisor)
 }
 
@@ -134,8 +157,11 @@ var (
 )
 
 const (
-	runtimeCrashWindow = 10 * time.Minute
-	runtimeCrashLimit  = 3
+	runtimeCrashWindow      = 10 * time.Minute
+	runtimeCrashLimit       = 3
+	RuntimeRescueEnterPath  = "/_cq/control/rescue/enter"
+	RuntimeRescueExitPath   = "/_cq/control/rescue/exit"
+	RuntimeRescueStatusPath = "/_cq/control/rescue/status"
 )
 
 type RuntimeWorkerProcess interface {
@@ -192,6 +218,7 @@ type RuntimeSupervisor struct {
 	launcher         RuntimeWorkerLauncher
 	checkpoints      RuntimeHolderCheckpointStore
 	worker           RuntimeWorkerProcess
+	workerManifest   WorkerManifestV1
 	checkpointDigest string
 	sequence         uint64
 	admissionReady   bool
@@ -329,6 +356,16 @@ func (supervisor *RuntimeSupervisor) AdmissionReady() bool {
 	return supervisor.admissionReady
 }
 
+func (supervisor *RuntimeSupervisor) DeniesNormalBearer(bearer []byte) bool {
+	if supervisor == nil {
+		return false
+	}
+	supervisor.mu.RLock()
+	authority := supervisor.callerAuthority
+	supervisor.mu.RUnlock()
+	return authority.DeniesBearer(bearer)
+}
+
 func (supervisor *RuntimeSupervisor) PendingRelease() RuntimeWorkerReleaseV1 {
 	if supervisor == nil {
 		return RuntimeWorkerReleaseV1{}
@@ -346,6 +383,10 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	if request.Method == http.MethodGet && request.URL.EscapedPath() == "/health" {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(writer, "{\"status\":\"ok\"}\n")
+		return
+	}
+	if request.URL != nil && (request.URL.EscapedPath() == RuntimeRescueEnterPath || request.URL.EscapedPath() == RuntimeRescueExitPath || request.URL.EscapedPath() == RuntimeRescueStatusPath) {
+		supervisor.serveRescueControl(writer, request)
 		return
 	}
 	supervisor.mu.Lock()
@@ -451,6 +492,69 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	}
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(response.Body)
+}
+
+func (supervisor *RuntimeSupervisor) serveRescueControl(writer http.ResponseWriter, request *http.Request) {
+	path := request.URL.EscapedPath()
+	wantMethod := http.MethodPost
+	if path == RuntimeRescueStatusPath {
+		wantMethod = http.MethodGet
+	}
+	if request.Method != wantMethod {
+		writer.Header().Set("Allow", wantMethod)
+		http.Error(writer, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	supervisor.mu.RLock()
+	authority := supervisor.callerAuthority
+	supervisor.mu.RUnlock()
+	authentication, err := authority.authenticate(request, normalCallerRouteLocal)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, ErrNormalCallerAuthScope) {
+			status = http.StatusForbidden
+		} else if errors.Is(err, ErrNormalCallerAuthUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(writer, http.StatusText(status), status)
+		return
+	}
+	if request.Body != nil {
+		body, readErr := io.ReadAll(io.LimitReader(request.Body, 1))
+		if readErr != nil || len(body) != 0 {
+			http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+	}
+	if _, err := authority.consume(request.Context(), authentication, request); err != nil {
+		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	switch path {
+	case RuntimeRescueEnterPath:
+		err = supervisor.EnterRescue(request.Context())
+	case RuntimeRescueExitPath:
+		supervisor.mu.RLock()
+		manifest := supervisor.workerManifest
+		supervisor.mu.RUnlock()
+		err = supervisor.ExitRescue(request.Context(), manifest)
+	case RuntimeRescueStatusPath:
+		// Authenticated read only.
+	default:
+		err = ErrRuntimeSupervisorUnavailable
+	}
+	if err != nil {
+		http.Error(writer, "rescue transition unavailable", http.StatusConflict)
+		return
+	}
+	supervisor.mu.RLock()
+	response := struct {
+		Mode       TrafficMode `json:"mode"`
+		Generation uint64      `json:"generation"`
+	}{Mode: supervisor.trafficMode, Generation: supervisor.modeGeneration}
+	supervisor.mu.RUnlock()
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(response)
 }
 
 func (supervisor *RuntimeSupervisor) releaseNormalAdmission() {
@@ -707,6 +811,7 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeCheckpointUnavailable, err)
 	}
 	supervisor.worker = worker
+	supervisor.workerManifest = manifest
 	supervisor.checkpointDigest = digest
 	supervisor.admissionReady = true
 	return ack, nil

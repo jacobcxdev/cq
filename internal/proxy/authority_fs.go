@@ -68,11 +68,14 @@ func (publisher *AuthorityObjectPublisher) ReplaceSelectorExactPrior(ctx context
 	}
 	release, err := publisher.cas.AcquireSelectorCAS(ctx, publisher.inspector, directory)
 	if err != nil {
-		return StableObjectIdentity{}, err
+		return StableObjectIdentity{}, fmt.Errorf("acquire selector CAS: %w", err)
 	}
 	identity, publishErr := publisher.publish(ctx, directory, name, prior, body, prior == nil, func() error {
 		return publisher.cas.validateSelectorCAS(directory)
 	})
+	if publishErr != nil {
+		publishErr = fmt.Errorf("publish selector: %w", publishErr)
+	}
 	return identity, errors.Join(publishErr, release())
 }
 
@@ -154,12 +157,18 @@ func (lock *SelectorCASLock) AcquireSelectorCAS(ctx context.Context, _ fsutil.Se
 }
 
 func (lock *SelectorCASLock) validateSelectorCAS(directory fsutil.SecureDirectory) error {
-	if lock == nil || lock.state == nil || lock.state.closed || directory == nil {
-		return ErrAuthorityCASCapability
+	if lock == nil || lock.state == nil || directory == nil {
+		return fmt.Errorf("%w: missing lock state", ErrAuthorityCASCapability)
+	}
+	if lock.state.closed {
+		return fmt.Errorf("%w: lock closed", ErrAuthorityCASCapability)
 	}
 	directoryIdentity, err := authorityDirectoryIdentity(lock.state.inspector, directory)
-	if err != nil || directoryIdentity != lock.state.directoryIdentity {
-		return ErrAuthorityCASCapability
+	if err != nil {
+		return fmt.Errorf("%w: directory validation: %v", ErrAuthorityCASCapability, err)
+	}
+	if directoryIdentity.Device != lock.state.directoryIdentity.Device || directoryIdentity.Inode != lock.state.directoryIdentity.Inode {
+		return fmt.Errorf("%w: directory identity changed", ErrAuthorityCASCapability)
 	}
 	if err := validateSelectorCASLockPath(lock.state.inspector, directory, lock.state.name, lock.state.identity); err != nil {
 		return fmt.Errorf("%w: lock path identity", ErrAuthorityCASCapability)

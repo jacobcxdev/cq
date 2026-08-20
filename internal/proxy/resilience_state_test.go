@@ -59,6 +59,9 @@ func TestProxyResilienceStateOpenIsNonCreatingAndReopensPolicy(t *testing.T) {
 	if reopened.DispatchPermits == nil || reopened.RuntimeMode == nil {
 		t.Fatal("state owner omitted production authorities")
 	}
+	if err := reopened.RuntimeMode.Commit(context.Background(), RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: 1, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescueDraining, Phase: RuntimeModePhaseIntent}); err != nil {
+		t.Fatalf("runtime mode commit: %v", err)
+	}
 }
 
 func TestProxyResilienceStateRejectsUnsafeRoot(t *testing.T) {

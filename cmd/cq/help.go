@@ -56,6 +56,7 @@ Commands:
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
   proxy policy        Initialise, apply, or inspect routing policy
+  proxy rescue        Enter, exit, or inspect rescue mode
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
 
@@ -101,6 +102,11 @@ Commands:
   initialise --state-root DIR         Create authority state and activate it in proxy config
   apply --file FILE [--state-root DIR] Publish next routing-policy generation
   status [--state-root DIR]           Print selected routing policy as JSON
+`,
+	"proxy rescue": `Usage: cq proxy rescue <enter|exit|status> [--port PORT]
+
+Control durable rescue mode on the loopback proxy. Requests require the local
+proxy token and never send it upstream.
 `,
 	"proxy pin": `Usage: cq proxy pin [--clear | <email-or-account-uuid>]
 

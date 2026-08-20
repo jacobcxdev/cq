@@ -171,6 +171,11 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, []string{"proxy", "policy"})
 		}
 		return runProxyPolicy(args[1:], os.Stdout)
+	case "rescue":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "rescue"})
+		}
+		return runProxyRescue(args[1:], os.Stdout)
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}

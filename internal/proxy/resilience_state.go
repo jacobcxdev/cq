@@ -41,6 +41,7 @@ type ProxyResilienceState struct {
 	modeDir     fsutil.SecureDirectory
 	routingLock *SelectorCASLock
 	modeLock    *SelectorCASLock
+	rescueKey   [sha256.Size]byte
 }
 
 func validateProxyResilienceStateOptions(ctx context.Context, options ProxyResilienceStateOptions) error {
@@ -157,12 +158,18 @@ func OpenProxyResilienceState(ctx context.Context, options ProxyResilienceStateO
 	if len(key) != sha256.Size {
 		return nil, errors.New("proxy resilience authority key invalid")
 	}
+	rescueKey, err := DeriveAuthorityKey(key, "cq/proxy-resilience/rescue-fairness/v1", sha256.Size)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroRuntimeBytes(rescueKey)
 	for _, name := range []string{proxyRoutingDirectoryName, proxyDispatchDirectoryName, proxyModeDirectoryName} {
 		if err := fsutil.ValidateSecureDirectory(options.FS, filepath.Join(options.Root, name)); err != nil {
 			return nil, err
 		}
 	}
 	state := &ProxyResilienceState{}
+	copy(state.rescueKey[:], rescueKey)
 	defer func() {
 		if returnErr != nil {
 			returnErr = errors.Join(returnErr, state.Close())
@@ -216,6 +223,18 @@ func OpenProxyResilienceState(ctx context.Context, options ProxyResilienceStateO
 	return state, nil
 }
 
+func (state *ProxyResilienceState) RescueFairnessKey() [sha256.Size]byte {
+	if state == nil {
+		return [sha256.Size]byte{}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed {
+		return [sha256.Size]byte{}
+	}
+	return state.rescueKey
+}
+
 func (state *ProxyResilienceState) Close() error {
 	if state == nil {
 		return nil
@@ -226,6 +245,7 @@ func (state *ProxyResilienceState) Close() error {
 		return nil
 	}
 	state.closed = true
+	zeroRuntimeBytes(state.rescueKey[:])
 	var err error
 	if state.DispatchPermits != nil {
 		err = errors.Join(err, state.DispatchPermits.Close())

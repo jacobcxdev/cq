@@ -354,12 +354,33 @@ func (authority *NormalCallerAuthority) fingerprint(bearer string) [sha256.Size]
 }
 
 func normalCallerFingerprint(key []byte, bearer string) [sha256.Size]byte {
+	return normalCallerFingerprintBytes(key, []byte(bearer))
+}
+
+func normalCallerFingerprintBytes(key, bearer []byte) [sha256.Size]byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte("cq/normal-caller-fingerprint/v1\x00"))
-	_, _ = mac.Write([]byte(bearer))
+	_, _ = mac.Write(bearer)
 	var result [sha256.Size]byte
 	copy(result[:], mac.Sum(nil))
 	return result
+}
+
+// DeniesBearer reports whether bearer belongs to any registered normal caller.
+// Rescue uses this to prevent CQ-owned credentials from crossing its relay.
+func (authority *NormalCallerAuthority) DeniesBearer(bearer []byte) bool {
+	if authority == nil || len(bearer) == 0 {
+		return false
+	}
+	fingerprint := normalCallerFingerprintBytes(authority.key, bearer)
+	authority.mu.RLock()
+	defer authority.mu.RUnlock()
+	for _, entry := range authority.entries {
+		if subtle.ConstantTimeCompare(fingerprint[:], entry.fingerprint[:]) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func exactBearer(request *http.Request) (string, error) {

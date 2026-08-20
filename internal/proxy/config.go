@@ -234,10 +234,20 @@ func (c *Config) validate() error {
 // LoadConfig reads proxy config from disk, generating defaults on first run.
 func LoadConfig() (*Config, error) {
 	path := filepath.Join(configDir(), "proxy.json")
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	cfg, err := loadConfigFile(path)
+	if errors.Is(err, os.ErrNotExist) {
 		return generateDefaultConfig(path)
 	}
+	return cfg, err
+}
+
+// LoadExistingConfig reads proxy config without creating state when absent.
+func LoadExistingConfig() (*Config, error) {
+	return loadConfigFile(filepath.Join(configDir(), "proxy.json"))
+}
+
+func loadConfigFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read proxy config: %w", err)
 	}
