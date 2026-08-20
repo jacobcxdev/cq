@@ -108,6 +108,18 @@ Commands:
 Control durable rescue mode on the loopback proxy. Requests require the local
 proxy token and never send it upstream.
 `,
+	"proxy candidate receipt show": `Usage: cq proxy candidate receipt show --instance-state-root PATH --attempt-id ID [--json]
+
+Read one exact retained candidate release receipt without creating state.
+`,
+	"operation status": `Usage: cq operation status [--operation-id ID] [--json]
+
+Read one authenticated local operation or report idle state.
+`,
+	"operation recover": `Usage: cq operation recover --operation-id ID [--json]
+
+Return a retained terminal result or reconcile an active operation when control is available.
+`,
 	"proxy pin": `Usage: cq proxy pin [--clear | <email-or-account-uuid>]
 
 Pin Claude proxy routing to a specific account, show the current pin, or clear it.
@@ -288,11 +300,52 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
 		defer cancel()
+		if arguments.InstanceStateRoot != "" {
+			target = proxyInspectionTargetForRoot(arguments.InstanceStateRoot)
+		}
 		snapshot := InspectProxy(ctx, target)
 		if err := RenderProxySnapshot(stdout, snapshot, mode); err != nil {
 			return true, 1, err
 		}
 		return true, snapshot.ExitCode, nil
+	}
+	if authority.Catalogue == "proxy" && authority.Row == "proxy_rescue" && !authority.Terminating {
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		if err := runProxyRescueContext(ctx, args[2:], stdout); err != nil {
+			return true, 1, err
+		}
+		return true, 0, nil
+	}
+	if authority.Catalogue == "proxy" && authority.Row == "proxy_policy_status" && !authority.Terminating {
+		if err := runProxyPolicy(args[2:], stdout); err != nil {
+			return true, 1, err
+		}
+		return true, 0, nil
+	}
+	if authority.Catalogue == "operator_recovery" && !authority.Terminating {
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		switch arguments := authority.Arguments.(type) {
+		case OperatorStatusArgumentsV1:
+			exitCode, runErr := runOperatorOperation(ctx, stdout, "status", arguments.OperationID, arguments.JSON)
+			return true, exitCode, runErr
+		case OperatorRecoverArgumentsV1:
+			exitCode, runErr := runOperatorOperation(ctx, stdout, "recover", arguments.OperationID, arguments.JSON)
+			return true, exitCode, runErr
+		default:
+			return true, 64, errors.New("operation usage")
+		}
+	}
+	if authority.Catalogue == "proxy" && authority.Row == "candidate_receipt_show" && !authority.Terminating {
+		arguments, ok := authority.Arguments.(CandidateReceiptLookupArgumentsV1)
+		if !ok {
+			return true, 64, errors.New("candidate receipt usage")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		exitCode, runErr := runCandidateReceiptLookup(ctx, stdout, arguments)
+		return true, exitCode, runErr
 	}
 	if authority.Catalogue == "proxy" && authority.Row == "proxy_status_frozen" && !authority.Terminating {
 		opts, parseErr := parseProxyCommandOptionsFor("proxy status", args[2:])
@@ -480,6 +533,11 @@ func validateProxyLexicalGrammar(args []string) error {
 		}
 		_, err := parseProxyPolicyOptions(args[2:])
 		return err
+	case "rescue":
+		if !validProxyRescueArguments(args[1:]) {
+			return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
+		}
+		return nil
 	case "install", "uninstall", "restart":
 		return nil
 	default:
@@ -694,7 +752,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "codex-default": true, "prime": true, "endpoint": true, "policy": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "codex-default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -714,6 +772,8 @@ func manualHelpInspectionPath(args []string) ([]string, bool) {
 		return nil, false
 	}
 	switch args[0] {
+	case "operation":
+		return interceptedGroupHelpPath("operation", args[1:], map[string]bool{"status": true, "recover": true})
 	case "refresh":
 		return []string{"refresh"}, true
 	case "agent":
@@ -792,10 +852,19 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 		}
 		return nil, false
 	}
+	if args[0] == "rescue" {
+		if len(args) == 1 || helpRequested(args[1:]) {
+			return []string{"proxy", "rescue"}, true
+		}
+		return nil, false
+	}
+	if len(args) >= 3 && args[0] == "candidate" && args[1] == "receipt" && args[2] == "show" && helpRequested(args[3:]) {
+		return []string{"proxy", "candidate", "receipt", "show"}, true
+	}
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
 		"validate-http": true, "status": true, "pin": true, "codex-default": true,
-		"policy": true,
+		"policy": true, "rescue": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)
 }
@@ -868,7 +937,7 @@ func isInterceptedCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "refresh", "agent", "proxy", "models":
+	case "refresh", "agent", "proxy", "models", "operation":
 		return true
 	case "codex":
 		return len(args) > 1 && (args[1] == "validate" || args[1] == "canary")

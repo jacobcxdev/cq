@@ -1,3 +1,5 @@
+//go:build !windows
+
 package proxy
 
 import (
@@ -527,15 +529,15 @@ func CanonicalCUManifestV1(cuID string) ([]byte, error) {
 	sort.Strings(proxyCUSelection.FullTestIDs)
 	proxyCUSelection.MinimumPassCount = len(proxyCUSelection.FullTestIDs)
 	releaseSelection := newCUTestPackage("./internal/tools/proxyrelease",
-		"TestBuildProxyReleaseShellEntryParsesThenRefusesInactivePurpose",
+		"TestBuildProxyReleaseShellEntryParsesThenRequiresExactSource",
 		"TestBuildProxyReleaseShellEntryRejectsMissingManifest",
 		"TestParseReleaseBuildManifestAcceptsClosedRequestAndRejectsUnknown",
 		"TestReadReleaseBuildManifestRejectsSymlink",
-		"TestRunFailsFeatureInactiveBeforeReleaseWork",
+		"TestRunRequiresExactSourceBeforeReleaseWork",
 	)
 	releaseSelection.FullTestIDs = append(releaseSelection.FullTestIDs,
-		"TestRunFailsFeatureInactiveBeforeReleaseWork/floor",
-		"TestRunFailsFeatureInactiveBeforeReleaseWork/target",
+		"TestRunRequiresExactSourceBeforeReleaseWork/floor",
+		"TestRunRequiresExactSourceBeforeReleaseWork/target",
 	)
 	sort.Strings(releaseSelection.FullTestIDs)
 	releaseSelection.MinimumPassCount = len(releaseSelection.FullTestIDs)
@@ -3559,16 +3561,4 @@ func readCUBytes(reader io.Reader, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("input exceeds %d bytes", limit)
 	}
 	return buffer.Bytes(), nil
-}
-
-func requireJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	err := decoder.Decode(&extra)
-	if err == io.EOF {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("decode trailing JSON: %w", err)
-	}
-	return fmt.Errorf("unexpected trailing JSON value")
 }

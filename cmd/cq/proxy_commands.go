@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -51,7 +52,13 @@ type OperatorRecoverArgumentsV1 struct {
 	JSON        bool
 }
 
-type ProxyStatusArgumentsV1 struct{ JSON bool }
+type ProxyStatusArgumentsV1 struct {
+	InstanceStateRoot string
+	JSON              bool
+	Human             bool
+	Strict            bool
+	Timeout           time.Duration
+}
 
 type ModelsListArgumentsV1 struct {
 	Provider string
@@ -194,16 +201,39 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		if len(argv) == 2 {
 			return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_status_frozen", Deadline: CommandDeadlineV1{Total: 5 * time.Second, Forward: 5 * time.Second}}, nil
 		}
-		if len(argv) == 3 && argv[2] == "--json" {
-			return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_status", Arguments: ProxyStatusArgumentsV1{JSON: true}, Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
-		}
 		if len(argv) == 4 && argv[2] == "--port" {
 			port, err := strconv.Atoi(argv[3])
 			if err == nil && port > 0 && port <= 65535 {
 				return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_status_frozen", Deadline: CommandDeadlineV1{Total: 5 * time.Second, Forward: 5 * time.Second}}, nil
 			}
 		}
+		arguments, ok := parseProxyStatusArguments(argv[2:])
+		if ok {
+			deadline := arguments.Timeout
+			if deadline == 0 {
+				deadline = 10 * time.Second
+			}
+			return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_status", Arguments: arguments, Deadline: CommandDeadlineV1{Total: deadline, Forward: deadline}}, nil
+		}
 		return terminatingOrdinary("ordinary_usage_error"), nil
+	}
+	if len(argv) >= 2 && argv[1] == "rescue" {
+		if helpRequested(argv[2:]) {
+			return terminatingOrdinary("ordinary_help"), nil
+		}
+		if !validProxyRescueArguments(argv[2:]) {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_rescue", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
+	}
+	if len(argv) >= 3 && argv[1] == "policy" && argv[2] == "status" {
+		if helpRequested(argv[3:]) {
+			return terminatingOrdinary("ordinary_help"), nil
+		}
+		if _, err := parseProxyPolicyOptions(argv[3:]); err != nil {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_policy_status", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
 	}
 	if len(argv) < 4 || argv[1] != "candidate" || argv[2] != "receipt" || argv[3] != "show" {
 		return terminatingOrdinary("ordinary_usage_error"), nil
@@ -243,6 +273,80 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		return terminatingOrdinary("ordinary_usage_error"), nil
 	}
 	return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_receipt_show", Arguments: arguments, Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
+}
+
+func parseProxyStatusArguments(argv []string) (ProxyStatusArgumentsV1, bool) {
+	var arguments ProxyStatusArgumentsV1
+	for index := 0; index < len(argv); index++ {
+		switch argv[index] {
+		case "--json":
+			if arguments.JSON || arguments.Human {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			arguments.JSON = true
+		case "--human":
+			if arguments.Human || arguments.JSON {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			arguments.Human = true
+		case "--strict":
+			if arguments.Strict {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			arguments.Strict = true
+		case "--instance-state-root":
+			if arguments.InstanceStateRoot != "" || index+1 >= len(argv) {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			root := argv[index+1]
+			clean := filepath.Clean(root)
+			if !filepath.IsAbs(root) || clean != root || clean == string(filepath.Separator) {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			arguments.InstanceStateRoot = root
+			index++
+		case "--timeout":
+			if arguments.Timeout != 0 || index+1 >= len(argv) {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(argv[index+1])
+			if err != nil || duration <= 0 {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+			index++
+		default:
+			if arguments.Timeout != 0 || index != len(argv)-1 {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(argv[index])
+			if err != nil || duration <= 0 {
+				return ProxyStatusArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+		}
+	}
+	if !arguments.JSON && !arguments.Human && !arguments.Strict && arguments.Timeout == 0 && arguments.InstanceStateRoot == "" {
+		return ProxyStatusArgumentsV1{}, false
+	}
+	return arguments, true
+}
+
+func validProxyRescueArguments(argv []string) bool {
+	if len(argv) != 1 && len(argv) != 3 {
+		return false
+	}
+	if argv[0] != "enter" && argv[0] != "exit" && argv[0] != "status" {
+		return false
+	}
+	if len(argv) == 1 {
+		return true
+	}
+	if argv[1] != "--port" {
+		return false
+	}
+	port, err := strconv.Atoi(argv[2])
+	return err == nil && port > 0 && port <= 65535
 }
 
 func classifyModelsAuthority(argv []string) (OrdinaryCommandAuthorityV1, error) {

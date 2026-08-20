@@ -49,14 +49,7 @@ func run(manifestPath string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return releaseProductionFeatureInactive(manifest.Purpose)
-}
-
-func releaseProductionFeatureInactive(purpose string) error {
-	if purpose == "floor" {
-		return fmt.Errorf("feature inactive: floor release requires Task 13/CU-8 construction authority")
-	}
-	return fmt.Errorf("feature inactive: target release requires Task 14/CU-9 construction authority")
+	return buildOperationalRelease(manifest, output)
 }
 
 func readReleaseBuildManifestV1(path string) (releaseBuildManifestV1, error) {

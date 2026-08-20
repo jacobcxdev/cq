@@ -247,3 +247,15 @@ func TestProxyCommandClassifiesCandidateReceiptLookupBeforeState(t *testing.T) {
 		t.Fatalf("duplicate selector = %+v, %v", duplicate, err)
 	}
 }
+
+func TestProxyCommandClassifiesReconciledStatusAndRescue(t *testing.T) {
+	status, err := ClassifyProxyCommand([]string{"proxy", "status", "--instance-state-root", "/tmp/instance", "--human", "--strict", "--timeout", "3s"})
+	arguments, ok := status.Arguments.(ProxyStatusArgumentsV1)
+	if err != nil || status.Row != "proxy_status" || !ok || arguments.InstanceStateRoot != "/tmp/instance" || !arguments.Human || !arguments.Strict || arguments.Timeout != 3*time.Second || status.Deadline.Total != 3*time.Second {
+		t.Fatalf("status authority = %+v args=%+v err=%v", status, arguments, err)
+	}
+	rescue, err := ClassifyProxyCommand([]string{"proxy", "rescue", "status", "--port", "29280"})
+	if err != nil || rescue.Row != "proxy_rescue" || rescue.Terminating {
+		t.Fatalf("rescue authority = %+v err=%v", rescue, err)
+	}
+}

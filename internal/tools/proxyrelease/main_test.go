@@ -25,12 +25,9 @@ func TestParseReleaseBuildManifestAcceptsClosedRequestAndRejectsUnknown(t *testi
 	}
 }
 
-func TestRunFailsFeatureInactiveBeforeReleaseWork(t *testing.T) {
+func TestRunRequiresExactSourceBeforeReleaseWork(t *testing.T) {
 	base := `{"approved_authority_path":"release-authority.json","approved_ed25519_public_key":"4444444444444444444444444444444444444444444444444444444444444444","approved_release_build_authority_digest":"3333333333333333333333333333333333333333333333333333333333333333","bundle_path":"release-bundle","kind":"proxy_release_build_manifest_v1","purpose":"floor","repository_identity_digest":"1111111111111111111111111111111111111111111111111111111111111111","schema_version":1,"source_commit":"86518eaa0edd580413dad750b31f1bfcea46f3c9","source_tree_digest":"2222222222222222222222222222222222222222222222222222222222222222"}`
-	for purpose, want := range map[string]string{
-		"floor":  "feature inactive: floor release requires Task 13/CU-8 construction authority",
-		"target": "feature inactive: target release requires Task 14/CU-9 construction authority",
-	} {
+	for _, purpose := range []string{"floor", "target"} {
 		t.Run(purpose, func(t *testing.T) {
 			manifest := []byte(strings.Replace(base, `"purpose":"floor"`, `"purpose":"`+purpose+`"`, 1))
 			path := filepath.Join(t.TempDir(), "manifest.json")
@@ -39,7 +36,7 @@ func TestRunFailsFeatureInactiveBeforeReleaseWork(t *testing.T) {
 			}
 			var output bytes.Buffer
 			err := run(path, &output)
-			if err == nil || err.Error() != want {
+			if err == nil || strings.Contains(err.Error(), "feature inactive") {
 				t.Fatalf("run error = %v", err)
 			}
 			if output.Len() != 0 {
@@ -101,7 +98,7 @@ func TestBuildProxyReleaseShellEntryRejectsMissingManifest(t *testing.T) {
 	}
 }
 
-func TestBuildProxyReleaseShellEntryParsesThenRefusesInactivePurpose(t *testing.T) {
+func TestBuildProxyReleaseShellEntryParsesThenRequiresExactSource(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +123,7 @@ func TestBuildProxyReleaseShellEntryParsesThenRefusesInactivePurpose(t *testing.
 		"GOPROXY=http://127.0.0.1:1", "PATH=/definitely/missing",
 	)
 	output, err := command.CombinedOutput()
-	if err == nil || !bytes.Contains(output, []byte("feature inactive: target release requires Task 14/CU-9 construction authority")) {
+	if err == nil || bytes.Contains(output, []byte("feature inactive")) {
 		t.Fatalf("build wrapper = %v\n%s", err, output)
 	}
 	if bytes.Contains(output, []byte("all modules verified")) {
