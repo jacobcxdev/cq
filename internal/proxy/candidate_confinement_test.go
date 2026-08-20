@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestCandidateConfinementRejectsCredentialAndProviderAuthority(t *testing.T) {
 	base := CandidateLaunchSpec{CandidateRoot: "/candidate", Inherited: []CandidateInheritedDescriptor{{FD: 3, Purpose: CandidateControllerIPC}}}
@@ -25,7 +28,12 @@ func TestCandidateConfinementRejectsCredentialAndProviderAuthority(t *testing.T)
 			}
 		})
 	}
-	if err := ValidateCandidateConfinement(base); err != nil {
-		t.Fatalf("safe candidate rejected: %v", err)
+	err := ValidateCandidateConfinement(base)
+	if runtime.GOOS == "darwin" {
+		if err != nil {
+			t.Fatalf("safe candidate rejected: %v", err)
+		}
+	} else if err == nil || err.Error() != "candidate platform confinement unavailable" {
+		t.Fatalf("unsupported platform error = %v", err)
 	}
 }
