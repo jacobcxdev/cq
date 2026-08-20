@@ -50,6 +50,8 @@ type proxyCodexNativeHTTPDependencies struct {
 	DefaultAccountKey codexprov.AccountKey
 	Executor          proxy.CodexHTTPAttemptDispatcher
 	Refresher         codexprov.CredentialReferenceRefresher
+	SessionPolicy     *proxy.SessionPolicyResolver
+	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	Headroom          proxy.CodexRequestHeadroom
 	HeadroomMode      proxy.HeadroomMode
 	Upstream          string
@@ -67,6 +69,8 @@ type proxyCodexWebSocketDependencies struct {
 	Runtime           proxy.CodexHTTPRequestPlanRuntime
 	DefaultAccountKey codexprov.AccountKey
 	Executor          proxy.ExplicitWebSocketExecutor
+	SessionPolicy     *proxy.SessionPolicyResolver
+	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	Upstream          string
 	Now               func() time.Time
 
@@ -99,6 +103,8 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		Routes:            deps.Routes,
 		Runtime:           deps.Runtime,
 		DefaultAccountKey: deps.DefaultAccountKey,
+		SessionPolicy:     deps.SessionPolicy,
+		DispatchPermits:   deps.DispatchPermits,
 		Authority: proxy.CodexLeaseAuthorityPolicy{
 			ModeEpoch:                   deps.Status.ModeEpoch,
 			Authoritative:               enforcing,
@@ -161,6 +167,8 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 		Routes:            deps.Routes,
 		Runtime:           deps.Runtime,
 		DefaultAccountKey: deps.DefaultAccountKey,
+		SessionPolicy:     deps.SessionPolicy,
+		DispatchPermits:   deps.DispatchPermits,
 		Authority: proxy.CodexLeaseAuthorityPolicy{
 			ModeEpoch:                   deps.Status.ModeEpoch,
 			Authoritative:               true,

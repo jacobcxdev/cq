@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -165,6 +166,11 @@ func runProxy(args []string) error {
 		return runProxyPrime(args[1:])
 	case "endpoint":
 		return runProxyEndpoint(args[1:])
+	case "policy":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "policy"})
+		}
+		return runProxyPolicy(args[1:], os.Stdout)
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
@@ -528,6 +534,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
+	var resilienceState *proxy.ProxyResilienceState
+	if stateDir := cfg.ResolvedProxyResilienceStateDir(); stateDir != "" {
+		resilienceState, err = proxy.OpenProxyResilienceState(context.Background(), proxy.ProxyResilienceStateOptions{
+			FS: fsys, Root: stateDir, Random: rand.Reader, Now: time.Now,
+		})
+		if err != nil {
+			return fmt.Errorf("proxy resilience state: %w", err)
+		}
+		defer func() { returnErr = errors.Join(returnErr, resilienceState.Close()) }()
+	}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
 	servingAttestor := proxy.NewServingAttestor()
 	httpRequirements, _ := proxy.DefaultCodexRoutingRequirements(version, codexClientBuild)
@@ -784,9 +800,15 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	var codexRoutes proxy.CodexHTTPRequestRouteSnapshotter
 	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
+	var sessionPolicy *proxy.SessionPolicyResolver
+	var dispatchPermits proxy.CallerDispatchPermitAuthority
 	if codexContinuity != nil {
 		codexRoutes = codexContinuity.Coordinator
 		codexPlanRuntime = codexContinuity.Runtime
+	}
+	if resilienceState != nil {
+		sessionPolicy = resilienceState.Routing.Resolver()
+		dispatchPermits = resilienceState.DispatchPermits
 	}
 	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status:            codexRouting.HTTP,
@@ -797,6 +819,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
 		Executor:          codexAttemptExecutor,
 		Refresher:         credentialControl,
+		SessionPolicy:     sessionPolicy,
+		DispatchPermits:   dispatchPermits,
 		Headroom:          proxy.NewCodexRequestHeadroomAdapter(headroom),
 		HeadroomMode:      resolvedMode,
 		Upstream:          cfg.CodexUpstream,
@@ -813,6 +837,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Runtime:           codexPlanRuntime,
 		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
 		Executor:          codexWebSocketExecutor,
+		SessionPolicy:     sessionPolicy,
+		DispatchPermits:   dispatchPermits,
 		Upstream:          cfg.CodexUpstream,
 		Now:               time.Now,
 	})

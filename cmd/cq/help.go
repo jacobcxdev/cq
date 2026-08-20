@@ -55,6 +55,7 @@ Commands:
   proxy codex-default Configure Codex routing default
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
+  proxy policy        Initialise, apply, or inspect routing policy
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
 
@@ -91,6 +92,15 @@ Shared proxy configuration is never changed by this command.
 The command writes only an expiring private request and restarts that service.
 The serving process owns validation and does not write readiness evidence until
 every installed acceptance gate and process attestation succeeds.
+`,
+	"proxy policy": `Usage: cq proxy policy <initialise|apply|status>
+
+Manage authenticated capability-aware routing policy.
+
+Commands:
+  initialise --state-root DIR         Create authority state and activate it in proxy config
+  apply --file FILE [--state-root DIR] Publish next routing-policy generation
+  status [--state-root DIR]           Print selected routing policy as JSON
 `,
 	"proxy pin": `Usage: cq proxy pin [--clear | <email-or-account-uuid>]
 
@@ -458,6 +468,12 @@ func validateProxyLexicalGrammar(args []string) error {
 		}
 	case "endpoint":
 		return validateProxyEndpointLexicalGrammar(args[1:])
+	case "policy":
+		if len(args) == 1 {
+			return nil
+		}
+		_, err := parseProxyPolicyOptions(args[2:])
+		return err
 	case "install", "uninstall", "restart":
 		return nil
 	default:
@@ -672,7 +688,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "codex-default": true, "prime": true, "endpoint": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "codex-default": true, "prime": true, "endpoint": true, "policy": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -764,9 +780,16 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 		}
 		return nil, false
 	}
+	if args[0] == "policy" {
+		if len(args) == 1 || helpRequested(args[1:]) {
+			return []string{"proxy", "policy"}, true
+		}
+		return nil, false
+	}
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
 		"validate-http": true, "status": true, "pin": true, "codex-default": true,
+		"policy": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)
 }

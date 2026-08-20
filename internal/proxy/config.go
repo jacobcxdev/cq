@@ -60,6 +60,7 @@ type Config struct {
 	CodexRoutingAccountKeys       []codex.AccountKey       `json:"codex_routing_account_keys,omitempty"`
 	CodexLeaseRetentionDays       int                      `json:"codex_lease_retention_days"`
 	CodexContinuityStateDir       string                   `json:"codex_continuity_state_dir,omitempty"`
+	ProxyResilienceStateDir       string                   `json:"proxy_resilience_state_dir,omitempty"`
 	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
 
 	unknownFields map[string]json.RawMessage
@@ -74,6 +75,7 @@ var configKnownFields = map[string]bool{
 	"codex_routing_default_account_key": true,
 	"codex_routing_account_keys":        true,
 	"codex_continuity_state_dir":        true,
+	"proxy_resilience_state_dir":        true,
 	"codex_window_priming":              true,
 }
 
@@ -144,6 +146,15 @@ func (c *Config) ResolvedCodexContinuityStateDir() string {
 	return configDir()
 }
 
+// ResolvedProxyResilienceStateDir returns configured durable policy/runtime
+// authority root. Empty keeps resilience features inactive and non-creating.
+func (c *Config) ResolvedProxyResilienceStateDir() string {
+	if c == nil {
+		return ""
+	}
+	return c.ProxyResilienceStateDir
+}
+
 func (c *Config) setDefaults() {
 	if c.Port == 0 {
 		c.Port = DefaultPort
@@ -194,6 +205,12 @@ func (c *Config) validate() error {
 		clean := filepath.Clean(c.CodexContinuityStateDir)
 		if !filepath.IsAbs(c.CodexContinuityStateDir) || clean != c.CodexContinuityStateDir || clean == string(filepath.Separator) {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
+		}
+	}
+	if c.ProxyResilienceStateDir != "" {
+		clean := filepath.Clean(c.ProxyResilienceStateDir)
+		if !filepath.IsAbs(c.ProxyResilienceStateDir) || clean != c.ProxyResilienceStateDir || clean == string(filepath.Separator) {
+			return fmt.Errorf("invalid proxy_resilience_state_dir %q: must be a clean absolute non-root path", c.ProxyResilienceStateDir)
 		}
 	}
 	seenRoutingAccounts := make(map[codex.AccountKey]bool, len(c.CodexRoutingAccountKeys))

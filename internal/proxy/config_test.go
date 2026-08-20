@@ -211,6 +211,32 @@ func TestConfigResolvesCodexContinuityStateDirectory(t *testing.T) {
 	}
 }
 
+func TestConfigProxyResilienceStateDirectoryRoundTripAndValidation(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "resilience")
+	cfg := Config{LocalToken: "token", ClaudeUpstream: DefaultUpstream, CodexUpstream: DefaultCodexUpstream, CodexLeaseRetentionDays: 7, ProxyResilienceStateDir: want}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reopened Config
+	if err := json.Unmarshal(body, &reopened); err != nil {
+		t.Fatal(err)
+	}
+	reopened.setDefaults()
+	if reopened.ProxyResilienceStateDir != want || reopened.ResolvedProxyResilienceStateDir() != want {
+		t.Fatalf("resilience root = %q", reopened.ProxyResilienceStateDir)
+	}
+	if err := reopened.validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{"relative", "/", want + "/../other"} {
+		reopened.ProxyResilienceStateDir = invalid
+		if err := reopened.validate(); err == nil {
+			t.Fatalf("accepted unsafe resilience root %q", invalid)
+		}
+	}
+}
+
 func TestConfigRejectsUnsafeCodexContinuityStateDirectory(t *testing.T) {
 	for _, path := range []string{"relative", "/", "/private/../tmp/cq"} {
 		t.Run(path, func(t *testing.T) {
