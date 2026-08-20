@@ -373,7 +373,7 @@ func runCheck(cli *CLI) error {
 	services := map[provider.ID]provider.Services{
 		provider.Claude: {Usage: claudeprov.New(httpClient)},
 		provider.Codex:  {Usage: codexprov.New(httpClient)},
-		provider.Gemini: {Usage: geminiprov.New(httpClient)},
+		provider.Gemini: {Usage: geminiprov.New()},
 	}
 
 	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini}
