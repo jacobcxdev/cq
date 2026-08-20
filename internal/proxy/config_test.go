@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,56 @@ import (
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestLoadExistingConfigDoesNotCreateMissingState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	if _, err := LoadExistingConfig(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cq")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config directory created: %v", err)
+	}
+}
+
+func TestRescueBootstrapSurvivesInvalidNormalConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	stateRoot := filepath.Join(root, "resilience")
+	if err := SaveConfig(&Config{
+		LocalToken:              "local-token",
+		ClaudeUpstream:          DefaultUpstream,
+		CodexUpstream:           DefaultCodexUpstream,
+		CodexLeaseRetentionDays: 7,
+		ProxyResilienceStateDir: stateRoot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cq", "proxy.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadExistingConfig(); err == nil {
+		t.Fatal("invalid normal config loaded")
+	}
+	bootstrap, err := LoadProxyRescueBootstrapConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.LocalToken != "local-token" || bootstrap.StateRoot != stateRoot || bootstrap.Port != DefaultPort {
+		t.Fatalf("bootstrap = %#v", bootstrap)
+	}
+}
+
+func TestRescueBootstrapMissingIsNonCreating(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	if _, err := LoadProxyRescueBootstrapConfig(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cq")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bootstrap load created state: %v", err)
+	}
+}
 
 func TestConfigDiagnosticsLogJSONRoundTrip(t *testing.T) {
 	cfg := Config{
@@ -209,6 +260,32 @@ func TestConfigResolvesCodexContinuityStateDirectory(t *testing.T) {
 	configured := Config{CodexContinuityStateDir: "/private/candidate-cq"}
 	if got := configured.ResolvedCodexContinuityStateDir(); got != "/private/candidate-cq" {
 		t.Fatalf("configured continuity state directory = %q", got)
+	}
+}
+
+func TestConfigProxyResilienceStateDirectoryRoundTripAndValidation(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "resilience")
+	cfg := Config{LocalToken: "token", ClaudeUpstream: DefaultUpstream, CodexUpstream: DefaultCodexUpstream, CodexLeaseRetentionDays: 7, ProxyResilienceStateDir: want}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reopened Config
+	if err := json.Unmarshal(body, &reopened); err != nil {
+		t.Fatal(err)
+	}
+	reopened.setDefaults()
+	if reopened.ProxyResilienceStateDir != want || reopened.ResolvedProxyResilienceStateDir() != want {
+		t.Fatalf("resilience root = %q", reopened.ProxyResilienceStateDir)
+	}
+	if err := reopened.validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{"relative", "/", want + "/../other"} {
+		reopened.ProxyResilienceStateDir = invalid
+		if err := reopened.validate(); err == nil {
+			t.Fatalf("accepted unsafe resilience root %q", invalid)
+		}
 	}
 }
 

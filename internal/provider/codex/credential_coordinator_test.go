@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func testCoordinator(t *testing.T) (*CredentialCoordinator, *durableFakeFS) {
@@ -20,7 +23,74 @@ func testCoordinator(t *testing.T) (*CredentialCoordinator, *durableFakeFS) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	coordinator.RefreshMutations = &recoveringRefreshRecorder{}
+	coordinator.CredentialOwner = &idempotentOwnerRecorder{}
 	return coordinator, fs
+}
+
+func TestNewCredentialCoordinatorDoesNotCreateCredentialOwnerAuthority(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	store, err := NewManagedStore(filesystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCredentialCoordinator(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coordinator.RefreshMutations != nil || coordinator.CredentialOwner != nil {
+		t.Fatal("ordinary constructor acquired credential-owner authority")
+	}
+	if _, err := filesystem.Stat(filepath.Join(store.Home, ".cq", "credential-authority", "authority.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ordinary constructor created credential-owner key: %v", err)
+	}
+}
+
+func TestNewCredentialCoordinatorWithAuthorityRejectsCandidate(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	store, err := NewManagedStore(filesystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationBackend := newMemoryCredentialAuthorityBackend()
+	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
+	_, err = NewCredentialCoordinatorWithAuthority(store, CredentialAuthorityCapabilities{
+		Role: CredentialAuthorityCandidate, LifecycleBound: true, RootKey: make([]byte, 32),
+		RefreshMutationBackend: mutationBackend, CredentialOwnerBackend: ownerBackend,
+	})
+	if err == nil {
+		t.Fatal("candidate acquired credential-owner authority")
+	}
+	occupancy, occupancyErr := mutationBackend.CredentialAuthorityOccupancy(context.Background())
+	if occupancyErr != nil {
+		t.Fatal(occupancyErr)
+	}
+	if occupancy.Files != 0 {
+		t.Fatalf("candidate created %d credential-owner objects", occupancy.Files)
+	}
+}
+
+func TestNewCredentialCoordinatorWithAuthorityDerivesSeparatePurposeKeys(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	store, err := NewManagedStore(filesystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationBackend := newMemoryCredentialAuthorityBackend()
+	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
+	coordinator, err := NewCredentialCoordinatorWithAuthority(store, CredentialAuthorityCapabilities{
+		Role: CredentialAuthorityPrimary, LifecycleBound: true, RootKey: bytes.Repeat([]byte{0x61}, 32),
+		RefreshMutationBackend: mutationBackend, CredentialOwnerBackend: ownerBackend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation := coordinator.RefreshMutations.(*RefreshMutationStore)
+	owner := coordinator.CredentialOwner.(*CredentialOwnerStore)
+	if mutation.chain.key == owner.chain.key {
+		t.Fatal("refresh mutation and credential owner shared one raw key")
+	}
+	closeAuthorityCoordinator(t, coordinator)
 }
 
 type cancellingInventorySource struct {

@@ -1,16 +1,19 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -27,8 +30,17 @@ const (
 	// DefaultCodexUpstream is the default ChatGPT backend API upstream for Codex models.
 	// ChatGPT OAuth tokens authenticate against this endpoint (not api.openai.com,
 	// which requires the api.responses.write scope unavailable to OAuth clients).
-	DefaultCodexUpstream = "https://chatgpt.com/backend-api/codex"
+	DefaultCodexUpstream     = "https://chatgpt.com/backend-api/codex"
+	proxyRescueBootstrapName = "proxy-rescue.json"
+	proxyRescueBootstrapMax  = 64 << 10
 )
+
+type ProxyRescueBootstrapConfig struct {
+	SchemaVersion int    `json:"schema_version"`
+	LocalToken    string `json:"local_token"`
+	StateRoot     string `json:"state_root"`
+	Port          int    `json:"port"`
+}
 
 // Config holds proxy configuration persisted to disk.
 type Config struct {
@@ -61,6 +73,7 @@ type Config struct {
 	CodexRoutingAccountKeys       []codex.AccountKey       `json:"codex_routing_account_keys,omitempty"`
 	CodexLeaseRetentionDays       int                      `json:"codex_lease_retention_days"`
 	CodexContinuityStateDir       string                   `json:"codex_continuity_state_dir,omitempty"`
+	ProxyResilienceStateDir       string                   `json:"proxy_resilience_state_dir,omitempty"`
 	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
 
 	unknownFields map[string]json.RawMessage
@@ -76,6 +89,7 @@ var configKnownFields = map[string]bool{
 	"codex_routing_pinned_account_key":  true,
 	"codex_routing_account_keys":        true,
 	"codex_continuity_state_dir":        true,
+	"proxy_resilience_state_dir":        true,
 	"codex_window_priming":              true,
 }
 
@@ -146,6 +160,15 @@ func (c *Config) ResolvedCodexContinuityStateDir() string {
 	return configDir()
 }
 
+// ResolvedProxyResilienceStateDir returns configured durable policy/runtime
+// authority root. Empty keeps resilience features inactive and non-creating.
+func (c *Config) ResolvedProxyResilienceStateDir() string {
+	if c == nil {
+		return ""
+	}
+	return c.ProxyResilienceStateDir
+}
+
 func (c *Config) setDefaults() {
 	if c.Port == 0 {
 		c.Port = DefaultPort
@@ -198,6 +221,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
 		}
 	}
+	if c.ProxyResilienceStateDir != "" {
+		clean := filepath.Clean(c.ProxyResilienceStateDir)
+		if !filepath.IsAbs(c.ProxyResilienceStateDir) || clean != c.ProxyResilienceStateDir || clean == string(filepath.Separator) {
+			return fmt.Errorf("invalid proxy_resilience_state_dir %q: must be a clean absolute non-root path", c.ProxyResilienceStateDir)
+		}
+	}
 	seenRoutingAccounts := make(map[codex.AccountKey]bool, len(c.CodexRoutingAccountKeys))
 	for _, accountKey := range c.CodexRoutingAccountKeys {
 		if accountKey == "" || seenRoutingAccounts[accountKey] {
@@ -219,10 +248,93 @@ func (c *Config) validate() error {
 // LoadConfig reads proxy config from disk, generating defaults on first run.
 func LoadConfig() (*Config, error) {
 	path := filepath.Join(configDir(), "proxy.json")
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	cfg, err := loadConfigFile(path)
+	if errors.Is(err, os.ErrNotExist) {
 		return generateDefaultConfig(path)
 	}
+	return cfg, err
+}
+
+// LoadExistingConfig reads proxy config without creating state when absent.
+func LoadExistingConfig() (*Config, error) {
+	return loadConfigFile(filepath.Join(configDir(), "proxy.json"))
+}
+
+// LoadProxyRescueBootstrapConfig reads only authority needed to keep rescue
+// control available when normal proxy configuration cannot be loaded.
+func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
+	path := filepath.Join(configDir(), proxyRescueBootstrapName)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return loadProxyRescueBootstrapFromNormalConfig()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read proxy rescue bootstrap: %w", err)
+	}
+	bootstrap, decodeErr := decodeProxyRescueBootstrap(data)
+	if decodeErr == nil {
+		return bootstrap, nil
+	}
+	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig()
+	if fallbackErr == nil {
+		return fallback, nil
+	}
+	return nil, errors.Join(decodeErr, fallbackErr)
+}
+
+func loadProxyRescueBootstrapFromNormalConfig() (*ProxyRescueBootstrapConfig, error) {
+	data, err := os.ReadFile(filepath.Join(configDir(), "proxy.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read proxy config: %w", err)
+	}
+	var minimal struct {
+		LocalToken              string `json:"local_token"`
+		ProxyResilienceStateDir string `json:"proxy_resilience_state_dir"`
+		Port                    int    `json:"port"`
+	}
+	if err := json.Unmarshal(data, &minimal); err != nil {
+		return nil, fmt.Errorf("parse proxy config: %w", err)
+	}
+	if minimal.Port == 0 {
+		minimal.Port = DefaultPort
+	}
+	return validateProxyRescueBootstrap(&ProxyRescueBootstrapConfig{
+		SchemaVersion: 1,
+		LocalToken:    minimal.LocalToken,
+		StateRoot:     minimal.ProxyResilienceStateDir,
+		Port:          minimal.Port,
+	})
+}
+
+func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error) {
+	if len(data) > proxyRescueBootstrapMax {
+		return nil, errors.New("proxy rescue bootstrap exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var bootstrap ProxyRescueBootstrapConfig
+	if err := decoder.Decode(&bootstrap); err != nil {
+		return nil, fmt.Errorf("parse proxy rescue bootstrap: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("parse proxy rescue bootstrap: trailing value")
+	}
+	return validateProxyRescueBootstrap(&bootstrap)
+}
+
+func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
+	if bootstrap == nil || bootstrap.SchemaVersion != 1 || bootstrap.LocalToken == "" || bootstrap.Port < 1 || bootstrap.Port > 65535 {
+		return nil, errors.New("proxy rescue bootstrap invalid")
+	}
+	clean := filepath.Clean(bootstrap.StateRoot)
+	if bootstrap.StateRoot == "" || !filepath.IsAbs(bootstrap.StateRoot) || clean != bootstrap.StateRoot || clean == string(filepath.Separator) {
+		return nil, errors.New("proxy rescue bootstrap state root invalid")
+	}
+	return bootstrap, nil
+}
+
+func loadConfigFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read proxy config: %w", err)
 	}
@@ -275,7 +387,29 @@ func SaveConfig(cfg *Config) error {
 	if err := saved.validate(); err != nil {
 		return err
 	}
-	return saveConfig(filepath.Join(configDir(), "proxy.json"), &saved)
+	if err := saveConfig(filepath.Join(configDir(), "proxy.json"), &saved); err != nil {
+		return err
+	}
+	bootstrapPath := filepath.Join(configDir(), proxyRescueBootstrapName)
+	if saved.ProxyResilienceStateDir == "" {
+		if err := os.Remove(bootstrapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove proxy rescue bootstrap: %w", err)
+		}
+		return nil
+	}
+	bootstrap, err := json.Marshal(ProxyRescueBootstrapConfig{
+		SchemaVersion: 1,
+		LocalToken:    saved.LocalToken,
+		StateRoot:     saved.ProxyResilienceStateDir,
+		Port:          saved.Port,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
+	}
+	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, bootstrapPath, bootstrap); err != nil {
+		return fmt.Errorf("write proxy rescue bootstrap: %w", err)
+	}
+	return nil
 }
 
 func saveConfig(path string, cfg *Config) error {

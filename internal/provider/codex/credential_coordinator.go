@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"os"
@@ -36,20 +38,22 @@ type CredentialRefreshBroker interface {
 }
 
 type CredentialCoordinator struct {
-	Store           *ManagedStore
-	Activator       *FileSystemActivator
-	Registry        AccountCatalogue
-	Journal         RemovalJournal
-	RefreshExchange RefreshExchange
-	Now             func() time.Time
-	ExternalSources []ExternalCredentialSource
-	mu              sync.Mutex
-	externalStateMu sync.Mutex
-	knownExternal   map[string]bool
-	externalPlans   map[externalPlanKey]string
-	refreshMu       sync.Mutex
-	refreshFlights  map[string]*refreshFlight
-	refreshRetained map[CandidateID]retainedRefresh
+	Store            *ManagedStore
+	Activator        *FileSystemActivator
+	Registry         AccountCatalogue
+	Journal          RemovalJournal
+	RefreshExchange  RefreshExchange
+	RefreshMutations RefreshMutationRecorder
+	CredentialOwner  CredentialOwnerRecorder
+	Now              func() time.Time
+	ExternalSources  []ExternalCredentialSource
+	mu               sync.Mutex
+	externalStateMu  sync.Mutex
+	knownExternal    map[string]bool
+	externalPlans    map[externalPlanKey]string
+	refreshMu        sync.Mutex
+	refreshFlights   map[string]*refreshFlight
+	refreshRetained  map[CandidateID]retainedRefresh
 }
 
 // LegacyManagedMigrationResult reports explicit, revision-fenced upgrades of
@@ -92,6 +96,102 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 	coordinator.Journal = RemovalJournal{FS: store.FS, Home: store.Home, Store: store}
 	return coordinator, nil
 }
+
+type CredentialAuthorityRole string
+
+const (
+	CredentialAuthorityPrimary   CredentialAuthorityRole = "primary"
+	CredentialAuthorityCandidate CredentialAuthorityRole = "candidate"
+)
+
+// CredentialAuthorityCapabilities are supplied only by an already-initialised
+// primary lifecycle holder. Construction never creates or regenerates a root
+// key or authority directory.
+type CredentialAuthorityCapabilities struct {
+	Role                   CredentialAuthorityRole
+	LifecycleBound         bool
+	RootKey                []byte
+	RefreshMutationBackend CredentialAuthorityBackend
+	CredentialOwnerBackend CredentialAuthorityBackend
+	RefreshMutationHook    func(string) error
+	CredentialOwnerHook    func(string) error
+}
+
+func NewCredentialCoordinatorWithAuthority(store *ManagedStore, capabilities CredentialAuthorityCapabilities) (*CredentialCoordinator, error) {
+	if capabilities.Role != CredentialAuthorityPrimary || !capabilities.LifecycleBound || len(capabilities.RootKey) != 32 || capabilities.RefreshMutationBackend == nil || capabilities.CredentialOwnerBackend == nil {
+		return nil, errors.New("lifecycle-bound primary credential authority unavailable")
+	}
+	coordinator, err := NewCredentialCoordinator(store)
+	if err != nil {
+		return nil, err
+	}
+	root := append([]byte(nil), capabilities.RootKey...)
+	defer clear(root)
+	mutationKey, err := hkdf.Key(sha256.New, root, nil, "cq/credential-owner/refresh-capacity/key/v1", 32)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(mutationKey)
+	ownerKey, err := hkdf.Key(sha256.New, root, nil, "cq/credential-owner/commit/key/v1", 32)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(ownerKey)
+	mutation, err := OpenRefreshMutationStore(context.Background(), capabilities.RefreshMutationBackend, mutationKey, capabilities.RefreshMutationHook)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := OpenCredentialOwnerStore(context.Background(), capabilities.CredentialOwnerBackend, ownerKey, capabilities.CredentialOwnerHook)
+	if err != nil {
+		_ = mutation.Close()
+		return nil, err
+	}
+	coordinator.RefreshMutations = mutation
+	coordinator.CredentialOwner = owner
+	if err := coordinator.hydrateCredentialRefresh(mutation, owner); err != nil {
+		_ = owner.Close()
+		_ = mutation.Close()
+		return nil, err
+	}
+	return coordinator, nil
+}
+
+func (c *CredentialCoordinator) hydrateCredentialRefresh(mutation *RefreshMutationStore, owner *CredentialOwnerStore) error {
+	recovery, ok, err := mutation.RecoverSelectedRefreshMutation()
+	if err != nil || !ok {
+		return err
+	}
+	ownerRecovery, err := owner.RecoverRefresh(recovery)
+	if err != nil {
+		return err
+	}
+	retained := retainedRefresh{
+		operationID:          recovery.OperationID,
+		selection:            recovery.Selection,
+		commitDigest:         ownerRecovery.CommitDigest,
+		attemptPersisted:     ownerRecovery.Attempted,
+		attemptIndeterminate: ownerRecovery.Attempted && ownerRecovery.Result == nil,
+	}
+	if ownerRecovery.Result != nil {
+		retained.material = ownerRecovery.Result.Material
+		retained.materialReady = ownerRecovery.Result.Error == ""
+		retained.expiresIn = ownerRecovery.Result.ExpiresIn
+		retained.resultPersisted = true
+		if ownerRecovery.Result.Error != "" {
+			retained.resultErr = persistedCredentialRefreshError{message: ownerRecovery.Result.Error, definitive: ownerRecovery.Result.Definitive}
+		}
+	}
+	c.retainRefresh(recovery.Ref.CandidateID, retained)
+	return nil
+}
+
+type persistedCredentialRefreshError struct {
+	message    string
+	definitive bool
+}
+
+func (e persistedCredentialRefreshError) Error() string           { return e.message }
+func (e persistedCredentialRefreshError) RefreshDefinitive() bool { return e.definitive }
 
 func (c *CredentialCoordinator) List(ctx context.Context) (Inventory, error) {
 	if err := ctx.Err(); err != nil {

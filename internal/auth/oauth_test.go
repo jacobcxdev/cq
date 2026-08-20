@@ -501,3 +501,67 @@ func TestCallbackValidCode(t *testing.T) {
 		t.Errorf("unexpected error: %v", e)
 	}
 }
+
+func TestOAuthAcceptedCallbackQueryGrammar(t *testing.T) {
+	state := strings.Repeat("A", 43)
+	want := OAuthAcceptedCallbackQueryV1{SchemaVersion: 1, Code: "a+b=", State: state}
+	for _, raw := range []string{
+		"code=a%2Bb%3D&state=" + state,
+		"state=" + state + "&%63ode=a%2bb%3d",
+	} {
+		got, err := ParseOAuthAcceptedCallbackQuery(raw, state)
+		if err != nil {
+			t.Fatalf("ParseOAuthAcceptedCallbackQuery(%q): %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestOAuthAcceptedCallbackQueryRejectsBeforeAcceptance(t *testing.T) {
+	state := strings.Repeat("A", 43)
+	cases := []string{
+		"code=a&state=" + state + "&extra=x",
+		"code=a&%73tate=" + state + "&state=" + state,
+		"code=a+b&state=" + state,
+		"code=%252B&state=" + state,
+		"code=%FF&state=" + state,
+		"code=a&&state=" + state,
+		"=code&state=" + state,
+		"code=&state=" + state,
+		"code=a",
+		"code=a&state=" + state[:42],
+		strings.Repeat("x", 1696),
+	}
+	for _, raw := range cases {
+		if _, err := ParseOAuthAcceptedCallbackQuery(raw, state); err == nil {
+			t.Errorf("accepted invalid raw query %q", raw)
+		}
+	}
+}
+
+func TestOAuthAcceptedCallbackCanonicalBound(t *testing.T) {
+	state := strings.Repeat("A", 43)
+	accepted, err := ParseOAuthAcceptedCallbackQuery("code="+strings.Repeat("x", 512)+"&state="+state, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := accepted.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canonical) != 596 {
+		t.Fatalf("canonical accepted callback is %d bytes, want 596", len(canonical))
+	}
+	rawMaximum := "%63%6f%64%65=" + strings.Repeat("%78", 512) + "&%73%74%61%74%65=" + strings.Repeat("%41", 43)
+	if len(rawMaximum) != 1695 {
+		t.Fatalf("raw maximum fixture is %d bytes", len(rawMaximum))
+	}
+	if _, err := ParseOAuthAcceptedCallbackQuery(rawMaximum, state); err != nil {
+		t.Fatalf("raw byte 1695 rejected: %v", err)
+	}
+	if _, err := ParseOAuthAcceptedCallbackQuery("code="+strings.Repeat("x", 513)+"&state="+state, state); err == nil {
+		t.Fatal("accepted code byte 513")
+	}
+}

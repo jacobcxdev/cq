@@ -1,0 +1,160 @@
+{
+  "authority_baseline_commit": "9fe30df8d4101f69084d6487740ed324a5d0b59d",
+  "blueprint_review_aggregate_sha256": "3b227af5077cbaab1ad1f29444549062bad5c343baa1d15e254a1994fe2850be",
+  "blueprint_sha256": "bd8bdff9a8ce4582d0a66e847c74f5e69744651de457ba8e6847e0fcda678f38",
+  "kind": "cq_proxy_construction_plan_recursive_review",
+  "plan_path": "docs/superpowers/plans/2026-08-13-proxy-resilience-and-routing.md",
+  "plan_sha256": "e01f1510288f0bd28c6d01a259b526c9135fa3e81ecf0b0e133dbce6d28d960b",
+  "prior_rounds": [
+    {
+      "findings": [
+        {
+          "correction": "Named private Go verifier and release-builder entrypoints and restricted shell wrappers to repository-root resolution plus exec.",
+          "evidence": "Verification scripts named library APIs but no executable that could invoke them.",
+          "id": "PLAN-ARCH-01",
+          "lens": "architecture",
+          "severity": "high"
+        },
+        {
+          "correction": "Removed invented partial-CU flags and deferred each complete CU gate until every owner in that unit exists.",
+          "evidence": "Draft invoked verify-proxy-cu with unowned --phase flags absent from blueprint command contract.",
+          "id": "PLAN-VER-01",
+          "lens": "verification_release",
+          "severity": "medium"
+        },
+        {
+          "correction": "Added the non-Darwin confinement peer so package builds remain explicit and fail closed off Darwin.",
+          "evidence": "Draft introduced a Darwin implementation without its build-tag complement.",
+          "id": "PLAN-PORT-01",
+          "lens": "architecture",
+          "severity": "medium"
+        },
+        {
+          "correction": "Added direct Claude, Codex, and Gemini refresh tests beside every planned refresh edit.",
+          "evidence": "Provider refresh files changed under CU-3 without direct package-local regression files for two providers.",
+          "id": "PLAN-COV-01",
+          "lens": "coverage_source_consistency",
+          "severity": "medium"
+        }
+      ],
+      "round": 1,
+      "verdict": "not_clean"
+    },
+    {
+      "findings": [
+        {
+          "correction": "Added explicit GREEN labels to every task's terminal focused or CU gate.",
+          "evidence": "Five tasks had a final test command but no explicit GREEN completion condition.",
+          "id": "PLAN-VER-02",
+          "lens": "verification_release",
+          "severity": "medium"
+        },
+        {
+          "correction": "Named active_attempt and compact_terminal_receipt and defined their exact authority-selected nullability.",
+          "evidence": "Candidate status precedence was described without exact JSON member names.",
+          "id": "PLAN-CLI-01",
+          "lens": "cli_operations",
+          "severity": "low"
+        },
+        {
+          "correction": "Specified source-exact post-upgrade JSON Text followed by Close.",
+          "evidence": "Protocol task omitted the JSON qualification from the handshake-error frame description.",
+          "id": "PLAN-PROTO-01",
+          "lens": "protocol_fidelity",
+          "severity": "low"
+        },
+        {
+          "correction": "Named OperationCoordinatorStore and RuntimeSupervisor directly in the file and interface maps.",
+          "evidence": "Coverage checks found only indirect file-name references for two central blueprint owners.",
+          "id": "PLAN-COV-02",
+          "lens": "coverage_source_consistency",
+          "severity": "low"
+        }
+      ],
+      "round": 2,
+      "verdict": "not_clean"
+    }
+  ],
+  "records": [
+    {
+      "evidence": [
+        "CU-0 through CU-9 are ordered, prerequisite-safe, and later-unit absence is inert.",
+        "Store, lock, process, broker, floor, promotion, and rollback ownership follows the frozen construction-unit table."
+      ],
+      "findings": [],
+      "lens": "architecture",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/architecture",
+      "verdict": "clean"
+    },
+    {
+      "evidence": [
+        "Command grammar, read-only inspection, human/JSON/doctor projection, status precedence, deadlines, exits, and release leaves are assigned.",
+        "Every non-mutating command remains pre-authority and missing runtime features return explicit incompatible states."
+      ],
+      "findings": [],
+      "lens": "cli_operations",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/cli_operations",
+      "verdict": "clean"
+    },
+    {
+      "evidence": [
+        "Session pools, delegations, continuity, permits, route budgets, V4 linearisation, rejection contraction, prewarm, and capability narrowing are covered.",
+        "HTTP, compact, retained, WebSocket, retry, and prewarm paths share the same immutable caller and route authority."
+      ],
+      "findings": [],
+      "lens": "routing_continuity",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/routing_continuity",
+      "verdict": "clean"
+    },
+    {
+      "evidence": [
+        "Candidate receives no reusable provider bearer, provider socket, credential descriptor, signing key, or direct official-origin egress.",
+        "No-follow filesystem operations, purpose-separated cryptography, scanner coverage, privacy projections, and live-listener isolation are explicit."
+      ],
+      "findings": [],
+      "lens": "security_privacy",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/security_privacy",
+      "verdict": "clean"
+    },
+    {
+      "evidence": [
+        "Normal and rescue HTTP/SSE/WebSocket contracts, OAuth carrier, broker IPC, repeated WebSocket sends, post-upgrade errors, and encoded/decoded scanning are assigned.",
+        "Source-differential corpora and exact no-replay terminal ordering cover every changed transport."
+      ],
+      "findings": [],
+      "lens": "protocol_fidelity",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/protocol_fidelity",
+      "verdict": "clean"
+    },
+    {
+      "evidence": [
+        "All 15 tasks have explicit RED and GREEN gates, exact file lists, interfaces, race-enabled tests, and commits.",
+        "Blueprint/review pins, CU reports, floor/target separation, full vet/race gates, candidate rehearsal, and final seven-lens implementation review are mandatory."
+      ],
+      "findings": [],
+      "lens": "verification_release",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/verification_release",
+      "verdict": "clean"
+    },
+    {
+      "evidence": [
+        "Current source boundaries were mapped through cq-main-9fe30df and verified against filesystem paths.",
+        "All ten CUs, 20 acceptance criteria, provider refresh owners, route catalogues, broker stores, release graphs, exact-cap, crash, privacy, and source fixtures are covered."
+      ],
+      "findings": [],
+      "lens": "coverage_source_consistency",
+      "reviewed_at": "2026-08-14T16:12:50Z",
+      "reviewer_task_id": "/root/local-plan-round3/coverage_source_consistency",
+      "verdict": "clean"
+    }
+  ],
+  "review_execution": "single_agent_separated_lens_pass",
+  "round": 3,
+  "schema_version": 1
+}

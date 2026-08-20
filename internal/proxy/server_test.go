@@ -27,6 +27,52 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
+func TestListenerInheritanceRejectsNilWithoutBinding(t *testing.T) {
+	srv := &Server{Config: &Config{Port: 19280}}
+	if err := srv.ServeAdoptedListener(context.Background(), nil); err == nil {
+		t.Fatal("ServeAdoptedListener(nil) succeeded")
+	}
+}
+
+func TestRuntimeSupervisorHandlerBypassesLocalNormalSemantics(t *testing.T) {
+	called := false
+	srv := &Server{
+		Config: &Config{ClaudeUpstream: "://invalid-local-handler-sentinel"},
+		RuntimeNormalHandler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			called = true
+			writer.WriteHeader(http.StatusAccepted)
+		}),
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/normal", nil))
+	if !called || response.Code != http.StatusAccepted {
+		t.Fatalf("forward handler called/status = %v/%d", called, response.Code)
+	}
+}
+
+func TestListenerInheritanceServesExactAdoptedListener(t *testing.T) {
+	listener := &runtimeTestListener{}
+	srv := &Server{Config: &Config{
+		Port:           19280,
+		ClaudeUpstream: "https://api.anthropic.com",
+		CodexUpstream:  "https://api.openai.com",
+		LocalToken:     "test-token",
+	}}
+	if err := srv.ServeAdoptedListener(context.Background(), listener); err == nil || !strings.Contains(err.Error(), "test listener stopped") {
+		t.Fatalf("ServeAdoptedListener error = %v", err)
+	}
+	listener.mu.Lock()
+	accepts := listener.accepts
+	listener.mu.Unlock()
+	if accepts != 1 {
+		t.Fatalf("adopted listener Accept calls = %d, want 1", accepts)
+	}
+}
+
 func mustParseURL(s string) *url.URL {
 	u, err := url.Parse(s)
 	if err != nil {

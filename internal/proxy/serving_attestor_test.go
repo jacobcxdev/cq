@@ -67,6 +67,30 @@ func TestServingAttestorProofBindsExactResponseAndConnection(t *testing.T) {
 	}
 }
 
+func TestServingAttestorListenerGenerationRequiresExactActivation(t *testing.T) {
+	random := bytes.Repeat([]byte{0x42}, servingAttestorSecretSize+servingAttestorEpochSize)
+	attestor := newServingAttestor(bytes.NewReader(random), time.Now, time.Second, 2)
+	if _, err := attestor.ListenerGeneration(); !errors.Is(err, ErrServingAttestorUnavailable) {
+		t.Fatalf("pre-activation generation error = %v", err)
+	}
+	listener := listenServingAttestorTestTCP4(t)
+	if err := attestor.activate(listener); err != nil {
+		t.Fatal(err)
+	}
+	first, err := attestor.ListenerGeneration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := attestor.ListenerGeneration()
+	if err != nil || first != second || first == ([sha256.Size]byte{}) {
+		t.Fatalf("listener generation = %x, %x, error %v", first, second, err)
+	}
+	<-attestor.BeginClose()
+	if _, err := attestor.ListenerGeneration(); !errors.Is(err, ErrServingAttestorUnavailable) {
+		t.Fatalf("closed generation error = %v", err)
+	}
+}
+
 func TestServingResponseMACVector(t *testing.T) {
 	t.Parallel()
 	var secret [servingAttestorSecretSize]byte

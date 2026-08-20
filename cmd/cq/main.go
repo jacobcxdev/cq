@@ -200,6 +200,23 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if isCandidateRuntimeCommand(os.Args[1:]) {
+		if err := runCandidateRuntimeChild(context.Background(), os.Args[3:]); err != nil {
+			fmt.Fprintln(os.Stderr, "cq: candidate runtime failed")
+			os.Exit(1)
+		}
+		return
+	}
+	if handled, exitCode, err := runPureGlobalInspection(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if err != nil && !pureInspectionErrorWasRendered(err) {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			exitCode = 1
+		}
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
+	}
 	// Legacy endpoint inspection is deliberately read-only. It must bypass
 	// compatibility initialisation because that path may create or update files.
 	if isReadOnlyLegacyEndpointInspectCommand(os.Args[1:]) {

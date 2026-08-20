@@ -16,11 +16,94 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
 )
 
 var validOAuthCode = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
+var validOAuthState = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+const (
+	maxOAuthCallbackRawQueryBytes = 1695
+	maxOAuthAcceptedQueryBytes    = 596
+)
+
+// OAuthAcceptedCallbackQueryV1 is the transient canonical projection of an
+// accepted callback. It must not be persisted or included in diagnostics.
+type OAuthAcceptedCallbackQueryV1 struct {
+	SchemaVersion int    `json:"schema_version"`
+	Code          string `json:"code"`
+	State         string `json:"state"`
+}
+
+// ParseOAuthAcceptedCallbackQuery decodes the closed two-member callback
+// grammar exactly once and binds it to the state generated for this login.
+func ParseOAuthAcceptedCallbackQuery(rawQuery, expectedState string) (OAuthAcceptedCallbackQueryV1, error) {
+	if len(rawQuery) < 1 || len(rawQuery) > maxOAuthCallbackRawQueryBytes {
+		return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback query length")
+	}
+	for i := range rawQuery {
+		if rawQuery[i] > 0x7f {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback query encoding")
+		}
+	}
+	members := strings.Split(rawQuery, "&")
+	if len(members) != 2 {
+		return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback member count")
+	}
+	values := make(map[string]string, 2)
+	for _, member := range members {
+		if member == "" {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("empty OAuth callback member")
+		}
+		keyRaw, valueRaw, ok := strings.Cut(member, "=")
+		if !ok || keyRaw == "" || valueRaw == "" {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback member")
+		}
+		key, err := url.QueryUnescape(keyRaw)
+		if err != nil || !utf8.ValidString(key) {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback key")
+		}
+		value, err := url.QueryUnescape(valueRaw)
+		if err != nil || !utf8.ValidString(value) {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback value")
+		}
+		if key != "code" && key != "state" {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("unknown OAuth callback key")
+		}
+		if _, exists := values[key]; exists {
+			return OAuthAcceptedCallbackQueryV1{}, errors.New("duplicate OAuth callback key")
+		}
+		values[key] = value
+	}
+	code, codeOK := values["code"]
+	state, stateOK := values["state"]
+	if !codeOK || !stateOK || len(code) < 1 || len(code) > 512 || !validOAuthCode.MatchString(code) {
+		return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback code")
+	}
+	decodedState, err := base64.RawURLEncoding.DecodeString(state)
+	if err != nil || len(decodedState) != 32 || !validOAuthState.MatchString(state) || state != expectedState {
+		return OAuthAcceptedCallbackQueryV1{}, errors.New("invalid OAuth callback state")
+	}
+	accepted := OAuthAcceptedCallbackQueryV1{SchemaVersion: 1, Code: code, State: state}
+	if _, err := accepted.CanonicalJSON(); err != nil {
+		return OAuthAcceptedCallbackQueryV1{}, err
+	}
+	return accepted, nil
+}
+
+// CanonicalJSON returns the sole semantic callback projection.
+func (q OAuthAcceptedCallbackQueryV1) CanonicalJSON() ([]byte, error) {
+	encoded, err := json.Marshal(q)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maxOAuthAcceptedQueryBytes {
+		return nil, errors.New("OAuth accepted callback query exceeds canonical bound")
+	}
+	return encoded, nil
+}
 
 const (
 	// DefaultExpiresInSec is the fallback token expiry when the server omits expires_in.
@@ -91,19 +174,12 @@ func Login(ctx context.Context, client httputil.Doer) (*TokenResponse, *Profile,
 
 		// Validate every request independently — bad requests must NOT
 		// consume the sync.Once so the real OAuth redirect can still succeed.
-		if r.URL.Query().Get("state") != state {
+		acceptedQuery, err := ParseOAuthAcceptedCallbackQuery(r.URL.RawQuery, state)
+		if err != nil {
 			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>Invalid state parameter.</p></body></html>")
 			return
 		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>No authorization code received.</p></body></html>")
-			return
-		}
-		if len(code) > 512 || !validOAuthCode.MatchString(code) {
-			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>Invalid authorization code.</p></body></html>")
-			return
-		}
+		code := acceptedQuery.Code
 
 		// Only the first valid callback is accepted; duplicates get a benign response.
 		sent := false

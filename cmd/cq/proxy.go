@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,11 +20,89 @@ import (
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func normalCallerCredentials(cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory) ([]proxy.NormalCallerCredentialV1, error) {
+	if cfg == nil || cfg.LocalToken == "" {
+		return nil, proxy.ErrNormalCallerAuthUnavailable
+	}
+	credentials := make([]proxy.NormalCallerCredentialV1, 0, 1+len(claudeAccounts)+len(codexInventory.Accounts))
+	appendCredential := func(domain proxy.NormalCallerDomain, bearer, identity string, expires time.Time) error {
+		if bearer == "" || identity == "" {
+			return nil
+		}
+		credentials = append(credentials, proxy.NormalCallerCredentialV1{Domain: domain, Bearer: bearer, SubjectID: identity, ValidUntil: expires})
+		return nil
+	}
+	if err := appendCredential(proxy.NormalCallerLocal, cfg.LocalToken, "local-owner", time.Time{}); err != nil {
+		return nil, err
+	}
+	for index, account := range claudeAccounts {
+		identity := account.AccountUUID
+		if identity == "" && account.TokenAccount != nil {
+			identity = account.TokenAccount.UUID
+		}
+		if identity == "" {
+			identity = account.Email
+		}
+		if identity == "" {
+			identity = fmt.Sprintf("anonymous-%d", index)
+		}
+		var expires time.Time
+		if account.ExpiresAt > 0 {
+			expires = time.UnixMilli(account.ExpiresAt)
+		}
+		if err := appendCredential(proxy.NormalCallerClaude, account.AccessToken, identity, expires); err != nil {
+			return nil, err
+		}
+	}
+	for _, account := range codexInventory.Accounts {
+		for _, candidate := range account.Candidates {
+			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision)
+			if err := appendCredential(proxy.NormalCallerCodex, candidate.Credential.AccessToken, identity, candidate.AccessExpiresAt); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return credentials, nil
+}
+
+var runProxyRuntimeRoleFn = runProxyRuntimeRole
+var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
+	return nil, proxy.ErrRuntimeRoleUnavailable
+}
+var runProxyAdoptedRuntimeFn = func(context.Context, net.Listener, func(context.Context, net.Listener, http.Handler) error) error {
+	return proxy.ErrRuntimeRoleUnavailable
+}
+
+var adoptProxyListenerFn = func() (net.Listener, error) { return nil, nil }
+
+func runProxyRuntimeRole(ctx context.Context, manifest proxy.RuntimeRoleManifestV1) error {
+	files := proxy.RuntimeRoleFiles{
+		Lifecycle: os.NewFile(uintptr(manifest.LifecycleFD), "runtime-lifecycle"),
+		Control:   os.NewFile(uintptr(manifest.ControlFD), "runtime-control"),
+		Secret:    os.NewFile(uintptr(manifest.SecretFD), "runtime-secret"),
+	}
+	if manifest.Role == proxy.RuntimeRoleSupervisor {
+		_ = files.Close()
+		return proxy.ErrRuntimeRoleUnavailable
+	}
+	if manifest.Role != proxy.RuntimeRoleWorker {
+		_ = files.Close()
+		return proxy.ErrRuntimeRoleManifest
+	}
+	// ExtraFiles is sequential; the worker's reserved descriptor 3 is a sealed
+	// non-socket placeholder and is closed before role-local validation.
+	if reserved := os.NewFile(uintptr(proxy.RuntimeListenerFD), "runtime-reserved"); reserved != nil {
+		_ = reserved.Close()
+	}
+	return proxy.RunRuntimeWorkerRole(ctx, manifest, files)
+}
 
 func runProxy(args []string) error {
 	if len(args) > 0 && isHelpToken(args[0]) {
@@ -83,6 +166,34 @@ func runProxy(args []string) error {
 		return runProxyPrime(args[1:])
 	case "endpoint":
 		return runProxyEndpoint(args[1:])
+	case "policy":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "policy"})
+		}
+		return runProxyPolicy(args[1:], os.Stdout)
+	case "rescue":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "rescue"})
+		}
+		return runProxyRescue(args[1:], os.Stdout)
+	case "candidate":
+		authority, err := ClassifyProxyCommand(append([]string{"proxy"}, args...))
+		if err != nil {
+			return err
+		}
+		if authority.Terminating {
+			if authority.Row == "ordinary_help" {
+				path, ok := proxyHelpInspectionPath(args)
+				if ok {
+					return writeManualHelp(os.Stdout, path)
+				}
+			}
+			return errors.New("proxy candidate usage")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		_, err = runProxyCandidateCommand(ctx, os.Stdout, authority, defaultCandidateCommandDependencies())
+		return err
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
@@ -291,6 +402,8 @@ func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefault
 type proxyCommandOptions struct {
 	Port                 int
 	MigrateLegacyManaged bool
+	JSON                 bool
+	RuntimeRole          *proxy.RuntimeRoleManifestV1
 }
 
 type proxyRegistryDependencies struct {
@@ -387,6 +500,14 @@ func parseProxyCommandOptions(args []string) (proxyCommandOptions, error) {
 
 func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOptions, error) {
 	var opts proxyCommandOptions
+	if command == "proxy start" && len(args) > 0 && args[0] == "--runtime-role" {
+		manifest, err := proxy.ParseRuntimeRoleArguments(args)
+		if err != nil {
+			return opts, err
+		}
+		opts.RuntimeRole = &manifest
+		return opts, nil
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
@@ -404,6 +525,11 @@ func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOpt
 				return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 			}
 			opts.MigrateLegacyManaged = true
+		case "--json":
+			if command != "proxy status" {
+				return opts, fmt.Errorf("%s: unknown argument", command)
+			}
+			opts.JSON = true
 		default:
 			return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 		}
@@ -416,6 +542,100 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 }
 
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
+	var supervisorRole *proxy.RuntimeRoleManifestV1
+	var workerRole *proxy.RuntimeRoleManifestV1
+	var workerFiles proxy.RuntimeRoleFiles
+	var supervisorFiles proxy.RuntimeRoleFiles
+	var supervisorHolder proxy.LifecycleHolderProof
+	var supervisorLauncher proxy.RuntimeWorkerLauncher
+	if opts.RuntimeRole != nil {
+		if opts.RuntimeRole.Role == proxy.RuntimeRoleWorker {
+			workerRole = opts.RuntimeRole
+			if reserved := os.NewFile(uintptr(proxy.RuntimeListenerFD), "runtime-reserved"); reserved != nil {
+				_ = reserved.Close()
+			}
+			workerFiles = proxy.RuntimeRoleFiles{
+				Lifecycle: os.NewFile(uintptr(workerRole.LifecycleFD), "runtime-lifecycle"),
+				Control:   os.NewFile(uintptr(workerRole.ControlFD), "runtime-control"),
+				Secret:    os.NewFile(uintptr(workerRole.SecretFD), "runtime-secret"),
+				Work:      os.NewFile(uintptr(workerRole.WorkFD), "runtime-work"),
+			}
+			if err := proxy.ValidateRuntimeRoleFiles(*workerRole, workerFiles); err != nil {
+				_ = workerFiles.Close()
+				return err
+			}
+			defer func() { returnErr = errors.Join(returnErr, workerFiles.Close()) }()
+		}
+		if opts.RuntimeRole.Role != proxy.RuntimeRoleSupervisor && opts.RuntimeRole.Role != proxy.RuntimeRoleWorker {
+			return proxy.ErrRuntimeRoleManifest
+		}
+		if opts.RuntimeRole.Role == proxy.RuntimeRoleSupervisor {
+			supervisorRole = opts.RuntimeRole
+			supervisorFiles = proxy.RuntimeRoleFiles{
+				Listener:  os.NewFile(uintptr(supervisorRole.ListenerFD), "runtime-listener"),
+				Lifecycle: os.NewFile(uintptr(supervisorRole.LifecycleFD), "runtime-lifecycle"),
+				Control:   os.NewFile(uintptr(supervisorRole.ControlFD), "runtime-control"),
+				Secret:    os.NewFile(uintptr(supervisorRole.SecretFD), "runtime-secret"),
+			}
+			if err := proxy.ValidateRuntimeRoleFiles(*supervisorRole, supervisorFiles); err != nil {
+				_ = supervisorFiles.Close()
+				return err
+			}
+			secret, err := proxy.ReadRuntimeSecret(supervisorFiles.Secret)
+			supervisorFiles.Secret = nil
+			if err != nil {
+				_ = supervisorFiles.Close()
+				return err
+			}
+			secret.Destroy()
+			var holderErr error
+			supervisorHolder, holderErr = proxy.RuntimeLifecycleHolder(supervisorFiles.Lifecycle, hex.EncodeToString(supervisorRole.LifecycleHolderIdentityDigest[:]))
+			if holderErr != nil {
+				_ = supervisorFiles.Close()
+				return holderErr
+			}
+			var launcherErr error
+			supervisorLauncher, launcherErr = newProxyRuntimeWorkerLauncherFn(*supervisorRole, supervisorHolder)
+			if launcherErr != nil {
+				_ = supervisorFiles.Close()
+				return launcherErr
+			}
+			defer func() { returnErr = errors.Join(returnErr, supervisorFiles.Close()) }()
+		}
+	}
+	var adoptedListener net.Listener
+	var err error
+	if supervisorRole == nil && workerRole == nil {
+		adoptedListener, err = adoptProxyListenerFn()
+	}
+	if err != nil {
+		return err
+	}
+	if adoptedListener != nil {
+		defer func() {
+			if adoptedListener != nil {
+				returnErr = errors.Join(returnErr, adoptedListener.Close())
+			}
+		}()
+		err = runProxyAdoptedRuntimeFn(context.Background(), adoptedListener, serveRuntimeSupervisor)
+		adoptedListener = nil
+		return err
+	}
+	if supervisorRole != nil {
+		store, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.DefaultNormalCallerAdmissionPath())
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		err = proxy.RunValidatedRuntimeSupervisorRole(context.Background(), *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
+			Files: supervisorFiles, SupervisorHolder: supervisorHolder, Launcher: supervisorLauncher,
+			Checkpoints: &proxy.RuntimeHashCheckpointStore{}, CallerAdmissions: store,
+			WorkerManifest: proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(supervisorRole.ManifestDigest[:])},
+			Serve:          serveRuntimeSupervisor,
+		})
+		supervisorFiles = proxy.RuntimeRoleFiles{}
+		return err
+	}
 	intent, err := claimInstalledHTTPValidationStartupRequest(
 		version,
 		consumeInstalledHTTPValidationStartupRequestFn,
@@ -436,6 +656,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
+	var resilienceState *proxy.ProxyResilienceState
+	if stateDir := cfg.ResolvedProxyResilienceStateDir(); stateDir != "" {
+		resilienceState, err = proxy.OpenProxyResilienceState(context.Background(), proxy.ProxyResilienceStateOptions{
+			FS: fsys, Root: stateDir, Random: rand.Reader, Now: time.Now,
+		})
+		if err != nil {
+			return fmt.Errorf("proxy resilience state: %w", err)
+		}
+		defer func() { returnErr = errors.Join(returnErr, resilienceState.Close()) }()
+	}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
 	servingAttestor := proxy.NewServingAttestor()
 	httpRequirements, _ := proxy.DefaultCodexRoutingRequirements(version, codexClientBuild)
@@ -556,6 +786,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
 		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
+	}
+	runtimeCallerCredentials, err := normalCallerCredentials(cfg, accounts, codexInventory)
+	if err != nil {
+		return fmt.Errorf("normal caller index: %w", err)
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
@@ -701,9 +935,15 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	var codexRoutes proxy.CodexHTTPRequestRouteSnapshotter
 	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
+	var sessionPolicy *proxy.SessionPolicyResolver
+	var dispatchPermits proxy.CallerDispatchPermitAuthority
 	if codexContinuity != nil {
 		codexRoutes = codexContinuity.Coordinator
 		codexPlanRuntime = codexContinuity.Runtime
+	}
+	if resilienceState != nil {
+		sessionPolicy = resilienceState.Routing.Resolver()
+		dispatchPermits = resilienceState.DispatchPermits
 	}
 	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status:            codexRouting.HTTP,
@@ -715,6 +955,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		PinnedAccountKey:  cfg.CodexRoutingPinnedAccountKey,
 		Executor:          codexAttemptExecutor,
 		Refresher:         credentialControl,
+		SessionPolicy:     sessionPolicy,
+		DispatchPermits:   dispatchPermits,
 		Headroom:          proxy.NewCodexRequestHeadroomAdapter(headroom),
 		HeadroomMode:      resolvedMode,
 		Upstream:          cfg.CodexUpstream,
@@ -732,6 +974,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
 		PinnedAccountKey:  cfg.CodexRoutingPinnedAccountKey,
 		Executor:          codexWebSocketExecutor,
+		SessionPolicy:     sessionPolicy,
+		DispatchPermits:   dispatchPermits,
 		Upstream:          cfg.CodexUpstream,
 		Now:               time.Now,
 	})
@@ -802,18 +1046,58 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		HeadroomMode:                     resolvedMode,
 		Catalog:                          catalog,
 		Refresher:                        proxyRefresher,
+		RuntimeCallerCredentials:         runtimeCallerCredentials,
 	}
 	if err := legacyFinaliseVerifier.bind(codexRouting, headroom, resolvedMode); err != nil {
 		return fmt.Errorf("legacy credential endpoint finalise verifier: %w", err)
 	}
 
-	err = srv.ListenAndServe(proxyCtx)
+	if workerRole != nil {
+		handler, handlerErr := srv.RuntimeHandler()
+		if handlerErr != nil {
+			return handlerErr
+		}
+		credentialSource := proxy.NormalCallerCredentialSource(func(ctx context.Context) ([]proxy.NormalCallerCredentialV1, error) {
+			current, listErr := codexRoutingInventory.List(ctx)
+			if listErr != nil {
+				return nil, listErr
+			}
+			return normalCallerCredentials(cfg, accounts, current)
+		})
+		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
+		workerFiles = proxy.RuntimeRoleFiles{}
+	} else {
+		err = srv.ListenAndServe(proxyCtx)
+	}
 	proxyCancel()
 	if codexPrimerDone != nil {
 		<-codexPrimerDone
 	}
 	if headroom != nil {
 		headroom.Stop()
+	}
+	return err
+}
+
+func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler http.Handler) error {
+	if ctx == nil || listener == nil || handler == nil {
+		return proxy.ErrRuntimeSupervisorUnavailable
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdown)
+		case <-done:
+		}
+	}()
+	err := server.Serve(listener)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return nil
 	}
 	return err
 }
@@ -925,17 +1209,13 @@ func reloadProxyConfig(selector *proxy.PinnedClaudeSelector, routing *proxy.Code
 }
 
 func runProxyStatus(opts proxyCommandOptions) error {
-	cfg, err := proxy.LoadConfig()
+	port, err := loadProxyStatusPort(opts)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if opts.Port != 0 {
-		cfg.Port = opts.Port
-	}
 
-	addr := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.Port)
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(addr)
+	addr := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	resp, err := proxyStatusGet(addr)
 	if err != nil {
 		return fmt.Errorf("proxy not running: %w", err)
 	}
@@ -949,4 +1229,116 @@ func runProxyStatus(opts proxyCommandOptions) error {
 	data, _ := json.MarshalIndent(health, "", "  ")
 	fmt.Println(string(data))
 	return nil
+}
+
+var proxyStatusGet = func(addr string) (*http.Response, error) {
+	return (&http.Client{Timeout: 5 * time.Second}).Get(addr)
+}
+
+func loadProxyStatusPort(opts proxyCommandOptions) (int, error) {
+	if opts.Port != 0 {
+		return opts.Port, nil
+	}
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" || !filepath.IsAbs(configHome) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			configHome = filepath.Join(os.TempDir(), "cq-config")
+		} else {
+			configHome = filepath.Join(home, ".config")
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(configHome, "cq", "proxy.json"))
+	if os.IsNotExist(err) {
+		return proxy.DefaultPort, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read proxy config: %w", err)
+	}
+	var cfg proxy.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return 0, fmt.Errorf("parse proxy config: %w", err)
+	}
+	setProxyStatusConfigDefaults(&cfg)
+	if err := validateProxyStatusConfig(&cfg); err != nil {
+		return 0, err
+	}
+	return cfg.Port, nil
+}
+
+func setProxyStatusConfigDefaults(cfg *proxy.Config) {
+	if cfg.Port == 0 {
+		cfg.Port = proxy.DefaultPort
+	}
+	if cfg.ClaudeUpstream == "" {
+		cfg.ClaudeUpstream = proxy.DefaultUpstream
+	}
+	if cfg.CodexUpstream == "" {
+		cfg.CodexUpstream = proxy.DefaultCodexUpstream
+	}
+	if cfg.CodexTurnRouting == "" {
+		cfg.CodexTurnRouting = proxy.CodexRoutingOff
+	}
+	if cfg.CodexWSTurnRouting == "" {
+		cfg.CodexWSTurnRouting = proxy.CodexRoutingOff
+	}
+	if cfg.CodexLeaseRetentionDays == 0 {
+		cfg.CodexLeaseRetentionDays = 7
+	}
+}
+
+func validateProxyStatusConfig(cfg *proxy.Config) error {
+	if cfg.LocalToken == "" {
+		return errors.New("local_token is required")
+	}
+	if _, err := url.Parse(cfg.ClaudeUpstream); err != nil {
+		return fmt.Errorf("invalid claude_upstream URL: %w", err)
+	}
+	if _, err := url.Parse(cfg.CodexUpstream); err != nil {
+		return fmt.Errorf("invalid codex_upstream URL: %w", err)
+	}
+	if cfg.HeadroomMode != "" && cfg.HeadroomMode != "token" && cfg.HeadroomMode != "cache" {
+		return fmt.Errorf("invalid headroom_mode %q: must be \"token\" or \"cache\"", cfg.HeadroomMode)
+	}
+	if err := validateProxyStatusRoutingMode("codex_turn_routing", cfg.CodexTurnRouting); err != nil {
+		return err
+	}
+	if err := validateProxyStatusRoutingMode("codex_ws_turn_routing", cfg.CodexWSTurnRouting); err != nil {
+		return err
+	}
+	if cfg.CodexLeaseRetentionDays < 1 || cfg.CodexLeaseRetentionDays > 365 {
+		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", cfg.CodexLeaseRetentionDays)
+	}
+	if cfg.CodexContinuityStateDir != "" {
+		clean := filepath.Clean(cfg.CodexContinuityStateDir)
+		if !filepath.IsAbs(cfg.CodexContinuityStateDir) || clean != cfg.CodexContinuityStateDir || clean == string(filepath.Separator) {
+			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", cfg.CodexContinuityStateDir)
+		}
+	}
+	seenRoutingAccounts := make(map[string]bool, len(cfg.CodexRoutingAccountKeys))
+	for _, accountKey := range cfg.CodexRoutingAccountKeys {
+		key := string(accountKey)
+		if key == "" || seenRoutingAccounts[key] {
+			return errors.New("invalid codex_routing_account_keys: keys must be non-empty and unique")
+		}
+		seenRoutingAccounts[key] = true
+	}
+	if len(seenRoutingAccounts) != 0 && cfg.CodexRoutingDefaultAccountKey != "" && !seenRoutingAccounts[string(cfg.CodexRoutingDefaultAccountKey)] {
+		return errors.New("invalid codex_routing_default_account_key: account is not allowed for routing")
+	}
+	for scope, modelID := range cfg.CodexWindowPriming.ModelOverrides {
+		if strings.TrimSpace(scope) == "" || strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("invalid Codex window priming model override %q", scope)
+		}
+	}
+	return nil
+}
+
+func validateProxyStatusRoutingMode(field string, mode proxy.CodexRoutingMode) error {
+	switch mode {
+	case proxy.CodexRoutingOff, proxy.CodexRoutingObserve, proxy.CodexRoutingEnforce:
+		return nil
+	default:
+		return fmt.Errorf("invalid %s %q: must be \"off\", \"observe\", or \"enforce\"", field, mode)
+	}
 }

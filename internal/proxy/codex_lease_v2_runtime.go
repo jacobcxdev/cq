@@ -54,6 +54,7 @@ type CodexLeaseRequestPlan struct {
 	Evidence                  CodexLeaseRequestEvidence
 	ExpectedBound             *CodexLeaseBoundExpectation
 	RequiresAccountContinuity bool
+	DispatchPermitDigest      string
 }
 
 // CodexLeaseRuntime performs the high-level durable request lifecycle over the
@@ -1135,14 +1136,15 @@ func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) 
 	}
 	envelope.PlanDigest = codexLeaseAttemptPlanDigest(runtime.store.key, slots)
 	return CodexCurrentRequest{
-		RequestKind:        plan.RequestKind,
-		CompactionPhase:    plan.CompactionPhase,
-		RequestedModelHash: runtime.store.hash("requested-model", plan.RequestedModel),
-		EffectiveModel:     plan.EffectiveModel,
-		RequiredBuckets:    append([]CapacityBucket(nil), plan.RequiredBuckets...),
-		AttemptEnvelope:    envelope,
-		RoutingRefs:        1,
-		Attempts:           []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
+		RequestKind:          plan.RequestKind,
+		CompactionPhase:      plan.CompactionPhase,
+		RequestedModelHash:   runtime.store.hash("requested-model", plan.RequestedModel),
+		EffectiveModel:       plan.EffectiveModel,
+		RequiredBuckets:      append([]CapacityBucket(nil), plan.RequiredBuckets...),
+		DispatchPermitDigest: plan.DispatchPermitDigest,
+		AttemptEnvelope:      envelope,
+		RoutingRefs:          1,
+		Attempts:             []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
 	}
 }
 
