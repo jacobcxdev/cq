@@ -271,7 +271,7 @@ func CodexCanaryJSONFieldProtection(kind CodexCanaryProtectionKind, path, field 
 // CodexCanaryRoutingPolicyProtection snapshots the complete account-routing
 // authority. Account order is canonical because allowlist order has no routing
 // meaning.
-func CodexCanaryRoutingPolicyProtection(kind CodexCanaryProtectionKind, path, defaultField, accountsField string) CodexCanaryProtection {
+func CodexCanaryRoutingPolicyProtection(kind CodexCanaryProtectionKind, path, defaultField, accountsField, pinnedField string) CodexCanaryProtection {
 	path = filepath.Clean(path)
 	return CodexCanaryProtection{
 		Kind:            kind,
@@ -290,6 +290,8 @@ func CodexCanaryRoutingPolicyProtection(kind CodexCanaryProtectionKind, path, de
 				Default         string   `json:"default,omitempty"`
 				AccountsPresent bool     `json:"accounts_present"`
 				Accounts        []string `json:"accounts,omitempty"`
+				PinnedPresent   bool     `json:"pinned_present"`
+				Pinned          string   `json:"pinned,omitempty"`
 			}
 			var snapshot routingPolicySnapshot
 			if value, ok := object[defaultField]; ok {
@@ -304,6 +306,12 @@ func CodexCanaryRoutingPolicyProtection(kind CodexCanaryProtectionKind, path, de
 					return nil, errors.New("invalid protected routing accounts")
 				}
 				sort.Strings(snapshot.Accounts)
+			}
+			if value, ok := object[pinnedField]; ok {
+				snapshot.PinnedPresent = true
+				if err := json.Unmarshal(value, &snapshot.Pinned); err != nil {
+					return nil, errors.New("invalid protected routing pin")
+				}
 			}
 			return json.Marshal(snapshot)
 		},

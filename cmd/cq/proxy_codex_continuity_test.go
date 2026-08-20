@@ -303,6 +303,7 @@ func TestNewProxyCodexNativeHTTPInstallsForEnforcementAndRetainedAuthority(t *te
 		Routes:            dependency,
 		Runtime:           dependency,
 		DefaultAccountKey: "default-account",
+		PinnedAccountKey:  "pinned-account",
 		Executor:          dependency,
 		Refresher:         dependency,
 		SessionPolicy:     sessionPolicy,
@@ -319,7 +320,7 @@ func TestNewProxyCodexNativeHTTPInstallsForEnforcementAndRetainedAuthority(t *te
 	if err != nil || handler != wantHandler {
 		t.Fatalf("native handler = %T, %v", handler, err)
 	}
-	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.SessionPolicy != sessionPolicy || planner.DispatchPermits != dispatchPermits || planner.Authority.ModeEpoch != 9 || !planner.Authority.Authoritative || !reflect.DeepEqual(planner.Authority.RetainedAuthoritativeEpochs, retained) {
+	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.PinnedAccountKey != "pinned-account" || planner.SessionPolicy != sessionPolicy || planner.DispatchPermits != dispatchPermits || planner.Authority.ModeEpoch != 9 || !planner.Authority.Authoritative || !reflect.DeepEqual(planner.Authority.RetainedAuthoritativeEpochs, retained) {
 		t.Fatalf("planner dependencies = %#v", planner)
 	}
 	if session == nil || session.Executor != dependency || session.Refresher != dependency || session.Capacity != capacity || upstream != "https://codex.example/backend-api" {
@@ -368,7 +369,7 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 			AuthoritativeEpoch: 12,
 		},
 		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
-		DefaultAccountKey: "default-account", Executor: executor, SessionPolicy: sessionPolicy, DispatchPermits: dispatchPermits, Upstream: "https://codex.example/backend-api", Now: time.Now,
+		DefaultAccountKey: "default-account", PinnedAccountKey: "pinned-account", Executor: executor, SessionPolicy: sessionPolicy, DispatchPermits: dispatchPermits, Upstream: "https://codex.example/backend-api", Now: time.Now,
 		newHandler: func(gotPlanner proxy.CodexNativeHTTPRequestPlanner, executor proxy.ExplicitWebSocketExecutor, gotUpstream string) (proxy.CodexWebSocketRoutingHandler, error) {
 			planner, _ = gotPlanner.(*proxy.CodexHTTPRequestPlanFactory)
 			gotExecutor = executor
@@ -379,7 +380,7 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 	if err != nil || handler != wantHandler {
 		t.Fatalf("WebSocket handler = %T, %v", handler, err)
 	}
-	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.SessionPolicy != sessionPolicy || planner.DispatchPermits != dispatchPermits || planner.Authority.ModeEpoch != 12 || !planner.Authority.Authoritative {
+	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.PinnedAccountKey != "pinned-account" || planner.SessionPolicy != sessionPolicy || planner.DispatchPermits != dispatchPermits || planner.Authority.ModeEpoch != 12 || !planner.Authority.Authoritative {
 		t.Fatalf("WebSocket planner dependencies = %#v", planner)
 	}
 	if planner.Headroom != nil || gotExecutor != executor || upstream != "https://codex.example/backend-api" {

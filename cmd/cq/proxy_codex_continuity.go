@@ -48,6 +48,7 @@ type proxyCodexNativeHTTPDependencies struct {
 	Routes            proxy.CodexHTTPRequestRouteSnapshotter
 	Runtime           proxy.CodexHTTPRequestPlanRuntime
 	DefaultAccountKey codexprov.AccountKey
+	PinnedAccountKey  codexprov.AccountKey
 	Executor          proxy.CodexHTTPAttemptDispatcher
 	Refresher         codexprov.CredentialReferenceRefresher
 	SessionPolicy     *proxy.SessionPolicyResolver
@@ -68,6 +69,7 @@ type proxyCodexWebSocketDependencies struct {
 	Routes            proxy.CodexHTTPRequestRouteSnapshotter
 	Runtime           proxy.CodexHTTPRequestPlanRuntime
 	DefaultAccountKey codexprov.AccountKey
+	PinnedAccountKey  codexprov.AccountKey
 	Executor          proxy.ExplicitWebSocketExecutor
 	SessionPolicy     *proxy.SessionPolicyResolver
 	DispatchPermits   proxy.CallerDispatchPermitAuthority
@@ -103,6 +105,7 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		Routes:            deps.Routes,
 		Runtime:           deps.Runtime,
 		DefaultAccountKey: deps.DefaultAccountKey,
+		PinnedAccountKey:  deps.PinnedAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
 		DispatchPermits:   deps.DispatchPermits,
 		TransportKind:     "http",
@@ -168,6 +171,7 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 		Routes:            deps.Routes,
 		Runtime:           deps.Runtime,
 		DefaultAccountKey: deps.DefaultAccountKey,
+		PinnedAccountKey:  deps.PinnedAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
 		DispatchPermits:   deps.DispatchPermits,
 		TransportKind:     "websocket",

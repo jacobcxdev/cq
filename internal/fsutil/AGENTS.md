@@ -18,4 +18,4 @@ Filesystem abstraction for dependency injection in tests.
 - `OSFileSystem` is the production implementation (delegates to `os` package)
 - `MemFS` supports injectable errors via `HomeDir`/`HomeDirErr` fields
 - `MemFS.MkdirAll` is a no-op and `ReadDir` returns an error — only file operations are implemented
-- Used by cache, Gemini provider, and Codex provider for testable file I/O
+- Used by cache and Codex provider for testable file I/O

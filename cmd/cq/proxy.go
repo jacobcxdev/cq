@@ -242,63 +242,161 @@ func runProxyPrime(args []string) error {
 }
 
 func runProxyPin(args []string) error {
+	fsys := fsutil.OSFileSystem{}
+	var home string
+	return runProxyPinWithDependencies(context.Background(), args, proxyCodexDefaultDependencies{
+		ListInventory: func(ctx context.Context) (codexprov.Inventory, error) {
+			inventory, resolvedHome, err := listProxyCodexDefaultInventory(ctx, fsys)
+			home = resolvedHome
+			return inventory, err
+		},
+		LoadAliasIndex: func() (codexprov.AccountAliasIndex, error) {
+			return (codexprov.Registry{FS: fsys, Home: home}).AccountAliasIndex()
+		},
+		LoadConfig: proxy.LoadConfig,
+		SaveConfig: proxy.SaveConfig,
+		Stdout:     os.Stdout,
+	})
+}
+
+func runProxyPinWithDependencies(ctx context.Context, args []string, deps proxyCodexDefaultDependencies) error {
 	if helpRequested(args) {
 		return writeManualHelp(os.Stdout, []string{"proxy", "pin"})
 	}
-	cfg, err := proxy.LoadConfig()
+	if len(args) == 0 {
+		cfg, err := deps.LoadConfig()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if cfg.PinnedClaudeAccount == "" {
+			fmt.Fprintln(deps.Stdout, "Claude proxy pin: not configured.")
+		} else {
+			fmt.Fprintf(deps.Stdout, "Claude proxy pin: %q\n", cfg.PinnedClaudeAccount)
+		}
+		if cfg.CodexRoutingPinnedAccountKey == "" {
+			fmt.Fprintln(deps.Stdout, "Codex proxy pin: not configured.")
+		} else {
+			fmt.Fprintf(deps.Stdout, "Codex proxy pin: %q\n", cfg.CodexRoutingPinnedAccountKey)
+		}
+		return nil
+	}
+
+	switch args[0] {
+	case "claude":
+		return runProxyClaudePin(args[1:], deps)
+	case "codex":
+		return runProxyCodexPin(ctx, args[1:], deps)
+	default:
+		return errors.New("proxy pin provider required: use claude or codex")
+	}
+}
+
+func runProxyClaudePin(args []string, deps proxyCodexDefaultDependencies) error {
+	cfg, err := deps.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// cq proxy pin (no args) — show current pin
+	// cq proxy pin claude — show current pin
 	if len(args) == 0 {
 		if cfg.PinnedClaudeAccount == "" {
-			fmt.Println("No pin is active. All Claude requests use automatic account selection.")
+			fmt.Fprintln(deps.Stdout, "Claude proxy pin: not configured.")
 		} else {
-			fmt.Printf("Pinned Claude account: %s\n", cfg.PinnedClaudeAccount)
+			fmt.Fprintf(deps.Stdout, "Claude proxy pin: %q\n", cfg.PinnedClaudeAccount)
 		}
 		return nil
 	}
 
-	// cq proxy pin --clear
+	// cq proxy pin claude --clear
 	if len(args) == 1 && args[0] == "--clear" {
 		cfg.PinnedClaudeAccount = ""
-		if err := proxy.SaveConfig(cfg); err != nil {
+		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
-		fmt.Println("Pinned Claude account cleared.")
-		fmt.Println("A running proxy will pick up the change shortly.")
+		fmt.Fprintln(deps.Stdout, "Claude proxy pin cleared.")
+		fmt.Fprintln(deps.Stdout, "A running proxy will pick up the change shortly.")
 		return nil
 	}
 
-	// cq proxy pin <email-or-uuid>
+	// cq proxy pin claude <email-or-uuid>
 	if len(args) == 1 {
 		arg := args[0]
 		lower := strings.ToLower(arg)
 
 		// Reject reserved words that look like commands but aren't flags.
 		if lower == "clear" || lower == "remove" {
-			fmt.Fprintf(os.Stderr, "Usage: cq proxy pin [--clear | <email-or-account-uuid>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: cq proxy pin claude [--clear | <email-or-account-uuid>]\n")
 			return fmt.Errorf("reserved word %q is not valid; did you mean --clear?", arg)
 		}
 
 		// Reject any argument that looks like an unknown flag.
 		if strings.HasPrefix(arg, "-") {
-			fmt.Fprintf(os.Stderr, "Usage: cq proxy pin [--clear | <email-or-account-uuid>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: cq proxy pin claude [--clear | <email-or-account-uuid>]\n")
 			return fmt.Errorf("unknown flag %q", arg)
 		}
 
 		cfg.PinnedClaudeAccount = arg
-		if err := proxy.SaveConfig(cfg); err != nil {
+		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
-		fmt.Printf("Pinned Claude account set to %q.\n", arg)
-		fmt.Println("A running proxy will pick up the change shortly.")
+		fmt.Fprintf(deps.Stdout, "Claude proxy pin: %q\n", arg)
+		fmt.Fprintln(deps.Stdout, "A running proxy will pick up the change shortly.")
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Usage: cq proxy pin [--clear | <email-or-account-uuid>]\n")
+	fmt.Fprintf(os.Stderr, "Usage: cq proxy pin claude [--clear | <email-or-account-uuid>]\n")
 	return fmt.Errorf("unexpected arguments")
+}
+
+func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefaultDependencies) error {
+	if len(args) > 1 || (len(args) == 1 && args[0] != "--clear" && strings.HasPrefix(args[0], "-")) {
+		return errors.New("usage: cq proxy pin codex [--clear | <account-reference>]")
+	}
+	if len(args) == 0 || args[0] == "--clear" {
+		cfg, err := deps.LoadConfig()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if len(args) == 0 {
+			if cfg.CodexRoutingPinnedAccountKey == "" {
+				fmt.Fprintln(deps.Stdout, "Codex proxy pin: not configured.")
+			} else {
+				fmt.Fprintf(deps.Stdout, "Codex proxy pin: %q\n", cfg.CodexRoutingPinnedAccountKey)
+			}
+			return nil
+		}
+		cfg.CodexRoutingPinnedAccountKey = ""
+		if err := deps.SaveConfig(cfg); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		fmt.Fprintln(deps.Stdout, "Codex proxy pin cleared.")
+		fmt.Fprintln(deps.Stdout, "Restart proxy to apply change.")
+		return nil
+	}
+
+	inventory, err := deps.ListInventory(ctx)
+	if err != nil || proxyCodexDefaultInventoryIncomplete(inventory) {
+		return errors.New("list Codex account inventory: unavailable")
+	}
+	aliases, err := deps.LoadAliasIndex()
+	if err != nil {
+		return errors.New("load Codex account aliases: unavailable")
+	}
+	accountKey, err := codexprov.ResolveAccountReference(inventory, aliases, args[0])
+	if err != nil {
+		return err
+	}
+	cfg, err := deps.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	cfg.CodexRoutingPinnedAccountKey = accountKey
+	if err := deps.SaveConfig(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	fmt.Fprintf(deps.Stdout, "Codex proxy pin: %q\n", string(accountKey))
+	fmt.Fprintln(deps.Stdout, "Restart proxy to apply change.")
+	return nil
 }
 
 type proxyCommandOptions struct {
@@ -677,7 +775,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("Codex credential inventory: %w", err)
 	}
-	codexRoutingInventory := newProxyCodexRoutingInventory(credentialControl, cfg.CodexRoutingAccountKeys)
+	codexRoutingInventory, codexContinuityInventory := newProxyCodexRoutingInventories(
+		credentialControl,
+		cfg.CodexRoutingAccountKeys,
+		cfg.CodexRoutingPinnedAccountKey,
+	)
 	codexInventory, err = codexRoutingInventory.List(context.Background())
 	if err != nil {
 		return fmt.Errorf("Codex routing inventory: %w", err)
@@ -700,13 +802,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return fmt.Errorf("Codex turn observer: %w", err)
 	}
 	codexObserver.SetCanary(activeCanary)
-	codexSelector := proxy.NewCodexInventorySelector(codexRoutingInventory, codexQuotaCache)
 
 	writeCodexHealthDiagnostics(os.Stderr, codexHealthFromInventory(codexInventory))
-	codexHealthTracker := newCodexHealthTracker(codexRoutingInventory, cfg.CodexRoutingDefaultAccountKey, codexHealthFromInventory(codexInventory))
+	codexHealthTracker := newCodexHealthTrackerWithRoutingDefaultInventory(
+		codexRoutingInventory,
+		codexContinuityInventory,
+		cfg.CodexRoutingDefaultAccountKey,
+		codexHealthFromInventory(codexInventory),
+	)
 
 	codexRequestScope := &proxy.CodexRequestScope{
-		Chooser:   codexSelector,
 		Inventory: codexRoutingInventory,
 	}
 	codexAttemptExecutor := &proxy.CodexAttemptExecutor{
@@ -722,6 +827,12 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher: credentialControl,
 		Capacity:  codexCapacity,
 	}
+	codexCapacityRefresher, err := newProxyCodexRoutingCapacityRefresher(cfg.CodexUpstream, codexRequestRouter, codexCapacity)
+	if err != nil {
+		return err
+	}
+	codexSelector := proxy.NewCodexInventorySelector(codexRoutingInventory, codexQuotaCache, codexCapacityRefresher)
+	codexRequestScope.Chooser = codexSelector
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
@@ -836,11 +947,12 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status:            codexRouting.HTTP,
-		Inventory:         codexRoutingInventory,
+		Inventory:         codexContinuityInventory,
 		Capacity:          codexCapacity,
 		Routes:            codexRoutes,
 		Runtime:           codexPlanRuntime,
 		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
+		PinnedAccountKey:  cfg.CodexRoutingPinnedAccountKey,
 		Executor:          codexAttemptExecutor,
 		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
@@ -855,11 +967,12 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexWebSocketBroker, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
 		Status:            codexRouting.WebSocket,
-		Inventory:         codexRoutingInventory,
+		Inventory:         codexContinuityInventory,
 		Capacity:          codexCapacity,
 		Routes:            codexRoutes,
 		Runtime:           codexPlanRuntime,
 		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
+		PinnedAccountKey:  cfg.CodexRoutingPinnedAccountKey,
 		Executor:          codexWebSocketExecutor,
 		SessionPolicy:     sessionPolicy,
 		DispatchPermits:   dispatchPermits,
@@ -987,6 +1100,28 @@ func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler 
 		return nil
 	}
 	return err
+}
+
+func newProxyCodexRoutingCapacityRefresher(
+	codexUpstream string,
+	router *proxy.CodexRequestRouter,
+	capacity *proxy.CodexCapacityLedger,
+) (*proxy.CodexRoutingCapacityRefresher, error) {
+	if router == nil || capacity == nil {
+		return nil, errors.New("Codex routing capacity refresh unavailable")
+	}
+	usageURL, err := proxy.CodexPrimerUsageURL(codexUpstream)
+	if err != nil {
+		return nil, fmt.Errorf("Codex routing capacity refresh: %w", err)
+	}
+	return &proxy.CodexRoutingCapacityRefresher{
+		Usage: &proxy.CodexPrimerUsageReader{
+			Router:   router,
+			UsageURL: usageURL,
+			Timeout:  5 * time.Second,
+		},
+		Capacity: capacity,
+	}, nil
 }
 
 func buildCodexPrimer(cfg *proxy.Config, owner bool, router *proxy.CodexRequestRouter, catalog *modelregistry.Catalog, fsys fsutil.DurableFileSystem) (*proxy.CodexPrimer, error) {

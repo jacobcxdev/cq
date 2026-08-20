@@ -18,7 +18,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 
 ## Architecture
 
-- **Two phases:** Fetch (provider APIs → quota results) and Render (results → TTY or JSON)
+- **Two phases:** Fetch (provider integrations → quota results) and Render (results → TTY or JSON)
 - **Three providers:** Claude and Codex (multi-account), Gemini (single-account)
 - **Concurrent fetch:** Each provider runs in its own goroutine with panic recovery
 - **Aggregate layer:** Weighted pace, correction-deadline gauge, and burndown across 2+ accounts
@@ -31,7 +31,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 | `internal/provider` | Provider interface + ID constants | [AGENTS.md](internal/provider/AGENTS.md) |
 | `internal/provider/claude` | Multi-account, OAuth refresh, parallel profile+usage | [AGENTS.md](internal/provider/claude/AGENTS.md) |
 | `internal/provider/codex` | Multi-account, automatic reads only (shared system credentials) | [AGENTS.md](internal/provider/codex/AGENTS.md) |
-| `internal/provider/gemini` | Single account, no refresh (shared credentials) | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
+| `internal/provider/gemini` | Single account, bounded Antigravity CLI usage command | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
 | `internal/app` | Runner (concurrent fetch), Report types, account management | [AGENTS.md](internal/app/AGENTS.md) |
 | `internal/output` | TTY renderer (lipgloss), JSON renderer | [AGENTS.md](internal/output/AGENTS.md) |
 | `internal/aggregate` | Weighted pace, gauge (correction-deadline), burndown computation | [AGENTS.md](internal/aggregate/AGENTS.md) |
@@ -44,7 +44,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 
 ## Key Decisions (Do Not Re-Litigate)
 
-1. **Dependency injection everywhere.** `httputil.Doer` for HTTP, `fsutil.FileSystem` for filesystem, `app.Cache` interface. All testable via fakes.
+1. **Dependency injection everywhere.** `httputil.Doer` for HTTP, `fsutil.FileSystem` for filesystem, `commandRunner` for Antigravity CLI, `app.Cache` interface. All testable via fakes.
 2. **Panic recovery is mandatory.** Every goroutine that calls external code must have `defer recover()`. Inner goroutines (Claude profile+usage) need their own recovery.
 3. **Atomic file writes.** All credential/cache persistence uses write-to-tmp + rename. No partial writes.
 4. **Nil-safe cache.** Runner guards all cache access on `r.Cache != nil`. Cache failure degrades gracefully.
@@ -73,6 +73,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 ## Gotchas
 
 - Claude and Codex have **multi-account** support; Gemini is single-account
+- Gemini keeps provider ID `gemini` but delegates quota to exact zero-token `agy -p /usage --output-format json --print-timeout 15s` command
 - `keyring.DiscoverClaudeAccounts()` calls real keychain — tests must mock at provider level
 - `mergeAnonymousFresh` uses token affinity (`sameStoredAccount`) to match anonymous entries — never merges blindly
 - `dedup` in Claude parser prefers usable results over errors on key collision
@@ -84,9 +85,9 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 ## Testing
 
 - All tests use `-race`; the codebase is race-free
-- Provider tests use `urlRewriter` (test HTTP transport) and `fakeFS` / `fsutil.MemFS`
-- `t.Setenv` for environment-dependent tests (Gemini credentials)
-- `t.TempDir` for file-based tests (cache, Gemini provider)
+- HTTP provider tests use `urlRewriter`; filesystem tests use `fakeFS` / `fsutil.MemFS`; Gemini tests inject a fake command runner
+- `t.Setenv` for environment-dependent and helper-process tests
+- `t.TempDir` for file-based tests
 - Every rule: test the happy path, the error path, and at least one edge case
 
 ## What NOT To Do

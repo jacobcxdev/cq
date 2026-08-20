@@ -2,19 +2,22 @@
 
 # provider/gemini
 
-Single-account Gemini provider. Returns `auth_expired` when token is expired (no token refresh — cq must not mutate shared credentials).
+Single-account Gemini provider backed by authenticated Antigravity CLI. Provider identity remains `gemini`; account authority remains external.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `provider.go` | `Fetch`: reads oauth_creds.json, checks expiry, parallel tier+quota fetch |
-| `parser.go` | `parseTier`, `parseQuota`: JSON parsing for tier and quota responses |
-| `refresh.go` | `fetchTier`, `fetchQuota` — HTTP calls |
+| `provider.go` | Discovers `agy`, applies timeout, invokes exact structured usage command, classifies errors |
+| `cli.go` | Direct no-shell command execution with bounded stdout and cancellation |
+| `parser.go` | Validates zero-token usage envelope and maps required Gemini quota buckets |
 
 ## For AI Agents
 
 ### Working In This Directory
 
-- No token refresh — cq shares `~/.gemini/oauth_creds.json` with gemini CLI; refreshing could invalidate gemini's cached credentials
-- Parallel fetch has separate error tracking: `quotaPanic` (bool) vs `quotaErr` (error) vs `quotaCode` (int)
+- Execute only `agy -p /usage --output-format json --print-timeout 15s`; command changes require safety review and tests
+- Accept output only when status is `SUCCESS`, turns and total tokens are zero, command name is `usage`, and required buckets occur exactly once
+- Keep stdout capped at 1 MiB, discard stderr, and never include raw command output in errors
+- Never read, refresh, write, log, or persist Antigravity credentials
+- Ignore `3p-*` buckets; map `gemini-5h` to `5h` and `gemini-weekly` to `7d`

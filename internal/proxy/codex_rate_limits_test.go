@@ -738,6 +738,39 @@ func TestCodexWebSocketCapacitySessionDoesNotRequireTurnObserver(t *testing.T) {
 	}
 }
 
+func TestCodexWebSocketCapacitySessionFencesHardUsageError(t *testing.T) {
+	now := time.Unix(1_704_067_000, 0)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	producer := newCodexRateLimitProducer(ledger, ledger.NewObservationStream(), "account-a", func() time.Time { return now }, true)
+	choice := RouteChoice{AccountKey: "account-a", EffectiveModel: "gpt-5.6-sol"}
+	session := newCodexWSObservationSession(nil, context.Background(), choice, producer)
+	if session == nil {
+		t.Fatal("capacity-only WebSocket session is nil")
+	}
+
+	session.ObserveUpstream([]byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`))
+	session.Close(nil)
+
+	view := ledger.Capacity("account-a", CapacityBucketForModel(choice.EffectiveModel))
+	if view.State != CapacityZero || view.Source != CapacitySourceHardLimit {
+		t.Fatalf("capacity = %+v, want authoritative hard-limit zero", view)
+	}
+}
+
+func TestCodexWebSocketCapacitySessionDoesNotFenceSoftError(t *testing.T) {
+	now := time.Unix(1_704_067_000, 0)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	producer := newCodexRateLimitProducer(ledger, ledger.NewObservationStream(), "account-a", func() time.Time { return now }, true)
+	session := newCodexWSObservationSession(nil, context.Background(), RouteChoice{AccountKey: "account-a"}, producer)
+
+	session.ObserveUpstream([]byte(`{"type":"error","status":429,"error":{"type":"rate_limit_exceeded"}}`))
+	session.Close(nil)
+
+	if view := ledger.Capacity("account-a", CapacityBucketBase); view.State != CapacityUnknown {
+		t.Fatalf("capacity = %+v, want unknown", view)
+	}
+}
+
 func TestCodexHTTPEnforcerBindsRouterCapacity(t *testing.T) {
 	ledger := NewCodexCapacityLedger(time.Now, time.Hour)
 	enforcer, err := NewCodexHTTPEnforcer(

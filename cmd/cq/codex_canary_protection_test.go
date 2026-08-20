@@ -119,7 +119,7 @@ func TestCodexCanaryProtectionsTrackOnlyDeclaredOwnedState(t *testing.T) {
 		managedNestedPath:  `{"fixture":"managed-nested-before"}`,
 		declaredAuthPath:   string(declaredAuth),
 		undeclaredAuthPath: `{"fixture":"undeclared-before"}`,
-		configPath:         `{"codex_routing_default_account_key":"synthetic-default-before","codex_routing_account_keys":["account-a","account-b"],"unrelated":"before"}`,
+		configPath:         `{"codex_routing_default_account_key":"synthetic-default-before","codex_routing_account_keys":["account-a","account-b"],"codex_routing_pinned_account_key":"synthetic-pin-before","unrelated":"before"}`,
 	} {
 		writePrivateCanaryFixture(t, path, contents)
 	}
@@ -143,14 +143,14 @@ func TestCodexCanaryProtectionsTrackOnlyDeclaredOwnedState(t *testing.T) {
 	writePrivateCanaryFixture(t, managedDecoyPath, `{"fixture":"managed-decoy-after"}`)
 	writePrivateCanaryFixture(t, managedNestedPath, `{"fixture":"managed-nested-after"}`)
 	writePrivateCanaryFixture(t, undeclaredAuthPath, `{"fixture":"undeclared-after"}`)
-	writePrivateCanaryFixture(t, configPath, `{"codex_routing_account_keys" : [ "account-a", "account-b" ], "codex_routing_default_account_key":"synthetic-default-before","unrelated":"after"}`)
+	writePrivateCanaryFixture(t, configPath, `{"codex_routing_account_keys" : [ "account-a", "account-b" ], "codex_routing_default_account_key":"synthetic-default-before","codex_routing_pinned_account_key":"synthetic-pin-before","unrelated":"after"}`)
 	if err := recorder.RecordAdmitted(now); err != nil {
 		t.Fatal(err)
 	}
 	if got := recorder.State().AutomaticHashChanges; got != 0 {
 		t.Fatalf("unowned or unrelated state changed protected evidence: count = %d", got)
 	}
-	writePrivateCanaryFixture(t, configPath, `{"codex_routing_account_keys":["account-b","account-a"],"codex_routing_default_account_key":"synthetic-default-before","unrelated":"after"}`)
+	writePrivateCanaryFixture(t, configPath, `{"codex_routing_account_keys":["account-b","account-a"],"codex_routing_default_account_key":"synthetic-default-before","codex_routing_pinned_account_key":"synthetic-pin-before","unrelated":"after"}`)
 	if err := recorder.RecordAdmitted(now); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestCodexCanaryProtectionsTrackOnlyDeclaredOwnedState(t *testing.T) {
 		{kind: proxy.CodexCanaryCQManagedAuth, path: managedPath, data: `{"fixture":"managed-after"}`},
 		{kind: proxy.CodexCanaryCodexBarManifest, path: manifestPath, data: string(manifest) + "\n"},
 		{kind: proxy.CodexCanaryCodexBarAuth, additionalKind: proxy.CodexCanaryCodexBarManifest, path: declaredAuthPath, data: string(syntheticCodexBarAuthFixture(t, "synthetic-access-after"))},
-		{kind: proxy.CodexCanaryRoutingDefault, path: configPath, data: `{"codex_routing_default_account_key":"synthetic-default-after","codex_routing_account_keys":["account-a","account-b"],"unrelated":"after"}`},
+		{kind: proxy.CodexCanaryRoutingDefault, path: configPath, data: `{"codex_routing_default_account_key":"synthetic-default-after","codex_routing_account_keys":["account-a","account-b"],"codex_routing_pinned_account_key":"synthetic-pin-before","unrelated":"after"}`},
 	}
 	for index, mutation := range mutations {
 		before := canaryDigestByKind(recorder.State())
@@ -195,12 +195,21 @@ func TestCodexCanaryProtectionsTrackOnlyDeclaredOwnedState(t *testing.T) {
 	}
 
 	before := recorder.State().AutomaticHashChanges
-	writePrivateCanaryFixture(t, configPath, `{"codex_routing_default_account_key":"synthetic-default-after","codex_routing_account_keys":["account-a"],"unrelated":"after"}`)
+	writePrivateCanaryFixture(t, configPath, `{"codex_routing_default_account_key":"synthetic-default-after","codex_routing_account_keys":["account-a"],"codex_routing_pinned_account_key":"synthetic-pin-before","unrelated":"after"}`)
 	if err := recorder.RecordAdmitted(now); err != nil {
 		t.Fatal(err)
 	}
 	if got := recorder.State().AutomaticHashChanges; got != before+1 {
 		t.Fatalf("routing allowlist mutation change count = %d, want %d", got, before+1)
+	}
+
+	before = recorder.State().AutomaticHashChanges
+	writePrivateCanaryFixture(t, configPath, `{"codex_routing_default_account_key":"synthetic-default-after","codex_routing_account_keys":["account-a"],"codex_routing_pinned_account_key":"synthetic-pin-after","unrelated":"after"}`)
+	if err := recorder.RecordAdmitted(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.State().AutomaticHashChanges; got != before+1 {
+		t.Fatalf("routing pin mutation change count = %d, want %d", got, before+1)
 	}
 }
 

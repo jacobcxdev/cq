@@ -163,6 +163,7 @@ type CodexHTTPRequestPlanFactory struct {
 	Routes            CodexHTTPRequestRouteSnapshotter
 	Runtime           CodexHTTPRequestPlanRuntime
 	DefaultAccountKey codex.AccountKey
+	PinnedAccountKey  codex.AccountKey
 	Authority         CodexLeaseAuthorityPolicy
 	Headroom          CodexRequestHeadroom
 	HeadroomMode      HeadroomMode
@@ -264,6 +265,9 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 		}
 		boundAccountKey = continuityAccountKey
+	}
+	if boundAccountKey == "" {
+		boundAccountKey = factory.PinnedAccountKey
 	}
 	dispatchInput := CodexFrozenDispatchInput{
 		Inventory:              inventory,
@@ -440,6 +444,7 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 		Capacity:          factory.Capacity,
 		Requirements:      codexHTTPRequestPlanRequirements(protocol),
 		DefaultAccountKey: factory.DefaultAccountKey,
+		BoundAccountKey:   factory.PinnedAccountKey,
 		AcceptedRevision:  input.AcceptedRevision,
 		Now:               now,
 	})

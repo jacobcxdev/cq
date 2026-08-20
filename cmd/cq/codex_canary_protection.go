@@ -43,6 +43,7 @@ func codexCanaryProtections(home, configDirectory string) ([]proxy.CodexCanaryPr
 			filepath.Join(configDirectory, "proxy.json"),
 			"codex_routing_default_account_key",
 			"codex_routing_account_keys",
+			"codex_routing_pinned_account_key",
 		),
 	}, nil
 }
