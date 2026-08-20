@@ -37,6 +37,22 @@ type SessionPolicyResolver struct {
 	policy RoutingPolicyV1
 }
 
+func (r *SessionPolicyResolver) capabilityPolicy(pool string) (RoutingPolicySnapshotV1, []CapabilityRoutingEvidenceV1, bool) {
+	if r == nil || len(r.policy.CapabilityPredicates) == 0 || len(r.policy.CapabilityRoutingEvidence) == 0 {
+		return RoutingPolicySnapshotV1{}, nil, false
+	}
+	for _, candidate := range r.policy.Pools {
+		if candidate.Name != pool {
+			continue
+		}
+		return RoutingPolicySnapshotV1{
+			SchemaVersion: 1, Active: true, RoutingGeneration: r.policy.RoutingGeneration,
+			Pool: candidate, Predicates: append([]CapabilityPredicateCoreV1(nil), r.policy.CapabilityPredicates...),
+		}, append([]CapabilityRoutingEvidenceV1(nil), r.policy.CapabilityRoutingEvidence...), true
+	}
+	return RoutingPolicySnapshotV1{}, nil, false
+}
+
 func NewSessionPolicyResolver(key []byte, policy RoutingPolicyV1) *SessionPolicyResolver {
 	resolver := &SessionPolicyResolver{policy: cloneRoutingPolicy(policy)}
 	if len(key) == 32 {

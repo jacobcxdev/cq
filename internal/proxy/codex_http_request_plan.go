@@ -169,6 +169,7 @@ type CodexHTTPRequestPlanFactory struct {
 	Now               func() time.Time
 	SessionPolicy     *SessionPolicyResolver
 	DispatchPermits   CallerDispatchPermitAuthority
+	TransportKind     string
 
 	operations codexHTTPRequestPlanFactoryOperations
 }
@@ -241,9 +242,9 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if factory.Now != nil {
 		now = factory.Now()
 	}
+	caller, callerOK := runtimeCallerAuthority(ctx)
 	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), Status: PolicyDecisionUnbound}
 	if factory.SessionPolicy != nil {
-		caller, _ := runtimeCallerAuthority(ctx)
 		policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
 		if err != nil {
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
@@ -264,7 +265,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		}
 		boundAccountKey = continuityAccountKey
 	}
-	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
+	dispatchInput := CodexFrozenDispatchInput{
 		Inventory:              inventory,
 		Capacity:               factory.Capacity,
 		Requirements:           requirements,
@@ -275,7 +276,8 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		BoundAccountKey:        boundAccountKey,
 		AcceptedRevision:       input.AcceptedRevision,
 		Now:                    now,
-	})
+	}
+	dispatch, err := factory.buildDispatch(ctx, dispatchInput)
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 	}
@@ -284,6 +286,38 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, dispatch.TerminalError())
 	}
 	choice := dispatchAccounts[0].Choice()
+	if policyDecision.Status == PolicyDecisionSelected {
+		capabilityPolicy, capabilityEvidence, active := factory.SessionPolicy.capabilityPolicy(policyDecision.Pool)
+		if active {
+			if !callerOK {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
+			}
+			allowed := policyDecision.Allowed
+			if boundAccountKey != "" {
+				allowed = []codex.AccountKey{boundAccountKey}
+			}
+			finalChoice, routeErr := ResolveCapabilityRoute(capabilityPolicy, capabilityEvidence, CallerRequestAuthorityV1{
+				SchemaVersion: 1, AllowedAccounts: allowed, Workspace: policyDecision.SessionDigest, EvaluatedAt: now,
+				FinalScope: codexCapabilityFinalScope(factory.TransportKind, input.Encoded, protocol, choice, caller),
+			})
+			if routeErr != nil {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, routeErr)
+			}
+			policyDecision.Allowed = append([]codex.AccountKey(nil), finalChoice.AllowedAccounts...)
+			inventory = filterCodexHTTPRequestInventory(inventory, []codex.AccountKey{finalChoice.AccountKey})
+			dispatchInput.Inventory = inventory
+			dispatchInput.BoundAccountKey = finalChoice.AccountKey
+			dispatch, err = factory.buildDispatch(ctx, dispatchInput)
+			if err != nil {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+			}
+			dispatchAccounts = dispatch.Accounts()
+			if len(dispatchAccounts) != 1 || dispatchAccounts[0].Choice().AccountKey != finalChoice.AccountKey {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
+			}
+			choice = dispatchAccounts[0].Choice()
+		}
+	}
 	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
@@ -293,8 +327,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	permitDigest := ""
 	if policyDecision.Status == PolicyDecisionSelected {
-		caller, ok := runtimeCallerAuthority(ctx)
-		if !ok || factory.DispatchPermits == nil {
+		if !callerOK || factory.DispatchPermits == nil {
 			frozen.Release()
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCallerDispatchPermitInvalid)
 		}
@@ -344,6 +377,22 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		result.Lifecycle = trace.wrapLifecycle(result.Lifecycle)
 	}
 	return result, nil
+}
+
+func codexCapabilityFinalScope(transport string, encoded []byte, protocol CodexProtocolRequest, choice RouteChoice, caller RuntimeCallerAuthorityV1) CapabilityFinalScopeCoreV1 {
+	if transport == "" {
+		transport = "http"
+	}
+	encodedDigest := sha256.Sum256(encoded)
+	transformationDigest := sha256.Sum256([]byte(protocol.Model + "\x00" + choice.EffectiveModel))
+	originDigest := sha256.Sum256([]byte(string(caller.Domain) + "\x00" + caller.SubjectID + "\x00" + caller.ConsumptionDigest + "\x00" + string(choice.AccountKey)))
+	return CapabilityFinalScopeCoreV1{
+		SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: transport,
+		ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth",
+		RequestedModel: protocol.Model, EffectiveModel: choice.EffectiveModel, OutboundModel: choice.EffectiveModel,
+		TransformationDigest: hex.EncodeToString(transformationDigest[:]), EncodedRequestDigest: hex.EncodeToString(encodedDigest[:]),
+		NormalCredentialOriginBindingDigest: hex.EncodeToString(originDigest[:]),
+	}
 }
 
 func filterCodexHTTPRequestInventory(inventory codex.Inventory, allowed []codex.AccountKey) codex.Inventory {

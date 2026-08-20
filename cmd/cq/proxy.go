@@ -442,6 +442,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 				Lifecycle: os.NewFile(uintptr(workerRole.LifecycleFD), "runtime-lifecycle"),
 				Control:   os.NewFile(uintptr(workerRole.ControlFD), "runtime-control"),
 				Secret:    os.NewFile(uintptr(workerRole.SecretFD), "runtime-secret"),
+				Work:      os.NewFile(uintptr(workerRole.WorkFD), "runtime-work"),
 			}
 			if err := proxy.ValidateRuntimeRoleFiles(*workerRole, workerFiles); err != nil {
 				_ = workerFiles.Close()
@@ -925,7 +926,14 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		if handlerErr != nil {
 			return handlerErr
 		}
-		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(proxyCtx, *workerRole, workerFiles, handler, runtimeCallerCredentials)
+		credentialSource := proxy.NormalCallerCredentialSource(func(ctx context.Context) ([]proxy.NormalCallerCredentialV1, error) {
+			current, listErr := codexRoutingInventory.List(ctx)
+			if listErr != nil {
+				return nil, listErr
+			}
+			return normalCallerCredentials(cfg, accounts, current)
+		})
+		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
 		workerFiles = proxy.RuntimeRoleFiles{}
 	} else {
 		err = srv.ListenAndServe(proxyCtx)

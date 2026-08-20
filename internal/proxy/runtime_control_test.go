@@ -27,6 +27,7 @@ func TestRuntimeControlRoleABIRejectsAmbientOrReorderedArguments(t *testing.T) {
 		ControlFD:                     RuntimeControlFD,
 		LifecycleHolderIdentityDigest: holderDigest,
 		SecretFD:                      RuntimeSecretFD,
+		WorkFD:                        RuntimeNoWorkFD,
 	}
 	want := []string{
 		"--runtime-role", "supervisor",
@@ -73,6 +74,7 @@ func TestRuntimeControlWorkerABIRejectsPublicListenerFDAndNonCanonicalValues(t *
 		ProxyInstanceID: "proxy-a", RuntimeInstanceID: "runtime-a",
 		ListenerFD: RuntimeNoListenerFD, LifecycleFD: RuntimeLifecycleFD,
 		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD,
+		WorkFD:                        RuntimeWorkFD,
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
 	arguments := RuntimeRoleArguments(worker)
@@ -85,6 +87,7 @@ func TestRuntimeControlWorkerABIRejectsPublicListenerFDAndNonCanonicalValues(t *
 	supervisor := worker
 	supervisor.Role = RuntimeRoleSupervisor
 	supervisor.ListenerFD = RuntimeListenerFD
+	supervisor.WorkFD = RuntimeNoWorkFD
 	valid := RuntimeRoleArguments(supervisor)
 	for _, mutate := range []func([]string){
 		func(args []string) { args[3] = "+1" },

@@ -22,6 +22,45 @@ func TestLoadExistingConfigDoesNotCreateMissingState(t *testing.T) {
 	}
 }
 
+func TestRescueBootstrapSurvivesInvalidNormalConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	stateRoot := filepath.Join(root, "resilience")
+	if err := SaveConfig(&Config{
+		LocalToken:              "local-token",
+		ClaudeUpstream:          DefaultUpstream,
+		CodexUpstream:           DefaultCodexUpstream,
+		CodexLeaseRetentionDays: 7,
+		ProxyResilienceStateDir: stateRoot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cq", "proxy.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadExistingConfig(); err == nil {
+		t.Fatal("invalid normal config loaded")
+	}
+	bootstrap, err := LoadProxyRescueBootstrapConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.LocalToken != "local-token" || bootstrap.StateRoot != stateRoot || bootstrap.Port != DefaultPort {
+		t.Fatalf("bootstrap = %#v", bootstrap)
+	}
+}
+
+func TestRescueBootstrapMissingIsNonCreating(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	if _, err := LoadProxyRescueBootstrapConfig(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cq")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bootstrap load created state: %v", err)
+	}
+}
+
 func TestConfigDiagnosticsLogJSONRoundTrip(t *testing.T) {
 	cfg := Config{
 		Port:           DefaultPort,

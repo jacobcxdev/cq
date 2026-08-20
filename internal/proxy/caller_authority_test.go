@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,37 @@ func testNormalCallerAuthority(t *testing.T, credentials []NormalCallerCredentia
 		t.Fatal(err)
 	}
 	return authority
+}
+
+func TestCallerAuthorityAcceptsOnlyAuthenticatedMonotonicIndexUpdates(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 32)
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	authority := testNormalCallerAuthority(t, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "old-bearer", SubjectID: "codex"}}, consumer)
+	updated, err := BuildNormalCallerIndexV1(key, 2, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "new-bearer", SubjectID: "codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.UpdateFromIndex(updated); err != nil {
+		t.Fatal(err)
+	}
+	newRequest := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	newRequest.Header.Set("Authorization", "Bearer new-bearer")
+	if _, err := authority.authenticate(newRequest, normalCallerRouteCodex); err != nil {
+		t.Fatalf("updated bearer rejected: %v", err)
+	}
+	oldRequest := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	oldRequest.Header.Set("Authorization", "Bearer old-bearer")
+	if _, err := authority.authenticate(oldRequest, normalCallerRouteCodex); !errors.Is(err, ErrNormalCallerAuthRequired) {
+		t.Fatalf("old bearer error = %v", err)
+	}
+	stale, _ := BuildNormalCallerIndexV1(key, 1, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "old-bearer", SubjectID: "codex"}})
+	if err := authority.UpdateFromIndex(stale); !errors.Is(err, ErrNormalCallerAuthUnavailable) {
+		t.Fatalf("stale update error = %v", err)
+	}
+	updated.MAC = strings.Repeat("0", 64)
+	if err := authority.UpdateFromIndex(updated); !errors.Is(err, ErrNormalCallerAuthUnavailable) {
+		t.Fatalf("unauthenticated update error = %v", err)
+	}
 }
 
 func TestCallerAuthorityRejectsAmbiguousBearerBeforeBodyOrWorker(t *testing.T) {
@@ -197,6 +229,47 @@ func TestCallerAuthorityBootsFromWorkerPublishedSafeIndex(t *testing.T) {
 	}
 }
 
+func TestRuntimeSupervisorRefreshesWorkerCallerIndexBeforeAuthentication(t *testing.T) {
+	key := bytes.Repeat([]byte{0x53}, 32)
+	oldIndex, err := BuildNormalCallerIndexV1(key, 1, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "old-bearer", SubjectID: "codex-worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newIndex, err := BuildNormalCallerIndexV1(key, 2, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "new-bearer", SubjectID: "codex-worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	worker := &callerAuthorityRefreshingWorker{
+		callerAuthorityObservingWorker: callerAuthorityObservingWorker{holder: runtimeHolder("worker"), consumer: consumer},
+		bootKey:                        append([]byte(nil), key...), bootIndex: oldIndex, current: newIndex,
+	}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &callerAuthorityLauncher{worker: worker}, &RuntimeHashCheckpointStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerAdmissionConsumer(consumer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString(`{"model":"gpt-5.4"}`))
+	request.Header.Set("Authorization", "Bearer new-bearer")
+	response := httptest.NewRecorder()
+	supervisor.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || worker.calls != 1 {
+		t.Fatalf("updated request = status %d calls %d", response.Code, worker.calls)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString(`{"model":"gpt-5.4"}`))
+	request.Header.Set("Authorization", "Bearer old-bearer")
+	response = httptest.NewRecorder()
+	supervisor.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || worker.calls != 1 {
+		t.Fatalf("stale request = status %d calls %d", response.Code, worker.calls)
+	}
+}
+
 func TestCallerAuthorityKeepsHealthSupervisorLocal(t *testing.T) {
 	events := []string{}
 	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events}, &runtimeTestCheckpointStore{events: &events})
@@ -224,6 +297,21 @@ type callerAuthorityObservingWorker struct {
 	consumer *callerAuthorityTestConsumer
 	calls    int
 	last     RuntimeHTTPRequestV1
+}
+
+type callerAuthorityRefreshingWorker struct {
+	callerAuthorityObservingWorker
+	bootKey   []byte
+	bootIndex NormalCallerIndexV1
+	current   NormalCallerIndexV1
+}
+
+func (worker *callerAuthorityRefreshingWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
+	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerAuthorityKey: worker.bootKey, CallerIndex: worker.bootIndex}, nil
+}
+
+func (worker *callerAuthorityRefreshingWorker) CallerIndex(context.Context) (NormalCallerIndexV1, error) {
+	return worker.current, nil
 }
 
 func (worker *callerAuthorityObservingWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {

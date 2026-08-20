@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -68,5 +69,33 @@ func TestProxyResilienceStateRejectsUnsafeRoot(t *testing.T) {
 	options := ProxyResilienceStateOptions{FS: fsutil.OSFileSystem{}, Root: "relative", Random: bytes.NewReader(make([]byte, 128)), Now: time.Now}
 	if err := InitialiseProxyResilienceState(context.Background(), options); err == nil {
 		t.Fatal("accepted relative state root")
+	}
+}
+
+func TestProxyRescueStateOpensWhenNormalRoutingStateIsCorrupt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	options := ProxyResilienceStateOptions{
+		FS:     fsutil.OSFileSystem{},
+		Root:   root,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x42}, 4096)),
+		Now:    time.Now,
+	}
+	if err := InitialiseProxyResilienceState(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, proxyRoutingDirectoryName, routingPolicyAnchorName), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := OpenProxyResilienceState(context.Background(), options); err == nil {
+		_ = state.Close()
+		t.Fatal("full state opened corrupt routing authority")
+	}
+	rescue, err := OpenProxyRescueState(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rescue.Close()
+	if rescue.RuntimeMode == nil || rescue.RescueFairnessKey() == ([sha256.Size]byte{}) {
+		t.Fatal("rescue authority incomplete")
 	}
 }

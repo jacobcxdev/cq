@@ -13,15 +13,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-
-	"golang.org/x/sys/unix"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func DefaultRuntimeLifecyclePath() string {
@@ -33,11 +28,13 @@ const (
 	RuntimeLifecycleFD  = 4
 	RuntimeControlFD    = 5
 	RuntimeSecretFD     = 6
+	RuntimeWorkFD       = 7
 	RuntimeNoListenerFD = -1
+	RuntimeNoWorkFD     = -1
 
 	RuntimeSecretSize        = 32
 	RuntimeControlFrameLimit = 64 << 10
-	RuntimeHTTPBodyLimit     = 32 << 10
+	RuntimeHTTPBodyLimit     = 10 << 20
 )
 
 var (
@@ -65,6 +62,7 @@ type RuntimeRoleManifestV1 struct {
 	LifecycleFD                   int               `json:"lifecycle_fd"`
 	ControlFD                     int               `json:"control_fd"`
 	SecretFD                      int               `json:"secret_fd"`
+	WorkFD                        int               `json:"work_fd"`
 	LifecycleHolderIdentityDigest [sha256.Size]byte `json:"lifecycle_holder_identity_digest"`
 }
 
@@ -83,6 +81,12 @@ func (manifest RuntimeRoleManifestV1) validate() error {
 		manifest.SecretFD == manifest.LifecycleFD || manifest.SecretFD == manifest.ControlFD {
 		return ErrRuntimeRoleManifest
 	}
+	if (manifest.Role == RuntimeRoleWorker && manifest.WorkFD != RuntimeWorkFD) ||
+		(manifest.Role == RuntimeRoleSupervisor && manifest.WorkFD != RuntimeNoWorkFD) ||
+		manifest.WorkFD == manifest.ListenerFD || manifest.WorkFD == manifest.LifecycleFD ||
+		manifest.WorkFD == manifest.ControlFD || manifest.WorkFD == manifest.SecretFD {
+		return ErrRuntimeRoleManifest
+	}
 	return nil
 }
 
@@ -99,6 +103,8 @@ func RuntimeRoleArguments(manifest RuntimeRoleManifestV1) []string {
 	}
 	if manifest.Role == RuntimeRoleSupervisor {
 		arguments = append(arguments, "--listener-fd", strconv.Itoa(manifest.ListenerFD))
+	} else {
+		arguments = append(arguments, "--work-fd", strconv.Itoa(manifest.WorkFD))
 	}
 	return append(arguments,
 		"--lifecycle-fd", strconv.Itoa(manifest.LifecycleFD),
@@ -114,20 +120,20 @@ func ParseRuntimeRoleArguments(arguments []string) (RuntimeRoleManifestV1, error
 		return manifest, ErrRuntimeRoleManifest
 	}
 	manifest.Role = RuntimeRole(arguments[1])
-	wantLength := 18
-	listenerOffset := 0
+	wantLength := 20
+	roleFDName := "--work-fd"
 	manifest.ListenerFD = RuntimeNoListenerFD
+	manifest.WorkFD = RuntimeNoWorkFD
 	if manifest.Role == RuntimeRoleSupervisor {
-		wantLength = 20
-		listenerOffset = 2
+		roleFDName = "--listener-fd"
 	} else if manifest.Role != RuntimeRoleWorker {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
 	if len(arguments) != wantLength || arguments[0] != "--runtime-role" || arguments[2] != "--runtime-schema" ||
 		arguments[4] != "--runtime-manifest-digest" || arguments[6] != "--proxy-instance" || arguments[8] != "--runtime-instance" ||
-		(listenerOffset != 0 && arguments[10] != "--listener-fd") || arguments[10+listenerOffset] != "--lifecycle-fd" ||
-		arguments[12+listenerOffset] != "--control-fd" || arguments[14+listenerOffset] != "--lifecycle-holder-digest" ||
-		arguments[16+listenerOffset] != "--secret-fd" {
+		arguments[10] != roleFDName || arguments[12] != "--lifecycle-fd" ||
+		arguments[14] != "--control-fd" || arguments[16] != "--lifecycle-holder-digest" ||
+		arguments[18] != "--secret-fd" {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
 	manifest.ProxyInstanceID = arguments[7]
@@ -144,26 +150,28 @@ func ParseRuntimeRoleArguments(arguments []string) (RuntimeRoleManifestV1, error
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
 	copy(manifest.ManifestDigest[:], manifestDigest)
-	if listenerOffset != 0 {
+	if manifest.Role == RuntimeRoleSupervisor {
 		if manifest.ListenerFD, err = parseCanonicalRuntimeDecimal(arguments[11]); err != nil {
 			return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 		}
-	}
-	if manifest.LifecycleFD, err = parseCanonicalRuntimeDecimal(arguments[11+listenerOffset]); err != nil {
+	} else if manifest.WorkFD, err = parseCanonicalRuntimeDecimal(arguments[11]); err != nil {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
-	if manifest.ControlFD, err = parseCanonicalRuntimeDecimal(arguments[13+listenerOffset]); err != nil {
+	if manifest.LifecycleFD, err = parseCanonicalRuntimeDecimal(arguments[13]); err != nil {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
-	if arguments[15+listenerOffset] != strings.ToLower(arguments[15+listenerOffset]) {
+	if manifest.ControlFD, err = parseCanonicalRuntimeDecimal(arguments[15]); err != nil {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
-	holderDigest, err := hex.DecodeString(arguments[15+listenerOffset])
+	if arguments[17] != strings.ToLower(arguments[17]) {
+		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
+	}
+	holderDigest, err := hex.DecodeString(arguments[17])
 	if err != nil || len(holderDigest) != sha256.Size {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
 	copy(manifest.LifecycleHolderIdentityDigest[:], holderDigest)
-	if manifest.SecretFD, err = parseCanonicalRuntimeDecimal(arguments[17+listenerOffset]); err != nil {
+	if manifest.SecretFD, err = parseCanonicalRuntimeDecimal(arguments[19]); err != nil {
 		return RuntimeRoleManifestV1{}, ErrRuntimeRoleManifest
 	}
 	if err := manifest.validate(); err != nil {
@@ -217,18 +225,6 @@ func NewRuntimePrivateTransport() (net.Conn, net.Conn, error) {
 	return first, second, nil
 }
 
-func newRuntimePrivateSocketFiles() (*os.File, *os.File, error) {
-	descriptors, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	unix.CloseOnExec(descriptors[0])
-	unix.CloseOnExec(descriptors[1])
-	firstFile := os.NewFile(uintptr(descriptors[0]), "runtime-supervisor-control")
-	secondFile := os.NewFile(uintptr(descriptors[1]), "runtime-worker-control")
-	return firstFile, secondFile, nil
-}
-
 func WriteRuntimeControlMessage(writer io.Writer, secret *RuntimeSecret, frame RuntimeControlFrameV1) error {
 	encoded, err := SealRuntimeControlFrame(secret, frame)
 	if err != nil {
@@ -257,36 +253,6 @@ func ReadRuntimeControlMessage(reader io.Reader, receiver *RuntimeControlReceive
 		return RuntimeControlFrameV1{}, err
 	}
 	return receiver.Receive(encoded)
-}
-
-func RuntimeDescriptorIdentityDigest(file *os.File) ([sha256.Size]byte, error) {
-	if file == nil {
-		return [sha256.Size]byte{}, ErrRuntimeRoleManifest
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return [sha256.Size]byte{}, err
-	}
-	canonical := "cq/runtime-descriptor-identity/v1\x00" + strconv.FormatUint(uint64(stat.Dev), 10) + "\x00" + strconv.FormatUint(uint64(stat.Ino), 10) + "\x00" + strconv.FormatUint(uint64(stat.Nlink), 10)
-	return sha256.Sum256([]byte(canonical)), nil
-}
-
-func RuntimeLifecycleHolder(file *os.File, descriptionID string) (LifecycleHolderProof, error) {
-	if file == nil || descriptionID == "" {
-		return LifecycleHolderProof{}, ErrLifecycleHolderConflict
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return LifecycleHolderProof{}, err
-	}
-	if stat.Nlink != 1 {
-		return LifecycleHolderProof{}, ErrLifecycleHolderConflict
-	}
-	return LifecycleHolderProof{
-		LockIdentity:  fsutil.SecureFileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino), Links: uint64(stat.Nlink)},
-		DescriptionID: descriptionID,
-		Mode:          LifecycleShared,
-	}, nil
 }
 
 type TrafficMode string

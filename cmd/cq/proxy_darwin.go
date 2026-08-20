@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
@@ -87,6 +88,7 @@ type proxyPlistData struct {
 
 func init() {
 	defaultProxyInspectionTarget = darwinProxyInspectionTarget
+	proxyInspectionTargetForRoot = darwinProxyInspectionTargetForRoot
 	adoptProxyListenerFn = adoptDarwinProxyListener
 	newProxyRuntimeWorkerLauncherFn = newDarwinProxyRuntimeWorkerLauncher
 	runProxyAdoptedRuntimeFn = runDarwinProxyAdoptedRuntime
@@ -116,7 +118,7 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		SchemaVersion: 1, Role: proxy.RuntimeRoleSupervisor, ManifestDigest: manifestDigest,
 		ProxyInstanceID: "primary", RuntimeInstanceID: hex.EncodeToString(manifestDigest[:16]),
 		ListenerFD: proxy.RuntimeListenerFD, LifecycleFD: proxy.RuntimeLifecycleFD,
-		ControlFD: proxy.RuntimeControlFD, SecretFD: proxy.RuntimeSecretFD,
+		ControlFD: proxy.RuntimeControlFD, SecretFD: proxy.RuntimeSecretFD, WorkFD: proxy.RuntimeNoWorkFD,
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
 	launcher := newDarwinRuntimeLauncher(executable, manifest, holder, path)
@@ -126,15 +128,15 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 	}
 	defer admissions.Close()
 	workerManifest := proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}
-	cfg, err := proxy.LoadExistingConfig()
-	if errors.Is(err, os.ErrNotExist) || (err == nil && cfg.ResolvedProxyResilienceStateDir() == "") {
+	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
+	if errors.Is(err, os.ErrNotExist) {
 		return proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, serve)
 	}
 	if err != nil {
 		return err
 	}
-	state, err := proxy.OpenProxyResilienceState(ctx, proxy.ProxyResilienceStateOptions{
-		FS: fsutil.OSFileSystem{}, Root: cfg.ResolvedProxyResilienceStateDir(), Random: rand.Reader, Now: time.Now,
+	state, err := proxy.OpenProxyRescueState(ctx, proxy.ProxyResilienceStateOptions{
+		FS: fsutil.OSFileSystem{}, Root: bootstrap.StateRoot, Random: rand.Reader, Now: time.Now,
 	})
 	if err != nil {
 		return err
@@ -145,7 +147,7 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		return err
 	}
 	callerAuthority, err := proxy.NewNormalCallerAuthority(callerKey, 1, []proxy.NormalCallerCredentialV1{{
-		Domain: proxy.NormalCallerLocal, Bearer: cfg.LocalToken, SubjectID: "local-control",
+		Domain: proxy.NormalCallerLocal, Bearer: bootstrap.LocalToken, SubjectID: "local-control",
 	}}, admissions, time.Now, rand.Reader)
 	for index := range callerKey {
 		callerKey[index] = 0
@@ -267,9 +269,127 @@ func adoptDarwinProxyListener() (net.Listener, error) {
 	return tcpListener, nil
 }
 
-// darwinProxyInspectionTarget is the CU-1 read-only platform boundary. It
-// deliberately exposes no live collectors until the CU that owns effects.
-func darwinProxyInspectionTarget() ProxyInspectionTarget { return ProxyInspectionTarget{} }
+type darwinProxyInspectionFacts struct {
+	inspector proxy.Fact[proxy.InspectorIdentity]
+	desired   proxy.Fact[proxy.DesiredProxyState]
+	service   proxy.Fact[proxy.ServiceState]
+	listener  proxy.Fact[proxy.ListenerState]
+	process   proxy.Fact[proxy.ProcessState]
+	runtime   proxy.Fact[proxy.RuntimeIdentity]
+	dataPlane proxy.Fact[proxy.DataPlaneProof]
+}
+
+func darwinProxyInspectionTarget() ProxyInspectionTarget {
+	return darwinProxyInspectionTargetForRoot("")
+}
+
+func darwinProxyInspectionTargetForRoot(instanceRoot string) ProxyInspectionTarget {
+	var once sync.Once
+	var facts darwinProxyInspectionFacts
+	collect := func(ctx context.Context) {
+		once.Do(func() { facts = collectDarwinProxyInspectionFacts(ctx, instanceRoot) })
+	}
+	return ProxyInspectionTarget{
+		Inspector: func(ctx context.Context) proxy.Fact[proxy.InspectorIdentity] { collect(ctx); return facts.inspector },
+		Desired:   func(ctx context.Context) proxy.Fact[proxy.DesiredProxyState] { collect(ctx); return facts.desired },
+		Service:   func(ctx context.Context) proxy.Fact[proxy.ServiceState] { collect(ctx); return facts.service },
+		Listener:  func(ctx context.Context) proxy.Fact[proxy.ListenerState] { collect(ctx); return facts.listener },
+		Process:   func(ctx context.Context) proxy.Fact[proxy.ProcessState] { collect(ctx); return facts.process },
+		Runtime:   func(ctx context.Context) proxy.Fact[proxy.RuntimeIdentity] { collect(ctx); return facts.runtime },
+		DataPlane: func(ctx context.Context) proxy.Fact[proxy.DataPlaneProof] { collect(ctx); return facts.dataPlane },
+	}
+}
+
+func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string) darwinProxyInspectionFacts {
+	facts := darwinProxyInspectionFacts{
+		inspector: proxy.UnavailableFact[proxy.InspectorIdentity]("inspector_unavailable"),
+		desired:   proxy.UnavailableFact[proxy.DesiredProxyState]("config_unavailable"),
+		service:   proxy.UnavailableFact[proxy.ServiceState]("service_unavailable"),
+		listener:  proxy.UnavailableFact[proxy.ListenerState]("listener_unavailable"),
+		process:   proxy.UnavailableFact[proxy.ProcessState]("process_unavailable"),
+		runtime:   proxy.UnavailableFact[proxy.RuntimeIdentity]("runtime_unavailable"),
+		dataPlane: proxy.UnavailableFact[proxy.DataPlaneProof]("data_plane_unavailable"),
+	}
+	executable, err := os.Executable()
+	if err == nil {
+		executable, err = filepath.EvalSymlinks(executable)
+	}
+	if err != nil || ctx.Err() != nil {
+		return facts
+	}
+	facts.inspector = proxy.KnownFact(proxy.InspectorIdentity{Executable: executable, Version: version})
+	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
+	if err != nil || (instanceRoot != "" && bootstrap.StateRoot != instanceRoot) {
+		return facts
+	}
+	var binding installedHTTPValidationServiceBinding
+	for _, label := range []string{proxyAgentLabel, homebrewProxyAgentLabel} {
+		candidate, candidateErr := resolveInstalledHTTPValidationService(label)
+		if candidateErr == nil {
+			if binding.label != "" {
+				facts.service = proxy.InvalidFact[proxy.ServiceState]("service_ambiguous")
+				return facts
+			}
+			binding = candidate
+		}
+	}
+	if binding.label == "" || ctx.Err() != nil {
+		facts.desired = proxy.KnownFact(proxy.DesiredProxyState{Configured: true, Listener: fmt.Sprintf("127.0.0.1:%d", bootstrap.Port)})
+		return facts
+	}
+	manager := "launchagent"
+	if binding.label == homebrewProxyAgentLabel {
+		manager = "homebrew"
+	}
+	listenerAddress := fmt.Sprintf("127.0.0.1:%d", binding.port)
+	facts.desired = proxy.KnownFact(proxy.DesiredProxyState{Manager: manager, Configured: true, Listener: listenerAddress})
+	target, err := installedHTTPValidationLaunchctlTarget(binding.label, os.Geteuid)
+	if err != nil {
+		return facts
+	}
+	launchctlOutput, err := exec.CommandContext(ctx, "launchctl", "print", target).Output()
+	if err != nil {
+		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "stopped"})
+		facts.listener = proxy.AbsentFact[proxy.ListenerState]()
+		facts.process = proxy.AbsentFact[proxy.ProcessState]()
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Health: "unhealthy"})
+		facts.dataPlane = proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"})
+		return facts
+	}
+	pid, err := parseInstalledHTTPValidationLaunchctlPID(launchctlOutput, target)
+	if err != nil {
+		facts.service = proxy.InvalidFact[proxy.ServiceState]("service_invalid")
+		return facts
+	}
+	lsofOutput, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", binding.port), "-sTCP:LISTEN", "-Fp").Output()
+	if err != nil || requireInstalledHTTPValidationListenerPID(lsofOutput, pid) != nil {
+		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
+		facts.listener = proxy.InvalidFact[proxy.ListenerState]("listener_mismatch")
+		return facts
+	}
+	facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
+	facts.listener = proxy.KnownFact(proxy.ListenerState{State: "listening", Listener: listenerAddress, PID: pid, Executable: executable})
+	facts.process = proxy.KnownFact(proxy.ProcessState{PID: pid, Executable: executable})
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listenerAddress+"/health", http.NoBody)
+	if err != nil {
+		return facts
+	}
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("proxy status redirect refused") }}
+	response, err := client.Do(request)
+	if err != nil {
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Health: "unhealthy"})
+		facts.dataPlane = proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"})
+		return facts
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusOK {
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: executable, Health: "healthy"})
+	} else {
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: executable, Health: "unhealthy"})
+	}
+	facts.dataPlane = proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"})
+	return facts
+}
 
 func proxyAgentPlistPath() (string, error) {
 	home, err := os.UserHomeDir()

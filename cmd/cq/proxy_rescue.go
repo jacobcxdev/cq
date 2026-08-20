@@ -16,13 +16,24 @@ import (
 const proxyRescueResponseMaxBytes = 64 << 10
 
 func runProxyRescue(args []string, output io.Writer) error {
+	return runProxyRescueContext(context.Background(), args, output)
+}
+
+func runProxyRescueContext(ctx context.Context, args []string, output io.Writer) error {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errors.New("proxy rescue redirect refused")
 		},
 	}
-	return runProxyRescueWithDependencies(context.Background(), args, output, proxy.LoadExistingConfig, client)
+	load := func() (*proxy.Config, error) {
+		bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
+		if err != nil {
+			return nil, err
+		}
+		return &proxy.Config{Port: bootstrap.Port, LocalToken: bootstrap.LocalToken}, nil
+	}
+	return runProxyRescueWithDependencies(ctx, args, output, load, client)
 }
 
 func runProxyRescueWithDependencies(ctx context.Context, args []string, output io.Writer, load func() (*proxy.Config, error), doer httputil.Doer) error {

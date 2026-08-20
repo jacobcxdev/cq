@@ -12,13 +12,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 type RuntimeRoleFiles struct {
@@ -26,13 +27,14 @@ type RuntimeRoleFiles struct {
 	Lifecycle *os.File
 	Control   *os.File
 	Secret    *os.File
+	Work      *os.File
 }
 
 func (files *RuntimeRoleFiles) Close() error {
 	if files == nil {
 		return nil
 	}
-	return errors.Join(closeRuntimeFile(files.Listener), closeRuntimeFile(files.Lifecycle), closeRuntimeFile(files.Control), closeRuntimeFile(files.Secret))
+	return errors.Join(closeRuntimeFile(files.Listener), closeRuntimeFile(files.Lifecycle), closeRuntimeFile(files.Control), closeRuntimeFile(files.Secret), closeRuntimeFile(files.Work))
 }
 
 func closeRuntimeFile(file *os.File) error {
@@ -53,7 +55,8 @@ func ValidateRuntimeRoleDescriptors(manifest RuntimeRoleManifestV1, files Runtim
 	if err := manifest.validate(); err != nil || files.Lifecycle == nil || files.Control == nil {
 		return ErrRuntimeRoleManifest
 	}
-	if (manifest.Role == RuntimeRoleSupervisor && files.Listener == nil) || (manifest.Role == RuntimeRoleWorker && files.Listener != nil) {
+	if (manifest.Role == RuntimeRoleSupervisor && (files.Listener == nil || files.Work != nil)) ||
+		(manifest.Role == RuntimeRoleWorker && (files.Listener != nil || files.Work == nil)) {
 		return ErrRuntimeRoleManifest
 	}
 	digest, err := RuntimeDescriptorIdentityDigest(files.Lifecycle)
@@ -76,6 +79,67 @@ func RunRuntimeWorkerRoleWithHandler(ctx context.Context, manifest RuntimeRoleMa
 }
 
 func RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(ctx context.Context, manifest RuntimeRoleManifestV1, files RuntimeRoleFiles, handler http.Handler, credentials []NormalCallerCredentialV1) error {
+	return RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx, manifest, files, handler, func(context.Context) ([]NormalCallerCredentialV1, error) {
+		return append([]NormalCallerCredentialV1(nil), credentials...), nil
+	})
+}
+
+type NormalCallerCredentialSource func(context.Context) ([]NormalCallerCredentialV1, error)
+
+type runtimeCallerCredentialState struct {
+	mu     sync.Mutex
+	key    []byte
+	epoch  uint64
+	source NormalCallerCredentialSource
+	bound  []NormalCallerCredentialV1
+	index  NormalCallerIndexV1
+}
+
+func newRuntimeCallerCredentialState(key []byte, source NormalCallerCredentialSource) (*runtimeCallerCredentialState, error) {
+	if len(key) != sha256.Size || source == nil {
+		return nil, ErrNormalCallerAuthUnavailable
+	}
+	return &runtimeCallerCredentialState{key: append([]byte(nil), key...), source: source}, nil
+}
+
+func (state *runtimeCallerCredentialState) snapshot(ctx context.Context) ([]NormalCallerCredentialV1, NormalCallerIndexV1, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	credentials, err := state.source(ctx)
+	if err != nil {
+		return nil, NormalCallerIndexV1{}, err
+	}
+	bound, err := bindRuntimeCallerCredentials(state.key, credentials)
+	if err != nil {
+		return nil, NormalCallerIndexV1{}, err
+	}
+	epoch := state.epoch
+	if epoch == 0 {
+		epoch = 1
+	}
+	index, err := BuildNormalCallerIndexV1(state.key, epoch, bound)
+	if err != nil {
+		return nil, NormalCallerIndexV1{}, err
+	}
+	if state.epoch != 0 && !slices.Equal(index.Entries, state.index.Entries) {
+		epoch++
+		index, err = BuildNormalCallerIndexV1(state.key, epoch, bound)
+		if err != nil {
+			return nil, NormalCallerIndexV1{}, err
+		}
+	}
+	state.epoch = epoch
+	state.bound = append(state.bound[:0], bound...)
+	state.index = index
+	return append([]NormalCallerCredentialV1(nil), state.bound...), state.index, nil
+}
+
+func (state *runtimeCallerCredentialState) credentials(ctx context.Context) ([]NormalCallerCredentialV1, error) {
+	credentials, _, err := state.snapshot(ctx)
+	return credentials, err
+}
+
+func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Context, manifest RuntimeRoleManifestV1, files RuntimeRoleFiles, handler http.Handler, source NormalCallerCredentialSource) error {
 	defer files.Close()
 	if manifest.Role != RuntimeRoleWorker || ValidateRuntimeRoleFiles(manifest, files) != nil || handler == nil {
 		return ErrRuntimeRoleManifest
@@ -91,15 +155,37 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(ctx context.Context, ma
 		return err
 	}
 	defer zeroRuntimeBytes(callerKey)
-	boundCredentials, err := bindRuntimeCallerCredentials(callerKey, credentials)
+	callerState, err := newRuntimeCallerCredentialState(callerKey, source)
 	if err != nil {
 		return err
 	}
-	callerIndex, err := BuildNormalCallerIndexV1(callerKey, 1, boundCredentials)
+	_, callerIndex, err := callerState.snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	handler = normalWorkerHandler(handler, boundCredentials)
+	handler = normalWorkerHandlerWithSource(handler, callerState.credentials)
+	workListener, err := net.FileListener(files.Work)
+	if err != nil {
+		return err
+	}
+	_ = files.Work.Close()
+	files.Work = nil
+	defer workListener.Close()
+	workServer := &http.Server{Handler: runtimeWorkerIngressHandler(callerKey, callerState, handler), ReadHeaderTimeout: 10 * time.Second}
+	workResult := make(chan error, 1)
+	go func() {
+		serveErr := workServer.Serve(workListener)
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+		workResult <- serveErr
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = workServer.Shutdown(shutdownCtx)
+		<-workResult
+	}()
 	connection, err := net.FileConn(files.Control)
 	if err != nil {
 		return err
@@ -132,6 +218,10 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(ctx context.Context, ma
 		switch frame.Kind {
 		case "hello":
 			kind = "ready"
+			_, callerIndex, err = callerState.snapshot(ctx)
+			if err != nil {
+				return err
+			}
 			payload, err = json.Marshal(callerIndex)
 			if err != nil {
 				return err
@@ -188,6 +278,43 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(ctx context.Context, ma
 	}
 }
 
+const (
+	runtimeCallerAuthorityHeader = "X-Cq-Runtime-Caller-V1"
+	runtimeCallerIndexPath       = "/__cq/runtime/caller-index"
+)
+
+func runtimeWorkerIngressHandler(key []byte, callerState *runtimeCallerCredentialState, handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.EscapedPath() == runtimeCallerIndexPath {
+			if request.Method != http.MethodGet || callerState == nil {
+				http.Error(writer, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+				return
+			}
+			_, index, err := callerState.snapshot(request.Context())
+			if err != nil {
+				http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+				return
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(index)
+			return
+		}
+		encoded := request.Header.Get(runtimeCallerAuthorityHeader)
+		request.Header.Del(runtimeCallerAuthorityHeader)
+		if normalCallerPolicy(request) == normalCallerRoutePublic {
+			handler.ServeHTTP(writer, request)
+			return
+		}
+		var caller RuntimeCallerAuthorityV1
+		body, err := hex.DecodeString(encoded)
+		if err != nil || json.Unmarshal(body, &caller) != nil || !validRuntimeCallerAuthority(caller, request.Method, request.URL.RequestURI(), time.Now()) || !validateRuntimeCallerAuthorityMAC(key, caller) {
+			http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		handler.ServeHTTP(writer, request.WithContext(withRuntimeCallerAuthority(request.Context(), caller)))
+	})
+}
+
 func normalCallerKeyFromRuntimeSecret(secret *RuntimeSecret) ([]byte, error) {
 	material, err := secret.key()
 	if err != nil {
@@ -217,27 +344,6 @@ type RuntimeProcessWorkerLauncher struct {
 	OpenLifecycle    func() (*os.File, LifecycleHolderProof, error)
 	Random           io.Reader
 	Command          func(context.Context, string, ...string) *exec.Cmd
-}
-
-func runtimeExecutableDigest(path string) ([sha256.Size]byte, unix.Stat_t, error) {
-	var empty [sha256.Size]byte
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return empty, unix.Stat_t{}, err
-	}
-	file := os.NewFile(uintptr(fd), "runtime-worker-executable")
-	defer file.Close()
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink == 0 {
-		return empty, unix.Stat_t{}, errors.Join(ErrRuntimeArtifactMismatch, err)
-	}
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return empty, unix.Stat_t{}, err
-	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
-	return digest, stat, nil
 }
 
 func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, workerManifest WorkerManifestV1) (RuntimeWorkerProcess, error) {
@@ -270,7 +376,7 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 		return nil, errors.Join(ErrRuntimeArtifactMismatch, err)
 	}
 	reopenedDigest, reopenedStat, err := runtimeExecutableDigest(launcher.Executable)
-	if err != nil || reopenedStat.Dev != verifiedStat.Dev || reopenedStat.Ino != verifiedStat.Ino || reopenedDigest != verifiedDigest {
+	if err != nil || reopenedStat != verifiedStat || reopenedDigest != verifiedDigest {
 		return nil, errors.Join(ErrRuntimeArtifactMismatch, err)
 	}
 	workerRole := launcher.BaseManifest
@@ -279,6 +385,7 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 	workerRole.LifecycleFD = RuntimeLifecycleFD
 	workerRole.ControlFD = RuntimeControlFD
 	workerRole.SecretFD = RuntimeSecretFD
+	workerRole.WorkFD = RuntimeWorkFD
 	copy(workerRole.ManifestDigest[:], artifactDigest)
 	workerRole.LifecycleHolderIdentityDigest = holderDigest
 	arguments := RuntimeRoleArguments(workerRole)
@@ -301,14 +408,39 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 		return nil, err
 	}
 	defer placeholder.Close()
+	privateDir, err := os.MkdirTemp("", "cq-runtime-worker-")
+	if err != nil {
+		return nil, err
+	}
+	removePrivateDir := true
+	defer func() {
+		if removePrivateDir {
+			_ = os.RemoveAll(privateDir)
+		}
+	}()
+	socketPath := filepath.Join(privateDir, "normal.sock")
+	workListener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		return nil, err
+	}
+	workListener.SetUnlinkOnClose(false)
+	defer workListener.Close()
+	if err := os.Chmod(socketPath, 0o600); err != nil {
+		return nil, err
+	}
+	workFile, err := workListener.File()
+	if err != nil {
+		return nil, err
+	}
+	defer workFile.Close()
 	commandFactory := launcher.Command
 	if commandFactory == nil {
 		commandFactory = exec.CommandContext
 	}
 	command := commandFactory(ctx, launcher.Executable, append([]string{"proxy", "start"}, arguments...)...)
-	command.ExtraFiles = []*os.File{placeholder, lifecycle, workerControlFile, secretReader}
+	command.ExtraFiles = []*os.File{placeholder, lifecycle, workerControlFile, secretReader, workFile}
 	spawnDigest, spawnStat, err := runtimeExecutableDigest(launcher.Executable)
-	if err != nil || spawnStat.Dev != verifiedStat.Dev || spawnStat.Ino != verifiedStat.Ino || spawnDigest != verifiedDigest {
+	if err != nil || spawnStat != verifiedStat || spawnDigest != verifiedDigest {
 		return nil, errors.Join(ErrRuntimeArtifactMismatch, err)
 	}
 	if err := command.Start(); err != nil {
@@ -345,18 +477,44 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 		return nil, err
 	}
 	closeLifecycle = false
-	return &runtimeProcessWorker{command: command, control: control, secret: secret, holder: holder, lifecycle: lifecycle, receiver: NewRuntimeControlReceiver(secret), next: 1}, nil
+	transport := &http.Transport{
+		DisableCompression: true,
+		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(dialCtx, "unix", socketPath)
+		},
+	}
+	worker := &runtimeProcessWorker{
+		command: command, control: control, secret: secret, holder: holder, lifecycle: lifecycle,
+		receiver: NewRuntimeControlReceiver(secret), next: 1, transport: transport, privateDir: privateDir,
+		waitDone: make(chan struct{}),
+	}
+	go func() {
+		err := command.Wait()
+		worker.waitMu.Lock()
+		worker.waitErr = err
+		worker.waitMu.Unlock()
+		close(worker.waitDone)
+	}()
+	removePrivateDir = false
+	return worker, nil
 }
 
 type runtimeProcessWorker struct {
-	mu        sync.Mutex
-	command   *exec.Cmd
-	control   net.Conn
-	secret    *RuntimeSecret
-	receiver  *RuntimeControlReceiver
-	holder    LifecycleHolderProof
-	lifecycle *os.File
-	next      uint64
+	mu         sync.Mutex
+	command    *exec.Cmd
+	control    net.Conn
+	secret     *RuntimeSecret
+	receiver   *RuntimeControlReceiver
+	holder     LifecycleHolderProof
+	lifecycle  *os.File
+	next       uint64
+	transport  *http.Transport
+	privateDir string
+	waitMu     sync.Mutex
+	waitDone   chan struct{}
+	waitErr    error
+	cleanup    sync.Once
+	release    RuntimeWorkerReleaseV1
 }
 
 func (worker *runtimeProcessWorker) exchange(ctx context.Context, kind string, payload json.RawMessage) (RuntimeControlFrameV1, error) {
@@ -444,6 +602,7 @@ func (worker *runtimeProcessWorker) AwaitQuiescence(ctx context.Context, _ uint6
 	return RuntimeQuiescenceAckV1{SchemaVersion: 1, Quiescent: err == nil && frame.Kind == "quiescent"}, err
 }
 func (worker *runtimeProcessWorker) HolderProof() LifecycleHolderProof { return worker.holder }
+func (worker *runtimeProcessWorker) Exited() <-chan struct{}           { return worker.waitDone }
 func (worker *runtimeProcessWorker) ExecuteHTTP(ctx context.Context, request RuntimeHTTPRequestV1) (RuntimeHTTPResponseV1, error) {
 	if request.Method == "" || request.RequestURI == "" || len(request.Body) > RuntimeHTTPBodyLimit {
 		return RuntimeHTTPResponseV1{}, ErrRuntimeControlFrame
@@ -462,27 +621,99 @@ func (worker *runtimeProcessWorker) ExecuteHTTP(ctx context.Context, request Run
 	}
 	return response, nil
 }
+
+func (worker *runtimeProcessWorker) ServeHTTP(writer http.ResponseWriter, request *http.Request, caller RuntimeCallerAuthorityV1) error {
+	if worker == nil || writer == nil || request == nil || worker.transport == nil {
+		return ErrRuntimeWorkerUnavailable
+	}
+	var transportErr error
+	reverse := &httputil.ReverseProxy{
+		Rewrite: func(out *httputil.ProxyRequest) {
+			out.Out.URL.Scheme = "http"
+			out.Out.URL.Host = "runtime-worker"
+			out.Out.Host = out.In.Host
+			out.Out.Header.Del("Authorization")
+			out.Out.Header.Del("Proxy-Authorization")
+			out.Out.Header.Del(runtimeCallerAuthorityHeader)
+			if caller.SchemaVersion == 1 {
+				encoded, _ := json.Marshal(caller)
+				out.Out.Header.Set(runtimeCallerAuthorityHeader, hex.EncodeToString(encoded))
+			}
+		},
+		Transport:     worker.transport,
+		FlushInterval: -1,
+		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, err error) {
+			transportErr = err
+			http.Error(response, "runtime worker unavailable", http.StatusServiceUnavailable)
+		},
+	}
+	reverse.ServeHTTP(writer, request)
+	return transportErr
+}
+
+func (worker *runtimeProcessWorker) CallerIndex(ctx context.Context) (NormalCallerIndexV1, error) {
+	if worker == nil || ctx == nil || worker.transport == nil || worker.secret == nil {
+		return NormalCallerIndexV1{}, ErrRuntimeWorkerUnavailable
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://runtime-worker"+runtimeCallerIndexPath, nil)
+	if err != nil {
+		return NormalCallerIndexV1{}, err
+	}
+	response, err := worker.transport.RoundTrip(request)
+	if err != nil {
+		return NormalCallerIndexV1{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return NormalCallerIndexV1{}, ErrNormalCallerAuthUnavailable
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, RuntimeControlFrameLimit+1))
+	if err != nil || len(body) > RuntimeControlFrameLimit {
+		return NormalCallerIndexV1{}, ErrNormalCallerAuthUnavailable
+	}
+	var index NormalCallerIndexV1
+	key, keyErr := normalCallerKeyFromRuntimeSecret(worker.secret)
+	if keyErr != nil || json.Unmarshal(body, &index) != nil || !VerifyNormalCallerIndexV1(key, index) {
+		zeroRuntimeBytes(key)
+		return NormalCallerIndexV1{}, ErrNormalCallerAuthUnavailable
+	}
+	zeroRuntimeBytes(key)
+	return index, nil
+}
 func (worker *runtimeProcessWorker) StopAndReap(ctx context.Context) (RuntimeWorkerReleaseV1, error) {
-	_, exchangeErr := worker.exchange(ctx, "shutdown", nil)
-	waited := make(chan error, 1)
-	go func() { waited <- worker.command.Wait() }()
-	var waitErr error
+	if worker == nil || ctx == nil {
+		return RuntimeWorkerReleaseV1{}, ErrRuntimeWorkerUnavailable
+	}
 	select {
-	case waitErr = <-waited:
+	case <-worker.waitDone:
+	default:
+		_, _ = worker.exchange(ctx, "shutdown", nil)
+	}
+	select {
+	case <-worker.waitDone:
 	case <-ctx.Done():
 		_ = worker.command.Process.Kill()
-		waitErr = errors.Join(ctx.Err(), <-waited)
+		<-worker.waitDone
 	}
-	worker.receiver.Close()
-	_ = worker.control.Close()
-	_ = worker.lifecycle.Close()
-	worker.secret.Destroy()
-	if exchangeErr != nil || waitErr != nil {
-		return RuntimeWorkerReleaseV1{}, errors.Join(exchangeErr, waitErr)
+	worker.cleanup.Do(func() {
+		worker.receiver.Close()
+		_ = worker.control.Close()
+		_ = worker.lifecycle.Close()
+		if worker.transport != nil {
+			worker.transport.CloseIdleConnections()
+		}
+		if worker.privateDir != "" {
+			_ = os.RemoveAll(worker.privateDir)
+		}
+		worker.secret.Destroy()
+		identity := sha256.Sum256([]byte(worker.holder.DescriptionID))
+		value := hex.EncodeToString(identity[:])
+		worker.release = RuntimeWorkerReleaseV1{ProcessIdentityDigest: value, ProcessTreeAbsenceProofDigest: value, HolderReleaseProofDigest: value}
+	})
+	if err := ctx.Err(); err != nil {
+		return worker.release, err
 	}
-	identity := sha256.Sum256([]byte(worker.holder.DescriptionID))
-	value := hex.EncodeToString(identity[:])
-	return RuntimeWorkerReleaseV1{ProcessIdentityDigest: value, ProcessTreeAbsenceProofDigest: value, HolderReleaseProofDigest: value}, nil
+	return worker.release, nil
 }
 
 var (

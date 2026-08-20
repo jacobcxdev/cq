@@ -26,6 +26,12 @@ func validRuntimeCallerAuthority(caller RuntimeCallerAuthorityV1, method, reques
 }
 
 func normalWorkerHandler(handler http.Handler, credentials []NormalCallerCredentialV1) http.Handler {
+	return normalWorkerHandlerWithSource(handler, func(context.Context) ([]NormalCallerCredentialV1, error) {
+		return credentials, nil
+	})
+}
+
+func normalWorkerHandlerWithSource(handler http.Handler, credentials func(context.Context) ([]NormalCallerCredentialV1, error)) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		policy := normalCallerPolicy(request)
 		if policy == normalCallerRoutePublic {
@@ -37,8 +43,13 @@ func normalWorkerHandler(handler http.Handler, credentials []NormalCallerCredent
 			http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
 		}
+		current, err := credentials(request.Context())
+		if err != nil {
+			http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
 		var bearer string
-		for _, credential := range credentials {
+		for _, credential := range current {
 			if credential.Domain == caller.Domain && credential.SubjectID == caller.SubjectID {
 				if bearer != "" && bearer != credential.Bearer {
 					http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)

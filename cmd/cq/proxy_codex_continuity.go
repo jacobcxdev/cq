@@ -105,6 +105,7 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		DefaultAccountKey: deps.DefaultAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
 		DispatchPermits:   deps.DispatchPermits,
+		TransportKind:     "http",
 		Authority: proxy.CodexLeaseAuthorityPolicy{
 			ModeEpoch:                   deps.Status.ModeEpoch,
 			Authoritative:               enforcing,
@@ -169,6 +170,7 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 		DefaultAccountKey: deps.DefaultAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
 		DispatchPermits:   deps.DispatchPermits,
+		TransportKind:     "websocket",
 		Authority: proxy.CodexLeaseAuthorityPolicy{
 			ModeEpoch:                   deps.Status.ModeEpoch,
 			Authoritative:               true,

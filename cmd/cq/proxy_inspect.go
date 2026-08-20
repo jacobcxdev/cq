@@ -23,6 +23,7 @@ type ProxyInspectionTarget struct {
 // defaultProxyInspectionTarget is intentionally effect-free in CU-1. Platform
 // collectors are added in the later execution unit through this seam.
 var defaultProxyInspectionTarget = func() ProxyInspectionTarget { return ProxyInspectionTarget{} }
+var proxyInspectionTargetForRoot = func(string) ProxyInspectionTarget { return defaultProxyInspectionTarget() }
 
 func InspectProxy(ctx context.Context, target ProxyInspectionTarget) proxy.ProxySnapshot {
 	startedAt := time.Now()

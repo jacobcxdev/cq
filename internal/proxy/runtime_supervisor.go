@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -64,6 +65,7 @@ func RunValidatedRuntimeSupervisorRole(ctx context.Context, manifest RuntimeRole
 	if err != nil {
 		return err
 	}
+	supervisor.setLifetimeContext(ctx)
 	if dependencies.CallerAdmissions != nil {
 		if err := supervisor.SetCallerAdmissionConsumer(dependencies.CallerAdmissions); err != nil {
 			return err
@@ -84,6 +86,7 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 	if err != nil {
 		return err
 	}
+	supervisor.setLifetimeContext(ctx)
 	if admissions != nil {
 		if err := supervisor.SetCallerAdmissionConsumer(admissions); err != nil {
 			return err
@@ -109,10 +112,11 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 			return err
 		}
 	}
+	var startupErr error
 	switch supervisor.TrafficMode() {
 	case TrafficModeNormal:
 		if _, err := supervisor.Boot(ctx, workerManifest); err != nil {
-			return err
+			startupErr = err
 		}
 	case TrafficModeRescue:
 		// Durable rescue mode intentionally starts without a normal worker.
@@ -123,7 +127,7 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 	default:
 		return ErrRuntimeSupervisorUnavailable
 	}
-	return serve(ctx, listener, supervisor)
+	return errors.Join(serve(ctx, listener, supervisor), startupErr)
 }
 
 type RuntimeHashCheckpointStore struct {
@@ -238,6 +242,7 @@ type RuntimeSupervisor struct {
 	rescueAdmitted   int
 	normalZero       chan struct{}
 	rescueZero       chan struct{}
+	lifetimeCtx      context.Context
 }
 
 func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
@@ -290,7 +295,17 @@ func NewRuntimeSupervisor(listener net.Listener, supervisorHolder LifecycleHolde
 		listener: listener, listenerIdentity: listener.Addr().Network() + "|" + listener.Addr().String(),
 		supervisorHolder: supervisorHolder, launcher: launcher, checkpoints: checkpoints, now: time.Now,
 		trafficMode: TrafficModeNormal, normalZero: closedRuntimeWaitChannel(), rescueZero: closedRuntimeWaitChannel(),
+		lifetimeCtx: context.Background(),
 	}, nil
+}
+
+func (supervisor *RuntimeSupervisor) setLifetimeContext(ctx context.Context) {
+	if supervisor == nil || ctx == nil {
+		return
+	}
+	supervisor.mu.Lock()
+	supervisor.lifetimeCtx = ctx
+	supervisor.mu.Unlock()
 }
 
 func closedRuntimeWaitChannel() chan struct{} {
@@ -421,11 +436,15 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	var caller RuntimeCallerAuthorityV1
 	var authentication normalCallerAuthentication
 	var authority *NormalCallerAuthority
+	var err error
 	if policy != normalCallerRoutePublic {
 		supervisor.mu.RLock()
 		authority = supervisor.callerAuthority
 		supervisor.mu.RUnlock()
-		var err error
+		if err := supervisor.refreshCallerAuthority(request.Context(), authority); err != nil {
+			http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
 		authentication, err = authority.authenticate(request, policy)
 		if err != nil {
 			status := http.StatusServiceUnavailable
@@ -438,13 +457,15 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 			return
 		}
 	}
-	body, err := io.ReadAll(io.LimitReader(request.Body, RuntimeHTTPBodyLimit+1))
-	if err != nil || len(body) > RuntimeHTTPBodyLimit {
-		http.Error(writer, "runtime request exceeds private transport limit", http.StatusRequestEntityTooLarge)
-		return
-	}
+	var body []byte
 	if policy != normalCallerRoutePublic {
 		if policy == normalCallerRouteClassified {
+			body, err = io.ReadAll(io.LimitReader(request.Body, RuntimeHTTPBodyLimit+1))
+			if err != nil || len(body) > RuntimeHTTPBodyLimit {
+				http.Error(writer, "runtime request exceeds limit", http.StatusRequestEntityTooLarge)
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
 			supervisor.mu.RLock()
 			classifier := supervisor.callerClassifier
 			supervisor.mu.RUnlock()
@@ -480,6 +501,13 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	header := request.Header.Clone()
 	header.Del("Authorization")
 	header.Del("Proxy-Authorization")
+	request.Header = header
+	if streaming, ok := worker.(interface {
+		ServeHTTP(http.ResponseWriter, *http.Request, RuntimeCallerAuthorityV1) error
+	}); ok {
+		_ = streaming.ServeHTTP(writer, request, caller)
+		return
+	}
 	response, err := worker.ExecuteHTTP(request.Context(), RuntimeHTTPRequestV1{Method: request.Method, RequestURI: request.URL.RequestURI(), Header: header, Body: body, Caller: caller})
 	if err != nil {
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
@@ -492,6 +520,32 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	}
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(response.Body)
+}
+
+func (supervisor *RuntimeSupervisor) refreshCallerAuthority(ctx context.Context, authority *NormalCallerAuthority) error {
+	if supervisor == nil || authority == nil || ctx == nil {
+		return ErrNormalCallerAuthUnavailable
+	}
+	supervisor.mu.RLock()
+	worker := supervisor.worker
+	provider, refreshes := worker.(interface {
+		CallerIndex(context.Context) (NormalCallerIndexV1, error)
+	})
+	supervisor.mu.RUnlock()
+	if !refreshes {
+		return nil
+	}
+	index, err := provider.CallerIndex(ctx)
+	if err != nil {
+		return err
+	}
+	supervisor.mu.RLock()
+	current := supervisor.worker == worker && supervisor.callerAuthority == authority
+	supervisor.mu.RUnlock()
+	if !current {
+		return ErrNormalCallerAuthUnavailable
+	}
+	return authority.UpdateFromIndex(index)
 }
 
 func (supervisor *RuntimeSupervisor) serveRescueControl(writer http.ResponseWriter, request *http.Request) {
@@ -757,7 +811,11 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 	if err := ctx.Err(); err != nil {
 		return RuntimeBootAckV1{}, err
 	}
-	worker, err := supervisor.launcher.Launch(ctx, manifest)
+	lifetimeCtx := supervisor.lifetimeCtx
+	if lifetimeCtx == nil {
+		lifetimeCtx = context.Background()
+	}
+	worker, err := supervisor.launcher.Launch(lifetimeCtx, manifest)
 	if err != nil || worker == nil {
 		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeSupervisorUnavailable, err)
 	}
@@ -814,7 +872,32 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 	supervisor.workerManifest = manifest
 	supervisor.checkpointDigest = digest
 	supervisor.admissionReady = true
+	supervisor.monitorWorkerLocked(worker, manifest)
 	return ack, nil
+}
+
+func (supervisor *RuntimeSupervisor) monitorWorkerLocked(worker RuntimeWorkerProcess, manifest WorkerManifestV1) {
+	exited, ok := worker.(interface{ Exited() <-chan struct{} })
+	if !ok || exited.Exited() == nil {
+		return
+	}
+	lifetime := supervisor.lifetimeCtx
+	go func() {
+		select {
+		case <-exited.Exited():
+		case <-lifetime.Done():
+			return
+		}
+		supervisor.mu.RLock()
+		current := supervisor.worker == worker && supervisor.admissionReady && supervisor.trafficMode == TrafficModeNormal
+		supervisor.mu.RUnlock()
+		if !current {
+			return
+		}
+		replaceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = supervisor.ReplaceFailedWorker(replaceCtx, manifest)
+	}()
 }
 
 func (supervisor *RuntimeSupervisor) ReplaceWorker(ctx context.Context, manifest WorkerManifestV1) (RuntimeBootAckV1, error) {

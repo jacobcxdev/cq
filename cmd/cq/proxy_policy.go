@@ -129,7 +129,7 @@ func resolveProxyPolicyRoot(explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	cfg, err := proxy.LoadConfig()
+	cfg, err := proxy.LoadExistingConfig()
 	if err != nil {
 		return "", err
 	}

@@ -60,15 +60,17 @@ type CallerDelegationV1 struct {
 }
 
 type RoutingPolicyV1 struct {
-	SchemaVersion       int                    `json:"schema_version"`
-	AuthorityGeneration uint64                 `json:"authority_generation"`
-	RoutingGeneration   uint64                 `json:"routing_generation"`
-	EffectiveGeneration uint64                 `json:"effective_generation"`
-	Pools               []AccountPoolV1        `json:"pools,omitempty"`
-	SessionBindings     []SessionBindingV1     `json:"session_bindings,omitempty"`
-	CapabilityEvidence  []CapabilityEvidenceV1 `json:"capability_evidence,omitempty"`
-	Delegations         []CallerDelegationV1   `json:"delegations,omitempty"`
-	MAC                 string                 `json:"mac,omitempty"`
+	SchemaVersion             int                           `json:"schema_version"`
+	AuthorityGeneration       uint64                        `json:"authority_generation"`
+	RoutingGeneration         uint64                        `json:"routing_generation"`
+	EffectiveGeneration       uint64                        `json:"effective_generation"`
+	Pools                     []AccountPoolV1               `json:"pools,omitempty"`
+	SessionBindings           []SessionBindingV1            `json:"session_bindings,omitempty"`
+	CapabilityEvidence        []CapabilityEvidenceV1        `json:"capability_evidence,omitempty"`
+	CapabilityPredicates      []CapabilityPredicateCoreV1   `json:"capability_predicates,omitempty"`
+	CapabilityRoutingEvidence []CapabilityRoutingEvidenceV1 `json:"capability_routing_evidence,omitempty"`
+	Delegations               []CallerDelegationV1          `json:"delegations,omitempty"`
+	MAC                       string                        `json:"mac,omitempty"`
 }
 
 type routingPolicyAnchorV1 struct {
@@ -267,6 +269,25 @@ func validateRoutingPolicy(policy RoutingPolicyV1, prior *RoutingPolicyV1) error
 		}
 		evidence[item.AccountKey] = struct{}{}
 	}
+	if (len(policy.CapabilityPredicates) == 0) != (len(policy.CapabilityRoutingEvidence) == 0) {
+		return errors.New("incomplete capability routing policy")
+	}
+	seenPredicates := make(map[string]struct{}, len(policy.CapabilityPredicates))
+	for _, predicate := range policy.CapabilityPredicates {
+		if !validCapabilityPredicate(predicate) {
+			return errors.New("invalid capability predicate")
+		}
+		key := capabilityPredicateKey(predicate)
+		if _, duplicate := seenPredicates[key]; duplicate {
+			return errors.New("duplicate capability predicate")
+		}
+		seenPredicates[key] = struct{}{}
+	}
+	for _, item := range policy.CapabilityRoutingEvidence {
+		if !validCapabilityEvidence(item, policy.RoutingGeneration, item.ObservedAt) {
+			return errors.New("invalid capability routing evidence")
+		}
+	}
 	delegations := make(map[string]struct{}, len(policy.Delegations))
 	for _, delegation := range policy.Delegations {
 		if delegation.Caller == "" || len(delegation.Accounts) == 0 || delegation.ExpiresAt.IsZero() || !delegation.ExpiresAt.Equal(delegation.ExpiresAt.UTC()) {
@@ -305,6 +326,14 @@ func cloneRoutingPolicy(policy RoutingPolicyV1) RoutingPolicyV1 {
 	}
 	policy.SessionBindings = append([]SessionBindingV1(nil), policy.SessionBindings...)
 	policy.CapabilityEvidence = append([]CapabilityEvidenceV1(nil), policy.CapabilityEvidence...)
+	policy.CapabilityPredicates = append([]CapabilityPredicateCoreV1(nil), policy.CapabilityPredicates...)
+	policy.CapabilityRoutingEvidence = append([]CapabilityRoutingEvidenceV1(nil), policy.CapabilityRoutingEvidence...)
+	for index := range policy.CapabilityRoutingEvidence {
+		if policy.CapabilityRoutingEvidence[index].ExpiresAt != nil {
+			expires := *policy.CapabilityRoutingEvidence[index].ExpiresAt
+			policy.CapabilityRoutingEvidence[index].ExpiresAt = &expires
+		}
+	}
 	policy.Delegations = append([]CallerDelegationV1(nil), policy.Delegations...)
 	return policy
 }

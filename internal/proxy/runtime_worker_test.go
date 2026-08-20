@@ -3,19 +3,23 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"golang.org/x/sys/unix"
 )
@@ -86,7 +90,7 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 		SchemaVersion: 1, Role: RuntimeRoleSupervisor, ManifestDigest: manifestDigest,
 		ProxyInstanceID: "proxy-a", RuntimeInstanceID: "runtime-a",
 		ListenerFD: RuntimeListenerFD, LifecycleFD: RuntimeLifecycleFD,
-		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD,
+		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD, WorkFD: RuntimeNoWorkFD,
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
 	launcher := &RuntimeProcessWorkerLauncher{
@@ -120,7 +124,7 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 		t.Fatalf("worker caller index = %#v", boot.CallerIndex)
 	}
 	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
-	authority, err := NewNormalCallerAuthorityFromIndex(boot.CallerAuthorityKey, boot.CallerIndex, consumer, time.Now, bytes.NewReader(bytes.Repeat([]byte{0x71}, 64)))
+	authority, err := NewNormalCallerAuthorityFromIndex(boot.CallerAuthorityKey, boot.CallerIndex, consumer, time.Now, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +147,72 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 	}
 	if response.StatusCode != http.StatusCreated || response.Header.Get("X-Worker") != "child" || string(response.Body) != "Bearer worker-only-bearer" {
 		t.Fatalf("worker response = %#v", response)
+	}
+	streaming, ok := process.(interface {
+		ServeHTTP(http.ResponseWriter, *http.Request, RuntimeCallerAuthorityV1) error
+	})
+	if !ok {
+		t.Fatal("process worker has no streaming HTTP transport")
+	}
+	newCaller := func(request *http.Request) RuntimeCallerAuthorityV1 {
+		request.Header.Set("Authorization", "Bearer worker-only-bearer")
+		authentication, authErr := authority.authenticate(request, normalCallerRouteCodex)
+		if authErr != nil {
+			t.Fatal(authErr)
+		}
+		result, consumeErr := authority.consume(context.Background(), authentication, request)
+		if consumeErr != nil {
+			t.Fatal(consumeErr)
+		}
+		return result
+	}
+	largeBody := bytes.Repeat([]byte("x"), 96<<10)
+	largeRequest := httptest.NewRequest(http.MethodPost, "http://runtime/responses?mode=large", bytes.NewReader(largeBody))
+	largeResponse := httptest.NewRecorder()
+	if err := streaming.ServeHTTP(largeResponse, largeRequest, newCaller(largeRequest)); err != nil {
+		t.Fatal(err)
+	}
+	if largeResponse.Code != http.StatusCreated || largeResponse.Body.String() != strconv.Itoa(len(largeBody)) {
+		t.Fatalf("large response = %d %q", largeResponse.Code, largeResponse.Body.String())
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := streaming.ServeHTTP(writer, request, newCaller(request)); err != nil {
+			http.Error(writer, err.Error(), http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+	sseRequest, err := http.NewRequest(http.MethodPost, server.URL+"/responses?mode=sse", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sseRequest.Header.Set("Authorization", "Bearer worker-only-bearer")
+	sseResponse, err := server.Client().Do(sseRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := make([]byte, len("data: one\n\n"))
+	started := time.Now()
+	if _, err := io.ReadFull(sseResponse.Body, first); err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != "data: one\n\n" || time.Since(started) > 150*time.Millisecond {
+		t.Fatalf("first SSE event = %q after %v", first, time.Since(started))
+	}
+	_ = sseResponse.Body.Close()
+
+	wsHeader := http.Header{"Authorization": {"Bearer worker-only-bearer"}}
+	wsConnection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/responses?mode=websocket", wsHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wsConnection.Close()
+	if err := wsConnection.WriteMessage(websocket.TextMessage, []byte("round-trip")); err != nil {
+		t.Fatal(err)
+	}
+	messageType, message, err := wsConnection.ReadMessage()
+	if err != nil || messageType != websocket.TextMessage || string(message) != "round-trip" {
+		t.Fatalf("websocket response = %d %q, %v", messageType, message, err)
 	}
 	if err := process.BeginDrain(context.Background(), TrafficModeDrain, 0); err != nil {
 		t.Fatal(err)
@@ -178,7 +248,37 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		Lifecycle: os.NewFile(RuntimeLifecycleFD, "lifecycle"),
 		Control:   os.NewFile(RuntimeControlFD, "control"),
 		Secret:    os.NewFile(RuntimeSecretFD, "secret"),
+		Work:      os.NewFile(RuntimeWorkFD, "work"),
 	}, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Query().Get("mode") {
+		case "large":
+			body, readErr := io.ReadAll(request.Body)
+			if readErr != nil {
+				http.Error(writer, readErr.Error(), http.StatusBadRequest)
+				return
+			}
+			writer.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(writer, strconv.Itoa(len(body)))
+			return
+		case "sse":
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(writer, "data: one\n\n")
+			writer.(http.Flusher).Flush()
+			time.Sleep(250 * time.Millisecond)
+			_, _ = io.WriteString(writer, "data: two\n\n")
+			return
+		case "websocket":
+			connection, upgradeErr := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+			if upgradeErr != nil {
+				return
+			}
+			defer connection.Close()
+			messageType, message, readErr := connection.ReadMessage()
+			if readErr == nil {
+				_ = connection.WriteMessage(messageType, message)
+			}
+			return
+		}
 		writer.Header().Set("X-Worker", "child")
 		writer.WriteHeader(http.StatusCreated)
 		_, _ = writer.Write([]byte(request.Header.Get("Authorization")))

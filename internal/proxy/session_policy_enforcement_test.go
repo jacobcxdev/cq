@@ -97,3 +97,46 @@ func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 		t.Fatalf("journal permit digest = %q", runtime.plan.DispatchPermitDigest)
 	}
 }
+
+func TestCapabilityRoutingSelectsFinalAccountBeforeDurableRequestJournal(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.DefaultAccountKey = "account-a"
+	factory.Inventory = &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}}
+	key := []byte("01234567890123456789012345678901")
+	sessionDigest := keyedSessionDigest(key, []byte("session"))
+	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
+	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools:                []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
+		SessionBindings:      []SessionBindingV1{{SessionDigest: sessionDigest, Pool: "team"}},
+		CapabilityEvidence:   []CapabilityEvidenceV1{{AccountKey: "account-a", State: CapabilitySupported}, {AccountKey: "account-b", State: CapabilitySupported}},
+		CapabilityPredicates: []CapabilityPredicateCoreV1{predicate},
+		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{
+			capabilityEvidenceForTest("account-a", sessionDigest, predicate, "probe-a", nil, CapabilityEvidenceIneligible, 7, now),
+			capabilityEvidenceForTest("account-b", sessionDigest, predicate, "probe-b", nil, CapabilityEvidenceEligible, 7, now),
+		},
+	})
+	permits := &sessionPolicyPermitRecorder{}
+	factory.DispatchPermits = permits
+	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local-caller", ConsumptionDigest: strings.Repeat("a", 64)}
+
+	prepared, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	if got := prepared.Dispatch.Accounts(); len(got) != 1 || got[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("final dispatch = %#v", got)
+	}
+	if len(permits.requests) != 1 || permits.requests[0].SelectedAccount != "account-b" || len(permits.requests[0].AllowedAccounts) != 1 || permits.requests[0].AllowedAccounts[0] != "account-b" {
+		t.Fatalf("permit requests = %#v", permits.requests)
+	}
+	if runtime.calls != 1 || runtime.plan.DispatchPermitDigest == "" {
+		t.Fatalf("durable begin = calls %d digest %q", runtime.calls, runtime.plan.DispatchPermitDigest)
+	}
+}

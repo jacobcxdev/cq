@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -185,6 +186,22 @@ func BuildNormalCallerIndexV1(key []byte, epoch uint64, credentials []NormalCall
 			index.Entries = append(index.Entries, entry)
 		}
 	}
+	sort.Slice(index.Entries, func(i, j int) bool {
+		left, right := index.Entries[i], index.Entries[j]
+		if left.Domain != right.Domain {
+			return left.Domain < right.Domain
+		}
+		if left.Fingerprint != right.Fingerprint {
+			return left.Fingerprint < right.Fingerprint
+		}
+		if left.SubjectID != right.SubjectID {
+			return left.SubjectID < right.SubjectID
+		}
+		if !left.ValidFrom.Equal(right.ValidFrom) {
+			return left.ValidFrom.Before(right.ValidFrom)
+		}
+		return left.ValidUntil.Before(right.ValidUntil)
+	})
 	index.MAC = normalCallerIndexMAC(key, index)
 	return index, nil
 }
@@ -194,6 +211,43 @@ func NewNormalCallerAuthorityFromIndex(key []byte, index NormalCallerIndexV1, co
 		return nil, ErrNormalCallerAuthUnavailable
 	}
 	authority := &NormalCallerAuthority{key: append([]byte(nil), key...), epoch: index.IndexEpoch, consumer: consumer, now: now, random: random}
+	entries, err := normalCallerEntriesFromIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	authority.entries = entries
+	return authority, nil
+}
+
+// UpdateFromIndex atomically replaces only with an authenticated newer index.
+// Replaying byte-identical current state is harmless; stale or conflicting
+// current-generation state fails closed.
+func (authority *NormalCallerAuthority) UpdateFromIndex(index NormalCallerIndexV1) error {
+	if authority == nil {
+		return ErrNormalCallerAuthUnavailable
+	}
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	if !VerifyNormalCallerIndexV1(authority.key, index) {
+		return ErrNormalCallerAuthUnavailable
+	}
+	entries, err := normalCallerEntriesFromIndex(index)
+	if err != nil || index.IndexEpoch < authority.epoch {
+		return ErrNormalCallerAuthUnavailable
+	}
+	if index.IndexEpoch == authority.epoch {
+		if !normalCallerEntriesEqual(authority.entries, entries) {
+			return ErrNormalCallerAuthUnavailable
+		}
+		return nil
+	}
+	authority.epoch = index.IndexEpoch
+	authority.entries = entries
+	return nil
+}
+
+func normalCallerEntriesFromIndex(index NormalCallerIndexV1) ([]normalCallerIndexEntry, error) {
+	entries := make([]normalCallerIndexEntry, 0, len(index.Entries))
 	for _, published := range index.Entries {
 		fingerprint, err := hex.DecodeString(published.Fingerprint)
 		if err != nil || len(fingerprint) != sha256.Size || published.Fingerprint != strings.ToLower(published.Fingerprint) || !validNormalCallerDomain(published.Domain) || published.SubjectID == "" || (!published.ValidUntil.IsZero() && !published.ValidFrom.IsZero() && !published.ValidFrom.Before(published.ValidUntil)) {
@@ -201,9 +255,21 @@ func NewNormalCallerAuthorityFromIndex(key []byte, index NormalCallerIndexV1, co
 		}
 		var exact [sha256.Size]byte
 		copy(exact[:], fingerprint)
-		authority.entries = append(authority.entries, normalCallerIndexEntry{domain: published.Domain, fingerprint: exact, subjectID: published.SubjectID, validFrom: published.ValidFrom, validUntil: published.ValidUntil})
+		entries = append(entries, normalCallerIndexEntry{domain: published.Domain, fingerprint: exact, subjectID: published.SubjectID, validFrom: published.ValidFrom, validUntil: published.ValidUntil})
 	}
-	return authority, nil
+	return entries, nil
+}
+
+func normalCallerEntriesEqual(left, right []normalCallerIndexEntry) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func VerifyNormalCallerIndexV1(key []byte, index NormalCallerIndexV1) bool {

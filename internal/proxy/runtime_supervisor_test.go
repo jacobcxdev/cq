@@ -48,6 +48,7 @@ type runtimeTestWorker struct {
 	events   *[]string
 	response RuntimeHTTPResponseV1
 	bootAck  RuntimeBootAckV1
+	exited   chan struct{}
 }
 
 func (w *runtimeTestWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
@@ -75,6 +76,7 @@ func (w *runtimeTestWorker) StopAndReap(context.Context) (RuntimeWorkerReleaseV1
 	}, nil
 }
 func (w *runtimeTestWorker) HolderProof() LifecycleHolderProof { return w.holder }
+func (w *runtimeTestWorker) Exited() <-chan struct{}           { return w.exited }
 func (w *runtimeTestWorker) ExecuteHTTP(context.Context, RuntimeHTTPRequestV1) (RuntimeHTTPResponseV1, error) {
 	*w.events = append(*w.events, "execute:"+w.holder.DescriptionID)
 	if w.response.StatusCode == 0 {
@@ -223,6 +225,65 @@ func TestRuntimeSupervisorCheckpointPrecedesAdmissionAndReplacementKeepsListener
 	}
 }
 
+func TestRuntimeSupervisorAutomaticallyReplacesExitedWorker(t *testing.T) {
+	events := []string{}
+	firstExited := make(chan struct{})
+	launcher := &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{
+		{holder: runtimeHolder("worker-1"), events: &events, exited: firstExited},
+		{holder: runtimeHolder("worker-2"), events: &events},
+	}}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), launcher, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}
+	if _, err := supervisor.Boot(context.Background(), manifest); err != nil {
+		t.Fatal(err)
+	}
+	close(firstExited)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		supervisor.mu.RLock()
+		worker := supervisor.worker
+		ready := supervisor.admissionReady
+		supervisor.mu.RUnlock()
+		if ready && worker != nil && worker.HolderProof().DescriptionID == "worker-2" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("worker was not replaced: events=%#v", events)
+}
+
+type runtimeContextLauncher struct {
+	worker *runtimeTestWorker
+	ctx    context.Context
+}
+
+func (launcher *runtimeContextLauncher) Launch(ctx context.Context, _ WorkerManifestV1) (RuntimeWorkerProcess, error) {
+	launcher.ctx = ctx
+	return launcher.worker, nil
+}
+
+func TestRuntimeSupervisorWorkerLifetimeOutlivesBootRequest(t *testing.T) {
+	events := []string{}
+	launcher := &runtimeContextLauncher{worker: &runtimeTestWorker{holder: runtimeHolder("worker"), events: &events}}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), launcher, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCtx, cancel := context.WithCancel(context.Background())
+	if _, err := supervisor.Boot(requestCtx, WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-launcher.ctx.Done():
+		t.Fatal("worker lifetime inherited request cancellation")
+	default:
+	}
+}
+
 func TestRuntimeSupervisorRoleBootstrapsWorkerAndCheckpointBeforeServe(t *testing.T) {
 	lifecyclePath := t.TempDir() + "/lifecycle.lock"
 	if err := os.WriteFile(lifecyclePath, []byte("lock"), 0o600); err != nil {
@@ -266,7 +327,7 @@ func TestRuntimeSupervisorRoleBootstrapsWorkerAndCheckpointBeforeServe(t *testin
 		SchemaVersion: 1, Role: RuntimeRoleSupervisor, ManifestDigest: manifestDigest,
 		ProxyInstanceID: "proxy-a", RuntimeInstanceID: "runtime-a",
 		ListenerFD: RuntimeListenerFD, LifecycleFD: RuntimeLifecycleFD,
-		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD,
+		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD, WorkFD: RuntimeNoWorkFD,
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
 	events := []string{}

@@ -1,16 +1,19 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -27,8 +30,17 @@ const (
 	// DefaultCodexUpstream is the default ChatGPT backend API upstream for Codex models.
 	// ChatGPT OAuth tokens authenticate against this endpoint (not api.openai.com,
 	// which requires the api.responses.write scope unavailable to OAuth clients).
-	DefaultCodexUpstream = "https://chatgpt.com/backend-api/codex"
+	DefaultCodexUpstream     = "https://chatgpt.com/backend-api/codex"
+	proxyRescueBootstrapName = "proxy-rescue.json"
+	proxyRescueBootstrapMax  = 64 << 10
 )
+
+type ProxyRescueBootstrapConfig struct {
+	SchemaVersion int    `json:"schema_version"`
+	LocalToken    string `json:"local_token"`
+	StateRoot     string `json:"state_root"`
+	Port          int    `json:"port"`
+}
 
 // Config holds proxy configuration persisted to disk.
 type Config struct {
@@ -246,6 +258,79 @@ func LoadExistingConfig() (*Config, error) {
 	return loadConfigFile(filepath.Join(configDir(), "proxy.json"))
 }
 
+// LoadProxyRescueBootstrapConfig reads only authority needed to keep rescue
+// control available when normal proxy configuration cannot be loaded.
+func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
+	path := filepath.Join(configDir(), proxyRescueBootstrapName)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return loadProxyRescueBootstrapFromNormalConfig()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read proxy rescue bootstrap: %w", err)
+	}
+	bootstrap, decodeErr := decodeProxyRescueBootstrap(data)
+	if decodeErr == nil {
+		return bootstrap, nil
+	}
+	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig()
+	if fallbackErr == nil {
+		return fallback, nil
+	}
+	return nil, errors.Join(decodeErr, fallbackErr)
+}
+
+func loadProxyRescueBootstrapFromNormalConfig() (*ProxyRescueBootstrapConfig, error) {
+	data, err := os.ReadFile(filepath.Join(configDir(), "proxy.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read proxy config: %w", err)
+	}
+	var minimal struct {
+		LocalToken              string `json:"local_token"`
+		ProxyResilienceStateDir string `json:"proxy_resilience_state_dir"`
+		Port                    int    `json:"port"`
+	}
+	if err := json.Unmarshal(data, &minimal); err != nil {
+		return nil, fmt.Errorf("parse proxy config: %w", err)
+	}
+	if minimal.Port == 0 {
+		minimal.Port = DefaultPort
+	}
+	return validateProxyRescueBootstrap(&ProxyRescueBootstrapConfig{
+		SchemaVersion: 1,
+		LocalToken:    minimal.LocalToken,
+		StateRoot:     minimal.ProxyResilienceStateDir,
+		Port:          minimal.Port,
+	})
+}
+
+func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error) {
+	if len(data) > proxyRescueBootstrapMax {
+		return nil, errors.New("proxy rescue bootstrap exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var bootstrap ProxyRescueBootstrapConfig
+	if err := decoder.Decode(&bootstrap); err != nil {
+		return nil, fmt.Errorf("parse proxy rescue bootstrap: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("parse proxy rescue bootstrap: trailing value")
+	}
+	return validateProxyRescueBootstrap(&bootstrap)
+}
+
+func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
+	if bootstrap == nil || bootstrap.SchemaVersion != 1 || bootstrap.LocalToken == "" || bootstrap.Port < 1 || bootstrap.Port > 65535 {
+		return nil, errors.New("proxy rescue bootstrap invalid")
+	}
+	clean := filepath.Clean(bootstrap.StateRoot)
+	if bootstrap.StateRoot == "" || !filepath.IsAbs(bootstrap.StateRoot) || clean != bootstrap.StateRoot || clean == string(filepath.Separator) {
+		return nil, errors.New("proxy rescue bootstrap state root invalid")
+	}
+	return bootstrap, nil
+}
+
 func loadConfigFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -300,7 +385,29 @@ func SaveConfig(cfg *Config) error {
 	if err := saved.validate(); err != nil {
 		return err
 	}
-	return saveConfig(filepath.Join(configDir(), "proxy.json"), &saved)
+	if err := saveConfig(filepath.Join(configDir(), "proxy.json"), &saved); err != nil {
+		return err
+	}
+	bootstrapPath := filepath.Join(configDir(), proxyRescueBootstrapName)
+	if saved.ProxyResilienceStateDir == "" {
+		if err := os.Remove(bootstrapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove proxy rescue bootstrap: %w", err)
+		}
+		return nil
+	}
+	bootstrap, err := json.Marshal(ProxyRescueBootstrapConfig{
+		SchemaVersion: 1,
+		LocalToken:    saved.LocalToken,
+		StateRoot:     saved.ProxyResilienceStateDir,
+		Port:          saved.Port,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
+	}
+	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, bootstrapPath, bootstrap); err != nil {
+		return fmt.Errorf("write proxy rescue bootstrap: %w", err)
+	}
+	return nil
 }
 
 func saveConfig(path string, cfg *Config) error {

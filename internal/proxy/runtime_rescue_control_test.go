@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -116,5 +117,39 @@ func TestRunAdoptedRuntimeSupervisorRestartsDirectlyInRescue(t *testing.T) {
 	}
 	if !served || len(events) != 0 {
 		t.Fatalf("served=%v events=%#v", served, events)
+	}
+}
+
+type runtimeRescueFailingLauncher struct{ err error }
+
+func (launcher runtimeRescueFailingLauncher) Launch(context.Context, WorkerManifestV1) (RuntimeWorkerProcess, error) {
+	return nil, launcher.err
+}
+
+func TestRunAdoptedRuntimeSupervisorServesRescueControlWhenNormalWorkerBootFails(t *testing.T) {
+	bootErr := errors.New("normal worker boot failed")
+	served := false
+	err := RunAdoptedRuntimeSupervisorConfigured(
+		context.Background(),
+		&runtimeTestListener{},
+		runtimeHolder("supervisor"),
+		runtimeRescueFailingLauncher{err: bootErr},
+		&runtimeTestCheckpointStore{events: &[]string{}},
+		nil,
+		WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"},
+		func(supervisor *RuntimeSupervisor) error {
+			return supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), &runtimeEvidenceTestStore{})
+		},
+		func(_ context.Context, _ net.Listener, handler http.Handler) error {
+			served = true
+			supervisor := handler.(*RuntimeSupervisor)
+			if supervisor.AdmissionReady() {
+				t.Fatal("normal admission enabled after failed worker boot")
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, bootErr) || !served {
+		t.Fatalf("error=%v served=%v", err, served)
 	}
 }
