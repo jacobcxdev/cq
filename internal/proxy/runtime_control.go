@@ -292,8 +292,11 @@ func RuntimeLifecycleHolder(file *os.File, descriptionID string) (LifecycleHolde
 type TrafficMode string
 
 const (
-	TrafficModeNormal TrafficMode = "normal"
-	TrafficModeDrain  TrafficMode = "drain"
+	TrafficModeNormal             TrafficMode = "normal"
+	TrafficModeDrain              TrafficMode = "drain"
+	TrafficModeRescueDraining     TrafficMode = "rescue_draining"
+	TrafficModeRescue             TrafficMode = "rescue"
+	TrafficModeRescueExitDraining TrafficMode = "rescue_exit_draining"
 )
 
 type RuntimeQuiescenceAckV1 struct {

@@ -203,6 +203,14 @@ type RuntimeSupervisor struct {
 	callerAuthority  *NormalCallerAuthority
 	callerClassifier NormalCallerBranchClassifier
 	callerAdmissions NormalCallerAdmissionConsumer
+	trafficMode      TrafficMode
+	modeGeneration   uint64
+	modeEvidence     RuntimeModeEvidenceStore
+	rescueHandler    http.Handler
+	normalAdmitted   int
+	rescueAdmitted   int
+	normalZero       chan struct{}
+	rescueZero       chan struct{}
 }
 
 func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
@@ -254,7 +262,53 @@ func NewRuntimeSupervisor(listener net.Listener, supervisorHolder LifecycleHolde
 	return &RuntimeSupervisor{
 		listener: listener, listenerIdentity: listener.Addr().Network() + "|" + listener.Addr().String(),
 		supervisorHolder: supervisorHolder, launcher: launcher, checkpoints: checkpoints, now: time.Now,
+		trafficMode: TrafficModeNormal, normalZero: closedRuntimeWaitChannel(), rescueZero: closedRuntimeWaitChannel(),
 	}, nil
+}
+
+func closedRuntimeWaitChannel() chan struct{} {
+	channel := make(chan struct{})
+	close(channel)
+	return channel
+}
+
+func (supervisor *RuntimeSupervisor) TrafficMode() TrafficMode {
+	if supervisor == nil {
+		return ""
+	}
+	supervisor.mu.RLock()
+	defer supervisor.mu.RUnlock()
+	return supervisor.trafficMode
+}
+
+func (supervisor *RuntimeSupervisor) ConfigureRescue(ctx context.Context, handler http.Handler, evidence RuntimeModeEvidenceStore) error {
+	if supervisor == nil || ctx == nil || handler == nil || evidence == nil {
+		return ErrRuntimeSupervisorUnavailable
+	}
+	record, found, err := evidence.Load(ctx)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := record.validate(); err != nil {
+			return err
+		}
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if supervisor.modeEvidence != nil {
+		return ErrRuntimeSupervisorUnavailable
+	}
+	supervisor.rescueHandler = handler
+	supervisor.modeEvidence = evidence
+	if found {
+		supervisor.modeGeneration = record.Generation
+		supervisor.trafficMode = record.EffectiveMode
+		if record.EffectiveMode != TrafficModeNormal {
+			supervisor.admissionReady = false
+		}
+	}
+	return nil
 }
 
 func (supervisor *RuntimeSupervisor) ListenerIdentity() string {
@@ -292,6 +346,34 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	if request.Method == http.MethodGet && request.URL.EscapedPath() == "/health" {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(writer, "{\"status\":\"ok\"}\n")
+		return
+	}
+	supervisor.mu.Lock()
+	switch supervisor.trafficMode {
+	case TrafficModeRescue, TrafficModeRescueDraining:
+		handler := supervisor.rescueHandler
+		if handler == nil {
+			supervisor.mu.Unlock()
+			http.Error(writer, "rescue unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if supervisor.rescueAdmitted == 0 {
+			supervisor.rescueZero = make(chan struct{})
+		}
+		supervisor.rescueAdmitted++
+		supervisor.mu.Unlock()
+		defer supervisor.releaseRescueAdmission()
+		handler.ServeHTTP(writer, request)
+		return
+	case TrafficModeRescueExitDraining:
+		supervisor.mu.Unlock()
+		http.Error(writer, "mode changed", http.StatusServiceUnavailable)
+		return
+	case TrafficModeNormal:
+		supervisor.mu.Unlock()
+	default:
+		supervisor.mu.Unlock()
+		http.Error(writer, "runtime mode unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	policy := normalCallerPolicy(request)
@@ -341,16 +423,23 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 			return
 		}
 	}
-	supervisor.mu.RLock()
-	defer supervisor.mu.RUnlock()
+	supervisor.mu.Lock()
 	if !supervisor.admissionReady || supervisor.worker == nil {
+		supervisor.mu.Unlock()
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	worker := supervisor.worker
+	if supervisor.normalAdmitted == 0 {
+		supervisor.normalZero = make(chan struct{})
+	}
+	supervisor.normalAdmitted++
+	supervisor.mu.Unlock()
+	defer supervisor.releaseNormalAdmission()
 	header := request.Header.Clone()
 	header.Del("Authorization")
 	header.Del("Proxy-Authorization")
-	response, err := supervisor.worker.ExecuteHTTP(request.Context(), RuntimeHTTPRequestV1{Method: request.Method, RequestURI: request.URL.RequestURI(), Header: header, Body: body, Caller: caller})
+	response, err := worker.ExecuteHTTP(request.Context(), RuntimeHTTPRequestV1{Method: request.Method, RequestURI: request.URL.RequestURI(), Header: header, Body: body, Caller: caller})
 	if err != nil {
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
@@ -362,6 +451,181 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	}
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(response.Body)
+}
+
+func (supervisor *RuntimeSupervisor) releaseNormalAdmission() {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	supervisor.normalAdmitted--
+	if supervisor.normalAdmitted == 0 {
+		close(supervisor.normalZero)
+	}
+}
+
+func (supervisor *RuntimeSupervisor) releaseRescueAdmission() {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	supervisor.rescueAdmitted--
+	if supervisor.rescueAdmitted == 0 {
+		close(supervisor.rescueZero)
+	}
+}
+
+func waitRuntimeAdmissions(ctx context.Context, zero <-chan struct{}) error {
+	if ctx == nil {
+		return ErrRuntimeSupervisorUnavailable
+	}
+	select {
+	case <-zero:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (supervisor *RuntimeSupervisor) EnterRescue(ctx context.Context) error {
+	if supervisor == nil || ctx == nil {
+		return ErrRuntimeSupervisorUnavailable
+	}
+	supervisor.mu.Lock()
+	if supervisor.modeEvidence == nil || supervisor.rescueHandler == nil || supervisor.trafficMode != TrafficModeNormal || supervisor.worker == nil {
+		supervisor.mu.Unlock()
+		return ErrRuntimeSupervisorUnavailable
+	}
+	supervisor.modeGeneration++
+	generation := supervisor.modeGeneration
+	intent := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescueDraining, Phase: RuntimeModePhaseIntent}
+	if err := supervisor.modeEvidence.Commit(ctx, intent); err != nil {
+		supervisor.modeGeneration--
+		supervisor.mu.Unlock()
+		return err
+	}
+	supervisor.trafficMode = TrafficModeRescueDraining
+	supervisor.admissionReady = false
+	supervisor.mu.Unlock()
+	return supervisor.completeRescueEntry(ctx, generation)
+}
+
+func (supervisor *RuntimeSupervisor) completeRescueEntry(ctx context.Context, generation uint64) error {
+	supervisor.mu.Lock()
+	if supervisor.trafficMode != TrafficModeRescueDraining || supervisor.modeGeneration != generation {
+		supervisor.mu.Unlock()
+		return ErrRuntimeGeneration
+	}
+	worker := supervisor.worker
+	sequence := supervisor.sequence
+	zero := supervisor.normalZero
+	supervisor.mu.Unlock()
+	if worker != nil {
+		if err := worker.BeginDrain(ctx, TrafficModeDrain, sequence); err != nil {
+			return err
+		}
+		ack, err := worker.AwaitQuiescence(ctx, sequence)
+		if err != nil {
+			return err
+		}
+		if !ack.Quiescent {
+			return ErrRuntimeSupervisorUnavailable
+		}
+	}
+	if err := waitRuntimeAdmissions(ctx, zero); err != nil {
+		return err
+	}
+	var release RuntimeWorkerReleaseV1
+	if worker != nil {
+		var err error
+		release, err = worker.StopAndReap(ctx)
+		if err != nil || !release.valid() {
+			if err != nil {
+				return err
+			}
+			return ErrRuntimeSupervisorUnavailable
+		}
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if supervisor.trafficMode != TrafficModeRescueDraining || supervisor.modeGeneration != generation || supervisor.worker != worker {
+		return ErrRuntimeGeneration
+	}
+	if worker != nil {
+		supervisor.worker = nil
+		supervisor.pendingRelease = release
+	}
+	receipt := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescue, Phase: RuntimeModePhaseEffective}
+	if err := supervisor.modeEvidence.Commit(ctx, receipt); err != nil {
+		return err
+	}
+	supervisor.trafficMode = TrafficModeRescue
+	return nil
+}
+
+func (supervisor *RuntimeSupervisor) ExitRescue(ctx context.Context, manifest WorkerManifestV1) error {
+	if supervisor == nil || ctx == nil {
+		return ErrRuntimeSupervisorUnavailable
+	}
+	supervisor.mu.Lock()
+	if supervisor.modeEvidence == nil || supervisor.trafficMode != TrafficModeRescue || supervisor.worker != nil {
+		supervisor.mu.Unlock()
+		return ErrRuntimeSupervisorUnavailable
+	}
+	supervisor.modeGeneration++
+	generation := supervisor.modeGeneration
+	intent := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeNormal, EffectiveMode: TrafficModeRescueExitDraining, Phase: RuntimeModePhaseIntent}
+	if err := supervisor.modeEvidence.Commit(ctx, intent); err != nil {
+		supervisor.modeGeneration--
+		supervisor.mu.Unlock()
+		return err
+	}
+	supervisor.trafficMode = TrafficModeRescueExitDraining
+	zero := supervisor.rescueZero
+	supervisor.mu.Unlock()
+	if err := waitRuntimeAdmissions(ctx, zero); err != nil {
+		return err
+	}
+	return supervisor.completeRescueExit(ctx, generation, manifest)
+}
+
+func (supervisor *RuntimeSupervisor) completeRescueExit(ctx context.Context, generation uint64, manifest WorkerManifestV1) error {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if supervisor.trafficMode != TrafficModeRescueExitDraining || supervisor.modeGeneration != generation {
+		return ErrRuntimeGeneration
+	}
+	if supervisor.worker == nil {
+		if _, err := supervisor.bootLocked(ctx, manifest, "rescue_exit", supervisor.pendingRelease); err != nil {
+			return err
+		}
+	}
+	receipt := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeNormal, EffectiveMode: TrafficModeNormal, Phase: RuntimeModePhaseEffective}
+	if err := supervisor.modeEvidence.Commit(ctx, receipt); err != nil {
+		return err
+	}
+	supervisor.trafficMode = TrafficModeNormal
+	return nil
+}
+
+func (supervisor *RuntimeSupervisor) ReconcileRescue(ctx context.Context, manifest WorkerManifestV1) error {
+	if supervisor == nil || ctx == nil {
+		return ErrRuntimeSupervisorUnavailable
+	}
+	supervisor.mu.RLock()
+	mode := supervisor.trafficMode
+	generation := supervisor.modeGeneration
+	zero := supervisor.rescueZero
+	supervisor.mu.RUnlock()
+	switch mode {
+	case TrafficModeNormal, TrafficModeRescue:
+		return nil
+	case TrafficModeRescueDraining:
+		return supervisor.completeRescueEntry(ctx, generation)
+	case TrafficModeRescueExitDraining:
+		if err := waitRuntimeAdmissions(ctx, zero); err != nil {
+			return err
+		}
+		return supervisor.completeRescueExit(ctx, generation, manifest)
+	default:
+		return ErrRuntimeSupervisorUnavailable
+	}
 }
 
 func (supervisor *RuntimeSupervisor) Boot(ctx context.Context, manifest WorkerManifestV1) (RuntimeBootAckV1, error) {
