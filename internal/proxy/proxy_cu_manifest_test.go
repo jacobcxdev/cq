@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -1211,6 +1212,7 @@ func TestReleaseCanonicalStoresReconcileTypedTempsAndKeepFutureAndGCInactive(t *
 
 func newReleaseCanonicalStoreRootForTest(t *testing.T) string {
 	t.Helper()
+	requireDarwinReleaseFilesystemForTest(t)
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -1221,6 +1223,13 @@ func newReleaseCanonicalStoreRootForTest(t *testing.T) string {
 		}
 	}
 	return root
+}
+
+func requireDarwinReleaseFilesystemForTest(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		t.Skip("requires Darwin APFS release filesystem")
+	}
 }
 
 func openReleaseCanonicalStoresForTest(t *testing.T) *releaseCanonicalStoresV1 {
@@ -1725,6 +1734,7 @@ func resignTargetSetChain(t *testing.T, graph *ReleaseGraphV1) {
 }
 
 func TestVerifyReleaseBundleDirectoryV1RecomputesPhysicalFiles(t *testing.T) {
+	requireDarwinReleaseFilesystemForTest(t)
 	graph := signedFloorReleaseGraph(t)
 	t.Run("exact floor", func(t *testing.T) {
 		if err := verifyReleaseBundleDirectoryStructureV1(materialiseFloorReleaseBundle(t, graph), graph); err != nil {
