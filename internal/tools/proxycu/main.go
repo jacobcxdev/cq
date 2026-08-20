@@ -55,7 +55,7 @@ func main() {
 }
 
 func runCU0(repositoryRoot, cuID string) (resultErr error) {
-	if cuID != "CU-0" && cuID != "CU-1" {
+	if cuID != "CU-0" && cuID != "CU-1" && cuID != "CU-2" {
 		return fmt.Errorf("construction unit %q has no manifest", cuID)
 	}
 	if err := proxy.VerifyBlueprintReview(
@@ -587,7 +587,7 @@ func run(args []string, dependencies testDependencies) error {
 	if len(args) == 1 && mode == "--self-test" {
 		mode = "self-test"
 	}
-	if len(args) == 1 && (mode == "CU-0" || mode == "CU-1") {
+	if len(args) == 1 && (mode == "CU-0" || mode == "CU-1" || mode == "CU-2") {
 		args = []string{"unit", mode}
 		mode = "unit"
 	}
@@ -610,9 +610,9 @@ func run(args []string, dependencies testDependencies) error {
 		return dependencies.SelfTest()
 	case "unit":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: unit CU-0|CU-1")
+			return fmt.Errorf("usage: unit CU-0|CU-1|CU-2")
 		}
-		if args[1] != "CU-0" && args[1] != "CU-1" {
+		if args[1] != "CU-0" && args[1] != "CU-1" && args[1] != "CU-2" {
 			return fmt.Errorf("construction unit %q has no manifest", args[1])
 		}
 		if dependencies.Unit == nil {

@@ -1,17 +1,61 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
+
+func openRestartableAuthorityCoordinator(t *testing.T, filesystem *fsutil.MemFS, mutationBackend, ownerBackend CredentialAuthorityBackend, mutationHook, ownerHook func(string) error) *CredentialCoordinator {
+	t.Helper()
+	store, err := NewManagedStore(filesystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCredentialCoordinatorWithAuthority(store, CredentialAuthorityCapabilities{
+		Role: CredentialAuthorityPrimary, LifecycleBound: true, RootKey: bytes.Repeat([]byte{0x73}, 32),
+		RefreshMutationBackend: mutationBackend, CredentialOwnerBackend: ownerBackend,
+		RefreshMutationHook: mutationHook, CredentialOwnerHook: ownerHook,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coordinator
+}
+
+func newRestartableAuthorityCoordinator(t *testing.T, filesystem *fsutil.MemFS, mutationBackend, ownerBackend CredentialAuthorityBackend, mutationHook, ownerHook func(string) error) (*CredentialCoordinator, CandidateRef, Revision) {
+	t.Helper()
+	coordinator := openRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, mutationHook, ownerHook)
+	record, err := coordinator.Store.SaveNew(testLoginCredential())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coordinator, recordRef(record), record.Metadata.Revision
+}
+
+func closeAuthorityCoordinator(t *testing.T, coordinator *CredentialCoordinator) {
+	t.Helper()
+	if owner, ok := coordinator.CredentialOwner.(*CredentialOwnerStore); ok {
+		if err := owner.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mutation, ok := coordinator.RefreshMutations.(*RefreshMutationStore); ok {
+		if err := mutation.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func testRefreshRecord(t *testing.T) (*CredentialCoordinator, *durableFakeFS, CandidateRef, Revision) {
 	t.Helper()
@@ -28,6 +72,8 @@ func testRefreshRecord(t *testing.T) (*CredentialCoordinator, *durableFakeFS, Ca
 		"/fake/home/.codex/accounts": {{name: string(ref.CandidateID) + ".auth.json"}},
 	}
 	coordinator.Now = func() time.Time { return time.Unix(1_000, 0).UTC() }
+	coordinator.RefreshMutations = &recoveringRefreshRecorder{}
+	coordinator.CredentialOwner = &idempotentOwnerRecorder{}
 	return coordinator, fs, ref, revision
 }
 
@@ -77,6 +123,345 @@ func TestRefreshRejectsStaleRevisionBeforeExchange(t *testing.T) {
 	}
 	if exchanges.Load() != 0 {
 		t.Fatalf("exchange count = %d, want 0", exchanges.Load())
+	}
+}
+
+type orderedRefreshMutationRecorder struct {
+	events *[]string
+	err    error
+}
+
+func (r orderedRefreshMutationRecorder) SelectRefreshMutation(operationID string, _ CandidateRef, _ Revision, _ RefreshMutationCapacity) (RefreshMutationSelection, error) {
+	*r.events = append(*r.events, "reservation")
+	return RefreshMutationSelection{ReservationDigest: operationID + "-reservation", CapacityLeaseDigest: operationID + "-lease"}, r.err
+}
+
+func (r orderedRefreshMutationRecorder) CompleteRefreshMutation(_ string, receiptDigest string) (string, error) {
+	*r.events = append(*r.events, "reservation-receipt")
+	if receiptDigest == "" {
+		return "", errors.New("missing credential receipt binding")
+	}
+	return "mutation-terminal", nil
+}
+
+type orderedCredentialOwnerRecorder struct{ events *[]string }
+
+func (r orderedCredentialOwnerRecorder) PublishCommit(_ string, reservationDigest, capacityLeaseDigest string) (string, error) {
+	*r.events = append(*r.events, "owner-commit")
+	if reservationDigest == "" || capacityLeaseDigest == "" {
+		return "", errors.New("missing mutation binding")
+	}
+	return "owner-commit-digest", nil
+}
+
+type recoveringRefreshRecorder struct {
+	selected         map[string]bool
+	completeFailures int
+	completions      int
+}
+
+func (r *recoveringRefreshRecorder) SelectRefreshMutation(operationID string, _ CandidateRef, _ Revision, _ RefreshMutationCapacity) (RefreshMutationSelection, error) {
+	if r.selected == nil {
+		r.selected = make(map[string]bool)
+	}
+	if r.selected[operationID] {
+		return RefreshMutationSelection{ReservationDigest: operationID + "-reservation", CapacityLeaseDigest: operationID + "-lease"}, nil
+	}
+	r.selected[operationID] = true
+	return RefreshMutationSelection{ReservationDigest: operationID + "-reservation", CapacityLeaseDigest: operationID + "-lease"}, nil
+}
+
+func (r *recoveringRefreshRecorder) CompleteRefreshMutation(operationID, receiptDigest string) (string, error) {
+	if !r.selected[operationID] {
+		return "", errors.New("unknown reservation")
+	}
+	if receiptDigest == "" {
+		return "", errors.New("missing credential receipt binding")
+	}
+	r.completions++
+	if r.completeFailures > 0 {
+		r.completeFailures--
+		return "", errors.New("terminal publication failed")
+	}
+	return operationID + "-terminal", nil
+}
+
+type idempotentOwnerRecorder struct {
+	commits        map[string]bool
+	receipts       map[string]bool
+	commitFailures int
+	commitAttempts int
+}
+
+func (r *idempotentOwnerRecorder) PublishCommit(operationID, reservationDigest, capacityLeaseDigest string) (string, error) {
+	r.commitAttempts++
+	if r.commitFailures > 0 {
+		r.commitFailures--
+		return "", errors.New("owner commit failed")
+	}
+	if reservationDigest == "" || capacityLeaseDigest == "" {
+		return "", errors.New("missing mutation binding")
+	}
+	if r.commits == nil {
+		r.commits = make(map[string]bool)
+	}
+	r.commits[operationID] = true
+	return operationID + "-commit", nil
+}
+
+func TestRefreshRetainsSelectionWhenOwnerCommitFails(t *testing.T) {
+	coordinator, _, ref, revision := testRefreshRecord(t)
+	refreshRecorder := &recoveringRefreshRecorder{}
+	ownerRecorder := &idempotentOwnerRecorder{commitFailures: 1}
+	coordinator.RefreshMutations = refreshRecorder
+	coordinator.CredentialOwner = ownerRecorder
+	coordinator.RefreshExchange = successfulRefresh
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); err == nil {
+		t.Fatal("owner commit failure was not returned")
+	}
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); err != nil {
+		t.Fatalf("retained owner commit recovery: %v", err)
+	}
+	if len(refreshRecorder.selected) != 1 || ownerRecorder.commitAttempts != 2 || len(ownerRecorder.commits) != 1 {
+		t.Fatalf("selection replayed or owner recovery diverged: selected=%v attempts=%d commits=%v", refreshRecorder.selected, ownerRecorder.commitAttempts, ownerRecorder.commits)
+	}
+}
+
+func TestRefreshRestartRecoversDurablePostSelectionContinuation(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	mutationBackend := newMemoryCredentialAuthorityBackend()
+	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
+	crash := errors.New("crash after selection")
+	coordinator, ref, revision := newRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, func(phase string) error {
+		if phase == "selected_anchor_durable" {
+			return crash
+		}
+		return nil
+	}, nil)
+	coordinator.RefreshExchange = successfulRefresh
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); !errors.Is(err, crash) {
+		t.Fatalf("Refresh error = %v, want selection crash", err)
+	}
+	closeAuthorityCoordinator(t, coordinator)
+
+	restarted := openRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, nil)
+	exchanges := 0
+	restarted.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+		exchanges++
+		return successfulRefresh(ctx, token)
+	}
+	if _, err := restarted.Refresh(context.Background(), ref, revision); err != nil {
+		t.Fatalf("restart recovery: %v", err)
+	}
+	if exchanges != 1 {
+		t.Fatalf("restart exchanges = %d, want 1", exchanges)
+	}
+}
+
+func TestRefreshRestartAdoptsOwnerContinuationBeforeAnchor(t *testing.T) {
+	for _, crashPhase := range []string{"continuation_durable", "selected_object_durable"} {
+		t.Run(crashPhase, func(t *testing.T) {
+			filesystem := fsutil.NewMemFS()
+			mutationBackend := newMemoryCredentialAuthorityBackend()
+			ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
+			crash := errors.New("owner publication crash")
+			coordinator, ref, revision := newRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, func(phase string) error {
+				if phase == crashPhase {
+					return crash
+				}
+				return nil
+			})
+			coordinator.RefreshExchange = successfulRefresh
+			if _, err := coordinator.Refresh(context.Background(), ref, revision); !errors.Is(err, crash) {
+				t.Fatalf("Refresh error = %v, want owner crash", err)
+			}
+			closeAuthorityCoordinator(t, coordinator)
+			restarted := openRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, nil)
+			exchanges := 0
+			restarted.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+				exchanges++
+				return successfulRefresh(ctx, token)
+			}
+			if _, err := restarted.Refresh(context.Background(), ref, revision); err != nil {
+				t.Fatalf("restart continuation adoption: %v", err)
+			}
+			if exchanges != 1 {
+				t.Fatalf("restart exchanges = %d, want 1", exchanges)
+			}
+		})
+	}
+}
+
+func TestRefreshRestartDoesNotReplayAttemptWithoutDurableResult(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	mutationBackend := newMemoryCredentialAuthorityBackend()
+	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
+	crash := errors.New("crash after invocation attempt")
+	coordinator, ref, revision := newRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, func(phase string) error {
+		if phase == "refresh_attempt_durable" {
+			return crash
+		}
+		return nil
+	})
+	exchanges := 0
+	coordinator.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+		exchanges++
+		return successfulRefresh(ctx, token)
+	}
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); !errors.Is(err, crash) {
+		t.Fatalf("Refresh error = %v, want attempt crash", err)
+	}
+	loaded, err := coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAuthorityCoordinator(t, coordinator)
+	restarted := openRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, nil)
+	restarted.RefreshExchange = func(context.Context, string) (*auth.CodexTokenResponse, error) {
+		exchanges++
+		return nil, errors.New("exchange replayed")
+	}
+	if _, err := restarted.Refresh(context.Background(), ref, loaded.Metadata.Revision); err == nil || err.Error() != "Codex refresh outcome indeterminate" {
+		t.Fatalf("restart error = %v, want indeterminate", err)
+	}
+	if exchanges != 0 {
+		t.Fatalf("exchange calls = %d, want 0", exchanges)
+	}
+}
+
+func TestRefreshRestartDoesNotReplayDurablePostExchangeResult(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	mutationBackend := newMemoryCredentialAuthorityBackend()
+	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
+	crash := errors.New("crash after exchange completion")
+	coordinator, ref, revision := newRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, func(phase string) error {
+		if phase == "refresh_result_durable" {
+			return crash
+		}
+		return nil
+	})
+	exchanges := 0
+	coordinator.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+		exchanges++
+		return successfulRefresh(ctx, token)
+	}
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); !errors.Is(err, crash) {
+		t.Fatalf("Refresh error = %v, want terminal crash", err)
+	}
+	mutationBackend.mu.Lock()
+	for name, entry := range mutationBackend.entries {
+		if bytes.Contains(entry.body, []byte("refreshed-access")) || bytes.Contains(entry.body, []byte("refreshed-refresh")) {
+			mutationBackend.mu.Unlock()
+			t.Fatalf("credential result persisted in plaintext in %q", name)
+		}
+	}
+	mutationBackend.mu.Unlock()
+	loaded, err := coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAuthorityCoordinator(t, coordinator)
+
+	restarted := openRestartableAuthorityCoordinator(t, filesystem, mutationBackend, ownerBackend, nil, nil)
+	restarted.RefreshExchange = func(context.Context, string) (*auth.CodexTokenResponse, error) {
+		exchanges++
+		return nil, errors.New("post-exchange effect replayed")
+	}
+	if _, err := restarted.Refresh(context.Background(), ref, loaded.Metadata.Revision); err != nil {
+		t.Fatalf("restart terminal recovery: %v", err)
+	}
+	if exchanges != 1 {
+		t.Fatalf("exchange replayed after restart: %d calls", exchanges)
+	}
+}
+
+func (r *idempotentOwnerRecorder) PublishReceipt(operationID, commitDigest string) (string, error) {
+	if !r.commits[operationID] {
+		return "", errors.New("unknown owner commit")
+	}
+	if commitDigest != operationID+"-commit" {
+		return "", errors.New("owner commit binding mismatch")
+	}
+	if r.receipts == nil {
+		r.receipts = make(map[string]bool)
+	}
+	r.receipts[operationID] = true
+	return operationID + "-receipt", nil
+}
+
+func (r orderedCredentialOwnerRecorder) PublishReceipt(_ string, commitDigest string) (string, error) {
+	*r.events = append(*r.events, "owner-receipt")
+	if commitDigest == "" {
+		return "", errors.New("missing owner commit digest")
+	}
+	return "owner-receipt-digest", nil
+}
+
+func TestRefreshMutationReservationPrecedesCredentialEffect(t *testing.T) {
+	coordinator, _, ref, revision := testRefreshRecord(t)
+	events := []string{}
+	coordinator.RefreshMutations = orderedRefreshMutationRecorder{events: &events}
+	coordinator.CredentialOwner = orderedCredentialOwnerRecorder{events: &events}
+	coordinator.RefreshExchange = func(context.Context, string) (*auth.CodexTokenResponse, error) {
+		events = append(events, "exchange")
+		return successfulRefresh(context.Background(), "")
+	}
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"reservation", "owner-commit", "exchange", "owner-receipt", "reservation-receipt"}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestRefreshMutationReservationFailurePreventsEffect(t *testing.T) {
+	coordinator, _, ref, revision := testRefreshRecord(t)
+	wantErr := errors.New("capacity refused")
+	events := []string{}
+	coordinator.RefreshMutations = orderedRefreshMutationRecorder{events: &events, err: wantErr}
+	coordinator.CredentialOwner = orderedCredentialOwnerRecorder{events: &events}
+	coordinator.RefreshExchange = func(context.Context, string) (*auth.CodexTokenResponse, error) {
+		events = append(events, "exchange")
+		return successfulRefresh(context.Background(), "")
+	}
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); !errors.Is(err, wantErr) {
+		t.Fatalf("Refresh error = %v, want %v", err, wantErr)
+	}
+	if !slices.Equal(events, []string{"reservation"}) {
+		t.Fatalf("events = %v, want reservation only", events)
+	}
+}
+
+func TestRefreshRetainedRecoveryTerminalisesOriginalReservation(t *testing.T) {
+	coordinator, fs, ref, revision := testRefreshRecord(t)
+	refreshRecorder := &recoveringRefreshRecorder{completeFailures: 1}
+	ownerRecorder := &idempotentOwnerRecorder{}
+	coordinator.RefreshMutations = refreshRecorder
+	coordinator.CredentialOwner = ownerRecorder
+	coordinator.RefreshExchange = successfulRefresh
+	fs.renameCount = 0
+	fs.failRenameAt = 2
+	if _, err := coordinator.Refresh(context.Background(), ref, revision); err == nil {
+		t.Fatal("Refresh error = nil, want final commit failure")
+	}
+	loaded, err := coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.failRenameAt = 0
+	if _, err := coordinator.Refresh(context.Background(), ref, loaded.Metadata.Revision); err == nil {
+		t.Fatal("retained recovery succeeded despite terminal publication failure")
+	}
+	loaded, err = coordinator.loadRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Refresh(context.Background(), ref, loaded.Metadata.Revision); err != nil {
+		t.Fatalf("second retained recovery: %v", err)
+	}
+	if refreshRecorder.completions != 2 || len(ownerRecorder.commits) != 1 || len(ownerRecorder.receipts) != 1 {
+		t.Fatalf("recovery state: completions=%d commits=%v receipts=%v", refreshRecorder.completions, ownerRecorder.commits, ownerRecorder.receipts)
 	}
 }
 

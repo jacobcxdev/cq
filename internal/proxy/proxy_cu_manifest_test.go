@@ -1441,8 +1441,8 @@ func TestVerifyReleaseGraphV1RejectsIncompleteGraph(t *testing.T) {
 func TestVerifyReleaseGraphV1RejectsUnavailableConstructionUnits(t *testing.T) {
 	graph := signedFloorReleaseGraph(t)
 	err := VerifyReleaseGraphAgainstApprovedAuthorityV1(graph, releaseAuthorityPinForTest(t, graph), releaseEvidenceForTest(t, graph))
-	if err == nil || !strings.Contains(err.Error(), "feature inactive") || !strings.Contains(err.Error(), "CU-2") {
-		t.Fatalf("release verification error = %v, want feature-inactive CU-2", err)
+	if err == nil || !strings.Contains(err.Error(), "feature inactive") || !strings.Contains(err.Error(), "CU-3") {
+		t.Fatalf("release verification error = %v, want feature-inactive CU-3", err)
 	}
 }
 
@@ -2562,8 +2562,22 @@ func TestCanonicalCUManifestV1ProvidesPinnedCU0Selection(t *testing.T) {
 			t.Fatalf("CU-1 manifest package %s has %d tests, want %d", selection.Package, got, want)
 		}
 	}
-	if _, err := CanonicalCUManifestV1("CU-2"); err == nil {
-		t.Fatal("returned a manifest for absent CU-2")
+	cu2Data, err := CanonicalCUManifestV1("CU-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cu2, err := ParseCUManifestV1(strings.NewReader(string(cu2Data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCU2Counts := map[string]int{"./internal/auth": 3, "./internal/provider/codex": 48, "./internal/proxy": 7}
+	if cu2.Unit != "CU-2" || len(cu2.Packages) != len(wantCU2Counts) {
+		t.Fatalf("CU-2 manifest = %#v", cu2)
+	}
+	for _, selection := range cu2.Packages {
+		if got, want := len(selection.FullTestIDs), wantCU2Counts[selection.Package]; got != want {
+			t.Fatalf("CU-2 manifest package %s has %d tests, want %d", selection.Package, got, want)
+		}
 	}
 }
 

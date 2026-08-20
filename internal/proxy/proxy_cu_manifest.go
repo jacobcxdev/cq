@@ -66,6 +66,9 @@ type CUTestPackageV1 struct {
 // construction unit. A later unit remains unavailable until it adds a
 // non-empty exact selection here.
 func CanonicalCUManifestV1(cuID string) ([]byte, error) {
+	if cuID == "CU-2" {
+		return canonicalCU2ManifestV1()
+	}
 	if cuID == "CU-1" {
 		return canonicalCU1ManifestV1()
 	}
@@ -551,6 +554,87 @@ func CanonicalCUManifestV1(cuID string) ([]byte, error) {
 		Unit:                             cuID,
 		RaceCount:                        1,
 		Packages:                         selections,
+	})
+}
+
+func canonicalCU2ManifestV1() ([]byte, error) {
+	authSelection := newCUTestPackage("./internal/auth",
+		"TestOAuthAcceptedCallbackCanonicalBound",
+		"TestOAuthAcceptedCallbackQueryGrammar",
+		"TestOAuthAcceptedCallbackQueryRejectsBeforeAcceptance",
+	)
+	providerSelection := newCUTestPackage("./internal/provider/codex",
+		"TestCredentialOwnerCommitReceiptOrdering",
+		"TestCredentialOwnerContinuationRecoveryRejectsMismatchBeforeAdoption",
+		"TestCredentialOwnerCrashAfterReceiptRecoversOriginalCommit",
+		"TestCredentialOwnerRefreshResultEnvelopeMaxAndPlusOne",
+		"TestCredentialOwnerWaiterReopensAfterTerminalAndCannotReplay",
+		"TestNewCredentialCoordinatorDoesNotCreateCredentialOwnerAuthority",
+		"TestNewCredentialCoordinatorWithAuthorityDerivesSeparatePurposeKeys",
+		"TestNewCredentialCoordinatorWithAuthorityRejectsCandidate",
+		"TestRefreshMutationCapacityExactAndPlusOne",
+		"TestRefreshMutationCompleteStableOperationFitsCredentialShare",
+		"TestRefreshMutationDurableSelectionPrecedesEffectAndRecovers",
+		"TestRefreshMutationRefusesInsufficientStableOperationCapacityBeforePublication",
+		"TestRefreshMutationReservationFailurePreventsEffect",
+		"TestRefreshMutationReservationPrecedesCredentialEffect",
+		"TestRefreshMutationSourceActionMapIsSignedAndOneToOne",
+		"TestRefreshRestartAdoptsOwnerContinuationBeforeAnchor",
+		"TestRefreshRestartDoesNotReplayAttemptWithoutDurableResult",
+		"TestRefreshRestartDoesNotReplayDurablePostExchangeResult",
+		"TestRefreshRestartRecoversDurablePostSelectionContinuation",
+		"TestRefreshRetainedRecoveryTerminalisesOriginalReservation",
+		"TestRefreshRetainsSelectionWhenOwnerCommitFails",
+	)
+	providerSelection.FullTestIDs = append(providerSelection.FullTestIDs,
+		"TestCredentialOwnerRefreshResultEnvelopeMaxAndPlusOne/max",
+		"TestCredentialOwnerRefreshResultEnvelopeMaxAndPlusOne/plus_one",
+		"TestRefreshMutationRefusesInsufficientStableOperationCapacityBeforePublication/567_files",
+		"TestRefreshMutationRefusesInsufficientStableOperationCapacityBeforePublication/near_byte_cap",
+		"TestRefreshRestartAdoptsOwnerContinuationBeforeAnchor/continuation_durable",
+		"TestRefreshRestartAdoptsOwnerContinuationBeforeAnchor/selected_object_durable",
+		"TestRefreshMutationCapacityExactAndPlusOne/OAuth_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/OAuth_result",
+		"TestRefreshMutationCapacityExactAndPlusOne/byte",
+		"TestRefreshMutationCapacityExactAndPlusOne/credential_byte",
+		"TestRefreshMutationCapacityExactAndPlusOne/credential_file",
+		"TestRefreshMutationCapacityExactAndPlusOne/decision",
+		"TestRefreshMutationCapacityExactAndPlusOne/decision_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/fixed_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/mutation",
+		"TestRefreshMutationCapacityExactAndPlusOne/mutation_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/oauth",
+		"TestRefreshMutationCapacityExactAndPlusOne/operator_slot",
+		"TestRefreshMutationCapacityExactAndPlusOne/outer_base",
+		"TestRefreshMutationCapacityExactAndPlusOne/outer_object_byte",
+		"TestRefreshMutationCapacityExactAndPlusOne/plan_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/progress",
+		"TestRefreshMutationCapacityExactAndPlusOne/reauth_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/selected_lease_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/terminal_lease_delta",
+		"TestRefreshMutationCapacityExactAndPlusOne/unit",
+		"TestRefreshMutationCapacityExactAndPlusOne/wire_frame",
+	)
+	sort.Strings(providerSelection.FullTestIDs)
+	providerSelection.MinimumPassCount = len(providerSelection.FullTestIDs)
+	proxySelection := newCUTestPackage("./internal/proxy",
+		"TestCredentialOwnerFilesystemBackendReopensTerminalAuthority",
+		"TestInstanceAuthorityExternalReferenceRowsAreClosed",
+		"TestInstanceAuthorityStagedActivation",
+		"TestOperationCoordinatorChildSelectionMapping",
+		"TestOperationCoordinatorCrashAfterObjectReopensWithoutSelectingIt",
+		"TestOperationCoordinatorKeyBootstrapRecovery",
+		"TestOperationCoordinatorOrdering",
+	)
+	return CanonicalJSONV1(CUManifestV1{
+		SchemaVersion:                    1,
+		Kind:                             "construction_unit_verification_manifest_v1",
+		BlueprintSHA256:                  frozenBlueprintSHA256,
+		ReviewAttestationAggregateSHA256: frozenReviewAggregateSHA256,
+		ReviewAuthorityBaselineCommit:    frozenReviewBaseline,
+		Unit:                             "CU-2",
+		RaceCount:                        1,
+		Packages:                         []CUTestPackageV1{authSelection, providerSelection, proxySelection},
 	})
 }
 

@@ -508,8 +508,8 @@ func TestShellWrappersRejectArityBeforeGoOrTemporaryWork(t *testing.T) {
 	}{
 		{path: "scripts/build-proxy-release", want: "expected exactly one release-build manifest"},
 		{path: "scripts/verify-blueprint-review", args: []string{"extra"}, want: "expected no arguments"},
-		{path: "scripts/verify-proxy-cu", want: "expected exactly one CU-0, CU-1, or --self-test argument"},
-		{path: "scripts/verify-proxy-cu", args: []string{"CU-0", "extra"}, want: "expected exactly one CU-0, CU-1, or --self-test argument"},
+		{path: "scripts/verify-proxy-cu", want: "expected exactly one CU-0, CU-1, CU-2, or --self-test argument"},
+		{path: "scripts/verify-proxy-cu", args: []string{"CU-0", "extra"}, want: "expected exactly one CU-0, CU-1, CU-2, or --self-test argument"},
 	}
 	for _, fixture := range fixtures {
 		t.Run(strings.ReplaceAll(fixture.path+strings.Join(fixture.args, "_"), "/", "_"), func(t *testing.T) {
@@ -688,10 +688,24 @@ func TestVerifyTestEventsRejectsCorruptEvidence(t *testing.T) {
 }
 
 func TestRunRejectsAbsentAndUnmanifestedCU(t *testing.T) {
-	for _, args := range [][]string{{"unit"}, {"unit", "CU-2"}, {"unit", "CU-0", "extra"}} {
+	for _, args := range [][]string{{"unit"}, {"unit", "CU-3"}, {"unit", "CU-0", "extra"}} {
 		if err := run(args, testDependencies{}); err == nil {
 			t.Fatalf("run(%v) accepted invalid unit invocation", args)
 		}
+	}
+}
+
+func TestRunAcceptsManifestedCU2(t *testing.T) {
+	var got string
+	err := run([]string{"CU-2"}, testDependencies{Unit: func(cuID string) error {
+		got = cuID
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "CU-2" {
+		t.Fatalf("unit = %q, want CU-2", got)
 	}
 }
 
