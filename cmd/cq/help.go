@@ -57,6 +57,7 @@ Commands:
   proxy endpoint      Explicitly inspect or transition the credential endpoint
   proxy policy        Initialise, apply, or inspect routing policy
   proxy rescue        Enter, exit, or inspect rescue mode
+  proxy candidate     Prepare and control isolated candidate validation
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
 
@@ -107,6 +108,38 @@ Commands:
 
 Control durable rescue mode on the loopback proxy. Requests require the local
 proxy token and never send it upstream.
+`,
+	"proxy candidate": `Usage: cq proxy candidate <command>
+
+Prepare, inspect, start, validate, stop, and remove isolated candidate state.
+Candidate commands never use the installed listener or ambient credentials.
+
+Commands:
+  prepare                         Prepare isolated candidate state
+  status                          Inspect isolated candidate state
+  client-bearer-barrier refresh  Refresh candidate client barrier
+  receipt show                    Show one retained release receipt
+  start                           Start isolated candidate runtime
+  artifact switch                 Switch candidate runtime release set
+  validate-release                Validate and export candidate release
+  stop                            Stop isolated candidate runtime
+  remove                          Remove terminal candidate state
+`,
+	"proxy candidate prepare": `Usage: cq proxy candidate prepare --instance-state-root PATH --port PORT --source-config PATH --target-release-bundle PATH --target-release-set DIGEST --client-build BUILD --client-executable PATH --local-token-client-registry FILE (--credential-mode none | --credential-mode read-only --credential-manifest FILE --confirm-read-only-credentials) [--policy-snapshot FILE] [--confirm-payload-capture] [--json] TIMEOUT
+`,
+	"proxy candidate status": `Usage: cq proxy candidate status --instance-state-root PATH [--json]
+`,
+	"proxy candidate client-bearer-barrier refresh": `Usage: cq proxy candidate client-bearer-barrier refresh --instance-state-root PATH --validation-run DIGEST [--json] TIMEOUT
+`,
+	"proxy candidate start": `Usage: cq proxy candidate start --instance-state-root PATH [--json] TIMEOUT
+`,
+	"proxy candidate artifact switch": `Usage: cq proxy candidate artifact switch --instance-state-root PATH --role runtime-bundle --release-set DIGEST --validation-run DIGEST --confirm-artifact-switch [--json] TIMEOUT
+`,
+	"proxy candidate validate-release": `Usage: cq proxy candidate validate-release --instance-state-root PATH --target-release-bundle PATH --floor-release-bundle PATH --floor-acceptance-receipt-file PATH --floor-acceptance-receipt DIGEST --client-build BUILD --client-executable PATH --validation-run DIGEST --receipt-out PATH --confirm-live-data-plane --confirm-quota-use [--json]
+`,
+	"proxy candidate stop": `Usage: cq proxy candidate stop --instance-state-root PATH --confirm-client-stopped [--json] TIMEOUT
+`,
+	"proxy candidate remove": `Usage: cq proxy candidate remove --instance-state-root PATH --confirm-candidate-state-loss [--json] TIMEOUT
 `,
 	"proxy candidate receipt show": `Usage: cq proxy candidate receipt show --instance-state-root PATH --attempt-id ID [--json]
 
@@ -322,6 +355,12 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 			return true, 1, err
 		}
 		return true, 0, nil
+	}
+	if authority.Catalogue == "proxy" && strings.HasPrefix(authority.Row, "candidate_") && authority.Row != "candidate_receipt_show" && !authority.Terminating {
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		exitCode, runErr := runProxyCandidateCommand(ctx, stdout, authority, defaultCandidateCommandDependencies())
+		return true, exitCode, runErr
 	}
 	if authority.Catalogue == "operator_recovery" && !authority.Terminating {
 		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
@@ -858,8 +897,30 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 		}
 		return nil, false
 	}
-	if len(args) >= 3 && args[0] == "candidate" && args[1] == "receipt" && args[2] == "show" && helpRequested(args[3:]) {
-		return []string{"proxy", "candidate", "receipt", "show"}, true
+	if args[0] == "candidate" {
+		if len(args) == 1 || args[1] == "--help" || args[1] == "-h" {
+			return []string{"proxy", "candidate"}, true
+		}
+		if args[1] == "help" {
+			path := append([]string{"proxy", "candidate"}, args[2:]...)
+			_, ok := manualHelp(path)
+			return path, ok
+		}
+		if helpRequested(args[2:]) {
+			if args[1] == "receipt" && len(args) >= 3 && args[2] == "show" {
+				return []string{"proxy", "candidate", "receipt", "show"}, true
+			}
+			if args[1] == "client-bearer-barrier" && len(args) >= 3 && args[2] == "refresh" {
+				return []string{"proxy", "candidate", "client-bearer-barrier", "refresh"}, true
+			}
+			if args[1] == "artifact" && len(args) >= 3 && args[2] == "switch" {
+				return []string{"proxy", "candidate", "artifact", "switch"}, true
+			}
+			path := []string{"proxy", "candidate", args[1]}
+			_, ok := manualHelp(path)
+			return path, ok
+		}
+		return nil, false
 	}
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,

@@ -190,6 +190,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if isCandidateRuntimeCommand(os.Args[1:]) {
+		if err := runCandidateRuntimeChild(context.Background(), os.Args[3:]); err != nil {
+			fmt.Fprintln(os.Stderr, "cq: candidate runtime failed")
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, exitCode, err := runPureGlobalInspection(os.Args[1:], os.Stdout, os.Stderr); handled {
 		if err != nil && !pureInspectionErrorWasRendered(err) {
 			fmt.Fprintf(os.Stderr, "cq: %v\n", err)

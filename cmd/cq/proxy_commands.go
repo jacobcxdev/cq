@@ -42,6 +42,75 @@ type CandidateReceiptLookupArgumentsV1 struct {
 	JSON              bool
 }
 
+type CandidatePrepareArgumentsV1 struct {
+	InstanceStateRoot          string
+	Port                       int
+	SourceConfig               string
+	TargetReleaseBundle        string
+	TargetReleaseSet           string
+	ClientBuild                string
+	ClientExecutable           string
+	LocalTokenClientRegistry   string
+	CredentialMode             string
+	CredentialManifest         string
+	ConfirmReadOnlyCredentials bool
+	PolicySnapshot             string
+	ConfirmPayloadCapture      bool
+	JSON                       bool
+	Timeout                    time.Duration
+}
+
+type CandidateStatusArgumentsV1 struct {
+	InstanceStateRoot string
+	JSON              bool
+}
+
+type CandidateMutationArgumentsV1 struct {
+	InstanceStateRoot    string
+	JSON                 bool
+	Timeout              time.Duration
+	ConfirmClientStopped bool
+}
+
+type CandidateBarrierArgumentsV1 struct {
+	InstanceStateRoot string
+	ValidationRun     string
+	JSON              bool
+	Timeout           time.Duration
+}
+
+type CandidateArtifactSwitchArgumentsV1 struct {
+	InstanceStateRoot     string
+	Role                  string
+	ReleaseSet            string
+	ValidationRun         string
+	ConfirmArtifactSwitch bool
+	JSON                  bool
+	Timeout               time.Duration
+}
+
+type CandidateValidateReleaseArgumentsV1 struct {
+	InstanceStateRoot          string
+	TargetReleaseBundle        string
+	FloorReleaseBundle         string
+	FloorAcceptanceReceiptFile string
+	FloorAcceptanceReceipt     string
+	ClientBuild                string
+	ClientExecutable           string
+	ValidationRun              string
+	ReceiptOut                 string
+	ConfirmLiveDataPlane       bool
+	ConfirmQuotaUse            bool
+	JSON                       bool
+}
+
+type CandidateRemoveArgumentsV1 struct {
+	InstanceStateRoot         string
+	ConfirmCandidateStateLoss bool
+	JSON                      bool
+	Timeout                   time.Duration
+}
+
 type OperatorStatusArgumentsV1 struct {
 	OperationID string
 	JSON        bool
@@ -235,6 +304,70 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		}
 		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_policy_status", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
 	}
+	if len(argv) >= 2 && argv[1] == "candidate" {
+		return classifyCandidateAuthority(argv)
+	}
+	return terminatingOrdinary("ordinary_usage_error"), nil
+}
+
+func classifyCandidateAuthority(argv []string) (OrdinaryCommandAuthorityV1, error) {
+	if len(argv) < 3 {
+		return terminatingOrdinary("ordinary_usage_error"), nil
+	}
+	if helpRequested(argv[2:]) {
+		return terminatingOrdinary("ordinary_help"), nil
+	}
+	switch argv[2] {
+	case "prepare":
+		arguments, ok := parseCandidatePrepareArguments(argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_prepare", Arguments: arguments, Deadline: CommandDeadlineV1{Total: arguments.Timeout, Forward: arguments.Timeout - 30*time.Second, Reserve: 30 * time.Second}}, nil
+	case "status":
+		arguments, ok := parseCandidateStatusArguments(argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_status", Arguments: arguments, Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
+	case "start", "stop":
+		arguments, ok := parseCandidateMutationArguments(argv[2], argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_" + argv[2], Arguments: arguments, Deadline: CommandDeadlineV1{Total: arguments.Timeout, Forward: arguments.Timeout - 15*time.Second, Reserve: 15 * time.Second}}, nil
+	case "client-bearer-barrier":
+		arguments, ok := parseCandidateBarrierArguments(argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_barrier_refresh", Arguments: arguments, Deadline: CommandDeadlineV1{Total: arguments.Timeout, Forward: arguments.Timeout - 30*time.Second, Reserve: 30 * time.Second}}, nil
+	case "artifact":
+		arguments, ok := parseCandidateArtifactSwitchArguments(argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_artifact_switch", Arguments: arguments, Deadline: CommandDeadlineV1{Total: arguments.Timeout, Forward: arguments.Timeout - 30*time.Second, Reserve: 30 * time.Second}}, nil
+	case "validate-release":
+		arguments, ok := parseCandidateValidateReleaseArguments(argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_validate_release", Arguments: arguments, Deadline: CommandDeadlineV1{Total: 16 * time.Minute, Forward: 15*time.Minute + 30*time.Second, Reserve: 30 * time.Second}}, nil
+	case "remove":
+		arguments, ok := parseCandidateRemoveArguments(argv[3:])
+		if !ok {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_remove", Arguments: arguments, Deadline: CommandDeadlineV1{Total: arguments.Timeout, Forward: arguments.Timeout - 15*time.Second, Reserve: 15 * time.Second}}, nil
+	case "receipt":
+		return classifyCandidateReceiptAuthority(argv)
+	default:
+		return terminatingOrdinary("ordinary_usage_error"), nil
+	}
+}
+
+func classifyCandidateReceiptAuthority(argv []string) (OrdinaryCommandAuthorityV1, error) {
 	if len(argv) < 4 || argv[1] != "candidate" || argv[2] != "receipt" || argv[3] != "show" {
 		return terminatingOrdinary("ordinary_usage_error"), nil
 	}
@@ -273,6 +406,352 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		return terminatingOrdinary("ordinary_usage_error"), nil
 	}
 	return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "candidate_receipt_show", Arguments: arguments, Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
+}
+
+func parseCandidatePrepareArguments(argv []string) (CandidatePrepareArgumentsV1, bool) {
+	var arguments CandidatePrepareArgumentsV1
+	seen := map[string]bool{}
+	for index := 0; index < len(argv); index++ {
+		arg := argv[index]
+		switch arg {
+		case "--json", "--confirm-read-only-credentials", "--confirm-payload-capture":
+			if seen[arg] {
+				return CandidatePrepareArgumentsV1{}, false
+			}
+			seen[arg] = true
+			switch arg {
+			case "--json":
+				arguments.JSON = true
+			case "--confirm-read-only-credentials":
+				arguments.ConfirmReadOnlyCredentials = true
+			case "--confirm-payload-capture":
+				arguments.ConfirmPayloadCapture = true
+			}
+		case "--instance-state-root", "--port", "--source-config", "--target-release-bundle", "--target-release-set", "--client-build", "--client-executable", "--local-token-client-registry", "--credential-mode", "--credential-manifest", "--policy-snapshot":
+			if seen[arg] || index+1 >= len(argv) {
+				return CandidatePrepareArgumentsV1{}, false
+			}
+			seen[arg] = true
+			value := argv[index+1]
+			index++
+			switch arg {
+			case "--instance-state-root":
+				arguments.InstanceStateRoot = value
+			case "--port":
+				port, err := strconv.Atoi(value)
+				if err != nil {
+					return CandidatePrepareArgumentsV1{}, false
+				}
+				arguments.Port = port
+			case "--source-config":
+				arguments.SourceConfig = value
+			case "--target-release-bundle":
+				arguments.TargetReleaseBundle = value
+			case "--target-release-set":
+				arguments.TargetReleaseSet = value
+			case "--client-build":
+				arguments.ClientBuild = value
+			case "--client-executable":
+				arguments.ClientExecutable = value
+			case "--local-token-client-registry":
+				arguments.LocalTokenClientRegistry = value
+			case "--credential-mode":
+				arguments.CredentialMode = value
+			case "--credential-manifest":
+				arguments.CredentialManifest = value
+			case "--policy-snapshot":
+				arguments.PolicySnapshot = value
+			}
+		default:
+			if arguments.Timeout != 0 || index != len(argv)-1 {
+				return CandidatePrepareArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(arg)
+			if err != nil || duration < 150*time.Second || duration > 5*time.Minute {
+				return CandidatePrepareArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+		}
+	}
+	if !cleanAbsolutePath(arguments.InstanceStateRoot) || arguments.Port < 1 || arguments.Port > 65535 || arguments.Port == 19280 || arguments.SourceConfig == "" || arguments.TargetReleaseBundle == "" || !lowerHexArgument(arguments.TargetReleaseSet, 64) || arguments.ClientBuild == "" || arguments.ClientExecutable == "" || arguments.LocalTokenClientRegistry == "" || arguments.Timeout == 0 {
+		return CandidatePrepareArgumentsV1{}, false
+	}
+	switch arguments.CredentialMode {
+	case "none":
+		if arguments.CredentialManifest != "" || arguments.ConfirmReadOnlyCredentials {
+			return CandidatePrepareArgumentsV1{}, false
+		}
+	case "read-only":
+		if arguments.CredentialManifest == "" || !arguments.ConfirmReadOnlyCredentials {
+			return CandidatePrepareArgumentsV1{}, false
+		}
+	default:
+		return CandidatePrepareArgumentsV1{}, false
+	}
+	return arguments, true
+}
+
+func parseCandidateStatusArguments(argv []string) (CandidateStatusArgumentsV1, bool) {
+	var arguments CandidateStatusArgumentsV1
+	for index := 0; index < len(argv); index++ {
+		switch argv[index] {
+		case "--instance-state-root":
+			if arguments.InstanceStateRoot != "" || index+1 >= len(argv) {
+				return CandidateStatusArgumentsV1{}, false
+			}
+			arguments.InstanceStateRoot = argv[index+1]
+			index++
+		case "--json":
+			if arguments.JSON {
+				return CandidateStatusArgumentsV1{}, false
+			}
+			arguments.JSON = true
+		default:
+			return CandidateStatusArgumentsV1{}, false
+		}
+	}
+	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot)
+}
+
+func parseCandidateMutationArguments(action string, argv []string) (CandidateMutationArgumentsV1, bool) {
+	var arguments CandidateMutationArgumentsV1
+	for index := 0; index < len(argv); index++ {
+		switch argv[index] {
+		case "--instance-state-root":
+			if arguments.InstanceStateRoot != "" || index+1 >= len(argv) {
+				return CandidateMutationArgumentsV1{}, false
+			}
+			arguments.InstanceStateRoot = argv[index+1]
+			index++
+		case "--json":
+			if arguments.JSON {
+				return CandidateMutationArgumentsV1{}, false
+			}
+			arguments.JSON = true
+		case "--confirm-client-stopped":
+			if arguments.ConfirmClientStopped {
+				return CandidateMutationArgumentsV1{}, false
+			}
+			arguments.ConfirmClientStopped = true
+		default:
+			if arguments.Timeout != 0 || index != len(argv)-1 {
+				return CandidateMutationArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(argv[index])
+			maximum := 90 * time.Second
+			if action == "stop" {
+				maximum = 30 * time.Second
+			}
+			if err != nil || duration < 30*time.Second || duration > maximum {
+				return CandidateMutationArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+		}
+	}
+	if !cleanAbsolutePath(arguments.InstanceStateRoot) || arguments.Timeout == 0 || (action == "stop" && !arguments.ConfirmClientStopped) || (action == "start" && arguments.ConfirmClientStopped) {
+		return CandidateMutationArgumentsV1{}, false
+	}
+	return arguments, true
+}
+
+func parseCandidateBarrierArguments(argv []string) (CandidateBarrierArgumentsV1, bool) {
+	if len(argv) == 0 || argv[0] != "refresh" {
+		return CandidateBarrierArgumentsV1{}, false
+	}
+	var arguments CandidateBarrierArgumentsV1
+	for index := 1; index < len(argv); index++ {
+		switch argv[index] {
+		case "--instance-state-root":
+			if arguments.InstanceStateRoot != "" || index+1 >= len(argv) {
+				return CandidateBarrierArgumentsV1{}, false
+			}
+			arguments.InstanceStateRoot = argv[index+1]
+			index++
+		case "--validation-run":
+			if arguments.ValidationRun != "" || index+1 >= len(argv) {
+				return CandidateBarrierArgumentsV1{}, false
+			}
+			arguments.ValidationRun = argv[index+1]
+			index++
+		case "--json":
+			if arguments.JSON {
+				return CandidateBarrierArgumentsV1{}, false
+			}
+			arguments.JSON = true
+		default:
+			if arguments.Timeout != 0 || index != len(argv)-1 {
+				return CandidateBarrierArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(argv[index])
+			if err != nil || duration < 150*time.Second || duration > 5*time.Minute {
+				return CandidateBarrierArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+		}
+	}
+	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot) && lowerHexArgument(arguments.ValidationRun, 64) && arguments.Timeout > 0
+}
+
+func parseCandidateArtifactSwitchArguments(argv []string) (CandidateArtifactSwitchArgumentsV1, bool) {
+	if len(argv) == 0 || argv[0] != "switch" {
+		return CandidateArtifactSwitchArgumentsV1{}, false
+	}
+	var arguments CandidateArtifactSwitchArgumentsV1
+	for index := 1; index < len(argv); index++ {
+		switch argv[index] {
+		case "--instance-state-root", "--role", "--release-set", "--validation-run":
+			if index+1 >= len(argv) {
+				return CandidateArtifactSwitchArgumentsV1{}, false
+			}
+			value := argv[index+1]
+			index++
+			switch argv[index-1] {
+			case "--instance-state-root":
+				if arguments.InstanceStateRoot != "" {
+					return CandidateArtifactSwitchArgumentsV1{}, false
+				}
+				arguments.InstanceStateRoot = value
+			case "--role":
+				if arguments.Role != "" {
+					return CandidateArtifactSwitchArgumentsV1{}, false
+				}
+				arguments.Role = value
+			case "--release-set":
+				if arguments.ReleaseSet != "" {
+					return CandidateArtifactSwitchArgumentsV1{}, false
+				}
+				arguments.ReleaseSet = value
+			case "--validation-run":
+				if arguments.ValidationRun != "" {
+					return CandidateArtifactSwitchArgumentsV1{}, false
+				}
+				arguments.ValidationRun = value
+			}
+		case "--confirm-artifact-switch":
+			if arguments.ConfirmArtifactSwitch {
+				return CandidateArtifactSwitchArgumentsV1{}, false
+			}
+			arguments.ConfirmArtifactSwitch = true
+		case "--json":
+			if arguments.JSON {
+				return CandidateArtifactSwitchArgumentsV1{}, false
+			}
+			arguments.JSON = true
+		default:
+			if arguments.Timeout != 0 || index != len(argv)-1 {
+				return CandidateArtifactSwitchArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(argv[index])
+			if err != nil || duration < 90*time.Second || duration > 2*time.Minute {
+				return CandidateArtifactSwitchArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+		}
+	}
+	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot) && arguments.Role == "runtime-bundle" && lowerHexArgument(arguments.ReleaseSet, 64) && lowerHexArgument(arguments.ValidationRun, 64) && arguments.ConfirmArtifactSwitch && arguments.Timeout > 0
+}
+
+func parseCandidateValidateReleaseArguments(argv []string) (CandidateValidateReleaseArgumentsV1, bool) {
+	var arguments CandidateValidateReleaseArgumentsV1
+	seen := map[string]bool{}
+	for index := 0; index < len(argv); index++ {
+		arg := argv[index]
+		switch arg {
+		case "--confirm-live-data-plane", "--confirm-quota-use", "--json":
+			if seen[arg] {
+				return CandidateValidateReleaseArgumentsV1{}, false
+			}
+			seen[arg] = true
+			switch arg {
+			case "--confirm-live-data-plane":
+				arguments.ConfirmLiveDataPlane = true
+			case "--confirm-quota-use":
+				arguments.ConfirmQuotaUse = true
+			case "--json":
+				arguments.JSON = true
+			}
+		case "--instance-state-root", "--target-release-bundle", "--floor-release-bundle", "--floor-acceptance-receipt-file", "--floor-acceptance-receipt", "--client-build", "--client-executable", "--validation-run", "--receipt-out":
+			if seen[arg] || index+1 >= len(argv) {
+				return CandidateValidateReleaseArgumentsV1{}, false
+			}
+			seen[arg] = true
+			value := argv[index+1]
+			index++
+			switch arg {
+			case "--instance-state-root":
+				arguments.InstanceStateRoot = value
+			case "--target-release-bundle":
+				arguments.TargetReleaseBundle = value
+			case "--floor-release-bundle":
+				arguments.FloorReleaseBundle = value
+			case "--floor-acceptance-receipt-file":
+				arguments.FloorAcceptanceReceiptFile = value
+			case "--floor-acceptance-receipt":
+				arguments.FloorAcceptanceReceipt = value
+			case "--client-build":
+				arguments.ClientBuild = value
+			case "--client-executable":
+				arguments.ClientExecutable = value
+			case "--validation-run":
+				arguments.ValidationRun = value
+			case "--receipt-out":
+				arguments.ReceiptOut = value
+			}
+		default:
+			return CandidateValidateReleaseArgumentsV1{}, false
+		}
+	}
+	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot) && arguments.TargetReleaseBundle != "" && arguments.FloorReleaseBundle != "" && arguments.FloorAcceptanceReceiptFile != "" && lowerHexArgument(arguments.FloorAcceptanceReceipt, 64) && arguments.ClientBuild != "" && arguments.ClientExecutable != "" && lowerHexArgument(arguments.ValidationRun, 64) && cleanAbsolutePath(arguments.ReceiptOut) && arguments.ConfirmLiveDataPlane && arguments.ConfirmQuotaUse
+}
+
+func parseCandidateRemoveArguments(argv []string) (CandidateRemoveArgumentsV1, bool) {
+	var arguments CandidateRemoveArgumentsV1
+	for index := 0; index < len(argv); index++ {
+		switch argv[index] {
+		case "--instance-state-root":
+			if arguments.InstanceStateRoot != "" || index+1 >= len(argv) {
+				return CandidateRemoveArgumentsV1{}, false
+			}
+			arguments.InstanceStateRoot = argv[index+1]
+			index++
+		case "--confirm-candidate-state-loss":
+			if arguments.ConfirmCandidateStateLoss {
+				return CandidateRemoveArgumentsV1{}, false
+			}
+			arguments.ConfirmCandidateStateLoss = true
+		case "--json":
+			if arguments.JSON {
+				return CandidateRemoveArgumentsV1{}, false
+			}
+			arguments.JSON = true
+		default:
+			if arguments.Timeout != 0 || index != len(argv)-1 {
+				return CandidateRemoveArgumentsV1{}, false
+			}
+			duration, err := time.ParseDuration(argv[index])
+			if err != nil || duration != 30*time.Second {
+				return CandidateRemoveArgumentsV1{}, false
+			}
+			arguments.Timeout = duration
+		}
+	}
+	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot) && arguments.ConfirmCandidateStateLoss && arguments.Timeout > 0
+}
+
+func cleanAbsolutePath(path string) bool {
+	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path && path != string(filepath.Separator)
+}
+
+func lowerHexArgument(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseProxyStatusArguments(argv []string) (ProxyStatusArgumentsV1, bool) {

@@ -176,6 +176,24 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, []string{"proxy", "rescue"})
 		}
 		return runProxyRescue(args[1:], os.Stdout)
+	case "candidate":
+		authority, err := ClassifyProxyCommand(append([]string{"proxy"}, args...))
+		if err != nil {
+			return err
+		}
+		if authority.Terminating {
+			if authority.Row == "ordinary_help" {
+				path, ok := proxyHelpInspectionPath(args)
+				if ok {
+					return writeManualHelp(os.Stdout, path)
+				}
+			}
+			return errors.New("proxy candidate usage")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)
+		defer cancel()
+		_, err = runProxyCandidateCommand(ctx, os.Stdout, authority, defaultCandidateCommandDependencies())
+		return err
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}

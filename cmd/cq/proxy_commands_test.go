@@ -248,6 +248,52 @@ func TestProxyCommandClassifiesCandidateReceiptLookupBeforeState(t *testing.T) {
 	}
 }
 
+func TestProxyCommandClassifiesCandidateLifecycleCommands(t *testing.T) {
+	root := "/tmp/cq-candidate"
+	prepare, err := ClassifyProxyCommand([]string{
+		"proxy", "candidate", "prepare", "--instance-state-root", root, "--port", "29280",
+		"--source-config", "/tmp/source.json", "--target-release-bundle", "/tmp/release.json",
+		"--target-release-set", strings.Repeat("a", 64), "--client-build", "codex-test",
+		"--client-executable", "/tmp/codex", "--local-token-client-registry", "/tmp/registry.json",
+		"--credential-mode", "none", "--policy-snapshot", "/tmp/policy.json", "--json", "150s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepareArgs, ok := prepare.Arguments.(CandidatePrepareArgumentsV1)
+	if prepare.Row != "candidate_prepare" || !ok || prepareArgs.InstanceStateRoot != root || prepareArgs.Port != 29280 || prepareArgs.Timeout != 150*time.Second || prepare.Deadline.Forward != 120*time.Second || prepare.Deadline.Reserve != 30*time.Second || !prepareArgs.JSON || prepareArgs.CredentialMode != "none" {
+		t.Fatalf("prepare authority = %#v", prepare)
+	}
+	for _, fixture := range []struct {
+		argv []string
+		row  string
+	}{
+		{[]string{"proxy", "candidate", "status", "--instance-state-root", root, "--json"}, "candidate_status"},
+		{[]string{"proxy", "candidate", "start", "--instance-state-root", root, "--json", "30s"}, "candidate_start"},
+		{[]string{"proxy", "candidate", "client-bearer-barrier", "refresh", "--instance-state-root", root, "--validation-run", strings.Repeat("1", 64), "150s"}, "candidate_barrier_refresh"},
+		{[]string{"proxy", "candidate", "artifact", "switch", "--instance-state-root", root, "--role", "runtime-bundle", "--release-set", strings.Repeat("2", 64), "--validation-run", strings.Repeat("1", 64), "--confirm-artifact-switch", "90s"}, "candidate_artifact_switch"},
+		{[]string{"proxy", "candidate", "validate-release", "--instance-state-root", root, "--target-release-bundle", "/tmp/target", "--floor-release-bundle", "/tmp/floor", "--floor-acceptance-receipt-file", "/tmp/floor-receipt", "--floor-acceptance-receipt", strings.Repeat("3", 64), "--client-build", "codex-test", "--client-executable", "/tmp/codex", "--validation-run", strings.Repeat("1", 64), "--receipt-out", "/tmp/receipt", "--confirm-live-data-plane", "--confirm-quota-use"}, "candidate_validate_release"},
+		{[]string{"proxy", "candidate", "stop", "--instance-state-root", root, "--confirm-client-stopped", "30s"}, "candidate_stop"},
+		{[]string{"proxy", "candidate", "remove", "--instance-state-root", root, "--confirm-candidate-state-loss", "30s"}, "candidate_remove"},
+	} {
+		authority, classifyErr := ClassifyProxyCommand(fixture.argv)
+		if classifyErr != nil || authority.Row != fixture.row || authority.Terminating {
+			t.Fatalf("ClassifyProxyCommand(%v) = %#v, %v", fixture.argv, authority, classifyErr)
+		}
+	}
+	invalid := [][]string{
+		{"proxy", "candidate", "prepare", "--instance-state-root", root, "--port", "19280"},
+		{"proxy", "candidate", "start", "--instance-state-root", root},
+		{"proxy", "candidate", "stop", "--instance-state-root", root, "30s"},
+	}
+	for _, argv := range invalid {
+		authority, classifyErr := ClassifyProxyCommand(argv)
+		if classifyErr != nil || authority.Row != "ordinary_usage_error" || !authority.Terminating {
+			t.Fatalf("invalid %v = %#v, %v", argv, authority, classifyErr)
+		}
+	}
+}
+
 func TestProxyCommandClassifiesReconciledStatusAndRescue(t *testing.T) {
 	status, err := ClassifyProxyCommand([]string{"proxy", "status", "--instance-state-root", "/tmp/instance", "--human", "--strict", "--timeout", "3s"})
 	arguments, ok := status.Arguments.(ProxyStatusArgumentsV1)
