@@ -60,6 +60,7 @@ func TestPureInspectionDispatchesCandidateReceiptLookup(t *testing.T) {
 
 func TestOperationAndCandidateReceiptHelpStayPreState(t *testing.T) {
 	for _, args := range [][]string{
+		{"operation", "--help"},
 		{"operation", "status", "--help"},
 		{"operation", "recover", "--help"},
 		{"proxy", "candidate", "receipt", "show", "--help"},
