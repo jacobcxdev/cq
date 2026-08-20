@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,7 @@ func TestParseUsageRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestParseUsageRejectsUnsafeEnvelope(t *testing.T) {
+	validFixture := string(usageFixture("SUCCESS", 0, 0, "usage", validGeminiBuckets))
 	tests := []struct {
 		name string
 		data []byte
@@ -80,6 +82,8 @@ func TestParseUsageRejectsUnsafeEnvelope(t *testing.T) {
 		{name: "model turn", data: usageFixture("SUCCESS", 1, 0, "usage", validGeminiBuckets)},
 		{name: "token use", data: usageFixture("SUCCESS", 0, 1, "usage", validGeminiBuckets)},
 		{name: "wrong command", data: usageFixture("SUCCESS", 0, 0, "status", validGeminiBuckets)},
+		{name: "missing turn count", data: []byte(strings.Replace(validFixture, `"num_turns":0,`, `"turn_count":0,`, 1))},
+		{name: "missing total tokens", data: []byte(strings.Replace(validFixture, `"total_tokens":0`, `"tokens_total":0`, 1))},
 		{name: "missing usage", data: []byte(`{"status":"SUCCESS","num_turns":0,"command":{"name":"usage","data":{"groups":[]}}}`)},
 		{name: "missing command", data: []byte(`{"status":"SUCCESS","num_turns":0,"usage":{"total_tokens":0}}`)},
 	}

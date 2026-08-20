@@ -16,13 +16,13 @@ const (
 
 type usageEnvelope struct {
 	Status   string        `json:"status"`
-	NumTurns int           `json:"num_turns"`
+	NumTurns *int          `json:"num_turns"`
 	Usage    *usageTotals  `json:"usage"`
 	Command  *usageCommand `json:"command"`
 }
 
 type usageTotals struct {
-	TotalTokens int64 `json:"total_tokens"`
+	TotalTokens *int64 `json:"total_tokens"`
 }
 
 type usageCommand struct {
@@ -49,10 +49,10 @@ func parseUsage(data []byte) (quota.Result, error) {
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return quota.Result{}, errors.New("decode usage output")
 	}
-	if envelope.Status != "SUCCESS" || envelope.NumTurns != 0 {
+	if envelope.Status != "SUCCESS" || envelope.NumTurns == nil || *envelope.NumTurns != 0 {
 		return quota.Result{}, errors.New("unsafe usage status")
 	}
-	if envelope.Usage == nil || envelope.Usage.TotalTokens != 0 {
+	if envelope.Usage == nil || envelope.Usage.TotalTokens == nil || *envelope.Usage.TotalTokens != 0 {
 		return quota.Result{}, errors.New("unsafe usage token count")
 	}
 	if envelope.Command == nil || envelope.Command.Name != "usage" {
