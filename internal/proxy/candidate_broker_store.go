@@ -29,14 +29,15 @@ type CandidateBrokerCaps struct {
 }
 
 type CandidateBrokerRecordV1 struct {
-	SchemaVersion  int    `json:"schema_version"`
-	RunID          string `json:"run_id"`
-	SourceDigest   string `json:"source_digest"`
-	Sequence       uint64 `json:"sequence"`
-	Kind           string `json:"kind"`
-	PayloadDigest  string `json:"payload_digest"`
-	PreviousDigest string `json:"previous_digest,omitempty"`
-	MAC            string `json:"mac,omitempty"`
+	SchemaVersion    int    `json:"schema_version"`
+	RunID            string `json:"run_id"`
+	SourceDigest     string `json:"source_digest"`
+	CapabilityDigest string `json:"capability_digest,omitempty"`
+	Sequence         uint64 `json:"sequence"`
+	Kind             string `json:"kind"`
+	PayloadDigest    string `json:"payload_digest"`
+	PreviousDigest   string `json:"previous_digest,omitempty"`
+	MAC              string `json:"mac,omitempty"`
 }
 
 type JournalPositionV1 struct {
@@ -204,6 +205,19 @@ func (s *CandidateBrokerStore) VerifySealedRun(ctx context.Context, seal Candida
 		return errors.New("candidate broker seal mismatch")
 	}
 	return nil
+}
+
+// JournalRecords returns an authenticated in-memory projection reconstructed
+// from the durable journal. The returned slice does not alias store state.
+func (s *CandidateBrokerStore) JournalRecords(runID string) []CandidateBrokerRecordV1 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records := s.journal[runID]
+	result := make([]CandidateBrokerRecordV1, len(records))
+	for index := range records {
+		result[index] = records[index].record
+	}
+	return result
 }
 
 // RetireRun removes dependants before their source objects.
