@@ -28,7 +28,7 @@ func TestComputeFiltersWeeklyExhaustedFrom5h(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now, nil)
+	agg, summary := Compute(results, now, "", nil)
 	if agg == nil || summary == nil {
 		t.Fatal("expected aggregate and summary")
 	}
@@ -59,10 +59,10 @@ func TestComputeUniformTierRescalingKeepsPercentAndBurndown(t *testing.T) {
 	}
 	results[0].RateLimitTier = "codex_pro_10x"
 	results[1].RateLimitTier = "codex_pro_10x"
-	before, _ := Compute(results, now, nil)
+	before, _ := Compute(results, now, "", nil)
 	results[0].RateLimitTier = "codex_pro_20x"
 	results[1].RateLimitTier = "codex_pro_20x"
-	after, _ := Compute(results, now, nil)
+	after, _ := Compute(results, now, "", nil)
 
 	if before[quota.Window5Hour].RemainingPct != after[quota.Window5Hour].RemainingPct {
 		t.Fatalf("remaining changed after uniform rescaling: %d to %d", before[quota.Window5Hour].RemainingPct, after[quota.Window5Hour].RemainingPct)
@@ -91,7 +91,7 @@ func TestComputeWeightsMixedCodexTiers(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now, nil)
+	agg, summary := Compute(results, now, "", nil)
 	if got := agg[quota.Window5Hour].RemainingPct; got != 68 {
 		t.Fatalf("mixed-tier remaining = %d, want 68", got)
 	}
@@ -123,7 +123,7 @@ func TestComputeIncludesAccountsMissing7dIn5h(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now, nil)
+	agg, _ := Compute(results, now, "", nil)
 	if got := agg[quota.Window5Hour].RemainingPct; got != 40 {
 		t.Fatalf("5h remaining = %d, want 40", got)
 	}
@@ -150,7 +150,7 @@ func TestComputeZeroes5hWhenAllWeeklyExhausted(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now, nil)
+	agg, _ := Compute(results, now, "", nil)
 	if got := agg[quota.Window5Hour].RemainingPct; got != 0 {
 		t.Fatalf("5h remaining = %d, want 0", got)
 	}
@@ -183,7 +183,7 @@ func TestComputeFiltersWeeklyExhaustedFrom5hBurndown(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now, nil)
+	agg, _ := Compute(results, now, "", nil)
 	if got := agg[quota.Window5Hour].Burndown; got != 1000 {
 		t.Fatalf("5h burndown = %d, want 1000", got)
 	}
@@ -377,7 +377,7 @@ func TestComputeDisjointWindows(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now, nil)
+	agg, summary := Compute(results, now, "", nil)
 	if agg == nil {
 		t.Fatal("expected non-nil aggregate for disjoint windows with 2 usable results")
 	}
@@ -421,7 +421,7 @@ func TestComputeDisjointWindowsBothAccountsSameWindow(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now, nil)
+	agg, summary := Compute(results, now, "", nil)
 	if agg == nil || summary == nil {
 		t.Fatal("expected non-nil aggregate when at least one window has >= 1 contributing account")
 	}
@@ -453,7 +453,7 @@ func TestComputeSustainabilityInAggregateResult(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now, nil)
+	agg, summary := Compute(results, now, "", nil)
 	if agg == nil || summary == nil {
 		t.Fatal("expected non-nil aggregate")
 	}
@@ -493,7 +493,7 @@ func TestComputeRequiresTwoUsableResults(t *testing.T) {
 		},
 	}
 
-	agg, summary := Compute(results, now, nil)
+	agg, summary := Compute(results, now, "", nil)
 	if agg != nil || summary != nil {
 		t.Error("expected nil aggregate when fewer than 2 usable results")
 	}
@@ -595,7 +595,7 @@ func TestComputeAggregatesDynamicSevenDayWindow(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now, nil)
+	agg, _ := Compute(results, now, "", nil)
 	if agg == nil {
 		t.Fatal("expected non-nil aggregate")
 	}
@@ -627,7 +627,7 @@ func TestComputeAggregatesGenericDurationWindow(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now, nil)
+	agg, _ := Compute(results, now, "", nil)
 	got, ok := agg[key]
 	if !ok {
 		t.Fatal("missing aggregate 1d window")
@@ -658,7 +658,7 @@ func TestComputeGatesDynamic5hWithMatching7dBucket(t *testing.T) {
 		},
 	}
 
-	agg, _ := Compute(results, now, nil)
+	agg, _ := Compute(results, now, "", nil)
 	if agg == nil {
 		t.Fatal("expected non-nil aggregate")
 	}

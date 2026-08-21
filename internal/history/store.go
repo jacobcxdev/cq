@@ -34,10 +34,10 @@ import (
 
 // schemaVersion is the on-disk BurnState schema version. Any mismatch on
 // load is treated as cold start (empty state).
-const schemaVersion = 1
+const schemaVersion = 2
 
 // stateFileName is the sidecar file name under the cache/history directory.
-const stateFileName = "burn_state_v1.json"
+const stateFileName = "burn_state_v2.json"
 
 // BurnRateKey identifies a single (provider, account, window) burn-rate entry.
 // All fields are value types so the struct is comparable and usable as a map
@@ -66,12 +66,14 @@ func (b BurnRates) Get(k BurnRateKey) (float64, bool) {
 // BurnState is the on-disk persistence schema.
 type BurnState struct {
 	Version  int                      `json:"version"`
-	Accounts map[string]*AccountState `json:"accounts"` // key = "<accountKey>"
+	Accounts map[string]*AccountState `json:"accounts"`
 }
 
 // AccountState holds all window states for a single (provider, account).
 type AccountState struct {
-	Windows map[string]*WindowState `json:"windows"` // key = window name
+	ProviderID string                  `json:"provider_id"`
+	AccountKey string                  `json:"account_key"`
+	Windows    map[string]*WindowState `json:"windows"` // key = window name
 }
 
 // WindowState captures the EWMA plus the minimum metadata needed to compute
@@ -164,7 +166,7 @@ func (s *Store) save(state *BurnState) error {
 // Must be called from serial code.
 func (s *Store) UpdateAndGetBurnRates(
 	ctx context.Context,
-	results []quota.Result,
+	providerResults map[string][]quota.Result,
 	nowEpoch int64,
 ) (BurnRates, error) {
 	_ = ctx // reserved for future cancellation support
@@ -177,106 +179,104 @@ func (s *Store) UpdateAndGetBurnRates(
 		state = emptyState()
 	}
 
-	for _, r := range results {
-		if !r.IsUsable() || len(r.Windows) == 0 {
+	for providerID, results := range providerResults {
+		if providerID == "" {
 			continue
 		}
-		// Backfilled-from-stale-cache results would poison the EWMA: a tiny
-		// Δt over data that's actually hours old.
-		if r.CacheAge > 0 {
-			continue
-		}
-		accountKey := r.AccountID
-		if accountKey == "" {
-			accountKey = r.Email
-		}
-		if accountKey == "" {
-			continue
-		}
-		// Provider is not carried on quota.Result directly, so the store
-		// keys on account identity only. Collisions across providers would
-		// only happen for identical account keys across Claude/Codex/Gemini,
-		// which is unlikely for a local CLI — and even then the window name
-		// prevents cross-window contamination. Downstream code builds the
-		// BurnRateKey with the provider ID from aggregate context so the
-		// read path is still provider-scoped.
-		accountFullKey := accountKey
-		acct, ok := state.Accounts[accountFullKey]
-		if !ok {
-			acct = &AccountState{Windows: make(map[string]*WindowState)}
-			state.Accounts[accountFullKey] = acct
-		} else if acct.Windows == nil {
-			acct.Windows = make(map[string]*WindowState)
-		}
+		for _, r := range results {
+			if !r.IsUsable() || len(r.Windows) == 0 {
+				continue
+			}
+			// Backfilled-from-stale-cache results would poison the EWMA: a tiny
+			// Δt over data that's actually hours old.
+			if r.CacheAge > 0 {
+				continue
+			}
+			accountKey := r.AccountID
+			if accountKey == "" {
+				accountKey = r.Email
+			}
+			if accountKey == "" {
+				continue
+			}
+			accountFullKey := providerID + "\x00" + accountKey
+			acct, ok := state.Accounts[accountFullKey]
+			if !ok {
+				acct = &AccountState{ProviderID: providerID, AccountKey: accountKey, Windows: make(map[string]*WindowState)}
+				state.Accounts[accountFullKey] = acct
+			} else if acct.Windows == nil {
+				acct.Windows = make(map[string]*WindowState)
+			}
 
-		for winName, w := range r.Windows {
-			windowKey := string(winName)
-			prev, have := acct.Windows[windowKey]
-			if !have {
-				// First observation: seed state, no rate sample yet.
-				acct.Windows[windowKey] = &WindowState{
-					EWMARatePctPerS:  0,
-					LastSeenUnix:     nowEpoch,
-					LastRemainingPct: w.RemainingPct,
-					LastResetAtUnix:  w.ResetAtUnix,
-					Samples:          1,
+			for winName, w := range r.Windows {
+				windowKey := string(winName)
+				prev, have := acct.Windows[windowKey]
+				if !have {
+					// First observation: seed state, no rate sample yet.
+					acct.Windows[windowKey] = &WindowState{
+						EWMARatePctPerS:  0,
+						LastSeenUnix:     nowEpoch,
+						LastRemainingPct: w.RemainingPct,
+						LastResetAtUnix:  w.ResetAtUnix,
+						Samples:          1,
+					}
+					continue
 				}
-				continue
-			}
 
-			dt := nowEpoch - prev.LastSeenUnix
-			if dt <= 0 {
-				// Clock went backward or duplicate observation — preserve
-				// prior state unchanged. This is deliberately strict: even
-				// a zero-delta would produce a divide-by-zero below.
-				continue
-			}
-			period := int64(quota.PeriodFor(winName).Seconds())
-			if period > 0 && dt > period {
-				// A gap longer than the window cannot distinguish suspended or
-				// unobserved resets from actual consumption. Cold-start instead.
-				*prev = WindowState{
-					LastSeenUnix:     nowEpoch,
-					LastRemainingPct: w.RemainingPct,
-					LastResetAtUnix:  w.ResetAtUnix,
-					Samples:          1,
+				dt := nowEpoch - prev.LastSeenUnix
+				if dt <= 0 {
+					// Clock went backward or duplicate observation — preserve
+					// prior state unchanged. This is deliberately strict: even
+					// a zero-delta would produce a divide-by-zero below.
+					continue
 				}
-				continue
-			}
+				period := int64(quota.PeriodFor(winName).Seconds())
+				if period > 0 && dt > period {
+					// A gap longer than the window cannot distinguish suspended or
+					// unobserved resets from actual consumption. Cold-start instead.
+					*prev = WindowState{
+						LastSeenUnix:     nowEpoch,
+						LastRemainingPct: w.RemainingPct,
+						LastResetAtUnix:  w.ResetAtUnix,
+						Samples:          1,
+					}
+					continue
+				}
 
-			deltaPct, resetOK := computeDelta(prev, w, winName)
-			if !resetOK {
-				// Ambiguous reset (e.g. synthetic epoch fallback or reset
-				// time went backwards) — reseed snapshot, no EWMA update.
+				deltaPct, resetOK := computeDelta(prev, w, winName)
+				if !resetOK {
+					// Ambiguous reset (e.g. synthetic epoch fallback or reset
+					// time went backwards) — reseed snapshot, no EWMA update.
+					prev.LastSeenUnix = nowEpoch
+					prev.LastRemainingPct = w.RemainingPct
+					prev.LastResetAtUnix = w.ResetAtUnix
+					continue
+				}
+
+				// Censor negative deltas (the API occasionally reports a small
+				// upward adjustment on refresh).
+				if deltaPct < 0 {
+					deltaPct = 0
+				}
+
+				// Exhaustion censoring: if the account is sitting at zero and
+				// was at zero before, this sample is censored data, not evidence
+				// of zero demand. Freeze the EWMA and update only LastSeenUnix.
+				if w.RemainingPct == 0 && deltaPct == 0 && prev.LastRemainingPct == 0 {
+					prev.LastSeenUnix = nowEpoch
+					prev.LastResetAtUnix = w.ResetAtUnix
+					continue
+				}
+
+				instantRate := float64(deltaPct) / float64(dt)
+				halfLife := halfLifeFor(winName)
+				alpha := 1.0 - math.Pow(2.0, -float64(dt)/halfLife)
+				prev.EWMARatePctPerS = alpha*instantRate + (1-alpha)*prev.EWMARatePctPerS
 				prev.LastSeenUnix = nowEpoch
 				prev.LastRemainingPct = w.RemainingPct
 				prev.LastResetAtUnix = w.ResetAtUnix
-				continue
+				prev.Samples++
 			}
-
-			// Censor negative deltas (the API occasionally reports a small
-			// upward adjustment on refresh).
-			if deltaPct < 0 {
-				deltaPct = 0
-			}
-
-			// Exhaustion censoring: if the account is sitting at zero and
-			// was at zero before, this sample is censored data, not evidence
-			// of zero demand. Freeze the EWMA and update only LastSeenUnix.
-			if w.RemainingPct == 0 && deltaPct == 0 && prev.LastRemainingPct == 0 {
-				prev.LastSeenUnix = nowEpoch
-				prev.LastResetAtUnix = w.ResetAtUnix
-				continue
-			}
-
-			instantRate := float64(deltaPct) / float64(dt)
-			halfLife := halfLifeFor(winName)
-			alpha := 1.0 - math.Pow(2.0, -float64(dt)/halfLife)
-			prev.EWMARatePctPerS = alpha*instantRate + (1-alpha)*prev.EWMARatePctPerS
-			prev.LastSeenUnix = nowEpoch
-			prev.LastRemainingPct = w.RemainingPct
-			prev.LastResetAtUnix = w.ResetAtUnix
-			prev.Samples++
 		}
 	}
 
@@ -288,7 +288,7 @@ func (s *Store) UpdateAndGetBurnRates(
 	}
 
 	rates := make(BurnRates)
-	for accountFullKey, acct := range state.Accounts {
+	for _, acct := range state.Accounts {
 		if acct == nil {
 			continue
 		}
@@ -296,15 +296,9 @@ func (s *Store) UpdateAndGetBurnRates(
 			if ws == nil || ws.Samples < 2 {
 				continue
 			}
-			// The store does not know the provider ID — it's keyed by account
-			// identity alone. Downstream code in aggregate constructs the
-			// BurnRateKey with the provider from aggregate context and looks
-			// up using the account-only key. To support that, we publish the
-			// rate under a key where ProviderID is empty, and the lookup site
-			// does the same. This keeps the package surface small.
 			rates[BurnRateKey{
-				ProviderID: "",
-				AccountKey: accountFullKey,
+				ProviderID: acct.ProviderID,
+				AccountKey: acct.AccountKey,
 				Window:     windowKey,
 			}] = ws.EWMARatePctPerS
 		}

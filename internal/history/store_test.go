@@ -5,12 +5,37 @@ import (
 	"encoding/json"
 	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+func updateTestBurnRates(s *Store, ctx context.Context, results []quota.Result, now int64) (BurnRates, error) {
+	return s.UpdateAndGetBurnRates(ctx, map[string][]quota.Result{"test": results}, now)
+}
+
+func TestBurnRatesRemainScopedAcrossProvidersWithSharedAccountIdentity(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	window := func(remaining int) []quota.Result {
+		return []quota.Result{{Status: quota.StatusOK, AccountID: "shared", Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: remaining, ResetAtUnix: 18_000}}}}
+	}
+	if _, err := s.UpdateAndGetBurnRates(ctx, map[string][]quota.Result{"claude": window(100), "codex": window(100)}, 100); err != nil {
+		t.Fatal(err)
+	}
+	rates, err := s.UpdateAndGetBurnRates(ctx, map[string][]quota.Result{"claude": window(90), "codex": window(80)}, 110)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeRate, claudeOK := rates.Get(BurnRateKey{ProviderID: "claude", AccountKey: "shared", Window: "5h"})
+	codexRate, codexOK := rates.Get(BurnRateKey{ProviderID: "codex", AccountKey: "shared", Window: "5h"})
+	if !claudeOK || !codexOK || claudeRate <= 0 || codexRate <= claudeRate {
+		t.Fatalf("rates = claude %v/%v codex %v/%v", claudeRate, claudeOK, codexRate, codexOK)
+	}
+}
 
 const testDir = "/cache/cq"
 
@@ -43,7 +68,7 @@ func TestStoreFirstObservationNoRate(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: now + 9_000},
 		}),
 	}
-	rates, err := s.UpdateAndGetBurnRates(ctx, results, now)
+	rates, err := updateTestBurnRates(s, ctx, results, now)
 	if err != nil {
 		t.Fatalf("UpdateAndGetBurnRates: %v", err)
 	}
@@ -56,7 +81,7 @@ func TestStoreFirstObservationNoRate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	acct := state.Accounts["acct1"]
+	acct := state.Accounts["test\x00acct1"]
 	if acct == nil {
 		t.Fatal("expected acct1 entry in state")
 	}
@@ -79,7 +104,7 @@ func TestStoreSecondObservationEWMAUpdate(t *testing.T) {
 	reset := now + 9_000
 
 	// First observation: seed.
-	_, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, err := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: reset},
 		}),
@@ -90,7 +115,7 @@ func TestStoreSecondObservationEWMAUpdate(t *testing.T) {
 
 	// Second observation 60s later: consumed 5 percentage points.
 	dt := int64(60)
-	rates, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	rates, err := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 95, ResetAtUnix: reset},
 		}),
@@ -101,7 +126,7 @@ func TestStoreSecondObservationEWMAUpdate(t *testing.T) {
 
 	// α = 1 - 2^(-60/1800) ≈ 0.02284
 	// ewma = α * (5/60) + (1-α)*0 = α * 0.08333 ≈ 0.001903
-	key := BurnRateKey{AccountKey: "acct1", Window: "5h"}
+	key := BurnRateKey{ProviderID: "test", AccountKey: "acct1", Window: "5h"}
 	got, ok := rates.Get(key)
 	if !ok {
 		t.Fatal("expected rate after second observation")
@@ -120,7 +145,7 @@ func TestStoreReseedsAfterObservationGapExceedsWindowPeriod(t *testing.T) {
 	period := int64(quota.PeriodFor(quota.Window5Hour).Seconds())
 	reset := now + 9_000
 
-	_, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, err := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: reset},
 		}),
@@ -129,7 +154,7 @@ func TestStoreReseedsAfterObservationGapExceedsWindowPeriod(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	rates, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	rates, err := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 70, ResetAtUnix: reset + period},
 		}),
@@ -137,7 +162,7 @@ func TestStoreReseedsAfterObservationGapExceedsWindowPeriod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if _, ok := rates.Get(BurnRateKey{AccountKey: "acct1", Window: "5h"}); ok {
+	if _, ok := rates.Get(BurnRateKey{ProviderID: "test", AccountKey: "acct1", Window: "5h"}); ok {
 		t.Fatal("stale observation produced burn rate after period-sized gap")
 	}
 
@@ -145,7 +170,7 @@ func TestStoreReseedsAfterObservationGapExceedsWindowPeriod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	w := state.Accounts["acct1"].Windows["5h"]
+	w := state.Accounts["test\x00acct1"].Windows["5h"]
 	if w.Samples != 1 || w.EWMARatePctPerS != 0 || w.LastRemainingPct != 70 {
 		t.Fatalf("reseeded state = %#v, want fresh sample at 70%%", w)
 	}
@@ -159,14 +184,14 @@ func TestStoreResetUnwrap(t *testing.T) {
 	reset := now + 3_600 // reset in 1h
 
 	// Seed at 100%.
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: reset},
 		}),
 	}, now)
 
 	// 60s later: used 10%.
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 90, ResetAtUnix: reset},
 		}),
@@ -175,7 +200,7 @@ func TestStoreResetUnwrap(t *testing.T) {
 	// 3700s later (past the reset): fresh window, at 95%. Reset advanced by one period.
 	newNow := now + 60 + 3700
 	newReset := reset + period
-	rates, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	rates, err := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 95, ResetAtUnix: newReset},
 		}),
@@ -185,7 +210,7 @@ func TestStoreResetUnwrap(t *testing.T) {
 	}
 
 	// Delta = 90 (prev) + 100 (one reset) - 95 = 95 percentage points.
-	key := BurnRateKey{AccountKey: "acct1", Window: "5h"}
+	key := BurnRateKey{ProviderID: "test", AccountKey: "acct1", Window: "5h"}
 	got, ok := rates.Get(key)
 	if !ok {
 		t.Fatal("expected rate after reset unwrap")
@@ -201,21 +226,21 @@ func TestStoreResetAmbiguousReseed(t *testing.T) {
 	now := int64(1_000_000)
 	reset := now + 3_600
 
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: reset},
 		}),
 	}, now)
 
 	// Reset moved by a non-clean multiple (1 hour ≠ period).
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 60, ResetAtUnix: reset + 3_600},
 		}),
 	}, now+60)
 
 	state, _ := s.load()
-	w := state.Accounts["acct1"].Windows["5h"]
+	w := state.Accounts["test\x00acct1"].Windows["5h"]
 	if w.EWMARatePctPerS != 0 {
 		t.Errorf("ambiguous reset produced EWMA = %v, want 0 (reseed)", w.EWMARatePctPerS)
 	}
@@ -231,12 +256,12 @@ func TestStoreExhaustionCensoring(t *testing.T) {
 	reset := now + 9_000
 
 	// Seed at 10%, then burn down to 0, then stay at 0.
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 10, ResetAtUnix: reset},
 		}),
 	}, now)
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 0, ResetAtUnix: reset},
 		}),
@@ -244,20 +269,20 @@ func TestStoreExhaustionCensoring(t *testing.T) {
 
 	// Capture EWMA after the 10→0 delta.
 	state, _ := s.load()
-	ewmaBefore := state.Accounts["acct1"].Windows["5h"].EWMARatePctPerS
+	ewmaBefore := state.Accounts["test\x00acct1"].Windows["5h"].EWMARatePctPerS
 	if ewmaBefore <= 0 {
 		t.Fatalf("expected positive EWMA before censoring, got %v", ewmaBefore)
 	}
 
 	// Now sit at 0 for another observation — should freeze EWMA.
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 0, ResetAtUnix: reset},
 		}),
 	}, now+120)
 
 	state, _ = s.load()
-	ewmaAfter := state.Accounts["acct1"].Windows["5h"].EWMARatePctPerS
+	ewmaAfter := state.Accounts["test\x00acct1"].Windows["5h"].EWMARatePctPerS
 	if ewmaAfter != ewmaBefore {
 		t.Errorf("EWMA changed during exhaustion censoring: before=%v after=%v", ewmaBefore, ewmaAfter)
 	}
@@ -279,13 +304,13 @@ func TestStoreSkipsBackfilledResults(t *testing.T) {
 			},
 		},
 	}
-	_, err := s.UpdateAndGetBurnRates(ctx, results, now)
+	_, err := updateTestBurnRates(s, ctx, results, now)
 	if err != nil {
 		t.Fatalf("UpdateAndGetBurnRates: %v", err)
 	}
 
 	state, _ := s.load()
-	if _, ok := state.Accounts["acct1"]; ok {
+	if _, ok := state.Accounts["test\x00acct1"]; ok {
 		t.Error("backfilled result should not create state entry")
 	}
 }
@@ -303,7 +328,7 @@ func TestStoreAnonymousSkipped(t *testing.T) {
 			},
 		},
 	}
-	_, err := s.UpdateAndGetBurnRates(ctx, results, now)
+	_, err := updateTestBurnRates(s, ctx, results, now)
 	if err != nil {
 		t.Fatalf("UpdateAndGetBurnRates: %v", err)
 	}
@@ -326,7 +351,7 @@ func TestStoreCorruptFileRecovery(t *testing.T) {
 	now := int64(1_000_000)
 
 	// Should not fail — corrupt load degrades to cold start.
-	_, err = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, err = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: now + 9_000},
 		}),
@@ -377,7 +402,7 @@ func TestStoreAtomicWrite(t *testing.T) {
 	ctx := context.Background()
 	now := int64(1_000_000)
 
-	_, err := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, err := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: now + 9_000},
 		}),
@@ -416,24 +441,24 @@ func TestStoreClockBackward(t *testing.T) {
 	now := int64(1_000_000)
 	reset := now + 9_000
 
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: reset},
 		}),
 	}, now)
 
 	stateBefore, _ := s.load()
-	samplesBefore := stateBefore.Accounts["acct1"].Windows["5h"].Samples
+	samplesBefore := stateBefore.Accounts["test\x00acct1"].Windows["5h"].Samples
 
 	// Call again with an earlier now — Δt ≤ 0.
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 90, ResetAtUnix: reset},
 		}),
 	}, now-10)
 
 	stateAfter, _ := s.load()
-	samplesAfter := stateAfter.Accounts["acct1"].Windows["5h"].Samples
+	samplesAfter := stateAfter.Accounts["test\x00acct1"].Windows["5h"].Samples
 	if samplesAfter != samplesBefore {
 		t.Errorf("Samples changed on clock-backward: before=%d after=%d", samplesBefore, samplesAfter)
 	}
@@ -446,7 +471,7 @@ func TestStoreCoalescesMultipleWindows(t *testing.T) {
 	r5 := now + 9_000
 	r7 := now + 302_400
 
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: r5},
 			quota.Window7Day:  {RemainingPct: 100, ResetAtUnix: r7},
@@ -454,15 +479,15 @@ func TestStoreCoalescesMultipleWindows(t *testing.T) {
 	}, now)
 
 	dt := int64(60)
-	rates, _ := s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	rates, _ := updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 95, ResetAtUnix: r5},
 			quota.Window7Day:  {RemainingPct: 99, ResetAtUnix: r7},
 		}),
 	}, now+dt)
 
-	r5Key := BurnRateKey{AccountKey: "acct1", Window: "5h"}
-	r7Key := BurnRateKey{AccountKey: "acct1", Window: "7d"}
+	r5Key := BurnRateKey{ProviderID: "test", AccountKey: "acct1", Window: "5h"}
+	r7Key := BurnRateKey{ProviderID: "test", AccountKey: "acct1", Window: "7d"}
 	if _, ok := rates.Get(r5Key); !ok {
 		t.Error("missing 5h rate")
 	}
@@ -483,7 +508,7 @@ func TestStoreUnknownAccountAbsentFromRates(t *testing.T) {
 	ctx := context.Background()
 	now := int64(1_000_000)
 
-	rates, _ := s.UpdateAndGetBurnRates(ctx, nil, now)
+	rates, _ := updateTestBurnRates(s, ctx, nil, now)
 	if len(rates) != 0 {
 		t.Errorf("empty results produced rates = %v, want empty", rates)
 	}
@@ -491,7 +516,7 @@ func TestStoreUnknownAccountAbsentFromRates(t *testing.T) {
 
 func TestBurnRatesNilSafe(t *testing.T) {
 	var rates BurnRates
-	if _, ok := rates.Get(BurnRateKey{AccountKey: "x", Window: "5h"}); ok {
+	if _, ok := rates.Get(BurnRateKey{ProviderID: "test", AccountKey: "x", Window: "5h"}); ok {
 		t.Error("nil BurnRates.Get should return ok=false")
 	}
 }
@@ -507,7 +532,7 @@ func TestStoreNewCreatesDir(t *testing.T) {
 func TestStoreWrittenFileVersion(t *testing.T) {
 	s, fs := newTestStore(t)
 	ctx := context.Background()
-	_, _ = s.UpdateAndGetBurnRates(ctx, []quota.Result{
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{
 		makeResult("acct1", map[quota.WindowName]quota.Window{
 			quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: 2_000_000},
 		}),
@@ -517,7 +542,8 @@ func TestStoreWrittenFileVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !strings.Contains(string(data), `"version":1`) {
-		t.Errorf("written file missing version:1 — got %s", string(data))
+	want := `"version":` + strconv.Itoa(schemaVersion)
+	if !strings.Contains(string(data), want) {
+		t.Errorf("written file missing %s — got %s", want, string(data))
 	}
 }
