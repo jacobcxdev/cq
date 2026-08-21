@@ -165,6 +165,29 @@ func TestProxyInspectPropagatesWriterErrors(t *testing.T) {
 	}
 }
 
+func TestProjectProxySnapshotMarksHomebrewResilienceFactsAbsent(t *testing.T) {
+	snapshot := proxy.ReconcileProxySnapshot(proxy.ProxySnapshot{
+		Desired:   proxy.KnownFact(proxy.DesiredProxyState{Manager: "homebrew", Configured: true, Listener: "127.0.0.1:19280"}),
+		Service:   proxy.KnownFact(proxy.ServiceState{Manager: "homebrew", State: "running", PID: 42, Executable: "/opt/homebrew/bin/cq"}),
+		Listener:  proxy.KnownFact(proxy.ListenerState{State: "listening", Listener: "127.0.0.1:19280", PID: 42, Executable: "/opt/homebrew/bin/cq"}),
+		Process:   proxy.KnownFact(proxy.ProcessState{PID: 42, Executable: "/opt/homebrew/bin/cq"}),
+		Runtime:   proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: 42, Executable: "/opt/homebrew/bin/cq", Health: "healthy"}),
+		DataPlane: proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"}),
+	})
+
+	got := projectProxySnapshot(snapshot)
+	if snapshot.Verdict != proxy.ProxyVerdictHealthy {
+		t.Fatalf("verdict = %s, want healthy", snapshot.Verdict)
+	}
+	for name, fact := range map[string]proxy.Fact[struct{}]{
+		"instance": got.Instance, "authority": got.Authority, "routing": got.Routing, "client bearer barrier": got.ClientBearerBarrier,
+	} {
+		if fact.Status != proxy.FactAbsent {
+			t.Errorf("%s status = %s, want absent", name, fact.Status)
+		}
+	}
+}
+
 var errProxyInspectWrite = errors.New("write failed")
 
 type failingProxyInspectWriter struct{}

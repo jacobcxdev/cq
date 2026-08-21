@@ -23,14 +23,18 @@ func TestProxySnapshotReconcilesSupportedTopologies(t *testing.T) {
 			exit: 0,
 		},
 		{
-			name: "homebrew legacy",
-			in: snapshotFixture(
-				ServiceState{Manager: "homebrew", State: "running", PID: 43, Executable: "/opt/homebrew/bin/cq"},
-				ListenerState{State: "listening", PID: 43, Executable: "/opt/homebrew/bin/cq"},
-				RuntimeIdentity{Reachable: true, PID: 43, Executable: "/opt/homebrew/bin/cq", Health: "healthy"},
-			),
-			want: ProxyVerdictLegacy,
-			exit: 1,
+			name: "homebrew healthy",
+			in: func() ProxySnapshot {
+				snapshot := snapshotFixture(
+					ServiceState{Manager: "homebrew", State: "running", PID: 43, Executable: "/opt/homebrew/bin/cq"},
+					ListenerState{State: "listening", PID: 43, Executable: "/opt/homebrew/bin/cq"},
+					RuntimeIdentity{Reachable: true, PID: 43, Executable: "/opt/homebrew/bin/cq", Health: "healthy"},
+				)
+				snapshot.DataPlane = KnownFact(DataPlaneProof{Code: "unproven"})
+				return snapshot
+			}(),
+			want: ProxyVerdictHealthy,
+			exit: 0,
 		},
 		{
 			name: "manual legacy",

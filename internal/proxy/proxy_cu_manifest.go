@@ -682,7 +682,7 @@ func canonicalCU1ManifestV1() ([]byte, error) {
 		"TestProxySnapshotReconcilesSupportedTopologies/cq_healthy",
 		"TestProxySnapshotReconcilesSupportedTopologies/crash_looping",
 		"TestProxySnapshotReconcilesSupportedTopologies/foreign_listener",
-		"TestProxySnapshotReconcilesSupportedTopologies/homebrew_legacy",
+		"TestProxySnapshotReconcilesSupportedTopologies/homebrew_healthy",
 		"TestProxySnapshotReconcilesSupportedTopologies/manual_legacy",
 		"TestProxySnapshotReconcilesSupportedTopologies/required_collector_unavailable",
 		"TestProxySnapshotReconcilesSupportedTopologies/stopped",

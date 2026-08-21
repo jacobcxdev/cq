@@ -148,16 +148,23 @@ func ReconcileProxySnapshot(snapshot ProxySnapshot) ProxySnapshot {
 		return withProxyVerdict(snapshot, ProxyVerdictIndeterminate, 4)
 	}
 	desired := snapshot.Desired.Value
-	if desired == nil || !desired.Configured || desired.Manager == "" || desired.Listener == "" || service == nil || desired.Manager != service.Manager || service.State != "running" || listener == nil || desired.Listener != listener.Listener || listener.State != "listening" || process == nil || runtime == nil || !runtime.Reachable || runtime.Health != "healthy" || snapshot.DataPlane.Status != FactKnown || snapshot.DataPlane.Value == nil || !snapshot.DataPlane.Value.Proven {
+	if desired == nil || !desired.Configured || desired.Manager == "" || desired.Listener == "" || service == nil || desired.Manager != service.Manager || service.State != "running" || listener == nil || desired.Listener != listener.Listener || listener.State != "listening" || process == nil || runtime == nil || !runtime.Reachable || runtime.Health != "healthy" || !dataPlaneSatisfiesManager(service.Manager, snapshot.DataPlane) {
 		return withProxyVerdict(snapshot, ProxyVerdictDegraded, 1)
 	}
-	if service != nil && (service.Manager == "homebrew" || service.Manager == "manual") {
+	if service.Manager == "manual" {
 		return withProxyVerdict(snapshot, ProxyVerdictLegacy, 1)
 	}
 	if snapshot.Inspector.Status == FactKnown && snapshot.Inspector.Value != nil && service != nil && snapshot.Inspector.Value.Executable != "" && service.Executable != "" && snapshot.Inspector.Value.Executable != service.Executable {
 		snapshot.Warnings = []string{"inspector_skew"}
 	}
 	return withProxyVerdict(snapshot, ProxyVerdictHealthy, 0)
+}
+
+func dataPlaneSatisfiesManager(manager string, fact Fact[DataPlaneProof]) bool {
+	if fact.Status != FactKnown || fact.Value == nil {
+		return false
+	}
+	return fact.Value.Proven || (manager == "homebrew" && fact.Value.Code == "unproven")
 }
 
 func normaliseProxySnapshotFacts(snapshot *ProxySnapshot) {
