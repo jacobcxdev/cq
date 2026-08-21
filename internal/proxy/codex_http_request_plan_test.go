@@ -810,7 +810,17 @@ func TestCodexHTTPRequestPlanFactoryPreparationRetryOverwritesShapeWithoutEmissi
 	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
 	factory.TransportKind = "http"
 	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{}}
+	inspectCalls := 0
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, header http.Header) (*CodexFrozenRequestInspection, error) {
+		inspectCalls++
+		inspection, err := InspectCodexNativeRequest(ctx, encoded, header)
+		if err == nil && inspectCalls == 2 {
+			inspection.Release()
+		}
+		return inspection, err
+	}
 	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	noteCodexObservation(ctx, codexObservationFields{LeasePhase: "prepared"})
 	first := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-first")), "}") + `,"reasoning":{"effort":"high"}}`)
 	second := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-terra", CodexRequestTurn, "private-second")), "}") + `,"previous_response_id":"private-id","reasoning":{"effort":"low"}}`)
 
@@ -819,7 +829,7 @@ func TestCodexHTTPRequestPlanFactoryPreparationRetryOverwritesShapeWithoutEmissi
 
 	event := RouteEvent{}
 	event.applyRouteDiagnostics(diagnostics)
-	if event.RequestLineage != "previous_response_id_present" || event.RequestedReasoningEffort != "low" || event.RequestedModelClass != "gpt_5_6_terra" {
+	if event.RequestKind != "" || event.RequestLineage != "unknown" || event.RequestedReasoningEffort != "unknown" || event.RequestedModelClass != "unknown" || event.CompactionPhase != "unknown" || event.LeasePhase != "prepared" {
 		t.Fatalf("retried request shape = %+v", event)
 	}
 }

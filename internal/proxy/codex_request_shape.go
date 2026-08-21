@@ -1,5 +1,7 @@
 package proxy
 
+import "context"
+
 const (
 	codexRequestLineagePreviousResponseIDAbsent  = "previous_response_id_absent"
 	codexRequestLineagePreviousResponseIDPresent = "previous_response_id_present"
@@ -25,6 +27,24 @@ func codexObservationFieldsForRequestShape(shape codexRequestShape) codexObserva
 		RequestedModelClass:      shape.RequestedModelClass,
 		CompactionPhase:          shape.CompactionPhase,
 	}
+}
+
+func replaceCodexRequestShapeObservation(ctx context.Context, shape codexRequestShape) {
+	if ctx == nil {
+		return
+	}
+	diagnostics, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics)
+	if diagnostics == nil {
+		return
+	}
+	fields := codexObservationFieldsForRequestShape(shape)
+	diagnostics.mu.Lock()
+	diagnostics.codex.RequestKind = fields.RequestKind
+	diagnostics.codex.RequestLineage = fields.RequestLineage
+	diagnostics.codex.RequestedReasoningEffort = fields.RequestedReasoningEffort
+	diagnostics.codex.RequestedModelClass = fields.RequestedModelClass
+	diagnostics.codex.CompactionPhase = fields.CompactionPhase
+	diagnostics.mu.Unlock()
 }
 
 func classifyCodexRequestShape(request CodexProtocolRequest, parseErr error) codexRequestShape {
