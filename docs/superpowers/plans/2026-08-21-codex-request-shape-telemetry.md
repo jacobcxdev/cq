@@ -80,7 +80,7 @@
 - [x] Add retry/rejection tests proving planner retries and upstream rotations do not duplicate telemetry; malformed, control, response, or unsupported legacy frames emit none.
 - [x] Run focused tests and confirm RED.
 - [x] Add one small shape-to-observation helper; every producer uses it rather than duplicating field assignment.
-- [x] Parse once and enrich request-local diagnostics in ordinary legacy and compact fallback HTTP handlers before optional enforcement/observation. In native plan factory, enrich immediately after strict protocol inspection only when transport is HTTP. Keep existing terminal server handlers as sole HTTP writers.
+- [x] Run strict observation extraction in ordinary legacy and compact fallback HTTP handlers before optional legacy enforcement parsing. In native plan factory, enrich immediately after strict protocol inspection only when transport is HTTP. Keep existing terminal server handlers as sole HTTP writers.
 - [x] Give each terminating WebSocket frame fresh diagnostics. Invoke one acceptance sink after successful build/adoption or dispatch/reservation, before dial/relay loops; retries and rotations must not emit.
 - [x] Install a WebSocket frame sink in server context. Emit fixed-field `RouteEvent` values through existing projection and safety boundary. In legacy relay, strictly accept only text `type=response.create` or JSON-RPC `method=response/create` client frames before parse/apply/emit; never inspect upstream frames.
 - [x] Keep existing connection-level WebSocket event unchanged; frame events remain distinguishable by authoritative `route_kind` in both legacy and terminating paths.

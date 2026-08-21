@@ -217,6 +217,11 @@ HTTP enriches one existing terminal route event. Each successfully parsed,
 accepted WebSocket request frame emits one `codex_websocket_frame` event.
 Malformed, control, response, and upstream frames emit none. Retries and
 account/upstream rotations emit no additional event.
+Legacy observation uses the same strict authority scanner as native routing,
+with model and metadata presence relaxed because they are optional for
+measurement. Duplicate, case-variant, escaped, or conflicting authority makes
+HTTP request-shape fields unknown and suppresses a legacy WebSocket frame
+event; existing HTTP routing and WebSocket relay behaviour remain unchanged.
 No raw prompt, tool, schema, output, response ID, model string, session value,
 or correlation is persisted. Manifest sizes and digests remain deferred because
 they are not authoritatively available in this boundary without broader scope.
@@ -353,13 +358,15 @@ accounts blindly.
 | 2026-08-21 | Defer manifest sizes and digests. | They are not authoritatively available at this boundary without inspecting or broadening protocol state. |
 | 2026-08-21 | Preserve Stage 11 observe-mode event expectations and lifecycle transcript hashes. | The test-only fallout fix covers one legacy connection event plus one frame event per accepted request without changing sealed transcript evidence. |
 | 2026-08-21 | Rebase Phase 0 cleanly onto current `origin/main` and `v0.23.7`. | Rewritten implementation history remains equivalent while verification runs against current main. |
+| 2026-08-21 | Fail closed when legacy observation authority is ambiguous. | Measurements must not disagree with strict native parsing; routing and relay behaviour stay outside Phase 0 scope. |
+| 2026-08-21 | Defer legacy HTTP parse reuse. | Sharing parsed requests would couple strict observation semantics to permissive enforcement behaviour; one extra bounded parse is the smaller Phase 0 cost. |
 
 ## Delivery checkpoints
 
 | Date | Commit | Outcome | Verification | Remaining gap |
 |---|---|---|---|---|
 | 2026-08-21 | `100f49e` | Provider-scoped burn history and valid cache-age inputs landed on `origin/main`. | Existing commit and full branch baseline inspected. | Privacy-safe request-shape telemetry. |
-| 2026-08-21 | `002ff66..d89b18d` | Added privacy-safe request-shape classification and HTTP/WebSocket route observations, plus the Stage 11 test-only fallout fix after rebasing onto current main. | `gofmt` clean; `go vet ./...`; `go build ./...`; `go test -race -count=1 ./...` passed, with `internal/proxy` completing in 243.540s; `git diff --check` passed. | Publication only. |
+| 2026-08-21 | `002ff66..42810d4` | Added privacy-safe request-shape classification and HTTP/WebSocket route observations, aligned legacy observation with strict authority rules, and updated Stage 11 diagnostics evidence after rebasing onto current main. | `gofmt` clean; `go vet ./...`; `go build ./...`; focused proxy race checks and `go test -race -count=1 ./...` passed, with final `internal/proxy` completing in 240.244s; `git diff --check` passed; final review found no Critical or Important issue. | Publication only. |
 
 ## Primary references
 
