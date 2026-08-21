@@ -23,6 +23,36 @@ func TestServerEmitDiagnosticsRejectsUnsafeCodexWithoutWriter(t *testing.T) {
 	}
 }
 
+func TestServerEmitDiagnosticsAllowsCodexWebSocketBrokerRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	writer, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	recorder := newCodexDiagnosticsTestCanary(t)
+	writer.SetCodexCanary(recorder)
+	server := &Server{Diag: writer, CodexCanary: recorder}
+	event := structurallySafeCodexRouteEvent()
+	event.RouteKind = "codex_websocket_broker"
+
+	server.emitDiagnostics(event)
+
+	if got := recorder.State().SecretLeaks; got != 0 {
+		t.Fatalf("secret leaks = %d, want 0", got)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readDiagnosticsEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if got := events[0].RouteKind; got != "codex_websocket_broker" {
+		t.Fatalf("route kind = %q, want codex_websocket_broker", got)
+	}
+}
+
 func TestServerEmitDiagnosticsProjectsCallerControlledModelBeforeWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	writer, err := OpenDiagnosticsWriter(path)
