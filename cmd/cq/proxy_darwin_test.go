@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -124,6 +125,21 @@ func TestDarwinProxyInspectionBoundaryHasNoLiveCollectorsInCU1(t *testing.T) {
 	target := darwinProxyInspectionTarget()
 	if target.Inspector == nil || target.Desired == nil || target.Service == nil || target.Listener == nil || target.Process == nil || target.Runtime == nil || target.DataPlane == nil {
 		t.Fatalf("Darwin inspection target omitted collector: %+v", target)
+	}
+}
+
+func TestDarwinProxyInspectionUsesExistingConfigWithoutResilienceState(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := proxy.SaveConfig(&proxy.Config{Port: 24567, LocalToken: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	facts := collectDarwinProxyInspectionFacts(context.Background(), "")
+	if facts.desired.Status != proxy.FactKnown || facts.desired.Value == nil {
+		t.Fatalf("desired fact = %+v, want known", facts.desired)
+	}
+	if got, want := facts.desired.Value.Listener, "127.0.0.1:24567"; got != want {
+		t.Fatalf("desired listener = %q, want %q", got, want)
 	}
 }
 
