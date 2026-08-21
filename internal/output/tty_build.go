@@ -303,7 +303,7 @@ func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibili
 		boldStyle.Render(fmt.Sprintf("%7s", "Proxy")),
 	)
 	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
-		header += brightBlackStyle.Render(" · ") + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
+		header += " " + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
 	}
 	return header
 }

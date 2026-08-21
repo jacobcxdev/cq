@@ -12,6 +12,41 @@ import (
 )
 
 var manualHelpByPath = map[string]string{
+	"": `Usage: cq <command> [flags]
+
+Check AI provider usage limits.
+
+Flags:
+  -h, --help       Show context-sensitive help
+  -j, --json       Output JSON
+  -r, --refresh    Bypass cache
+  -v, --version    Print version
+
+Commands:
+  check       Check provider quota usage
+  claude      Manage Claude accounts
+  codex       Manage Codex accounts and validation
+  gemini      Show Gemini account
+  refresh     Refresh stored OAuth tokens
+  agent       Manage the background refresh agent
+  proxy       Run and configure the local API proxy
+  models      Manage the local model registry
+  operation   Inspect or recover a durable proxy operation
+
+Run "cq <command> --help" for more information on a command.
+`,
+	"codex": `Usage: cq codex <command>
+
+Manage Codex accounts and validation.
+
+Commands:
+  codex login       Add Codex account
+  codex accounts    List Codex accounts
+  codex switch      Switch active Codex account
+  codex remove      Remove Codex account
+  codex validate    Validate installed Codex routing
+  codex canary      Manage Codex routing canary
+`,
 	"codex validate": "Usage: cq codex validate capture ... | http --client-build BUILD [--state-dir DIR] | websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]\n",
 	"codex canary":   "Usage: cq codex canary start|status|stop\n",
 	"refresh": `Usage: cq refresh
@@ -60,7 +95,7 @@ Commands:
   proxy restart       Restart proxy launch agent
   proxy validate-http Request one-shot installed HTTP validation
   proxy pin           Pin Claude or Codex proxy routing
-  proxy codex-default Configure Codex routing default
+  proxy default       Configure provider routing defaults
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
   proxy policy        Initialise, apply, or inspect routing policy
@@ -189,15 +224,21 @@ Examples:
   cq proxy pin codex user@example.com
   cq proxy pin codex --clear
 `,
-	"proxy codex-default": `Usage: cq proxy codex-default [--clear | <account-reference>]
+	"proxy default": `Usage: cq proxy default <provider>
 
-Show, set, or clear CQ-owned Codex routing default.
+Show, set, or clear proxy routing defaults.
+
+Commands:
+  proxy default codex Configure Codex routing default
+`,
+	"proxy default codex": `Usage: cq proxy default codex [--clear | <account-reference>]
+
+Show, set, or clear proxy routing default.
 An account reference may be a unique email, CQ alias, or opaque AccountKey.
 CQ resolves it once and stores only opaque AccountKey.
 
-The stored opaque account key is independent of Codex Desktop/system identity.
-This command changes only CQ proxy configuration and never mutates Codex Bar or system authentication.
-The running proxy keeps its startup value. Restart proxy to apply change.
+Stored account key is independent of system identity.
+Restart proxy to apply changes.
 
 Options:
   --clear            Clear the Codex routing default
@@ -436,7 +477,7 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 		return true, 64, errors.New("proxy status usage")
 	}
 	if result := classifyInterceptedInspection(args); result.handled {
-		if len(result.helpPath) > 0 {
+		if result.helpPath != nil {
 			writer := stdout
 			if result.helpOnStderr {
 				writer = stderr
@@ -582,8 +623,11 @@ func validateProxyLexicalGrammar(args []string) error {
 		}
 	case "pin":
 		return validateProxyPinLexicalGrammar(args[1:])
-	case "codex-default":
-		if len(args) > 2 || (len(args) == 2 && args[1] != "--clear" && strings.HasPrefix(args[1], "-")) {
+	case "default":
+		if len(args) < 2 || args[1] != "codex" {
+			return fmt.Errorf("usage: cq proxy default <provider>")
+		}
+		if len(args) > 3 || (len(args) == 3 && args[2] != "--clear" && strings.HasPrefix(args[2], "-")) {
 			return errors.New(proxyCodexDefaultUsageMessage)
 		}
 	case "prime":
@@ -820,7 +864,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "codex-default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -830,6 +874,9 @@ func manualUsageInspectionError(args []string) error {
 }
 
 func manualHelpInspectionPath(args []string) ([]string, bool) {
+	if rootHelpRequested(args) {
+		return []string{}, true
+	}
 	if len(args) == 2 && args[0] == "codex" && (args[1] == "validate" || args[1] == "canary") {
 		return []string{"codex", args[1]}, true
 	}
@@ -851,11 +898,28 @@ func manualHelpInspectionPath(args []string) ([]string, bool) {
 	case "proxy":
 		return proxyHelpInspectionPath(args[1:])
 	case "codex":
+		if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+			return []string{"codex"}, true
+		}
 		if len(args) >= 2 && (args[1] == "validate" || args[1] == "canary") && (len(args) == 2 || helpRequested(args[2:])) {
 			return []string{"codex", args[1]}, true
 		}
 	}
 	return nil, false
+}
+
+func rootHelpRequested(args []string) bool {
+	help := false
+	for _, arg := range args {
+		switch arg {
+		case "--help", "-h":
+			help = true
+		case "--json", "-j", "--refresh", "-r":
+		default:
+			return false
+		}
+	}
+	return help
 }
 
 func interceptedGroupHelpPath(group string, args []string, leaves map[string]bool) ([]string, bool) {
@@ -903,6 +967,20 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 	}
 	if args[0] == "prime" {
 		return proxyPrimeHelpInspectionPath(args[1:])
+	}
+	if args[0] == "default" {
+		if len(args) == 1 || args[1] == "--help" || args[1] == "-h" {
+			return []string{"proxy", "default"}, true
+		}
+		if args[1] == "help" {
+			path := append([]string{"proxy", "default"}, args[2:]...)
+			_, ok := manualHelp(path)
+			return path, ok
+		}
+		if len(args) == 3 && args[1] == "codex" && helpRequested(args[2:]) {
+			return []string{"proxy", "default", "codex"}, true
+		}
+		return nil, false
 	}
 	if args[0] == "endpoint" {
 		if len(args) == 1 || helpRequested(args[1:]) {
@@ -953,7 +1031,7 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 	}
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
-		"validate-http": true, "status": true, "pin": true, "codex-default": true,
+		"validate-http": true, "status": true, "pin": true,
 		"policy": true, "rescue": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)

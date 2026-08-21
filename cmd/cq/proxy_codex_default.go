@@ -13,7 +13,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-const proxyCodexDefaultUsageMessage = "usage: cq proxy codex-default [--clear | <account-reference>]"
+const proxyCodexDefaultUsageMessage = "usage: cq proxy default codex [--clear | <account-reference>]"
 
 type proxyCodexDefaultDependencies struct {
 	ListInventory  func(context.Context) (codexprov.Inventory, error)

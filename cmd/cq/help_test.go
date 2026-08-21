@@ -13,48 +13,64 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 func TestRootHelpShowsFullCLISurface(t *testing.T) {
 	out := &bytes.Buffer{}
-	var cli CLI
-	kctx, err := kong.New(&cli,
-		append(cliKongOptions(), kong.Writers(out, io.Discard), kong.Exit(func(int) {}))...,
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
+	handled, exitCode, err := runPureGlobalInspection([]string{"--help"}, out, io.Discard)
+	if !handled || exitCode != 0 || err != nil {
+		t.Fatalf("root help = %t, %d, %v", handled, exitCode, err)
 	}
-
-	_, _ = kctx.Parse([]string{"--help"})
 	help := out.String()
 	for _, want := range []string{
-		"check [<providers> ...]",
-		"claude login",
-		"codex login",
-		"gemini accounts",
+		"check",
+		"claude",
+		"codex",
+		"gemini",
 		"refresh",
-		"agent install",
-		"agent uninstall",
-		"proxy start",
-		"proxy install",
-		"proxy uninstall",
-		"proxy restart",
-		"proxy status",
-		"proxy validate-http",
-		"proxy pin",
-		"proxy prime",
-		"proxy codex-default",
-		"models list",
-		"models refresh",
-		"models overlay add",
-		"models overlay remove",
-		"models overlay prune",
+		"agent",
+		"proxy",
+		"models",
+		"operation",
 	} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("root help missing %q:\n%s", want, help)
+		}
+	}
+	for _, unwanted := range []string{"claude login", "codex login", "gemini accounts", "agent install", "proxy start", "models list", "operation status"} {
+		if strings.Contains(help, unwanted) {
+			t.Fatalf("root help contains nested command %q:\n%s", unwanted, help)
+		}
+	}
+}
+
+func TestCodexHelpShowsImmediateCommands(t *testing.T) {
+	out := &bytes.Buffer{}
+	handled, exitCode, err := runPureGlobalInspection([]string{"codex", "--help"}, out, io.Discard)
+	if !handled || exitCode != 0 || err != nil {
+		t.Fatalf("codex help = %t, %d, %v", handled, exitCode, err)
+	}
+	help := out.String()
+	for _, want := range []string{"codex login", "codex accounts", "codex switch", "codex remove", "codex validate", "codex canary"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("codex help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestProxyDefaultHelpShowsImmediateProviders(t *testing.T) {
+	help, ok := manualHelp([]string{"proxy", "default"})
+	if !ok {
+		t.Fatal("manualHelp(proxy default) missing entry")
+	}
+	for _, want := range []string{
+		"Usage: cq proxy default <provider>",
+		"proxy default codex",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("proxy default help missing %q:\n%s", want, help)
 		}
 	}
 }
@@ -521,7 +537,7 @@ func TestPureGlobalInspectionHandlesCompleteInterceptedLexicalErrors(t *testing.
 		{name: "proxy validate live port", args: []string{"proxy", "validate-http", "--port", "19280"}, want: "proxy validate-http: live proxy port is forbidden"},
 		{name: "proxy pin flag", args: []string{"proxy", "pin", "--bad"}, want: "unknown flag \"--bad\""},
 		{name: "proxy pin arity", args: []string{"proxy", "pin", "one", "two"}, want: "unexpected arguments"},
-		{name: "proxy codex default", args: []string{"proxy", "codex-default", "--bad"}, want: proxyCodexDefaultUsageMessage},
+		{name: "proxy codex default", args: []string{"proxy", "default", "codex", "--bad"}, want: proxyCodexDefaultUsageMessage},
 		{name: "proxy endpoint inspect arity", args: []string{"proxy", "endpoint", "inspect-legacy", "extra"}, want: "usage: cq proxy endpoint inspect-legacy"},
 		{name: "proxy endpoint command", args: []string{"proxy", "endpoint", "unknown"}, want: "unknown proxy endpoint command: unknown"},
 		{name: "models command", args: []string{"models", "unknown"}, want: "unknown models command: unknown"},
@@ -575,7 +591,7 @@ func TestPureGlobalInspectionLexicalErrorsMatchHandlers(t *testing.T) {
 			_, err := parseProxyCommandOptionsFor("proxy status", []string{"--migrate-legacy-managed"})
 			return err
 		}},
-		{name: "proxy codex default", args: []string{"proxy", "codex-default", "--bad"}, handler: func() error {
+		{name: "proxy codex default", args: []string{"proxy", "default", "codex", "--bad"}, handler: func() error {
 			return runProxyCodexDefaultWithDependencies(nil, []string{"--bad"}, proxyCodexDefaultDependencies{})
 		}},
 		{name: "models list", args: []string{"models", "list", "--provider"}, handler: func() error { return runModelsList([]string{"--provider"}, modelDeps) }},
@@ -692,13 +708,12 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 		},
 		{
 			name: "proxy codex default",
-			path: []string{"proxy", "codex-default"},
+			path: []string{"proxy", "default", "codex"},
 			want: []string{
-				"Usage: cq proxy codex-default [--clear | <account-reference>]",
+				"Usage: cq proxy default codex [--clear | <account-reference>]",
 				"unique email, CQ alias, or opaque AccountKey",
-				"independent of Codex Desktop/system identity",
-				"never mutates Codex Bar or system authentication",
-				"Restart proxy to apply change.",
+				"independent of system identity",
+				"Restart proxy to apply changes.",
 			},
 		},
 		{
@@ -736,9 +751,10 @@ func TestRunProxyCodexDefaultHelpDoesNotCreateConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 
 	for _, args := range [][]string{
-		{"codex-default", "--help"},
-		{"codex-default", "-h"},
-		{"help", "codex-default"},
+		{"default", "--help"},
+		{"default", "codex", "--help"},
+		{"default", "codex", "-h"},
+		{"help", "default", "codex"},
 	} {
 		if err := runProxy(args); err != nil {
 			t.Fatalf("runProxy(%v) error = %v", args, err)

@@ -212,7 +212,7 @@ func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
 
 	model := BuildTTYModel(report, now)
 	section := model.Sections[0]
-	if got, want := stripANSI(section.ProxyHeader), "      Proxy · 2 × pro 20x = 40x"; got != want {
+	if got, want := stripANSI(section.ProxyHeader), "      Proxy 2 × pro 20x = 40x"; got != want {
 		t.Fatalf("proxy header = %q, want %q", got, want)
 	}
 	if want := yellowStyle.Render(providerIcon(provider.Codex)); !strings.HasPrefix(section.ProxyHeader, "  "+want) {

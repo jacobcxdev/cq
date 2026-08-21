@@ -157,11 +157,8 @@ func runProxy(args []string) error {
 		return runProxyStatus(opts)
 	case "pin":
 		return runProxyPin(args[1:])
-	case "codex-default":
-		if helpRequested(args[1:]) {
-			return writeManualHelp(os.Stdout, []string{"proxy", "codex-default"})
-		}
-		return runProxyCodexDefault(args[1:])
+	case "default":
+		return runProxyDefault(args[1:])
 	case "prime":
 		return runProxyPrime(args[1:])
 	case "endpoint":
@@ -197,6 +194,23 @@ func runProxy(args []string) error {
 	default:
 		return fmt.Errorf("unknown proxy command: %s", args[0])
 	}
+}
+
+func runProxyDefault(args []string) error {
+	if len(args) > 0 && isHelpToken(args[0]) {
+		path := []string{"proxy", "default"}
+		if len(args) > 1 && args[0] == "help" {
+			path = append(path, args[1:]...)
+		}
+		return writeManualHelp(os.Stdout, path)
+	}
+	if len(args) == 2 && args[0] == "codex" && helpRequested(args[1:]) {
+		return writeManualHelp(os.Stdout, []string{"proxy", "default", "codex"})
+	}
+	if len(args) == 0 || args[0] != "codex" {
+		return fmt.Errorf("usage: cq proxy default <provider>")
+	}
+	return runProxyCodexDefault(args[1:])
 }
 
 func runProxyPrime(args []string) error {
