@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -96,6 +97,43 @@ func TestParseUsageObservationPreservesExactDescriptorPercentage(t *testing.T) {
 	}
 	if observation.Result.Windows[quota.Window7Day].RemainingPct != 100 {
 		t.Fatalf("display remaining = %v", observation.Result.Windows[quota.Window7Day].RemainingPct)
+	}
+}
+
+func TestParseUsageJSONPreservesExactRemainingPercentage(t *testing.T) {
+	result := parseUsage([]byte(`{
+		"rate_limit":{
+			"primary_window":{"used_percent":0.4,"limit_window_seconds":18000,"reset_at":1774051200},
+			"secondary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_at":1774569600}
+		}
+	}`), "", "")
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Windows map[quota.WindowName]struct {
+			RemainingPct      int      `json:"remaining_pct"`
+			RemainingPctExact *float64 `json:"remaining_pct_exact"`
+		} `json:"windows"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[quota.WindowName]struct {
+		rounded int
+		exact   float64
+	}{
+		quota.Window5Hour: {rounded: 100, exact: 99.6},
+		quota.Window7Day:  {rounded: 0, exact: 0},
+	} {
+		window := decoded.Windows[name]
+		if window.RemainingPct != want.rounded {
+			t.Errorf("%s remaining_pct = %d, want %d", name, window.RemainingPct, want.rounded)
+		}
+		if window.RemainingPctExact == nil || *window.RemainingPctExact != want.exact {
+			t.Errorf("%s remaining_pct_exact = %v, want %v", name, window.RemainingPctExact, want.exact)
+		}
 	}
 }
 
