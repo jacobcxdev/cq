@@ -56,7 +56,18 @@ func classifyCodexRequestShape(request CodexProtocolRequest, parseErr error) cod
 }
 
 func classifyCodexRequestedModelClass(model string) string {
-	return projectCodexRequestedModelClass(model)
+	switch model {
+	case "":
+		return codexRequestedModelClassUnknown
+	case "gpt-5.6-sol":
+		return codexRequestedModelClassSol
+	case "gpt-5.6-terra":
+		return codexRequestedModelClassTerra
+	case "gpt-5.6-luna":
+		return codexRequestedModelClassLuna
+	default:
+		return codexRequestedModelClassOther
+	}
 }
 
 func codexRequestedReasoningEffort(request CodexProtocolRequest) string {

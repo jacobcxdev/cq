@@ -457,11 +457,12 @@ func TestProjectCodexDiagnosticsProjectsRequestedModelClass(t *testing.T) {
 
 func TestProjectCodexDiagnosticsIsIdempotentAndLeavesOtherProvidersAlone(t *testing.T) {
 	projected := projectCodexDiagnostics(RouteEvent{
-		Provider: "codex",
-		Model:    "model_family_gpt",
-		Bucket:   "capacity_model_scoped",
+		Provider:            "codex",
+		Model:               "model_family_gpt",
+		RequestedModelClass: "gpt_5_6_sol",
+		Bucket:              "capacity_model_scoped",
 	})
-	if projected.Model != "model_family_gpt" || projected.Bucket != "capacity_model_scoped" {
+	if projected.Model != "model_family_gpt" || projected.RequestedModelClass != "gpt_5_6_sol" || projected.Bucket != "capacity_model_scoped" {
 		t.Fatalf("projected closed values changed: %#v", projected)
 	}
 

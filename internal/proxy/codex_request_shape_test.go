@@ -85,6 +85,9 @@ func TestCodexRequestShapeClassifiesClosedModelAndMetadata(t *testing.T) {
 		{name: "absent metadata and model", wantModelClass: "unknown", wantPhase: "unknown"},
 		{name: "invalid metadata kind", request: CodexProtocolRequest{Metadata: CodexTurnMetadataResult{Found: true, Strong: true, Metadata: CodexTurnMetadata{SessionID: "session", ThreadID: "thread", TurnID: "turn", RequestKind: "caller-private-kind"}}}, wantModelClass: "unknown", wantPhase: "unknown"},
 		{name: "other requested model", request: CodexProtocolRequest{Model: "caller-private-model"}, wantModelClass: "other", wantPhase: "unknown"},
+		{name: "projected Sol label is raw input", request: CodexProtocolRequest{Model: "gpt_5_6_sol"}, wantModelClass: "other", wantPhase: "unknown"},
+		{name: "unknown label is raw input", request: CodexProtocolRequest{Model: "unknown"}, wantModelClass: "other", wantPhase: "unknown"},
+		{name: "projected Terra label is raw input", request: CodexProtocolRequest{Model: "gpt_5_6_terra"}, wantModelClass: "other", wantPhase: "unknown"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
