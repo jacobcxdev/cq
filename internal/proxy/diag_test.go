@@ -443,7 +443,7 @@ func TestProjectCodexDiagnosticsProjectsRequestedModelClass(t *testing.T) {
 		{model: "gpt-5.6-terra", want: "gpt_5_6_terra"},
 		{model: "gpt-5.6-luna", want: "gpt_5_6_luna"},
 		{model: "caller-private-model", want: "other"},
-		{model: "", want: "unknown"},
+		{model: "", want: ""},
 	} {
 		event := projectCodexDiagnostics(RouteEvent{Provider: "codex", RequestedModelClass: test.model})
 		if event.RequestedModelClass != test.want {

@@ -125,6 +125,35 @@ func TestServerEmitDiagnosticsProjectsRequestedModelClassBeforeWriter(t *testing
 	}
 }
 
+func TestServerEmitDiagnosticsPreservesLegacyEmptyRequestShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	writer, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	server := &Server{Diag: writer}
+	event := structurallySafeCodexRouteEvent()
+	event.RequestLineage = ""
+	event.RequestedReasoningEffort = ""
+	event.RequestedModelClass = ""
+	event.CompactionPhase = ""
+
+	server.emitDiagnostics(event)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"request_lineage", "requested_reasoning_effort", "requested_model_class", "compaction_phase"} {
+		if strings.Contains(string(data), `"`+key+`":`) {
+			t.Fatalf("legacy event persisted %s: %q", key, data)
+		}
+	}
+}
+
 func TestServerEmitDiagnosticsUsesWriterCanaryAsCompatibilityFallback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	writer, err := OpenDiagnosticsWriter(path)

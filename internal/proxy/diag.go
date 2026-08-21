@@ -515,7 +515,9 @@ func projectCodexRequestedModelClass(value string) string {
 		return codexRequestedModelClassLuna
 	case codexRequestedModelClassOther:
 		return codexRequestedModelClassOther
-	case "", codexRequestedModelClassUnknown:
+	case "":
+		return ""
+	case codexRequestedModelClassUnknown:
 		return codexRequestedModelClassUnknown
 	default:
 		return codexRequestedModelClassOther
