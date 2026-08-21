@@ -99,12 +99,18 @@ type RoutingPolicySnapshotV1 struct {
 	Predicates        []CapabilityPredicateCoreV1 `json:"predicates"`
 }
 
+type CapabilityAccountWorkspaceV1 struct {
+	AccountKey providerCodex.AccountKey `json:"account_key"`
+	Workspace  string                   `json:"workspace"`
+}
+
 type CallerRequestAuthorityV1 struct {
-	SchemaVersion   int                        `json:"schema_version"`
-	AllowedAccounts []providerCodex.AccountKey `json:"allowed_accounts"`
-	Workspace       string                     `json:"workspace"`
-	EvaluatedAt     time.Time                  `json:"evaluated_at"`
-	FinalScope      CapabilityFinalScopeCoreV1 `json:"final_scope"`
+	SchemaVersion     int                            `json:"schema_version"`
+	AllowedAccounts   []providerCodex.AccountKey     `json:"allowed_accounts"`
+	PreferredAccount  providerCodex.AccountKey       `json:"preferred_account,omitempty"`
+	AccountWorkspaces []CapabilityAccountWorkspaceV1 `json:"account_workspaces"`
+	EvaluatedAt       time.Time                      `json:"evaluated_at"`
+	FinalScope        CapabilityFinalScopeCoreV1     `json:"final_scope"`
 }
 
 type FinalRouteChoiceV1 struct {
@@ -175,11 +181,18 @@ func ResolveCapabilityRoute(policy RoutingPolicySnapshotV1, evidence []Capabilit
 	sort.Slice(predicates, func(i, j int) bool {
 		return capabilityPredicateKey(predicates[i]) < capabilityPredicateKey(predicates[j])
 	})
+	selected := eligible[0]
+	for _, account := range eligible {
+		if account == request.PreferredAccount {
+			selected = account
+			break
+		}
+	}
 	choice := FinalRouteChoiceV1{
-		SchemaVersion: 1, AccountKey: eligible[0], AllowedAccounts: eligible,
+		SchemaVersion: 1, AccountKey: selected, AllowedAccounts: eligible,
 		Pool: policy.Pool.Name, RoutingGeneration: policy.RoutingGeneration,
 		FinalScope: request.FinalScope, Predicates: predicates,
-		EvidenceUsed: usedByAccount[eligible[0]],
+		EvidenceUsed: usedByAccount[selected],
 	}
 	choice.RouteScope = CapabilityRouteScopeCoreV1{SchemaVersion: 1, FinalScope: choice.FinalScope, Predicates: choice.Predicates, EvidenceUsed: choice.EvidenceUsed}
 	encoded, err := CanonicalJSONV1(choice)
@@ -218,7 +231,7 @@ func validateCapabilityRoutingInputs(policy RoutingPolicySnapshotV1, request Cal
 		}
 		seenPredicates[key] = struct{}{}
 	}
-	if request.SchemaVersion != 1 || request.Workspace == "" || request.EvaluatedAt.IsZero() || len(request.AllowedAccounts) == 0 || !validFinalScope(request.FinalScope) {
+	if request.SchemaVersion != 1 || request.EvaluatedAt.IsZero() || len(request.AllowedAccounts) == 0 || len(request.AccountWorkspaces) == 0 || !validFinalScope(request.FinalScope) {
 		return errors.New("invalid caller request authority")
 	}
 	seenAllowed := make(map[providerCodex.AccountKey]struct{}, len(request.AllowedAccounts))
@@ -230,6 +243,19 @@ func validateCapabilityRoutingInputs(policy RoutingPolicySnapshotV1, request Cal
 			return errors.New("duplicate caller account")
 		}
 		seenAllowed[account] = struct{}{}
+	}
+	seenWorkspaces := make(map[providerCodex.AccountKey]struct{}, len(request.AccountWorkspaces))
+	for _, workspace := range request.AccountWorkspaces {
+		if workspace.AccountKey == "" || workspace.Workspace == "" {
+			return errors.New("invalid account workspace")
+		}
+		if _, allowed := seenAllowed[workspace.AccountKey]; !allowed {
+			return errors.New("workspace account outside caller authority")
+		}
+		if _, duplicate := seenWorkspaces[workspace.AccountKey]; duplicate {
+			return errors.New("duplicate account workspace")
+		}
+		seenWorkspaces[workspace.AccountKey] = struct{}{}
 	}
 	return nil
 }
@@ -249,11 +275,21 @@ func validFinalScope(scope CapabilityFinalScopeCoreV1) bool {
 }
 
 func capabilityEvidenceAllowsAccount(account providerCodex.AccountKey, policy RoutingPolicySnapshotV1, evidence []CapabilityRoutingEvidenceV1, request CallerRequestAuthorityV1) ([]CapabilityEvidenceUseCoreV1, bool) {
+	workspace := ""
+	for _, scoped := range request.AccountWorkspaces {
+		if scoped.AccountKey == account {
+			workspace = scoped.Workspace
+			break
+		}
+	}
+	if workspace == "" {
+		return nil, false
+	}
 	used := make([]CapabilityEvidenceUseCoreV1, 0, len(policy.Predicates))
 	for _, predicate := range policy.Predicates {
 		matched := false
 		for _, item := range evidence {
-			if item.AccountKey != account || item.Workspace != request.Workspace || !evidenceMatchesPredicate(item, predicate) {
+			if item.AccountKey != account || item.Workspace != workspace || !evidenceMatchesPredicate(item, predicate) {
 				continue
 			}
 			if !validCapabilityEvidence(item, policy.RoutingGeneration, request.EvaluatedAt) || item.State != CapabilityEvidenceEligible {

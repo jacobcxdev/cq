@@ -19,7 +19,7 @@ func TestCapabilityRoutingNarrowsAuthorityAndSortsFiniteEvidenceBeforeNull(t *te
 		Predicates: []CapabilityPredicateCoreV1{predicate},
 	}
 	request := CallerRequestAuthorityV1{
-		SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account-c", "account-a"}, Workspace: "workspace-a", EvaluatedAt: now,
+		SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account-c", "account-a"}, PreferredAccount: "account-a", AccountWorkspaces: []CapabilityAccountWorkspaceV1{{AccountKey: "account-a", Workspace: "workspace-a"}}, EvaluatedAt: now,
 		FinalScope: CapabilityFinalScopeCoreV1{SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: "http", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5.1", OutboundModel: "gpt-5.1", TransformationDigest: digestBytes([]byte("transform")), EncodedRequestDigest: digestBytes([]byte("request")), NormalCredentialOriginBindingDigest: digestBytes([]byte("origin"))},
 	}
 	evidence := []CapabilityRoutingEvidenceV1{
@@ -49,7 +49,7 @@ func TestCapabilityRoutingExcludesConflictingStaleAndDifferentlyScopedEvidence(t
 	now := time.Unix(1_700_000_000, 0).UTC()
 	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
 	policy := RoutingPolicySnapshotV1{SchemaVersion: 1, Active: true, RoutingGeneration: 4, Pool: AccountPoolV1{Name: "derived", Members: []codex.AccountKey{"account"}}, Predicates: []CapabilityPredicateCoreV1{predicate}}
-	request := CallerRequestAuthorityV1{SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account"}, Workspace: "workspace", EvaluatedAt: now, FinalScope: CapabilityFinalScopeCoreV1{SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: "http", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5", OutboundModel: "gpt-5", TransformationDigest: digestBytes([]byte("t")), EncodedRequestDigest: digestBytes([]byte("r")), NormalCredentialOriginBindingDigest: digestBytes([]byte("o"))}}
+	request := CallerRequestAuthorityV1{SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account"}, PreferredAccount: "account", AccountWorkspaces: []CapabilityAccountWorkspaceV1{{AccountKey: "account", Workspace: "workspace"}}, EvaluatedAt: now, FinalScope: CapabilityFinalScopeCoreV1{SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: "http", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5", OutboundModel: "gpt-5", TransformationDigest: digestBytes([]byte("t")), EncodedRequestDigest: digestBytes([]byte("r")), NormalCredentialOriginBindingDigest: digestBytes([]byte("o"))}}
 	expired := now.Add(-time.Second)
 	evidence := []CapabilityRoutingEvidenceV1{
 		capabilityEvidenceForTest("account", "workspace", predicate, "eligible", nil, CapabilityEvidenceEligible, 4, now),
@@ -59,6 +59,28 @@ func TestCapabilityRoutingExcludesConflictingStaleAndDifferentlyScopedEvidence(t
 	}
 	if _, err := ResolveCapabilityRoute(policy, evidence, request); !errors.Is(err, ErrCapabilityRouteUnavailable) {
 		t.Fatalf("ResolveCapabilityRoute error = %v", err)
+	}
+}
+
+func TestCapabilityRoutingPrefersOrdinaryEligibleSelection(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
+	policy := RoutingPolicySnapshotV1{SchemaVersion: 1, Active: true, RoutingGeneration: 4, Pool: AccountPoolV1{Name: "derived", Members: []codex.AccountKey{"account-a", "account-b"}}, Predicates: []CapabilityPredicateCoreV1{predicate}}
+	request := CallerRequestAuthorityV1{
+		SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account-a", "account-b"}, PreferredAccount: "account-b", EvaluatedAt: now,
+		AccountWorkspaces: []CapabilityAccountWorkspaceV1{{AccountKey: "account-a", Workspace: "workspace-a"}, {AccountKey: "account-b", Workspace: "workspace-b"}},
+		FinalScope:        CapabilityFinalScopeCoreV1{SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: "http", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5", OutboundModel: "gpt-5", TransformationDigest: digestBytes([]byte("t")), EncodedRequestDigest: digestBytes([]byte("r")), NormalCredentialOriginBindingDigest: digestBytes([]byte("o"))},
+	}
+	evidence := []CapabilityRoutingEvidenceV1{
+		capabilityEvidenceForTest("account-a", "workspace-a", predicate, "a", nil, CapabilityEvidenceEligible, 4, now),
+		capabilityEvidenceForTest("account-b", "workspace-b", predicate, "b", nil, CapabilityEvidenceEligible, 4, now),
+	}
+	choice, err := ResolveCapabilityRoute(policy, evidence, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != "account-b" || len(choice.AllowedAccounts) != 2 {
+		t.Fatalf("choice = %#v", choice)
 	}
 }
 

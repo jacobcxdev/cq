@@ -48,6 +48,13 @@ func (r *SessionPolicyResolver) capabilityPolicy(pool string, revision uint64) (
 	if r.policy.RoutingGeneration != revision || len(r.policy.CapabilityPredicates) == 0 || len(r.policy.CapabilityRoutingEvidence) == 0 {
 		return RoutingPolicySnapshotV1{}, nil, false
 	}
+	capabilityPool := r.policy.CapabilityPool
+	if capabilityPool == "" && len(r.policy.Pools) == 1 {
+		capabilityPool = r.policy.Pools[0].Name
+	}
+	if pool != capabilityPool {
+		return RoutingPolicySnapshotV1{}, nil, false
+	}
 	for _, candidate := range r.policy.Pools {
 		if candidate.Name != pool {
 			continue

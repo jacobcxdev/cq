@@ -314,6 +314,35 @@ func TestCodexHTTPRequestPlanFactoryPinsWebSocketPrewarm(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryAppliesSessionPolicyToWebSocketPrewarm(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	key := []byte("01234567890123456789012345678901")
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+		}}},
+		DefaultAccountKey: "account-a",
+		SessionPolicy: NewSessionPolicyResolver(key, RoutingPolicyV1{
+			SchemaVersion: 1, RoutingGeneration: 7,
+			Pools:           []AccountPoolV1{{Name: "bound", Members: []codex.AccountKey{"account-b"}}},
+			SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "bound"}},
+		}),
+		Now: func() time.Time { return now },
+	}
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local", ConsumptionDigest: strings.Repeat("a", 64)}
+	dispatch, err := factory.planWebSocketPrewarm(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{Encoded: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("dispatch = %#v", accounts)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
 	t.Parallel()
 	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)

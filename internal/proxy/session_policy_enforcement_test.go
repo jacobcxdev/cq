@@ -73,6 +73,22 @@ func TestSessionPolicyResolverAllowsExplicitPoolWithoutCapabilityEvidence(t *tes
 	}
 }
 
+func TestSessionPolicyResolverScopesCapabilityRulesToNamedPool(t *testing.T) {
+	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "local_token_v1", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
+	resolver := NewSessionPolicyResolver(nil, RoutingPolicyV1{
+		RoutingGeneration: 7, CapabilityPool: "cyber",
+		Pools:                     []AccountPoolV1{{Name: "paid", Members: []codex.AccountKey{"paid"}}, {Name: "cyber", Members: []codex.AccountKey{"cyber"}}},
+		CapabilityPredicates:      []CapabilityPredicateCoreV1{predicate},
+		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{{AccountKey: "cyber"}},
+	})
+	if _, _, active := resolver.capabilityPolicy("paid", 7); active {
+		t.Fatal("paid pool inherited cyber capability rules")
+	}
+	if _, _, active := resolver.capabilityPolicy("cyber", 7); !active {
+		t.Fatal("cyber pool missing capability rules")
+	}
+}
+
 func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
@@ -118,22 +134,26 @@ func TestCapabilityRoutingSelectsFinalAccountBeforeDurableRequestJournal(t *test
 	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
 	factory := codexHTTPRequestPlanTestFactory(runtime)
 	factory.DefaultAccountKey = "account-a"
+	accountA := frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour)))
+	accountA.Identity.AccountID = "workspace-a"
+	accountB := frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour)))
+	accountB.Identity.AccountID = "workspace-b"
 	factory.Inventory = &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
-		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
-		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+		accountA, accountB,
 	}}}
 	key := []byte("01234567890123456789012345678901")
 	sessionDigest := keyedSessionDigest(key, []byte("session"))
-	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
+	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: string(NormalCallerLocal), AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
 	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		CapabilityPool:       "team",
 		Pools:                []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
 		SessionBindings:      []SessionBindingV1{{SessionDigest: sessionDigest, Pool: "team"}},
 		CapabilityEvidence:   []CapabilityEvidenceV1{{AccountKey: "account-a", State: CapabilitySupported}, {AccountKey: "account-b", State: CapabilitySupported}},
 		CapabilityPredicates: []CapabilityPredicateCoreV1{predicate},
 		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{
-			capabilityEvidenceForTest("account-a", sessionDigest, predicate, "probe-a", nil, CapabilityEvidenceIneligible, 7, now),
-			capabilityEvidenceForTest("account-b", sessionDigest, predicate, "probe-b", nil, CapabilityEvidenceEligible, 7, now),
+			capabilityEvidenceForTest("account-a", "workspace-a", predicate, "probe-a", nil, CapabilityEvidenceIneligible, 7, now),
+			capabilityEvidenceForTest("account-b", "workspace-b", predicate, "probe-b", nil, CapabilityEvidenceEligible, 7, now),
 		},
 	})
 	permits := &sessionPolicyPermitRecorder{}
