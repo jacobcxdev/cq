@@ -2,15 +2,6 @@
 
 package main
 
-/*
-#include <launch.h>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <sys/param.h>
-static int cq_runtime_fd_path(int fd, char *path) { return fcntl(fd, F_GETPATH, path); }
-*/
-import "C"
-
 import (
 	"context"
 	"crypto/rand"
@@ -25,10 +16,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"text/template"
 	"time"
-	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -218,37 +207,29 @@ func newDarwinProxyRuntimeWorkerLauncher(manifest proxy.RuntimeRoleManifestV1, s
 		return nil, err
 	}
 	var lifecyclePath string
-	{
-		var path [C.MAXPATHLEN]C.char
-		if C.cq_runtime_fd_path(C.int(manifest.LifecycleFD), &path[0]) != 0 {
-			return nil, fmt.Errorf("resolve runtime lifecycle descriptor")
-		}
-		lifecyclePath = C.GoString(&path[0])
+	fdPath := fmt.Sprintf("/dev/fd/%d", manifest.LifecycleFD)
+	lifecyclePath, err = filepath.EvalSymlinks(fdPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime lifecycle descriptor: %w", err)
+	}
+	if !filepath.IsAbs(lifecyclePath) {
+		return nil, fmt.Errorf("resolve runtime lifecycle descriptor: non-absolute path")
 	}
 	return newDarwinRuntimeLauncher(executable, manifest, supervisorHolder, lifecyclePath), nil
 }
 
 func adoptDarwinProxyListener() (net.Listener, error) {
-	name := C.CString("PublicListener")
-	defer C.free(unsafe.Pointer(name))
-	var descriptors *C.int
-	var count C.size_t
-	result := syscall.Errno(C.launch_activate_socket(name, &descriptors, &count))
-	if result != 0 {
-		if errors.Is(result, syscall.ENOENT) || errors.Is(result, syscall.ESRCH) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(proxy.RuntimeListenerFD, &stat); err != nil {
+		if errors.Is(err, unix.EBADF) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("activate launchd proxy listener: %w", result)
+		return nil, fmt.Errorf("inspect launchd proxy listener: %w", err)
 	}
-	if descriptors == nil || count != 1 {
-		if descriptors != nil {
-			C.free(unsafe.Pointer(descriptors))
-		}
-		return nil, fmt.Errorf("activate launchd proxy listener: expected one descriptor")
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return nil, nil
 	}
-	descriptor := *descriptors
-	C.free(unsafe.Pointer(descriptors))
-	file := os.NewFile(uintptr(descriptor), "launchd-PublicListener")
+	file := os.NewFile(uintptr(proxy.RuntimeListenerFD), "launchd-PublicListener")
 	if file == nil {
 		return nil, fmt.Errorf("activate launchd proxy listener: invalid descriptor")
 	}
