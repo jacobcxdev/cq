@@ -143,16 +143,26 @@ type proxyRuntimeProjectionV1 struct {
 
 func projectProxySnapshot(snapshot proxy.ProxySnapshot) proxySnapshotProjectionV1 {
 	services := []proxyServiceProjectionV1{}
+	instance := proxy.UnavailableFact[struct{}]("instance_unavailable")
+	authority := proxy.UnavailableFact[struct{}]("authority_unavailable")
+	routing := proxy.UnavailableFact[struct{}]("routing_unavailable")
+	clientBearerBarrier := proxy.UnavailableFact[struct{}]("client_bearer_barrier_unavailable")
 	if snapshot.Service.Status == proxy.FactKnown && snapshot.Service.Value != nil {
 		services = append(services, proxyServiceProjectionV1{Manager: snapshot.Service.Value.Manager, State: snapshot.Service.Value.State})
+		if snapshot.Service.Value.Manager == "homebrew" {
+			instance = proxy.AbsentFact[struct{}]()
+			authority = proxy.AbsentFact[struct{}]()
+			routing = proxy.AbsentFact[struct{}]()
+			clientBearerBarrier = proxy.AbsentFact[struct{}]()
+		}
 	}
 	return proxySnapshotProjectionV1{
-		Instance: proxy.UnavailableFact[struct{}]("instance_unavailable"),
+		Instance: instance,
 		Verdict:  snapshot.Verdict,
 		Desired: projectProxyFact(snapshot.Desired, func(value proxy.DesiredProxyState) proxyDesiredProjectionV1 {
 			return proxyDesiredProjectionV1{Manager: value.Manager, Configured: value.Configured}
 		}),
-		Authority: proxy.UnavailableFact[struct{}]("authority_unavailable"),
+		Authority: authority,
 		Services:  services,
 		Listener: projectProxyFact(snapshot.Listener, func(value proxy.ListenerState) proxyListenerProjectionV1 {
 			return proxyListenerProjectionV1{State: value.State}
@@ -160,8 +170,8 @@ func projectProxySnapshot(snapshot proxy.ProxySnapshot) proxySnapshotProjectionV
 		Runtime: projectProxyFact(snapshot.Runtime, func(value proxy.RuntimeIdentity) proxyRuntimeProjectionV1 {
 			return proxyRuntimeProjectionV1{Reachable: value.Reachable, Health: value.Health}
 		}),
-		Routing:             proxy.UnavailableFact[struct{}]("routing_unavailable"),
-		ClientBearerBarrier: proxy.UnavailableFact[struct{}]("client_bearer_barrier_unavailable"),
+		Routing:             routing,
+		ClientBearerBarrier: clientBearerBarrier,
 		CollectedAt:         snapshot.CollectedAt,
 		DurationMS:          snapshot.DurationMS,
 	}

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -413,7 +414,12 @@ var runProxyLaunchctl = func(args ...string) error {
 	return exec.Command("launchctl", args...).Run()
 }
 
+var currentExecutable = os.Executable
+
 func installProxyAgent() error {
+	if err := rejectHomebrewProxyServiceMutation("start"); err != nil {
+		return err
+	}
 	exe, err := resolveExecutable()
 	if err != nil {
 		return fmt.Errorf("resolve executable: %w", err)
@@ -521,6 +527,9 @@ func restartProxyAgent() error {
 }
 
 func uninstallProxyAgent() error {
+	if err := rejectHomebrewProxyServiceMutation("stop"); err != nil {
+		return err
+	}
 	plistPath, err := proxyAgentPlistPath()
 	if err != nil {
 		return err
@@ -541,4 +550,28 @@ func uninstallProxyAgent() error {
 
 	fmt.Fprintf(os.Stderr, "cq: uninstalled proxy LaunchAgent\n")
 	return nil
+}
+
+func rejectHomebrewProxyServiceMutation(action string) error {
+	executable, err := currentExecutable()
+	if err != nil {
+		return fmt.Errorf("resolve current executable: %w", err)
+	}
+	if !isHomebrewFormulaExecutable(executable) {
+		return nil
+	}
+	return fmt.Errorf("cq is managed by Homebrew; use brew services %s cq", action)
+}
+
+func isHomebrewFormulaExecutable(executable string) bool {
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	parts := strings.Split(filepath.Clean(executable), string(os.PathSeparator))
+	for index := 0; index+4 < len(parts); index++ {
+		if parts[index] == "Cellar" && parts[index+1] == "cq" && parts[index+2] != "" && parts[index+3] == "bin" && parts[index+4] == "cq" {
+			return true
+		}
+	}
+	return false
 }

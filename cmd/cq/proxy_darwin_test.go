@@ -71,6 +71,48 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	}
 }
 
+func TestInstallProxyAgentRejectsHomebrewExecutable(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	defer func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+	}()
+	currentExecutable = func() (string, error) {
+		return "/opt/homebrew/Cellar/cq/0.23.6/bin/cq", nil
+	}
+	runProxyLaunchctl = func(...string) error {
+		t.Fatal("launchctl called for Homebrew-managed install")
+		return nil
+	}
+
+	err := installProxyAgent()
+	if err == nil || !strings.Contains(err.Error(), "brew services start cq") {
+		t.Fatalf("installProxyAgent error = %v, want Homebrew start guidance", err)
+	}
+}
+
+func TestUninstallProxyAgentRejectsHomebrewExecutable(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	defer func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+	}()
+	currentExecutable = func() (string, error) {
+		return "/usr/local/Cellar/cq/0.23.6/bin/cq", nil
+	}
+	runProxyLaunchctl = func(...string) error {
+		t.Fatal("launchctl called for Homebrew-managed uninstall")
+		return nil
+	}
+
+	err := uninstallProxyAgent()
+	if err == nil || !strings.Contains(err.Error(), "brew services stop cq") {
+		t.Fatalf("uninstallProxyAgent error = %v, want Homebrew stop guidance", err)
+	}
+}
+
 func TestRestartProxyAgentRunsKickstart(t *testing.T) {
 	t.Helper()
 
