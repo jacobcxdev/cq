@@ -288,15 +288,20 @@ func buildAggHeader(agg *app.AggregateReport) string {
 }
 
 func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibilityReport) string {
-	header := fmt.Sprintf("  %s  %7s proxy %d/%d eligible",
-		boldStyle.Render(providerIcon(id)),
-		boldStyle.Render(fmt.Sprintf("%7s", providerDisplayName(id))),
-		eligibility.EligibleCount,
-		eligibility.DiscoveredCount,
-	)
-	if eligibility.ExcludedCount > 0 {
-		header += brightBlackStyle.Render(fmt.Sprintf(" · %d excluded", eligibility.ExcludedCount))
+	iconStyle := boldStyle
+	if eligibility.Aggregate != nil {
+		minPct := 100
+		for _, window := range eligibility.Aggregate.Windows {
+			if window.RemainingPct < minPct {
+				minPct = window.RemainingPct
+			}
+		}
+		iconStyle = pctStyle(minPct)
 	}
+	header := fmt.Sprintf("  %s  %s",
+		iconStyle.Render(providerIcon(id)),
+		boldStyle.Render(fmt.Sprintf("%7s", "Proxy")),
+	)
 	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
 		header += brightBlackStyle.Render(" · ") + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
 	}

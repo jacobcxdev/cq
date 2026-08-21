@@ -392,6 +392,7 @@ type RoutingAccount struct {
 	Key       AccountKey
 	AccountID string
 	Email     string
+	Active    bool
 }
 
 // RoutingAccounts exposes secret-free identities needed to compare provider
@@ -407,6 +408,7 @@ func (p *Provider) RoutingAccounts(ctx context.Context) ([]RoutingAccount, error
 			Key:       logical.Key,
 			AccountID: logical.Identity.AccountID,
 			Email:     logical.Identity.Email,
+			Active:    logical.Active,
 		}
 	}
 	return accounts, nil

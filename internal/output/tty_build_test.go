@@ -10,6 +10,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
+	"github.com/muesli/termenv"
 )
 
 func TestBuildTTYModel_SingleProvider(t *testing.T) {
@@ -181,6 +182,10 @@ func TestBuildTTYModel_WithAggregate(t *testing.T) {
 }
 
 func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
 	now := time.Unix(1_000, 0)
 	report := app.Report{Providers: []app.ProviderReport{{
 		ID: provider.Codex,
@@ -199,7 +204,7 @@ func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
 				ProviderID: provider.Codex,
 				Summary:    aggregate.AccountSummary{Count: 2, TotalMulti: 40, Label: "2 × pro 20x = 40x"},
 				Windows: map[quota.WindowName]quota.AggregateResult{
-					quota.Window7Day: {RemainingPct: 55},
+					quota.Window7Day: {RemainingPct: 49},
 				},
 			},
 		},
@@ -207,13 +212,13 @@ func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
 
 	model := BuildTTYModel(report, now)
 	section := model.Sections[0]
-	if !strings.Contains(section.ProxyHeader, "proxy 2/3 eligible · 1 excluded") {
-		t.Fatalf("proxy header = %q", section.ProxyHeader)
+	if got, want := stripANSI(section.ProxyHeader), "      Proxy · 2 × pro 20x = 40x"; got != want {
+		t.Fatalf("proxy header = %q, want %q", got, want)
 	}
-	if !strings.Contains(section.ProxyHeader, "2 × pro 20x = 40x") {
-		t.Fatalf("proxy aggregate label missing from %q", section.ProxyHeader)
+	if want := yellowStyle.Render(providerIcon(provider.Codex)); !strings.HasPrefix(section.ProxyHeader, "  "+want) {
+		t.Fatalf("proxy icon does not use aggregate percentage colour: %q", section.ProxyHeader)
 	}
-	if len(section.ProxyRows) != 1 || !strings.Contains(section.ProxyRows[0].Pct, "55%") {
+	if len(section.ProxyRows) != 1 || !strings.Contains(section.ProxyRows[0].Pct, "49%") {
 		t.Fatalf("proxy rows = %#v", section.ProxyRows)
 	}
 }

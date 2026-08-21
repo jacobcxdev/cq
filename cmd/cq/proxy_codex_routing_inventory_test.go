@@ -38,9 +38,25 @@ func TestProxyCodexRoutingInventoryPreservesAllAccountsWithoutConfiguration(t *t
 	}
 }
 
+func TestProxyCodexRoutingInventoryIncludesActiveAccountOutsideAllowlist(t *testing.T) {
+	source := &staticProxyCodexRoutingInventory{inventory: codexprov.Inventory{Accounts: []codexprov.LogicalAccount{
+		{Key: "account-a", Active: true},
+		{Key: "account-b"},
+		{Key: "account-c"},
+	}}}
+
+	got, err := newProxyCodexRoutingInventory(source, []codexprov.AccountKey{"account-b", "account-c"}).List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Accounts) != 3 || got.Accounts[0].Key != "account-a" {
+		t.Fatalf("filtered accounts = %#v, want active account plus allowlist", got.Accounts)
+	}
+}
+
 func TestProxyCodexRoutingInventoriesPinNewWorkAndPreserveContinuityAccounts(t *testing.T) {
 	source := &staticProxyCodexRoutingInventory{inventory: codexprov.Inventory{Accounts: []codexprov.LogicalAccount{
-		{Key: "account-a"},
+		{Key: "account-a", Active: true},
 		{Key: "account-b"},
 		{Key: "account-c"},
 	}}}
