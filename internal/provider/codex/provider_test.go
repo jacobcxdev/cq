@@ -157,6 +157,24 @@ type staticCredentialInventory struct{ inventory Inventory }
 
 func (s staticCredentialInventory) List(context.Context) (Inventory, error) { return s.inventory, nil }
 
+func TestRoutingAccountsPreserveOpaqueKeyAndIdentity(t *testing.T) {
+	provider := &Provider{inventory: staticCredentialInventory{inventory: Inventory{Accounts: []LogicalAccount{
+		{Key: "route-a", Identity: AccountIdentity{AccountID: "account-a", Email: "a@example.com"}},
+		{Key: "route-b", Identity: AccountIdentity{AccountID: "account-b", Email: "b@example.com"}},
+	}}}}
+
+	accounts, err := provider.RoutingAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("routing accounts = %d, want 2", len(accounts))
+	}
+	if accounts[0].Key != "route-a" || accounts[0].AccountID != "account-a" || accounts[0].Email != "a@example.com" {
+		t.Fatalf("first routing account = %#v", accounts[0])
+	}
+}
+
 type staticSecretResolver struct{ material CredentialMaterial }
 
 func (s staticSecretResolver) Resolve(context.Context, CandidateRef) (CredentialMaterial, error) {

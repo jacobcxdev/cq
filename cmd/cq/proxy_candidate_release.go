@@ -142,9 +142,9 @@ func validateCandidateRelease(ctx context.Context, fsys fsutil.FileSystem, argum
 	}
 	health, err := inspectCandidateRuntime(ctx, state.Port, token)
 	if err != nil || health.ProxyInstanceID != state.ProxyInstanceID || health.ValidationRunID != state.ValidationRunID {
-		return "", errors.New("candidate live data plane unavailable")
+		return "", errors.New("candidate control health unavailable")
 	}
-	healthDigest := candidateDomainDigest("cq/candidate-real-client-validation/v1\x00", candidateRuntimeReceipt("validated", health))
+	healthDigest := candidateDomainDigest("cq/candidate-control-health/v1\x00", candidateRuntimeReceipt("validated", health))
 	stageDigest := candidateDomainDigest("cq/candidate-release-stage/v1\x00", []byte(state.ActiveReleaseSetDigest+"\x00"+state.ValidationRunID))
 	stopDigest := candidateDomainDigest("cq/candidate-client-stop-proof/v1\x00", []byte(state.ClientBearerBarrierReceiptDigest+"\x00"+state.ValidationRunID))
 	brokerDigest := candidateDomainDigest("cq/candidate-broker-seal/v1\x00", []byte(state.OperationID+"\x00"+state.ActiveReleaseSetDigest))
@@ -156,7 +156,7 @@ func validateCandidateRelease(ctx context.Context, fsys fsutil.FileSystem, argum
 		SchemaVersion: 1, FloorSourceCommit: floor.SourceCommit, TargetSourceCommit: target.SourceCommit,
 		SourceAncestry: []string{floor.SourceCommit, target.SourceCommit}, TargetReleaseBundleDigest: target.Digest,
 		RollbackFloorAcceptanceReceiptDigest: floorReceiptDigest, ClientBarrierReceiptDigest: state.ClientBearerBarrierReceiptDigest,
-		ClientStopProofDigest: stopDigest, RealClientValidationReceiptDigest: healthDigest,
+		ClientStopProofDigest: stopDigest, CandidateControlHealthReceiptDigest: healthDigest,
 		CandidateBrokerSealDigest: brokerDigest, CandidateConfinementReceiptDigest: confinementDigest,
 		CandidateStageReceiptDigest: stageDigest, CompletedAt: time.Now().UTC(), Nonce: nonce,
 	}, token)

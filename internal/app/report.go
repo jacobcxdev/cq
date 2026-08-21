@@ -54,11 +54,12 @@ type Report struct {
 }
 
 type ProviderReport struct {
-	ID           provider.ID          `json:"id"`
-	Name         string               `json:"name"`
-	Availability ProviderAvailability `json:"availability"`
-	Results      []quota.Result       `json:"results"`
-	Aggregate    *AggregateReport     `json:"aggregate,omitempty"`
+	ID               provider.ID             `json:"id"`
+	Name             string                  `json:"name"`
+	Availability     ProviderAvailability    `json:"availability"`
+	Results          []quota.Result          `json:"results"`
+	Aggregate        *AggregateReport        `json:"aggregate,omitempty"`
+	ProxyEligibility *ProxyEligibilityReport `json:"proxy_eligibility,omitempty"`
 }
 
 type ProviderAvailabilityState string
@@ -82,6 +83,13 @@ type AggregateReport struct {
 	Kind       string                                     `json:"kind"`
 	Summary    aggregate.AccountSummary                   `json:"summary"`
 	Windows    map[quota.WindowName]quota.AggregateResult `json:"windows"`
+}
+
+type ProxyEligibilityReport struct {
+	DiscoveredCount int              `json:"discovered_count"`
+	EligibleCount   int              `json:"eligible_count"`
+	ExcludedCount   int              `json:"excluded_count"`
+	Aggregate       *AggregateReport `json:"aggregate,omitempty"`
 }
 
 const providerLimitedThresholdPct = 5
@@ -240,4 +248,39 @@ func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][
 		report.Providers = append(report.Providers, pr)
 	}
 	return report
+}
+
+// AddProxyEligibility adds a proxy-scoped capacity view without changing the
+// provider-wide aggregate or the configured routing allowlist.
+func AddProxyEligibility(report *Report, id provider.ID, eligible func(quota.Result) bool) {
+	if report == nil || eligible == nil {
+		return
+	}
+	for i := range report.Providers {
+		pr := &report.Providers[i]
+		if pr.ID != id {
+			continue
+		}
+		eligibleResults := make([]quota.Result, 0, len(pr.Results))
+		for _, result := range pr.Results {
+			if eligible(result) {
+				eligibleResults = append(eligibleResults, result)
+			}
+		}
+		eligibility := &ProxyEligibilityReport{
+			DiscoveredCount: len(pr.Results),
+			EligibleCount:   len(eligibleResults),
+			ExcludedCount:   len(pr.Results) - len(eligibleResults),
+		}
+		if windows, summary := aggregate.Compute(eligibleResults, report.GeneratedAt.Unix(), nil); len(windows) > 0 && summary != nil {
+			eligibility.Aggregate = &AggregateReport{
+				ProviderID: id,
+				Kind:       "proxy_eligible_weighted_pace",
+				Summary:    *summary,
+				Windows:    windows,
+			}
+		}
+		pr.ProxyEligibility = eligibility
+		return
+	}
 }

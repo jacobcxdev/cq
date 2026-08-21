@@ -10,11 +10,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	if err := proxy.SaveConfig(&proxy.Config{Port: 24567, LocalToken: "test-token"}); err != nil {
+		t.Fatal(err)
+	}
 
 	oldRunner := runProxyLaunchctl
 	defer func() { runProxyLaunchctl = oldRunner }()
@@ -52,6 +58,9 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	plist := string(plistData)
 	if !strings.Contains(plist, "<string>proxy</string>") || !strings.Contains(plist, "<string>start</string>") {
 		t.Fatalf("plist = %q, want proxy start arguments", plist)
+	}
+	if !strings.Contains(plist, "<string>24567</string>") {
+		t.Fatalf("plist = %q, want configured port", plist)
 	}
 	if !strings.Contains(plist, "<string>"+filepath.Join(dir, "Library", "Logs", "cq", "proxy.log")+"</string>") {
 		t.Fatalf("plist = %q, want proxy log path", plist)

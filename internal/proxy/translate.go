@@ -146,7 +146,8 @@ type openaiUsage struct {
 	OutputTokens       int `json:"output_tokens"`
 	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails *struct {
-		CachedTokens int `json:"cached_tokens"`
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
@@ -611,6 +612,9 @@ func translateUsage(usage *openaiUsage) anthropicUsage {
 	}
 	if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
 		translated.CacheReadInputTokens = intPtr(usage.InputTokensDetails.CachedTokens)
+	}
+	if usage.InputTokensDetails != nil && usage.InputTokensDetails.CacheWriteTokens > 0 {
+		translated.CacheCreationInputTokens = intPtr(usage.InputTokensDetails.CacheWriteTokens)
 	}
 	if usage.OutputTokensDetails != nil && usage.OutputTokensDetails.ReasoningTokens > 0 {
 		translated.ReasoningOutputTokens = intPtr(usage.OutputTokensDetails.ReasoningTokens)

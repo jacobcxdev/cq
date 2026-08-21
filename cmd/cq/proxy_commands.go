@@ -99,8 +99,7 @@ type CandidateValidateReleaseArgumentsV1 struct {
 	ClientExecutable           string
 	ValidationRun              string
 	ReceiptOut                 string
-	ConfirmLiveDataPlane       bool
-	ConfirmQuotaUse            bool
+	ConfirmControlHealth       bool
 	JSON                       bool
 }
 
@@ -657,16 +656,14 @@ func parseCandidateValidateReleaseArguments(argv []string) (CandidateValidateRel
 	for index := 0; index < len(argv); index++ {
 		arg := argv[index]
 		switch arg {
-		case "--confirm-live-data-plane", "--confirm-quota-use", "--json":
+		case "--confirm-control-health", "--json":
 			if seen[arg] {
 				return CandidateValidateReleaseArgumentsV1{}, false
 			}
 			seen[arg] = true
 			switch arg {
-			case "--confirm-live-data-plane":
-				arguments.ConfirmLiveDataPlane = true
-			case "--confirm-quota-use":
-				arguments.ConfirmQuotaUse = true
+			case "--confirm-control-health":
+				arguments.ConfirmControlHealth = true
 			case "--json":
 				arguments.JSON = true
 			}
@@ -701,7 +698,7 @@ func parseCandidateValidateReleaseArguments(argv []string) (CandidateValidateRel
 			return CandidateValidateReleaseArgumentsV1{}, false
 		}
 	}
-	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot) && arguments.TargetReleaseBundle != "" && arguments.FloorReleaseBundle != "" && arguments.FloorAcceptanceReceiptFile != "" && lowerHexArgument(arguments.FloorAcceptanceReceipt, 64) && arguments.ClientBuild != "" && arguments.ClientExecutable != "" && lowerHexArgument(arguments.ValidationRun, 64) && cleanAbsolutePath(arguments.ReceiptOut) && arguments.ConfirmLiveDataPlane && arguments.ConfirmQuotaUse
+	return arguments, cleanAbsolutePath(arguments.InstanceStateRoot) && arguments.TargetReleaseBundle != "" && arguments.FloorReleaseBundle != "" && arguments.FloorAcceptanceReceiptFile != "" && lowerHexArgument(arguments.FloorAcceptanceReceipt, 64) && arguments.ClientBuild != "" && arguments.ClientExecutable != "" && lowerHexArgument(arguments.ValidationRun, 64) && cleanAbsolutePath(arguments.ReceiptOut) && arguments.ConfirmControlHealth
 }
 
 func parseCandidateRemoveArguments(argv []string) (CandidateRemoveArgumentsV1, bool) {

@@ -48,14 +48,26 @@ func writeTTY(w io.Writer, model TTYModel) error {
 			writeWindowRow(ew, row)
 		}
 
-		if section.AggHeader != "" {
+		if section.AggHeader != "" || section.ProxyHeader != "" {
 			ew.write("\n")
 			ew.write(section.ThinSep)
 			ew.write("\n\n")
-			ew.write(section.AggHeader)
-			ew.write("\n")
-			for _, row := range section.AggRows {
-				writeWindowRow(ew, row)
+			if section.AggHeader != "" {
+				ew.write(section.AggHeader)
+				ew.write("\n")
+				for _, row := range section.AggRows {
+					writeWindowRow(ew, row)
+				}
+			}
+			if section.ProxyHeader != "" {
+				if section.AggHeader != "" {
+					ew.write("\n")
+				}
+				ew.write(section.ProxyHeader)
+				ew.write("\n")
+				for _, row := range section.ProxyRows {
+					writeWindowRow(ew, row)
+				}
 			}
 		}
 

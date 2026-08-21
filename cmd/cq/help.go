@@ -143,7 +143,7 @@ Commands:
 `,
 	"proxy candidate artifact switch": `Usage: cq proxy candidate artifact switch --instance-state-root PATH --role runtime-bundle --release-set DIGEST --validation-run DIGEST --confirm-artifact-switch [--json] TIMEOUT
 `,
-	"proxy candidate validate-release": `Usage: cq proxy candidate validate-release --instance-state-root PATH --target-release-bundle PATH --floor-release-bundle PATH --floor-acceptance-receipt-file PATH --floor-acceptance-receipt DIGEST --client-build BUILD --client-executable PATH --validation-run DIGEST --receipt-out PATH --confirm-live-data-plane --confirm-quota-use [--json]
+	"proxy candidate validate-release": `Usage: cq proxy candidate validate-release --instance-state-root PATH --target-release-bundle PATH --floor-release-bundle PATH --floor-acceptance-receipt-file PATH --floor-acceptance-receipt DIGEST --client-build BUILD --client-executable PATH --validation-run DIGEST --receipt-out PATH --confirm-control-health [--json]
 `,
 	"proxy candidate stop": `Usage: cq proxy candidate stop --instance-state-root PATH --confirm-client-stopped [--json] TIMEOUT
 `,
@@ -357,7 +357,10 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 		if err := RenderProxySnapshot(stdout, snapshot, mode); err != nil {
 			return true, 1, err
 		}
-		return true, snapshot.ExitCode, nil
+		if arguments.Strict {
+			return true, snapshot.ExitCode, nil
+		}
+		return true, 0, nil
 	}
 	if authority.Catalogue == "proxy" && authority.Row == "proxy_rescue" && !authority.Terminating {
 		ctx, cancel := context.WithTimeout(context.Background(), authority.Deadline.Total)

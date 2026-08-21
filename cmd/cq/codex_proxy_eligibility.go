@@ -1,0 +1,66 @@
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/quota"
+)
+
+func enrichCodexProxyEligibility(ctx context.Context, report *app.Report, codexProvider *codexprov.Provider) error {
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load proxy config: %w", err)
+	}
+	accounts, err := codexProvider.RoutingAccounts(ctx)
+	if err != nil {
+		return fmt.Errorf("list Codex routing accounts: %w", err)
+	}
+	addCodexProxyEligibility(report, cfg, accounts)
+	return nil
+}
+
+func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []codexprov.RoutingAccount) {
+	if report == nil || cfg == nil {
+		return
+	}
+	allowed := make(map[codexprov.AccountKey]bool)
+	if cfg.CodexRoutingPinnedAccountKey != "" {
+		allowed[cfg.CodexRoutingPinnedAccountKey] = true
+	} else {
+		for _, key := range cfg.CodexRoutingAccountKeys {
+			allowed[key] = true
+		}
+	}
+	unrestricted := len(allowed) == 0
+
+	byAccountID := make(map[string]codexprov.AccountKey, len(accounts))
+	byEmail := make(map[string]codexprov.AccountKey, len(accounts))
+	duplicateEmail := make(map[string]bool)
+	for _, account := range accounts {
+		if account.AccountID != "" {
+			byAccountID[account.AccountID] = account.Key
+		}
+		if account.Email != "" {
+			if _, exists := byEmail[account.Email]; exists {
+				duplicateEmail[account.Email] = true
+			}
+			byEmail[account.Email] = account.Key
+		}
+	}
+
+	app.AddProxyEligibility(report, provider.Codex, func(result quota.Result) bool {
+		if unrestricted {
+			return true
+		}
+		key, found := byAccountID[result.AccountID]
+		if !found && result.Email != "" && !duplicateEmail[result.Email] {
+			key, found = byEmail[result.Email]
+		}
+		return found && allowed[key]
+	})
+}

@@ -48,6 +48,43 @@ func TestBuildReportClaudeAggregate(t *testing.T) {
 	}
 }
 
+func TestAddProxyEligibilityKeepsDiscoveredAndEligibleAggregatesDistinct(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	results := []quota.Result{
+		{Status: quota.StatusOK, AccountID: "excluded", RateLimitTier: "codex_pro_20x", Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 97, ResetAtUnix: now.Unix() + 302_400},
+		}},
+		{Status: quota.StatusOK, AccountID: "eligible-a", RateLimitTier: "codex_pro_20x", Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 54, ResetAtUnix: now.Unix() + 302_400},
+		}},
+		{Status: quota.StatusOK, AccountID: "eligible-b", RateLimitTier: "codex_pro_20x", Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 55, ResetAtUnix: now.Unix() + 302_400},
+		}},
+	}
+	report := buildReport(now, []provider.ID{provider.Codex}, map[provider.ID][]quota.Result{provider.Codex: results}, nil)
+
+	AddProxyEligibility(&report, provider.Codex, func(result quota.Result) bool {
+		return result.AccountID != "excluded"
+	})
+
+	got := report.Providers[0]
+	if got.Aggregate.Windows[quota.Window7Day].RemainingPct != 69 {
+		t.Fatalf("discovered remaining = %d, want 69", got.Aggregate.Windows[quota.Window7Day].RemainingPct)
+	}
+	if got.ProxyEligibility == nil {
+		t.Fatal("proxy eligibility missing")
+	}
+	if got.ProxyEligibility.DiscoveredCount != 3 || got.ProxyEligibility.EligibleCount != 2 || got.ProxyEligibility.ExcludedCount != 1 {
+		t.Fatalf("proxy eligibility counts = %#v", got.ProxyEligibility)
+	}
+	if got.ProxyEligibility.Aggregate == nil {
+		t.Fatal("proxy-eligible aggregate missing")
+	}
+	if remaining := got.ProxyEligibility.Aggregate.Windows[quota.Window7Day].RemainingPct; remaining != 55 {
+		t.Fatalf("proxy-eligible remaining = %d, want 55", remaining)
+	}
+}
+
 func TestBuildReportPreservesOrder(t *testing.T) {
 	now := time.Unix(1000, 0)
 	order := []provider.ID{provider.Gemini, provider.Claude, provider.Codex}

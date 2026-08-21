@@ -245,6 +245,9 @@ type CodexModeStatus struct {
 	Configured                  CodexRoutingMode `json:"configured"`
 	Effective                   CodexRoutingMode `json:"effective"`
 	InhibitionReason            string           `json:"inhibition_reason,omitempty"`
+	Limitation                  string           `json:"limitation,omitempty"`
+	ConnectionSticky            bool             `json:"connection_sticky,omitempty"`
+	CapacitySkewPct             int              `json:"capacity_skew_pct,omitempty"`
 	ModeEpoch                   uint64           `json:"mode_epoch"`
 	ShadowEpoch                 uint64           `json:"shadow_epoch,omitempty"`
 	AuthoritativeEpoch          uint64           `json:"authoritative_epoch,omitempty"`

@@ -232,7 +232,7 @@ func TestParseUsageProMultiplier(t *testing.T) {
 	}
 }
 
-func TestParseUsageProMultiplierAfterPromoEnds(t *testing.T) {
+func TestParseUsageProMultiplierDoesNotExpire(t *testing.T) {
 	oldNow := nowFunc
 	nowFunc = func() time.Time { return time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC) }
 	defer func() { nowFunc = oldNow }()
@@ -246,11 +246,11 @@ func TestParseUsageProMultiplierAfterPromoEnds(t *testing.T) {
 
 	result := parseUsage(proJSON, "user@example.com", "")
 
-	if result.RateLimitTier != "codex_pro_10x" {
-		t.Errorf("RateLimitTier = %q, want codex_pro_10x", result.RateLimitTier)
+	if result.RateLimitTier != "codex_pro_20x" {
+		t.Errorf("RateLimitTier = %q, want codex_pro_20x", result.RateLimitTier)
 	}
-	if m := quota.ExtractMultiplier(result.RateLimitTier); m != 10 {
-		t.Errorf("ExtractMultiplier = %d, want 10", m)
+	if m := quota.ExtractMultiplier(result.RateLimitTier); m != 20 {
+		t.Errorf("ExtractMultiplier = %d, want 20", m)
 	}
 }
 
@@ -512,7 +512,7 @@ func TestParseUsageUnknownDoesNotReceivePromoMultiplier(t *testing.T) {
 	}
 }
 
-func TestParseUsagePromoAppliesOnlyBeforeDeadline(t *testing.T) {
+func TestParseUsageProMultiplierRemainsAfterProLitePromoDeadline(t *testing.T) {
 	oldNow := nowFunc
 	defer func() { nowFunc = oldNow }()
 
@@ -534,8 +534,8 @@ func TestParseUsagePromoAppliesOnlyBeforeDeadline(t *testing.T) {
 			"primary_window": {"used_percent": 10.0, "limit_window_seconds": 18000, "reset_at": 1774051200}
 		}
 	}`), "user@example.com", "")
-	if proAfter.RateLimitTier != "codex_pro_10x" {
-		t.Fatalf("RateLimitTier after deadline = %q, want codex_pro_10x", proAfter.RateLimitTier)
+	if proAfter.RateLimitTier != "codex_pro_20x" {
+		t.Fatalf("RateLimitTier after deadline = %q, want codex_pro_20x", proAfter.RateLimitTier)
 	}
 }
 

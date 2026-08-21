@@ -395,11 +395,6 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if request.Method == http.MethodGet && request.URL.EscapedPath() == "/health" {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(writer, "{\"status\":\"ok\"}\n")
-		return
-	}
 	if request.URL != nil && (request.URL.EscapedPath() == RuntimeRescueEnterPath || request.URL.EscapedPath() == RuntimeRescueExitPath || request.URL.EscapedPath() == RuntimeRescueStatusPath) {
 		supervisor.serveRescueControl(writer, request)
 		return
@@ -488,7 +483,7 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	supervisor.mu.Lock()
 	if !supervisor.admissionReady || supervisor.worker == nil {
 		supervisor.mu.Unlock()
-		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
+		writeRuntimeWorkerUnavailable(writer, request)
 		return
 	}
 	worker := supervisor.worker
@@ -510,7 +505,7 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	}
 	response, err := worker.ExecuteHTTP(request.Context(), RuntimeHTTPRequestV1{Method: request.Method, RequestURI: request.URL.RequestURI(), Header: header, Body: body, Caller: caller})
 	if err != nil {
-		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
+		writeRuntimeWorkerUnavailable(writer, request)
 		return
 	}
 	for name, values := range response.Header {
@@ -520,6 +515,16 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 	}
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(response.Body)
+}
+
+func writeRuntimeWorkerUnavailable(writer http.ResponseWriter, request *http.Request) {
+	if request != nil && request.Method == http.MethodGet && request.URL != nil && request.URL.EscapedPath() == "/health" {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(writer, "{\"status\":\"degraded\",\"supervisor_alive\":true,\"data_plane_ready\":false}\n")
+		return
+	}
+	http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 }
 
 func (supervisor *RuntimeSupervisor) refreshCallerAuthority(ctx context.Context, authority *NormalCallerAuthority) error {

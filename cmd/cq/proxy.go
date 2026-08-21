@@ -893,7 +893,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}
 
-	codexPrimer, err := buildCodexPrimer(cfg, credentialControl.Owner(), codexRequestRouter, catalog, fsys)
+	codexPrimer, err := buildCodexPrimer(cfg, credentialControl.Owner(), codexRequestRouter, credentialControl, catalog, fsys)
 	if err != nil {
 		return err
 	}
@@ -1124,11 +1124,11 @@ func newProxyCodexRoutingCapacityRefresher(
 	}, nil
 }
 
-func buildCodexPrimer(cfg *proxy.Config, owner bool, router *proxy.CodexRequestRouter, catalog *modelregistry.Catalog, fsys fsutil.DurableFileSystem) (*proxy.CodexPrimer, error) {
+func buildCodexPrimer(cfg *proxy.Config, owner bool, router *proxy.CodexRequestRouter, inventory codexprov.CredentialInventory, catalog *modelregistry.Catalog, fsys fsutil.DurableFileSystem) (*proxy.CodexPrimer, error) {
 	if cfg == nil || !cfg.CodexWindowPriming.Enabled || !owner {
 		return nil, nil
 	}
-	if router == nil || catalog == nil {
+	if router == nil || inventory == nil || catalog == nil {
 		return nil, fmt.Errorf("Codex window priming dependencies unavailable")
 	}
 	entries := catalog.Snapshot().Entries
@@ -1146,11 +1146,13 @@ func buildCodexPrimer(cfg *proxy.Config, owner bool, router *proxy.CodexRequestR
 	if err != nil {
 		return nil, fmt.Errorf("Codex window primer journal: %w", err)
 	}
+	primerRouter := *router
+	primerRouter.Scope = &proxy.CodexRequestScope{Inventory: inventory}
 	return &proxy.CodexPrimer{
-		Accounts: router.AccountKeys,
-		Usage:    &proxy.CodexPrimerUsageReader{Router: router, UsageURL: usageURL},
+		Accounts: primerRouter.AccountKeys,
+		Usage:    &proxy.CodexPrimerUsageReader{Router: &primerRouter, UsageURL: usageURL},
 		Requester: &proxy.CodexPrimerRequester{
-			Router: router, ResponsesURL: strings.TrimRight(cfg.CodexUpstream, "/") + "/responses",
+			Router: &primerRouter, ResponsesURL: strings.TrimRight(cfg.CodexUpstream, "/") + "/responses",
 		},
 		Store:          store,
 		Models:         func() []modelregistry.Entry { return catalog.Snapshot().Entries },

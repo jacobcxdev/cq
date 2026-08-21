@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -390,6 +391,31 @@ func TestTranslateResponse_RichUsageFields(t *testing.T) {
 	}
 	if resp.Usage.TotalTokens == nil || *resp.Usage.TotalTokens != 15 {
 		t.Fatalf("total_tokens = %v, want 15", resp.Usage.TotalTokens)
+	}
+}
+
+func TestTranslateUsageCacheWriteTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		details string
+		want    *int
+	}{
+		{name: "absent", details: `{}`},
+		{name: "zero", details: `{"input_tokens_details":{"cache_write_tokens":0}}`},
+		{name: "positive", details: `{"input_tokens_details":{"cache_write_tokens":7}}`, want: intPtr(7)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var usage openaiUsage
+			if err := json.Unmarshal([]byte(test.details), &usage); err != nil {
+				t.Fatal(err)
+			}
+			translated := translateUsage(&usage)
+			if !reflect.DeepEqual(translated.CacheCreationInputTokens, test.want) {
+				t.Fatalf("cache_creation_input_tokens = %v, want %v", translated.CacheCreationInputTokens, test.want)
+			}
+		})
 	}
 }
 

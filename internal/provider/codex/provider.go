@@ -343,10 +343,7 @@ func inventoryHasDegradedExternalSource(inventory Inventory) bool {
 	return false
 }
 
-// DiscoverAccounts returns the coordinator's Codex account inventory without
-// making network calls. It implements provider.Discoverer so the runner can
-// synthesise auth_expired rows for accounts absent from the cache.
-func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, error) {
+func (p *Provider) discoverAccountInventory(ctx context.Context) (Inventory, error) {
 	inventoryReader := p.inventory
 	var control *CredentialControl
 	if inventoryReader == nil {
@@ -354,21 +351,30 @@ func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, er
 			var err error
 			control, err = OpenDefaultCredentialRefreshControl(ctx, durableFS, p.client)
 			if err != nil {
-				return nil, fmt.Errorf("open Codex credential inventory: %w", err)
+				return Inventory{}, fmt.Errorf("open Codex credential inventory: %w", err)
 			}
 			defer control.Close()
 			inventoryReader = control
 		}
 	}
-	var inventory Inventory
 	if inventoryReader != nil {
 		listed, err := inventoryReader.List(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list Codex credential inventory: %w", err)
+			return Inventory{}, fmt.Errorf("list Codex credential inventory: %w", err)
 		}
-		inventory = listed
+		return listed, nil
 	} else {
-		inventory = DiscoverInventory(p.fs)
+		return DiscoverInventory(p.fs), nil
+	}
+}
+
+// DiscoverAccounts returns the coordinator's Codex account inventory without
+// making network calls. It implements provider.Discoverer so the runner can
+// synthesise auth_expired rows for accounts absent from the cache.
+func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, error) {
+	inventory, err := p.discoverAccountInventory(ctx)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]provider.Account, len(inventory.Accounts))
 	for i, logical := range inventory.Accounts {
@@ -380,6 +386,30 @@ func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, er
 		}
 	}
 	return out, nil
+}
+
+type RoutingAccount struct {
+	Key       AccountKey
+	AccountID string
+	Email     string
+}
+
+// RoutingAccounts exposes secret-free identities needed to compare provider
+// discovery with proxy routing policy.
+func (p *Provider) RoutingAccounts(ctx context.Context) ([]RoutingAccount, error) {
+	inventory, err := p.discoverAccountInventory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	accounts := make([]RoutingAccount, len(inventory.Accounts))
+	for i, logical := range inventory.Accounts {
+		accounts[i] = RoutingAccount{
+			Key:       logical.Key,
+			AccountID: logical.Identity.AccountID,
+			Email:     logical.Identity.Email,
+		}
+	}
+	return accounts, nil
 }
 
 // fetchAccount fetches quota for one concrete candidate. Refresh decisions

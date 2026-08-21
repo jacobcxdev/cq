@@ -9,12 +9,14 @@ type TTYModel struct {
 
 // TTYSection represents one provider block (header + window rows + optional aggregate).
 type TTYSection struct {
-	Separator  string         // thick separator line (em-dash)
-	Header     string         // "  ✻  Claude max 20x · user@email.com"
-	WindowRows []TTYWindowRow // per-window rows
-	ThinSep    string         // thin separator before aggregate (empty if none)
-	AggHeader  string         // aggregate header (empty if none)
-	AggRows    []TTYWindowRow // aggregate rows
+	Separator   string         // thick separator line (em-dash)
+	Header      string         // "  ✻  Claude max 20x · user@email.com"
+	WindowRows  []TTYWindowRow // per-window rows
+	ThinSep     string         // thin separator before aggregate (empty if none)
+	AggHeader   string         // aggregate header (empty if none)
+	AggRows     []TTYWindowRow // aggregate rows
+	ProxyHeader string         // proxy eligibility summary (empty if unavailable)
+	ProxyRows   []TTYWindowRow // proxy-eligible aggregate rows
 }
 
 // TTYWindowRow holds the pre-formatted fields for a single window line.

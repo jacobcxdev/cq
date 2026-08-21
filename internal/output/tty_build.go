@@ -57,6 +57,12 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 			section.AggHeader = buildAggHeader(pr.Aggregate)
 			section.AggRows = buildAggRows(pr.Aggregate.Windows)
 		}
+		if pr.ProxyEligibility != nil {
+			section.ProxyHeader = buildProxyEligibilityHeader(pr.ID, pr.ProxyEligibility)
+			if pr.ProxyEligibility.Aggregate != nil {
+				section.ProxyRows = buildAggRows(pr.ProxyEligibility.Aggregate.Windows)
+			}
+		}
 
 		if isFirst {
 			providerFirstIdx = append(providerFirstIdx, len(model.Sections))
@@ -76,7 +82,7 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		if firstSet[i] {
 			model.Sections[i].Separator = buildSeparator(sepWidth)
 		}
-		if model.Sections[i].AggHeader != "" {
+		if model.Sections[i].AggHeader != "" || model.Sections[i].ProxyHeader != "" {
 			model.Sections[i].ThinSep = buildThinSeparator(sepWidth)
 		}
 	}
@@ -281,6 +287,22 @@ func buildAggHeader(agg *app.AggregateReport) string {
 	return header
 }
 
+func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibilityReport) string {
+	header := fmt.Sprintf("  %s  %7s proxy %d/%d eligible",
+		boldStyle.Render(providerIcon(id)),
+		boldStyle.Render(fmt.Sprintf("%7s", providerDisplayName(id))),
+		eligibility.EligibleCount,
+		eligibility.DiscoveredCount,
+	)
+	if eligibility.ExcludedCount > 0 {
+		header += brightBlackStyle.Render(fmt.Sprintf(" · %d excluded", eligibility.ExcludedCount))
+	}
+	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
+		header += brightBlackStyle.Render(" · ") + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
+	}
+	return header
+}
+
 // buildAggRows builds window rows for aggregate data.
 func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindowRow {
 	orderedKeys := orderedAggWindowKeys(windows)
@@ -388,6 +410,14 @@ func measuredSepWidth(model TTYModel) int {
 		for _, row := range sec.AggRows {
 			if w := rowVisibleWidth(row); w > maxW {
 				maxW = w
+			}
+			if w := visibleWidth(sec.ProxyHeader); w > maxW {
+				maxW = w
+			}
+			for _, row := range sec.ProxyRows {
+				if w := rowVisibleWidth(row); w > maxW {
+					maxW = w
+				}
 			}
 		}
 	}
