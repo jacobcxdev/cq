@@ -22,7 +22,7 @@ func classifyCodexRequestShape(request CodexProtocolRequest, parseErr error) cod
 		}
 	}
 	shape := codexRequestShape{RequestedReasoningEffort: codexRequestedReasoningEffort(request)}
-	if request.PreviousResponseID == "" {
+	if !request.HasPreviousResponseID {
 		shape.RequestLineage = codexRequestLineagePreviousResponseIDAbsent
 	} else {
 		shape.RequestLineage = codexRequestLineagePreviousResponseIDPresent

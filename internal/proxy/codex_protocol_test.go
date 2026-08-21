@@ -55,6 +55,37 @@ func TestParseCodexProtocolRequestReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestParseCodexProtocolRequestPreservesPreviousResponseIDPresence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		body    string
+		wantID  string
+		wantHas bool
+	}{
+		{name: "top level non-empty", body: `{"previous_response_id":"response"}`, wantID: "response", wantHas: true},
+		{name: "top level empty", body: `{"previous_response_id":""}`, wantHas: true},
+		{name: "top level null", body: `{"previous_response_id":null}`, wantHas: true},
+		{name: "top level absent", body: `{}`, wantHas: false},
+		{name: "params non-empty", body: `{"params":{"previous_response_id":"response"}}`, wantID: "response", wantHas: true},
+		{name: "params empty", body: `{"params":{"previous_response_id":""}}`, wantHas: true},
+		{name: "params null", body: `{"params":{"previous_response_id":null}}`, wantHas: true},
+		{name: "params absent", body: `{"params":{}}`, wantHas: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseCodexProtocolRequest([]byte(tt.body), "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.PreviousResponseID != tt.wantID || got.HasPreviousResponseID != tt.wantHas {
+				t.Fatalf("previous response ID/presence = %q/%v, want %q/%v", got.PreviousResponseID, got.HasPreviousResponseID, tt.wantID, tt.wantHas)
+			}
+		})
+	}
+}
+
 func TestCodexProtocolRequestAcceptsBodyOverLegacyLimit(t *testing.T) {
 	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
 	got, err := ParseCodexProtocolRequest(body, "", nil)

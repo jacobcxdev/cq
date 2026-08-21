@@ -14,7 +14,8 @@ func TestCodexRequestShapeLineage(t *testing.T) {
 		want    string
 	}{
 		{name: "previous response ID absent", want: "previous_response_id_absent"},
-		{name: "previous response ID present", request: CodexProtocolRequest{PreviousResponseID: "response-private"}, want: "previous_response_id_present"},
+		{name: "previous response ID non-empty", request: CodexProtocolRequest{PreviousResponseID: "response-private", HasPreviousResponseID: true}, want: "previous_response_id_present"},
+		{name: "previous response ID empty", request: CodexProtocolRequest{HasPreviousResponseID: true}, want: "previous_response_id_present"},
 		{name: "parse failure", err: errors.New("decode request"), want: "unknown"},
 	}
 	for _, tt := range tests {

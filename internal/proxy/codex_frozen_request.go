@@ -732,6 +732,7 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 			Type:                          typeName,
 			Model:                         modelName,
 			PreviousResponseID:            previous,
+			HasPreviousResponseID:         result.rootPrevious.present || result.paramsPrevious.present,
 			RequestedReasoningEffort:      requestedReasoningEffort,
 			HasRequestedReasoningEffort:   hasRequestedReasoningEffort,
 			RequestedReasoningEffortValid: requestedReasoningEffortValid,
@@ -773,7 +774,7 @@ func validateCodexFrozenPreparedAuthority(prepared codexFrozenAuthority, source 
 	if prepared.protocol.Metadata != source.Metadata || prepared.metadataSources != sourceMetadata || prepared.protocol.TurnState != source.TurnState || prepared.protocol.HasTurnState != source.HasTurnState {
 		return CodexFrozenRequestMetadataAuthority, errors.New("transformed request changed turn authority")
 	}
-	if prepared.protocol.Type != source.Type || prepared.protocol.PreviousResponseID != source.PreviousResponseID || prepared.protocol.RequestedReasoningEffort != source.RequestedReasoningEffort || prepared.protocol.HasRequestedReasoningEffort != source.HasRequestedReasoningEffort || prepared.protocol.RequestedReasoningEffortValid != source.RequestedReasoningEffortValid || prepared.previous != sourcePrevious || prepared.protocol.HasEncryptedState != source.HasEncryptedState {
+	if prepared.protocol.Type != source.Type || prepared.protocol.PreviousResponseID != source.PreviousResponseID || prepared.protocol.HasPreviousResponseID != source.HasPreviousResponseID || prepared.protocol.RequestedReasoningEffort != source.RequestedReasoningEffort || prepared.protocol.HasRequestedReasoningEffort != source.HasRequestedReasoningEffort || prepared.protocol.RequestedReasoningEffortValid != source.RequestedReasoningEffortValid || prepared.previous != sourcePrevious || prepared.protocol.HasEncryptedState != source.HasEncryptedState {
 		return CodexFrozenRequestProtocolInvalid, errors.New("transformed request changed protocol authority")
 	}
 	return "", nil

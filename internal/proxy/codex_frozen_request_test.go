@@ -349,6 +349,43 @@ func TestInspectCodexNativeRequestCapturesRequestedReasoningEffort(t *testing.T)
 	}
 }
 
+func TestInspectCodexNativeRequestPreservesPreviousResponseIDPresence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		previous string
+		wantID   string
+		wantHas  bool
+	}{
+		{name: "top level non-empty", previous: `,"previous_response_id":"response"`, wantID: "response", wantHas: true},
+		{name: "top level empty", previous: `,"previous_response_id":""`, wantHas: true},
+		{name: "top level null", previous: `,"previous_response_id":null`, wantHas: true},
+		{name: "top level absent", wantHas: false},
+		{name: "params non-empty", previous: `,"params":{"previous_response_id":"response"}`, wantID: "response", wantHas: true},
+		{name: "params empty", previous: `,"params":{"previous_response_id":""}`, wantHas: true},
+		{name: "params null", previous: `,"params":{"previous_response_id":null}`, wantHas: true},
+		{name: "params absent", previous: `,"params":{}`, wantHas: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"type":"response.create","model":"gpt-5.4"` + tt.previous + `,"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+			inspection, err := InspectCodexNativeRequest(context.Background(), body, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inspection.Release()
+			protocol, err := inspection.Protocol()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if protocol.PreviousResponseID != tt.wantID || protocol.HasPreviousResponseID != tt.wantHas {
+				t.Fatalf("previous response ID/presence = %q/%v, want %q/%v", protocol.PreviousResponseID, protocol.HasPreviousResponseID, tt.wantID, tt.wantHas)
+			}
+		})
+	}
+}
+
 func TestInspectCodexNativeRequestRejectsAmbiguousRequestedReasoningEffort(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
