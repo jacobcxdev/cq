@@ -189,6 +189,54 @@ func TestDispatchUnknownCommandReturnsError(t *testing.T) {
 	}
 }
 
+func TestDispatchCodexAccountsJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	for _, args := range [][]string{
+		{"codex", "accounts", "--json"},
+		{"--json", "codex", "accounts"},
+	} {
+		var cli CLI
+		kctx, err := kong.New(&cli,
+			kong.Writers(io.Discard, io.Discard),
+			kong.Exit(func(int) {}),
+		)
+		if err != nil {
+			t.Fatalf("kong.New: %v", err)
+		}
+		parsed, err := kctx.Parse(args)
+		if err != nil {
+			t.Fatalf("Parse(%v): %v", args, err)
+		}
+
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		originalStdout := os.Stdout
+		os.Stdout = writer
+		dispatchErr := dispatch(parsed, &cli)
+		_ = writer.Close()
+		os.Stdout = originalStdout
+		output, readErr := io.ReadAll(reader)
+		_ = reader.Close()
+		if dispatchErr != nil {
+			t.Fatalf("dispatch(%v): %v", args, dispatchErr)
+		}
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+
+		var accounts []provider.Account
+		if err := json.Unmarshal(output, &accounts); err != nil {
+			t.Fatalf("dispatch(%v) output is not JSON: %v", args, err)
+		}
+		if accounts == nil || len(accounts) != 0 {
+			t.Fatalf("dispatch(%v) accounts = %#v, want []", args, accounts)
+		}
+	}
+}
+
 func TestCLIParsesRemoveCommands(t *testing.T) {
 	var cli CLI
 	kctx, err := kong.New(&cli,

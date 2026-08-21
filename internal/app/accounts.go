@@ -164,7 +164,7 @@ func runCodexLoginWithAdmin(ctx context.Context, client httputil.Doer, activate 
 }
 
 // RunAccounts lists discovered accounts for the given provider.
-func RunAccounts(id provider.ID) error {
+func RunAccounts(id provider.ID, jsonOutput bool) error {
 	mgr := AccountManager(id, nil)
 	if mgr == nil {
 		return fmt.Errorf("account management not supported for %s", id)
@@ -173,6 +173,12 @@ func RunAccounts(id provider.ID) error {
 	accounts, err := mgr.Discover(context.Background())
 	if err != nil {
 		return err
+	}
+	if jsonOutput {
+		if accounts == nil {
+			accounts = []provider.Account{}
+		}
+		return json.NewEncoder(os.Stdout).Encode(accounts)
 	}
 	if len(accounts) == 0 {
 		fmt.Printf("No %s accounts found.\n", id)

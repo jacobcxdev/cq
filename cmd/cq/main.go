@@ -338,7 +338,7 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		}
 		return err
 	case "claude accounts":
-		return app.RunAccounts(provider.Claude)
+		return app.RunAccounts(provider.Claude, cli.JSON)
 	case "claude switch <email>":
 		err := app.RunSwitch(provider.Claude, cli.Claude.Switch.Email, httputil.NewClient(10*time.Second, version))
 		if err == nil {
@@ -358,7 +358,7 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		}
 		return err
 	case "codex accounts":
-		return app.RunAccounts(provider.Codex)
+		return app.RunAccounts(provider.Codex, cli.JSON)
 	case "codex switch <email>":
 		err := app.RunSwitch(provider.Codex, cli.Codex.Switch.Email, httputil.NewClient(10*time.Second, version))
 		if err == nil {
@@ -372,7 +372,7 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		}
 		return err
 	case "gemini accounts":
-		return app.RunAccounts(provider.Gemini)
+		return app.RunAccounts(provider.Gemini, cli.JSON)
 	default:
 		return fmt.Errorf("unknown command: %s", ctx.Command())
 	}
