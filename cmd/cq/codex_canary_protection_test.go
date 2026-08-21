@@ -303,7 +303,7 @@ func syntheticCodexBarManifestFixture(t *testing.T, managedHome string, auth []b
 		"version": 3,
 		"accounts": []any{map[string]any{
 			"id": "synthetic-record", "managedHomePath": managedHome,
-			"providerAccountID": "synthetic-account", "workspaceAccountID": "synthetic-user",
+			"providerAccountID": "synthetic-account", "workspaceAccountID": "synthetic-account",
 			"authFingerprint": hex.EncodeToString(fingerprint[:]),
 		}},
 	})
