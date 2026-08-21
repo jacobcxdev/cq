@@ -85,7 +85,7 @@ type ProxyCmd struct {
 	Status       ProxyStatusCmd       `cmd:"" help:"Show proxy health"`
 	ValidateHTTP ProxyValidateHTTPCmd `cmd:"" name:"validate-http" help:"Request one-shot installed HTTP validation"`
 	Pin          ProxyPinCmd          `cmd:"" help:"Pin Claude or Codex proxy routing"`
-	CodexDefault ProxyCodexDefaultCmd `cmd:"" name:"codex-default" help:"Configure Codex routing default"`
+	Default      ProxyDefaultCmd      `cmd:"" help:"Configure provider routing defaults"`
 	Prime        ProxyPrimeCmd        `cmd:"" help:"Manage Codex quota-window priming"`
 	Endpoint     ProxyEndpointCmd     `cmd:"" help:"Inspect or transition the credential endpoint"`
 }
@@ -118,6 +118,10 @@ type ProxyPinClaudeCmd struct {
 type ProxyPinCodexCmd struct {
 	Clear     bool   `help:"Clear active Codex account pin"`
 	Reference string `arg:"" optional:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
+}
+
+type ProxyDefaultCmd struct {
+	Codex ProxyCodexDefaultCmd `cmd:"" help:"Configure Codex routing default"`
 }
 
 type ProxyCodexDefaultCmd struct {

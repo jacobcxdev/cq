@@ -19,7 +19,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-const proxyCodexDefaultUsage = "usage: cq proxy codex-default [--clear | <account-reference>]"
+const proxyCodexDefaultUsage = "usage: cq proxy default codex [--clear | <account-reference>]"
 
 type proxyCodexDefaultHarness struct {
 	inventory    codexprov.Inventory

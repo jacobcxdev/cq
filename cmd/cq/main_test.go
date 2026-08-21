@@ -228,9 +228,9 @@ func TestCLIParsesProxyCodexDefault(t *testing.T) {
 		wantClear     bool
 		wantReference string
 	}{
-		{name: "status", args: []string{"proxy", "codex-default"}},
-		{name: "clear", args: []string{"proxy", "codex-default", "--clear"}, wantClear: true},
-		{name: "reference", args: []string{"proxy", "codex-default", "person@example.test"}, wantReference: "person@example.test"},
+		{name: "status", args: []string{"proxy", "default", "codex"}},
+		{name: "clear", args: []string{"proxy", "default", "codex", "--clear"}, wantClear: true},
+		{name: "reference", args: []string{"proxy", "default", "codex", "person@example.test"}, wantReference: "person@example.test"},
 	}
 
 	for _, tt := range tests {
@@ -248,17 +248,30 @@ func TestCLIParsesProxyCodexDefault(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%v): %v", tt.args, err)
 			}
-			if got := parsed.Command(); !strings.HasPrefix(got, "proxy codex-default") ||
+			if got := parsed.Command(); !strings.HasPrefix(got, "proxy default codex") ||
 				(tt.wantReference != "" && !strings.Contains(got, "<account-reference>")) {
-				t.Fatalf("Command() = %q, want proxy codex-default command for %q", got, tt.wantReference)
+				t.Fatalf("Command() = %q, want proxy default codex command for %q", got, tt.wantReference)
 			}
-			if cli.Proxy.CodexDefault.Clear != tt.wantClear {
-				t.Fatalf("Clear = %t, want %t", cli.Proxy.CodexDefault.Clear, tt.wantClear)
+			if cli.Proxy.Default.Codex.Clear != tt.wantClear {
+				t.Fatalf("Clear = %t, want %t", cli.Proxy.Default.Codex.Clear, tt.wantClear)
 			}
-			if cli.Proxy.CodexDefault.Reference != tt.wantReference {
-				t.Fatalf("Reference = %q, want %q", cli.Proxy.CodexDefault.Reference, tt.wantReference)
+			if cli.Proxy.Default.Codex.Reference != tt.wantReference {
+				t.Fatalf("Reference = %q, want %q", cli.Proxy.Default.Codex.Reference, tt.wantReference)
 			}
 		})
+	}
+
+	var cli CLI
+	kctx, err := kong.New(&cli,
+		kong.Writers(io.Discard, io.Discard),
+		kong.Exit(func(int) {}),
+	)
+	if err != nil {
+		t.Fatalf("kong.New: %v", err)
+	}
+
+	if _, err := kctx.Parse([]string{"proxy", "codex-default"}); err == nil {
+		t.Fatal("Parse(proxy codex-default) error = nil, want unknown command")
 	}
 }
 
