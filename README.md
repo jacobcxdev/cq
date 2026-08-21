@@ -166,7 +166,7 @@ cq refresh                 # Run a one-shot refresh
 
 For each provider, cq displays remaining quota as a percentage bar, pace indicator, and burndown estimate for each rate-limit window. Requires a [Nerd Font](https://www.nerdfonts.com/) for icons to render correctly. Recommended: [`jacobcxdev/tap/liga-sf-mono-nerd-font`](https://github.com/jacobcxdev/homebrew-tap).
 
-![cq output](docs/screenshot.png)
+![cq output](assets/screenshot.png)
 
 ## Configuration
 
