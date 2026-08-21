@@ -291,7 +291,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	choice := dispatchAccounts[0].Choice()
 	if policyDecision.Status == PolicyDecisionSelected {
-		capabilityPolicy, capabilityEvidence, active := factory.SessionPolicy.capabilityPolicy(policyDecision.Pool)
+		capabilityPolicy, capabilityEvidence, active := factory.SessionPolicy.capabilityPolicy(policyDecision.Pool, policyDecision.PolicyRevision)
 		if active {
 			if !callerOK {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)

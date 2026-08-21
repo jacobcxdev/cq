@@ -58,6 +58,21 @@ func TestSessionPolicyEnforcementPreservesUnboundParity(t *testing.T) {
 	}
 }
 
+func TestSessionPolicyResolverAllowsExplicitPoolWithoutCapabilityEvidence(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	session := []byte("explicit-session")
+	resolver := NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
+		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, session), Pool: "team"}},
+	})
+
+	decision := resolver.Resolve(session, []codex.AccountKey{"account-b", "account-c", "account-a"})
+	if decision.Status != PolicyDecisionSelected || len(decision.Allowed) != 2 || decision.Allowed[0] != "account-a" || decision.Allowed[1] != "account-b" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
 func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}

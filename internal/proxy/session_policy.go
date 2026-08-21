@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"sync"
 	"time"
 
 	providerCodex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -33,12 +34,18 @@ type SessionPolicyDecision struct {
 }
 
 type SessionPolicyResolver struct {
+	mu     sync.RWMutex
 	key    [32]byte
 	policy RoutingPolicyV1
 }
 
-func (r *SessionPolicyResolver) capabilityPolicy(pool string) (RoutingPolicySnapshotV1, []CapabilityRoutingEvidenceV1, bool) {
-	if r == nil || len(r.policy.CapabilityPredicates) == 0 || len(r.policy.CapabilityRoutingEvidence) == 0 {
+func (r *SessionPolicyResolver) capabilityPolicy(pool string, revision uint64) (RoutingPolicySnapshotV1, []CapabilityRoutingEvidenceV1, bool) {
+	if r == nil {
+		return RoutingPolicySnapshotV1{}, nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.policy.RoutingGeneration != revision || len(r.policy.CapabilityPredicates) == 0 || len(r.policy.CapabilityRoutingEvidence) == 0 {
 		return RoutingPolicySnapshotV1{}, nil, false
 	}
 	for _, candidate := range r.policy.Pools {
@@ -61,7 +68,27 @@ func NewSessionPolicyResolver(key []byte, policy RoutingPolicyV1) *SessionPolicy
 	return resolver
 }
 
+func (r *SessionPolicyResolver) Replace(policy RoutingPolicyV1) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.policy = cloneRoutingPolicy(policy)
+	r.mu.Unlock()
+}
+
 func (r *SessionPolicyResolver) Resolve(exactSession []byte, global []providerCodex.AccountKey) SessionPolicyDecision {
+	decision, _ := r.resolveWithPolicy(exactSession, global)
+	return decision
+}
+
+func (r *SessionPolicyResolver) resolveWithPolicy(exactSession []byte, global []providerCodex.AccountKey) (SessionPolicyDecision, RoutingPolicyV1) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.resolveLocked(exactSession, global), cloneRoutingPolicy(r.policy)
+}
+
+func (r *SessionPolicyResolver) resolveLocked(exactSession []byte, global []providerCodex.AccountKey) SessionPolicyDecision {
 	digest := keyedSessionDigest(r.key[:], exactSession)
 	decision := SessionPolicyDecision{SessionDigest: digest, PolicyRevision: r.policy.RoutingGeneration, Status: PolicyDecisionUnbound}
 	var poolName string
@@ -84,13 +111,9 @@ func (r *SessionPolicyResolver) Resolve(exactSession []byte, global []providerCo
 			break
 		}
 	}
-	supported := make(map[providerCodex.AccountKey]bool)
-	for _, evidence := range r.policy.CapabilityEvidence {
-		supported[evidence.AccountKey] = evidence.State == CapabilitySupported
-	}
 	seen := make(map[providerCodex.AccountKey]struct{})
 	for _, account := range global {
-		if _, inPool := poolMembers[account]; inPool && supported[account] {
+		if _, inPool := poolMembers[account]; inPool {
 			if _, duplicate := seen[account]; !duplicate {
 				decision.Allowed = append(decision.Allowed, account)
 				seen[account] = struct{}{}
@@ -112,7 +135,7 @@ func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerA
 	if resolver == nil {
 		return SessionPolicyDecision{Allowed: sortedAccountKeys(global), Status: PolicyDecisionUnbound}, nil
 	}
-	decision := resolver.Resolve(exactSession, global)
+	decision, policy := resolver.resolveWithPolicy(exactSession, global)
 	if decision.Status == PolicyDecisionUnbound {
 		decision.Allowed = sortedAccountKeys(global)
 		return decision, nil
@@ -123,7 +146,7 @@ func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerA
 	if caller.Domain == NormalCallerCodex {
 		allowed := make(map[providerCodex.AccountKey]struct{})
 		matched := false
-		for _, delegation := range resolver.policy.Delegations {
+		for _, delegation := range policy.Delegations {
 			if delegation.Caller != caller.SubjectID || !now.Before(delegation.ExpiresAt) {
 				continue
 			}
