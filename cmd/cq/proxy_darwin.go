@@ -300,8 +300,21 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	}
 	facts.inspector = proxy.KnownFact(proxy.InspectorIdentity{Executable: executable, Version: version})
 	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
-	if err != nil || (instanceRoot != "" && bootstrap.StateRoot != instanceRoot) {
-		return facts
+	port := 0
+	if err == nil {
+		if instanceRoot != "" && bootstrap.StateRoot != instanceRoot {
+			return facts
+		}
+		port = bootstrap.Port
+	} else {
+		if instanceRoot != "" {
+			return facts
+		}
+		cfg, configErr := proxy.LoadExistingConfig()
+		if configErr != nil {
+			return facts
+		}
+		port = cfg.Port
 	}
 	var binding installedHTTPValidationServiceBinding
 	for _, label := range []string{proxyAgentLabel, homebrewProxyAgentLabel} {
@@ -315,7 +328,7 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 		}
 	}
 	if binding.label == "" || ctx.Err() != nil {
-		facts.desired = proxy.KnownFact(proxy.DesiredProxyState{Configured: true, Listener: fmt.Sprintf("127.0.0.1:%d", bootstrap.Port)})
+		facts.desired = proxy.KnownFact(proxy.DesiredProxyState{Configured: true, Listener: fmt.Sprintf("127.0.0.1:%d", port)})
 		return facts
 	}
 	manager := "launchagent"
