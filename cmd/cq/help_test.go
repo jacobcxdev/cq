@@ -100,7 +100,7 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"agent", "unknown", "--help"}, exitCode: 1},
 		{args: []string{"proxy", "start", "--help"}},
 		{args: []string{"proxy", "status"}, helper: true},
-		{args: []string{"proxy", "status", "--json"}, exitCode: 4},
+		{args: []string{"proxy", "status", "--json"}},
 		{args: []string{"proxy", "start", "--port", "29280", "--help"}},
 		{args: []string{"proxy", "help", "start"}},
 		{args: []string{"models", "list", "--help"}},
@@ -197,7 +197,7 @@ func TestProxyStatusPreDispatchBoundaryUsesOnlyInjectedCollectors(t *testing.T) 
 	}
 	var stdout bytes.Buffer
 	handled, exitCode, err := runPureGlobalInspectionWithTarget([]string{"proxy", "status", "--json"}, &stdout, io.Discard, target)
-	if err != nil || !handled || exitCode != 4 || calls != 7 || !deadlineSeen {
+	if err != nil || !handled || exitCode != 0 || calls != 7 || !deadlineSeen {
 		t.Fatalf("pre-dispatch status = handled %t exit %d calls %d err %v", handled, exitCode, calls, err)
 	}
 	if !strings.Contains(stdout.String(), `"kind":"proxy_snapshot"`) {
@@ -263,6 +263,25 @@ func TestProxyStatusPreDispatchPreservesFrozenBareStatus(t *testing.T) {
 		if !handled || exitCode != 64 || err == nil || err.Error() != "proxy status usage" || requestedAddress != "" {
 			t.Fatalf("mixed status selectors %v = handled %t exit %d address %q err %v", args, handled, exitCode, requestedAddress, err)
 		}
+	}
+}
+
+func TestReconciledProxyStatusStrictControlsVerdictExit(t *testing.T) {
+	target := ProxyInspectionTarget{}
+	for _, test := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{name: "non-strict", args: []string{"proxy", "status", "--human"}, want: 0},
+		{name: "strict", args: []string{"proxy", "status", "--human", "--strict"}, want: 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handled, exitCode, err := runPureGlobalInspectionWithTarget(test.args, io.Discard, io.Discard, target)
+			if err != nil || !handled || exitCode != test.want {
+				t.Fatalf("status = handled %t exit %d err %v, want exit %d", handled, exitCode, err, test.want)
+			}
+		})
 	}
 }
 

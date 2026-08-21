@@ -39,7 +39,7 @@ func TestRunProxyRegistryUsesFederatedCredentialAuthority(t *testing.T) {
 	}
 
 	assertCodexRegistryModel(t, pipeline, token)
-	_, primerErr := buildCodexPrimer(cfg, true, &proxy.CodexRequestRouter{}, pipeline.Catalog, nil)
+	_, primerErr := buildCodexPrimer(cfg, true, &proxy.CodexRequestRouter{}, &staticProxyCodexRoutingInventory{}, pipeline.Catalog, nil)
 	if primerErr == nil || !strings.Contains(primerErr.Error(), "journal") {
 		t.Fatalf("buildCodexPrimer() error = %v, want post-catalogue journal dependency", primerErr)
 	}

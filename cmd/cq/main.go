@@ -386,10 +386,11 @@ func invalidateProviderCache(id provider.ID) {
 
 func runCheck(cli *CLI) error {
 	httpClient := httputil.NewClient(10*time.Second, version)
+	codexProvider := codexprov.New(httpClient)
 
 	services := map[provider.ID]provider.Services{
 		provider.Claude: {Usage: claudeprov.New(httpClient)},
-		provider.Codex:  {Usage: codexprov.New(httpClient)},
+		provider.Codex:  {Usage: codexProvider},
 		provider.Gemini: {Usage: geminiprov.New()},
 	}
 
@@ -444,6 +445,14 @@ func runCheck(cli *CLI) error {
 	report, err := runner.BuildReport(ctx, req)
 	if err != nil {
 		return err
+	}
+	for _, id := range providerIDs {
+		if id == provider.Codex {
+			if eligibilityErr := enrichCodexProxyEligibility(ctx, &report, codexProvider); eligibilityErr != nil {
+				fmt.Fprintf(os.Stderr, "cq: Codex proxy eligibility unavailable: %v\n", eligibilityErr)
+			}
+			break
+		}
 	}
 	if !cli.JSON {
 		ttyRenderer.Now = report.GeneratedAt

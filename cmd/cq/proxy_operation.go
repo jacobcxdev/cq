@@ -77,8 +77,6 @@ func runOperatorOperation(ctx context.Context, output io.Writer, action, operati
 		} else if action == "recover" {
 			state, exitCode = "indeterminate", 4
 			result.RecoveryControl = "unavailable"
-			remediation := "cq proxy service start --manager launchagent"
-			result.Remediation = &remediation
 			errorsOut = append(errorsOut, operationResultError("operator_operation_indeterminate", exitCode, "operation recovery control is unavailable"))
 		} else {
 			state, exitCode = "pending", 1

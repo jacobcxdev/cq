@@ -900,6 +900,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp["codex_routing_default"] = codexHealth.RoutingDefault
 	}
 	httpMode, wsMode := s.codexRoutingHealth()
+	s.annotateCodexWebSocketSkew(r.Context(), &wsMode)
 	resp["codex_turn_routing"] = httpMode
 	resp["codex_ws_turn_routing"] = wsMode
 	if s.CodexObserver != nil {
@@ -933,6 +934,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = w.Write(body.Bytes())
+}
+
+func (s *Server) annotateCodexWebSocketSkew(ctx context.Context, mode *CodexModeStatus) {
+	if s == nil || mode == nil || mode.Effective != CodexRoutingObserve || s.CodexRequests == nil || s.CodexRequests.Capacity == nil {
+		return
+	}
+	keys, err := s.CodexRequests.AccountKeys(ctx)
+	if err != nil && s.CodexDiscover != nil {
+		for _, account := range s.CodexDiscover() {
+			if account.AccountKey != "" {
+				keys = append(keys, account.AccountKey)
+			}
+		}
+	}
+	minRemaining, maxRemaining, known := 101, -1, 0
+	for _, key := range keys {
+		view := s.CodexRequests.Capacity.Capacity(key, CapacityBucketBase)
+		if view.State == CapacityUnknown || view.RemainingPct < 0 {
+			continue
+		}
+		minRemaining = min(minRemaining, view.RemainingPct)
+		maxRemaining = max(maxRemaining, view.RemainingPct)
+		known++
+	}
+	if known < 2 || maxRemaining <= minRemaining {
+		return
+	}
+	mode.ConnectionSticky = true
+	mode.CapacitySkewPct = maxRemaining - minRemaining
+	mode.Limitation = "account selected once per WebSocket connection; later turns cannot rebalance"
 }
 
 func normaliseCodexRoutingDefaultHealth(health CodexRoutingDefaultHealth) CodexRoutingDefaultHealth {

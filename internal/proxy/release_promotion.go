@@ -27,7 +27,7 @@ type CandidateReleasePromotionInputV1 struct {
 	RollbackFloorAcceptanceReceiptDigest string    `json:"rollback_floor_acceptance_receipt_digest"`
 	ClientBarrierReceiptDigest           string    `json:"client_barrier_receipt_digest"`
 	ClientStopProofDigest                string    `json:"client_stop_proof_digest"`
-	RealClientValidationReceiptDigest    string    `json:"real_client_validation_receipt_digest"`
+	CandidateControlHealthReceiptDigest  string    `json:"candidate_control_health_receipt_digest"`
 	CandidateBrokerSealDigest            string    `json:"candidate_broker_seal_digest"`
 	CandidateConfinementReceiptDigest    string    `json:"candidate_confinement_receipt_digest"`
 	CandidateStageReceiptDigest          string    `json:"candidate_stage_receipt_digest"`
@@ -66,7 +66,7 @@ func validCandidateReleasePromotionInput(input CandidateReleasePromotionInputV1)
 		}
 		seen[commit] = struct{}{}
 	}
-	for _, digest := range []string{input.TargetReleaseBundleDigest, input.RollbackFloorAcceptanceReceiptDigest, input.ClientBarrierReceiptDigest, input.ClientStopProofDigest, input.RealClientValidationReceiptDigest, input.CandidateBrokerSealDigest, input.CandidateConfinementReceiptDigest, input.CandidateStageReceiptDigest} {
+	for _, digest := range []string{input.TargetReleaseBundleDigest, input.RollbackFloorAcceptanceReceiptDigest, input.ClientBarrierReceiptDigest, input.ClientStopProofDigest, input.CandidateControlHealthReceiptDigest, input.CandidateBrokerSealDigest, input.CandidateConfinementReceiptDigest, input.CandidateStageReceiptDigest} {
 		if !lowerHexDigest(digest) {
 			return false
 		}

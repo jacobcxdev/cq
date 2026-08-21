@@ -180,6 +180,44 @@ func TestBuildTTYModel_WithAggregate(t *testing.T) {
 	}
 }
 
+func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	report := app.Report{Providers: []app.ProviderReport{{
+		ID: provider.Codex,
+		Results: []quota.Result{{
+			Status: quota.StatusOK,
+			Plan:   "pro",
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window7Day: {RemainingPct: 97, ResetAtUnix: 303_400},
+			},
+		}},
+		ProxyEligibility: &app.ProxyEligibilityReport{
+			DiscoveredCount: 3,
+			EligibleCount:   2,
+			ExcludedCount:   1,
+			Aggregate: &app.AggregateReport{
+				ProviderID: provider.Codex,
+				Summary:    aggregate.AccountSummary{Count: 2, TotalMulti: 40, Label: "2 × pro 20x = 40x"},
+				Windows: map[quota.WindowName]quota.AggregateResult{
+					quota.Window7Day: {RemainingPct: 55},
+				},
+			},
+		},
+	}}}
+
+	model := BuildTTYModel(report, now)
+	section := model.Sections[0]
+	if !strings.Contains(section.ProxyHeader, "proxy 2/3 eligible · 1 excluded") {
+		t.Fatalf("proxy header = %q", section.ProxyHeader)
+	}
+	if !strings.Contains(section.ProxyHeader, "2 × pro 20x = 40x") {
+		t.Fatalf("proxy aggregate label missing from %q", section.ProxyHeader)
+	}
+	if len(section.ProxyRows) != 1 || !strings.Contains(section.ProxyRows[0].Pct, "55%") {
+		t.Fatalf("proxy rows = %#v", section.ProxyRows)
+	}
+}
+
 // TestBuildAggRows_UnderburnWithImminentOverrideKeepsUnderburn verifies that
 // when GaugePos is in the underburn range (>= 4) and GaugeOverride is
 // "imminent_block", buildAggRows must render the underburn columns (waste pct
@@ -601,12 +639,12 @@ func TestRenderBarMarkerAt100Pct(t *testing.T) {
 
 func TestOrderedWindowKeys_DynamicWindowOrder(t *testing.T) {
 	windows := map[quota.WindowName]quota.Window{
-		quota.Window5Hour:                                 {},
-		quota.Window7Day:                                  {},
-		quota.WindowName("7d:sonnet"):                    {},
-		quota.WindowName("5h:gpt-5.3-codex-spark"):       {},
-		quota.WindowName("7d:gpt-5.3-codex-spark"):       {},
-		quota.WindowPro:                                   {},
+		quota.Window5Hour:                          {},
+		quota.Window7Day:                           {},
+		quota.WindowName("7d:sonnet"):              {},
+		quota.WindowName("5h:gpt-5.3-codex-spark"): {},
+		quota.WindowName("7d:gpt-5.3-codex-spark"): {},
+		quota.WindowPro:                            {},
 	}
 
 	got := orderedWindowKeys(windows)
@@ -642,8 +680,8 @@ func TestBuildTTYModel_ModelScopedWindowsUseBucketHeaders(t *testing.T) {
 						Status: quota.StatusOK,
 						Plan:   "plus",
 						Windows: map[quota.WindowName]quota.Window{
-							quota.Window5Hour:                           {RemainingPct: 75, ResetAtUnix: 10000},
-							quota.Window7Day:                            {RemainingPct: 90, ResetAtUnix: 20000},
+							quota.Window5Hour:                          {RemainingPct: 75, ResetAtUnix: 10000},
+							quota.Window7Day:                           {RemainingPct: 90, ResetAtUnix: 20000},
 							quota.WindowName("7d:sonnet"):              {RemainingPct: 70, ResetAtUnix: 30000},
 							quota.WindowName("5h:gpt-5.3-codex-spark"): {RemainingPct: 65, ResetAtUnix: 11000},
 							quota.WindowName("7d:gpt-5.3-codex-spark"): {RemainingPct: 85, ResetAtUnix: 21000},

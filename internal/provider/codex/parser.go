@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	nowFunc          = time.Now
-	codexPromoEndsAt = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	nowFunc                 = time.Now
+	codexProLitePromoEndsAt = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
 )
 
 type usageWindow struct {
@@ -132,12 +132,9 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 func rateLimitTierForPlan(plan string, now time.Time) string {
 	switch plan {
 	case "pro":
-		if now.Before(codexPromoEndsAt) {
-			return "codex_pro_20x"
-		}
-		return "codex_pro_10x"
+		return "codex_pro_20x"
 	case "prolite":
-		if now.Before(codexPromoEndsAt) {
+		if now.Before(codexProLitePromoEndsAt) {
 			return "codex_prolite_10x"
 		}
 		return "codex_prolite_5x"

@@ -41,6 +41,68 @@ func TestComputeFiltersWeeklyExhaustedFrom5h(t *testing.T) {
 	}
 }
 
+func TestComputeUniformTierRescalingKeepsPercentAndBurndown(t *testing.T) {
+	now := int64(1_000)
+	results := []quota.Result{
+		{
+			Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: now + 9_000},
+			},
+		},
+		{
+			Status: quota.StatusOK,
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window5Hour: {RemainingPct: 20, ResetAtUnix: now + 9_000},
+			},
+		},
+	}
+	results[0].RateLimitTier = "codex_pro_10x"
+	results[1].RateLimitTier = "codex_pro_10x"
+	before, _ := Compute(results, now, nil)
+	results[0].RateLimitTier = "codex_pro_20x"
+	results[1].RateLimitTier = "codex_pro_20x"
+	after, _ := Compute(results, now, nil)
+
+	if before[quota.Window5Hour].RemainingPct != after[quota.Window5Hour].RemainingPct {
+		t.Fatalf("remaining changed after uniform rescaling: %d to %d", before[quota.Window5Hour].RemainingPct, after[quota.Window5Hour].RemainingPct)
+	}
+	if before[quota.Window5Hour].Burndown != after[quota.Window5Hour].Burndown {
+		t.Fatalf("burndown changed after uniform rescaling: %d to %d", before[quota.Window5Hour].Burndown, after[quota.Window5Hour].Burndown)
+	}
+}
+
+func TestComputeWeightsMixedCodexTiers(t *testing.T) {
+	now := int64(1_000)
+	results := []quota.Result{
+		{
+			Status:        quota.StatusOK,
+			RateLimitTier: "codex_pro_20x",
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: now + 9_000},
+			},
+		},
+		{
+			Status:        quota.StatusOK,
+			RateLimitTier: "codex_prolite_5x",
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window5Hour: {RemainingPct: 20, ResetAtUnix: now + 9_000},
+			},
+		},
+	}
+
+	agg, summary := Compute(results, now, nil)
+	if got := agg[quota.Window5Hour].RemainingPct; got != 68 {
+		t.Fatalf("mixed-tier remaining = %d, want 68", got)
+	}
+	if got := agg[quota.Window5Hour].Burndown; got != 19_125 {
+		t.Fatalf("mixed-tier burndown = %d, want 19125", got)
+	}
+	if summary.TotalMulti != 25 {
+		t.Fatalf("mixed-tier multiplier = %d, want 25", summary.TotalMulti)
+	}
+}
+
 func TestComputeIncludesAccountsMissing7dIn5h(t *testing.T) {
 	now := int64(1_000)
 	results := []quota.Result{
@@ -202,9 +264,9 @@ func TestWindowElapsed(t *testing.T) {
 	now := int64(1_000)
 
 	tests := []struct {
-		name      string
-		w         quota.Window
-		want      float64
+		name string
+		w    quota.Window
+		want float64
 	}{
 		{"zero ResetAtUnix", quota.Window{ResetAtUnix: 0, RemainingPct: 50}, 0},
 		{"future reset, elapsed negative clamped to 0", quota.Window{ResetAtUnix: now + period + 500, RemainingPct: 50}, 0},

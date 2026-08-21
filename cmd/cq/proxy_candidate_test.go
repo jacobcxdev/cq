@@ -312,7 +312,7 @@ func TestCandidateReleaseValidationExportsAuthenticatedReceipt(t *testing.T) {
 		InstanceStateRoot: root, TargetReleaseBundle: targetPath, FloorReleaseBundle: floorPath,
 		FloorAcceptanceReceiptFile: floorReceiptPath, FloorAcceptanceReceipt: candidateDomainDigest("cq/release-import-floor/v1\x00", floorReceipt),
 		ClientBuild: "codex-test", ClientExecutable: clientPath, ValidationRun: state.ValidationRunID, ReceiptOut: outputPath,
-		ConfirmLiveDataPlane: true, ConfirmQuotaUse: true,
+		ConfirmControlHealth: true,
 	}
 	digest, err := validateCandidateRelease(ctx, fsutil.OSFileSystem{}, arguments, state, token)
 	if err != nil || len(digest) != 64 {

@@ -118,6 +118,34 @@ func TestRuntimeSupervisorForwardsNormalHTTPOnlyToSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestRuntimeSupervisorHealthRequiresAndForwardsWorkerHealth(t *testing.T) {
+	events := []string{}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events}, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailable := httptest.NewRecorder()
+	supervisor.ServeHTTP(unavailable, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if unavailable.Code != http.StatusServiceUnavailable || unavailable.Header().Get("Content-Type") != "application/json" || unavailable.Body.String() != "{\"status\":\"degraded\",\"supervisor_alive\":true,\"data_plane_ready\":false}\n" {
+		t.Fatalf("health without worker = %d %q %q", unavailable.Code, unavailable.Header().Get("Content-Type"), unavailable.Body.String())
+	}
+
+	worker := &runtimeTestWorker{
+		holder:   runtimeHolder("worker"),
+		events:   &events,
+		response: RuntimeHTTPResponseV1{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"status":"degraded","worker":true}`)},
+	}
+	supervisor.launcher = &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	forwarded := httptest.NewRecorder()
+	supervisor.ServeHTTP(forwarded, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if forwarded.Code != http.StatusOK || forwarded.Body.String() != `{"status":"degraded","worker":true}` {
+		t.Fatalf("worker health = %d %q", forwarded.Code, forwarded.Body.String())
+	}
+}
+
 type runtimeFailingLauncher struct{ calls int }
 
 func (launcher *runtimeFailingLauncher) Launch(context.Context, WorkerManifestV1) (RuntimeWorkerProcess, error) {

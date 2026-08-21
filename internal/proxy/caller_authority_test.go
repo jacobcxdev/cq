@@ -270,7 +270,7 @@ func TestRuntimeSupervisorRefreshesWorkerCallerIndexBeforeAuthentication(t *test
 	}
 }
 
-func TestCallerAuthorityKeepsHealthSupervisorLocal(t *testing.T) {
+func TestCallerAuthorityKeepsUnavailableHealthPublic(t *testing.T) {
 	events := []string{}
 	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events}, &runtimeTestCheckpointStore{events: &events})
 	if err != nil {
@@ -278,7 +278,7 @@ func TestCallerAuthorityKeepsHealthSupervisorLocal(t *testing.T) {
 	}
 	response := httptest.NewRecorder()
 	supervisor.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
-	if response.Code != http.StatusOK || response.Body.String() != "{\"status\":\"ok\"}\n" {
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "{\"status\":\"degraded\",\"supervisor_alive\":true,\"data_plane_ready\":false}\n" {
 		t.Fatalf("health response = %d %q", response.Code, response.Body.String())
 	}
 	if len(events) != 0 {

@@ -23,11 +23,11 @@ func TestReleasePromotionRequiresDescendantAndEveryAdmissionProof(t *testing.T) 
 	}
 
 	for name, mutate := range map[string]func(*CandidateReleasePromotionInputV1){
-		"same source":    func(input *CandidateReleasePromotionInputV1) { input.TargetSourceCommit = input.FloorSourceCommit },
-		"no barrier":     func(input *CandidateReleasePromotionInputV1) { input.ClientBarrierReceiptDigest = "" },
-		"no client":      func(input *CandidateReleasePromotionInputV1) { input.RealClientValidationReceiptDigest = "" },
-		"no broker":      func(input *CandidateReleasePromotionInputV1) { input.CandidateBrokerSealDigest = "" },
-		"no confinement": func(input *CandidateReleasePromotionInputV1) { input.CandidateConfinementReceiptDigest = "" },
+		"same source":       func(input *CandidateReleasePromotionInputV1) { input.TargetSourceCommit = input.FloorSourceCommit },
+		"no barrier":        func(input *CandidateReleasePromotionInputV1) { input.ClientBarrierReceiptDigest = "" },
+		"no control health": func(input *CandidateReleasePromotionInputV1) { input.CandidateControlHealthReceiptDigest = "" },
+		"no broker":         func(input *CandidateReleasePromotionInputV1) { input.CandidateBrokerSealDigest = "" },
+		"no confinement":    func(input *CandidateReleasePromotionInputV1) { input.CandidateConfinementReceiptDigest = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := input
@@ -98,7 +98,7 @@ func candidateReleasePromotionInputForTest() CandidateReleasePromotionInputV1 {
 		RollbackFloorAcceptanceReceiptDigest: strings.Repeat("2", 64),
 		ClientBarrierReceiptDigest:           strings.Repeat("3", 64),
 		ClientStopProofDigest:                strings.Repeat("4", 64),
-		RealClientValidationReceiptDigest:    strings.Repeat("5", 64),
+		CandidateControlHealthReceiptDigest:  strings.Repeat("5", 64),
 		CandidateBrokerSealDigest:            strings.Repeat("6", 64),
 		CandidateConfinementReceiptDigest:    strings.Repeat("7", 64),
 		CandidateStageReceiptDigest:          strings.Repeat("8", 64),

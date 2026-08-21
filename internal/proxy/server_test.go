@@ -171,6 +171,44 @@ func TestServerHealthReportsConfiguredEffectiveCodexModes(t *testing.T) {
 	}
 }
 
+func TestServerHealthWarnsWebSocketObserveCannotRebalanceSkewedAccounts(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	for account, remaining := range map[codex.AccountKey]int{"account-a": 97, "account-b": 54} {
+		ledger.ObserveQuotaSnapshot(account, QuotaSnapshot{
+			FetchedAt: now,
+			Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+				"7d": {RemainingPct: remaining, ResetAtUnix: now.Add(7 * 24 * time.Hour).Unix()},
+			}},
+		})
+	}
+	srv := &Server{
+		CodexDiscover: func() []codex.CodexAccount {
+			return []codex.CodexAccount{{AccountKey: "account-a"}, {AccountKey: "account-b"}}
+		},
+		CodexRequests: &CodexRequestRouter{Capacity: ledger},
+		CodexRouting: &CodexRoutingRuntime{WebSocket: CodexModeStatus{
+			Configured: CodexRoutingObserve,
+			Effective:  CodexRoutingObserve,
+		}},
+	}
+
+	w := httptest.NewRecorder()
+	srv.handleHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var response struct {
+		WS CodexModeStatus `json:"codex_ws_turn_routing"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.WS.CapacitySkewPct != 43 {
+		t.Fatalf("WebSocket capacity skew = %d, want 43", response.WS.CapacitySkewPct)
+	}
+	if !response.WS.ConnectionSticky || response.WS.Limitation == "" {
+		t.Fatalf("WebSocket routing limitation = %+v", response.WS)
+	}
+}
+
 func TestServerCodexWebSocketObserverHonoursExplicitOff(t *testing.T) {
 	httpObserver := &CodexTurnObserver{}
 	wsObserver := &CodexTurnObserver{}

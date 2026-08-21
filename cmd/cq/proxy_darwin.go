@@ -397,6 +397,10 @@ func installProxyAgent() error {
 	if err != nil {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
+	cfg, err := proxy.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load proxy config: %w", err)
+	}
 
 	plistPath, err := proxyAgentPlistPath()
 	if err != nil {
@@ -427,7 +431,7 @@ func installProxyAgent() error {
 		Label:   proxyAgentLabel,
 		Binary:  exe,
 		LogPath: logPath,
-		Port:    proxy.DefaultPort,
+		Port:    cfg.Port,
 	}
 	if err := proxyPlistTemplate.Execute(f, data); err != nil {
 		f.Close()
