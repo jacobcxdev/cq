@@ -30,14 +30,14 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+release:
+  draft: false
+
 changelog:
   sort: asc
   filters:
-    include:
-      - "^feat"
-      - "^fix"
-      - "^perf"
-      - "^refactor"
+    exclude:
+      - "^Merge "
 
 brews:
   - repository:
