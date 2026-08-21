@@ -36,7 +36,7 @@ type Cache interface {
 // tested without touching the filesystem. Nil-safe: a nil History causes the
 // runner to skip rate computation, and the gauge cold-starts (GaugePos = -1).
 type History interface {
-	UpdateAndGetBurnRates(ctx context.Context, results []quota.Result, nowEpoch int64) (history.BurnRates, error)
+	UpdateAndGetBurnRates(ctx context.Context, results map[string][]quota.Result, nowEpoch int64) (history.BurnRates, error)
 }
 
 type Renderer interface {
@@ -212,12 +212,10 @@ func guidanceWithReset(guidance string, resetIn int64) string {
 	return guidance + " The limiting window resets in about " + strconv.FormatInt(minutes, 10) + " minutes."
 }
 
-// flattenFetched returns all results from the fetched map in a single slice,
-// for the history store to process in one pass.
-func flattenFetched(fetched map[provider.ID][]quota.Result) []quota.Result {
-	var out []quota.Result
-	for _, results := range fetched {
-		out = append(out, results...)
+func providerFetched(fetched map[provider.ID][]quota.Result) map[string][]quota.Result {
+	out := make(map[string][]quota.Result, len(fetched))
+	for id, results := range fetched {
+		out[string(id)] = results
 	}
 	return out
 }
@@ -237,7 +235,7 @@ func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][
 			Availability: providerAvailability(results, now),
 			Results:      results,
 		}
-		if windows, summary := aggregate.Compute(results, now.Unix(), burnRates); len(windows) > 0 && summary != nil {
+		if windows, summary := aggregate.Compute(results, now.Unix(), string(id), burnRates); len(windows) > 0 && summary != nil {
 			pr.Aggregate = &AggregateReport{
 				ProviderID: id,
 				Kind:       "weighted_pace",
@@ -272,7 +270,7 @@ func AddProxyEligibility(report *Report, id provider.ID, eligible func(quota.Res
 			EligibleCount:   len(eligibleResults),
 			ExcludedCount:   len(pr.Results) - len(eligibleResults),
 		}
-		if windows, summary := aggregate.Compute(eligibleResults, report.GeneratedAt.Unix(), nil); len(windows) > 0 && summary != nil {
+		if windows, summary := aggregate.Compute(eligibleResults, report.GeneratedAt.Unix(), string(pr.ID), nil); len(windows) > 0 && summary != nil {
 			eligibility.Aggregate = &AggregateReport{
 				ProviderID: id,
 				Kind:       "proxy_eligible_weighted_pace",

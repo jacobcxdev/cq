@@ -15,8 +15,8 @@ import (
 
 type Runner struct {
 	Clock    Clock
-	Cache    Cache    // nil = no caching
-	History  History  // nil = cold-start, no burn-rate smoothing
+	Cache    Cache   // nil = no caching
+	History  History // nil = cold-start, no burn-rate smoothing
 	Services map[provider.ID]provider.Services
 	Renderer Renderer
 }
@@ -67,7 +67,7 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	var burnRates history.BurnRates
 	if r.History != nil {
 		var err error
-		burnRates, err = r.History.UpdateAndGetBurnRates(ctx, flattenFetched(fetched), now.Unix())
+		burnRates, err = r.History.UpdateAndGetBurnRates(ctx, providerFetched(fetched), now.Unix())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: history update failed: %v\n", err)
 		}
@@ -79,6 +79,7 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id provider.ID) []quota.Result {
 	if !refresh && r.Cache != nil {
 		if cached, ok, err := r.Cache.Get(ctx, string(id)); err == nil && ok {
+			cached = markCachedResults(cached, r.cacheAge(ctx, id))
 			return r.enrichCachedWithDiscovered(ctx, id, cached)
 		}
 	}
@@ -114,6 +115,22 @@ func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id p
 		}
 	}
 	return results
+}
+
+func (r *Runner) cacheAge(ctx context.Context, id provider.ID) int64 {
+	age := int64(1)
+	if duration, ok := r.Cache.Age(ctx, string(id)); ok && duration > 0 {
+		age = max(int64(duration.Seconds()), 1)
+	}
+	return age
+}
+
+func markCachedResults(results []quota.Result, age int64) []quota.Result {
+	marked := append([]quota.Result(nil), results...)
+	for index := range marked {
+		marked[index].CacheAge = max(marked[index].CacheAge, age, 1)
+	}
+	return marked
 }
 
 // enrichCachedWithDiscovered takes cached results and merges in locally discovered
@@ -176,11 +193,7 @@ func (r *Runner) backfillFromCache(ctx context.Context, id provider.ID, results 
 	if err != nil || !ok {
 		return results
 	}
-	age, hasAge := r.Cache.Age(ctx, string(id))
-	ageS := int64(0)
-	if hasAge {
-		ageS = int64(age.Seconds())
-	}
+	ageS := r.cacheAge(ctx, id)
 
 	// Index cached results by account identity.
 	byID := make(map[string]quota.Result)

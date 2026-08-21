@@ -17,7 +17,7 @@ type acctInfo struct {
 //
 // burnRates supplies per-account EWMA burn rates for the gauge math; a nil
 // or empty map causes the gauge to cold-start (GaugePos = -1).
-func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates) (map[quota.WindowName]quota.AggregateResult, *AccountSummary) {
+func Compute(results []quota.Result, nowEpoch int64, providerID string, burnRates history.BurnRates) (map[quota.WindowName]quota.AggregateResult, *AccountSummary) {
 	var valid []quota.Result
 	for _, r := range results {
 		if r.IsUsable() {
@@ -57,7 +57,7 @@ func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates
 	agg := make(map[quota.WindowName]quota.AggregateResult)
 	for _, winName := range windowNames {
 		periodS := int64(quota.PeriodFor(winName).Seconds())
-		result, ok := computeWindow(winName, periodS, accounts, nowEpoch, burnRates)
+		result, ok := computeWindow(winName, periodS, accounts, nowEpoch, providerID, burnRates)
 		if !ok {
 			continue
 		}
@@ -70,7 +70,7 @@ func Compute(results []quota.Result, nowEpoch int64, burnRates history.BurnRates
 	return agg, summary
 }
 
-func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo, nowEpoch int64, burnRates history.BurnRates) (quota.AggregateResult, bool) {
+func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo, nowEpoch int64, providerID string, burnRates history.BurnRates) (quota.AggregateResult, bool) {
 	var sumRemaining, sumExpected, sumWeight float64
 	// Burndown: Σ(pct_i * m_i) / Σ((100-pct_i) * m_i / elapsed_i)
 	var burnNum, burnDen float64
@@ -146,7 +146,7 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		result.Sustainability = 0
 	}
 
-	gi := computeGaugeInfo(accounts, winName, periodS, nowEpoch, burnRates)
+	gi := computeGaugeInfo(accounts, winName, periodS, nowEpoch, providerID, burnRates)
 	result.GaugePos = gi.Pos
 	result.GaugeOverride = gi.Override
 	if gi.GapStart >= 0 {

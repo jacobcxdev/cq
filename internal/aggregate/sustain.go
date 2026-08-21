@@ -170,6 +170,7 @@ func computeGaugeInfo(
 	winName quota.WindowName,
 	periodS int64,
 	nowEpoch int64,
+	providerID string,
 	burnRates history.BurnRates,
 ) GaugeInfo {
 	unknown := GaugeInfo{Pos: -1, GapStart: -1, WasteDeadline: -1}
@@ -179,7 +180,7 @@ func computeGaugeInfo(
 	}
 
 	sustainers, totalSupply, totalDemand, sumActiveMulti, haveData, hasWindowData :=
-		buildSustainersAndRatios(accounts, winName, period, nowEpoch, burnRates)
+		buildSustainersAndRatios(accounts, winName, period, nowEpoch, providerID, burnRates)
 
 	if !hasWindowData {
 		return unknown
@@ -316,6 +317,7 @@ func buildSustainersAndRatios(
 	winName quota.WindowName,
 	period float64,
 	nowEpoch int64,
+	providerID string,
 	burnRates history.BurnRates,
 ) (
 	sustainers []sustainAccount,
@@ -392,9 +394,7 @@ func buildSustainersAndRatios(
 
 		// Secondary EWMA signal from the persistent burn store. Only used by
 		// the max-rate override pass in computeGaugeInfo — never contributes
-		// to rho. The store keys on account identity alone (provider not
-		// captured), so we query with an empty provider field — see
-		// internal/history.UpdateAndGetBurnRates.
+		// to rho.
 		var ewmaRate float64
 		accountKey := a.result.AccountID
 		if accountKey == "" {
@@ -402,7 +402,7 @@ func buildSustainersAndRatios(
 		}
 		if accountKey != "" {
 			if r, have := burnRates.Get(history.BurnRateKey{
-				ProviderID: "",
+				ProviderID: providerID,
 				AccountKey: accountKey,
 				Window:     string(winName),
 			}); have {

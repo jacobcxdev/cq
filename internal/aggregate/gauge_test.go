@@ -20,7 +20,7 @@ func burnRateFor(args ...any) history.BurnRates {
 		account, _ := args[i].(string)
 		window, _ := args[i+1].(quota.WindowName)
 		rate, _ := args[i+2].(float64)
-		rates[history.BurnRateKey{AccountKey: account, Window: string(window)}] = rate
+		rates[history.BurnRateKey{ProviderID: "", AccountKey: account, Window: string(window)}] = rate
 	}
 	return rates
 }
@@ -188,7 +188,7 @@ func TestComputeGaugeInfoUnknown(t *testing.T) {
 	accounts := []acctInfo{
 		{result: quota.Result{Windows: map[quota.WindowName]quota.Window{}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, 18_000, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, 18_000, now, "", nil)
 	if gi.Pos != -1 {
 		t.Errorf("Pos = %d, want -1 (unknown)", gi.Pos)
 	}
@@ -211,7 +211,7 @@ func TestComputeGaugeInfoAllDry(t *testing.T) {
 			quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now + resetIn + 4*60},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window7Day, 604_800, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window7Day, 604_800, now, "", nil)
 	if gi.Pos != 0 {
 		t.Errorf("Pos = %d, want 0 (all dry)", gi.Pos)
 	}
@@ -241,7 +241,7 @@ func TestComputeGaugeInfoSevereOverburn(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: now + period},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != 0 {
 		t.Errorf("Pos = %d, want 0 (severe overburn)", gi.Pos)
 	}
@@ -269,7 +269,7 @@ func TestComputeGaugeInfoModerateOverburn(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 60, ResetAtUnix: now + 14_400},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != 1 {
 		t.Errorf("Pos = %d, want 1 (moderate overburn)", gi.Pos)
 	}
@@ -296,7 +296,7 @@ func TestComputeGaugeInfoMildOverburn(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 72, ResetAtUnix: now + 14_400},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != 2 {
 		t.Errorf("Pos = %d, want 2 (mild overburn)", gi.Pos)
 	}
@@ -320,7 +320,7 @@ func TestComputeGaugeInfoOnPace(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 50, ResetAtUnix: now + 9_000},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != 3 {
 		t.Errorf("Pos = %d, want 3 (on pace)", gi.Pos)
 	}
@@ -340,7 +340,7 @@ func TestComputeGaugeInfoUnderburn(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 95, ResetAtUnix: now + 1_800},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos < 4 {
 		t.Errorf("Pos = %d, want >= 4 (underburn)", gi.Pos)
 	}
@@ -364,7 +364,7 @@ func TestComputeGaugeInfoWeeklyGateWithinHorizon(t *testing.T) {
 			quota.Window7Day:  {RemainingPct: 0, ResetAtUnix: now + 3_600}, // 7d resets in 1h
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	// Account B provides coverage after 3600s. Should not be position 0 (all dry).
 	if gi.Pos == 0 {
 		t.Error("weekly-gated account with reset within horizon should contribute coverage")
@@ -385,7 +385,7 @@ func TestComputeGaugeInfoWeeklyGateBeyondHorizon(t *testing.T) {
 			quota.Window7Day:  {RemainingPct: 0, ResetAtUnix: now + 100_000}, // 7d resets far away
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	// Only account A contributes. Should still produce a valid position.
 	if gi.Pos < -1 || gi.Pos > 6 {
 		t.Errorf("Pos = %d, want valid position", gi.Pos)
@@ -410,7 +410,7 @@ func TestComputeGaugeInfoAllElapsedZeroReturnsUnknown(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: now + period},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != -1 {
 		t.Errorf("Pos = %d, want -1 (all elapsed=0 → no cumulative signal)", gi.Pos)
 	}
@@ -451,7 +451,7 @@ func TestComputeGaugeInfoCumulativeOverburnDirection(t *testing.T) {
 			quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: now + period},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != 2 {
 		t.Errorf("Pos = %d, want 2 (mild overburn from cumulative used/elapsed)", gi.Pos)
 	}
@@ -474,7 +474,7 @@ func TestComputeGaugeInfoNoSustainersAllGated(t *testing.T) {
 			quota.Window7Day:  {RemainingPct: 0, ResetAtUnix: now + 200_000},
 		}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, period, now, "", nil)
 	if gi.Pos != 0 {
 		t.Errorf("Pos = %d, want 0 (all gated beyond horizon = all dry)", gi.Pos)
 	}

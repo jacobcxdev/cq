@@ -5,6 +5,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -156,7 +157,7 @@ func sweepPositions(
 			})
 		}
 
-		gi := computeGaugeInfo(accounts, winName, periodS, now, nil)
+		gi := computeGaugeInfo(accounts, winName, periodS, now, "", nil)
 		positions = append(positions, gi.Pos)
 	}
 	return positions
@@ -240,13 +241,30 @@ func TestGaugeImminentOverridePreservesNaturalPos(t *testing.T) {
 	// EWMA 0.005 pct/s → remaining/ewmaRate = 90/0.005 = 18000s < 21600s → fires.
 	rates := burnRateFor("heavy", quota.Window7Day, 0.005)
 
-	gi := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, rates)
+	gi := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, "", rates)
 	if gi.Override != "imminent_block" {
 		t.Errorf("Override = %q, want %q", gi.Override, "imminent_block")
 	}
 	// Natural rho position must be preserved; override must not rewrite Pos.
 	if gi.Pos != 6 {
 		t.Errorf("Pos = %d, want 6 (natural underburn bucket preserved despite override)", gi.Pos)
+	}
+}
+
+func TestGaugeUsesOnlyMatchingProviderBurnRate(t *testing.T) {
+	now := int64(10_000_000)
+	periodS := int64(7 * 24 * 3600)
+	accounts := []acctInfo{{multiplier: 1, result: quota.Result{AccountID: "shared", Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+		quota.Window7Day: {RemainingPct: 90, ResetAtUnix: now + 304800},
+	}}}}
+	rates := history.BurnRates{
+		{ProviderID: "claude", AccountKey: "shared", Window: string(quota.Window7Day)}: 0.005,
+	}
+	if got := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, "codex", rates).Override; got != "" {
+		t.Fatalf("Codex override used Claude burn rate: %q", got)
+	}
+	if got := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, "claude", rates).Override; got != "imminent_block" {
+		t.Fatalf("Claude override = %q", got)
 	}
 }
 
@@ -275,7 +293,7 @@ func TestGaugeCumulativeImminentOverridePreservesNaturalPos(t *testing.T) {
 			}}},
 	}
 
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, periodS, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, periodS, now, "", nil)
 	if gi.Override != "imminent_block" {
 		t.Errorf("Override = %q, want %q", gi.Override, "imminent_block")
 	}
@@ -304,7 +322,7 @@ func TestGaugeNoImminentOverrideWhenSustainable(t *testing.T) {
 				quota.Window7Day: {RemainingPct: 90, ResetAtUnix: now + periodS - 60480},
 			}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window7Day, periodS, now, "", nil)
 	if gi.Override != "" {
 		t.Errorf("Override = %q, want empty (sustainable)", gi.Override)
 	}
@@ -330,7 +348,7 @@ func TestGaugeColdStartReturnsUnknown(t *testing.T) {
 				quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: now + 18_000},
 			}}},
 	}
-	gi := computeGaugeInfo(accounts, quota.Window5Hour, 18_000, now, nil)
+	gi := computeGaugeInfo(accounts, quota.Window5Hour, 18_000, now, "", nil)
 	if gi.Pos != -1 {
 		t.Errorf("Pos = %d, want -1 (cold start)", gi.Pos)
 	}

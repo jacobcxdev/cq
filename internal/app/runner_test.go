@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
@@ -35,11 +36,20 @@ func (m *mockProvider) DiscoverAccounts(_ context.Context) ([]provider.Account, 
 
 // mockCache implements Cache.
 type mockCache struct {
-	data    map[string][]quota.Result
-	putErr  error
-	getErr  error
-	ageVal  time.Duration
-	ageOK   bool
+	data   map[string][]quota.Result
+	putErr error
+	getErr error
+	ageVal time.Duration
+	ageOK  bool
+}
+
+type captureHistory struct {
+	results map[string][]quota.Result
+}
+
+func (h *captureHistory) UpdateAndGetBurnRates(_ context.Context, results map[string][]quota.Result, _ int64) (history.BurnRates, error) {
+	h.results = results
+	return nil, nil
 }
 
 func (c *mockCache) Get(_ context.Context, id string) ([]quota.Result, bool, error) {
@@ -160,11 +170,13 @@ func TestRunnerUsesCache(t *testing.T) {
 	cached := []quota.Result{{Status: quota.StatusOK}}
 	p := &mockProvider{id: provider.Codex}
 	cr := &captureRenderer{}
+	h := &captureHistory{}
 	runner := &Runner{
 		Clock: fixedClock(time.Unix(1000, 0)),
 		Cache: &mockCache{data: map[string][]quota.Result{
 			string(provider.Codex): cached,
-		}},
+		}, ageVal: 15 * time.Second, ageOK: true},
+		History: h,
 		Services: map[provider.ID]provider.Services{
 			provider.Codex: {Usage: p},
 		},
@@ -182,6 +194,12 @@ func TestRunnerUsesCache(t *testing.T) {
 	}
 	if len(cr.report.Providers[0].Results) != 1 {
 		t.Fatalf("results len = %d, want 1", len(cr.report.Providers[0].Results))
+	}
+	if got := cr.report.Providers[0].Results[0].CacheAge; got != 15 {
+		t.Fatalf("CacheAge = %d, want 15", got)
+	}
+	if got := h.results[string(provider.Codex)][0].CacheAge; got != 15 {
+		t.Fatalf("history CacheAge = %d, want 15", got)
 	}
 }
 
@@ -289,7 +307,7 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredClaudeAccount(t *testing.T) {
 
 func TestRunnerUsesCacheAndAddsExpiredDiscoveredGeminiAccount(t *testing.T) {
 	p := &mockProvider{
-		id: provider.Gemini,
+		id:         provider.Gemini,
 		discovered: []provider.Account{{Email: "gemini@example.com"}},
 	}
 	cr := &captureRenderer{}
@@ -328,7 +346,7 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredGeminiAccount(t *testing.T) {
 
 func TestRunnerUsesCacheAndMarksSynthesisedDiscoveredAccountActive(t *testing.T) {
 	p := &mockProvider{
-		id: provider.Gemini,
+		id:         provider.Gemini,
 		discovered: []provider.Account{{Email: "active@example.com", Active: true}},
 	}
 	cr := &captureRenderer{}
