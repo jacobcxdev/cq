@@ -69,6 +69,19 @@ func TestProxyCommandClassifiesRefreshAndOperatorRows(t *testing.T) {
 	}
 }
 
+func TestProxyCommandClassifiesPolicyMutations(t *testing.T) {
+	for _, argv := range [][]string{
+		{"proxy", "policy", "apply", "--file", "/tmp/policy.json"},
+		{"proxy", "policy", "pool", "set", "team", "--account", "account"},
+		{"proxy", "policy", "session", "list"},
+	} {
+		authority, err := ClassifyProxyCommand(argv)
+		if err != nil || authority.Terminating || authority.Catalogue != "proxy" || authority.Row != "proxy_policy" {
+			t.Fatalf("ClassifyProxyCommand(%v) = %#v, %v", argv, authority, err)
+		}
+	}
+}
+
 func TestProxyCommandHelpAnywhereAndIgnoredRefreshTails(t *testing.T) {
 	for _, argv := range [][]string{
 		{"help"},

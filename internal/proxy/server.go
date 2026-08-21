@@ -156,6 +156,10 @@ type Server struct {
 	// Refresher is the optional registry refresher. When non-nil, it backs
 	// the /v1/registry/refresh endpoint.
 	Refresher RegistryRefresher
+	// RoutingPolicy remains worker-owned while local authenticated control
+	// reads or publishes policy through this process.
+	RoutingPolicy *RoutingPolicyStore
+	SessionPolicy *SessionPolicyResolver
 }
 
 type codexWebSocketRoutingProvider interface {
@@ -363,6 +367,9 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("GET /models", s.handleCodexNativeModels)
 	mux.HandleFunc("GET /v1/registry", s.handleRegistry)
 	mux.HandleFunc("POST /v1/registry/refresh", s.handleRegistryRefresh)
+	mux.HandleFunc("GET "+RuntimePolicyPath, s.handlePolicyControl)
+	mux.HandleFunc("PUT "+RuntimePolicyPath, s.handlePolicyControl)
+	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
 	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
 	mux.HandleFunc("GET "+codexCompactResponsesPath, s.handleCodexCompactResponsesGetRoute)

@@ -1047,6 +1047,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Catalog:                          catalog,
 		Refresher:                        proxyRefresher,
 		RuntimeCallerCredentials:         runtimeCallerCredentials,
+		SessionPolicy:                    sessionPolicy,
+	}
+	if resilienceState != nil {
+		srv.RoutingPolicy = resilienceState.Routing
 	}
 	if err := legacyFinaliseVerifier.bind(codexRouting, headroom, resolvedMode); err != nil {
 		return fmt.Errorf("legacy credential endpoint finalise verifier: %w", err)

@@ -103,14 +103,23 @@ The command writes only an expiring private request and restarts that service.
 The serving process owns validation and does not write readiness evidence until
 every installed acceptance gate and process attestation succeeds.
 `,
-	"proxy policy": `Usage: cq proxy policy <initialise|apply|status>
+	"proxy policy": `Usage: cq proxy policy <initialise|apply|status|pool|session>
 
 Manage authenticated capability-aware routing policy.
 
 Commands:
   initialise --state-root DIR         Create authority state and activate it in proxy config
-  apply --file FILE [--state-root DIR] Publish next routing-policy generation
-  status [--state-root DIR]           Print selected routing policy as JSON
+  apply --file FILE [--state-root DIR] Publish policy through live control; explicit state root is offline
+  status [--state-root DIR]           Print live policy; explicit state root is offline
+  pool set NAME --account ACCOUNT...  Replace one explicit account pool
+  session bind --pool NAME SELECTOR   Bind one exact session to a pool
+  session show SELECTOR               Show one privacy-safe binding
+  session list                        List full digests and pool names
+  session unbind SELECTOR             Remove one exact binding
+  session digest SELECTOR             Compute one keyed digest
+
+Session selectors:
+  --session-id ID | --session-id-stdin | --digest FULL_LOWER_HEX
 `,
 	"proxy rescue": `Usage: cq proxy rescue <enter|exit|status> [--port PORT]
 
@@ -370,7 +379,7 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 		}
 		return true, 0, nil
 	}
-	if authority.Catalogue == "proxy" && authority.Row == "proxy_policy_status" && !authority.Terminating {
+	if authority.Catalogue == "proxy" && (authority.Row == "proxy_policy_status" || authority.Row == "proxy_policy") && !authority.Terminating {
 		if err := runProxyPolicy(args[2:], stdout); err != nil {
 			return true, 1, err
 		}

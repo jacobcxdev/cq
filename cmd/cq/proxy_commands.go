@@ -294,14 +294,17 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		}
 		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_rescue", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
 	}
-	if len(argv) >= 3 && argv[1] == "policy" && argv[2] == "status" {
-		if helpRequested(argv[3:]) {
+	if len(argv) >= 2 && argv[1] == "policy" {
+		if helpRequested(argv[2:]) {
 			return terminatingOrdinary("ordinary_help"), nil
 		}
-		if _, err := parseProxyPolicyOptions(argv[3:]); err != nil {
-			return terminatingOrdinary("ordinary_usage_error"), nil
+		if len(argv) >= 3 && argv[2] == "status" {
+			if _, err := parseProxyPolicyOptions(argv[3:]); err != nil {
+				return terminatingOrdinary("ordinary_usage_error"), nil
+			}
+			return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_policy_status", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
 		}
-		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_policy_status", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_policy", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
 	}
 	if len(argv) >= 2 && argv[1] == "candidate" {
 		return classifyCandidateAuthority(argv)
