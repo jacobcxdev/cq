@@ -18,6 +18,43 @@ func TestCodexProtocolRequest(t *testing.T) {
 	}
 }
 
+func TestParseCodexProtocolRequestReasoningEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "top level",
+			body: `{"type":"response.create","reasoning":{"effort":"high"}}`,
+			want: "high",
+		},
+		{
+			name: "websocket params",
+			body: `{"type":"response/create","params":{"reasoning":{"effort":"low"}}}`,
+			want: "low",
+		},
+		{
+			name: "absent",
+			body: `{"type":"response.create"}`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseCodexProtocolRequest([]byte(tt.body), "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RequestedReasoningEffort != tt.want {
+				t.Fatalf("reasoning effort = %q, want %q", got.RequestedReasoningEffort, tt.want)
+			}
+		})
+	}
+}
+
 func TestCodexProtocolRequestAcceptsBodyOverLegacyLimit(t *testing.T) {
 	body := codexProtocolRequestBodyAtSize(t, maxRequestBody+1)
 	got, err := ParseCodexProtocolRequest(body, "", nil)

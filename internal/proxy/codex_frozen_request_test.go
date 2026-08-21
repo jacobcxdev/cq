@@ -307,6 +307,108 @@ func TestInspectCodexNativeRequestEnforcesTypedAuthority(t *testing.T) {
 	}
 }
 
+func TestInspectCodexNativeRequestCapturesRequestedReasoningEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "top level",
+			body: `{"type":"response.create","model":"gpt-5.4","reasoning":{"effort":"high"},"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`,
+			want: "high",
+		},
+		{
+			name: "params",
+			body: `{"type":"response/create","params":{"model":"gpt-5.4","reasoning":{"effort":"low"}},"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`,
+			want: "low",
+		},
+		{
+			name: "top level null falls back to params",
+			body: `{"type":"response/create","reasoning":null,"params":{"model":"gpt-5.4","reasoning":{"effort":"low"}},"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`,
+			want: "low",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspection, err := InspectCodexNativeRequest(context.Background(), []byte(tt.body), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inspection.Release()
+			protocol, err := inspection.Protocol()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if protocol.RequestedReasoningEffort != tt.want || !protocol.HasRequestedReasoningEffort || !protocol.RequestedReasoningEffortValid {
+				t.Fatalf("protocol reasoning effort = %#v", protocol)
+			}
+		})
+	}
+}
+
+func TestInspectCodexNativeRequestRejectsAmbiguousRequestedReasoningEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "duplicate effort",
+			body: `{"type":"response.create","model":"gpt-5.4","reasoning":{"effort":"private-one","effort":"private-two"},"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`,
+		},
+		{
+			name: "escaped effort",
+			body: `{"type":"response.create","model":"gpt-5.4","reasoning":{"\u0065ffort":"private"},"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspection, err := InspectCodexNativeRequest(context.Background(), []byte(tt.body), nil)
+			if inspection != nil {
+				inspection.Release()
+			}
+			assertFrozenRequestErrorCode(t, err, CodexFrozenRequestProtocolInvalid)
+			if strings.Contains(err.Error(), "private") {
+				t.Fatalf("error leaked requested reasoning effort: %q", err)
+			}
+		})
+	}
+}
+
+func TestInspectCodexNativeRequestMarksInvalidRequestedReasoningEffortUnknown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		reasoning string
+	}{
+		{name: "non-object reasoning", reasoning: `1`},
+		{name: "non-string effort", reasoning: `{"effort":1}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body := []byte(`{"type":"response.create","model":"gpt-5.4","reasoning":` + tt.reasoning + `,"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+			inspection, err := InspectCodexNativeRequest(context.Background(), body, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inspection.Release()
+			protocol, err := inspection.Protocol()
+			if err != nil {
+				t.Fatal(err)
+			}
+			shape := classifyCodexRequestShape(protocol, nil)
+			if protocol.RequestedReasoningEffort != "" || !protocol.HasRequestedReasoningEffort || protocol.RequestedReasoningEffortValid || shape.RequestedReasoningEffort != "unknown" {
+				t.Fatalf("invalid requested reasoning effort = %#v / %#v", protocol, shape)
+			}
+		})
+	}
+}
+
 func TestInspectCodexNativeRequestCapturesBoundedTurnStateAuthority(t *testing.T) {
 	body := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private")
 	header := http.Header{"X-Codex-Turn-State": {"state-one"}}
