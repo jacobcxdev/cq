@@ -16,28 +16,32 @@ import (
 )
 
 type RouteEvent struct {
-	Time            time.Time `json:"time"`
-	Method          string    `json:"method"`
-	Path            string    `json:"path"`
-	Provider        string    `json:"provider"`
-	RouteKind       string    `json:"route_kind,omitempty"`
-	Model           string    `json:"model,omitempty"`
-	AccountHint     string    `json:"account_hint,omitempty"`
-	PinActive       bool      `json:"pin_active,omitempty"`
-	Failover        bool      `json:"failover,omitempty"`
-	StatusCode      int       `json:"status_code,omitempty"`
-	LatencyMS       int64     `json:"latency_ms,omitempty"`
-	Error           string    `json:"error,omitempty"`
-	SessionKey      string    `json:"session_key,omitempty"`
-	SessionSource   string    `json:"session_source,omitempty"`
-	TurnHint        string    `json:"turn_hint,omitempty"`
-	RequestKind     string    `json:"request_kind,omitempty"`
-	LeasePhase      string    `json:"lease_phase,omitempty"`
-	LeaseGeneration uint64    `json:"lease_generation,omitempty"`
-	Decision        string    `json:"decision,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
-	Bucket          string    `json:"bucket,omitempty"`
-	Continuity      string    `json:"continuity,omitempty"`
+	Time                     time.Time `json:"time"`
+	Method                   string    `json:"method"`
+	Path                     string    `json:"path"`
+	Provider                 string    `json:"provider"`
+	RouteKind                string    `json:"route_kind,omitempty"`
+	Model                    string    `json:"model,omitempty"`
+	RequestLineage           string    `json:"request_lineage,omitempty"`
+	RequestedReasoningEffort string    `json:"requested_reasoning_effort,omitempty"`
+	RequestedModelClass      string    `json:"requested_model_class,omitempty"`
+	CompactionPhase          string    `json:"compaction_phase,omitempty"`
+	AccountHint              string    `json:"account_hint,omitempty"`
+	PinActive                bool      `json:"pin_active,omitempty"`
+	Failover                 bool      `json:"failover,omitempty"`
+	StatusCode               int       `json:"status_code,omitempty"`
+	LatencyMS                int64     `json:"latency_ms,omitempty"`
+	Error                    string    `json:"error,omitempty"`
+	SessionKey               string    `json:"session_key,omitempty"`
+	SessionSource            string    `json:"session_source,omitempty"`
+	TurnHint                 string    `json:"turn_hint,omitempty"`
+	RequestKind              string    `json:"request_kind,omitempty"`
+	LeasePhase               string    `json:"lease_phase,omitempty"`
+	LeaseGeneration          uint64    `json:"lease_generation,omitempty"`
+	Decision                 string    `json:"decision,omitempty"`
+	Reason                   string    `json:"reason,omitempty"`
+	Bucket                   string    `json:"bucket,omitempty"`
+	Continuity               string    `json:"continuity,omitempty"`
 }
 
 type routeDiagnosticsContextKey struct{}
@@ -50,15 +54,19 @@ type routeDiagnostics struct {
 }
 
 type codexObservationFields struct {
-	TurnHint        string
-	RequestKind     string
-	LeasePhase      string
-	LeaseGeneration uint64
-	Decision        string
-	Reason          string
-	Bucket          string
-	AccountHint     string
-	Continuity      string
+	TurnHint                 string
+	RequestKind              string
+	RequestLineage           string
+	RequestedReasoningEffort string
+	RequestedModelClass      string
+	CompactionPhase          string
+	LeasePhase               string
+	LeaseGeneration          uint64
+	Decision                 string
+	Reason                   string
+	Bucket                   string
+	AccountHint              string
+	Continuity               string
 }
 
 func withRouteDiagnostics(ctx context.Context) (context.Context, *routeDiagnostics) {
@@ -81,6 +89,18 @@ func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
 	}
 	if fields.RequestKind != "" {
 		diag.codex.RequestKind = fields.RequestKind
+	}
+	if fields.RequestLineage != "" {
+		diag.codex.RequestLineage = fields.RequestLineage
+	}
+	if fields.RequestedReasoningEffort != "" {
+		diag.codex.RequestedReasoningEffort = fields.RequestedReasoningEffort
+	}
+	if fields.RequestedModelClass != "" {
+		diag.codex.RequestedModelClass = fields.RequestedModelClass
+	}
+	if fields.CompactionPhase != "" {
+		diag.codex.CompactionPhase = fields.CompactionPhase
 	}
 	if fields.LeasePhase != "" {
 		diag.codex.LeasePhase = fields.LeasePhase
@@ -149,6 +169,10 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 	diag.mu.Unlock()
 	event.TurnHint = codex.TurnHint
 	event.RequestKind = codex.RequestKind
+	event.RequestLineage = codex.RequestLineage
+	event.RequestedReasoningEffort = codex.RequestedReasoningEffort
+	event.RequestedModelClass = codex.RequestedModelClass
+	event.CompactionPhase = codex.CompactionPhase
 	event.LeasePhase = codex.LeasePhase
 	event.LeaseGeneration = codex.LeaseGeneration
 	event.Decision = codex.Decision
@@ -456,6 +480,12 @@ const (
 	codexDiagnosticsModelReasoning = "model_family_reasoning"
 	codexDiagnosticsModelUnknown   = "model_family_unknown"
 
+	codexRequestedModelClassSol     = "gpt_5_6_sol"
+	codexRequestedModelClassTerra   = "gpt_5_6_terra"
+	codexRequestedModelClassLuna    = "gpt_5_6_luna"
+	codexRequestedModelClassOther   = "other"
+	codexRequestedModelClassUnknown = "unknown"
+
 	codexDiagnosticsBucketBase        = "capacity_base"
 	codexDiagnosticsBucketModelScoped = "capacity_model_scoped"
 	codexDiagnosticsBucketUnknown     = "capacity_unknown"
@@ -470,8 +500,26 @@ func projectCodexDiagnostics(event RouteEvent) RouteEvent {
 		return event
 	}
 	event.Model = projectCodexDiagnosticsModel(event.Model)
+	event.RequestedModelClass = projectCodexRequestedModelClass(event.RequestedModelClass)
 	event.Bucket = projectCodexDiagnosticsBucket(event.Bucket)
 	return event
+}
+
+func projectCodexRequestedModelClass(value string) string {
+	switch value {
+	case codexRequestedModelClassSol, "gpt-5.6-sol":
+		return codexRequestedModelClassSol
+	case codexRequestedModelClassTerra, "gpt-5.6-terra":
+		return codexRequestedModelClassTerra
+	case codexRequestedModelClassLuna, "gpt-5.6-luna":
+		return codexRequestedModelClassLuna
+	case codexRequestedModelClassOther:
+		return codexRequestedModelClassOther
+	case "", codexRequestedModelClassUnknown:
+		return codexRequestedModelClassUnknown
+	default:
+		return codexRequestedModelClassOther
+	}
 }
 
 func projectCodexDiagnosticsModel(value string) string {
@@ -568,6 +616,10 @@ func safeCodexRouteEvent(event RouteEvent) bool {
 		safeCodexSessionCorrelation(event.SessionKey, event.SessionSource) &&
 		safeHashedHint(event.TurnHint, "turn") &&
 		safeCodexRequestKind(event.RequestKind) &&
+		safeCodexRequestLineage(event.RequestLineage) &&
+		safeCodexRequestedReasoningEffort(event.RequestedReasoningEffort) &&
+		safeCodexRequestedModelClass(event.RequestedModelClass) &&
+		safeCodexCompactionPhase(event.CompactionPhase) &&
 		safeCodexLeasePhase(event.LeasePhase) &&
 		safeCodexDecision(event.Decision) &&
 		safeCodexReason(event.Reason) &&
@@ -623,6 +675,42 @@ func safeCodexSessionCorrelation(key, source string) bool {
 func safeCodexRequestKind(value string) bool {
 	switch value {
 	case "", string(CodexRequestTurn), string(CodexRequestPrewarm), string(CodexRequestCompaction), string(CodexRequestMemory):
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexRequestLineage(value string) bool {
+	switch value {
+	case "", codexRequestLineagePreviousResponseIDAbsent, codexRequestLineagePreviousResponseIDPresent, codexRequestLineageUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexRequestedReasoningEffort(value string) bool {
+	switch value {
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", codexRequestedReasoningEffortUnspecified, codexRequestedReasoningEffortUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexRequestedModelClass(value string) bool {
+	switch value {
+	case "", codexRequestedModelClassSol, codexRequestedModelClassTerra, codexRequestedModelClassLuna, codexRequestedModelClassOther, codexRequestedModelClassUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexCompactionPhase(value string) bool {
+	switch value {
+	case "", string(CodexCompactionStandalone), string(CodexCompactionPreTurn), string(CodexCompactionMidTurn), "not_applicable", "unknown":
 		return true
 	default:
 		return false

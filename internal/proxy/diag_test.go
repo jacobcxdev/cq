@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -240,35 +242,15 @@ func TestDiagnosticsWriterAcceptsStructurallySafeCodexCorrelation(t *testing.T) 
 
 // ── sessionCorrelation tests ─────────────────────────────────────────────────
 
-func TestDiagnosticsWriterRejectsEveryUnsafeCodexFreeFormField(t *testing.T) {
+func TestDiagnosticsWriterRejectsEveryUnsafeCodexStringField(t *testing.T) {
 	unsafeFixture := "raw-private-fixture"
-	tests := []struct {
-		name   string
-		mutate func(*RouteEvent)
-	}{
-		{name: "method", mutate: func(event *RouteEvent) { event.Method = unsafeFixture }},
-		{name: "route kind", mutate: func(event *RouteEvent) { event.RouteKind = unsafeFixture }},
-		{name: "account hint", mutate: func(event *RouteEvent) { event.AccountHint = unsafeFixture }},
-		{name: "session key", mutate: func(event *RouteEvent) { event.SessionKey = unsafeFixture }},
-		{name: "session source", mutate: func(event *RouteEvent) { event.SessionSource = unsafeFixture }},
-		{name: "turn hint", mutate: func(event *RouteEvent) { event.TurnHint = unsafeFixture }},
-		{name: "request kind", mutate: func(event *RouteEvent) { event.RequestKind = unsafeFixture }},
-		{name: "lease phase", mutate: func(event *RouteEvent) { event.LeasePhase = unsafeFixture }},
-		{name: "decision", mutate: func(event *RouteEvent) { event.Decision = unsafeFixture }},
-		{name: "reason", mutate: func(event *RouteEvent) { event.Reason = unsafeFixture }},
-		{name: "bucket", mutate: func(event *RouteEvent) { event.Bucket = unsafeFixture }},
-		{name: "continuity", mutate: func(event *RouteEvent) { event.Continuity = unsafeFixture }},
-		{name: "error", mutate: func(event *RouteEvent) { event.Error = unsafeFixture }},
-		{name: "model", mutate: func(event *RouteEvent) { event.Model = unsafeFixture }},
-		{name: "model with supported prefix", mutate: func(event *RouteEvent) { event.Model = "gpt-privatefixture123" }},
-		{name: "model-scoped bucket with supported prefix", mutate: func(event *RouteEvent) { event.Bucket = "model:gpt-privatefixture123" }},
-		{name: "path", mutate: func(event *RouteEvent) { event.Path = unsafeFixture }},
-		{name: "well formed raw live call path", mutate: func(event *RouteEvent) { event.Path = "/v1/realtime/calls/call_privatefixture123" }},
-		{name: "well formed unknown event reason", mutate: func(event *RouteEvent) { event.Reason = "response_event_privatefixture123" }},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+	eventType := reflect.TypeOf(RouteEvent{})
+	for i := 0; i < eventType.NumField(); i++ {
+		field := eventType.Field(i)
+		if field.Type.Kind() != reflect.String || field.Name == "Provider" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "routes.jsonl")
 			writer, err := OpenDiagnosticsWriter(path)
 			if err != nil {
@@ -279,7 +261,7 @@ func TestDiagnosticsWriterRejectsEveryUnsafeCodexFreeFormField(t *testing.T) {
 			writer.SetCodexCanary(recorder)
 
 			event := structurallySafeCodexRouteEvent()
-			test.mutate(&event)
+			reflect.ValueOf(&event).Elem().FieldByIndex(field.Index).SetString(unsafeFixture)
 			err = writer.Write(event)
 			if !errors.Is(err, ErrUnsafeCodexDiagnostics) {
 				t.Fatalf("write error = %v, want ErrUnsafeCodexDiagnostics", err)
@@ -298,6 +280,126 @@ func TestDiagnosticsWriterRejectsEveryUnsafeCodexFreeFormField(t *testing.T) {
 				t.Fatalf("unsafe event reached diagnostics: %q", data)
 			}
 		})
+	}
+}
+
+func TestDiagnosticsWriterRejectsUnsafeCodexStringPatterns(t *testing.T) {
+	for _, mutate := range []func(*RouteEvent){
+		func(event *RouteEvent) { event.Model = "gpt-privatefixture123" },
+		func(event *RouteEvent) { event.Bucket = "model:gpt-privatefixture123" },
+		func(event *RouteEvent) { event.Path = "/v1/realtime/calls/call_privatefixture123" },
+		func(event *RouteEvent) { event.Reason = "response_event_privatefixture123" },
+	} {
+		path := filepath.Join(t.TempDir(), "routes.jsonl")
+		writer, err := OpenDiagnosticsWriter(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := newCodexDiagnosticsTestCanary(t)
+		writer.SetCodexCanary(recorder)
+		event := structurallySafeCodexRouteEvent()
+		mutate(&event)
+		if err := writer.Write(event); !errors.Is(err, ErrUnsafeCodexDiagnostics) {
+			t.Fatalf("Write error = %v, want ErrUnsafeCodexDiagnostics", err)
+		}
+		if got := recorder.State().SecretLeaks; got != 1 {
+			t.Fatalf("secret leaks = %d, want 1", got)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 0 {
+			t.Fatalf("unsafe pattern reached diagnostics: %q", data)
+		}
+	}
+}
+
+func TestRouteEventJSONShapeFieldsAreAdditiveAndCompatible(t *testing.T) {
+	legacy := RouteEvent{Time: time.Unix(1, 0).UTC(), Method: http.MethodPost, Path: "/v1/responses", Provider: "codex", RouteKind: "codex_native", Model: "model_family_gpt"}
+	got, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"time":"1970-01-01T00:00:01Z","method":"POST","path":"/v1/responses","provider":"codex","route_kind":"codex_native","model":"model_family_gpt"}`
+	if string(got) != want {
+		t.Fatalf("legacy JSON = %s, want %s", got, want)
+	}
+
+	withShape := legacy
+	withShape.RequestLineage = "previous_response_id_present"
+	withShape.RequestedReasoningEffort = "high"
+	withShape.RequestedModelClass = "gpt_5_6_sol"
+	withShape.CompactionPhase = "mid_turn"
+	encoded, err := json.Marshal(withShape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old struct {
+		Time  time.Time `json:"time"`
+		Model string    `json:"model,omitempty"`
+	}
+	if err := json.Unmarshal(encoded, &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Time != legacy.Time || old.Model != legacy.Model {
+		t.Fatalf("old decoder = %#v, want legacy fields", old)
+	}
+	var decoded RouteEvent
+	if err := json.Unmarshal([]byte(want), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.RequestLineage != "" || decoded.RequestedReasoningEffort != "" || decoded.RequestedModelClass != "" || decoded.CompactionPhase != "" {
+		t.Fatalf("new decoder filled absent fields: %#v", decoded)
+	}
+}
+
+func TestRouteDiagnosticsAppliesRequestShapeFields(t *testing.T) {
+	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	noteCodexObservation(ctx, codexObservationFields{
+		RequestLineage:           "previous_response_id_present",
+		RequestedReasoningEffort: "high",
+		RequestedModelClass:      "gpt_5_6_sol",
+		CompactionPhase:          "mid_turn",
+	})
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.RequestLineage != "previous_response_id_present" || event.RequestedReasoningEffort != "high" || event.RequestedModelClass != "gpt_5_6_sol" || event.CompactionPhase != "mid_turn" {
+		t.Fatalf("request shape diagnostics = %#v", event)
+	}
+}
+
+func TestDiagnosticsWriterRejectsRawRequestShapeValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	writer, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	recorder := newCodexDiagnosticsTestCanary(t)
+	writer.SetCodexCanary(recorder)
+	event := structurallySafeCodexRouteEvent()
+	event.RequestedModelClass = "gpt-raw-private-model"
+	event.RequestLineage = "raw-private-response"
+	event.RequestedReasoningEffort = "raw-private-effort"
+	event.CompactionPhase = "raw-private-session"
+	if err := writer.Write(event); !errors.Is(err, ErrUnsafeCodexDiagnostics) {
+		t.Fatalf("Write error = %v, want ErrUnsafeCodexDiagnostics", err)
+	}
+	if got := recorder.State().SecretLeaks; got != 1 {
+		t.Fatalf("secret leaks = %d, want 1", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"gpt-raw-private-model", "raw-private-response", "raw-private-effort", "raw-private-session"} {
+		if strings.Contains(string(data), raw) {
+			t.Fatalf("raw request shape reached diagnostics: %q", data)
+		}
 	}
 }
 
@@ -332,6 +434,24 @@ func TestProjectCodexDiagnosticsUsesClosedModelAndBucketValues(t *testing.T) {
 				t.Fatalf("projection retained caller bytes: %#v", event)
 			}
 		})
+	}
+}
+
+func TestProjectCodexDiagnosticsProjectsRequestedModelClass(t *testing.T) {
+	for _, test := range []struct{ model, want string }{
+		{model: "gpt-5.6-sol", want: "gpt_5_6_sol"},
+		{model: "gpt-5.6-terra", want: "gpt_5_6_terra"},
+		{model: "gpt-5.6-luna", want: "gpt_5_6_luna"},
+		{model: "caller-private-model", want: "other"},
+		{model: "", want: "unknown"},
+	} {
+		event := projectCodexDiagnostics(RouteEvent{Provider: "codex", RequestedModelClass: test.model})
+		if event.RequestedModelClass != test.want {
+			t.Fatalf("requested model class = %q, want %q", event.RequestedModelClass, test.want)
+		}
+		if strings.Contains(event.RequestedModelClass, "private") {
+			t.Fatalf("projection retained caller bytes: %#v", event)
+		}
 	}
 }
 
@@ -392,24 +512,28 @@ func TestDiagnosticsWriterPreservesNonCodexEvents(t *testing.T) {
 
 func structurallySafeCodexRouteEvent() RouteEvent {
 	return RouteEvent{
-		Method:          http.MethodPost,
-		Path:            "/v1/responses",
-		Provider:        "codex",
-		RouteKind:       "codex_native",
-		Model:           "model_family_gpt",
-		AccountHint:     "codex:0123456789ab",
-		StatusCode:      http.StatusOK,
-		SessionKey:      "codex-session:abcdef012345",
-		SessionSource:   "session_id",
-		TurnHint:        "turn:0123456789ab",
-		RequestKind:     "turn",
-		LeasePhase:      "bound_active",
-		LeaseGeneration: 1,
-		Decision:        "shadow_admitted",
-		Reason:          "candidate_attempt_1",
-		Bucket:          "capacity_model_scoped",
-		Continuity:      "pinned",
-		Error:           "api_error:no_codex_accounts",
+		Method:                   http.MethodPost,
+		Path:                     "/v1/responses",
+		Provider:                 "codex",
+		RouteKind:                "codex_native",
+		Model:                    "model_family_gpt",
+		AccountHint:              "codex:0123456789ab",
+		StatusCode:               http.StatusOK,
+		SessionKey:               "codex-session:abcdef012345",
+		SessionSource:            "session_id",
+		TurnHint:                 "turn:0123456789ab",
+		RequestKind:              "turn",
+		RequestLineage:           "previous_response_id_absent",
+		RequestedReasoningEffort: "high",
+		RequestedModelClass:      "gpt_5_6_sol",
+		CompactionPhase:          "not_applicable",
+		LeasePhase:               "bound_active",
+		LeaseGeneration:          1,
+		Decision:                 "shadow_admitted",
+		Reason:                   "candidate_attempt_1",
+		Bucket:                   "capacity_model_scoped",
+		Continuity:               "pinned",
+		Error:                    "api_error:no_codex_accounts",
 	}
 }
 

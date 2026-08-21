@@ -69,3 +69,30 @@ func TestCodexRequestShapeRejectsNonStringEffort(t *testing.T) {
 		t.Fatalf("reasoning effort = %q, want unknown", shape.RequestedReasoningEffort)
 	}
 }
+
+func TestCodexRequestShapeClassifiesClosedModelAndMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		request         CodexProtocolRequest
+		wantModelClass  string
+		wantRequestKind string
+		wantPhase       string
+	}{
+		{name: "supported compaction", request: CodexProtocolRequest{Model: "gpt-5.6-sol", Metadata: CodexTurnMetadataResult{Found: true, Strong: true, Metadata: CodexTurnMetadata{SessionID: "session", ThreadID: "thread", TurnID: "turn", RequestKind: CodexRequestCompaction, CompactionPhase: CodexCompactionMidTurn}}}, wantModelClass: "gpt_5_6_sol", wantRequestKind: "compaction", wantPhase: "mid_turn"},
+		{name: "validated non compaction", request: CodexProtocolRequest{Model: "gpt-5.6-terra", Metadata: CodexTurnMetadataResult{Found: true, Strong: true, Metadata: CodexTurnMetadata{SessionID: "session", ThreadID: "thread", TurnID: "turn", RequestKind: CodexRequestTurn}}}, wantModelClass: "gpt_5_6_terra", wantRequestKind: "turn", wantPhase: "not_applicable"},
+		{name: "weak metadata", request: CodexProtocolRequest{Model: "gpt-5.6-luna", Metadata: CodexTurnMetadataResult{Found: true, Metadata: CodexTurnMetadata{SessionID: "session", ThreadID: "thread", TurnID: "turn", RequestKind: CodexRequestCompaction, CompactionPhase: CodexCompactionPreTurn}}}, wantModelClass: "gpt_5_6_luna", wantRequestKind: "compaction", wantPhase: "unknown"},
+		{name: "absent metadata and model", wantModelClass: "unknown", wantPhase: "unknown"},
+		{name: "invalid metadata kind", request: CodexProtocolRequest{Metadata: CodexTurnMetadataResult{Found: true, Strong: true, Metadata: CodexTurnMetadata{SessionID: "session", ThreadID: "thread", TurnID: "turn", RequestKind: "caller-private-kind"}}}, wantModelClass: "unknown", wantPhase: "unknown"},
+		{name: "other requested model", request: CodexProtocolRequest{Model: "caller-private-model"}, wantModelClass: "other", wantPhase: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyCodexRequestShape(tt.request, nil)
+			if got.RequestedModelClass != tt.wantModelClass || got.RequestKind != tt.wantRequestKind || got.CompactionPhase != tt.wantPhase {
+				t.Fatalf("shape = %#v, want model class %q request kind %q phase %q", got, tt.wantModelClass, tt.wantRequestKind, tt.wantPhase)
+			}
+		})
+	}
+}

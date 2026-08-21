@@ -85,6 +85,46 @@ func TestServerEmitDiagnosticsProjectsCallerControlledModelBeforeWriter(t *testi
 	}
 }
 
+func TestServerEmitDiagnosticsProjectsRequestedModelClassBeforeWriter(t *testing.T) {
+	for _, test := range []struct {
+		requestedModel string
+		wantClass      string
+	}{
+		{requestedModel: "gpt-5.6-sol", wantClass: "gpt_5_6_sol"},
+		{requestedModel: "gpt-5.6-terra", wantClass: "gpt_5_6_terra"},
+		{requestedModel: "gpt-5.6-luna", wantClass: "gpt_5_6_luna"},
+	} {
+		t.Run(test.requestedModel, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			writer, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
+			recorder := newCodexDiagnosticsTestCanary(t)
+			writer.SetCodexCanary(recorder)
+			server := &Server{Diag: writer, CodexCanary: recorder}
+			event := structurallySafeCodexRouteEvent()
+			event.RequestedModelClass = test.requestedModel
+
+			server.emitDiagnostics(event)
+			if got := recorder.State().SecretLeaks; got != 0 {
+				t.Fatalf("secret leaks = %d, want 0", got)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), test.requestedModel) {
+				t.Fatalf("raw requested model reached diagnostics: %q", data)
+			}
+			if !strings.Contains(string(data), `"requested_model_class":"`+test.wantClass+`"`) {
+				t.Fatalf("projected class missing from diagnostics: %q", data)
+			}
+		})
+	}
+}
+
 func TestServerEmitDiagnosticsUsesWriterCanaryAsCompatibilityFallback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	writer, err := OpenDiagnosticsWriter(path)
