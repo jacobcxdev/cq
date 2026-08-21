@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -301,25 +302,31 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 				allowed = []codex.AccountKey{boundAccountKey}
 			}
 			finalChoice, routeErr := ResolveCapabilityRoute(capabilityPolicy, capabilityEvidence, CallerRequestAuthorityV1{
-				SchemaVersion: 1, AllowedAccounts: allowed, Workspace: policyDecision.SessionDigest, EvaluatedAt: now,
+				SchemaVersion: 1, AllowedAccounts: allowed, PreferredAccount: choice.AccountKey, AccountWorkspaces: codexCapabilityAccountWorkspaces(inventory, allowed), EvaluatedAt: now,
 				FinalScope: codexCapabilityFinalScope(factory.TransportKind, input.Encoded, protocol, choice, caller),
 			})
 			if routeErr != nil {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, routeErr)
 			}
 			policyDecision.Allowed = append([]codex.AccountKey(nil), finalChoice.AllowedAccounts...)
-			inventory = filterCodexHTTPRequestInventory(inventory, []codex.AccountKey{finalChoice.AccountKey})
+			inventory = filterCodexHTTPRequestInventory(inventory, finalChoice.AllowedAccounts)
 			dispatchInput.Inventory = inventory
-			dispatchInput.BoundAccountKey = finalChoice.AccountKey
 			dispatch, err = factory.buildDispatch(ctx, dispatchInput)
 			if err != nil {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 			}
 			dispatchAccounts = dispatch.Accounts()
-			if len(dispatchAccounts) != 1 || dispatchAccounts[0].Choice().AccountKey != finalChoice.AccountKey {
+			if len(dispatchAccounts) == 0 {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
 			}
 			choice = dispatchAccounts[0].Choice()
+			finalChoice, routeErr = ResolveCapabilityRoute(capabilityPolicy, capabilityEvidence, CallerRequestAuthorityV1{
+				SchemaVersion: 1, AllowedAccounts: finalChoice.AllowedAccounts, PreferredAccount: choice.AccountKey, AccountWorkspaces: codexCapabilityAccountWorkspaces(inventory, finalChoice.AllowedAccounts), EvaluatedAt: now,
+				FinalScope: codexCapabilityFinalScope(factory.TransportKind, input.Encoded, protocol, choice, caller),
+			})
+			if routeErr != nil || finalChoice.AccountKey != choice.AccountKey {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
+			}
 		}
 	}
 	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
@@ -392,11 +399,26 @@ func codexCapabilityFinalScope(transport string, encoded []byte, protocol CodexP
 	originDigest := sha256.Sum256([]byte(string(caller.Domain) + "\x00" + caller.SubjectID + "\x00" + caller.ConsumptionDigest + "\x00" + string(choice.AccountKey)))
 	return CapabilityFinalScopeCoreV1{
 		SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: transport,
-		ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth",
+		ProductSurface: string(caller.Domain), AccessPath: "responses", AuthMode: "oauth",
 		RequestedModel: protocol.Model, EffectiveModel: choice.EffectiveModel, OutboundModel: choice.EffectiveModel,
 		TransformationDigest: hex.EncodeToString(transformationDigest[:]), EncodedRequestDigest: hex.EncodeToString(encodedDigest[:]),
 		NormalCredentialOriginBindingDigest: hex.EncodeToString(originDigest[:]),
 	}
+}
+
+func codexCapabilityAccountWorkspaces(inventory codex.Inventory, allowed []codex.AccountKey) []CapabilityAccountWorkspaceV1 {
+	set := make(map[codex.AccountKey]struct{}, len(allowed))
+	for _, account := range allowed {
+		set[account] = struct{}{}
+	}
+	workspaces := make([]CapabilityAccountWorkspaceV1, 0, len(allowed))
+	for _, account := range inventory.Accounts {
+		if _, ok := set[account.Key]; ok && account.Identity.AccountID != "" {
+			workspaces = append(workspaces, CapabilityAccountWorkspaceV1{AccountKey: account.Key, Workspace: account.Identity.AccountID})
+		}
+	}
+	sort.Slice(workspaces, func(i, j int) bool { return workspaces[i].AccountKey < workspaces[j].AccountKey })
+	return workspaces
 }
 
 func filterCodexHTTPRequestInventory(inventory codex.Inventory, allowed []codex.AccountKey) codex.Inventory {
@@ -438,6 +460,15 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 	now := time.Now()
 	if factory.Now != nil {
 		now = factory.Now()
+	}
+	accounts := codexHTTPRequestPlanAccountKeys(inventory)
+	caller, _ := runtimeCallerAuthority(ctx)
+	decision, policyErr := enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, factory.PinnedAccountKey, now)
+	if policyErr != nil {
+		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, policyErr)
+	}
+	if decision.Status == PolicyDecisionSelected {
+		inventory = filterCodexHTTPRequestInventory(inventory, decision.Allowed)
 	}
 	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
 		Inventory:         inventory,

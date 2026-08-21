@@ -67,6 +67,7 @@ type RoutingPolicyV1 struct {
 	Pools                     []AccountPoolV1               `json:"pools,omitempty"`
 	SessionBindings           []SessionBindingV1            `json:"session_bindings,omitempty"`
 	CapabilityEvidence        []CapabilityEvidenceV1        `json:"capability_evidence,omitempty"`
+	CapabilityPool            string                        `json:"capability_pool,omitempty"`
 	CapabilityPredicates      []CapabilityPredicateCoreV1   `json:"capability_predicates,omitempty"`
 	CapabilityRoutingEvidence []CapabilityRoutingEvidenceV1 `json:"capability_routing_evidence,omitempty"`
 	Delegations               []CallerDelegationV1          `json:"delegations,omitempty"`
@@ -271,6 +272,16 @@ func validateRoutingPolicy(policy RoutingPolicyV1, prior *RoutingPolicyV1) error
 	}
 	if (len(policy.CapabilityPredicates) == 0) != (len(policy.CapabilityRoutingEvidence) == 0) {
 		return errors.New("incomplete capability routing policy")
+	}
+	if len(policy.CapabilityPredicates) > 0 {
+		if policy.CapabilityPool == "" && len(policy.Pools) == 1 {
+			policy.CapabilityPool = policy.Pools[0].Name
+		}
+		if pools[policy.CapabilityPool] == nil {
+			return errors.New("invalid capability pool")
+		}
+	} else if policy.CapabilityPool != "" {
+		return errors.New("capability pool without routing policy")
 	}
 	seenPredicates := make(map[string]struct{}, len(policy.CapabilityPredicates))
 	for _, predicate := range policy.CapabilityPredicates {
