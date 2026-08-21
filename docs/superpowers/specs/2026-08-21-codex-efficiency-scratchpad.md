@@ -9,7 +9,7 @@ promoted into an approved implementation plan.
 
 **Branch:** `jacobcxdev/feat/codex-efficiency-phase-0`
 
-**Base:** `origin/main` at `100f49e`
+**Base:** `origin/main` at `dd03042` (`v0.23.7`)
 
 ## Purpose
 
@@ -187,28 +187,42 @@ Codex or its client owns:
 
 ### Phase 0 - trustworthy measurement
 
-Status: active.
+Status: implemented and verified locally; pending publication.
 
-Completed on `origin/main` at `100f49e`:
+Dependencies present on `origin/main` through `dd03042`:
 
 - Scoped persistent burn history by provider and account.
 - Marked ordinary cache hits with measured cache age.
 - Cold-started a clean history schema after contaminated prior observations.
+- Landed the broker diagnostics allowlist dependency so WebSocket route events
+  persist safely.
 
-Current candidate slice:
+Delivered request-shape observations contain four new sparse, privacy-safe
+fields. Existing `request_kind` and `route_kind` continue to carry validated
+request kind and transport:
 
-- Add content-free request-shape observations at CQ's existing route telemetry
-  boundary.
-- Report whether Codex sent full or incremental input when authoritative
-  transport evidence exists.
-- Record model, effort, transport, compaction phase, request kind, and manifest
-  sizes or digests only when already available without inspecting content.
-- Emit explicit unknown values instead of inferring unavailable state.
-- Preserve current log compatibility and secret-safety guarantees.
+- `request_lineage`: exact `previous_response_id` key presence, including
+  empty and null values. It is not proof of cache hit, full input, or
+  incremental input.
+- `requested_reasoning_effort`: closed values `none`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max`, `ultra`, `unspecified`, and `unknown`.
+- `requested_model_class`: persisted values `gpt_5_6_sol`, `gpt_5_6_terra`,
+  and `gpt_5_6_luna` only when exact raw `gpt-5.6-sol`, `gpt-5.6-terra`, or
+  `gpt-5.6-luna` model values match; otherwise `other` or `unknown`. This is
+  separate from existing `Model` semantics.
+- `compaction_phase`: exact validated values `standalone_turn`, `pre_turn`,
+  `mid_turn`, `not_applicable`, and `unknown`.
 
-Before implementation, source discovery must prove which fields CQ receives
-authoritatively. Unsupported fields are removed from this slice rather than
-reconstructed from prompt bodies.
+HTTP enriches one existing terminal route event. Each successfully parsed,
+accepted WebSocket request frame emits one `codex_websocket_frame` event.
+Malformed, control, response, and upstream frames emit none. Retries and
+account/upstream rotations emit no additional event.
+No raw prompt, tool, schema, output, response ID, model string, session value,
+or correlation is persisted. Manifest sizes and digests remain deferred because
+they are not authoritatively available in this boundary without broader scope.
+
+No cache-hit, full/incremental, directory-hash, or account-switch inference is
+made. Unsupported facts remain absent or unknown.
 
 ### Phase 1 - controlled no-code experiments
 
@@ -329,16 +343,23 @@ accounts blindly.
 | Date | Decision | Reason |
 |---|---|---|
 | 2026-08-21 | Preserve research in this tracked scratchpad. | Task-only state is not durable programme state. |
-| 2026-08-21 | Start Phase 0 from `origin/main` at `100f49e`. | Burn-history fixes already landed; avoids duplicating `Quota fixes` work. |
+| 2026-08-21 | Start Phase 0 from `origin/main` at `e158593`. | Burn-history fixes and the broker diagnostics allowlist fix already landed; avoids duplicating `Quota fixes` work. |
 | 2026-08-21 | Keep CQ as quota and admission plane. | Downstream model rewriting would make Codex state and UI dishonest. |
 | 2026-08-21 | Park detailed pool design. | Pools protect capacity but do not reduce credits directly. |
 | 2026-08-21 | Require measurement before automatic classification. | Quality and retry costs can erase nominal model-price savings. |
+| 2026-08-21 | Record only four sparse request-shape fields. | CQ receives authoritative protocol metadata at transport boundaries; prompt/body correlation and inferred cache state would exceed the evidence boundary. |
+| 2026-08-21 | Emit one frame observation per successfully parsed accepted WebSocket request. | A long-lived socket must not collapse multiple turns into one last-frame snapshot; retries, rotations, and non-request frames are not requests. |
+| 2026-08-21 | Keep `request_lineage` factual and preserve existing `Model`. | Key presence is observable; cache/full/incremental state and requested model class are separate claims. |
+| 2026-08-21 | Defer manifest sizes and digests. | They are not authoritatively available at this boundary without inspecting or broadening protocol state. |
+| 2026-08-21 | Preserve Stage 11 observe-mode event expectations and lifecycle transcript hashes. | The test-only fallout fix covers one legacy connection event plus one frame event per accepted request without changing sealed transcript evidence. |
+| 2026-08-21 | Rebase Phase 0 cleanly onto current `origin/main` and `v0.23.7`. | Rewritten implementation history remains equivalent while verification runs against current main. |
 
 ## Delivery checkpoints
 
 | Date | Commit | Outcome | Verification | Remaining gap |
 |---|---|---|---|---|
 | 2026-08-21 | `100f49e` | Provider-scoped burn history and valid cache-age inputs landed on `origin/main`. | Existing commit and full branch baseline inspected. | Privacy-safe request-shape telemetry. |
+| 2026-08-21 | `002ff66..d89b18d` | Added privacy-safe request-shape classification and HTTP/WebSocket route observations, plus the Stage 11 test-only fallout fix after rebasing onto current main. | `gofmt` clean; `go vet ./...`; `go build ./...`; `go test -race -count=1 ./...` passed, with `internal/proxy` completing in 243.540s; `git diff --check` passed. | Publication only. |
 
 ## Primary references
 
