@@ -1336,6 +1336,14 @@ func TestServerLegacyCodexWebSocketEmitsOneSafeEventPerAcceptedClientRequest(t *
 				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"private-id","reasoning":{"effort":"high"},"input":"private-prompt"}`)},
 				{messageType: websocket.TextMessage, payload: []byte(`{"jsonrpc":"2.0","id":"private-correlation","method":"response/create","params":{"model":"gpt-5.6-terra","reasoning":{"effort":"private-effort"},"input":"private-prompt-two"}}`)},
 				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","private":"client-response"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","type":"response.create","model":"private-duplicate"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","TYPE":"response.create","model":"private-case"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","\u0074ype":"response.create","model":"private-escaped"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"method":"response/create","method":"response/create","params":{"model":"private-method-duplicate"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"method":"response/create","METHOD":"response/create","params":{"model":"private-method-case"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"method":"response/create","\u006dethod":"response/create","params":{"model":"private-method-escaped"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","params":{"model":"private-params-model","MODEL":"private-params-model"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","previous_response_id":"private-root","params":{"previous_response_id":"private-params"}}`)},
 				{messageType: websocket.TextMessage, payload: []byte(`not-json-private`)},
 				{messageType: websocket.BinaryMessage, payload: []byte(`{"type":"response.create","private":"binary"}`)},
 			}
@@ -1370,7 +1378,7 @@ func TestServerLegacyCodexWebSocketEmitsOneSafeEventPerAcceptedClientRequest(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, private := range []string{"private-prompt", "private-id", "private-correlation", "private-effort", "gpt-5.6-sol", "gpt-5.6-terra", "upstream-secret", "private-control"} {
+			for _, private := range []string{"private-prompt", "private-id", "private-correlation", "private-effort", "private-duplicate", "private-case", "private-escaped", "private-method", "private-root", "private-params", "gpt-5.6-sol", "gpt-5.6-terra", "upstream-secret", "private-control"} {
 				if strings.Contains(string(data), private) {
 					t.Fatalf("private frame bytes reached diagnostics: %q", data)
 				}
@@ -1526,12 +1534,20 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 			if gotPath != "/responses/compact" {
 				t.Fatalf("upstream path = %q, want /responses/compact", gotPath)
 			}
+			ambiguous := httptest.NewRecorder()
+			ambiguousBody := `{"model":"private-compact-one","model":"private-compact-two","input":"private-ambiguous-prompt"}`
+			ambiguousRequest := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(ambiguousBody))
+			ambiguousRequest.Header.Set("Content-Type", "application/json")
+			captureStderr(t, func() { handler.ServeHTTP(ambiguous, ambiguousRequest) })
+			if ambiguous.Code != http.StatusOK {
+				t.Fatalf("ambiguous authority status = %d, want 200, body: %s", ambiguous.Code, ambiguous.Body.String())
+			}
 			if err := diag.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
 			events := readDiagnosticsEvents(t, path)
-			if len(events) != 1 {
-				t.Fatalf("events = %d, want 1", len(events))
+			if len(events) != 2 {
+				t.Fatalf("events = %d, want 2", len(events))
 			}
 			ev := events[0]
 			if ev.Method != http.MethodPost || ev.Path != tc.path || ev.Provider != "codex" {
@@ -1549,8 +1565,12 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 			if ev.RequestLineage != "previous_response_id_present" || ev.RequestedReasoningEffort != "ultra" || ev.RequestedModelClass != "other" || ev.RequestKind != "compaction" || ev.CompactionPhase != "standalone_turn" {
 				t.Fatalf("request shape = %+v", ev)
 			}
+			ambiguousEvent := events[1]
+			if ambiguousEvent.RequestLineage != "unknown" || ambiguousEvent.RequestedReasoningEffort != "unknown" || ambiguousEvent.RequestedModelClass != "unknown" || ambiguousEvent.RequestKind != "" || ambiguousEvent.CompactionPhase != "unknown" {
+				t.Fatalf("ambiguous request shape = %+v", ambiguousEvent)
+			}
 			assertDiagnosticsLogDoesNotContain(t, path, privateModel)
-			for _, private := range []string{privateResponseID, "private-compact-session", "private-compact-thread", "private-compact-turn", "private-compact-prompt"} {
+			for _, private := range []string{privateResponseID, "private-compact-session", "private-compact-thread", "private-compact-turn", "private-compact-prompt", "private-compact-one", "private-compact-two", "private-ambiguous-prompt"} {
 				assertDiagnosticsLogDoesNotContain(t, path, private)
 			}
 			if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
@@ -3306,7 +3326,10 @@ func TestServerLegacyNativeCodexPersistsOneSafeRequestShapeInEveryMode(t *testin
 			}
 			if mode == "enforce" {
 				executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
-					"one-candidate": {{resp: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completedSSE("response-safe")))}}},
+					"one-candidate": {
+						{resp: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completedSSE("response-safe")))}},
+						{resp: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completedSSE("response-ambiguous")))}},
+					},
 				}}
 				server.CodexHTTPEnforcer = testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one", RequestedModel: "gpt-5.6-sol", EffectiveModel: "gpt-5.6-sol"}}}, executor, fsutil.NewMemFS())
 			}
@@ -3320,22 +3343,34 @@ func TestServerLegacyNativeCodexPersistsOneSafeRequestShapeInEveryMode(t *testin
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
 			}
+			ambiguous := httptest.NewRecorder()
+			ambiguousBody := `{"type":"response.create","TYPE":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"private-ambiguous-session","thread_id":"private-ambiguous-thread","turn_id":"private-ambiguous-turn","request_kind":"turn"}},"input":"private-ambiguous-prompt"}`
+			ambiguousRequest := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(ambiguousBody))
+			ambiguousRequest.Header.Set("Content-Type", "application/json")
+			server.handleNativeCodex(ambiguous, ambiguousRequest)
+			if ambiguous.Code != http.StatusOK {
+				t.Fatalf("ambiguous authority status = %d, want 200, body = %q", ambiguous.Code, ambiguous.Body.String())
+			}
 			if err := diagnostics.Close(); err != nil {
 				t.Fatal(err)
 			}
 			events := readDiagnosticsEvents(t, path)
-			if len(events) != 1 {
-				t.Fatalf("events = %+v, want exactly one", events)
+			if len(events) != 2 {
+				t.Fatalf("events = %+v, want exactly two", events)
 			}
 			event := events[0]
 			if event.RequestLineage != "previous_response_id_absent" || event.RequestedReasoningEffort != "ultra" || event.RequestedModelClass != "gpt_5_6_sol" || event.RequestKind != "turn" || event.CompactionPhase != "not_applicable" {
 				t.Fatalf("shape event = %+v", event)
 			}
+			ambiguousEvent := events[1]
+			if ambiguousEvent.RequestLineage != "unknown" || ambiguousEvent.RequestedReasoningEffort != "unknown" || ambiguousEvent.RequestedModelClass != "unknown" || ambiguousEvent.RequestKind != "" || ambiguousEvent.CompactionPhase != "unknown" {
+				t.Fatalf("ambiguous shape event = %+v", ambiguousEvent)
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, private := range []string{"private-prompt", "private-session", "private-thread", "private-turn", "gpt-5.6-sol"} {
+			for _, private := range []string{"private-prompt", "private-session", "private-thread", "private-turn", "private-ambiguous-session", "private-ambiguous-thread", "private-ambiguous-turn", "private-ambiguous-prompt", "gpt-5.6-sol"} {
 				if strings.Contains(string(data), private) {
 					t.Fatalf("private request bytes reached diagnostics: %q", data)
 				}

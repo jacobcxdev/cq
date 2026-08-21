@@ -1,6 +1,9 @@
 package proxy
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 const (
 	codexRequestLineagePreviousResponseIDAbsent  = "previous_response_id_absent"
@@ -17,6 +20,18 @@ type codexRequestShape struct {
 	RequestedModelClass      string
 	RequestKind              string
 	CompactionPhase          string
+}
+
+func parseCodexObservationRequest(body []byte, headers http.Header) (CodexProtocolRequest, error) {
+	directMetadata, directMetadataPresent, err := singleCodexFrozenHeader(headers, codexTurnMetadataKey)
+	if err != nil {
+		return CodexProtocolRequest{}, err
+	}
+	authority, _, err := extractCodexFrozenAuthorityWithRequirements(body, directMetadata, directMetadataPresent, nil, false, false, true)
+	if err != nil {
+		return CodexProtocolRequest{}, err
+	}
+	return authority.protocol, nil
 }
 
 func codexObservationFieldsForRequestShape(shape codexRequestShape) codexObservationFields {

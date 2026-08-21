@@ -2,8 +2,46 @@ package proxy
 
 import (
 	"errors"
+	"net/http"
 	"testing"
 )
+
+func TestParseCodexObservationRequestUsesFrozenAuthorityRules(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "duplicate request discriminator", body: `{"type":"response.create","type":"response.create"}`},
+		{name: "case variant request discriminator", body: `{"type":"response.create","TYPE":"response.create"}`},
+		{name: "escaped request discriminator", body: `{"type":"response.create","\u0074ype":"response.create"}`},
+		{name: "duplicate JSON-RPC discriminator", body: `{"method":"response/create","method":"response/create"}`},
+		{name: "case variant JSON-RPC discriminator", body: `{"method":"response/create","METHOD":"response/create"}`},
+		{name: "escaped JSON-RPC discriminator", body: `{"method":"response/create","\u006dethod":"response/create"}`},
+		{name: "case variant params authority", body: `{"params":{"model":"gpt-5.6-sol","MODEL":"gpt-5.6-sol"}}`},
+		{name: "duplicate params container", body: `{"params":{},"PARAMS":{}}`},
+		{name: "conflicting previous authority", body: `{"previous_response_id":"first","params":{"previous_response_id":"second"}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseCodexObservationRequest([]byte(tt.body), nil); err == nil {
+				t.Fatal("ambiguous observation authority accepted")
+			}
+		})
+	}
+}
+
+func TestParseCodexObservationRequestAllowsMissingRoutingAuthority(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"type":"response.create","previous_response_id":"private-response","reasoning":{"effort":"high"}}`)
+	request, err := parseCodexObservationRequest(body, http.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Type != "response.create" || request.Model != "" || request.PreviousResponseID != "private-response" || !request.HasPreviousResponseID || request.RequestedReasoningEffort != "high" || !request.HasRequestedReasoningEffort || !request.RequestedReasoningEffortValid || request.Metadata.Found {
+		t.Fatalf("request = %#v", request)
+	}
+}
 
 func TestCodexRequestShapeLineage(t *testing.T) {
 	t.Parallel()

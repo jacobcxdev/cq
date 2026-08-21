@@ -1243,7 +1243,7 @@ func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagn
 		(envelope.Type != "response.create" && envelope.Method != "response/create") {
 		return nil, false
 	}
-	request, err := ParseCodexProtocolRequest(frame, "", nil)
+	request, err := parseCodexObservationRequest(frame, nil)
 	if err != nil {
 		return nil, false
 	}
