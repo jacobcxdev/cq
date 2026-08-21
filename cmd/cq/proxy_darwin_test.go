@@ -143,6 +143,15 @@ func TestDarwinProxyInspectionUsesExistingConfigWithoutResilienceState(t *testin
 	}
 }
 
+func TestDarwinProxyInspectionUsesConfiguredPortWhenServiceOmitsPort(t *testing.T) {
+	if got := darwinProxyInspectionListenerPort(19280, 0); got != 19280 {
+		t.Fatalf("listener port = %d, want 19280", got)
+	}
+	if got := darwinProxyInspectionListenerPort(19280, 29280); got != 29280 {
+		t.Fatalf("explicit listener port = %d, want 29280", got)
+	}
+}
+
 type launchctlTestExitError int
 
 func (e launchctlTestExitError) Error() string { return fmt.Sprintf("exit status %d", e) }

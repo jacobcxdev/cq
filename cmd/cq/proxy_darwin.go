@@ -335,7 +335,8 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	if binding.label == homebrewProxyAgentLabel {
 		manager = "homebrew"
 	}
-	listenerAddress := fmt.Sprintf("127.0.0.1:%d", binding.port)
+	listenerPort := darwinProxyInspectionListenerPort(port, binding.port)
+	listenerAddress := fmt.Sprintf("127.0.0.1:%d", listenerPort)
 	facts.desired = proxy.KnownFact(proxy.DesiredProxyState{Manager: manager, Configured: true, Listener: listenerAddress})
 	target, err := installedHTTPValidationLaunchctlTarget(binding.label, os.Geteuid)
 	if err != nil {
@@ -355,7 +356,7 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 		facts.service = proxy.InvalidFact[proxy.ServiceState]("service_invalid")
 		return facts
 	}
-	lsofOutput, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", binding.port), "-sTCP:LISTEN", "-Fp").Output()
+	lsofOutput, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", listenerPort), "-sTCP:LISTEN", "-Fp").Output()
 	if err != nil || requireInstalledHTTPValidationListenerPID(lsofOutput, pid) != nil {
 		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
 		facts.listener = proxy.InvalidFact[proxy.ListenerState]("listener_mismatch")
@@ -383,6 +384,13 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	}
 	facts.dataPlane = proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"})
 	return facts
+}
+
+func darwinProxyInspectionListenerPort(configured, service int) int {
+	if service > 0 {
+		return service
+	}
+	return configured
 }
 
 func proxyAgentPlistPath() (string, error) {
