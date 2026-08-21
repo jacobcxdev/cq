@@ -68,7 +68,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 }
 
 type codexWSUpstreamDialer interface {
-	Dial(context.Context, RouteChoice, CandidateAttempt, string, http.Header) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error)
+	Dial(context.Context, RouteChoice, CandidateAttempt, string, http.Header, func(CandidateAttempt)) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error)
 }
 
 type codexWebSocketPrewarmPlanner interface {
@@ -84,11 +84,11 @@ type codexExplicitWSUpstreamDialer struct {
 	executor ExplicitWebSocketExecutor
 }
 
-func (dialer codexExplicitWSUpstreamDialer) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
+func (dialer codexExplicitWSUpstreamDialer) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header, onDispatch func(CandidateAttempt)) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
 	if dialer.executor == nil {
 		return nil, nil, nil, attempt, ErrCodexLeaseWriterUnavailable
 	}
-	conn, response, body, actual, err := executeCodexWebSocketAttempt(dialer.executor, ctx, choice, attempt, upstreamURL, header, nil)
+	conn, response, body, actual, err := executeCodexWebSocketAttempt(dialer.executor, ctx, choice, attempt, upstreamURL, header, onDispatch)
 	return conn, response, body, actual, err
 }
 
@@ -235,7 +235,7 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 	}
 	accountIndex := 0
 	for {
-		dial := broker.connect(ctx, prepared.leaseHandle, accounts[accountIndex], active)
+		dial := broker.connect(ctx, prepared.leaseHandle, prepared.receipt, accounts[accountIndex], active)
 		if dial.lifecycle == nil {
 			if dial.err != nil {
 				return dial.err
@@ -357,7 +357,7 @@ func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, acco
 	for _, attempt := range account.Attempts() {
 		broker.upstreamGeneration++
 		generation := broker.upstreamGeneration
-		conn, response, body, _, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers)
+		conn, response, body, _, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers, nil)
 		if dialErr == nil && conn != nil {
 			active.conn = conn
 			active.account = choice.AccountKey
@@ -459,14 +459,15 @@ func (broker *codexTerminatingWSBroker) cancelActivePrewarm(active *codexWSActiv
 	active.prewarm = CodexPrewarmReservation{}
 }
 
-func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *CodexLeaseRequestHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {
+func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *CodexLeaseRequestHandle, receipt *codexTurnReceiptHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {
 	marked, err := handle.MarkDispatchedContext(ctx)
 	if err != nil {
 		return codexWSDialResult{err: err}
 	}
 	choice := account.Choice()
 	if active.conn != nil && active.account == choice.AccountKey {
-		lifecycle, err := newCodexWSLifecycle(marked, broker.config.DownstreamGeneration, active.generation)
+		receipt.attempt(choice.AccountKey)
+		lifecycle, err := newCodexWSLifecycle(marked, broker.config.DownstreamGeneration, active.generation, receipt)
 		return codexWSDialResult{lifecycle: lifecycle, response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}, err: err}
 	}
 	if active.conn != nil {
@@ -477,11 +478,13 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 	for _, attempt := range account.Attempts() {
 		broker.upstreamGeneration++
 		generation := broker.upstreamGeneration
-		lifecycle, lifecycleErr := newCodexWSLifecycle(marked, broker.config.DownstreamGeneration, generation)
+		lifecycle, lifecycleErr := newCodexWSLifecycle(marked, broker.config.DownstreamGeneration, generation, receipt)
 		if lifecycleErr != nil {
 			return codexWSDialResult{err: lifecycleErr}
 		}
-		conn, response, body, _, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers)
+		conn, response, body, _, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers, func(actual CandidateAttempt) {
+			receipt.attempt(actual.AccountKey)
+		})
 		if dialErr == nil && conn != nil {
 			*active = codexWSActiveUpstream{conn: conn, account: choice.AccountKey, generation: generation}
 			return codexWSDialResult{lifecycle: lifecycle, response: response}

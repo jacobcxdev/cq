@@ -64,6 +64,9 @@ func normalCallerPolicy(request *http.Request) normalCallerRoutePolicy {
 	if request.Method == http.MethodPost && path == RuntimePolicySessionDigestPath {
 		return normalCallerRouteLocal
 	}
+	if request.Method == http.MethodPost && path == RuntimeCodexTurnReceiptPath {
+		return normalCallerRouteLocal
+	}
 	if request.Method == http.MethodGet && path == "/v1/registry" {
 		return normalCallerRouteLocalOrClaude
 	}

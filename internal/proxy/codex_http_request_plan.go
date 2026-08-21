@@ -91,6 +91,7 @@ type CodexPreparedHTTPRequest struct {
 	Lifecycle CodexHTTPRequestLifecycle
 
 	leaseHandle *CodexLeaseRequestHandle
+	receipt     *codexTurnReceiptHandle
 }
 
 // CodexHTTPRequestPlanErrorCode classifies preparation failures without
@@ -172,6 +173,7 @@ type CodexHTTPRequestPlanFactory struct {
 	SessionPolicy     *SessionPolicyResolver
 	DispatchPermits   CallerDispatchPermitAuthority
 	TransportKind     string
+	TurnReceipts      *CodexTurnReceiptStore
 
 	operations codexHTTPRequestPlanFactoryOperations
 }
@@ -390,7 +392,58 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		})
 		result.Lifecycle = trace.wrapLifecycle(result.Lifecycle)
 	}
+	result.receipt = factory.registerCodexTurnReceipt(protocol, policyDecision, boundAccountKey, dispatchAccounts[0])
+	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
+}
+
+func (factory *CodexHTTPRequestPlanFactory) registerCodexTurnReceipt(protocol CodexProtocolRequest, policy SessionPolicyDecision, boundAccountKey codex.AccountKey, account CodexFrozenDispatchAccount) *codexTurnReceiptHandle {
+	if factory == nil || factory.TurnReceipts == nil || !protocol.Metadata.Strong {
+		return nil
+	}
+	metadata := protocol.Metadata.Metadata
+	if metadata.RequestKind != CodexRequestTurn || metadata.SessionID == "" || metadata.TurnID == "" {
+		return nil
+	}
+	transport := CodexTurnReceiptTransportHTTP
+	if factory.TransportKind == "websocket" {
+		transport = CodexTurnReceiptTransportWebSocket
+	}
+	routeReason := CodexTurnReceiptRouteUnknown
+	if boundAccountKey != "" {
+		routeReason = CodexTurnReceiptRouteBound
+	} else {
+		switch account.decision {
+		case codexRuntimeDecisionAffinityReuse:
+			routeReason = CodexTurnReceiptRouteAffinityReuse
+		case codexRuntimeDecisionFairnessSelect:
+			routeReason = CodexTurnReceiptRouteFairnessSelect
+		case codexRuntimeDecisionTerminalDefault:
+			routeReason = CodexTurnReceiptRouteTerminalDefault
+		}
+	}
+	pool := ""
+	if policy.Status == PolicyDecisionSelected {
+		pool = policy.Pool
+	}
+	shape := classifyCodexRequestShape(protocol, nil)
+	choice := account.Choice()
+	session := []byte(metadata.SessionID)
+	turn := []byte(metadata.TurnID)
+	defer zeroRuntimeBytes(session)
+	defer zeroRuntimeBytes(turn)
+	return factory.TurnReceipts.register(session, turn, CodexTurnReceiptV1{
+		State:                    CodexTurnReceiptPlanned,
+		Transport:                transport,
+		RequestKind:              shape.RequestKind,
+		RequestLineage:           shape.RequestLineage,
+		RequestedModelClass:      shape.RequestedModelClass,
+		RequestedReasoningEffort: shape.RequestedReasoningEffort,
+		CompactionPhase:          shape.CompactionPhase,
+		Pool:                     pool,
+		RouteReason:              routeReason,
+		PlannedAccountHint:       redactedAccountHint("codex", string(choice.AccountKey)),
+	})
 }
 
 func codexCapabilityFinalScope(transport string, encoded []byte, protocol CodexProtocolRequest, choice RouteChoice, caller RuntimeCallerAuthorityV1) CapabilityFinalScopeCoreV1 {
@@ -629,6 +682,8 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	result.Frozen = frozen
 	result.leaseHandle = handle
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
+	result.receipt = factory.registerCodexTurnReceipt(protocol, SessionPolicyDecision{}, reservation.AccountKey, dispatchAccounts[0])
+	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
 }
 

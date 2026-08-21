@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -157,6 +158,69 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	choice, err := result.Frozen.Choice()
 	if err != nil || !reflect.DeepEqual(choice, choices[0].Choice()) {
 		t.Fatalf("frozen choice = %#v, %v", choice, err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRegistersReceiptAfterDurableBegin(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	store, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x51}, 32)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.TransportKind = "http"
+	factory.TurnReceipts = store
+	body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")), "}") + `,"reasoning":{"effort":"high"}}`)
+
+	prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	receipt, found := store.lookup([]byte("session"), []byte("turn"))
+	if !found {
+		t.Fatal("receipt not registered")
+	}
+	if receipt.State != CodexTurnReceiptPlanned || receipt.Transport != CodexTurnReceiptTransportHTTP ||
+		receipt.RequestKind != "turn" || receipt.RequestLineage != "previous_response_id_absent" ||
+		receipt.RequestedModelClass != "gpt_5_6_sol" || receipt.RequestedReasoningEffort != "high" ||
+		receipt.CompactionPhase != "not_applicable" || receipt.RouteReason != CodexTurnReceiptRouteFairnessSelect ||
+		receipt.PlannedAccountHint != redactedAccountHint("codex", "account") || receipt.ActualAccountHint != "" {
+		t.Fatalf("receipt = %+v", receipt)
+	}
+	if prepared.receipt == nil {
+		t.Fatal("prepared receipt handle unavailable")
+	}
+	if _, ok := prepared.Lifecycle.(*codexTurnReceiptLifecycle); !ok {
+		t.Fatalf("lifecycle = %T, want receipt wrapper", prepared.Lifecycle)
+	}
+
+	failingStore, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x52}, 32)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingRuntime := &codexHTTPRequestPlanTestRuntime{err: errors.New("begin failed")}
+	failingFactory := codexHTTPRequestPlanTestFactory(failingRuntime)
+	failingFactory.TransportKind = "http"
+	failingFactory.TurnReceipts = failingStore
+	if _, err := failingFactory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body}); err == nil {
+		t.Fatal("failed begin succeeded")
+	}
+	if _, found := failingStore.lookup([]byte("session"), []byte("turn")); found {
+		t.Fatal("failed begin registered receipt")
+	}
+
+	compaction := frozenRequestBody("gpt-5.6-sol", CodexRequestCompaction, "private-compaction")
+	compactionRuntime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	compactionFactory := codexHTTPRequestPlanTestFactory(compactionRuntime)
+	compactionFactory.TransportKind = "http"
+	compactionFactory.TurnReceipts = failingStore
+	if prepared, err := compactionFactory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: compaction}); err == nil {
+		prepared.Frozen.Release()
+	}
+	if _, found := failingStore.lookup([]byte("session"), []byte("turn")); found {
+		t.Fatal("compaction registered root Stop receipt")
 	}
 }
 

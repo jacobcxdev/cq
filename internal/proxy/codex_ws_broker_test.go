@@ -20,10 +20,18 @@ import (
 
 func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.T) {
 	t.Parallel()
+	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("r", 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := testCodexTurnReceipt()
+	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
+	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: runtimeLease,
+		receipt: receipt,
 		slots: []CodexLeaseAttemptSlotPlan{
 			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
 			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
@@ -75,13 +83,25 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	if !upstreamA.closed {
 		t.Fatal("replaced upstream was not closed")
 	}
+	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-b") {
+		t.Fatalf("rotated receipt = (%+v, %v)", gotReceipt, found)
+	}
 }
 
 func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *testing.T) {
 	t.Parallel()
+	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("p", 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := testCodexTurnReceipt()
+	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
+	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		receipt: receipt,
 		slots: []CodexLeaseAttemptSlotPlan{{
 			AccountKey:  "account-a",
 			CandidateID: "candidate-a",
@@ -150,6 +170,51 @@ func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *te
 	}
 	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm {
 		t.Fatalf("durable prewarm adoption = %#v", restored.ResolvedRecords)
+	}
+	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
+		t.Fatalf("reused-socket receipt = (%+v, %v)", gotReceipt, found)
+	}
+}
+
+func TestCodexTerminatingWSBrokerDoesNotInventActualBeforeDispatch(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	handle, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("d", 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := testCodexTurnReceipt()
+	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
+	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
+	dialer := &codexWSBrokerDialerStub{outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{
+		"account-a": {{err: errors.New("resolution failed"), skipDispatch: true}},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: &codexWSBrokerPlannerStub{}, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := CodexFrozenDispatchAccount{
+		choice:   RouteChoice{AccountKey: "account-a"},
+		attempts: []CandidateAttempt{{AccountKey: "account-a", Candidate: codex.CandidateRef{AccountKey: "account-a", CandidateID: "candidate-a"}}},
+	}
+	active := &codexWSActiveUpstream{}
+	dial := broker.connect(context.Background(), handle, receipt, account, active)
+	if dial.lifecycle == nil || dial.err == nil {
+		t.Fatalf("dial = %#v", dial)
+	}
+	got, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if !found || got.State != CodexTurnReceiptPlanned || got.ActualAccountHint != "" {
+		t.Fatalf("pre-dispatch receipt = (%+v, %v)", got, found)
+	}
+	_ = dial.lifecycle.Indeterminate(context.Background(), dial.lifecycle.upstreamGeneration)
+	got, _ = receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if got.State != CodexTurnReceiptIndeterminate || got.ActualAccountHint != "" {
+		t.Fatalf("indeterminate receipt = %+v", got)
 	}
 }
 
@@ -595,6 +660,7 @@ func codexWSBrokerHard429() []byte {
 
 type codexWSBrokerPlannerStub struct {
 	runtime        *CodexLeaseRuntime
+	receipt        *codexTurnReceiptHandle
 	slots          []CodexLeaseAttemptSlotPlan
 	attempts       map[codex.AccountKey]int
 	prewarmCalls   int
@@ -631,6 +697,7 @@ func (planner *codexWSBrokerPlannerStub) Build(_ context.Context, input CodexHTT
 		Dispatch:    CodexFrozenDispatchPlan{accounts: accounts, status: CodexRoutePlanReady},
 		Lifecycle:   NewCodexHTTPRequestLifecycle(handle),
 		leaseHandle: handle,
+		receipt:     planner.receipt,
 	}, nil
 }
 
@@ -709,7 +776,7 @@ func (planner *codexWSBrokerPlannerStub) adoptWebSocketPrewarm(ctx context.Conte
 		choice:   choice,
 		attempts: []CandidateAttempt{{AccountKey: selected.AccountKey, Candidate: codex.CandidateRef{AccountKey: selected.AccountKey, CandidateID: codex.CandidateID(selected.CandidateID)}, Revision: "revision-1", Ordinal: 1}},
 	}}, status: CodexRoutePlanReady}
-	return CodexPreparedHTTPRequest{Dispatch: dispatch, Lifecycle: NewCodexHTTPRequestLifecycle(handle), leaseHandle: handle}, nil
+	return CodexPreparedHTTPRequest{Dispatch: dispatch, Lifecycle: NewCodexHTTPRequestLifecycle(handle), leaseHandle: handle, receipt: planner.receipt}, nil
 }
 
 type codexWSBrokerRead struct {
@@ -779,10 +846,11 @@ type codexWSBrokerDialerStub struct {
 }
 
 type codexWSBrokerDialOutcome struct {
-	conn     websocketRelayConn
-	response *http.Response
-	body     []byte
-	err      error
+	conn         websocketRelayConn
+	response     *http.Response
+	body         []byte
+	err          error
+	skipDispatch bool
 }
 
 type codexWSBrokerBlockingConn struct {
@@ -820,11 +888,14 @@ func (conn *codexWSBrokerBlockingConn) Close() error {
 	return nil
 }
 
-func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
+func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header, onDispatch func(CandidateAttempt)) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
 	dialer.accounts = append(dialer.accounts, choice.AccountKey)
 	if outcomes := dialer.outcomes[choice.AccountKey]; len(outcomes) != 0 {
 		outcome := outcomes[0]
 		dialer.outcomes[choice.AccountKey] = outcomes[1:]
+		if onDispatch != nil && !outcome.skipDispatch {
+			onDispatch(attempt)
+		}
 		return outcome.conn, outcome.response, append([]byte(nil), outcome.body...), attempt, outcome.err
 	}
 	connections := dialer.connections[choice.AccountKey]
@@ -832,5 +903,8 @@ func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoic
 		return nil, nil, nil, attempt, errors.New("no scripted connection")
 	}
 	dialer.connections[choice.AccountKey] = connections[1:]
+	if onDispatch != nil {
+		onDispatch(attempt)
+	}
 	return connections[0], &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}, nil, attempt, nil
 }

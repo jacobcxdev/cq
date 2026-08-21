@@ -160,6 +160,9 @@ type Server struct {
 	// reads or publishes policy through this process.
 	RoutingPolicy *RoutingPolicyStore
 	SessionPolicy *SessionPolicyResolver
+	// CodexTurnReceipts remains worker-owned and process-local. It exposes only
+	// privacy-safe post-turn route facts through authenticated local control.
+	CodexTurnReceipts *CodexTurnReceiptStore
 }
 
 type codexWebSocketRoutingProvider interface {
@@ -370,6 +373,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("GET "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("PUT "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
+	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
 	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
 	mux.HandleFunc("GET "+codexCompactResponsesPath, s.handleCodexCompactResponsesGetRoute)
