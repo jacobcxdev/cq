@@ -614,7 +614,7 @@ func writeRegistryCodexBarFixture(t *testing.T, identity codexprov.AccountIdenti
 		"version": 3,
 		"accounts": []any{map[string]any{
 			"id": "external-one", "managedHomePath": managedHome,
-			"providerAccountID": identity.AccountID, "workspaceAccountID": identity.UserID,
+			"providerAccountID": identity.AccountID, "workspaceAccountID": identity.AccountID,
 			"authFingerprint": hex.EncodeToString(fingerprint[:]),
 		}},
 	})

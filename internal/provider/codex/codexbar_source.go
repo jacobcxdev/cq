@@ -345,7 +345,7 @@ func (s *CodexBarSource) readValidatedRecord(record codexBarManifestRecord, expe
 	if record.ProviderAccountID == "" || record.WorkspaceAccountID == "" {
 		return validatedCodexBarRecord{}, fmt.Errorf("%w: manifest identity", ErrExternalInvalid)
 	}
-	if record.ProviderAccountID != claims.AccountID || record.WorkspaceAccountID != claims.UserID {
+	if record.ProviderAccountID != claims.AccountID || record.WorkspaceAccountID != claims.AccountID {
 		return validatedCodexBarRecord{}, ErrExternalIdentityMismatch
 	}
 	return validatedCodexBarRecord{

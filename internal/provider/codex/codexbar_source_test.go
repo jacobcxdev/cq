@@ -33,7 +33,7 @@ func writeCodexBarFixture(t *testing.T, root string, authMode os.FileMode, mutat
 		"id":                 "synthetic-record",
 		"managedHomePath":    managedHome,
 		"providerAccountID":  "acct-1",
-		"workspaceAccountID": "user-1",
+		"workspaceAccountID": "acct-1",
 		"authFingerprint":    hex.EncodeToString(fingerprint[:]),
 	}
 	if mutateRecord != nil {
@@ -761,6 +761,19 @@ func TestCodexBarSourceRejectsProviderIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestCodexBarSourceAcceptsV3WorkspaceAccountIdentity(t *testing.T) {
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+
+	candidates, err := NewCodexBarSource(root).List(context.Background())
+	if err != nil {
+		t.Fatalf("List error = %v, want nil", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("List returned %d candidates, want 1", len(candidates))
+	}
+}
+
 func TestCodexBarSourceRejectsOuterAccountClaimMismatch(t *testing.T) {
 	root := t.TempDir()
 	writeCodexBarFixture(t, root, 0o600, nil)
@@ -784,7 +797,7 @@ func TestCodexBarSourceRejectsOuterAccountClaimMismatch(t *testing.T) {
 func TestCodexBarSourceRejectsWorkspaceIdentityMismatch(t *testing.T) {
 	root := t.TempDir()
 	writeCodexBarFixture(t, root, 0o600, func(record map[string]any) {
-		record["workspaceAccountID"] = "different-user"
+		record["workspaceAccountID"] = "different-account"
 	})
 
 	_, err := NewCodexBarSource(root).List(context.Background())
