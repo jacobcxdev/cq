@@ -44,6 +44,30 @@ func TestAddCodexProxyEligibilityUsesEffectiveRoutingAllowlist(t *testing.T) {
 	}
 }
 
+func TestAddCodexProxyEligibilityIncludesActiveAccountOutsideAllowlist(t *testing.T) {
+	report := app.Report{Providers: []app.ProviderReport{{
+		ID: provider.Codex,
+		Results: []quota.Result{
+			{Status: quota.StatusOK, AccountID: "account-a"},
+			{Status: quota.StatusOK, AccountID: "account-b"},
+			{Status: quota.StatusOK, AccountID: "account-c"},
+		},
+	}}}
+	accounts := []codexprov.RoutingAccount{
+		{Key: "route-a", AccountID: "account-a", Active: true},
+		{Key: "route-b", AccountID: "account-b"},
+		{Key: "route-c", AccountID: "account-c"},
+	}
+	cfg := &proxy.Config{CodexRoutingAccountKeys: []codexprov.AccountKey{"route-b", "route-c"}}
+
+	addCodexProxyEligibility(&report, cfg, accounts)
+
+	eligibility := report.Providers[0].ProxyEligibility
+	if eligibility.EligibleCount != 3 || eligibility.ExcludedCount != 0 {
+		t.Fatalf("proxy eligibility counts = %#v, want active account plus allowlist", eligibility)
+	}
+}
+
 func TestAddCodexProxyEligibilityUsesPinForNewWork(t *testing.T) {
 	report := app.Report{Providers: []app.ProviderReport{{
 		ID: provider.Codex,
@@ -53,7 +77,7 @@ func TestAddCodexProxyEligibilityUsesPinForNewWork(t *testing.T) {
 		},
 	}}}
 	accounts := []codexprov.RoutingAccount{
-		{Key: "route-a", AccountID: "account-a"},
+		{Key: "route-a", AccountID: "account-a", Active: true},
 		{Key: "route-b", AccountID: "account-b"},
 	}
 	cfg := &proxy.Config{

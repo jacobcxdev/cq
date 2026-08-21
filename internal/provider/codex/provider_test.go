@@ -159,7 +159,7 @@ func (s staticCredentialInventory) List(context.Context) (Inventory, error) { re
 
 func TestRoutingAccountsPreserveOpaqueKeyAndIdentity(t *testing.T) {
 	provider := &Provider{inventory: staticCredentialInventory{inventory: Inventory{Accounts: []LogicalAccount{
-		{Key: "route-a", Identity: AccountIdentity{AccountID: "account-a", Email: "a@example.com"}},
+		{Key: "route-a", Identity: AccountIdentity{AccountID: "account-a", Email: "a@example.com"}, Active: true},
 		{Key: "route-b", Identity: AccountIdentity{AccountID: "account-b", Email: "b@example.com"}},
 	}}}}
 
@@ -170,7 +170,7 @@ func TestRoutingAccountsPreserveOpaqueKeyAndIdentity(t *testing.T) {
 	if len(accounts) != 2 {
 		t.Fatalf("routing accounts = %d, want 2", len(accounts))
 	}
-	if accounts[0].Key != "route-a" || accounts[0].AccountID != "account-a" || accounts[0].Email != "a@example.com" {
+	if accounts[0].Key != "route-a" || accounts[0].AccountID != "account-a" || accounts[0].Email != "a@example.com" || !accounts[0].Active {
 		t.Fatalf("first routing account = %#v", accounts[0])
 	}
 }

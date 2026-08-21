@@ -29,6 +29,7 @@ func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []
 		return
 	}
 	allowed := make(map[codexprov.AccountKey]bool)
+	includeActive := cfg.CodexRoutingPinnedAccountKey == ""
 	if cfg.CodexRoutingPinnedAccountKey != "" {
 		allowed[cfg.CodexRoutingPinnedAccountKey] = true
 	} else {
@@ -38,18 +39,18 @@ func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []
 	}
 	unrestricted := len(allowed) == 0
 
-	byAccountID := make(map[string]codexprov.AccountKey, len(accounts))
-	byEmail := make(map[string]codexprov.AccountKey, len(accounts))
+	byAccountID := make(map[string]codexprov.RoutingAccount, len(accounts))
+	byEmail := make(map[string]codexprov.RoutingAccount, len(accounts))
 	duplicateEmail := make(map[string]bool)
 	for _, account := range accounts {
 		if account.AccountID != "" {
-			byAccountID[account.AccountID] = account.Key
+			byAccountID[account.AccountID] = account
 		}
 		if account.Email != "" {
 			if _, exists := byEmail[account.Email]; exists {
 				duplicateEmail[account.Email] = true
 			}
-			byEmail[account.Email] = account.Key
+			byEmail[account.Email] = account
 		}
 	}
 
@@ -57,10 +58,10 @@ func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []
 		if unrestricted {
 			return true
 		}
-		key, found := byAccountID[result.AccountID]
+		account, found := byAccountID[result.AccountID]
 		if !found && result.Email != "" && !duplicateEmail[result.Email] {
-			key, found = byEmail[result.Email]
+			account, found = byEmail[result.Email]
 		}
-		return found && allowed[key]
+		return found && (allowed[account.Key] || (includeActive && account.Active))
 	})
 }

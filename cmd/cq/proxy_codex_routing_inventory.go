@@ -7,8 +7,9 @@ import (
 )
 
 type proxyCodexRoutingInventory struct {
-	source  codexprov.CredentialInventory
-	allowed map[codexprov.AccountKey]bool
+	source        codexprov.CredentialInventory
+	allowed       map[codexprov.AccountKey]bool
+	includeActive bool
 }
 
 func newProxyCodexRoutingInventories(source codexprov.CredentialInventory, allowed []codexprov.AccountKey, pinned codexprov.AccountKey) (codexprov.CredentialInventory, codexprov.CredentialInventory) {
@@ -16,7 +17,7 @@ func newProxyCodexRoutingInventories(source codexprov.CredentialInventory, allow
 		inventory := newProxyCodexRoutingInventory(source, allowed)
 		return inventory, inventory
 	}
-	selection := newProxyCodexRoutingInventory(source, []codexprov.AccountKey{pinned})
+	selection := newExactProxyCodexRoutingInventory(source, []codexprov.AccountKey{pinned})
 	if len(allowed) == 0 {
 		return selection, source
 	}
@@ -31,10 +32,18 @@ func newProxyCodexRoutingInventories(source codexprov.CredentialInventory, allow
 	if !found {
 		continuityKeys = append(continuityKeys, pinned)
 	}
-	return selection, newProxyCodexRoutingInventory(source, continuityKeys)
+	return selection, newExactProxyCodexRoutingInventory(source, continuityKeys)
 }
 
 func newProxyCodexRoutingInventory(source codexprov.CredentialInventory, allowed []codexprov.AccountKey) codexprov.CredentialInventory {
+	return newProxyCodexRoutingInventoryWithActive(source, allowed, true)
+}
+
+func newExactProxyCodexRoutingInventory(source codexprov.CredentialInventory, allowed []codexprov.AccountKey) codexprov.CredentialInventory {
+	return newProxyCodexRoutingInventoryWithActive(source, allowed, false)
+}
+
+func newProxyCodexRoutingInventoryWithActive(source codexprov.CredentialInventory, allowed []codexprov.AccountKey, includeActive bool) codexprov.CredentialInventory {
 	if len(allowed) == 0 {
 		return source
 	}
@@ -42,7 +51,7 @@ func newProxyCodexRoutingInventory(source codexprov.CredentialInventory, allowed
 	for _, key := range allowed {
 		set[key] = true
 	}
-	return &proxyCodexRoutingInventory{source: source, allowed: set}
+	return &proxyCodexRoutingInventory{source: source, allowed: set, includeActive: includeActive}
 }
 
 func (inventory *proxyCodexRoutingInventory) List(ctx context.Context) (codexprov.Inventory, error) {
@@ -52,7 +61,7 @@ func (inventory *proxyCodexRoutingInventory) List(ctx context.Context) (codexpro
 	}
 	accounts := make([]codexprov.LogicalAccount, 0, len(view.Accounts))
 	for _, account := range view.Accounts {
-		if inventory.allowed[account.Key] {
+		if inventory.allowed[account.Key] || (inventory.includeActive && account.Active) {
 			accounts = append(accounts, account)
 		}
 	}
