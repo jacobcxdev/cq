@@ -770,6 +770,80 @@ func TestCodexHTTPRequestPlanFactoryErrorsAreTypedPrivateAndPreserveCancellation
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryEnrichesOnlyHTTPDiagnosticsWithoutEmitting(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		transportKind string
+		wantLineage   string
+		wantModel     string
+	}{
+		{name: "HTTP", transportKind: "http", wantLineage: "previous_response_id_present", wantModel: "gpt_5_6_sol"},
+		{name: "WebSocket", transportKind: "websocket"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+			factory.TransportKind = test.transportKind
+			factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{}}
+			ctx, diagnostics := withRouteDiagnostics(context.Background())
+			body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-prompt")), "}") + `,"previous_response_id":"private-response","reasoning":{"effort":"high"}}`)
+
+			_, _ = factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
+
+			event := RouteEvent{}
+			event.applyRouteDiagnostics(diagnostics)
+			if event.RequestLineage != test.wantLineage || event.RequestedModelClass != test.wantModel {
+				t.Fatalf("request shape = %+v, want lineage %q model %q", event, test.wantLineage, test.wantModel)
+			}
+			if event.RequestedReasoningEffort != map[bool]string{true: "high"}[test.transportKind == "http"] {
+				t.Fatalf("reasoning effort = %q", event.RequestedReasoningEffort)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPreparationRetryOverwritesShapeWithoutEmission(t *testing.T) {
+	t.Parallel()
+
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	factory.TransportKind = "http"
+	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{}}
+	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	first := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-first")), "}") + `,"reasoning":{"effort":"high"}}`)
+	second := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-terra", CodexRequestTurn, "private-second")), "}") + `,"previous_response_id":"private-id","reasoning":{"effort":"low"}}`)
+
+	_, _ = factory.buildOnce(ctx, CodexHTTPRequestPlanInput{Encoded: first})
+	_, _ = factory.buildOnce(ctx, CodexHTTPRequestPlanInput{Encoded: second})
+
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.RequestLineage != "previous_response_id_present" || event.RequestedReasoningEffort != "low" || event.RequestedModelClass != "gpt_5_6_terra" {
+		t.Fatalf("retried request shape = %+v", event)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryAppliesUnknownShapeOnProtocolError(t *testing.T) {
+	t.Parallel()
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	factory.TransportKind = "http"
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, header http.Header) (*CodexFrozenRequestInspection, error) {
+		inspection, err := InspectCodexNativeRequest(ctx, encoded, header)
+		if err == nil {
+			inspection.Release()
+		}
+		return inspection, err
+	}
+	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	_, _ = factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")})
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.RequestLineage != "unknown" || event.RequestedReasoningEffort != "unknown" || event.RequestedModelClass != "unknown" || event.CompactionPhase != "unknown" {
+		t.Fatalf("protocol error shape = %+v", event)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryRejectsInvalidRouteSnapshotBeforeFreeze(t *testing.T) {
 	t.Parallel()
 

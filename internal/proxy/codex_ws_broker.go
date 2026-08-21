@@ -106,6 +106,24 @@ type codexTerminatingWSBroker struct {
 	upstreamGeneration uint64
 }
 
+type codexWSFrameObservationSinkContextKey struct{}
+
+type codexWSFrameObservationSink func(*routeDiagnostics)
+
+func withCodexWSFrameObservationSink(ctx context.Context, sink codexWSFrameObservationSink) context.Context {
+	return context.WithValue(ctx, codexWSFrameObservationSinkContextKey{}, sink)
+}
+
+func emitAcceptedCodexWSFrameObservation(ctx context.Context, diagnostics *routeDiagnostics) {
+	if ctx == nil || diagnostics == nil {
+		return
+	}
+	sink, _ := ctx.Value(codexWSFrameObservationSinkContextKey{}).(codexWSFrameObservationSink)
+	if sink != nil {
+		sink(diagnostics)
+	}
+}
+
 type codexWSActiveUpstream struct {
 	conn       websocketRelayConn
 	account    codex.AccountKey
@@ -197,6 +215,7 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 	if err != nil {
 		return err
 	}
+	emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
 	if prepared.Frozen != nil {
 		defer prepared.Frozen.Release()
 	}
@@ -287,6 +306,7 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 		return err
 	}
 	active.prewarm = reservation
+	emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
 	for accountIndex, account := range accounts {
 		dial := broker.connectPrewarm(ctx, account, active)
 		if active.conn == nil {

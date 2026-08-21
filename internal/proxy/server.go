@@ -1168,7 +1168,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
 	if webSocketEnforcing {
-		if err := s.CodexWebSocketBroker.Serve(r.Context(), clientConn, r.Header); err != nil {
+		brokerContext := withCodexWSFrameObservationSink(r.Context(), func(diagnostics *routeDiagnostics) {
+			s.emitCodexWebSocketFrameObservation(diagnostics)
+		})
+		if err := s.CodexWebSocketBroker.Serve(brokerContext, clientConn, r.Header); err != nil {
 			diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing failed")
 			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		}
@@ -1183,6 +1186,9 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	if messageType == websocket.TextMessage {
 		requestedModel = extractCodexWebSocketFrameModel(message)
 		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, message, 1)
+	}
+	if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
+		s.emitCodexWebSocketFrameObservation(diagnostics)
 	}
 	wsObserver := s.codexWebSocketObserver()
 	if wsObserver != nil {
@@ -1206,6 +1212,11 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	relayErr := relayWebSocketPairObserved(r.Context(), clientConn, upstreamConn, func(fromClient bool, messageType int, message []byte) {
+		if fromClient {
+			if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
+				s.emitCodexWebSocketFrameObservation(diagnostics)
+			}
+		}
 		if observation == nil || messageType != websocket.TextMessage {
 			return
 		}
@@ -1218,6 +1229,39 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	if observation != nil {
 		observation.Close(relayErr)
 	}
+}
+
+func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagnostics, bool) {
+	if messageType != websocket.TextMessage {
+		return nil, false
+	}
+	var envelope struct {
+		Type   string `json:"type"`
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(frame, &envelope); err != nil ||
+		(envelope.Type != "response.create" && envelope.Method != "response/create") {
+		return nil, false
+	}
+	request, err := ParseCodexProtocolRequest(frame, "", nil)
+	if err != nil {
+		return nil, false
+	}
+	diagnostics := &routeDiagnostics{}
+	diagnostics.codex = codexObservationFieldsForRequestShape(classifyCodexRequestShape(request, nil))
+	return diagnostics, true
+}
+
+func (s *Server) emitCodexWebSocketFrameObservation(diagnostics *routeDiagnostics) {
+	event := RouteEvent{
+		Time:      time.Now().UTC(),
+		Method:    http.MethodPost,
+		Path:      legacyCodexResponsesPath,
+		Provider:  "codex",
+		RouteKind: "codex_websocket_frame",
+	}
+	event.applyRouteDiagnostics(diagnostics)
+	s.emitDiagnostics(event)
 }
 
 func (s *Server) codexWebSocketObserver() *CodexTurnObserver {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -48,8 +49,13 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	accepted := 0
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(*routeDiagnostics) { accepted++ })
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted frame observations = %d, want 1 across rotation", accepted)
 	}
 	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
 		t.Fatalf("dial accounts = %#v", got)
@@ -106,8 +112,18 @@ func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	var accepted []codexObservationFields
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(diagnostics *routeDiagnostics) {
+		event := RouteEvent{}
+		event.applyRouteDiagnostics(diagnostics)
+		accepted = append(accepted, codexObservationFields{RequestKind: event.RequestKind, RequestLineage: event.RequestLineage})
+	})
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
+	}
+	if len(accepted) != 2 || accepted[0].RequestKind != "prewarm" || accepted[0].RequestLineage != "previous_response_id_absent" ||
+		accepted[1].RequestKind != "turn" || accepted[1].RequestLineage != "previous_response_id_present" {
+		t.Fatalf("accepted frame observations = %+v, want prewarm then continued turn", accepted)
 	}
 	if planner.prewarmCalls != 1 || planner.adoptionCalls != 1 || planner.buildCalls != 0 {
 		t.Fatalf("planner calls = prewarm %d adoption %d build %d, want 1/1/0", planner.prewarmCalls, planner.adoptionCalls, planner.buildCalls)
@@ -134,6 +150,31 @@ func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *te
 	}
 	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm {
 		t.Fatalf("durable prewarm adoption = %#v", restored.ResolvedRecords)
+	}
+}
+
+func TestCodexTerminatingWSBrokerRejectedFrameDoesNotEmitObservation(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator)}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: &codexWSBrokerDialerStub{}, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accepted []codexObservationFields
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(diagnostics *routeDiagnostics) {
+		event := RouteEvent{}
+		event.applyRouteDiagnostics(diagnostics)
+		accepted = append(accepted, codexObservationFields{RequestKind: event.RequestKind})
+	})
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","private":"prompt"}`)}}}
+	if err := broker.Serve(ctx, downstream); err == nil {
+		t.Fatal("rejected response frame succeeded")
+	}
+	if len(accepted) != 0 {
+		t.Fatalf("rejected frame observations = %+v, want none", accepted)
 	}
 }
 
@@ -187,6 +228,55 @@ func TestServerCodexWebSocketEnforceUsesTerminatingBroker(t *testing.T) {
 	}
 }
 
+func TestServerCodexWebSocketEnforcePersistsEachAcceptedFrameSeparately(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = diagnostics.Close() })
+	server := &Server{
+		Config: &Config{ClaudeUpstream: "https://claude.test", CodexUpstream: "https://codex.test", LocalToken: "local-token"},
+		CodexRouting: &CodexRoutingRuntime{WebSocket: CodexModeStatus{
+			Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 41, AuthoritativeEpoch: 41,
+		}},
+		CodexWebSocketBroker: &codexWebSocketFrameSinkHandlerStub{},
+		Diag:                 diagnostics,
+	}
+	handler, err := server.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := httptest.NewServer(handler)
+	defer proxyServer.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxyServer.URL, "http")+legacyCodexResponsesPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frame := range [][]byte{
+		codexTerminatingWSFrame("turn-a", ""),
+		codexTerminatingWSFrame("turn-b", `,"previous_response_id":"private-id"`),
+	} {
+		if err := client.WriteMessage(websocket.TextMessage, frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := client.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	events := waitForDiagnosticsEvents(t, path, 3)
+	var frameEvents []RouteEvent
+	for _, event := range events {
+		if event.RouteKind == "codex_websocket_frame" {
+			frameEvents = append(frameEvents, event)
+		}
+	}
+	if len(frameEvents) != 2 || frameEvents[0].RequestLineage != "previous_response_id_absent" || frameEvents[1].RequestLineage != "previous_response_id_present" {
+		t.Fatalf("frame events = %+v, want two independent snapshots", frameEvents)
+	}
+}
+
 func TestServerCodexWebSocketEnforceRejectsMissingBrokerBeforeUpgrade(t *testing.T) {
 	t.Parallel()
 	server := &Server{
@@ -221,6 +311,24 @@ func TestServerCodexWebSocketEnforceRejectsMissingBrokerBeforeUpgrade(t *testing
 
 type codexWebSocketRoutingHandlerStub struct {
 	header http.Header
+}
+
+type codexWebSocketFrameSinkHandlerStub struct{}
+
+func (*codexWebSocketFrameSinkHandlerStub) Serve(ctx context.Context, connection *websocket.Conn, _ http.Header) error {
+	for range 2 {
+		messageType, payload, err := connection.ReadMessage()
+		if err != nil {
+			return err
+		}
+		pending, err := newCodexWSPendingFrame(messageType, payload)
+		if err != nil {
+			return err
+		}
+		emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
+		pending.Release()
+	}
+	return connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed"}`))
 }
 
 func (handler *codexWebSocketRoutingHandlerStub) Serve(_ context.Context, connection *websocket.Conn, header http.Header) error {
@@ -426,8 +534,13 @@ func TestCodexTerminatingWSBrokerExhaustsSameAccountAuthBeforeRotation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	accepted := 0
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(*routeDiagnostics) { accepted++ })
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted frame observations = %d, want 1 across candidate retry", accepted)
 	}
 	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-a"}) {
 		t.Fatalf("dial accounts = %#v", got)

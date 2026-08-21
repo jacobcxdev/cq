@@ -221,6 +221,9 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	defer inspection.Release()
 
 	protocol, err := inspection.Protocol()
+	if factory.TransportKind == "http" {
+		noteCodexObservation(ctx, codexObservationFieldsForRequestShape(classifyCodexRequestShape(protocol, err)))
+	}
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 	}

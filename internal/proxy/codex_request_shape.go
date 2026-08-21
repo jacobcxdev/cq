@@ -17,6 +17,16 @@ type codexRequestShape struct {
 	CompactionPhase          string
 }
 
+func codexObservationFieldsForRequestShape(shape codexRequestShape) codexObservationFields {
+	return codexObservationFields{
+		RequestKind:              shape.RequestKind,
+		RequestLineage:           shape.RequestLineage,
+		RequestedReasoningEffort: shape.RequestedReasoningEffort,
+		RequestedModelClass:      shape.RequestedModelClass,
+		CompactionPhase:          shape.CompactionPhase,
+	}
+}
+
 func classifyCodexRequestShape(request CodexProtocolRequest, parseErr error) codexRequestShape {
 	if parseErr != nil {
 		return codexRequestShape{
