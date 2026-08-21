@@ -589,7 +589,7 @@ func safeCodexDiagnosticsMethod(value string) bool {
 
 func safeCodexRouteKind(value string) bool {
 	switch value {
-	case "", "anthropic_count_tokens", "anthropic_messages", "codex_app_server", "codex_compact", "codex_images", "codex_legacy_websocket", "codex_live_call", "codex_live_sideband", "codex_native", "codex_search", "codex_websocket_frame", "openai_unsupported":
+	case "", "anthropic_count_tokens", "anthropic_messages", "codex_app_server", "codex_compact", "codex_images", "codex_legacy_websocket", "codex_live_call", "codex_live_sideband", "codex_native", "codex_search", "codex_websocket_broker", "codex_websocket_frame", "openai_unsupported":
 		return true
 	default:
 		return false
