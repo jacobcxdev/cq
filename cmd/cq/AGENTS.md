@@ -17,5 +17,6 @@ CLI entry point using kong for command parsing.
 
 - `CLI` struct defines the kong command tree; `CheckCmd` is the default command
 - `runCheck` wires together cache, runner, and renderer — cache failure is non-fatal (nil cache)
+- `runCheck` passes one shared HTTP client and release-linked Gemini OAuth client secret to providers
 - Provider IDs come from `provider.Ordered`; the enum constraint on `CheckCmd.Providers` must match
 - `dispatch` routes kong commands to the appropriate handler function

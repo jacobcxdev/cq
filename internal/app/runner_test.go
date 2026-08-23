@@ -25,6 +25,18 @@ type mockProvider struct {
 	discovered []provider.Account
 }
 
+type blockingProvider struct {
+	id      provider.ID
+	started chan<- provider.ID
+	release <-chan struct{}
+}
+
+func (p *blockingProvider) Fetch(_ context.Context, _ time.Time) ([]quota.Result, error) {
+	p.started <- p.id
+	<-p.release
+	return []quota.Result{{Status: quota.StatusOK}}, nil
+}
+
 func (m *mockProvider) Fetch(_ context.Context, _ time.Time) ([]quota.Result, error) {
 	m.called = true
 	return m.results, m.err
@@ -116,6 +128,49 @@ func TestRunnerRun(t *testing.T) {
 	}
 	if cr.report.Providers[0].ID != provider.Codex {
 		t.Errorf("provider ID = %q, want %q", cr.report.Providers[0].ID, provider.Codex)
+	}
+}
+
+func TestRunnerStartsAllProvidersBeforeWaiting(t *testing.T) {
+	started := make(chan provider.ID, 3)
+	release := make(chan struct{})
+	ids := []provider.ID{provider.Claude, provider.Codex, provider.Gemini}
+	services := make(map[provider.ID]provider.Services, len(ids))
+	for _, id := range ids {
+		services[id] = provider.Services{Usage: &blockingProvider{
+			id:      id,
+			started: started,
+			release: release,
+		}}
+	}
+	runner := &Runner{
+		Clock:    fixedClock(time.Unix(1000, 0)),
+		Services: services,
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := runner.BuildReport(context.Background(), RunRequest{Providers: ids, Refresh: true})
+		done <- err
+	}()
+
+	seen := make(map[provider.ID]bool, len(ids))
+	for range ids {
+		select {
+		case id := <-started:
+			seen[id] = true
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("providers did not all begin before one completed")
+		}
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("BuildReport() error = %v", err)
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Fatalf("provider %q did not begin fetch", id)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ builds:
     ldflags:
       - -s -w
       - -X main.version={{ .Version }}
+      - -X main.geminiOAuthClientSecret={{ .Env.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
       - -X github.com/jacobcxdev/cq/internal/proxy.codexStage11CorpusBuildProvenanceSHA256={{ .Env.CODEX_STAGE11_PROVENANCE_SHA256 }}
     goos:
       - darwin

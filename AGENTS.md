@@ -31,7 +31,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 | `internal/provider` | Provider interface + ID constants | [AGENTS.md](internal/provider/AGENTS.md) |
 | `internal/provider/claude` | Multi-account, OAuth refresh, parallel profile+usage | [AGENTS.md](internal/provider/claude/AGENTS.md) |
 | `internal/provider/codex` | Multi-account, automatic reads only (shared system credentials) | [AGENTS.md](internal/provider/codex/AGENTS.md) |
-| `internal/provider/gemini` | Single account, bounded Antigravity CLI usage command | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
+| `internal/provider/gemini` | Single account, direct Antigravity OAuth and quota HTTP | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
 | `internal/app` | Runner (concurrent fetch), Report types, account management | [AGENTS.md](internal/app/AGENTS.md) |
 | `internal/output` | TTY renderer (lipgloss), JSON renderer | [AGENTS.md](internal/output/AGENTS.md) |
 | `internal/aggregate` | Weighted pace, gauge (correction-deadline), burndown computation | [AGENTS.md](internal/aggregate/AGENTS.md) |
@@ -44,7 +44,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 
 ## Key Decisions (Do Not Re-Litigate)
 
-1. **Dependency injection everywhere.** `httputil.Doer` for HTTP, `fsutil.FileSystem` for filesystem, `commandRunner` for Antigravity CLI, `app.Cache` interface. All testable via fakes.
+1. **Dependency injection everywhere.** `httputil.Doer` for HTTP, `fsutil.FileSystem` for filesystem, a narrow credential reader for Antigravity Keychain access, and `app.Cache` interface. All testable via fakes.
 2. **Panic recovery is mandatory.** Every goroutine that calls external code must have `defer recover()`. Inner goroutines (Claude profile+usage) need their own recovery.
 3. **Atomic file writes.** All credential/cache persistence uses write-to-tmp + rename. No partial writes.
 4. **Nil-safe cache.** Runner guards all cache access on `r.Cache != nil`. Cache failure degrades gracefully.
@@ -73,7 +73,8 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 ## Gotchas
 
 - Claude and Codex have **multi-account** support; Gemini is single-account
-- Gemini keeps provider ID `gemini` but delegates quota to exact zero-token `agy -p /usage --output-format json --print-timeout 15s` command
+- Gemini keeps provider ID `gemini`, reads Antigravity-owned local state concurrently, and calls private Antigravity HTTP endpoints directly
+- Gemini OAuth client secret is release-time link data; never add runtime environment, CLI, binary-scraping, or persistence fallbacks
 - `keyring.DiscoverClaudeAccounts()` calls real keychain — tests must mock at provider level
 - `mergeAnonymousFresh` uses token affinity (`sameStoredAccount`) to match anonymous entries — never merges blindly
 - `dedup` in Claude parser prefers usable results over errors on key collision
@@ -85,7 +86,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 ## Testing
 
 - All tests use `-race`; the codebase is race-free
-- HTTP provider tests use `urlRewriter`; filesystem tests use `fakeFS` / `fsutil.MemFS`; Gemini tests inject a fake command runner
+- HTTP provider tests use `urlRewriter` or an injected `httputil.Doer`; filesystem tests use `fakeFS` / `fsutil.MemFS`; Gemini tests inject credential, filesystem, and HTTP fakes
 - `t.Setenv` for environment-dependent and helper-process tests
 - `t.TempDir` for file-based tests
 - Every rule: test the happy path, the error path, and at least one edge case

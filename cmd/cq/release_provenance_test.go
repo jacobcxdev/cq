@@ -37,3 +37,24 @@ func TestReleaseEmbedsCodexStage11Provenance(t *testing.T) {
 		t.Fatalf("release provenance = %q, want %q", output, reviewed)
 	}
 }
+
+func TestReleaseRequiresAndEmbedsGeminiOAuthSecret(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaser, err := os.ReadFile("../../.goreleaser.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowText := string(workflow)
+	if !strings.Contains(workflowText, "run: test -n \"$GEMINI_ANTIGRAVITY_CLIENT_SECRET\"") {
+		t.Fatal("release workflow does not fail closed when Gemini OAuth secret is absent")
+	}
+	if strings.Count(workflowText, "secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET") < 2 {
+		t.Fatal("release workflow does not supply Gemini OAuth secret to validation and packaging")
+	}
+	if !strings.Contains(string(releaser), "main.geminiOAuthClientSecret={{ .Env.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}") {
+		t.Fatal("GoReleaser does not embed Gemini OAuth secret")
+	}
+}

@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -10,31 +9,25 @@ import (
 )
 
 const validGeminiBuckets = `
-	{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.734,"reset_time":"2026-08-27T06:56:51Z"},
-	{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.426,"reset_time":"2026-08-20T11:56:51Z"}`
+	{"bucketId":"gemini-weekly","remainingFraction":0.734,"resetTime":"2026-08-27T06:56:51Z"},
+	{"bucketId":"gemini-5h","remainingFraction":0.426,"resetTime":"2026-08-20T11:56:51Z"}`
 
-func usageFixture(status string, numTurns, totalTokens int, commandName, buckets string) []byte {
+func quotaFixture(buckets string) []byte {
 	return []byte(fmt.Sprintf(`{
-		"conversation_id":"",
-		"status":%q,
-		"response":"quota text not used",
-		"duration_seconds":0,
-		"num_turns":%d,
-		"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":%d},
-		"command":{"name":%q,"data":{"description":"quota description","groups":[
-			{"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[%s]},
-			{"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[
-				{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.01,"reset_time":"2026-08-27T06:56:51Z"},
-				{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.02,"reset_time":"2026-08-20T11:56:51Z"}
+		"groups":[
+			{"buckets":[%s]},
+			{"buckets":[
+				{"bucketId":"3p-weekly","remainingFraction":0.01,"resetTime":"2026-08-27T06:56:51Z"},
+				{"bucketId":"3p-5h","remainingFraction":0.02,"resetTime":"2026-08-20T11:56:51Z"}
 			]}
-		]}}
-	}`, status, numTurns, totalTokens, commandName, buckets))
+		]
+	}`, buckets))
 }
 
-func TestParseUsageMapsOnlyGeminiBuckets(t *testing.T) {
-	result, err := parseUsage(usageFixture("SUCCESS", 0, 0, "usage", validGeminiBuckets))
+func TestParseQuotaSummaryMapsOnlyGeminiBuckets(t *testing.T) {
+	result, err := parseQuotaSummary(quotaFixture(validGeminiBuckets))
 	if err != nil {
-		t.Fatalf("parseUsage() error = %v", err)
+		t.Fatalf("parseQuotaSummary() error = %v", err)
 	}
 	if result.AccountID != "antigravity-cli" || !result.Active {
 		t.Fatalf("identity = %q/%v, want antigravity-cli/true", result.AccountID, result.Active)
@@ -66,79 +59,54 @@ func TestParseUsageMapsOnlyGeminiBuckets(t *testing.T) {
 	}
 }
 
-func TestParseUsageRejectsMalformedJSON(t *testing.T) {
-	if _, err := parseUsage([]byte(`{"status":`)); err == nil {
-		t.Fatal("parseUsage() error = nil, want malformed JSON error")
+func TestParseQuotaSummaryRejectsMalformedJSON(t *testing.T) {
+	if _, err := parseQuotaSummary([]byte(`{"groups":`)); err == nil {
+		t.Fatal("parseQuotaSummary() error = nil, want malformed JSON error")
 	}
 }
 
-func TestParseUsageRejectsUnsafeEnvelope(t *testing.T) {
-	validFixture := string(usageFixture("SUCCESS", 0, 0, "usage", validGeminiBuckets))
-	tests := []struct {
-		name string
-		data []byte
-	}{
-		{name: "non-success status", data: usageFixture("ERROR", 0, 0, "usage", validGeminiBuckets)},
-		{name: "model turn", data: usageFixture("SUCCESS", 1, 0, "usage", validGeminiBuckets)},
-		{name: "token use", data: usageFixture("SUCCESS", 0, 1, "usage", validGeminiBuckets)},
-		{name: "wrong command", data: usageFixture("SUCCESS", 0, 0, "status", validGeminiBuckets)},
-		{name: "missing turn count", data: []byte(strings.Replace(validFixture, `"num_turns":0,`, `"turn_count":0,`, 1))},
-		{name: "missing total tokens", data: []byte(strings.Replace(validFixture, `"total_tokens":0`, `"tokens_total":0`, 1))},
-		{name: "missing usage", data: []byte(`{"status":"SUCCESS","num_turns":0,"command":{"name":"usage","data":{"groups":[]}}}`)},
-		{name: "missing command", data: []byte(`{"status":"SUCCESS","num_turns":0,"usage":{"total_tokens":0}}`)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseUsage(tt.data); err == nil {
-				t.Fatal("parseUsage() error = nil, want safety validation error")
-			}
-		})
-	}
-}
-
-func TestParseUsageRequiresExactlyOneOfEachGeminiBucket(t *testing.T) {
+func TestParseQuotaSummaryRequiresExactlyOneOfEachGeminiBucket(t *testing.T) {
 	tests := []struct {
 		name    string
 		buckets string
 	}{
 		{
 			name:    "missing weekly",
-			buckets: `{"id":"gemini-5h","remaining_fraction":0.5,"reset_time":"2026-08-20T11:56:51Z"}`,
+			buckets: `{"bucketId":"gemini-5h","remainingFraction":0.5,"resetTime":"2026-08-20T11:56:51Z"}`,
 		},
 		{
 			name:    "missing five hour",
-			buckets: `{"id":"gemini-weekly","remaining_fraction":0.5,"reset_time":"2026-08-27T06:56:51Z"}`,
+			buckets: `{"bucketId":"gemini-weekly","remainingFraction":0.5,"resetTime":"2026-08-27T06:56:51Z"}`,
 		},
 		{
 			name: "duplicate weekly",
 			buckets: validGeminiBuckets + `,
-				{"id":"gemini-weekly","remaining_fraction":0.4,"reset_time":"2026-08-27T06:56:51Z"}`,
+				{"bucketId":"gemini-weekly","remainingFraction":0.4,"resetTime":"2026-08-27T06:56:51Z"}`,
 		},
 		{
 			name: "missing fraction",
 			buckets: `
-				{"id":"gemini-weekly","reset_time":"2026-08-27T06:56:51Z"},
-				{"id":"gemini-5h","remaining_fraction":0.5,"reset_time":"2026-08-20T11:56:51Z"}`,
+				{"bucketId":"gemini-weekly","resetTime":"2026-08-27T06:56:51Z"},
+				{"bucketId":"gemini-5h","remainingFraction":0.5,"resetTime":"2026-08-20T11:56:51Z"}`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseUsage(usageFixture("SUCCESS", 0, 0, "usage", tt.buckets)); err == nil {
-				t.Fatal("parseUsage() error = nil, want required bucket error")
+			if _, err := parseQuotaSummary(quotaFixture(tt.buckets)); err == nil {
+				t.Fatal("parseQuotaSummary() error = nil, want required bucket error")
 			}
 		})
 	}
 }
 
-func TestParseUsageClampsFractionsAndMarksExhausted(t *testing.T) {
+func TestParseQuotaSummaryClampsFractionsAndMarksExhausted(t *testing.T) {
 	buckets := `
-		{"id":"gemini-weekly","remaining_fraction":1.4,"reset_time":"2026-08-27T06:56:51Z"},
-		{"id":"gemini-5h","remaining_fraction":-0.2,"reset_time":"2026-08-20T11:56:51Z"}`
-	result, err := parseUsage(usageFixture("SUCCESS", 0, 0, "usage", buckets))
+		{"bucketId":"gemini-weekly","remainingFraction":1.4,"resetTime":"2026-08-27T06:56:51Z"},
+		{"bucketId":"gemini-5h","remainingFraction":-0.2,"resetTime":"2026-08-20T11:56:51Z"}`
+	result, err := parseQuotaSummary(quotaFixture(buckets))
 	if err != nil {
-		t.Fatalf("parseUsage() error = %v", err)
+		t.Fatalf("parseQuotaSummary() error = %v", err)
 	}
 	if got := result.Windows[quota.Window7Day].RemainingPct; got != 100 {
 		t.Fatalf("7d remaining = %d, want 100", got)
@@ -148,5 +116,18 @@ func TestParseUsageClampsFractionsAndMarksExhausted(t *testing.T) {
 	}
 	if result.Status != quota.StatusExhausted {
 		t.Fatalf("status = %q, want %q", result.Status, quota.StatusExhausted)
+	}
+}
+
+func TestParseQuotaSummaryUsesZeroForInvalidResetTime(t *testing.T) {
+	buckets := `
+		{"bucketId":"gemini-weekly","remainingFraction":0.5,"resetTime":"invalid"},
+		{"bucketId":"gemini-5h","remainingFraction":0.5,"resetTime":""}`
+	result, err := parseQuotaSummary(quotaFixture(buckets))
+	if err != nil {
+		t.Fatalf("parseQuotaSummary() error = %v", err)
+	}
+	if result.Windows[quota.Window7Day].ResetAtUnix != 0 || result.Windows[quota.Window5Hour].ResetAtUnix != 0 {
+		t.Fatalf("reset times = %#v, want zero values", result.Windows)
 	}
 }

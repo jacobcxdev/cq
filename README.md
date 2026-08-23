@@ -14,7 +14,7 @@ Or with Go:
 go install github.com/jacobcxdev/cq/cmd/cq@latest
 ```
 
-Gemini quota requires [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) installed as `agy` and authenticated. cq delegates quota reads to Antigravity; it does not read or refresh Antigravity credentials.
+Gemini quota requires an authenticated [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) account. cq reads Antigravity's existing Keychain credential and project cache, then calls Antigravity's quota API directly. It never writes either store.
 
 ## Usage
 
@@ -36,7 +36,7 @@ Every command path has its own help text, including leaves such as `cq proxy pin
 ```bash
 cq                         # Check all providers
 cq check claude codex      # Check specific providers
-cq check gemini            # Check Gemini quota through Antigravity CLI
+cq check gemini            # Check Gemini quota through Antigravity HTTP API
 cq --json                  # JSON output
 cq --refresh               # Bypass cached quota results
 cq --version               # Print version
@@ -51,7 +51,7 @@ Common command families:
 | `cq` / `cq check` | Fetch quota usage for all or selected providers. |
 | `cq claude ...` | Add, list, switch, or remove Claude accounts. |
 | `cq codex ...` | Add, list, switch, or remove Codex accounts. |
-| `cq check gemini` | Fetch Gemini quota through authenticated Antigravity CLI. |
+| `cq check gemini` | Fetch Gemini quota using an authenticated Antigravity account. |
 | `cq refresh` | Refresh stored OAuth tokens before they expire. |
 | `cq agent ...` | Install or uninstall background quota refresh. |
 | `cq proxy ...` | Run, inspect, install, or configure the local proxy. |
@@ -83,7 +83,7 @@ cq codex switch EMAIL      # Switch active Codex account
 cq codex remove EMAIL      # Remove Codex account
 ```
 
-Gemini authentication and account selection stay externally managed by Antigravity CLI. cq preserves provider name `gemini` in commands, JSON output, and cache keys.
+Gemini authentication and account selection stay externally managed by Antigravity. cq reads its existing credential and cached project ID concurrently, never invokes `agy`, and preserves provider name `gemini` in commands, JSON output, and cache keys.
 
 > **Note:** After switching accounts, MCP servers that use the provider's credentials (for example Codex MCP) may need to be reconnected to pick up the new active account.
 
