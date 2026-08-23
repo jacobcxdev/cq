@@ -181,15 +181,23 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		if !ok {
 			return ErrCodexLeaseWriterUnavailable
 		}
-		prepared, err = planner.adoptWebSocketPrewarm(ctx, input, active.prewarm, func(ctx context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
-			if active.conn == nil || active.account != account || active.generation != fence.UpstreamSocketGeneration ||
-				broker.config.DownstreamGeneration != fence.DownstreamSocketGeneration || active.prewarm.Generation != fence.ReservationGeneration {
-				return ErrCodexContinuity
+		if pending.request.PreviousResponseID != active.prewarm.ResponseAnchor {
+			err = planner.cancelWebSocketPrewarm(active.prewarm)
+			if err == nil {
+				active.prewarm = CodexPrewarmReservation{}
+				prepared, err = broker.config.Plans.Build(ctx, input)
 			}
-			return ctx.Err()
-		})
-		if err == nil {
-			active.prewarm = CodexPrewarmReservation{}
+		} else {
+			prepared, err = planner.adoptWebSocketPrewarm(ctx, input, active.prewarm, func(ctx context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
+				if active.conn == nil || active.account != account || active.generation != fence.UpstreamSocketGeneration ||
+					broker.config.DownstreamGeneration != fence.DownstreamSocketGeneration || active.prewarm.Generation != fence.ReservationGeneration {
+					return ErrCodexContinuity
+				}
+				return ctx.Err()
+			})
+			if err == nil {
+				active.prewarm = CodexPrewarmReservation{}
+			}
 		}
 	} else {
 		prepared, err = broker.config.Plans.Build(ctx, input)
