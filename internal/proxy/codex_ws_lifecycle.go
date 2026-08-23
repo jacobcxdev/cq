@@ -39,13 +39,14 @@ type codexWSLifecycleResult struct {
 // reader has stopped.
 type codexWSLifecycle struct {
 	handle               *CodexLeaseRequestHandle
+	receipt              *codexTurnReceiptHandle
 	downstreamGeneration uint64
 	upstreamGeneration   uint64
 	turnAdmitted         bool
 	attemptAdmitted      bool
 }
 
-func newCodexWSLifecycle(handle *CodexLeaseRequestHandle, downstreamGeneration, upstreamGeneration uint64) (*codexWSLifecycle, error) {
+func newCodexWSLifecycle(handle *CodexLeaseRequestHandle, downstreamGeneration, upstreamGeneration uint64, receipts ...*codexTurnReceiptHandle) (*codexWSLifecycle, error) {
 	if handle == nil || downstreamGeneration == 0 || upstreamGeneration == 0 {
 		return nil, fmt.Errorf("%w: incomplete WebSocket lifecycle", ErrCodexLeaseInvalidMutation)
 	}
@@ -53,8 +54,13 @@ func newCodexWSLifecycle(handle *CodexLeaseRequestHandle, downstreamGeneration, 
 	if !ok || (current.State != CodexAttemptDispatched && current.State != CodexAttemptStreaming) {
 		return nil, ErrCodexLeaseTransition
 	}
+	var receipt *codexTurnReceiptHandle
+	if len(receipts) != 0 {
+		receipt = receipts[0]
+	}
 	return &codexWSLifecycle{
 		handle:               handle,
+		receipt:              receipt,
 		downstreamGeneration: downstreamGeneration,
 		upstreamGeneration:   upstreamGeneration,
 		turnAdmitted:         handle.record.EverAdmitted,
@@ -120,6 +126,7 @@ func (lifecycle *codexWSLifecycle) ObserveFrame(ctx context.Context, upstreamGen
 			return result, err
 		}
 		lifecycle.handle = completed
+		lifecycle.receipt.terminal(CodexTurnReceiptCompleted)
 		result.Terminal = true
 	case CodexSSEError:
 		if !lifecycle.turnAdmitted && !lifecycle.attemptAdmitted && observation.Error.Found {
@@ -136,6 +143,7 @@ func (lifecycle *codexWSLifecycle) ObserveFrame(ctx context.Context, upstreamGen
 			return result, err
 		}
 		lifecycle.handle = failed
+		lifecycle.receipt.terminal(CodexTurnReceiptFailed)
 		result.Terminal = true
 	case CodexSSEMalformed, CodexSSEUnknown:
 		return result, lifecycle.indeterminate(ctx, "upstream event was malformed or unknown")
@@ -174,6 +182,7 @@ func (lifecycle *codexWSLifecycle) FinishRejected(upstreamGeneration uint64) err
 		return err
 	}
 	lifecycle.handle = handle
+	lifecycle.receipt.terminal(CodexTurnReceiptRejected)
 	return nil
 }
 
@@ -233,6 +242,7 @@ func (lifecycle *codexWSLifecycle) indeterminate(ctx context.Context, reason str
 		return err
 	}
 	lifecycle.handle = handle
+	lifecycle.receipt.terminal(CodexTurnReceiptIndeterminate)
 	return fmt.Errorf("%w: %s", ErrCodexWSInvalidFrame, reason)
 }
 

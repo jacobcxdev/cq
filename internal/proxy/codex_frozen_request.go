@@ -572,17 +572,22 @@ type codexFrozenMetadataFields struct {
 }
 
 type codexFrozenScanResult struct {
-	typeValue         codexFrozenRawValue
-	rootModel         codexFrozenRawValue
-	paramsModel       codexFrozenRawValue
-	rootPrevious      codexFrozenRawValue
-	paramsPrevious    codexFrozenRawValue
-	params            codexFrozenRawValue
-	clientMetadata    codexFrozenRawValue
-	nestedMetadata    codexFrozenRawValue
-	nestedFields      codexFrozenMetadataFields
-	flatFields        codexFrozenMetadataFields
-	hasEncryptedState bool
+	typeValue             codexFrozenRawValue
+	methodValue           codexFrozenRawValue
+	rootModel             codexFrozenRawValue
+	paramsModel           codexFrozenRawValue
+	rootPrevious          codexFrozenRawValue
+	paramsPrevious        codexFrozenRawValue
+	rootReasoning         codexFrozenRawValue
+	paramsReasoning       codexFrozenRawValue
+	rootReasoningEffort   codexFrozenRawValue
+	paramsReasoningEffort codexFrozenRawValue
+	params                codexFrozenRawValue
+	clientMetadata        codexFrozenRawValue
+	nestedMetadata        codexFrozenRawValue
+	nestedFields          codexFrozenMetadataFields
+	flatFields            codexFrozenMetadataFields
+	hasEncryptedState     bool
 }
 
 type codexFrozenAuthority struct {
@@ -613,7 +618,11 @@ func codexFrozenAuthorityFailureCode(err error) CodexFrozenRequestErrorCode {
 }
 
 func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetadataPresent bool, headers http.Header) (codexFrozenAuthority, CodexFrozenRequestErrorCode, error) {
-	scanner := codexFrozenJSONScanner{source: body}
+	return extractCodexFrozenAuthorityWithRequirements(body, directMetadata, directMetadataPresent, headers, true, true, false)
+}
+
+func extractCodexFrozenAuthorityWithRequirements(body []byte, directMetadata string, directMetadataPresent bool, headers http.Header, requireModel, requireMetadata, observeRequestMethod bool) (codexFrozenAuthority, CodexFrozenRequestErrorCode, error) {
+	scanner := codexFrozenJSONScanner{source: body, observeRequestMethod: observeRequestMethod}
 	result, err := scanner.scanRequest()
 	if err != nil {
 		return codexFrozenAuthority{}, codexFrozenAuthorityFailureCode(err), err
@@ -636,19 +645,22 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 		model = codexFrozenModelAuthority{location: codexFrozenModelRoot, value: result.rootModel}
 	case result.paramsModel.present:
 		model = codexFrozenModelAuthority{location: codexFrozenModelParams, value: result.paramsModel}
-	default:
+	case requireModel:
 		err = newCodexFrozenAuthorityFailure(CodexFrozenRequestModelAuthority, "native request requires one model authority")
 	}
 	if err != nil {
 		return codexFrozenAuthority{}, codexFrozenAuthorityFailureCode(err), err
 	}
-	modelName, err := decodeCodexFrozenString(model.value.bytes(body), len(body), "native request model")
-	if err != nil || modelName == "" {
-		if err == nil {
-			err = errors.New("native request model must be non-empty")
+	modelName := ""
+	if model.value.present {
+		modelName, err = decodeCodexFrozenString(model.value.bytes(body), len(body), "native request model")
+		if err != nil || modelName == "" {
+			if err == nil {
+				err = errors.New("native request model must be non-empty")
+			}
+			err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestModelAuthority, err: err}
+			return codexFrozenAuthority{}, CodexFrozenRequestModelAuthority, err
 		}
-		err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestModelAuthority, err: err}
-		return codexFrozenAuthority{}, CodexFrozenRequestModelAuthority, err
 	}
 
 	typeName, err := decodeCodexFrozenOptionalString(result.typeValue.bytes(body), codexTurnIDMaxBytes, "native request type")
@@ -661,6 +673,11 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 		err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestProtocolInvalid, err: err}
 		return codexFrozenAuthority{}, CodexFrozenRequestProtocolInvalid, err
 	}
+	reasoning := result.paramsReasoning
+	if result.rootReasoning.present && !bytes.Equal(bytes.TrimSpace(result.rootReasoning.bytes(body)), []byte("null")) {
+		reasoning = result.rootReasoning
+	}
+	requestedReasoningEffort, hasRequestedReasoningEffort, requestedReasoningEffortValid := parseCodexRequestedReasoningEffort(reasoning.bytes(body))
 
 	metadataResults := make([]CodexTurnMetadataResult, 0, 3)
 	metadataSources := codexFrozenMetadataSources(0)
@@ -698,7 +715,7 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 		}
 		metadataSources |= codexFrozenMetadataFlatSource
 	}
-	if len(metadataResults) == 0 {
+	if len(metadataResults) == 0 && requireMetadata {
 		err = newCodexFrozenAuthorityFailure(CodexFrozenRequestMetadataAuthority, "strong turn metadata required")
 		return codexFrozenAuthority{}, CodexFrozenRequestMetadataAuthority, err
 	}
@@ -718,15 +735,23 @@ func extractCodexFrozenAuthority(body []byte, directMetadata string, directMetad
 		err = &codexFrozenAuthorityFailure{code: CodexFrozenRequestMetadataAuthority, err: err}
 		return codexFrozenAuthority{}, CodexFrozenRequestMetadataAuthority, err
 	}
+	metadata := CodexTurnMetadataResult{}
+	if len(metadataResults) > 0 {
+		metadata = metadataResults[0]
+	}
 	return codexFrozenAuthority{
 		protocol: CodexProtocolRequest{
-			Type:               typeName,
-			Model:              modelName,
-			PreviousResponseID: previous,
-			Metadata:           metadataResults[0],
-			TurnState:          turnState,
-			HasTurnState:       hasTurnState,
-			HasEncryptedState:  result.hasEncryptedState,
+			Type:                          typeName,
+			Model:                         modelName,
+			PreviousResponseID:            previous,
+			HasPreviousResponseID:         result.rootPrevious.present || result.paramsPrevious.present,
+			RequestedReasoningEffort:      requestedReasoningEffort,
+			HasRequestedReasoningEffort:   hasRequestedReasoningEffort,
+			RequestedReasoningEffortValid: requestedReasoningEffortValid,
+			Metadata:                      metadata,
+			TurnState:                     turnState,
+			HasTurnState:                  hasTurnState,
+			HasEncryptedState:             result.hasEncryptedState,
 		},
 		model:           model,
 		previous:        previousAuthority,
@@ -761,7 +786,7 @@ func validateCodexFrozenPreparedAuthority(prepared codexFrozenAuthority, source 
 	if prepared.protocol.Metadata != source.Metadata || prepared.metadataSources != sourceMetadata || prepared.protocol.TurnState != source.TurnState || prepared.protocol.HasTurnState != source.HasTurnState {
 		return CodexFrozenRequestMetadataAuthority, errors.New("transformed request changed turn authority")
 	}
-	if prepared.protocol.Type != source.Type || prepared.protocol.PreviousResponseID != source.PreviousResponseID || prepared.previous != sourcePrevious || prepared.protocol.HasEncryptedState != source.HasEncryptedState {
+	if prepared.protocol.Type != source.Type || prepared.protocol.PreviousResponseID != source.PreviousResponseID || prepared.protocol.HasPreviousResponseID != source.HasPreviousResponseID || prepared.protocol.RequestedReasoningEffort != source.RequestedReasoningEffort || prepared.protocol.HasRequestedReasoningEffort != source.HasRequestedReasoningEffort || prepared.protocol.RequestedReasoningEffortValid != source.RequestedReasoningEffortValid || prepared.previous != sourcePrevious || prepared.protocol.HasEncryptedState != source.HasEncryptedState {
 		return CodexFrozenRequestProtocolInvalid, errors.New("transformed request changed protocol authority")
 	}
 	return "", nil
@@ -992,13 +1017,16 @@ const (
 	codexFrozenJSONClientMetadata
 	codexFrozenJSONMetadata
 	codexFrozenJSONCompaction
+	codexFrozenJSONRootReasoning
+	codexFrozenJSONParamsReasoning
 )
 
 type codexFrozenJSONScanner struct {
-	source []byte
-	pos    int
-	depth  int
-	result codexFrozenScanResult
+	source               []byte
+	pos                  int
+	depth                int
+	observeRequestMethod bool
+	result               codexFrozenScanResult
 }
 
 func (scanner *codexFrozenJSONScanner) scanRequest() (codexFrozenScanResult, error) {
@@ -1111,6 +1139,15 @@ func (scanner *codexFrozenJSONScanner) scanObject(context codexFrozenJSONContext
 		if err != nil {
 			return err
 		}
+		if scanner.observeRequestMethod && context == codexFrozenJSONRoot && codexJSONNameEqual(name, "method") {
+			if !codexJSONASCIIName(name) {
+				return newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "non-ASCII native request authority field")
+			}
+			field = "method"
+		}
+		if field == "effort" && bytes.Contains(scanner.source[keyStart:keyEnd], []byte{'\\'}) {
+			return newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "escaped native request authority field")
+		}
 		childContext := codexFrozenJSONGeneric
 		childMetadata := (*codexFrozenMetadataFields)(nil)
 		switch {
@@ -1118,6 +1155,10 @@ func (scanner *codexFrozenJSONScanner) scanObject(context codexFrozenJSONContext
 			childContext = codexFrozenJSONParams
 		case context == codexFrozenJSONRoot && field == "client_metadata":
 			childContext = codexFrozenJSONClientMetadata
+		case context == codexFrozenJSONRoot && field == "reasoning":
+			childContext = codexFrozenJSONRootReasoning
+		case context == codexFrozenJSONParams && field == "reasoning":
+			childContext = codexFrozenJSONParamsReasoning
 		case context == codexFrozenJSONClientMetadata && field == codexTurnMetadataKey:
 			childContext = codexFrozenJSONMetadata
 			childMetadata = &scanner.result.nestedFields
@@ -1285,10 +1326,14 @@ func (scanner *codexFrozenJSONScanner) captureField(context codexFrozenJSONConte
 		switch field {
 		case "type":
 			target = &scanner.result.typeValue
+		case "method":
+			target = &scanner.result.methodValue
 		case "model":
 			target = &scanner.result.rootModel
 		case "previous_response_id":
 			target = &scanner.result.rootPrevious
+		case "reasoning":
+			target = &scanner.result.rootReasoning
 		case "params":
 			target = &scanner.result.params
 		case "client_metadata":
@@ -1299,6 +1344,16 @@ func (scanner *codexFrozenJSONScanner) captureField(context codexFrozenJSONConte
 			target = &scanner.result.paramsModel
 		} else if field == "previous_response_id" {
 			target = &scanner.result.paramsPrevious
+		} else if field == "reasoning" {
+			target = &scanner.result.paramsReasoning
+		}
+	case codexFrozenJSONRootReasoning:
+		if field == "effort" {
+			target = &scanner.result.rootReasoningEffort
+		}
+	case codexFrozenJSONParamsReasoning:
+		if field == "effort" {
+			target = &scanner.result.paramsReasoningEffort
 		}
 	case codexFrozenJSONClientMetadata:
 		if field == codexTurnMetadataKey {
@@ -1354,9 +1409,11 @@ func codexFrozenAuthorityField(context codexFrozenJSONContext, name string) (str
 	code := CodexFrozenRequestProtocolInvalid
 	switch context {
 	case codexFrozenJSONRoot:
-		fields = []string{"type", "model", "previous_response_id", "params", "client_metadata"}
+		fields = []string{"type", "model", "previous_response_id", "reasoning", "params", "client_metadata"}
 	case codexFrozenJSONParams:
-		fields = []string{"model", "previous_response_id"}
+		fields = []string{"model", "previous_response_id", "reasoning"}
+	case codexFrozenJSONRootReasoning, codexFrozenJSONParamsReasoning:
+		fields = []string{"effort"}
 	case codexFrozenJSONClientMetadata:
 		fields = []string{codexTurnMetadataKey, "session_id", "thread_id", "turn_id", "window_id", "request_kind", "compaction"}
 		code = CodexFrozenRequestMetadataAuthority

@@ -111,6 +111,12 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		return
 	}
 	decodedBody := decodedRequest.Decoded()
+	telemetryRequest, telemetryErr := parseCodexObservationRequest(decodedBody, r.Header)
+	telemetryShape := classifyCodexRequestShape(telemetryRequest, telemetryErr)
+	noteCodexObservation(ctx, codexObservationFieldsForRequestShape(telemetryShape))
+	if telemetryErr != nil {
+		defer replaceCodexRequestShapeObservation(ctx, telemetryShape)
+	}
 	protocolRequest, enforce, err := s.parseCodexHTTPEnforcementDecoded(decodedBody, r.Header)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())

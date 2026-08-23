@@ -12,6 +12,9 @@
 /dist/
 coverage.out
 
+# Local plans and evidence
+/docs/
+
 # IDE
 .idea/
 .vscode/

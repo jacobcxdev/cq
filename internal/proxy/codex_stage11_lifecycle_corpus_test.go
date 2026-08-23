@@ -235,7 +235,7 @@ func TestCodexStage11ObserveMismatchIsPostDispatch(t *testing.T) {
 	harness.mustWebSocket(t, "negative-observe-ws-b", body, codexStage11RouteAccountB)
 
 	expected := codexStage11ExpectedEvidence{
-		httpRequests: 1, webSocketConnections: 1, observeRequests: 2, observeAttempts: 2,
+		httpRequests: 1, webSocketConnections: 1, webSocketRequests: 1, observeRequests: 2, observeAttempts: 2,
 		observeContinuityErrors: 1, upstreamRoutes: 2, journalRecords: 1, journalLanes: 1,
 		journalShadowRecords: 1,
 		shadowLeases:         1, shadowAccountKey: codexStage11RouteAccount, shadowState: LeaseBoundQuiescent,
@@ -258,7 +258,7 @@ func TestCodexStage11NativeHTTPWebSocketAuthorityUnavailable(t *testing.T) {
 	harness.mustWebSocket(t, "negative-authority-ws-b", body, codexStage11RouteAccountB)
 
 	expected := codexStage11ExpectedEvidence{
-		httpRequests: 1, webSocketConnections: 1, observeRequests: 1, observeAttempts: 1,
+		httpRequests: 1, webSocketConnections: 1, webSocketRequests: 1, observeRequests: 1, observeAttempts: 1,
 		upstreamRoutes: 2, journalRecords: 1, journalLanes: 1,
 		shadowLeases: 1, shadowAccountKey: codexStage11RouteAccountB, shadowState: LeaseBoundQuiescent,
 		shadowHasResponseAnchor: true,
@@ -279,7 +279,7 @@ func TestCodexStage11WebSocketShadowDoesNotAuthoriseNativeHTTP(t *testing.T) {
 	harness.mustHTTP(t, "negative-shadow-http-a", "/responses", body, http.StatusOK, turn.Turn)
 
 	expected := codexStage11ExpectedEvidence{
-		httpRequests: 1, webSocketConnections: 1, observeRequests: 1, observeAttempts: 1,
+		httpRequests: 1, webSocketConnections: 1, webSocketRequests: 1, observeRequests: 1, observeAttempts: 1,
 		upstreamRoutes: 2, journalRecords: 1, journalLanes: 1,
 		shadowLeases: 1, shadowAccountKey: codexStage11RouteAccountB, shadowState: LeaseBoundQuiescent,
 		shadowHasResponseAnchor: true,
@@ -493,6 +493,7 @@ func codexStage11HeaderDigest(name, value string) string {
 type codexStage11ExpectedEvidence struct {
 	httpRequests              int
 	webSocketConnections      int
+	webSocketRequests         int
 	observeRequests           int
 	observeAttempts           int
 	observeContinuityErrors   int
@@ -920,7 +921,7 @@ func (h *codexStage11LifecycleHarness) runCase(t *testing.T, corpusCase codexSta
 		turn := identity("main", "tool")
 		h.mustWebSocketToolLoop(t, requestID("tool"), turn)
 		return codexStage11ExpectedEvidence{
-			webSocketConnections: 1, observeRequests: 2, observeAttempts: 1, upstreamRoutes: 2,
+			webSocketConnections: 1, webSocketRequests: 2, observeRequests: 2, observeAttempts: 1, upstreamRoutes: 2,
 			shadowLeases: 1, shadowAccountKey: codexStage11RouteAccount, shadowState: LeaseBoundQuiescent,
 			shadowHasEncryptedState: true, shadowHasResponseAnchor: true,
 		}
@@ -959,7 +960,7 @@ func (h *codexStage11LifecycleHarness) runCase(t *testing.T, corpusCase codexSta
 		h.mustWebSocket(t, requestID("prewarm"), codexStage11TurnBody(prewarm, CodexRequestPrewarm, "", "", true), codexStage11RouteAccount)
 		turn := identity("main", "turn")
 		h.mustHTTP(t, requestID("turn"), "/responses", codexStage11TurnBody(turn, CodexRequestTurn, "", "", false), http.StatusOK, turn.Turn)
-		return codexStage11ExpectedEvidence{httpRequests: 1, webSocketConnections: 1, observeRequests: 1, observeAttempts: 1, upstreamRoutes: 2, journalRecords: 1, journalLanes: 1}
+		return codexStage11ExpectedEvidence{httpRequests: 1, webSocketConnections: 1, webSocketRequests: 1, observeRequests: 1, observeAttempts: 1, upstreamRoutes: 2, journalRecords: 1, journalLanes: 1}
 
 	case "compaction":
 		turn := identity("main", "compact")
@@ -986,7 +987,7 @@ func (h *codexStage11LifecycleHarness) runCase(t *testing.T, corpusCase codexSta
 		}}, codexStage11RouteAccount)
 		h.assertShadowLease(t, key, codexStage11RouteAccount, LeaseBoundQuiescent, true, codexStage11ContinuationResponseID)
 		return codexStage11ExpectedEvidence{
-			webSocketConnections: 2, observeRequests: 2, observeAttempts: 2, upstreamRoutes: 2,
+			webSocketConnections: 2, webSocketRequests: 2, observeRequests: 2, observeAttempts: 2, upstreamRoutes: 2,
 			shadowLeases: 1, shadowAccountKey: codexStage11RouteAccount, shadowState: LeaseBoundQuiescent,
 			shadowHasEncryptedState: true, shadowHasResponseAnchor: true,
 		}
@@ -1005,7 +1006,7 @@ func (h *codexStage11LifecycleHarness) runCase(t *testing.T, corpusCase codexSta
 		h.mustHTTPAccount(t, requestID("legacy-http-observe"), "/responses", body, http.StatusOK, turn.Turn, account)
 		h.mustWebSocket(t, requestID("ws-observe"), body, account)
 		return codexStage11ExpectedEvidence{
-			httpRequests: 1, webSocketConnections: 1, observeRequests: 2, observeAttempts: 2,
+			httpRequests: 1, webSocketConnections: 1, webSocketRequests: 1, observeRequests: 2, observeAttempts: 2,
 			upstreamRoutes: 2, journalRecords: 1, journalLanes: 1,
 			journalShadowRecords: 1,
 			shadowLeases:         1, shadowAccountKey: account, shadowState: LeaseBoundQuiescent,
@@ -1644,7 +1645,7 @@ func (h *codexStage11LifecycleHarness) assertNoUpstream(t *testing.T, start int,
 
 func (h *codexStage11LifecycleHarness) assertEvidenceAndShutdown(t *testing.T, expected codexStage11ExpectedEvidence) {
 	t.Helper()
-	waitForDiagnosticsEvents(t, h.diagnosticsPath, expected.httpRequests+expected.webSocketConnections)
+	waitForDiagnosticsEvents(t, h.diagnosticsPath, expected.httpRequests+expected.webSocketConnections+expected.webSocketRequests)
 	h.waitForDurableJournalSettlement(t, expected.journalRecords)
 	h.assertEvidence(t, expected)
 	if err := h.close(); err != nil {
@@ -1746,8 +1747,27 @@ func (h *codexStage11LifecycleHarness) assertEvidence(t *testing.T, expected cod
 	}
 	h.assertDurableJournalSemantics(t, envelope, expected)
 	lines := bytes.Split(bytes.TrimSpace(diagnostics), []byte("\n"))
-	if len(lines) != expected.httpRequests+expected.webSocketConnections {
-		t.Fatalf("diagnostic route events = %d, want %d", len(lines), expected.httpRequests+expected.webSocketConnections)
+	wantEvents := expected.httpRequests + expected.webSocketConnections + expected.webSocketRequests
+	if len(lines) != wantEvents {
+		t.Fatalf("diagnostic route events = %d, want %d", len(lines), wantEvents)
+	}
+	var legacyWebSocketConnections, brokerWebSocketConnections, webSocketRequests int
+	for _, line := range lines {
+		var event RouteEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode diagnostic route event: %v", err)
+		}
+		switch event.RouteKind {
+		case "codex_legacy_websocket":
+			legacyWebSocketConnections++
+		case "codex_websocket_broker":
+			brokerWebSocketConnections++
+		case "codex_websocket_frame":
+			webSocketRequests++
+		}
+	}
+	if legacyWebSocketConnections != expected.webSocketConnections || brokerWebSocketConnections != 0 || webSocketRequests != expected.webSocketRequests {
+		t.Fatalf("WebSocket diagnostic events = legacy connections %d broker connections %d requests %d, want %d/0/%d", legacyWebSocketConnections, brokerWebSocketConnections, webSocketRequests, expected.webSocketConnections, expected.webSocketRequests)
 	}
 }
 

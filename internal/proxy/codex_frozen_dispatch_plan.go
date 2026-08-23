@@ -46,9 +46,10 @@ func (e *CodexFrozenDispatchError) Error() string {
 
 // CodexFrozenDispatchPlan is a memory-only sequence of per-account dispatches.
 type CodexFrozenDispatchPlan struct {
-	accounts []CodexFrozenDispatchAccount
-	status   CodexRoutePlanStatus
-	probe    codexInstalledHTTPDispatchFacts
+	accounts         []CodexFrozenDispatchAccount
+	policyCandidates []CodexRoutePolicyCandidate
+	status           CodexRoutePlanStatus
+	probe            codexInstalledHTTPDispatchFacts
 }
 
 // CodexFrozenDispatchAccount binds one frozen route choice to exact credential attempts.
@@ -82,7 +83,7 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		DefaultAccountKey:      input.DefaultAccountKey,
 		BoundAccountKey:        input.BoundAccountKey,
 	})
-	plan := CodexFrozenDispatchPlan{status: policy.Status()}
+	plan := CodexFrozenDispatchPlan{status: policy.Status(), policyCandidates: candidates}
 	if err != nil {
 		return plan, err
 	}

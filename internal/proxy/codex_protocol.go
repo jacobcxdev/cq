@@ -15,13 +15,17 @@ const (
 )
 
 type CodexProtocolRequest struct {
-	Type               string
-	Model              string
-	PreviousResponseID string
-	Metadata           CodexTurnMetadataResult
-	TurnState          string
-	HasTurnState       bool
-	HasEncryptedState  bool
+	Type                          string
+	Model                         string
+	PreviousResponseID            string
+	HasPreviousResponseID         bool
+	RequestedReasoningEffort      string
+	HasRequestedReasoningEffort   bool
+	RequestedReasoningEffortValid bool
+	Metadata                      CodexTurnMetadataResult
+	TurnState                     string
+	HasTurnState                  bool
+	HasEncryptedState             bool
 }
 
 func ParseCodexProtocolRequest(body []byte, directMetadata string, handshake *CodexTurnMetadata) (CodexProtocolRequest, error) {
@@ -43,16 +47,22 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 	var envelope struct {
 		Type               string          `json:"type"`
 		Model              string          `json:"model"`
-		PreviousResponseID string          `json:"previous_response_id"`
+		PreviousResponseID json.RawMessage `json:"previous_response_id"`
+		Reasoning          json.RawMessage `json:"reasoning"`
 		Params             json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return CodexProtocolRequest{}, fmt.Errorf("decode Codex protocol request: %w", err)
 	}
+	previousResponseID, hasPreviousResponseID, err := decodeCodexPreviousResponseID(envelope.PreviousResponseID)
+	if err != nil {
+		return CodexProtocolRequest{}, fmt.Errorf("decode Codex protocol previous response ID: %w", err)
+	}
 	if len(envelope.Params) != 0 && !bytes.Equal(envelope.Params, []byte("null")) {
 		var params struct {
-			Model              string `json:"model"`
-			PreviousResponseID string `json:"previous_response_id"`
+			Model              string          `json:"model"`
+			PreviousResponseID json.RawMessage `json:"previous_response_id"`
+			Reasoning          json.RawMessage `json:"reasoning"`
 		}
 		if err := json.Unmarshal(envelope.Params, &params); err != nil {
 			return CodexProtocolRequest{}, fmt.Errorf("decode Codex protocol params: %w", err)
@@ -60,17 +70,60 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 		if envelope.Model == "" {
 			envelope.Model = params.Model
 		}
-		if envelope.PreviousResponseID == "" {
-			envelope.PreviousResponseID = params.PreviousResponseID
+		paramsPreviousResponseID, hasParamsPreviousResponseID, decodeErr := decodeCodexPreviousResponseID(params.PreviousResponseID)
+		if decodeErr != nil {
+			return CodexProtocolRequest{}, fmt.Errorf("decode Codex protocol params previous response ID: %w", decodeErr)
+		}
+		hasPreviousResponseID = hasPreviousResponseID || hasParamsPreviousResponseID
+		if previousResponseID == "" {
+			previousResponseID = paramsPreviousResponseID
+		}
+		if len(envelope.Reasoning) == 0 || bytes.Equal(envelope.Reasoning, []byte("null")) {
+			envelope.Reasoning = params.Reasoning
 		}
 	}
+	reasoningEffort, hasReasoningEffort, reasoningEffortValid := parseCodexRequestedReasoningEffort(envelope.Reasoning)
 	return CodexProtocolRequest{
-		Type:               envelope.Type,
-		Model:              envelope.Model,
-		PreviousResponseID: envelope.PreviousResponseID,
-		Metadata:           metadata,
-		HasEncryptedState:  jsonContainsKey(body, "encrypted_content"),
+		Type:                          envelope.Type,
+		Model:                         envelope.Model,
+		PreviousResponseID:            previousResponseID,
+		HasPreviousResponseID:         hasPreviousResponseID,
+		RequestedReasoningEffort:      reasoningEffort,
+		HasRequestedReasoningEffort:   hasReasoningEffort,
+		RequestedReasoningEffortValid: reasoningEffortValid,
+		Metadata:                      metadata,
+		HasEncryptedState:             jsonContainsKey(body, "encrypted_content"),
 	}, nil
+}
+
+func decodeCodexPreviousResponseID(raw json.RawMessage) (value string, found bool, err error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return "", false, nil
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", true, err
+	}
+	return value, true, nil
+}
+
+func parseCodexRequestedReasoningEffort(raw json.RawMessage) (effort string, found, valid bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", false, true
+	}
+	var reasoning map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return "", true, false
+	}
+	effortRaw, found := reasoning["effort"]
+	if !found || bytes.Equal(bytes.TrimSpace(effortRaw), []byte("null")) {
+		return "", false, true
+	}
+	if err := json.Unmarshal(effortRaw, &effort); err != nil {
+		return "", true, false
+	}
+	return effort, true, true
 }
 
 type CodexWrappedError struct {

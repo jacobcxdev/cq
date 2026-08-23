@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -33,6 +34,40 @@ func TestCachePutAndGet(t *testing.T) {
 	}
 	if got[0].Plan != "test" {
 		t.Fatalf("plan = %q, want test", got[0].Plan)
+	}
+}
+
+func TestCacheRoundTripPreservesExactRemainingPercentage(t *testing.T) {
+	fs := fsutil.NewMemFS()
+	c, err := New(fs, "/cache", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile("/cache/codex.json", []byte(`[{"status":"ok","windows":{"7d":{"remaining_pct":100,"remaining_pct_exact":99.6,"reset_at_unix":1774569600}}}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	results, ok, err := c.Get(context.Background(), string(provider.Codex))
+	if err != nil || !ok {
+		t.Fatalf("Get() = ok %v, error %v", ok, err)
+	}
+	if err := c.Put(context.Background(), "copy", results); err != nil {
+		t.Fatal(err)
+	}
+	data, err := fs.ReadFile("/cache/copy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []struct {
+		Windows map[quota.WindowName]struct {
+			RemainingPctExact *float64 `json:"remaining_pct_exact"`
+		} `json:"windows"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got := decoded[0].Windows[quota.Window7Day].RemainingPctExact
+	if got == nil || *got != 99.6 {
+		t.Fatalf("remaining_pct_exact = %v, want 99.6", got)
 	}
 }
 

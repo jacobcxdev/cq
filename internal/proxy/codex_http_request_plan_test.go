@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -157,6 +158,121 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	choice, err := result.Frozen.Choice()
 	if err != nil || !reflect.DeepEqual(choice, choices[0].Choice()) {
 		t.Fatalf("frozen choice = %#v, %v", choice, err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRegistersReceiptAfterDurableBegin(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	store, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x51}, 32)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.TransportKind = "http"
+	factory.TurnReceipts = store
+	body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")), "}") + `,"reasoning":{"effort":"high"}}`)
+
+	prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	receipt, found := store.lookup([]byte("session"), []byte("turn"))
+	if !found {
+		t.Fatal("receipt not registered")
+	}
+	if receipt.State != CodexTurnReceiptPlanned || receipt.Transport != CodexTurnReceiptTransportHTTP ||
+		receipt.RequestKind != "turn" || receipt.RequestLineage != "previous_response_id_absent" ||
+		receipt.RequestedModelClass != "gpt_5_6_sol" || receipt.RequestedReasoningEffort != "high" ||
+		receipt.CompactionPhase != "not_applicable" || receipt.RouteReason != CodexTurnReceiptRouteFairnessSelect ||
+		receipt.PlannedAccountHint != redactedAccountHint("codex", "account") || receipt.ActualAccountHint != "" ||
+		receipt.ShadowComparison != CodexTurnReceiptShadowNotApplicable || receipt.ShadowAlternativeAccountHint != "" {
+		t.Fatalf("receipt = %+v", receipt)
+	}
+	if prepared.receipt == nil {
+		t.Fatal("prepared receipt handle unavailable")
+	}
+	if _, ok := prepared.Lifecycle.(*codexTurnReceiptLifecycle); !ok {
+		t.Fatalf("lifecycle = %T, want receipt wrapper", prepared.Lifecycle)
+	}
+
+	failingStore, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x52}, 32)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingRuntime := &codexHTTPRequestPlanTestRuntime{err: errors.New("begin failed")}
+	failingFactory := codexHTTPRequestPlanTestFactory(failingRuntime)
+	failingFactory.TransportKind = "http"
+	failingFactory.TurnReceipts = failingStore
+	if _, err := failingFactory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body}); err == nil {
+		t.Fatal("failed begin succeeded")
+	}
+	if _, found := failingStore.lookup([]byte("session"), []byte("turn")); found {
+		t.Fatal("failed begin registered receipt")
+	}
+
+	compaction := frozenRequestBody("gpt-5.6-sol", CodexRequestCompaction, "private-compaction")
+	compactionRuntime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	compactionFactory := codexHTTPRequestPlanTestFactory(compactionRuntime)
+	compactionFactory.TransportKind = "http"
+	compactionFactory.TurnReceipts = failingStore
+	if prepared, err := compactionFactory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: compaction}); err == nil {
+		prepared.Frozen.Release()
+	}
+	if _, found := failingStore.lookup([]byte("session"), []byte("turn")); found {
+		t.Fatal("compaction registered root Stop receipt")
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRecordsNoAffinityAlternativeWithoutChangingRoute(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	frozenDispatchObserveCapacity(t, capacity, "account-a", CapacityBucketBase, 20, now)
+	frozenDispatchObserveCapacity(t, capacity, "account-b", CapacityBucketBase, 80, now)
+	accounts := []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}
+	store, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x53}, 32)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: accounts}},
+		Capacity:  capacity,
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration:       1,
+			AffinityPresent:         true,
+			AffinityAccountKey:      "account-a",
+			AffinityEffectiveModel:  "gpt-5.6-sol",
+			AffinityCacheAdmittedAt: now.Add(-time.Minute),
+		}},
+		Runtime:           &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}},
+		DefaultAccountKey: "account-b",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+		TransportKind:     "http",
+		TurnReceipts:      store,
+	}
+	body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")), "}") + `,"reasoning":{"effort":"high"}}`)
+
+	prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	if got := prepared.Dispatch.Accounts()[0].Choice().AccountKey; got != "account-a" {
+		t.Fatalf("actual account = %q, want account-a", got)
+	}
+	receipt, found := store.lookup([]byte("session"), []byte("turn"))
+	if !found {
+		t.Fatal("receipt not registered")
+	}
+	if receipt.ShadowComparison != CodexTurnReceiptShadowAlternativeAccount || receipt.ShadowAlternativeAccountHint != redactedAccountHint("codex", "account-b") {
+		t.Fatalf("shadow receipt = %+v", receipt)
 	}
 }
 
@@ -767,6 +883,90 @@ func TestCodexHTTPRequestPlanFactoryErrorsAreTypedPrivateAndPreserveCancellation
 	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanInspect, "private-body")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error does not preserve cancellation: %v", err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryEnrichesOnlyHTTPDiagnosticsWithoutEmitting(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		transportKind string
+		wantLineage   string
+		wantModel     string
+	}{
+		{name: "HTTP", transportKind: "http", wantLineage: "previous_response_id_present", wantModel: "gpt_5_6_sol"},
+		{name: "WebSocket", transportKind: "websocket"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+			factory.TransportKind = test.transportKind
+			factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{}}
+			ctx, diagnostics := withRouteDiagnostics(context.Background())
+			body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-prompt")), "}") + `,"previous_response_id":"private-response","reasoning":{"effort":"high"}}`)
+
+			_, _ = factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
+
+			event := RouteEvent{}
+			event.applyRouteDiagnostics(diagnostics)
+			if event.RequestLineage != test.wantLineage || event.RequestedModelClass != test.wantModel {
+				t.Fatalf("request shape = %+v, want lineage %q model %q", event, test.wantLineage, test.wantModel)
+			}
+			if event.RequestedReasoningEffort != map[bool]string{true: "high"}[test.transportKind == "http"] {
+				t.Fatalf("reasoning effort = %q", event.RequestedReasoningEffort)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPreparationRetryOverwritesShapeWithoutEmission(t *testing.T) {
+	t.Parallel()
+
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	factory.TransportKind = "http"
+	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{}}
+	inspectCalls := 0
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, header http.Header) (*CodexFrozenRequestInspection, error) {
+		inspectCalls++
+		inspection, err := InspectCodexNativeRequest(ctx, encoded, header)
+		if err == nil && inspectCalls == 2 {
+			inspection.Release()
+		}
+		return inspection, err
+	}
+	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	noteCodexObservation(ctx, codexObservationFields{LeasePhase: "prepared"})
+	first := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-first")), "}") + `,"reasoning":{"effort":"high"}}`)
+	second := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-terra", CodexRequestTurn, "private-second")), "}") + `,"previous_response_id":"private-id","reasoning":{"effort":"low"}}`)
+
+	_, _ = factory.buildOnce(ctx, CodexHTTPRequestPlanInput{Encoded: first})
+	_, _ = factory.buildOnce(ctx, CodexHTTPRequestPlanInput{Encoded: second})
+
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.RequestKind != "" || event.RequestLineage != "unknown" || event.RequestedReasoningEffort != "unknown" || event.RequestedModelClass != "unknown" || event.CompactionPhase != "unknown" || event.LeasePhase != "prepared" {
+		t.Fatalf("retried request shape = %+v", event)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryAppliesUnknownShapeOnProtocolError(t *testing.T) {
+	t.Parallel()
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	factory.TransportKind = "http"
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, header http.Header) (*CodexFrozenRequestInspection, error) {
+		inspection, err := InspectCodexNativeRequest(ctx, encoded, header)
+		if err == nil {
+			inspection.Release()
+		}
+		return inspection, err
+	}
+	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	_, _ = factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")})
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.RequestLineage != "unknown" || event.RequestedReasoningEffort != "unknown" || event.RequestedModelClass != "unknown" || event.CompactionPhase != "unknown" {
+		t.Fatalf("protocol error shape = %+v", event)
 	}
 }
 

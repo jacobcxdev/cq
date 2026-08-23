@@ -173,6 +173,8 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, []string{"proxy", "rescue"})
 		}
 		return runProxyRescue(args[1:], os.Stdout)
+	case "hook":
+		return runProxyHook(args[1:], os.Stdin, os.Stdout)
 	case "candidate":
 		authority, err := ClassifyProxyCommand(append([]string{"proxy"}, args...))
 		if err != nil {
@@ -959,6 +961,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		sessionPolicy = resilienceState.Routing.Resolver()
 		dispatchPermits = resilienceState.DispatchPermits
 	}
+	codexTurnReceipts, err := proxy.NewCodexTurnReceiptStore(rand.Reader, time.Now)
+	if err != nil {
+		return fmt.Errorf("Codex turn receipts: %w", err)
+	}
 	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status:            codexRouting.HTTP,
 		Inventory:         codexContinuityInventory,
@@ -971,6 +977,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
 		DispatchPermits:   dispatchPermits,
+		TurnReceipts:      codexTurnReceipts,
 		Headroom:          proxy.NewCodexRequestHeadroomAdapter(headroom),
 		HeadroomMode:      resolvedMode,
 		Upstream:          cfg.CodexUpstream,
@@ -990,6 +997,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Executor:          codexWebSocketExecutor,
 		SessionPolicy:     sessionPolicy,
 		DispatchPermits:   dispatchPermits,
+		TurnReceipts:      codexTurnReceipts,
 		Upstream:          cfg.CodexUpstream,
 		Now:               time.Now,
 	})
@@ -1062,6 +1070,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher:                        proxyRefresher,
 		RuntimeCallerCredentials:         runtimeCallerCredentials,
 		SessionPolicy:                    sessionPolicy,
+		CodexTurnReceipts:                codexTurnReceipts,
 	}
 	if resilienceState != nil {
 		srv.RoutingPolicy = resilienceState.Routing

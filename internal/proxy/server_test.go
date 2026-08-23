@@ -1273,6 +1273,120 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 	assertPayloadLogDoesNotContain(t, path, "acct-codex")
 }
 
+func TestServerLegacyCodexWebSocketEmitsOneSafeEventPerAcceptedClientRequest(t *testing.T) {
+	for _, observerConfigured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("observer_configured_%t", observerConfigured), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			diagnostics, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = diagnostics.Close() })
+
+			upgrader := websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				connection, upgradeErr := upgrader.Upgrade(w, r, nil)
+				if upgradeErr != nil {
+					return
+				}
+				defer connection.Close()
+				for {
+					messageType, message, readErr := connection.ReadMessage()
+					if readErr != nil {
+						return
+					}
+					if writeErr := connection.WriteMessage(messageType, []byte(`{"type":"response.in_progress","private":"upstream-secret"}`)); writeErr != nil {
+						return
+					}
+					_ = message
+				}
+			}))
+			defer upstream.Close()
+
+			server := &Server{
+				Config: &Config{ClaudeUpstream: "https://claude.test", CodexUpstream: upstream.URL, LocalToken: "local-token"},
+				CodexUpgradeTransport: &legacyCodexTokenTransport{
+					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-token"}},
+					Inner:    http.DefaultTransport,
+				},
+				Diag: diagnostics,
+			}
+			if observerConfigured {
+				server.CodexWebSocketObserverConfigured = true
+				server.CodexWebSocketObserver = newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+			}
+			handler, err := server.handler()
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxyServer := httptest.NewServer(handler)
+			defer proxyServer.Close()
+			client, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxyServer.URL, "http")+legacyCodexResponsesPath, nil)
+			if err != nil {
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				t.Fatal(err)
+			}
+
+			frames := []struct {
+				messageType int
+				payload     []byte
+			}{
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"private-id","reasoning":{"effort":"high"},"input":"private-prompt"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"jsonrpc":"2.0","id":"private-correlation","method":"response/create","params":{"model":"gpt-5.6-terra","reasoning":{"effort":"private-effort"},"input":"private-prompt-two"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","private":"client-response"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","type":"response.create","model":"private-duplicate"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","TYPE":"response.create","model":"private-case"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","\u0074ype":"response.create","model":"private-escaped"}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"method":"response/create","method":"response/create","params":{"model":"private-method-duplicate"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"method":"response/create","METHOD":"response/create","params":{"model":"private-method-case"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"method":"response/create","\u006dethod":"response/create","params":{"model":"private-method-escaped"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","params":{"model":"private-params-model","MODEL":"private-params-model"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","previous_response_id":"private-root","params":{"previous_response_id":"private-params"}}`)},
+				{messageType: websocket.TextMessage, payload: []byte(`not-json-private`)},
+				{messageType: websocket.BinaryMessage, payload: []byte(`{"type":"response.create","private":"binary"}`)},
+			}
+			for _, frame := range frames {
+				if err := client.WriteMessage(frame.messageType, frame.payload); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := client.ReadMessage(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = client.WriteControl(websocket.PingMessage, []byte("private-control"), time.Now().Add(time.Second))
+			_ = client.Close()
+
+			events := waitForDiagnosticsEvents(t, path, 3)
+			var framesOnly []RouteEvent
+			for _, event := range events {
+				if event.RouteKind == "codex_websocket_frame" {
+					framesOnly = append(framesOnly, event)
+				}
+			}
+			if len(framesOnly) != 2 {
+				t.Fatalf("frame events = %+v, want exactly two", framesOnly)
+			}
+			if framesOnly[0].RequestLineage != "previous_response_id_present" || framesOnly[0].RequestedModelClass != "gpt_5_6_sol" || framesOnly[0].RequestedReasoningEffort != "high" {
+				t.Fatalf("first frame event = %+v", framesOnly[0])
+			}
+			if framesOnly[1].RequestLineage != "previous_response_id_absent" || framesOnly[1].RequestedModelClass != "gpt_5_6_terra" || framesOnly[1].RequestedReasoningEffort != "unknown" {
+				t.Fatalf("second frame event = %+v", framesOnly[1])
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, private := range []string{"private-prompt", "private-id", "private-correlation", "private-effort", "private-duplicate", "private-case", "private-escaped", "private-method", "private-root", "private-params", "gpt-5.6-sol", "gpt-5.6-terra", "upstream-secret", "private-control"} {
+				if strings.Contains(string(data), private) {
+					t.Fatalf("private frame bytes reached diagnostics: %q", data)
+				}
+			}
+		})
+	}
+}
+
 func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testing.T) {
 	t.Skip("invalid app-server facade retired; native Responses websocket is tested separately")
 	path := filepath.Join(t.TempDir(), "payloads.jsonl")
@@ -1367,6 +1481,7 @@ func TestServerPayloadDiagnosticsCodexAppServerWebSocketFrameEmitsEvent(t *testi
 
 func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 	const privateModel = "gpt-private-compact-model"
+	const privateResponseID = "private-compact-response"
 	for _, tc := range []struct {
 		name string
 		path string
@@ -1408,7 +1523,8 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 				t.Fatalf("handler() error = %v", err)
 			}
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{"model":"`+privateModel+`","previous_response_id":"resp_abc"}`))
+			requestBody := `{"model":"` + privateModel + `","previous_response_id":"` + privateResponseID + `","reasoning":{"effort":"ultra"},"client_metadata":{"x-codex-turn-metadata":{"session_id":"private-compact-session","thread_id":"private-compact-thread","turn_id":"private-compact-turn","request_kind":"compaction","compaction":{"phase":"standalone_turn"}}},"input":"private-compact-prompt"}`
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(requestBody))
 			req.Header.Set("Content-Type", "application/json")
 			stderr := captureStderr(t, func() { handler.ServeHTTP(w, req) })
 
@@ -1418,12 +1534,20 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 			if gotPath != "/responses/compact" {
 				t.Fatalf("upstream path = %q, want /responses/compact", gotPath)
 			}
+			ambiguous := httptest.NewRecorder()
+			ambiguousBody := `{"model":"private-compact-one","model":"private-compact-two","input":"private-ambiguous-prompt"}`
+			ambiguousRequest := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(ambiguousBody))
+			ambiguousRequest.Header.Set("Content-Type", "application/json")
+			captureStderr(t, func() { handler.ServeHTTP(ambiguous, ambiguousRequest) })
+			if ambiguous.Code != http.StatusOK {
+				t.Fatalf("ambiguous authority status = %d, want 200, body: %s", ambiguous.Code, ambiguous.Body.String())
+			}
 			if err := diag.Close(); err != nil {
 				t.Fatalf("Close: %v", err)
 			}
 			events := readDiagnosticsEvents(t, path)
-			if len(events) != 1 {
-				t.Fatalf("events = %d, want 1", len(events))
+			if len(events) != 2 {
+				t.Fatalf("events = %d, want 2", len(events))
 			}
 			ev := events[0]
 			if ev.Method != http.MethodPost || ev.Path != tc.path || ev.Provider != "codex" {
@@ -1438,7 +1562,17 @@ func TestServerDiagnosticsCompactRoutesEmitEvents(t *testing.T) {
 			if ev.StatusCode != http.StatusOK {
 				t.Fatalf("StatusCode = %d, want 200", ev.StatusCode)
 			}
+			if ev.RequestLineage != "previous_response_id_present" || ev.RequestedReasoningEffort != "ultra" || ev.RequestedModelClass != "other" || ev.RequestKind != "compaction" || ev.CompactionPhase != "standalone_turn" {
+				t.Fatalf("request shape = %+v", ev)
+			}
+			ambiguousEvent := events[1]
+			if ambiguousEvent.RequestLineage != "unknown" || ambiguousEvent.RequestedReasoningEffort != "unknown" || ambiguousEvent.RequestedModelClass != "unknown" || ambiguousEvent.RequestKind != "" || ambiguousEvent.CompactionPhase != "unknown" {
+				t.Fatalf("ambiguous request shape = %+v", ambiguousEvent)
+			}
 			assertDiagnosticsLogDoesNotContain(t, path, privateModel)
+			for _, private := range []string{privateResponseID, "private-compact-session", "private-compact-thread", "private-compact-turn", "private-compact-prompt", "private-compact-one", "private-compact-two", "private-ambiguous-prompt"} {
+				assertDiagnosticsLogDoesNotContain(t, path, private)
+			}
 			if strings.Contains(stderr, privateModel) || !strings.Contains(stderr, "model_family="+codexDiagnosticsModelGPT) {
 				t.Fatalf("stderr retained raw model or omitted projection: %q", stderr)
 			}
@@ -3162,6 +3296,86 @@ func TestServer_NativeCodex_StreamingPassthrough(t *testing.T) {
 	}
 	if strings.Contains(stderr, "protocol=anthropic-messages") {
 		t.Fatalf("stderr unexpectedly logged translated protocol for native route: %s", stderr)
+	}
+}
+
+func TestServerLegacyNativeCodexPersistsOneSafeRequestShapeInEveryMode(t *testing.T) {
+	for _, mode := range []string{"off", "observe", "enforce"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			diagnostics, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = diagnostics.Close() })
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, completedSSE("response-safe"))
+			}))
+			defer upstream.Close()
+			server := &Server{
+				Config: &Config{CodexUpstream: upstream.URL},
+				CodexTransport: &legacyCodexTokenTransport{
+					Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "private-token"}},
+					Inner:    http.DefaultTransport,
+				},
+				Diag: diagnostics,
+			}
+			if mode == "observe" {
+				server.CodexObserver = newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(1, false, nil), nil, []byte("01234567890123456789012345678901"))
+			}
+			if mode == "enforce" {
+				executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+					"one-candidate": {
+						{resp: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completedSSE("response-safe")))}},
+						{resp: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completedSSE("response-ambiguous")))}},
+					},
+				}}
+				server.CodexHTTPEnforcer = testHTTPEnforcer(t, &sequenceRouteChooser{choices: []RouteChoice{{AccountKey: "one", RequestedModel: "gpt-5.6-sol", EffectiveModel: "gpt-5.6-sol"}}}, executor, fsutil.NewMemFS())
+			}
+			body := `{"type":"response.create","model":"gpt-5.6-sol","reasoning":{"effort":"ultra"},"client_metadata":{"x-codex-turn-metadata":{"session_id":"private-session","thread_id":"private-thread","turn_id":"private-turn","request_kind":"turn"}},"input":"private-prompt"}`
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+
+			server.handleNativeCodex(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+			}
+			ambiguous := httptest.NewRecorder()
+			ambiguousBody := `{"type":"response.create","TYPE":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"private-ambiguous-session","thread_id":"private-ambiguous-thread","turn_id":"private-ambiguous-turn","request_kind":"turn"}},"input":"private-ambiguous-prompt"}`
+			ambiguousRequest := httptest.NewRequest(http.MethodPost, legacyCodexResponsesPath, strings.NewReader(ambiguousBody))
+			ambiguousRequest.Header.Set("Content-Type", "application/json")
+			server.handleNativeCodex(ambiguous, ambiguousRequest)
+			if ambiguous.Code != http.StatusOK {
+				t.Fatalf("ambiguous authority status = %d, want 200, body = %q", ambiguous.Code, ambiguous.Body.String())
+			}
+			if err := diagnostics.Close(); err != nil {
+				t.Fatal(err)
+			}
+			events := readDiagnosticsEvents(t, path)
+			if len(events) != 2 {
+				t.Fatalf("events = %+v, want exactly two", events)
+			}
+			event := events[0]
+			if event.RequestLineage != "previous_response_id_absent" || event.RequestedReasoningEffort != "ultra" || event.RequestedModelClass != "gpt_5_6_sol" || event.RequestKind != "turn" || event.CompactionPhase != "not_applicable" {
+				t.Fatalf("shape event = %+v", event)
+			}
+			ambiguousEvent := events[1]
+			if ambiguousEvent.RequestLineage != "unknown" || ambiguousEvent.RequestedReasoningEffort != "unknown" || ambiguousEvent.RequestedModelClass != "unknown" || ambiguousEvent.RequestKind != "" || ambiguousEvent.CompactionPhase != "unknown" {
+				t.Fatalf("ambiguous shape event = %+v", ambiguousEvent)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, private := range []string{"private-prompt", "private-session", "private-thread", "private-turn", "private-ambiguous-session", "private-ambiguous-thread", "private-ambiguous-turn", "private-ambiguous-prompt", "gpt-5.6-sol"} {
+				if strings.Contains(string(data), private) {
+					t.Fatalf("private request bytes reached diagnostics: %q", data)
+				}
+			}
+		})
 	}
 }
 

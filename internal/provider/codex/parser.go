@@ -78,7 +78,8 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 			}
 			resetAtUnix := parseNumericResetAt(entry.window.ResetAt)
 			remaining := remainingPct(entry.window.UsedPercent)
-			windows[name] = quota.Window{RemainingPct: remaining, ResetAtUnix: resetAtUnix}
+			exactRemaining := exactRemainingPct(entry.window.UsedPercent)
+			windows[name] = quota.Window{RemainingPct: remaining, RemainingPctExact: &exactRemaining, ResetAtUnix: resetAtUnix}
 			if resetAtUnix > 0 {
 				rawLimitName := entry.slot
 				scopeKind := WindowScopeShared
@@ -90,7 +91,7 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 					RawLimitName: rawLimitName, WindowName: name,
 					Period:    time.Duration(entry.window.LimitWindowSeconds) * time.Second,
 					ScopeKind: scopeKind, Scope: bucket,
-					ResetAt: time.Unix(resetAtUnix, 0), RemainingPct: exactRemainingPct(entry.window.UsedPercent),
+					ResetAt: time.Unix(resetAtUnix, 0), RemainingPct: exactRemaining,
 				})
 			}
 		}

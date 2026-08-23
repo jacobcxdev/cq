@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,10 +20,18 @@ import (
 
 func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.T) {
 	t.Parallel()
+	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("r", 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := testCodexTurnReceipt()
+	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
+	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: runtimeLease,
+		receipt: receipt,
 		slots: []CodexLeaseAttemptSlotPlan{
 			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
 			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
@@ -48,8 +57,13 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	accepted := 0
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(*routeDiagnostics) { accepted++ })
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted frame observations = %d, want 1 across rotation", accepted)
 	}
 	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
 		t.Fatalf("dial accounts = %#v", got)
@@ -69,13 +83,25 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	if !upstreamA.closed {
 		t.Fatal("replaced upstream was not closed")
 	}
+	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-b") {
+		t.Fatalf("rotated receipt = (%+v, %v)", gotReceipt, found)
+	}
 }
 
 func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *testing.T) {
 	t.Parallel()
+	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("p", 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := testCodexTurnReceipt()
+	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
+	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		receipt: receipt,
 		slots: []CodexLeaseAttemptSlotPlan{{
 			AccountKey:  "account-a",
 			CandidateID: "candidate-a",
@@ -106,8 +132,18 @@ func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	var accepted []codexObservationFields
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(diagnostics *routeDiagnostics) {
+		event := RouteEvent{}
+		event.applyRouteDiagnostics(diagnostics)
+		accepted = append(accepted, codexObservationFields{RequestKind: event.RequestKind, RequestLineage: event.RequestLineage})
+	})
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
+	}
+	if len(accepted) != 2 || accepted[0].RequestKind != "prewarm" || accepted[0].RequestLineage != "previous_response_id_absent" ||
+		accepted[1].RequestKind != "turn" || accepted[1].RequestLineage != "previous_response_id_present" {
+		t.Fatalf("accepted frame observations = %+v, want prewarm then continued turn", accepted)
 	}
 	if planner.prewarmCalls != 1 || planner.adoptionCalls != 1 || planner.buildCalls != 0 {
 		t.Fatalf("planner calls = prewarm %d adoption %d build %d, want 1/1/0", planner.prewarmCalls, planner.adoptionCalls, planner.buildCalls)
@@ -134,6 +170,76 @@ func TestCodexTerminatingWSBrokerForwardsInstalledPrewarmBeforeDurableTurn(t *te
 	}
 	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm {
 		t.Fatalf("durable prewarm adoption = %#v", restored.ResolvedRecords)
+	}
+	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
+		t.Fatalf("reused-socket receipt = (%+v, %v)", gotReceipt, found)
+	}
+}
+
+func TestCodexTerminatingWSBrokerDoesNotInventActualBeforeDispatch(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	handle, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("d", 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptValue := testCodexTurnReceipt()
+	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
+	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
+	dialer := &codexWSBrokerDialerStub{outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{
+		"account-a": {{err: errors.New("resolution failed"), skipDispatch: true}},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: &codexWSBrokerPlannerStub{}, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := CodexFrozenDispatchAccount{
+		choice:   RouteChoice{AccountKey: "account-a"},
+		attempts: []CandidateAttempt{{AccountKey: "account-a", Candidate: codex.CandidateRef{AccountKey: "account-a", CandidateID: "candidate-a"}}},
+	}
+	active := &codexWSActiveUpstream{}
+	dial := broker.connect(context.Background(), handle, receipt, account, active)
+	if dial.lifecycle == nil || dial.err == nil {
+		t.Fatalf("dial = %#v", dial)
+	}
+	got, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if !found || got.State != CodexTurnReceiptPlanned || got.ActualAccountHint != "" {
+		t.Fatalf("pre-dispatch receipt = (%+v, %v)", got, found)
+	}
+	_ = dial.lifecycle.Indeterminate(context.Background(), dial.lifecycle.upstreamGeneration)
+	got, _ = receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
+	if got.State != CodexTurnReceiptIndeterminate || got.ActualAccountHint != "" {
+		t.Fatalf("indeterminate receipt = %+v", got)
+	}
+}
+
+func TestCodexTerminatingWSBrokerRejectedFrameDoesNotEmitObservation(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator)}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: &codexWSBrokerDialerStub{}, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accepted []codexObservationFields
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(diagnostics *routeDiagnostics) {
+		event := RouteEvent{}
+		event.applyRouteDiagnostics(diagnostics)
+		accepted = append(accepted, codexObservationFields{RequestKind: event.RequestKind})
+	})
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","private":"prompt"}`)}}}
+	if err := broker.Serve(ctx, downstream); err == nil {
+		t.Fatal("rejected response frame succeeded")
+	}
+	if len(accepted) != 0 {
+		t.Fatalf("rejected frame observations = %+v, want none", accepted)
 	}
 }
 
@@ -238,6 +344,55 @@ func TestServerCodexWebSocketEnforceUsesTerminatingBroker(t *testing.T) {
 	}
 }
 
+func TestServerCodexWebSocketEnforcePersistsEachAcceptedFrameSeparately(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = diagnostics.Close() })
+	server := &Server{
+		Config: &Config{ClaudeUpstream: "https://claude.test", CodexUpstream: "https://codex.test", LocalToken: "local-token"},
+		CodexRouting: &CodexRoutingRuntime{WebSocket: CodexModeStatus{
+			Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 41, AuthoritativeEpoch: 41,
+		}},
+		CodexWebSocketBroker: &codexWebSocketFrameSinkHandlerStub{},
+		Diag:                 diagnostics,
+	}
+	handler, err := server.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := httptest.NewServer(handler)
+	defer proxyServer.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxyServer.URL, "http")+legacyCodexResponsesPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frame := range [][]byte{
+		codexTerminatingWSFrame("turn-a", ""),
+		codexTerminatingWSFrame("turn-b", `,"previous_response_id":"private-id"`),
+	} {
+		if err := client.WriteMessage(websocket.TextMessage, frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := client.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	events := waitForDiagnosticsEvents(t, path, 3)
+	var frameEvents []RouteEvent
+	for _, event := range events {
+		if event.RouteKind == "codex_websocket_frame" {
+			frameEvents = append(frameEvents, event)
+		}
+	}
+	if len(frameEvents) != 2 || frameEvents[0].RequestLineage != "previous_response_id_absent" || frameEvents[1].RequestLineage != "previous_response_id_present" {
+		t.Fatalf("frame events = %+v, want two independent snapshots", frameEvents)
+	}
+}
+
 func TestServerCodexWebSocketEnforceRejectsMissingBrokerBeforeUpgrade(t *testing.T) {
 	t.Parallel()
 	server := &Server{
@@ -272,6 +427,24 @@ func TestServerCodexWebSocketEnforceRejectsMissingBrokerBeforeUpgrade(t *testing
 
 type codexWebSocketRoutingHandlerStub struct {
 	header http.Header
+}
+
+type codexWebSocketFrameSinkHandlerStub struct{}
+
+func (*codexWebSocketFrameSinkHandlerStub) Serve(ctx context.Context, connection *websocket.Conn, _ http.Header) error {
+	for range 2 {
+		messageType, payload, err := connection.ReadMessage()
+		if err != nil {
+			return err
+		}
+		pending, err := newCodexWSPendingFrame(messageType, payload)
+		if err != nil {
+			return err
+		}
+		emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
+		pending.Release()
+	}
+	return connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed"}`))
 }
 
 func (handler *codexWebSocketRoutingHandlerStub) Serve(_ context.Context, connection *websocket.Conn, header http.Header) error {
@@ -477,8 +650,13 @@ func TestCodexTerminatingWSBrokerExhaustsSameAccountAuthBeforeRotation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	accepted := 0
+	ctx := withCodexWSFrameObservationSink(context.Background(), func(*routeDiagnostics) { accepted++ })
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted frame observations = %d, want 1 across candidate retry", accepted)
 	}
 	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-a"}) {
 		t.Fatalf("dial accounts = %#v", got)
@@ -533,6 +711,7 @@ func codexWSBrokerHard429() []byte {
 
 type codexWSBrokerPlannerStub struct {
 	runtime        *CodexLeaseRuntime
+	receipt        *codexTurnReceiptHandle
 	slots          []CodexLeaseAttemptSlotPlan
 	attempts       map[codex.AccountKey]int
 	prewarmCalls   int
@@ -570,6 +749,7 @@ func (planner *codexWSBrokerPlannerStub) Build(_ context.Context, input CodexHTT
 		Dispatch:    CodexFrozenDispatchPlan{accounts: accounts, status: CodexRoutePlanReady},
 		Lifecycle:   NewCodexHTTPRequestLifecycle(handle),
 		leaseHandle: handle,
+		receipt:     planner.receipt,
 	}, nil
 }
 
@@ -649,7 +829,7 @@ func (planner *codexWSBrokerPlannerStub) adoptWebSocketPrewarm(ctx context.Conte
 		choice:   choice,
 		attempts: []CandidateAttempt{{AccountKey: selected.AccountKey, Candidate: codex.CandidateRef{AccountKey: selected.AccountKey, CandidateID: codex.CandidateID(selected.CandidateID)}, Revision: "revision-1", Ordinal: 1}},
 	}}, status: CodexRoutePlanReady}
-	return CodexPreparedHTTPRequest{Dispatch: dispatch, Lifecycle: NewCodexHTTPRequestLifecycle(handle), leaseHandle: handle}, nil
+	return CodexPreparedHTTPRequest{Dispatch: dispatch, Lifecycle: NewCodexHTTPRequestLifecycle(handle), leaseHandle: handle, receipt: planner.receipt}, nil
 }
 
 type codexWSBrokerRead struct {
@@ -719,10 +899,11 @@ type codexWSBrokerDialerStub struct {
 }
 
 type codexWSBrokerDialOutcome struct {
-	conn     websocketRelayConn
-	response *http.Response
-	body     []byte
-	err      error
+	conn         websocketRelayConn
+	response     *http.Response
+	body         []byte
+	err          error
+	skipDispatch bool
 }
 
 type codexWSBrokerBlockingConn struct {
@@ -760,11 +941,14 @@ func (conn *codexWSBrokerBlockingConn) Close() error {
 	return nil
 }
 
-func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
+func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header, onDispatch func(CandidateAttempt)) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
 	dialer.accounts = append(dialer.accounts, choice.AccountKey)
 	if outcomes := dialer.outcomes[choice.AccountKey]; len(outcomes) != 0 {
 		outcome := outcomes[0]
 		dialer.outcomes[choice.AccountKey] = outcomes[1:]
+		if onDispatch != nil && !outcome.skipDispatch {
+			onDispatch(attempt)
+		}
 		return outcome.conn, outcome.response, append([]byte(nil), outcome.body...), attempt, outcome.err
 	}
 	connections := dialer.connections[choice.AccountKey]
@@ -772,5 +956,8 @@ func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoic
 		return nil, nil, nil, attempt, errors.New("no scripted connection")
 	}
 	dialer.connections[choice.AccountKey] = connections[1:]
+	if onDispatch != nil {
+		onDispatch(attempt)
+	}
 	return connections[0], &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}, nil, attempt, nil
 }

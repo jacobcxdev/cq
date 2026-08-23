@@ -17,6 +17,7 @@ type codexWSPendingFrame struct {
 	key         LeaseKey
 	portable    bool
 	prewarm     bool
+	diagnostics *routeDiagnostics
 	released    bool
 }
 
@@ -41,6 +42,8 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 	if !prewarm {
 		key = NewCodexLeaseKey(request.Metadata.Metadata)
 	}
+	diagnostics := &routeDiagnostics{}
+	diagnostics.codex = codexObservationFieldsForRequestShape(classifyCodexRequestShape(request, nil))
 	return &codexWSPendingFrame{
 		messageType: messageType,
 		encoded:     append([]byte(nil), payload...),
@@ -48,6 +51,7 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 		key:         key,
 		portable:    request.PreviousResponseID == "" && !request.HasEncryptedState && !request.HasTurnState,
 		prewarm:     prewarm,
+		diagnostics: diagnostics,
 	}, nil
 }
 
@@ -115,5 +119,6 @@ func (frame *codexWSPendingFrame) Release() {
 	frame.key = LeaseKey{}
 	frame.portable = false
 	frame.prewarm = false
+	frame.diagnostics = nil
 	frame.released = true
 }
