@@ -46,6 +46,15 @@ const (
 	CodexTurnReceiptRouteUnknown         CodexTurnReceiptRouteReason = "unknown"
 )
 
+type CodexTurnReceiptShadowComparison string
+
+const (
+	CodexTurnReceiptShadowSameAccount        CodexTurnReceiptShadowComparison = "same_account"
+	CodexTurnReceiptShadowAlternativeAccount CodexTurnReceiptShadowComparison = "alternative_account"
+	CodexTurnReceiptShadowNotApplicable      CodexTurnReceiptShadowComparison = "not_applicable"
+	CodexTurnReceiptShadowUnavailable        CodexTurnReceiptShadowComparison = "unavailable"
+)
+
 // CodexTurnReceiptV1 contains only closed, privacy-safe route facts.
 type CodexTurnReceiptV1 struct {
 	State                    CodexTurnReceiptState       `json:"state"`
@@ -61,16 +70,29 @@ type CodexTurnReceiptV1 struct {
 	ActualAccountHint        string                      `json:"actual_account_hint,omitempty"`
 }
 
+// CodexTurnReceiptV2 adds closed, privacy-safe shadow-routing facts.
+type CodexTurnReceiptV2 struct {
+	CodexTurnReceiptV1
+	ShadowComparison             CodexTurnReceiptShadowComparison `json:"shadow_comparison"`
+	ShadowAlternativeAccountHint string                           `json:"shadow_alternative_account_hint,omitempty"`
+}
+
 type CodexTurnReceiptLookupV1 struct {
 	SchemaVersion int                 `json:"schema_version"`
 	Found         bool                `json:"found"`
 	Receipt       *CodexTurnReceiptV1 `json:"receipt,omitempty"`
 }
 
+type CodexTurnReceiptLookupV2 struct {
+	SchemaVersion int                 `json:"schema_version"`
+	Found         bool                `json:"found"`
+	Receipt       *CodexTurnReceiptV2 `json:"receipt,omitempty"`
+}
+
 type codexTurnReceiptKey [sha256.Size]byte
 
 type codexTurnReceiptEntry struct {
-	receipt   CodexTurnReceiptV1
+	receipt   CodexTurnReceiptV2
 	updatedAt time.Time
 	sequence  uint64
 }
@@ -104,7 +126,7 @@ func NewCodexTurnReceiptStore(random io.Reader, now func() time.Time) (*CodexTur
 	return store, nil
 }
 
-func (store *CodexTurnReceiptStore) register(session, turn []byte, receipt CodexTurnReceiptV1) *codexTurnReceiptHandle {
+func (store *CodexTurnReceiptStore) register(session, turn []byte, receipt CodexTurnReceiptV2) *codexTurnReceiptHandle {
 	if store == nil || !validCanonicalSessionID(session) || !validCanonicalSessionID(turn) || !validCodexTurnReceipt(receipt) {
 		return nil
 	}
@@ -121,9 +143,9 @@ func (store *CodexTurnReceiptStore) register(session, turn []byte, receipt Codex
 	return &codexTurnReceiptHandle{store: store, key: key}
 }
 
-func (store *CodexTurnReceiptStore) lookup(session, turn []byte) (CodexTurnReceiptV1, bool) {
+func (store *CodexTurnReceiptStore) lookup(session, turn []byte) (CodexTurnReceiptV2, bool) {
 	if store == nil || !validCanonicalSessionID(session) || !validCanonicalSessionID(turn) {
-		return CodexTurnReceiptV1{}, false
+		return CodexTurnReceiptV2{}, false
 	}
 	key := store.digest(session, turn)
 	now := store.now()
@@ -131,11 +153,11 @@ func (store *CodexTurnReceiptStore) lookup(session, turn []byte) (CodexTurnRecei
 	defer store.mu.Unlock()
 	entry, found := store.entries[key]
 	if !found {
-		return CodexTurnReceiptV1{}, false
+		return CodexTurnReceiptV2{}, false
 	}
 	if codexTurnReceiptTerminal(entry.receipt.State) && !now.Before(entry.updatedAt.Add(codexTurnReceiptTerminalTTL)) {
 		delete(store.entries, key)
-		return CodexTurnReceiptV1{}, false
+		return CodexTurnReceiptV2{}, false
 	}
 	return entry.receipt, true
 }
@@ -155,7 +177,7 @@ func (store *CodexTurnReceiptStore) digest(session, turn []byte) codexTurnReceip
 	return key
 }
 
-func (store *CodexTurnReceiptStore) update(key codexTurnReceiptKey, update func(*CodexTurnReceiptV1)) {
+func (store *CodexTurnReceiptStore) update(key codexTurnReceiptKey, update func(*CodexTurnReceiptV2)) {
 	if store == nil || update == nil {
 		return
 	}
@@ -200,7 +222,7 @@ func (handle *codexTurnReceiptHandle) attempt(account codex.AccountKey) {
 	if handle == nil || handle.store == nil || account == "" {
 		return
 	}
-	handle.store.update(handle.key, func(receipt *CodexTurnReceiptV1) {
+	handle.store.update(handle.key, func(receipt *CodexTurnReceiptV2) {
 		receipt.State = CodexTurnReceiptAttempted
 		receipt.ActualAccountHint = redactedAccountHint("codex", string(account))
 	})
@@ -210,7 +232,7 @@ func (handle *codexTurnReceiptHandle) terminal(state CodexTurnReceiptState) {
 	if handle == nil || handle.store == nil || !codexTurnReceiptTerminal(state) {
 		return
 	}
-	handle.store.update(handle.key, func(receipt *CodexTurnReceiptV1) {
+	handle.store.update(handle.key, func(receipt *CodexTurnReceiptV2) {
 		receipt.State = state
 	})
 }
@@ -224,7 +246,21 @@ func codexTurnReceiptTerminal(state CodexTurnReceiptState) bool {
 	}
 }
 
-func validCodexTurnReceipt(receipt CodexTurnReceiptV1) bool {
+func validCodexTurnReceipt(receipt CodexTurnReceiptV2) bool {
+	if !validCodexTurnReceiptV1(receipt.CodexTurnReceiptV1) {
+		return false
+	}
+	switch receipt.ShadowComparison {
+	case CodexTurnReceiptShadowAlternativeAccount:
+		return validCodexTurnReceiptAccountHint(receipt.ShadowAlternativeAccountHint)
+	case CodexTurnReceiptShadowSameAccount, CodexTurnReceiptShadowNotApplicable, CodexTurnReceiptShadowUnavailable:
+		return receipt.ShadowAlternativeAccountHint == ""
+	default:
+		return false
+	}
+}
+
+func validCodexTurnReceiptV1(receipt CodexTurnReceiptV1) bool {
 	if receipt.State != CodexTurnReceiptPlanned || receipt.RequestKind != string(CodexRequestTurn) || receipt.RequestLineage == "" || receipt.RequestedModelClass == "" || receipt.RequestedReasoningEffort == "" || receipt.CompactionPhase == "" {
 		return false
 	}
@@ -240,6 +276,18 @@ func validCodexTurnReceipt(receipt CodexTurnReceiptV1) bool {
 	default:
 		return false
 	}
+}
+
+func validCodexTurnReceiptAccountHint(value string) bool {
+	if len(value) != len("codex:")+12 || value[:len("codex:")] != "codex:" {
+		return false
+	}
+	for _, current := range value[len("codex:"):] {
+		if (current < '0' || current > '9') && (current < 'a' || current > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type codexTurnReceiptLifecycle struct {

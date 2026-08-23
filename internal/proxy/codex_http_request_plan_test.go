@@ -186,7 +186,8 @@ func TestCodexHTTPRequestPlanFactoryRegistersReceiptAfterDurableBegin(t *testing
 		receipt.RequestKind != "turn" || receipt.RequestLineage != "previous_response_id_absent" ||
 		receipt.RequestedModelClass != "gpt_5_6_sol" || receipt.RequestedReasoningEffort != "high" ||
 		receipt.CompactionPhase != "not_applicable" || receipt.RouteReason != CodexTurnReceiptRouteFairnessSelect ||
-		receipt.PlannedAccountHint != redactedAccountHint("codex", "account") || receipt.ActualAccountHint != "" {
+		receipt.PlannedAccountHint != redactedAccountHint("codex", "account") || receipt.ActualAccountHint != "" ||
+		receipt.ShadowComparison != CodexTurnReceiptShadowNotApplicable || receipt.ShadowAlternativeAccountHint != "" {
 		t.Fatalf("receipt = %+v", receipt)
 	}
 	if prepared.receipt == nil {
@@ -221,6 +222,57 @@ func TestCodexHTTPRequestPlanFactoryRegistersReceiptAfterDurableBegin(t *testing
 	}
 	if _, found := failingStore.lookup([]byte("session"), []byte("turn")); found {
 		t.Fatal("compaction registered root Stop receipt")
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRecordsNoAffinityAlternativeWithoutChangingRoute(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	frozenDispatchObserveCapacity(t, capacity, "account-a", CapacityBucketBase, 20, now)
+	frozenDispatchObserveCapacity(t, capacity, "account-b", CapacityBucketBase, 80, now)
+	accounts := []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}
+	store, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x53}, 32)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: accounts}},
+		Capacity:  capacity,
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration:       1,
+			AffinityPresent:         true,
+			AffinityAccountKey:      "account-a",
+			AffinityEffectiveModel:  "gpt-5.6-sol",
+			AffinityCacheAdmittedAt: now.Add(-time.Minute),
+		}},
+		Runtime:           &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}},
+		DefaultAccountKey: "account-b",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+		TransportKind:     "http",
+		TurnReceipts:      store,
+	}
+	body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")), "}") + `,"reasoning":{"effort":"high"}}`)
+
+	prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	if got := prepared.Dispatch.Accounts()[0].Choice().AccountKey; got != "account-a" {
+		t.Fatalf("actual account = %q, want account-a", got)
+	}
+	receipt, found := store.lookup([]byte("session"), []byte("turn"))
+	if !found {
+		t.Fatal("receipt not registered")
+	}
+	if receipt.ShadowComparison != CodexTurnReceiptShadowAlternativeAccount || receipt.ShadowAlternativeAccountHint != redactedAccountHint("codex", "account-b") {
+		t.Fatalf("shadow receipt = %+v", receipt)
 	}
 }
 

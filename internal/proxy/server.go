@@ -374,6 +374,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("PUT "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
+	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptV2Path, s.handleCodexTurnReceipt)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
 	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
 	mux.HandleFunc("GET "+codexCompactResponsesPath, s.handleCodexCompactResponsesGetRoute)

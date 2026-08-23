@@ -99,7 +99,7 @@ func runProxyCodexStopHook(ctx context.Context, input io.Reader, output io.Write
 		return errors.New("encode Codex turn receipt lookup")
 	}
 	defer clear(payload)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimeCodexTurnReceiptPath), bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimeCodexTurnReceiptV2Path), bytes.NewReader(payload))
 	if err != nil {
 		return errors.New("construct Codex turn receipt lookup")
 	}
@@ -121,7 +121,7 @@ func runProxyCodexStopHook(ctx context.Context, input io.Reader, output io.Write
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("Codex turn receipt lookup returned status %d", response.StatusCode)
 	}
-	var lookup proxy.CodexTurnReceiptLookupV1
+	var lookup proxy.CodexTurnReceiptLookupV2
 	decoder = json.NewDecoder(bytes.NewReader(responseBody))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&lookup); err != nil {
@@ -150,8 +150,8 @@ func validCodexStopHookID(value []byte) bool {
 	return true
 }
 
-func validCodexTurnReceiptLookup(lookup proxy.CodexTurnReceiptLookupV1) bool {
-	if lookup.SchemaVersion != 1 || lookup.Found != (lookup.Receipt != nil) {
+func validCodexTurnReceiptLookup(lookup proxy.CodexTurnReceiptLookupV2) bool {
+	if lookup.SchemaVersion != 2 || lookup.Found != (lookup.Receipt != nil) {
 		return false
 	}
 	if !lookup.Found {
@@ -193,6 +193,18 @@ func validCodexTurnReceiptLookup(lookup proxy.CodexTurnReceiptLookupV1) bool {
 	if receipt.ActualAccountHint != "" && !codexStopHookAccountHintPattern.MatchString(receipt.ActualAccountHint) {
 		return false
 	}
+	switch receipt.ShadowComparison {
+	case proxy.CodexTurnReceiptShadowAlternativeAccount:
+		if !codexStopHookAccountHintPattern.MatchString(receipt.ShadowAlternativeAccountHint) {
+			return false
+		}
+	case proxy.CodexTurnReceiptShadowSameAccount, proxy.CodexTurnReceiptShadowNotApplicable, proxy.CodexTurnReceiptShadowUnavailable:
+		if receipt.ShadowAlternativeAccountHint != "" {
+			return false
+		}
+	default:
+		return false
+	}
 	switch receipt.RouteReason {
 	case proxy.CodexTurnReceiptRouteBound, proxy.CodexTurnReceiptRouteAffinityReuse, proxy.CodexTurnReceiptRouteFairnessSelect, proxy.CodexTurnReceiptRouteTerminalDefault, proxy.CodexTurnReceiptRouteUnknown:
 		return true
@@ -201,7 +213,7 @@ func validCodexTurnReceiptLookup(lookup proxy.CodexTurnReceiptLookupV1) bool {
 	}
 }
 
-func formatCodexTurnReceipt(receipt proxy.CodexTurnReceiptV1) string {
+func formatCodexTurnReceipt(receipt proxy.CodexTurnReceiptV2) string {
 	transport := "HTTP"
 	if receipt.Transport == proxy.CodexTurnReceiptTransportWebSocket {
 		transport = "WebSocket"
@@ -221,7 +233,17 @@ func formatCodexTurnReceipt(receipt proxy.CodexTurnReceiptV1) string {
 	}
 	segments = append(segments, codexTurnReceiptModelName(receipt.RequestedModelClass)+"/"+codexTurnReceiptEffortName(receipt.RequestedReasoningEffort))
 	segments = append(segments, codexTurnReceiptReason(receipt.RouteReason))
-	return strings.Join(segments, "; ") + ". Shadow comparison: not enabled."
+	message := strings.Join(segments, "; ") + ". Shadow: no-affinity comparison "
+	switch receipt.ShadowComparison {
+	case proxy.CodexTurnReceiptShadowSameAccount:
+		return message + "agreed."
+	case proxy.CodexTurnReceiptShadowAlternativeAccount:
+		return message + "favoured account " + receipt.ShadowAlternativeAccountHint + "."
+	case proxy.CodexTurnReceiptShadowNotApplicable:
+		return message + "not applicable."
+	default:
+		return message + "unavailable."
+	}
 }
 
 func codexTurnReceiptModelName(model string) string {

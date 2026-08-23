@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	RuntimeCodexTurnReceiptPath = "/_cq/control/codex/turn-receipt"
-	codexTurnReceiptRequestMax  = 16 << 10
+	RuntimeCodexTurnReceiptPath   = "/_cq/control/codex/turn-receipt"
+	RuntimeCodexTurnReceiptV2Path = "/_cq/control/codex/turn-receipt/v2"
+	codexTurnReceiptRequestMax    = 16 << 10
 )
 
 func (s *Server) handleCodexTurnReceipt(writer http.ResponseWriter, request *http.Request) {
@@ -50,9 +51,20 @@ func (s *Server) handleCodexTurnReceipt(writer http.ResponseWriter, request *htt
 		return
 	}
 	receipt, found := s.CodexTurnReceipts.lookup(session, turn)
+	if request.URL.Path == RuntimeCodexTurnReceiptV2Path {
+		response := CodexTurnReceiptLookupV2{SchemaVersion: 2, Found: found}
+		if found {
+			response.Receipt = &receipt
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(writer).Encode(response); err != nil {
+			http.Error(writer, "Codex turn receipt response unavailable", http.StatusInternalServerError)
+		}
+		return
+	}
 	response := CodexTurnReceiptLookupV1{SchemaVersion: 1, Found: found}
 	if found {
-		response.Receipt = &receipt
+		response.Receipt = &receipt.CodexTurnReceiptV1
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(writer).Encode(response); err != nil {

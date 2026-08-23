@@ -118,6 +118,50 @@ func TestCodexTurnReceiptStoreRejectsInvalidIdentityAndRandomness(t *testing.T) 
 	}
 }
 
+func TestCodexTurnReceiptStoreRejectsInvalidShadowComparison(t *testing.T) {
+	store, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x31}, 32)), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		comparison CodexTurnReceiptShadowComparison
+		hint       string
+	}{
+		{name: "missing"},
+		{name: "unknown", comparison: "unknown"},
+		{name: "alternative without hint", comparison: CodexTurnReceiptShadowAlternativeAccount},
+		{name: "same with hint", comparison: CodexTurnReceiptShadowSameAccount, hint: redactedAccountHint("codex", "account-b")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			receipt := testCodexTurnReceipt()
+			receipt.ShadowComparison = test.comparison
+			receipt.ShadowAlternativeAccountHint = test.hint
+			if handle := store.register([]byte("session"), []byte("turn-"+test.name), receipt); handle != nil {
+				t.Fatalf("invalid shadow comparison accepted: %+v", receipt)
+			}
+		})
+	}
+
+	receipt := testCodexTurnReceipt()
+	receipt.ShadowComparison = CodexTurnReceiptShadowAlternativeAccount
+	receipt.ShadowAlternativeAccountHint = redactedAccountHint("codex", "account-b")
+	if handle := store.register([]byte("session"), []byte("valid-alternative"), receipt); handle == nil {
+		t.Fatal("valid alternative shadow comparison rejected")
+	}
+}
+
+func TestCodexTurnReceiptV1JSONContractExcludesShadowAdvice(t *testing.T) {
+	receipt := testCodexTurnReceipt().CodexTurnReceiptV1
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("shadow_")) {
+		t.Fatalf("V1 receipt contains V2 shadow fields: %s", encoded)
+	}
+}
+
 func TestCodexTurnReceiptHTTPLifecycleTracksActualAndTerminalEvidence(t *testing.T) {
 	store, err := NewCodexTurnReceiptStore(bytes.NewReader(bytes.Repeat([]byte{0x12}, 32)), time.Now)
 	if err != nil {
@@ -211,17 +255,20 @@ func (lifecycle *codexTurnReceiptLifecycleStub) ProviderFailed(CodexHTTPResponse
 	return lifecycle, nil
 }
 
-func testCodexTurnReceipt() CodexTurnReceiptV1 {
-	return CodexTurnReceiptV1{
-		State:                    CodexTurnReceiptPlanned,
-		Transport:                CodexTurnReceiptTransportHTTP,
-		RequestKind:              "turn",
-		RequestLineage:           codexRequestLineagePreviousResponseIDAbsent,
-		RequestedModelClass:      codexRequestedModelClassSol,
-		RequestedReasoningEffort: "high",
-		CompactionPhase:          "not_applicable",
-		Pool:                     "protected",
-		RouteReason:              CodexTurnReceiptRouteAffinityReuse,
-		PlannedAccountHint:       redactedAccountHint("codex", "account-a"),
+func testCodexTurnReceipt() CodexTurnReceiptV2 {
+	return CodexTurnReceiptV2{
+		CodexTurnReceiptV1: CodexTurnReceiptV1{
+			State:                    CodexTurnReceiptPlanned,
+			Transport:                CodexTurnReceiptTransportHTTP,
+			RequestKind:              "turn",
+			RequestLineage:           codexRequestLineagePreviousResponseIDAbsent,
+			RequestedModelClass:      codexRequestedModelClassSol,
+			RequestedReasoningEffort: "high",
+			CompactionPhase:          "not_applicable",
+			Pool:                     "protected",
+			RouteReason:              CodexTurnReceiptRouteAffinityReuse,
+			PlannedAccountHint:       redactedAccountHint("codex", "account-a"),
+		},
+		ShadowComparison: CodexTurnReceiptShadowNotApplicable,
 	}
 }

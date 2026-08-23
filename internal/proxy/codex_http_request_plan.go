@@ -337,6 +337,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
+	shadowAdvice := codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable}
+	if factory.TurnReceipts != nil && codexTurnReceiptEligible(protocol) {
+		shadowAdvice = codexNoAffinityShadowAdvice(ctx, dispatch, dispatchInput.DefaultAccountKey, dispatchInput.BoundAccountKey, dispatchAccounts[0])
+	}
 	frozen, err := factory.freeze(ctx, inspection, choice)
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanFreeze, err)
@@ -392,19 +396,16 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		})
 		result.Lifecycle = trace.wrapLifecycle(result.Lifecycle)
 	}
-	result.receipt = factory.registerCodexTurnReceipt(protocol, policyDecision, boundAccountKey, dispatchAccounts[0])
+	result.receipt = factory.registerCodexTurnReceipt(protocol, policyDecision, boundAccountKey, dispatchAccounts[0], shadowAdvice)
 	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
 }
 
-func (factory *CodexHTTPRequestPlanFactory) registerCodexTurnReceipt(protocol CodexProtocolRequest, policy SessionPolicyDecision, boundAccountKey codex.AccountKey, account CodexFrozenDispatchAccount) *codexTurnReceiptHandle {
-	if factory == nil || factory.TurnReceipts == nil || !protocol.Metadata.Strong {
+func (factory *CodexHTTPRequestPlanFactory) registerCodexTurnReceipt(protocol CodexProtocolRequest, policy SessionPolicyDecision, boundAccountKey codex.AccountKey, account CodexFrozenDispatchAccount, shadow codexNoAffinityShadowResult) *codexTurnReceiptHandle {
+	if factory == nil || factory.TurnReceipts == nil || !codexTurnReceiptEligible(protocol) {
 		return nil
 	}
 	metadata := protocol.Metadata.Metadata
-	if metadata.RequestKind != CodexRequestTurn || metadata.SessionID == "" || metadata.TurnID == "" {
-		return nil
-	}
 	transport := CodexTurnReceiptTransportHTTP
 	if factory.TransportKind == "websocket" {
 		transport = CodexTurnReceiptTransportWebSocket
@@ -432,18 +433,34 @@ func (factory *CodexHTTPRequestPlanFactory) registerCodexTurnReceipt(protocol Co
 	turn := []byte(metadata.TurnID)
 	defer zeroRuntimeBytes(session)
 	defer zeroRuntimeBytes(turn)
-	return factory.TurnReceipts.register(session, turn, CodexTurnReceiptV1{
-		State:                    CodexTurnReceiptPlanned,
-		Transport:                transport,
-		RequestKind:              shape.RequestKind,
-		RequestLineage:           shape.RequestLineage,
-		RequestedModelClass:      shape.RequestedModelClass,
-		RequestedReasoningEffort: shape.RequestedReasoningEffort,
-		CompactionPhase:          shape.CompactionPhase,
-		Pool:                     pool,
-		RouteReason:              routeReason,
-		PlannedAccountHint:       redactedAccountHint("codex", string(choice.AccountKey)),
+	shadowAlternativeAccountHint := ""
+	if shadow.Comparison == CodexTurnReceiptShadowAlternativeAccount && shadow.AlternativeAccountKey != "" {
+		shadowAlternativeAccountHint = redactedAccountHint("codex", string(shadow.AlternativeAccountKey))
+	}
+	return factory.TurnReceipts.register(session, turn, CodexTurnReceiptV2{
+		CodexTurnReceiptV1: CodexTurnReceiptV1{
+			State:                    CodexTurnReceiptPlanned,
+			Transport:                transport,
+			RequestKind:              shape.RequestKind,
+			RequestLineage:           shape.RequestLineage,
+			RequestedModelClass:      shape.RequestedModelClass,
+			RequestedReasoningEffort: shape.RequestedReasoningEffort,
+			CompactionPhase:          shape.CompactionPhase,
+			Pool:                     pool,
+			RouteReason:              routeReason,
+			PlannedAccountHint:       redactedAccountHint("codex", string(choice.AccountKey)),
+		},
+		ShadowComparison:             shadow.Comparison,
+		ShadowAlternativeAccountHint: shadowAlternativeAccountHint,
 	})
+}
+
+func codexTurnReceiptEligible(protocol CodexProtocolRequest) bool {
+	if !protocol.Metadata.Strong {
+		return false
+	}
+	metadata := protocol.Metadata.Metadata
+	return metadata.RequestKind == CodexRequestTurn && metadata.SessionID != "" && metadata.TurnID != ""
 }
 
 func codexCapabilityFinalScope(transport string, encoded []byte, protocol CodexProtocolRequest, choice RouteChoice, caller RuntimeCallerAuthorityV1) CapabilityFinalScopeCoreV1 {
@@ -682,7 +699,7 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	result.Frozen = frozen
 	result.leaseHandle = handle
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
-	result.receipt = factory.registerCodexTurnReceipt(protocol, SessionPolicyDecision{}, reservation.AccountKey, dispatchAccounts[0])
+	result.receipt = factory.registerCodexTurnReceipt(protocol, SessionPolicyDecision{}, reservation.AccountKey, dispatchAccounts[0], codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable})
 	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
 }

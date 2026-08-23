@@ -18,7 +18,7 @@ func TestProxyCodexHookForwardsOnlyCorrelationAndWritesExactReceipt(t *testing.T
 
 	var outbound map[string]string
 	doer := testDoer(func(request *http.Request) (*http.Response, error) {
-		if request.Method != http.MethodPost || request.URL.String() != "http://127.0.0.1:24567"+proxy.RuntimeCodexTurnReceiptPath {
+		if request.Method != http.MethodPost || request.URL.String() != "http://127.0.0.1:24567"+proxy.RuntimeCodexTurnReceiptV2Path {
 			t.Fatalf("request = %s %s", request.Method, request.URL)
 		}
 		if got := request.Header.Get("Authorization"); got != "Bearer local-secret" {
@@ -37,10 +37,10 @@ func TestProxyCodexHookForwardsOnlyCorrelationAndWritesExactReceipt(t *testing.T
 		if err := json.Unmarshal(body, &outbound); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		response := proxy.CodexTurnReceiptLookupV1{
-			SchemaVersion: 1,
+		response := proxy.CodexTurnReceiptLookupV2{
+			SchemaVersion: 2,
 			Found:         true,
-			Receipt: &proxy.CodexTurnReceiptV1{
+			Receipt: &proxy.CodexTurnReceiptV2{CodexTurnReceiptV1: proxy.CodexTurnReceiptV1{
 				State:                    proxy.CodexTurnReceiptCompleted,
 				Transport:                proxy.CodexTurnReceiptTransportWebSocket,
 				RequestKind:              "turn",
@@ -52,7 +52,7 @@ func TestProxyCodexHookForwardsOnlyCorrelationAndWritesExactReceipt(t *testing.T
 				RouteReason:              proxy.CodexTurnReceiptRouteAffinityReuse,
 				PlannedAccountHint:       "codex:fedcba987654",
 				ActualAccountHint:        "codex:0123456789ab",
-			},
+			}, ShadowComparison: proxy.CodexTurnReceiptShadowAlternativeAccount, ShadowAlternativeAccountHint: "codex:abcdef123456"},
 		}
 		body, err = json.Marshal(response)
 		if err != nil {
@@ -82,7 +82,7 @@ func TestProxyCodexHookForwardsOnlyCorrelationAndWritesExactReceipt(t *testing.T
 	if len(outbound) != 2 || outbound["session_id"] != "session-1" || outbound["turn_id"] != "turn-2" {
 		t.Fatalf("outbound = %#v", outbound)
 	}
-	want := "{\"systemMessage\":\"CQ route: completed via WebSocket; pool protected; account codex:0123456789ab (actual); Sol/High; warm affinity. Shadow comparison: not enabled.\"}\n"
+	want := "{\"systemMessage\":\"CQ route: completed via WebSocket; pool protected; account codex:0123456789ab (actual); Sol/High; warm affinity. Shadow: no-affinity comparison favoured account codex:abcdef123456.\"}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
@@ -92,7 +92,7 @@ func TestProxyCodexHookMissWritesEmptyObject(t *testing.T) {
 	t.Parallel()
 
 	doer := testDoer(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"schema_version":1,"found":false}`))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"schema_version":2,"found":false}`))}, nil
 	})
 	var output bytes.Buffer
 	err := runProxyCodexStopHook(context.Background(), strings.NewReader(`{"hook_event_name":"Stop","session_id":"session","turn_id":"turn"}`), &output, proxyCodexHookDependencies{
