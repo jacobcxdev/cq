@@ -1,23 +1,28 @@
-<!-- Parent: ../AGENTS.md -->
+<!-- Parent: ../../AGENTS.md -->
 
 # provider/gemini
 
-Single-account Gemini provider backed by authenticated Antigravity CLI. Provider identity remains `gemini`; account authority remains external.
+Single-account Gemini provider backed by direct Antigravity HTTP calls. Provider identity remains `gemini`; credential and project authority remains external.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `provider.go` | Discovers `agy`, applies timeout, invokes exact structured usage command, classifies errors |
-| `cli.go` | Direct no-shell command execution with bounded stdout and cancellation |
-| `parser.go` | Validates zero-token usage envelope and maps required Gemini quota buckets |
+| `provider.go` | Reads independent local inputs concurrently, refreshes token in memory, resolves project, and classifies results |
+| `credentials.go` | Read-only Antigravity Keychain and bounded project-cache decoding |
+| `client.go` | Bounded OAuth, `loadCodeAssist`, and quota-summary HTTP requests |
+| `parser.go` | Maps required direct Gemini quota buckets |
 
 ## For AI Agents
 
 ### Working In This Directory
 
-- Execute only `agy -p /usage --output-format json --print-timeout 15s`; command changes require safety review and tests
-- Accept output only when status is `SUCCESS`, turns and total tokens are zero, command name is `usage`, and required buckets occur exactly once
-- Keep stdout capped at 1 MiB, discard stderr, and never include raw command output in errors
-- Never read, refresh, write, log, or persist Antigravity credentials
+- Never invoke `agy`, scrape its binary at runtime, or add a CLI fallback
+- Read Keychain service `gemini`, account `antigravity`, and Antigravity project cache without writing either
+- Keep public OAuth client ID in source; inject client secret only at release link time
+- Retain refreshed access and refresh tokens only in process memory
+- Send exact `User-Agent: antigravity/cli/cq` on private Antigravity endpoints
+- Read all HTTP responses through `httputil.ReadBody`
+- Keep panic recovery around concurrent credential and project reads
 - Ignore `3p-*` buckets; map `gemini-5h` to `5h` and `gemini-weekly` to `7d`
+- Never include credentials, project IDs, raw response bodies, or transport details in errors

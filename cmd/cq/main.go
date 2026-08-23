@@ -194,6 +194,10 @@ type RemoveCmd struct {
 // version is set at build time via -ldflags. Falls back to "dev".
 var version = "dev"
 
+// geminiOAuthClientSecret is injected into release builds via -ldflags.
+// Development builds can use a still-valid Antigravity access token without it.
+var geminiOAuthClientSecret string
+
 func cliKongOptions() []kong.Option {
 	return []kong.Option{
 		kong.Name("cq"),
@@ -395,7 +399,7 @@ func runCheck(cli *CLI) error {
 	services := map[provider.ID]provider.Services{
 		provider.Claude: {Usage: claudeprov.New(httpClient)},
 		provider.Codex:  {Usage: codexProvider},
-		provider.Gemini: {Usage: geminiprov.New()},
+		provider.Gemini: {Usage: geminiprov.New(httpClient, geminiOAuthClientSecret)},
 	}
 
 	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini}

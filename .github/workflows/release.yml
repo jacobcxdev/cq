@@ -25,6 +25,11 @@ jobs:
       - name: Bind reviewed Codex corpus provenance
         run: echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go ${GITHUB_REF_NAME#v} ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
 
+      - name: Verify Gemini OAuth client secret
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
+        run: test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
@@ -32,6 +37,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
 
       - name: Verify published release
         env:

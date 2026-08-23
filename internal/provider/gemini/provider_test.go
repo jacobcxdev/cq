@@ -3,169 +3,381 @@ package gemini
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
-type fakeCommandRunner struct {
-	path        string
-	lookupErr   error
-	output      []byte
-	runErr      error
-	waitForDone bool
-
-	lookupNames     []string
-	runPaths        []string
-	runArgs         [][]string
-	hasDeadline     bool
-	deadlineTimeout time.Duration
-	contextErr      error
-}
-
-func (f *fakeCommandRunner) LookPath(name string) (string, error) {
-	f.lookupNames = append(f.lookupNames, name)
-	return f.path, f.lookupErr
-}
-
-func (f *fakeCommandRunner) Run(ctx context.Context, path string, args ...string) ([]byte, error) {
-	f.runPaths = append(f.runPaths, path)
-	f.runArgs = append(f.runArgs, append([]string(nil), args...))
-	if deadline, ok := ctx.Deadline(); ok {
-		f.hasDeadline = true
-		f.deadlineTimeout = time.Until(deadline)
-	}
-	if f.waitForDone {
-		<-ctx.Done()
-		f.contextErr = ctx.Err()
-		return nil, ctx.Err()
-	}
-	return f.output, f.runErr
-}
-
-func TestDiscoverAccountsReturnsNoneWithoutCLI(t *testing.T) {
-	runner := &fakeCommandRunner{lookupErr: errors.New("not found")}
-
-	accounts, err := newProvider(runner).DiscoverAccounts(context.Background())
+func TestDiscoverAccountsReturnsNoneWithoutCredentials(t *testing.T) {
+	p := &Provider{credentials: staticCredentialReader{err: os.ErrNotExist}}
+	accounts, err := p.DiscoverAccounts(context.Background())
 	if err != nil {
 		t.Fatalf("DiscoverAccounts() error = %v", err)
 	}
 	if len(accounts) != 0 {
 		t.Fatalf("DiscoverAccounts() count = %d, want 0", len(accounts))
 	}
-	if len(runner.runPaths) != 0 {
-		t.Fatalf("Run() calls = %d, want 0", len(runner.runPaths))
-	}
 }
 
-func TestDiscoverAccountsReturnsAntigravityCLI(t *testing.T) {
-	runner := &fakeCommandRunner{path: "/opt/homebrew/bin/agy"}
-
-	accounts, err := newProvider(runner).DiscoverAccounts(context.Background())
+func TestDiscoverAccountsUsesCredentialPresence(t *testing.T) {
+	p := &Provider{credentials: staticCredentialReader{raw: "present"}}
+	accounts, err := p.DiscoverAccounts(context.Background())
 	if err != nil {
 		t.Fatalf("DiscoverAccounts() error = %v", err)
 	}
 	if len(accounts) != 1 {
 		t.Fatalf("DiscoverAccounts() count = %d, want 1", len(accounts))
 	}
-	account := accounts[0]
-	if account.AccountID != antigravityAccountID || account.Label != "Antigravity CLI" || !account.Active {
-		t.Fatalf("account = %#v, want stable active Antigravity identity", account)
-	}
-	if account.Email != "" {
-		t.Fatalf("account email = %q, want empty", account.Email)
-	}
-	if !reflect.DeepEqual(runner.lookupNames, []string{"agy"}) {
-		t.Fatalf("LookPath() names = %q, want [agy]", runner.lookupNames)
-	}
-	if len(runner.runPaths) != 0 {
-		t.Fatalf("Run() calls = %d, want 0", len(runner.runPaths))
-	}
-}
-
-func TestFetchRunsExactUsageCommand(t *testing.T) {
-	runner := &fakeCommandRunner{
-		path:   "/opt/homebrew/bin/agy",
-		output: usageFixture("SUCCESS", 0, 0, "usage", validGeminiBuckets),
-	}
-
-	results, err := newProvider(runner).Fetch(context.Background(), time.Time{})
-	if err != nil {
-		t.Fatalf("Fetch() error = %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("Fetch() count = %d, want 1", len(results))
-	}
-	if results[0].AccountID != antigravityAccountID || !results[0].Active {
-		t.Fatalf("result identity = %q/%v, want antigravity-cli/true", results[0].AccountID, results[0].Active)
-	}
-	if !reflect.DeepEqual(runner.runPaths, []string{"/opt/homebrew/bin/agy"}) {
-		t.Fatalf("Run() paths = %q, want resolved agy path", runner.runPaths)
-	}
-	wantArgs := []string{"-p", "/usage", "--output-format", "json", "--print-timeout", "15s"}
-	if len(runner.runArgs) != 1 || !reflect.DeepEqual(runner.runArgs[0], wantArgs) {
-		t.Fatalf("Run() args = %q, want %q", runner.runArgs, wantArgs)
-	}
-	if !runner.hasDeadline || runner.deadlineTimeout < 19*time.Second || runner.deadlineTimeout > 20*time.Second {
-		t.Fatalf("Run() timeout = %s (present %v), want 20s safety timeout", runner.deadlineTimeout, runner.hasDeadline)
+	want := struct {
+		id     string
+		label  string
+		active bool
+	}{antigravityAccountID, "Antigravity CLI", true}
+	got := struct {
+		id     string
+		label  string
+		active bool
+	}{accounts[0].AccountID, accounts[0].Label, accounts[0].Active}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("account = %#v, want %#v", got, want)
 	}
 }
 
-func TestFetchReturnsNotConfiguredWithoutCLI(t *testing.T) {
-	runner := &fakeCommandRunner{lookupErr: errors.New("not found")}
+type blockingCredentialReader struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+	raw     string
+}
 
-	result := fetchSingleResult(t, newProvider(runner), context.Background())
-	assertResultError(t, result, "not_configured")
-	if result.Error.Message != "install and authenticate antigravity-cli" {
-		t.Fatalf("error message = %q, want install guidance", result.Error.Message)
+func (r *blockingCredentialReader) Get(_, _ string) (string, error) {
+	r.once.Do(func() { r.started <- struct{}{} })
+	<-r.release
+	return r.raw, nil
+}
+
+type blockingFileSystem struct {
+	fsutil.FileSystem
+	started chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (f *blockingFileSystem) ReadFile(name string) ([]byte, error) {
+	f.once.Do(func() { f.started <- struct{}{} })
+	<-f.release
+	return f.FileSystem.ReadFile(name)
+}
+
+func TestFetchReadsLocalInputsConcurrently(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fsys := fsutil.NewMemFS()
+	path := filepath.Join("/home/test", antigravityProjectCachePath)
+	if err := fsys.WriteFile(path, []byte("project-123"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if len(runner.runPaths) != 0 {
-		t.Fatalf("Run() calls = %d, want 0", len(runner.runPaths))
+	p := &Provider{
+		credentials: &blockingCredentialReader{
+			started: started,
+			release: release,
+			raw:     credentialFixture("access", "refresh", "2026-08-24T00:00:00Z"),
+		},
+		fs: &blockingFileSystem{
+			FileSystem: fsys,
+			started:    started,
+			release:    release,
+		},
+	}
+
+	type response struct {
+		inputs localInputs
+		err    error
+	}
+	done := make(chan response, 1)
+	go func() {
+		inputs, err := p.readLocalInputs()
+		done <- response{inputs: inputs, err: err}
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("local reads did not start concurrently")
+		}
+	}
+	close(release)
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("readLocalInputs() error = %v", got.err)
+	}
+	if got.inputs.ProjectID != "project-123" || got.inputs.Credentials.AccessToken != "access" {
+		t.Fatalf("readLocalInputs() = %#v, want both local inputs", got.inputs)
 	}
 }
 
-func TestFetchClassifiesCommandFailureWithoutDetails(t *testing.T) {
-	runner := &fakeCommandRunner{
-		path:   "/opt/homebrew/bin/agy",
-		runErr: errors.New("secret diagnostic details"),
-	}
+type panickingCredentialReader struct{}
 
-	result := fetchSingleResult(t, newProvider(runner), context.Background())
-	assertResultError(t, result, "fetch_error")
-	if strings.Contains(result.Error.Message, "secret diagnostic details") {
-		t.Fatalf("error message exposed command details: %q", result.Error.Message)
+func (panickingCredentialReader) Get(_, _ string) (string, error) {
+	panic("credential payload")
+}
+
+func TestReadLocalInputsRecoversCredentialPanic(t *testing.T) {
+	p := &Provider{credentials: panickingCredentialReader{}, fs: fsutil.NewMemFS()}
+	_, err := p.readLocalInputs()
+	if !errors.Is(err, errLocalInputPanic) {
+		t.Fatalf("readLocalInputs() error = %v, want %v", err, errLocalInputPanic)
 	}
 }
 
-func TestFetchClassifiesInvalidOutputWithoutDetails(t *testing.T) {
-	raw := `{"secret":"account@example.com"}`
-	runner := &fakeCommandRunner{
-		path:   "/opt/homebrew/bin/agy",
-		output: []byte(raw),
-	}
+func TestProviderFetchUsesFreshTokenAndCachedProject(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	requests := 0
+	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.URL.String() != retrieveQuotaURL {
+			t.Fatalf("URL = %s, want quota endpoint", req.URL)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer stored-access" {
+			t.Fatalf("Authorization = %q, want stored access token", got)
+		}
+		return httpResponse(http.StatusOK, string(quotaFixture(validGeminiBuckets))), nil
+	})
+	p := testProvider(t, doer, credentialFixture("stored-access", "stored-refresh", now.Add(time.Hour).Format(time.RFC3339)), "project-123", true, "client-secret")
 
-	result := fetchSingleResult(t, newProvider(runner), context.Background())
-	assertResultError(t, result, "parse_error")
-	if strings.Contains(result.Error.Message, raw) || strings.Contains(result.Error.Message, "account@example.com") {
-		t.Fatalf("error message exposed command output: %q", result.Error.Message)
+	result := fetchSingleResult(t, p, context.Background(), now)
+	if result.Status != quota.StatusOK || result.AccountID != antigravityAccountID || !result.Active {
+		t.Fatalf("Fetch() result = %#v, want active Gemini quota", result)
+	}
+	if requests != 1 {
+		t.Fatalf("request count = %d, want quota request only", requests)
 	}
 }
 
-func TestFetchPropagatesCallerCancellation(t *testing.T) {
-	runner := &fakeCommandRunner{
-		path:        "/opt/homebrew/bin/agy",
-		waitForDone: true,
+func TestProviderFetchRefreshesExpiredTokenInMemory(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	var paths []string
+	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+		paths = append(paths, req.URL.Path)
+		switch req.URL.String() {
+		case oauthTokenURL:
+			return httpResponse(http.StatusOK, "{\"access_token\":\"new-access\",\"refresh_token\":\"rotated-refresh\",\"expires_in\":3600}"), nil
+		case retrieveQuotaURL:
+			if got := req.Header.Get("Authorization"); got != "Bearer new-access" {
+				t.Fatalf("Authorization = %q, want refreshed token", got)
+			}
+			return httpResponse(http.StatusOK, string(quotaFixture(validGeminiBuckets))), nil
+		default:
+			t.Fatalf("unexpected URL %s", req.URL)
+			return nil, nil
+		}
+	})
+	p := testProvider(t, doer, credentialFixture("expired-access", "stored-refresh", now.Add(-time.Hour).Format(time.RFC3339)), "project-123", true, "client-secret")
+
+	result := fetchSingleResult(t, p, context.Background(), now)
+	if result.Status != quota.StatusOK {
+		t.Fatalf("Fetch() result = %#v, want quota", result)
 	}
+	if want := []string{"/token", "/v1internal:retrieveUserQuotaSummary"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("request paths = %q, want %q", paths, want)
+	}
+}
+
+func TestProviderFetchLoadsMissingProjectBeforeQuota(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	var paths []string
+	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+		paths = append(paths, req.URL.Path)
+		switch req.URL.String() {
+		case loadCodeAssistURL:
+			return httpResponse(http.StatusOK, "{\"cloudaicompanionProject\":\"loaded-project\"}"), nil
+		case retrieveQuotaURL:
+			body, _ := io.ReadAll(req.Body)
+			if string(body) != "{\"project\":\"loaded-project\"}" {
+				t.Fatalf("quota body = %q, want loaded project", body)
+			}
+			return httpResponse(http.StatusOK, string(quotaFixture(validGeminiBuckets))), nil
+		default:
+			t.Fatalf("unexpected URL %s", req.URL)
+			return nil, nil
+		}
+	})
+	p := testProvider(t, doer, credentialFixture("stored-access", "stored-refresh", now.Add(time.Hour).Format(time.RFC3339)), "", false, "client-secret")
+
+	result := fetchSingleResult(t, p, context.Background(), now)
+	if result.Status != quota.StatusOK {
+		t.Fatalf("Fetch() result = %#v, want quota", result)
+	}
+	if want := []string{"/v1internal:loadCodeAssist", "/v1internal:retrieveUserQuotaSummary"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("request paths = %q, want %q", paths, want)
+	}
+}
+
+func TestProviderFetchClassifiesLocalInputFailures(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		credential staticCredentialReader
+		project    string
+		write      bool
+		wantCode   string
+	}{
+		{name: "missing credentials", credential: staticCredentialReader{err: os.ErrNotExist}, wantCode: "not_configured"},
+		{name: "malformed credentials", credential: staticCredentialReader{raw: "not-json"}, wantCode: "parse_error"},
+		{name: "missing access token", credential: staticCredentialReader{raw: credentialFixture("", "refresh", now.Add(time.Hour).Format(time.RFC3339))}, project: "project", write: true, wantCode: "no_token"},
+		{name: "malformed project", credential: staticCredentialReader{raw: credentialFixture("access", "refresh", now.Add(time.Hour).Format(time.RFC3339))}, project: "project\x00id", write: true, wantCode: "parse_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := fsutil.NewMemFS()
+			if tt.write {
+				writeProject(t, fsys, tt.project)
+			}
+			p := newProvider(doerFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("HTTP must not run after local input failure")
+				return nil, nil
+			}), fsys, tt.credential, "client-secret")
+			result := fetchSingleResult(t, p, context.Background(), now)
+			assertResultError(t, result, tt.wantCode, 0)
+		})
+	}
+}
+
+func TestProviderFetchRequiresRefreshMaterial(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		refresh string
+		secret  string
+	}{
+		{name: "missing refresh token", secret: "client-secret"},
+		{name: "missing client secret", refresh: "refresh-token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := testProvider(t, doerFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("HTTP must not run without refresh material")
+				return nil, nil
+			}), credentialFixture("expired", tt.refresh, now.Add(-time.Hour).Format(time.RFC3339)), "project", true, tt.secret)
+			assertResultError(t, fetchSingleResult(t, p, context.Background(), now), "auth_expired", 0)
+		})
+	}
+}
+
+func TestProviderFetchClassifiesHTTPFailures(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		transport  error
+		wantCode   string
+		wantStatus int
+	}{
+		{name: "transport", transport: errors.New("private-token"), wantCode: "fetch_error"},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: "{\"error\":\"private-token\"}", wantCode: "auth_expired", wantStatus: http.StatusUnauthorized},
+		{name: "api error", status: http.StatusTooManyRequests, body: "{\"error\":\"private-token\"}", wantCode: "api_error", wantStatus: http.StatusTooManyRequests},
+		{name: "malformed quota", status: http.StatusOK, body: "{\"groups\":[]}", wantCode: "parse_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doer := doerFunc(func(*http.Request) (*http.Response, error) {
+				if tt.transport != nil {
+					return nil, tt.transport
+				}
+				return httpResponse(tt.status, tt.body), nil
+			})
+			p := testProvider(t, doer, credentialFixture("access", "refresh", now.Add(time.Hour).Format(time.RFC3339)), "project", true, "client-secret")
+			result := fetchSingleResult(t, p, context.Background(), now)
+			assertResultError(t, result, tt.wantCode, tt.wantStatus)
+			if strings.Contains(result.Error.Message, "private-token") {
+				t.Fatalf("error message exposed private data: %q", result.Error.Message)
+			}
+		})
+	}
+}
+
+func TestProviderFetchClassifiesRefreshRejection(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	p := testProvider(t, doerFunc(func(*http.Request) (*http.Response, error) {
+		return httpResponse(http.StatusBadRequest, "{\"error\":\"invalid_grant\",\"secret\":\"private\"}"), nil
+	}), credentialFixture("expired", "refresh", now.Add(-time.Hour).Format(time.RFC3339)), "project", true, "client-secret")
+	assertResultError(t, fetchSingleResult(t, p, context.Background(), now), "auth_expired", http.StatusBadRequest)
+}
+
+func TestProviderFetchClassifiesProjectFailures(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantCode   string
+		wantStatus int
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, wantCode: "auth_expired", wantStatus: http.StatusUnauthorized},
+		{name: "api error", status: http.StatusServiceUnavailable, wantCode: "api_error", wantStatus: http.StatusServiceUnavailable},
+		{name: "malformed", status: http.StatusOK, body: "{}", wantCode: "parse_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := testProvider(t, doerFunc(func(*http.Request) (*http.Response, error) {
+				return httpResponse(tt.status, tt.body), nil
+			}), credentialFixture("access", "refresh", now.Add(time.Hour).Format(time.RFC3339)), "", false, "client-secret")
+			assertResultError(t, fetchSingleResult(t, p, context.Background(), now), tt.wantCode, tt.wantStatus)
+		})
+	}
+}
+
+func TestProviderFetchPropagatesCancellation(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	p := testProvider(t, doerFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, req.Context().Err()
+	}), credentialFixture("access", "refresh", now.Add(time.Hour).Format(time.RFC3339)), "project", true, "client-secret")
+	assertResultError(t, fetchSingleResult(t, p, ctx, now), "fetch_error", 0)
+}
 
-	result := fetchSingleResult(t, newProvider(runner), ctx)
-	assertResultError(t, result, "fetch_error")
-	if !errors.Is(runner.contextErr, context.Canceled) {
-		t.Fatalf("runner context error = %v, want %v", runner.contextErr, context.Canceled)
+func TestProviderFetchRecoversHTTPPanic(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	p := testProvider(t, doerFunc(func(*http.Request) (*http.Response, error) {
+		panic("private-token")
+	}), credentialFixture("access", "refresh", now.Add(time.Hour).Format(time.RFC3339)), "project", true, "client-secret")
+	result := fetchSingleResult(t, p, context.Background(), now)
+	assertResultError(t, result, "fetch_panic", 0)
+	if strings.Contains(result.Error.Message, "private-token") {
+		t.Fatalf("panic result exposed private data: %q", result.Error.Message)
+	}
+}
+
+func testProvider(t *testing.T, doer doerFunc, rawCredential, project string, writeProjectCache bool, clientSecret string) *Provider {
+	t.Helper()
+	fsys := fsutil.NewMemFS()
+	if writeProjectCache {
+		writeProject(t, fsys, project)
+	}
+	return newProvider(doer, fsys, staticCredentialReader{raw: rawCredential}, clientSecret)
+}
+
+func writeProject(t *testing.T, fsys fsutil.FileSystem, project string) {
+	t.Helper()
+	home, err := fsys.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, antigravityProjectCachePath)
+	if err := fsys.WriteFile(path, []byte(project), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -173,9 +385,9 @@ type quotaProvider interface {
 	Fetch(context.Context, time.Time) ([]quota.Result, error)
 }
 
-func fetchSingleResult(t *testing.T, provider quotaProvider, ctx context.Context) quota.Result {
+func fetchSingleResult(t *testing.T, p quotaProvider, ctx context.Context, now time.Time) quota.Result {
 	t.Helper()
-	results, err := provider.Fetch(ctx, time.Time{})
+	results, err := p.Fetch(ctx, now)
 	if err != nil {
 		t.Fatalf("Fetch() error = %v", err)
 	}
@@ -185,9 +397,12 @@ func fetchSingleResult(t *testing.T, provider quotaProvider, ctx context.Context
 	return results[0]
 }
 
-func assertResultError(t *testing.T, result quota.Result, code string) {
+func assertResultError(t *testing.T, result quota.Result, code string, status int) {
 	t.Helper()
-	if result.Status != quota.StatusError || result.Error == nil || result.Error.Code != code {
-		t.Fatalf("result error = %#v, want code %q", result, code)
+	if result.Status != quota.StatusError || result.Error == nil {
+		t.Fatalf("result = %#v, want error", result)
+	}
+	if result.Error.Code != code || result.Error.HTTPStatus != status {
+		t.Fatalf("error = %#v, want code/status %q/%d", result.Error, code, status)
 	}
 }
