@@ -75,6 +75,26 @@ func TestProxyDefaultHelpShowsImmediateProviders(t *testing.T) {
 	}
 }
 
+func TestProxyHelpShowsEveryImmediateCommand(t *testing.T) {
+	help, ok := manualHelp([]string{"proxy"})
+	if !ok {
+		t.Fatal("manualHelp(proxy) missing entry")
+	}
+	for _, command := range stringCommandsForSelector(t, "proxy.go", "runProxy", "args[0]") {
+		want := "proxy " + command
+		if !strings.Contains(help, want) {
+			t.Fatalf("proxy help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestProxyHookCommandReachesHandler(t *testing.T) {
+	handled, exitCode, err := runPureGlobalInspection([]string{"proxy", "hook", "codex-stop"}, io.Discard, io.Discard)
+	if handled || exitCode != 0 || err != nil {
+		t.Fatalf("proxy hook pre-dispatch = %t, %d, %v; want handler fallthrough", handled, exitCode, err)
+	}
+}
+
 func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 	if os.Getenv("CQ_TEST_BARE_PROXY_STATUS") == "1" {
 		proxyStatusGet = func(string) (*http.Response, error) {
@@ -119,6 +139,9 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"proxy", "status", "--json"}},
 		{args: []string{"proxy", "start", "--port", "29280", "--help"}},
 		{args: []string{"proxy", "help", "start"}},
+		{args: []string{"proxy", "hook", "--help"}},
+		{args: []string{"proxy", "hook", "codex-stop", "--help"}},
+		{args: []string{"proxy", "help", "hook"}},
 		{args: []string{"models", "list", "--help"}},
 		{args: []string{"models", "list", "--provider", "codex", "--help"}},
 		{args: []string{"models", "help", "list"}},
@@ -674,6 +697,11 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 			name: "agent",
 			path: []string{"agent"},
 			want: []string{"Usage: cq agent <command>", "agent install", "agent uninstall"},
+		},
+		{
+			name: "proxy hook",
+			path: []string{"proxy", "hook"},
+			want: []string{"Usage: cq proxy hook codex-stop", "privacy-safe turn receipt", "does not change routing"},
 		},
 		{
 			name: "proxy start",

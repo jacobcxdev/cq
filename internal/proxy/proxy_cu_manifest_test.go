@@ -2545,7 +2545,7 @@ func TestCanonicalCUManifestV1ProvidesPinnedCU0Selection(t *testing.T) {
 		t.Fatalf("CU-0 manifest = %#v", manifest)
 	}
 	wantCounts := map[string]int{
-		"./cmd/cq":                      80,
+		"./cmd/cq":                      81,
 		"./internal/proxy":              266,
 		"./internal/tools/proxycu":      66,
 		"./internal/tools/proxyrelease": 7,
