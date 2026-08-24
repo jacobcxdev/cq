@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -95,7 +94,7 @@ func TestProxyRescueStateOpensWhenNormalRoutingStateIsCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rescue.Close()
-	if rescue.RuntimeMode == nil || rescue.RescueFairnessKey() == ([sha256.Size]byte{}) {
+	if rescue.RuntimeMode == nil {
 		t.Fatal("rescue authority incomplete")
 	}
 }
