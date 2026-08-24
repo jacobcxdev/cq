@@ -58,3 +58,13 @@ func TestReleaseRequiresAndEmbedsGeminiOAuthSecret(t *testing.T) {
 		t.Fatal("GoReleaser does not embed Gemini OAuth secret")
 	}
 }
+
+func TestHomebrewServiceLeavesListenerToRuntimeSupervisor(t *testing.T) {
+	releaser, err := os.ReadFile("../../.goreleaser.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(releaser), `sockets `) {
+		t.Fatal("Homebrew service claims runtime supervisor listener")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
@@ -71,6 +72,12 @@ type runtimeSupervisorStartupConsumer struct{}
 
 func (runtimeSupervisorStartupConsumer) Consume(context.Context, proxy.ProviderBranchAdmissionConsumptionV1) error {
 	return nil
+}
+
+type runtimeSupervisorCallerResolver func(context.Context, codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error)
+
+func (resolve runtimeSupervisorCallerResolver) ResolveExact(ctx context.Context, planned codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+	return resolve(ctx, planned)
 }
 
 func runtimeSupervisorStartupHolder(description string) proxy.LifecycleHolderProof {
@@ -132,5 +139,85 @@ func TestRuntimeSupervisorStartupSkipsCredentialDiscovery(t *testing.T) {
 
 	if err := runProxyStart(proxyCommandOptions{}); !errors.Is(err, want) {
 		t.Fatalf("runProxyStart error = %v, want %v", err, want)
+	}
+}
+
+func TestOwnedRuntimeSupervisorStartupSkipsCredentialDiscovery(t *testing.T) {
+	oldAdopt := adoptProxyListenerFn
+	oldRun := runProxyOwnedRuntimeFn
+	oldLoad := loadProxyStartConfigFn
+	oldDiscoverClaude := discoverClaudeAccountsFn
+	oldHTTPClient := newHTTPClientFn
+	t.Cleanup(func() {
+		adoptProxyListenerFn = oldAdopt
+		runProxyOwnedRuntimeFn = oldRun
+		loadProxyStartConfigFn = oldLoad
+		discoverClaudeAccountsFn = oldDiscoverClaude
+		newHTTPClientFn = oldHTTPClient
+	})
+
+	want := errors.New("supervisor served")
+	adoptProxyListenerFn = func() (net.Listener, error) { return nil, nil }
+	loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 29280}, nil }
+	runProxyOwnedRuntimeFn = func(_ context.Context, port int, _ func(context.Context, net.Listener, http.Handler) error) (bool, error) {
+		if port != 29280 {
+			t.Fatalf("supervisor port = %d, want 29280", port)
+		}
+		return true, want
+	}
+	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth {
+		panic("supervisor discovered Claude credentials")
+	}
+	newHTTPClientFn = func(time.Duration, string) httputil.Doer {
+		panic("supervisor constructed provider client")
+	}
+
+	if err := runProxyStart(proxyCommandOptions{}); !errors.Is(err, want) {
+		t.Fatalf("runProxyStart error = %v, want %v", err, want)
+	}
+}
+
+func TestNormalCallerCredentialsResolveExternalCodexBearer(t *testing.T) {
+	account := codexprov.LogicalAccount{
+		Key: "account-key",
+		Identity: codexprov.AccountIdentity{
+			AccountID: "account-id", UserID: "user-id",
+		},
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "external-candidate"},
+			Revision: "revision", Source: codexprov.SourceExternal, Routable: true,
+		}},
+	}
+	resolverCalls := 0
+	credentials, err := normalCallerCredentials(context.Background(), &proxy.Config{LocalToken: "local-token"}, nil, codexprov.Inventory{Accounts: []codexprov.LogicalAccount{account}}, runtimeSupervisorCallerResolver(func(_ context.Context, planned codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+		resolverCalls++
+		if planned.Ref != account.Candidates[0].Ref || planned.Revision != "revision" || planned.Source != codexprov.SourceExternal {
+			t.Fatalf("resolved plan = %#v", planned)
+		}
+		return codexprov.CredentialMaterial{AccessToken: "external-token"}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolverCalls != 1 || len(credentials) != 2 || credentials[1].Domain != proxy.NormalCallerCodex || credentials[1].Bearer != "external-token" {
+		t.Fatalf("caller credentials = %#v, resolver calls = %d", credentials, resolverCalls)
+	}
+}
+
+func TestNormalCallerCredentialsFailWhenExternalCodexBearerCannotResolve(t *testing.T) {
+	want := errors.New("resolve failed")
+	account := codexprov.LogicalAccount{
+		Key:      "account-key",
+		Identity: codexprov.AccountIdentity{AccountID: "account-id", UserID: "user-id"},
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "external-candidate"},
+			Revision: "revision", Source: codexprov.SourceExternal, Routable: true,
+		}},
+	}
+	_, err := normalCallerCredentials(context.Background(), &proxy.Config{LocalToken: "local-token"}, nil, codexprov.Inventory{Accounts: []codexprov.LogicalAccount{account}}, runtimeSupervisorCallerResolver(func(context.Context, codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+		return codexprov.CredentialMaterial{}, want
+	}))
+	if !errors.Is(err, want) {
+		t.Fatalf("normalCallerCredentials error = %v, want %v", err, want)
 	}
 }

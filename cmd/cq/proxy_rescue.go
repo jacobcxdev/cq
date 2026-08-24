@@ -13,7 +13,10 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-const proxyRescueResponseMaxBytes = 64 << 10
+const (
+	proxyRescueControlTimeout   = 30 * time.Second
+	proxyRescueResponseMaxBytes = 64 << 10
+)
 
 func runProxyRescue(args []string, output io.Writer) error {
 	return runProxyRescueContext(context.Background(), args, output)
@@ -21,7 +24,7 @@ func runProxyRescue(args []string, output io.Writer) error {
 
 func runProxyRescueContext(ctx context.Context, args []string, output io.Writer) error {
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: proxyRescueControlTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errors.New("proxy rescue redirect refused")
 		},

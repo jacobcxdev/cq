@@ -314,7 +314,7 @@ func TestProxyCommandClassifiesReconciledStatusAndRescue(t *testing.T) {
 		t.Fatalf("status authority = %+v args=%+v err=%v", status, arguments, err)
 	}
 	rescue, err := ClassifyProxyCommand([]string{"proxy", "rescue", "status", "--port", "29280"})
-	if err != nil || rescue.Row != "proxy_rescue" || rescue.Terminating {
+	if err != nil || rescue.Row != "proxy_rescue" || rescue.Terminating || rescue.Deadline.Total != 30*time.Second {
 		t.Fatalf("rescue authority = %+v err=%v", rescue, err)
 	}
 }

@@ -99,3 +99,34 @@ func TestProxyRescueStateOpensWhenNormalRoutingStateIsCorrupt(t *testing.T) {
 		t.Fatal("rescue authority incomplete")
 	}
 }
+
+func TestProxyWorkerStateCoexistsWithRescueAuthority(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	options := ProxyResilienceStateOptions{
+		FS:     fsutil.OSFileSystem{},
+		Root:   root,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x43}, 8192)),
+		Now:    time.Now,
+	}
+	if err := InitialiseProxyResilienceState(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	rescue, err := OpenProxyRescueState(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rescue.Close()
+
+	options.SkipRuntimeMode = true
+	worker, err := OpenProxyResilienceState(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	if worker.Routing == nil || worker.DispatchPermits == nil {
+		t.Fatal("worker routing authority incomplete")
+	}
+	if worker.RuntimeMode != nil {
+		t.Fatal("worker acquired supervisor-owned runtime mode authority")
+	}
+}

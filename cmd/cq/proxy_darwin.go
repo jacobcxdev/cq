@@ -43,20 +43,6 @@ var proxyPlistTemplate = template.Must(template.New("plist").Parse(`<?xml versio
 		<string>proxy</string>
 		<string>start</string>
 	</array>
-	<key>Sockets</key>
-	<dict>
-		<key>PublicListener</key>
-		<dict>
-			<key>SockFamily</key>
-			<string>IPv4</string>
-			<key>SockNodeName</key>
-			<string>127.0.0.1</string>
-			<key>SockServiceName</key>
-			<string>{{ .Port }}</string>
-			<key>SockType</key>
-			<string>stream</string>
-		</dict>
-	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>RunAtLoad</key>
@@ -82,6 +68,19 @@ func init() {
 	adoptProxyListenerFn = adoptDarwinProxyListener
 	newProxyRuntimeWorkerLauncherFn = newDarwinProxyRuntimeWorkerLauncher
 	runProxyAdoptedRuntimeFn = runDarwinProxyAdoptedRuntime
+	runProxyOwnedRuntimeFn = runDarwinProxyOwnedRuntime
+}
+
+func runDarwinProxyOwnedRuntime(ctx context.Context, port int, serve func(context.Context, net.Listener, http.Handler) error) (handled bool, returnErr error) {
+	if err := initialiseDarwinRuntimeLifecycle(); err != nil {
+		return true, err
+	}
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		return true, err
+	}
+	defer listener.Close()
+	return true, runDarwinProxyAdoptedRuntime(ctx, listener, serve)
 }
 
 func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error) error {

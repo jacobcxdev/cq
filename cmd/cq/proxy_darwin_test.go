@@ -60,8 +60,8 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	if !strings.Contains(plist, "<string>proxy</string>") || !strings.Contains(plist, "<string>start</string>") {
 		t.Fatalf("plist = %q, want proxy start arguments", plist)
 	}
-	if !strings.Contains(plist, "<string>24567</string>") {
-		t.Fatalf("plist = %q, want configured port", plist)
+	if strings.Contains(plist, "<key>Sockets</key>") {
+		t.Fatalf("plist = %q, want runtime supervisor to own listener", plist)
 	}
 	if !strings.Contains(plist, "<string>"+filepath.Join(dir, "Library", "Logs", "cq", "proxy.log")+"</string>") {
 		t.Fatalf("plist = %q, want proxy log path", plist)
