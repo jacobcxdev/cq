@@ -8,13 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"mime"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,16 +29,12 @@ const (
 	rescueHeaderNameLimit    = 128
 	rescueHeaderValueLimit   = 16 << 10
 	rescueBearerLimit        = 16 << 10
-	rescueAccountIDLimit     = 512
 	rescueRequestBodyLimit   = 64 << 20
 )
 
 var (
 	ErrRescueCapacity = errors.New("rescue capacity unavailable")
 	errRescueRedirect = errors.New("rescue redirect refused")
-	rescueUserAgent   = regexp.MustCompile(`^[^\r\n]*/0\.147\.0 \([^\r\n()]+\) [^\r\n()]+(?: \([^\r\n()]*\))?$`)
-	rescueUUIDv4      = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	rescueTraceParent = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
 )
 
 type RescueIngressKind string
@@ -279,11 +273,7 @@ func (relay *RescueRelay) ServeHTTP(writer http.ResponseWriter, request *http.Re
 		writeRescueError(writer, status, code)
 		return
 	}
-	bearer, err := validateRescueHeaders(request, route.kind)
-	if err != nil {
-		writeRescueError(writer, http.StatusUnauthorized, "rescue_caller_auth_required")
-		return
-	}
+	bearer := rescueBearer(request)
 	if relay.DenyBearer != nil && relay.DenyBearer(bearer) {
 		writeRescueError(writer, http.StatusUnauthorized, "rescue_local_token_refused")
 		return
@@ -399,15 +389,9 @@ func classifyRescueRoute(request *http.Request) (rescueRoute, int, string) {
 		if request.Method != http.MethodGet {
 			return rescueRoute{allow: http.MethodGet}, http.StatusMethodNotAllowed, "rescue_method_unsupported"
 		}
-		if request.URL.RawQuery != "client_version=0.147.0" {
-			return rescueRoute{}, http.StatusBadRequest, "rescue_query_unsupported"
-		}
 		return rescueRoute{kind: rescueRouteModels, suffix: "/models"}, 0, ""
 	}
 	if path == "/responses" || path == "/v1/responses" {
-		if request.URL.RawQuery != "" {
-			return rescueRoute{}, http.StatusBadRequest, "rescue_query_unsupported"
-		}
 		if path == "/responses" && request.Method == http.MethodGet && isRescueWebSocketUpgrade(request) {
 			return rescueRoute{kind: rescueRouteWebSocket, suffix: "/responses"}, 0, ""
 		}
@@ -421,9 +405,6 @@ func classifyRescueRoute(request *http.Request) (rescueRoute, int, string) {
 		return rescueRoute{kind: rescueRouteResponse, suffix: "/responses", flush: true}, 0, ""
 	}
 	if path == "/responses/compact" || path == "/v1/responses/compact" {
-		if request.URL.RawQuery != "" {
-			return rescueRoute{}, http.StatusBadRequest, "rescue_query_unsupported"
-		}
 		if request.Method != http.MethodPost {
 			return rescueRoute{allow: http.MethodPost}, http.StatusMethodNotAllowed, "rescue_method_unsupported"
 		}
@@ -432,153 +413,19 @@ func classifyRescueRoute(request *http.Request) (rescueRoute, int, string) {
 	return rescueRoute{}, http.StatusNotFound, "rescue_route_unsupported"
 }
 
-func validateRescueHeaders(request *http.Request, route rescueRouteKind) ([]byte, error) {
-	allowed := map[string]bool{
-		"authorization": true, "user-agent": true, "originator": true, "version": true,
-		"chatgpt-account-id": true, "x-openai-fedramp": true, "x-openai-internal-codex-residency": true,
-		"openai-organization": true, "openai-project": true, "traceparent": true, "tracestate": true,
+func rescueBearer(request *http.Request) []byte {
+	if request == nil {
+		return nil
 	}
-	required := []string{"authorization", "user-agent", "originator", "version"}
-	switch route {
-	case rescueRouteResponse:
-		for _, name := range []string{"content-type", "accept", "session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "content-encoding", "x-codex-turn-metadata", "x-codex-turn-state", "x-codex-parent-thread-id", "x-openai-subagent", "x-openai-memgen-request", "x-openai-internal-codex-responses-lite", "x-codex-beta-features", "x-oai-attestation", "x-codex-inference-call-id"} {
-			allowed[name] = true
-		}
-		required = append(required, "content-type", "accept", "session-id", "thread-id", "x-client-request-id", "x-codex-window-id")
-	case rescueRouteCompact:
-		for _, name := range []string{"content-type", "session-id", "thread-id", "x-codex-window-id", "x-codex-installation-id", "x-codex-turn-metadata", "x-codex-turn-state", "x-codex-parent-thread-id", "x-openai-subagent", "x-openai-memgen-request", "x-openai-internal-codex-responses-lite", "x-codex-beta-features", "x-oai-attestation"} {
-			allowed[name] = true
-		}
-		required = append(required, "content-type", "session-id", "thread-id", "x-codex-window-id", "x-codex-installation-id")
-	case rescueRouteWebSocket:
-		for _, name := range []string{"connection", "upgrade", "sec-websocket-version", "sec-websocket-key", "sec-websocket-extensions", "openai-beta", "session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-turn-metadata", "x-codex-parent-thread-id", "x-openai-subagent", "x-openai-memgen-request", "x-codex-beta-features", "x-oai-attestation", "x-responsesapi-include-timing-metrics"} {
-			allowed[name] = true
-		}
-		required = append(required, "connection", "upgrade", "sec-websocket-version", "sec-websocket-key", "sec-websocket-extensions", "openai-beta", "session-id", "thread-id", "x-client-request-id", "x-codex-window-id")
+	values := request.Header.Values("Authorization")
+	if len(values) != 1 || len(values[0]) > rescueBearerLimit || !strings.HasPrefix(values[0], "Bearer ") {
+		return nil
 	}
-	values := make(map[string][]string, len(request.Header))
-	for name, entries := range request.Header {
-		lower := strings.ToLower(name)
-		if !allowed[lower] || len(entries) != 1 {
-			return nil, errors.New("unsupported rescue header")
-		}
-		values[lower] = entries
+	bearer := strings.TrimPrefix(values[0], "Bearer ")
+	if bearer == "" {
+		return nil
 	}
-	for _, name := range required {
-		if _, exists := values[name]; !exists {
-			return nil, fmt.Errorf("missing %s", name)
-		}
-	}
-	authorization := values["authorization"][0]
-	if len(authorization) > rescueBearerLimit || !strings.HasPrefix(authorization, "Bearer ") {
-		return nil, errors.New("invalid bearer")
-	}
-	bearer := []byte(strings.TrimPrefix(authorization, "Bearer "))
-	if len(bearer) == 0 || !validRescueBearer(bearer) {
-		return nil, errors.New("invalid bearer")
-	}
-	if userAgent := values["user-agent"][0]; len(userAgent) == 0 || len(userAgent) > rescueHeaderValueLimit || !rescueUserAgent.MatchString(userAgent) || !visibleASCII(userAgent) {
-		return nil, errors.New("invalid user agent")
-	}
-	if values["version"][0] != "0.147.0" {
-		return nil, errors.New("invalid version")
-	}
-	if account, ok := values["chatgpt-account-id"]; ok && (account[0] == "" || len(account[0]) > rescueAccountIDLimit) {
-		return nil, errors.New("invalid account id")
-	}
-	if fedramp, ok := values["x-openai-fedramp"]; ok && fedramp[0] != "true" {
-		return nil, errors.New("invalid fedramp")
-	}
-	if residency, ok := values["x-openai-internal-codex-residency"]; ok && residency[0] != "us" {
-		return nil, errors.New("invalid residency")
-	}
-	for _, name := range []string{"openai-organization", "openai-project"} {
-		if value, ok := values[name]; ok && strings.TrimSpace(value[0]) == "" {
-			return nil, errors.New("invalid tenancy")
-		}
-	}
-	if trace, ok := values["traceparent"]; ok && !rescueTraceParent.MatchString(trace[0]) {
-		return nil, errors.New("invalid traceparent")
-	}
-	if _, ok := values["tracestate"]; ok {
-		if _, hasParent := values["traceparent"]; !hasParent {
-			return nil, errors.New("tracestate without traceparent")
-		}
-	}
-	if route == rescueRouteResponse {
-		if values["content-type"][0] != "application/json" || values["accept"][0] != "text/event-stream" {
-			return nil, errors.New("invalid response content headers")
-		}
-		if encoding, ok := values["content-encoding"]; ok && encoding[0] != "zstd" {
-			return nil, errors.New("invalid content encoding")
-		}
-		if inference, ok := values["x-codex-inference-call-id"]; ok && !rescueUUIDv4.MatchString(inference[0]) {
-			return nil, errors.New("invalid inference id")
-		}
-	}
-	if route == rescueRouteCompact && values["content-type"][0] != "application/json" {
-		return nil, errors.New("invalid compact content type")
-	}
-	if route == rescueRouteWebSocket {
-		decodedKey, decodeErr := base64.StdEncoding.DecodeString(values["sec-websocket-key"][0])
-		if !strings.EqualFold(values["connection"][0], "Upgrade") || !strings.EqualFold(values["upgrade"][0], "websocket") ||
-			values["sec-websocket-version"][0] != "13" || decodeErr != nil || len(decodedKey) != 16 ||
-			values["sec-websocket-extensions"][0] != "permessage-deflate; client_max_window_bits" ||
-			values["openai-beta"][0] != "responses_websockets=2026-02-06" {
-			return nil, errors.New("invalid websocket handshake")
-		}
-		if timing, ok := values["x-responsesapi-include-timing-metrics"]; ok && timing[0] != "true" {
-			return nil, errors.New("invalid websocket timing flag")
-		}
-	}
-	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-installation-id", "x-codex-turn-metadata", "x-codex-parent-thread-id", "x-openai-subagent", "x-oai-attestation"} {
-		if value, ok := values[name]; ok && value[0] == "" {
-			return nil, fmt.Errorf("empty %s", name)
-		}
-	}
-	for _, name := range []string{"x-openai-memgen-request", "x-openai-internal-codex-responses-lite"} {
-		if value, ok := values[name]; ok && value[0] != "true" {
-			return nil, fmt.Errorf("invalid %s", name)
-		}
-	}
-	if beta, ok := values["x-codex-beta-features"]; ok && !validRescueBetaFeatures(beta[0]) {
-		return nil, errors.New("invalid beta features")
-	}
-	return bearer, nil
-}
-
-func validRescueBearer(value []byte) bool {
-	seenEquals := false
-	for _, character := range value {
-		if character == '=' {
-			seenEquals = true
-			continue
-		}
-		if seenEquals || !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("-._~+/", rune(character))) {
-			return false
-		}
-	}
-	return true
-}
-
-func visibleASCII(value string) bool {
-	for index := 0; index < len(value); index++ {
-		if value[index] < 0x20 || value[index] > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-func validRescueBetaFeatures(value string) bool {
-	switch value {
-	case "network_proxy", "prevent_idle_sleep", "remote_compaction_v2",
-		"network_proxy,prevent_idle_sleep", "network_proxy,remote_compaction_v2",
-		"prevent_idle_sleep,remote_compaction_v2", "network_proxy,prevent_idle_sleep,remote_compaction_v2":
-		return true
-	default:
-		return false
-	}
+	return []byte(bearer)
 }
 
 func validateRescueBody(request *http.Request, route rescueRouteKind) error {

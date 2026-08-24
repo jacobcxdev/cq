@@ -497,7 +497,7 @@ func policyAllowsCaller(policy normalCallerRoutePolicy, domain NormalCallerDomai
 	case normalCallerRouteLocal:
 		return domain == NormalCallerLocal
 	case normalCallerRouteCodex:
-		return domain == NormalCallerCodex
+		return domain == NormalCallerLocal || domain == NormalCallerCodex
 	case normalCallerRouteLocalOrClaude:
 		return domain == NormalCallerLocal || domain == NormalCallerClaude
 	case normalCallerRouteClassified:

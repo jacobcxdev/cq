@@ -139,7 +139,7 @@ func TestCallerAuthorityConsumesOneUseAdmissionBeforeWorkerDispatch(t *testing.T
 	}
 }
 
-func TestCallerAuthorityNativeCodexRejectsLocalTokenBeforeWorker(t *testing.T) {
+func TestCallerAuthorityNativeCodexAcceptsLocalToken(t *testing.T) {
 	events := []string{}
 	worker := &runtimeTestWorker{holder: runtimeHolder("worker"), events: &events}
 	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}}, &runtimeTestCheckpointStore{events: &events})
@@ -155,13 +155,17 @@ func TestCallerAuthorityNativeCodexRejectsLocalTokenBeforeWorker(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer local-token")
 	response := httptest.NewRecorder()
 	supervisor.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden || body.reads != 0 {
-		t.Fatalf("status/body reads = %d/%d, want 403/0", response.Code, body.reads)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.Code)
 	}
+	dispatched := false
 	for _, event := range events {
 		if event == "execute:worker" {
-			t.Fatal("local token reached native Codex worker route")
+			dispatched = true
 		}
+	}
+	if !dispatched {
+		t.Fatal("local token did not reach native Codex worker route")
 	}
 }
 

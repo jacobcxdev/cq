@@ -2,20 +2,307 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
+
+func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
+		t.Skip("installed Codex supervisor acceptance requires explicit opt-in")
+	}
+	clientPath, err := resolveCodexInstalledClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
+	if err != nil {
+		t.Fatalf("open authoritative validation runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := core.close(); err != nil {
+			t.Errorf("close authoritative validation runtime: %v", err)
+		}
+	})
+	localToken, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Config: &Config{
+			LocalToken:     localToken,
+			ClaudeUpstream: "http://" + core.upstream.address,
+			CodexUpstream:  "http://" + core.upstream.address,
+		},
+		CodexNativeHTTP: core.nativeHTTPHandler(),
+		Catalog:         modelregistry.NewCatalog(modelregistry.Snapshot{}),
+	}
+	handler, err := server.RuntimeHandler()
+	if err != nil {
+		t.Fatalf("construct candidate runtime handler: %v", err)
+	}
+	listener, _ := newCodexRuntimeSupervisorAcceptanceServer(t, handler, localToken)
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, localToken)
+	runner := codexTaskAffinityAcceptanceRunner{}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := runCodexCompactionAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, false, "Reply with exactly PONG and no other text.", "PONG"); err != nil {
+		t.Fatalf("first Codex compaction turn: %v", err)
+	}
+	if err := runCodexCompactionAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, true, "Reply with exactly PONG and no other text.", "PONG"); err != nil {
+		t.Fatalf("second Codex compaction turn: %v", err)
+	}
+	core.upstream.mu.Lock()
+	compact := core.upstream.compact
+	core.upstream.mu.Unlock()
+	if compact == 0 {
+		t.Fatal("installed Codex did not issue remote compaction request")
+	}
+}
+
+func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
+		t.Skip("installed Codex rescue acceptance requires explicit opt-in")
+	}
+	clientPath, err := resolveCodexInstalledClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	localToken, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamToken, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerHandler := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "normal worker used during rescue", http.StatusInternalServerError)
+	})
+	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServer(t, workerHandler, localToken)
+
+	var upstreamMu sync.Mutex
+	upstreamModels := 0
+	upstreamResponses := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+upstreamToken {
+			http.Error(writer, "unexpected authentication", http.StatusUnauthorized)
+			return
+		}
+		upstreamMu.Lock()
+		defer upstreamMu.Unlock()
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/backend-api/codex/models":
+			upstreamModels++
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"models":[]}`)
+		case request.Method == http.MethodPost && request.URL.Path == "/backend-api/codex/responses":
+			upstreamResponses++
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"rescue-validation-response\"}}\n\n")
+			_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"rescue-validation-message\",\"content\":[{\"type\":\"output_text\",\"text\":\"PONG\"}]}}\n\n")
+			_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"rescue-validation-response\",\"end_turn\":true,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n")
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerURL, err := url.Parse(listener.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fairnessKey := sha256.Sum256([]byte("installed-codex-rescue-acceptance"))
+	relay := &RescueRelay{
+		Transport: &http.Client{Transport: &codexRescueAcceptanceTransport{target: target, inner: http.DefaultTransport}},
+		Origin:    origin, LoopbackHost: listenerURL.Host, ForwardingAcknowledged: true,
+		DenyBearer: func(bearer []byte) bool { return string(bearer) == localToken },
+		Budget:     NewRescueBudget(time.Now, fairnessKey),
+	}
+	if err := supervisor.ConfigureRescue(context.Background(), relay, &runtimeEvidenceTestStore{}); err != nil {
+		t.Fatal(err)
+	}
+	enter, err := http.NewRequest(http.MethodPost, listener.URL+RuntimeRescueEnterPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enter.Header.Set("Authorization", "Bearer "+localToken)
+	enterResponse, err := http.DefaultClient.Do(enter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = enterResponse.Body.Close()
+	if enterResponse.StatusCode != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescue {
+		t.Fatalf("enter rescue = %d mode %q", enterResponse.StatusCode, supervisor.TrafficMode())
+	}
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, upstreamToken)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := runCodexTaskAffinityAcceptanceTurn(ctx, codexTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, "PONG"); err != nil {
+		t.Fatalf("Codex rescue turn: %v", err)
+	}
+	upstreamMu.Lock()
+	models := upstreamModels
+	responses := upstreamResponses
+	upstreamMu.Unlock()
+	if models == 0 || responses != 1 {
+		t.Fatalf("rescue upstream calls = models %d responses %d", models, responses)
+	}
+}
+
+type codexRescueAcceptanceTransport struct {
+	target *url.URL
+	inner  http.RoundTripper
+}
+
+func (transport *codexRescueAcceptanceTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	clone := request.Clone(request.Context())
+	clone.URL = new(url.URL)
+	*clone.URL = *request.URL
+	clone.URL.Scheme = transport.target.Scheme
+	clone.URL.Host = transport.target.Host
+	clone.Host = transport.target.Host
+	return transport.inner.RoundTrip(clone)
+}
+
+type codexRuntimeSupervisorAcceptanceWorker struct {
+	holder  LifecycleHolderProof
+	handler http.Handler
+	exited  chan struct{}
+}
+
+func (worker *codexRuntimeSupervisorAcceptanceWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
+	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder}, nil
+}
+
+func (worker *codexRuntimeSupervisorAcceptanceWorker) BeginDrain(context.Context, TrafficMode, uint64) error {
+	return nil
+}
+
+func (worker *codexRuntimeSupervisorAcceptanceWorker) AwaitQuiescence(context.Context, uint64) (RuntimeQuiescenceAckV1, error) {
+	return RuntimeQuiescenceAckV1{SchemaVersion: 1, Quiescent: true}, nil
+}
+
+func (worker *codexRuntimeSupervisorAcceptanceWorker) StopAndReap(context.Context) (RuntimeWorkerReleaseV1, error) {
+	return RuntimeWorkerReleaseV1{
+		ProcessIdentityDigest:         "validation-process",
+		ProcessTreeAbsenceProofDigest: "validation-absence",
+		HolderReleaseProofDigest:      "validation-release",
+	}, nil
+}
+
+func (worker *codexRuntimeSupervisorAcceptanceWorker) HolderProof() LifecycleHolderProof {
+	return worker.holder
+}
+func (worker *codexRuntimeSupervisorAcceptanceWorker) Exited() <-chan struct{} { return worker.exited }
+func (worker *codexRuntimeSupervisorAcceptanceWorker) ExecuteHTTP(context.Context, RuntimeHTTPRequestV1) (RuntimeHTTPResponseV1, error) {
+	return RuntimeHTTPResponseV1{}, ErrRuntimeWorkerUnavailable
+}
+func (worker *codexRuntimeSupervisorAcceptanceWorker) ServeHTTP(writer http.ResponseWriter, request *http.Request, caller RuntimeCallerAuthorityV1) error {
+	worker.handler.ServeHTTP(writer, request.WithContext(withRuntimeCallerAuthority(request.Context(), caller)))
+	return nil
+}
+
+type codexRuntimeSupervisorAcceptanceLauncher struct {
+	worker RuntimeWorkerProcess
+}
+
+func (launcher *codexRuntimeSupervisorAcceptanceLauncher) Launch(context.Context, WorkerManifestV1) (RuntimeWorkerProcess, error) {
+	return launcher.worker, nil
+}
+
+type codexRuntimeSupervisorAcceptanceConsumer struct {
+	mu       sync.Mutex
+	consumed map[string]struct{}
+}
+
+func (consumer *codexRuntimeSupervisorAcceptanceConsumer) Consume(_ context.Context, consumption ProviderBranchAdmissionConsumptionV1) error {
+	consumer.mu.Lock()
+	defer consumer.mu.Unlock()
+	if _, exists := consumer.consumed[consumption.AdmissionID]; exists {
+		return ErrNormalCallerAdmissionReplayed
+	}
+	consumer.consumed[consumption.AdmissionID] = struct{}{}
+	return nil
+}
+
+func newCodexRuntimeSupervisorAcceptanceServer(t *testing.T, handler http.Handler, localToken string) (*httptest.Server, *RuntimeSupervisor) {
+	t.Helper()
+	events := []string{}
+	credential := NormalCallerCredentialV1{Domain: NormalCallerLocal, Bearer: localToken, SubjectID: "validation-local"}
+	worker := &codexRuntimeSupervisorAcceptanceWorker{
+		holder:  runtimeHolder("validation-worker"),
+		handler: normalWorkerHandler(handler, []NormalCallerCredentialV1{credential}),
+		exited:  make(chan struct{}),
+	}
+	supervisor, err := NewRuntimeSupervisor(
+		&runtimeTestListener{},
+		runtimeHolder("validation-supervisor"),
+		&codexRuntimeSupervisorAcceptanceLauncher{worker: worker},
+		&runtimeTestCheckpointStore{events: &events},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "validation-artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	key := sha256.Sum256([]byte(localToken))
+	authority, err := NewNormalCallerAuthority(
+		key[:],
+		1,
+		[]NormalCallerCredentialV1{credential},
+		&codexRuntimeSupervisorAcceptanceConsumer{consumed: make(map[string]struct{})},
+		time.Now,
+		rand.Reader,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	listener := httptest.NewServer(supervisor)
+	listenerURL, err := url.Parse(listener.URL)
+	if err != nil || listenerURL.Port() == "" || listenerURL.Port() == "19280" {
+		listener.Close()
+		t.Fatal("Codex acceptance listener did not use an isolated alternate port")
+	}
+	t.Cleanup(listener.Close)
+	return listener, supervisor
+}
 
 func TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
@@ -223,6 +510,57 @@ func runCodexTaskAffinityAcceptanceTurn(
 	}
 	if strings.TrimSpace(string(result)) != output {
 		return errors.New("Codex task-affinity output mismatch")
+	}
+	return nil
+}
+
+func runCodexCompactionAcceptanceTurn(
+	ctx context.Context,
+	runner codexAcceptanceRunner,
+	client codexInstalledExecutableProof,
+	baseURL string,
+	isolation codexTaskAffinityAcceptanceIsolation,
+	resume bool,
+	prompt string,
+	output string,
+) error {
+	outputPath := filepath.Join(isolation.root, "compaction-"+strings.ToLower(output)+".txt")
+	args := codexAcceptanceExecArguments(baseURL, isolation.work, outputPath)
+	args = slices.DeleteFunc(args, func(value string) bool { return value == "--ephemeral" })
+	args = slices.Insert(args, len(args)-1,
+		"-c", "model_context_window=4096",
+		"-c", "model_auto_compact_token_limit=2048",
+	)
+	args[len(args)-1] = prompt
+	if resume {
+		args = slices.Insert(args, 1, "resume", "--last")
+		args = removeCodexTaskAffinityUnsupportedResumeArguments(args)
+	}
+	environment := append(codexAcceptanceBaseEnvironment(isolation.home, isolation.codexHome, isolation.tmp, isolation.cache, isolation.config),
+		"XDG_DATA_HOME="+isolation.data,
+		"NO_PROXY=127.0.0.1,localhost",
+		"no_proxy=127.0.0.1,localhost",
+	)
+	_, err := runner.Run(ctx, codexAcceptanceCommand{
+		executable:         client.path,
+		expectedExecutable: client,
+		args:               args,
+		env:                environment,
+		dir:                isolation.work,
+		endpoint:           baseURL + legacyCodexResponsesPath,
+		outputPath:         outputPath,
+		sandboxWriteRoot:   isolation.root,
+		loopbackOnly:       true,
+	})
+	if err != nil {
+		return err
+	}
+	result, err := os.ReadFile(outputPath)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(result)) != output {
+		return errors.New("Codex compaction output mismatch")
 	}
 	return nil
 }

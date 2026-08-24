@@ -480,6 +480,7 @@ type codexInstalledHTTPValidationUpstream struct {
 	responses      uint64
 	compact        uint64
 	models         uint64
+	reportedInput  uint64
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -502,6 +503,7 @@ func startCodexInstalledHTTPValidationUpstream() (*codexInstalledHTTPValidationU
 		scenarioByTurn: make(map[string]codexInstalledHTTPValidationScenario),
 		requestsByTurn: make(map[string]uint64),
 		turns:          make(map[string]struct{}),
+		reportedInput:  3000,
 	}
 	upstream.server = &http.Server{
 		Handler:           http.HandlerFunc(upstream.serveHTTPRecovering),
@@ -580,11 +582,13 @@ func (upstream *codexInstalledHTTPValidationUpstream) serveHTTP(writer http.Resp
 	upstream.requestsByTurn[turnKey]++
 	requestOrdinal := upstream.requestsByTurn[turnKey]
 	scenario := upstream.scenarioByTurn[turnKey]
-	if request.URL.Path == "/responses/compact" {
+	isCompaction := request.URL.Path == "/responses/compact" || protocol.Metadata.Metadata.RequestKind == CodexRequestCompaction
+	if isCompaction {
 		upstream.compact++
 	} else {
 		upstream.responses++
 	}
+	reportedInput := upstream.reportedInput
 	upstream.mu.Unlock()
 
 	reject := false
@@ -612,8 +616,13 @@ func (upstream *codexInstalledHTTPValidationUpstream) serveHTTP(writer http.Resp
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"validation-response\"}}\n\n")
+	if isCompaction {
+		_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"validation-state\"}}\n\n")
+		_, _ = fmt.Fprintf(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"validation-response\",\"end_turn\":true,\"usage\":{\"input_tokens\":%d,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":%d}}}\n\n", reportedInput, reportedInput)
+		return
+	}
 	_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"validation-message\",\"content\":[{\"type\":\"output_text\",\"text\":\"PONG\"}]}}\n\n")
-	_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"validation-response\",\"end_turn\":true,\"usage\":{\"input_tokens\":0,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":0}}}\n\n")
+	_, _ = fmt.Fprintf(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"validation-response\",\"end_turn\":true,\"usage\":{\"input_tokens\":%d,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":%d}}}\n\n", reportedInput, reportedInput)
 }
 
 func (upstream *codexInstalledHTTPValidationUpstream) recordRoute(metadata CodexTurnMetadata, accountID string, status int) {

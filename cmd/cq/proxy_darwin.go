@@ -162,7 +162,7 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		relay := &proxy.RescueRelay{
 			Transport: transport, DialWS: websocket.DefaultDialer, Origin: origin,
 			LoopbackHost: listener.Addr().String(), ForwardingAcknowledged: true,
-			DenyBearer: supervisor.DeniesNormalBearer, Budget: proxy.NewRescueBudget(time.Now, state.RescueFairnessKey()),
+			DenyBearer: denyExactRescueBearer(bootstrap.LocalToken), Budget: proxy.NewRescueBudget(time.Now, state.RescueFairnessKey()),
 			Admission: func(*http.Request) proxy.RescueIngressKind { return proxy.RescueIngressUnverified },
 		}
 		return supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode)

@@ -8,7 +8,25 @@ permissions:
   contents: write
 
 jobs:
+  validate-codex:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install current Codex client
+        run: brew install --cask codex
+
+      - name: Validate normal, compaction, and rescue routing
+        env:
+          CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"
+        run: go test -race -count=1 ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledRescuePassesThroughCurrentClient)$'
+
   release:
+    needs: validate-codex
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
