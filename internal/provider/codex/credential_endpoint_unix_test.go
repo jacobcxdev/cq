@@ -1190,6 +1190,67 @@ func TestCredentialEndpointConcurrentVerifiedRecoveryHasOneOwner(t *testing.T) {
 	}
 }
 
+func TestCredentialEndpointWaitsForConsistentLiveOwnerProof(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	owner, err := OpenRecoveringCredentialControl(path, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+
+	sidecarPath := credentialEndpointSidecarPath(path)
+	original, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_ = fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, sidecarPath, original)
+		}
+	}()
+	rewriteCredentialEndpointSidecar(t, path, func(sidecar *endpointSidecarFixture) {
+		sidecar.Inode++
+	})
+
+	type openResult struct {
+		control *CredentialControl
+		err     error
+	}
+	results := make(chan openResult, 1)
+	go func() {
+		control, err := OpenRecoveringCredentialControl(path, coordinator)
+		results <- openResult{control: control, err: err}
+	}()
+
+	select {
+	case result := <-results:
+		if result.control != nil {
+			_ = result.control.Close()
+		}
+		t.Fatalf("open returned during transient mixed proof: %v", result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, sidecarPath, original); err != nil {
+		t.Fatal(err)
+	}
+	restored = true
+
+	select {
+	case result := <-results:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		defer result.control.Close()
+		if result.control.Owner() {
+			t.Fatal("consistent live owner proof created a second owner")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("open did not delegate after live owner proof became consistent")
+	}
+}
+
 func TestCredentialEndpointPublishedSidecarIndeterminateCommitRemainsRecoverable(t *testing.T) {
 	path := filepath.Join(shortEndpointDir(t), "credential.sock")
 	endpoint, client, err := openCredentialEndpoint(path, false, nil)

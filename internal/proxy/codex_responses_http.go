@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -307,6 +308,8 @@ func (s *Server) doCodexHTTPRouteWithDecoded(ctx context.Context, model string, 
 		}
 	}
 	var observation *CodexTurnObservation
+	var pinned RouteChoice
+	var pinnedFound bool
 	if hasDecodedBody {
 		observation = s.beginCodexHTTPObservationDecoded(ctx, decodedBody, header, compact)
 	} else {
@@ -319,23 +322,69 @@ func (s *Server) doCodexHTTPRouteWithDecoded(ctx context.Context, model string, 
 		if err != nil {
 			return nil, RouteChoice{}, observation, err
 		}
-		if found {
-			if s.CodexRequests == nil {
-				return nil, choice, observation, errors.New("no Codex accounts configured")
-			}
-			noteRouteAccount(ctx, redactedAccountHint("codex", string(choice.AccountKey)), false)
-			response, _, failure, err := s.CodexRequests.DoPinned(ctx, choice, upstream)
-			if err != nil {
-				return nil, choice, observation, err
-			}
-			if failure == CodexPinnedAuthFailure && response == nil {
-				return nil, choice, observation, errors.New("bound Codex account authentication failed")
-			}
-			return response, choice, observation, nil
+		pinned, pinnedFound = choice, found
+	}
+	continuity := codex.AccountKey("")
+	if pinnedFound {
+		continuity = pinned.AccountKey
+	}
+	exclusions, err := s.codexSessionPolicyExclusions(ctx, request, continuity)
+	if err != nil {
+		return nil, RouteChoice{}, observation, err
+	}
+	if pinnedFound {
+		choice := pinned
+		if s.CodexRequests == nil {
+			return nil, choice, observation, errors.New("no Codex accounts configured")
+		}
+		noteRouteAccount(ctx, redactedAccountHint("codex", string(choice.AccountKey)), false)
+		response, _, failure, err := s.CodexRequests.DoPinned(ctx, choice, upstream)
+		if err != nil {
+			return nil, choice, observation, err
+		}
+		if failure == CodexPinnedAuthFailure && response == nil {
+			return nil, choice, observation, errors.New("bound Codex account authentication failed")
+		}
+		return response, choice, observation, nil
+	}
+	response, choice, _, err := s.doCodexRequestExcluding(ctx, model, upstream, exclusions)
+	return response, choice, observation, err
+}
+
+func (s *Server) codexSessionPolicyExclusions(ctx context.Context, request CodexProtocolRequest, continuity codex.AccountKey) ([]codex.SelectionExclusion, error) {
+	if s == nil || s.SessionPolicy == nil {
+		return nil, nil
+	}
+	session := []byte(request.Metadata.Metadata.SessionID)
+	if decision := s.SessionPolicy.Resolve(session, nil); decision.Status == PolicyDecisionUnbound {
+		return nil, nil
+	}
+	if s.CodexRequests == nil {
+		return nil, ErrSessionPolicyUnavailable
+	}
+	accounts, err := s.CodexRequests.AccountKeys(ctx)
+	if err != nil {
+		return nil, errors.Join(ErrSessionPolicyUnavailable, err)
+	}
+	caller, _ := runtimeCallerAuthority(ctx)
+	decision, err := enforceSessionPolicy(s.SessionPolicy, caller, session, accounts, continuity, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if decision.Status != PolicyDecisionSelected {
+		return nil, nil
+	}
+	allowed := make(map[codex.AccountKey]struct{}, len(decision.Allowed))
+	for _, account := range decision.Allowed {
+		allowed[account] = struct{}{}
+	}
+	exclusions := make([]codex.SelectionExclusion, 0, len(accounts)-len(allowed))
+	for _, account := range accounts {
+		if _, ok := allowed[account]; !ok {
+			exclusions = append(exclusions, codex.SelectionExclusion{AccountKey: account})
 		}
 	}
-	response, choice, _, err := s.doCodexRequest(ctx, model, upstream)
-	return response, choice, observation, err
+	return exclusions, nil
 }
 
 func (enforcer *CodexHTTPEnforcer) persist(leases []CodexTurnLease) error {
