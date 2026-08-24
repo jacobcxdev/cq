@@ -339,13 +339,13 @@ func TestCredentialCoordinatorListRejectsUnsafeCoreCredentialPaths(t *testing.T)
 			},
 		},
 		{
-			name: "managed directory permissive",
+			name: "managed directory writable by another principal",
 			setup: func(t *testing.T, home string) {
 				accountsDir := filepath.Join(home, ".codex", "accounts")
 				if err := os.MkdirAll(accountsDir, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Chmod(accountsDir, 0o755); err != nil {
+				if err := os.Chmod(accountsDir, 0o777); err != nil {
 					t.Fatal(err)
 				}
 			},

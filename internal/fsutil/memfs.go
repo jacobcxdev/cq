@@ -676,6 +676,50 @@ func (directory *memSecureDirectory) Rename(oldName, newName string) error {
 	return nil
 }
 
+func (directory *memSecureDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.renameChecked(oldName, newName, expected, false)
+}
+
+func (directory *memSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.renameChecked(oldName, newName, expected, true)
+}
+
+func (directory *memSecureDirectory) renameChecked(oldName, newName string, expected SecureFileIdentity, noReplace bool) error {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	if err := validateSecureEntryName(oldName); err != nil {
+		return err
+	}
+	if err := validateSecureEntryName(newName); err != nil {
+		return err
+	}
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return err
+	}
+	oldPath := filepath.Join(path, oldName)
+	file, ok := directory.fsys.files[oldPath]
+	if !ok {
+		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
+	}
+	identity := SecureFileIdentity{Inode: file.inode, Links: 1}
+	if !SameSecureObject(identity, expected) {
+		return fmt.Errorf("%w: checked rename source identity", ErrUnsafeSecurePath)
+	}
+	newPath := filepath.Join(path, newName)
+	if _, exists := directory.fsys.dirs[filepath.Clean(newPath)]; exists {
+		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+	}
+	if noReplace {
+		if _, exists := directory.fsys.files[newPath]; exists {
+			return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+		}
+	}
+	directory.fsys.files[newPath] = file
+	delete(directory.fsys.files, oldPath)
+	return nil
+}
+
 func (directory *memSecureDirectory) RenameNoReplace(oldName, newName string) error {
 	directory.fsys.mu.Lock()
 	defer directory.fsys.mu.Unlock()
@@ -719,6 +763,29 @@ func (directory *memSecureDirectory) Remove(name string) error {
 	filePath := filepath.Join(path, name)
 	if _, ok := directory.fsys.files[filePath]; !ok {
 		return &os.PathError{Op: "remove", Path: filePath, Err: os.ErrNotExist}
+	}
+	delete(directory.fsys.files, filePath)
+	return nil
+}
+
+func (directory *memSecureDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	if err := validateSecureEntryName(name); err != nil {
+		return err
+	}
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return err
+	}
+	filePath := filepath.Join(path, name)
+	file, ok := directory.fsys.files[filePath]
+	if !ok {
+		return &os.PathError{Op: "remove", Path: filePath, Err: os.ErrNotExist}
+	}
+	identity := SecureFileIdentity{Inode: file.inode, Links: 1}
+	if !SameSecureObject(identity, expected) {
+		return fmt.Errorf("%w: checked remove source identity", ErrUnsafeSecurePath)
 	}
 	delete(directory.fsys.files, filePath)
 	return nil

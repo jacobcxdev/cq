@@ -1519,10 +1519,46 @@ type failCodexLeaseV2PostSyncReadDirectory struct {
 	journalReadsAfterSync int
 }
 
+func forwardCodexLeaseRenameChecked(directory fsutil.SecureDirectory, oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func forwardCodexLeaseRenameNoReplaceChecked(directory fsutil.SecureDirectory, oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func forwardCodexLeaseRemoveChecked(directory fsutil.SecureDirectory, name string, expected fsutil.SecureFileIdentity) error {
+	return directory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
+func (directory *failCodexLeaseV2PostSyncReadDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRenameChecked(directory.SecureDirectory, oldName, newName, expected)
+}
+
+func (directory *failCodexLeaseV2PostSyncReadDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRenameNoReplaceChecked(directory.SecureDirectory, oldName, newName, expected)
+}
+
+func (directory *failCodexLeaseV2PostSyncReadDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRemoveChecked(directory.SecureDirectory, name, expected)
+}
+
 type failCodexLeaseV2PreReplaceReadDirectory struct {
 	fsutil.SecureDirectory
 	journalName  string
 	journalReads int
+}
+
+func (directory *failCodexLeaseV2PreReplaceReadDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRenameChecked(directory.SecureDirectory, oldName, newName, expected)
+}
+
+func (directory *failCodexLeaseV2PreReplaceReadDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRenameNoReplaceChecked(directory.SecureDirectory, oldName, newName, expected)
+}
+
+func (directory *failCodexLeaseV2PreReplaceReadDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRemoveChecked(directory.SecureDirectory, name, expected)
 }
 
 func (directory *failCodexLeaseV2PreReplaceReadDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -98,6 +99,125 @@ func TestUnixSecureDirectoryRetainsOpenedIdentity(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(held, "value")); err != nil || string(got) != "opened" {
 		t.Fatalf("opened directory content = %q, %v; want opened", got, err)
+	}
+}
+
+func TestUnixRenameNoReplaceCheckedRestoresSourceWhenDestinationExists(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"source": "source", "destination": "destination"} {
+		if err := os.WriteFile(filepath.Join(state, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory, err := (OSFileSystem{}).OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	identity := unixTestFileIdentity(t, filepath.Join(state, "source"))
+	err = directory.(IdentityBoundRenamer).RenameNoReplaceChecked("source", "destination", identity)
+	if errors.Is(err, ErrSecureCapabilityUnavailable) {
+		t.Skip("kernel no-replace rename is unavailable")
+	}
+	if !errors.Is(err, os.ErrExist) || errors.Is(err, ErrCommitIndeterminate) {
+		t.Fatalf("rename error = %v, want existing destination with successful restore", err)
+	}
+	assertUnixIdentityQuarantineShape(t, state, map[string]string{"source": "source", "destination": "destination"})
+}
+
+func TestUnixIdentityBoundOperationsRestoreMismatchedSource(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(SecureDirectory, SecureFileIdentity) error
+	}{
+		{name: "rename", run: func(directory SecureDirectory, identity SecureFileIdentity) error {
+			return directory.(IdentityBoundRenamer).RenameChecked("source", "destination", identity)
+		}},
+		{name: "remove", run: func(directory SecureDirectory, identity SecureFileIdentity) error {
+			return directory.(IdentityBoundRemover).RemoveChecked("source", identity)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(state, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(state, "source"), []byte("source"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			directory, err := (OSFileSystem{}).OpenSecureDirectory(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			identity := unixTestFileIdentity(t, filepath.Join(state, "source"))
+			identity.Inode++
+			err = test.run(directory, identity)
+			if !errors.Is(err, ErrUnsafeSecurePath) || errors.Is(err, ErrCommitIndeterminate) {
+				t.Fatalf("operation error = %v, want unsafe path with successful restore", err)
+			}
+			assertUnixIdentityQuarantineShape(t, state, map[string]string{"source": "source"})
+		})
+	}
+}
+
+func TestRestoreIdentityQuarantineReportsRetainedNameOnFailure(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{".cq-quarantine-known": "trusted", "source": "replacement"} {
+		if err := os.WriteFile(filepath.Join(state, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory, err := (OSFileSystem{}).OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	cause := errors.New("injected second rename failure")
+	err = restoreIdentityQuarantine(".cq-quarantine-known", "source", cause, directory.RenameNoReplace)
+	if !errors.Is(err, ErrCommitIndeterminate) || !strings.Contains(err.Error(), `.cq-quarantine-known`) {
+		t.Fatalf("restore error = %v, want indeterminate named quarantine", err)
+	}
+	assertUnixIdentityQuarantineShape(t, state, map[string]string{".cq-quarantine-known": "trusted", "source": "replacement"})
+}
+
+func unixTestFileIdentity(t *testing.T, path string) SecureFileIdentity {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := (OSFileSystem{}).FileIdentity(info)
+	if !ok {
+		t.Fatal("file identity unavailable")
+	}
+	return identity
+}
+
+func assertUnixIdentityQuarantineShape(t *testing.T, state string, expected map[string]string) {
+	t.Helper()
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(expected) {
+		t.Fatalf("entries = %v, want %v", entries, expected)
+	}
+	for _, entry := range entries {
+		value, ok := expected[entry.Name()]
+		if !ok {
+			t.Fatalf("unexpected entry %q (expected %v)", entry.Name(), expected)
+		}
+		body, err := os.ReadFile(filepath.Join(state, entry.Name()))
+		if err != nil || string(body) != value {
+			t.Fatalf("entry %q = %q, %v; want %q", entry.Name(), body, err, value)
+		}
 	}
 }
 

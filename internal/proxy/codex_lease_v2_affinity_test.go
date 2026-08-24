@@ -1058,6 +1058,18 @@ type blockingCodexLeaseAffinityDirectory struct {
 	once    sync.Once
 }
 
+func (directory *blockingCodexLeaseAffinityDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *blockingCodexLeaseAffinityDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *blockingCodexLeaseAffinityDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (directory *blockingCodexLeaseAffinityDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {
 	file, err := directory.SecureDirectory.CreateExclusive(name, mode)
 	if err != nil {

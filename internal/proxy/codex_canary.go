@@ -628,7 +628,7 @@ func (recorder *CodexCanaryRecorder) requireOwnerLocked() error {
 	if err != nil || !heldInfo.Mode().IsRegular() || heldInfo.Mode().Perm() != 0o600 {
 		return errors.New("Codex canary serving owner unavailable")
 	}
-	heldOwner, heldOwnerOK := recorder.ownerInspector.FileOwnerUID(heldInfo)
+	heldOwnerOK := fsutil.ValidateSecureOwner(recorder.ownerInspector, heldInfo) == nil
 	heldIdentity, heldIdentityOK := recorder.ownerInspector.FileIdentity(heldInfo)
 	pathFile, err := recorder.ownerDirectory.OpenNoFollow(codexCanaryOwnerLockName)
 	if err != nil {
@@ -639,9 +639,9 @@ func (recorder *CodexCanaryRecorder) requireOwnerLocked() error {
 	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 {
 		return errors.New("Codex canary serving owner unavailable")
 	}
-	pathOwner, pathOwnerOK := recorder.ownerInspector.FileOwnerUID(pathInfo)
+	pathOwnerOK := fsutil.ValidateSecureOwner(recorder.ownerInspector, pathInfo) == nil
 	pathIdentity, pathIdentityOK := recorder.ownerInspector.FileIdentity(pathInfo)
-	if !heldOwnerOK || !pathOwnerOK || heldOwner != recorder.ownerInspector.EffectiveUID() || pathOwner != heldOwner ||
+	if !heldOwnerOK || !pathOwnerOK ||
 		!heldIdentityOK || !pathIdentityOK || heldIdentity != pathIdentity || heldIdentity.Links != 1 {
 		return errors.New("Codex canary serving owner unavailable")
 	}

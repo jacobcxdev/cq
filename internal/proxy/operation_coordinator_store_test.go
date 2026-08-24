@@ -6,8 +6,16 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	providerCodex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestCredentialAuthorityIdentityRoundTripsFullFileID(t *testing.T) {
+	stable := StableObjectIdentity{File: fsutil.SecureFileIdentity{Device: 1, Inode: 2, Links: 1, FileID: [16]byte{15: 9}}, Size: 3, Digest: "digest"}
+	if got := stableCodexAuthorityIdentity(codexAuthorityIdentity(stable)); got != stable {
+		t.Fatalf("identity round trip = %#v, want %#v", got, stable)
+	}
+}
 
 func TestOperationCoordinatorOrdering(t *testing.T) {
 	filesystem, directory := newAuthorityFSTestDirectory(t)

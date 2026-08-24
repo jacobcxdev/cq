@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,22 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
+
+func TestLifecycleHolderProofJSONExcludesInMemoryFileID(t *testing.T) {
+	proof := LifecycleHolderProof{LockIdentity: fsutil.SecureFileIdentity{Device: 1, Inode: 2, Links: 1}, DescriptionID: "description", Mode: LifecycleShared}
+	withoutFileID, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof.LockIdentity.FileID[15] = 9
+	withFileID, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(withFileID, withoutFileID) {
+		t.Fatalf("FileID changed holder proof JSON: %s != %s", withFileID, withoutFileID)
+	}
+}
 
 func TestAuthorityLockDowngradesSameDescriptionAndReleases(t *testing.T) {
 	backend := &fakeLifecycleBackend{next: 1, identity: fsutil.SecureFileIdentity{Device: 1, Inode: 2, Links: 1}}

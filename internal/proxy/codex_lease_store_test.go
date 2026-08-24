@@ -400,6 +400,18 @@ type replaceLeaseDirectoryAfterReads struct {
 	fsys *replaceLeaseDirectoryAfterReadsFS
 }
 
+func (directory *replaceLeaseDirectoryAfterReads) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *replaceLeaseDirectoryAfterReads) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *replaceLeaseDirectoryAfterReads) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (directory *replaceLeaseDirectoryAfterReads) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
 	file, err := directory.SecureDirectory.OpenNoFollow(name)
 	if err != nil {
@@ -446,6 +458,20 @@ func (directory *recordingSecureDirectory) CreateExclusive(name string, mode os.
 func (directory *recordingSecureDirectory) Rename(oldName, newName string) error {
 	directory.fsys.events = append(directory.fsys.events, "rename")
 	return directory.SecureDirectory.Rename(oldName, newName)
+}
+
+func (directory *recordingSecureDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	directory.fsys.events = append(directory.fsys.events, "rename")
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *recordingSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	directory.fsys.events = append(directory.fsys.events, "rename")
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *recordingSecureDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *recordingSecureDirectory) Sync() error {
@@ -515,6 +541,18 @@ func (fsys *failingDurableFS) OpenSecureDirectory(path string) (fsutil.SecureDir
 type failingSecureDirectory struct {
 	fsutil.SecureDirectory
 	fsys *failingDurableFS
+}
+
+func (directory *failingSecureDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *failingSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *failingSecureDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *failingSecureDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {

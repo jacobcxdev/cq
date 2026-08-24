@@ -131,8 +131,16 @@ func SecureAtomicCreateInDirectoryChecked(inspector SecurePathInspector, directo
 	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforePublish, nil, true)
 }
 
-func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error, noReplace bool) error {
+func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error, noReplace bool) (result error) {
 	if inspector == nil || directory == nil {
+		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
+	}
+	renamer, ok := directory.(IdentityBoundRenamer)
+	if !ok {
+		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
+	}
+	remover, ok := directory.(IdentityBoundRemover)
+	if !ok {
 		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
 	}
 	if err := validateSecureEntryName(name); err != nil {
@@ -155,21 +163,6 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 	if err != nil {
 		return commitFailure("create durable temporary file", err)
 	}
-	removeTemporary := true
-	defer func() {
-		if removeTemporary {
-			_ = directory.Remove(temporaryName)
-		}
-	}()
-
-	if err := writeFull(file, data); err != nil {
-		_ = file.Close()
-		return commitFailure("write durable temporary file", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return commitFailure("sync durable temporary file", err)
-	}
 	temporaryInspector, ok := file.(DurableFileInspector)
 	if !ok {
 		_ = file.Close()
@@ -189,6 +182,41 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 		_ = file.Close()
 		return commitFailure("validate durable temporary descriptor", fmt.Errorf("%w: temporary file identity", ErrUnsafeSecurePath))
 	}
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			if cleanupErr := remover.RemoveChecked(temporaryName, temporaryIdentity); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				if errors.Is(cleanupErr, ErrCommitIndeterminate) {
+					result = commitIndeterminate("clean durable temporary file", errors.Join(result, cleanupErr))
+				} else {
+					result = commitFailure("clean durable temporary file", errors.Join(result, cleanupErr))
+				}
+			}
+		}
+	}()
+
+	if err := writeFull(file, data); err != nil {
+		_ = file.Close()
+		return commitFailure("write durable temporary file", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return commitFailure("sync durable temporary file", err)
+	}
+	temporaryInfo, err = temporaryInspector.Stat()
+	if err != nil {
+		_ = file.Close()
+		return commitFailure("inspect durable temporary file", err)
+	}
+	if err := validateSecureRegularInfo(inspector, temporaryInfo); err != nil {
+		_ = file.Close()
+		return commitFailure("validate durable temporary descriptor", err)
+	}
+	temporaryIdentityAfterSync, ok := inspector.FileIdentity(temporaryInfo)
+	if !ok || !SameSecureObject(temporaryIdentityAfterSync, temporaryIdentity) {
+		_ = file.Close()
+		return commitFailure("validate durable temporary descriptor", fmt.Errorf("%w: temporary file identity", ErrUnsafeSecurePath))
+	}
 	if err := file.Close(); err != nil {
 		return commitFailure("close durable temporary file", err)
 	}
@@ -200,7 +228,7 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 		return commitFailure("revalidate durable temporary path", err)
 	}
 	temporaryPathIdentity, ok := inspector.FileIdentity(temporaryPathInfo)
-	if !ok || temporaryPathIdentity != temporaryIdentity {
+	if !ok || !SameSecureObject(temporaryPathIdentity, temporaryIdentity) {
 		return commitFailure("revalidate durable temporary path", fmt.Errorf("%w: temporary file path identity", ErrUnsafeSecurePath))
 	}
 	if beforeReplace != nil {
@@ -209,11 +237,14 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 		}
 	}
 	if noReplace {
-		err = directory.RenameNoReplace(temporaryName, name)
+		err = renamer.RenameNoReplaceChecked(temporaryName, name, temporaryIdentity)
 	} else {
-		err = directory.Rename(temporaryName, name)
+		err = renamer.RenameChecked(temporaryName, name, temporaryIdentity)
 	}
 	if err != nil {
+		if errors.Is(err, ErrCommitIndeterminate) {
+			return commitIndeterminate("publish durable file", err)
+		}
 		return commitFailure("publish durable file", err)
 	}
 	removeTemporary = false
@@ -222,7 +253,7 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 		return commitIndeterminate("validate installed durable file", err)
 	}
 	installedIdentity, ok := inspector.FileIdentity(installedInfo)
-	if !ok || installedIdentity != temporaryIdentity {
+	if !ok || !SameSecureObject(installedIdentity, temporaryIdentity) {
 		return commitIndeterminate("validate installed durable file", fmt.Errorf("%w: installed file identity", ErrUnsafeSecurePath))
 	}
 	if err := validateDirectory(); err != nil {
@@ -236,7 +267,7 @@ func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory Secur
 		return commitIndeterminate("revalidate installed durable file after sync", err)
 	}
 	installedAfterSyncIdentity, ok := inspector.FileIdentity(installedAfterSyncInfo)
-	if !ok || installedAfterSyncIdentity != temporaryIdentity {
+	if !ok || !SameSecureObject(installedAfterSyncIdentity, temporaryIdentity) {
 		return commitIndeterminate("revalidate installed durable file after sync", fmt.Errorf("%w: installed file identity", ErrUnsafeSecurePath))
 	}
 	if err := validateDirectory(); err != nil {
@@ -257,6 +288,13 @@ func SecurePromoteNoReplaceInDirectory(inspector SecurePathInspector, directory 
 // source proof and immediately before the no-replace rename.
 func SecurePromoteNoReplaceInDirectoryChecked(inspector SecurePathInspector, directory SecureDirectory, sourceName, destinationName string, expected []byte, expectedIdentity SecureFileIdentity, beforePromote func() error) error {
 	if inspector == nil || directory == nil {
+		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
+	}
+	renamer, ok := directory.(IdentityBoundRenamer)
+	if !ok {
+		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
+	}
+	if _, ok := directory.(IdentityBoundRemover); !ok {
 		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
 	}
 	if err := validateSecureEntryName(sourceName); err != nil {
@@ -301,7 +339,10 @@ func SecurePromoteNoReplaceInDirectoryChecked(inspector SecurePathInspector, dir
 			return commitFailure("validate promotion precondition", err)
 		}
 	}
-	if err := directory.RenameNoReplace(sourceName, destinationName); err != nil {
+	if err := renamer.RenameNoReplaceChecked(sourceName, destinationName, expectedIdentity); err != nil {
+		if errors.Is(err, ErrCommitIndeterminate) {
+			return commitIndeterminate("promote durable file", err)
+		}
 		return commitFailure("promote durable file", err)
 	}
 	validateInstalled := func() error {
@@ -537,10 +578,18 @@ func validateRetainedDirectoryPath(inspector SecurePathInspector, directory Dura
 		if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() {
 			return fmt.Errorf("%w: directory path type", ErrUnsafeSecurePath)
 		}
+		if ancestors, ok := inspector.(SecureAncestorInspector); ok {
+			if err := ancestors.ValidateRetainedAncestor(heldInfo); err != nil {
+				return err
+			}
+			if err := ancestors.ValidateRetainedAncestor(pathInfo); err != nil {
+				return err
+			}
+		}
 	}
 	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
 	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
-	if !heldOK || !pathOK || !sameSecureObject(heldIdentity, pathIdentity) {
+	if !heldOK || !pathOK || !SameSecureObject(heldIdentity, pathIdentity) {
 		return fmt.Errorf("%w: retained directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
@@ -571,6 +620,32 @@ func ValidateOwnerControlledDirectory(fsys FileSystem, path string) error {
 		return err
 	}
 	return validateOwnerControlledDirectoryInfo(inspector, info)
+}
+
+func ValidateExternalCredentialDirectory(fsys FileSystem, path string) error {
+	inspector, ok := fsys.(SecurePathInspector)
+	if !ok {
+		return ErrSecureCapabilityUnavailable
+	}
+	info, err := inspector.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return validateExternalCredentialDirectoryInfo(inspector, info)
+}
+
+func validateExternalCredentialDirectoryInfo(inspector SecurePathInspector, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("%w: external credential directory type", ErrUnsafeSecurePath)
+	}
+	if external, ok := inspector.(SecureExternalPathInspector); ok {
+		return external.ValidateExternalCredentialDirectoryInfo(info)
+	}
+	permissions := info.Mode().Perm()
+	if permissions != 0o700 && permissions != 0o755 {
+		return fmt.Errorf("%w: directory mode %04o", ErrUnsafeSecurePath, permissions)
+	}
+	return ValidateSecureOwner(inspector, info)
 }
 
 // OpenOwnerControlledDirectory retains an owner-controlled 0700 or 0755
@@ -611,7 +686,7 @@ func validateOwnerControlledDirectoryInfo(inspector SecurePathInspector, info os
 	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return fmt.Errorf("%w: directory special mode", ErrUnsafeSecurePath)
 	}
-	return validateSecureOwner(inspector, info)
+	return ValidateSecureOwner(inspector, info)
 }
 
 func validateSecureDirectoryInfo(inspector SecurePathInspector, info os.FileInfo) error {
@@ -624,7 +699,7 @@ func validateSecureDirectoryInfo(inspector SecurePathInspector, info os.FileInfo
 	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return fmt.Errorf("%w: directory special mode", ErrUnsafeSecurePath)
 	}
-	return validateSecureOwner(inspector, info)
+	return ValidateSecureOwner(inspector, info)
 }
 
 func ValidateSecureRegularFile(fsys FileSystem, path string) error {
@@ -806,7 +881,7 @@ func validateSecureDirectoryHandle(inspector SecurePathInspector, directory Secu
 	}
 	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
 	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
-	if !heldOK || !pathOK || !sameSecureObject(heldIdentity, pathIdentity) {
+	if !heldOK || !pathOK || !SameSecureObject(heldIdentity, pathIdentity) {
 		return fmt.Errorf("%w: directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
@@ -837,7 +912,7 @@ func ValidateOwnerControlledDirectoryHandle(inspector SecurePathInspector, direc
 	}
 	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
 	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
-	if !heldOK || !pathOK || !sameSecureObject(heldIdentity, pathIdentity) {
+	if !heldOK || !pathOK || !SameSecureObject(heldIdentity, pathIdentity) {
 		return fmt.Errorf("%w: directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
@@ -880,8 +955,8 @@ func validateSecureRegularFileInDirectoryIfPresent(inspector SecurePathInspector
 	return err
 }
 
-func sameSecureObject(first, second SecureFileIdentity) bool {
-	return first.Device == second.Device && first.Inode == second.Inode
+func SameSecureObject(first, second SecureFileIdentity) bool {
+	return first == second
 }
 
 func validateSecureEntryName(name string) error {
@@ -905,7 +980,7 @@ func validateSecureRegularInfo(inspector SecurePathInspector, info os.FileInfo) 
 	if !ok || identity.Links != 1 {
 		return fmt.Errorf("%w: regular file identity", ErrUnsafeSecurePath)
 	}
-	return validateSecureOwner(inspector, info)
+	return ValidateSecureOwner(inspector, info)
 }
 
 func AcquireExclusiveLock(fsys FileSystem, path string) (ExclusiveLock, error) {
@@ -1097,12 +1172,75 @@ func acquireExclusiveLockInDirectory(inspector SecurePathInspector, directory Se
 	return lock, nil
 }
 
-func validateSecureOwner(inspector SecurePathInspector, info os.FileInfo) error {
+func ValidateSecureOwner(inspector SecurePathInspector, info os.FileInfo) error {
+	if principals, ok := inspector.(SecurePrincipalInspector); ok {
+		effective, effectiveOK := principals.EffectivePrincipal()
+		owner, ownerOK := principals.FileOwnerPrincipal(info)
+		if !effectiveOK || !ownerOK || effective != owner {
+			return fmt.Errorf("%w: owner", ErrUnsafeSecurePath)
+		}
+		return nil
+	}
 	owner, ok := inspector.FileOwnerUID(info)
 	if !ok || owner != inspector.EffectiveUID() {
 		return fmt.Errorf("%w: owner", ErrUnsafeSecurePath)
 	}
 	return nil
+}
+
+func validateSecureOwner(inspector SecurePathInspector, info os.FileInfo) error {
+	return ValidateSecureOwner(inspector, info)
+}
+
+func ValidateExternalCredentialFile(inspector SecurePathInspector, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("%w: external file type", ErrUnsafeSecurePath)
+	}
+	identity, ok := inspector.FileIdentity(info)
+	if !ok || identity.Links != 1 {
+		return fmt.Errorf("%w: external credential identity", ErrUnsafeSecurePath)
+	}
+	if external, ok := inspector.(SecureExternalPathInspector); ok {
+		return external.ValidateExternalCredential(info)
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("%w: external credential mode", ErrUnsafeSecurePath)
+	}
+	return ValidateSecureOwner(inspector, info)
+}
+
+func ValidateExternalCacheFile(inspector SecurePathInspector, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("%w: external cache file type", ErrUnsafeSecurePath)
+	}
+	identity, ok := inspector.FileIdentity(info)
+	if !ok || identity.Links != 1 {
+		return fmt.Errorf("%w: external cache identity", ErrUnsafeSecurePath)
+	}
+	if external, ok := inspector.(SecureExternalPathInspector); ok {
+		return external.ValidateExternalCache(info)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: external cache file is writable by another principal", ErrUnsafeSecurePath)
+	}
+	return ValidateSecureOwner(inspector, info)
+}
+
+func ValidateRetainedExternalImportFile(inspector SecurePathInspector, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("%w: external import file type", ErrUnsafeSecurePath)
+	}
+	identity, ok := inspector.FileIdentity(info)
+	if !ok || identity.Links != 1 {
+		return fmt.Errorf("%w: external import identity", ErrUnsafeSecurePath)
+	}
+	if external, ok := inspector.(SecureExternalPathInspector); ok {
+		return external.ValidateRetainedExternalImportFileInfo(info)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: external import file is writable by another principal", ErrUnsafeSecurePath)
+	}
+	return ValidateSecureOwner(inspector, info)
 }
 
 func createUniqueTemporary(creator ExclusiveFileCreator, base string) (string, DurableFile, error) {

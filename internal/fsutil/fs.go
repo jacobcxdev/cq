@@ -69,6 +69,21 @@ type SecureFileIdentity struct {
 	Device uint64
 	Inode  uint64
 	Links  uint64
+	FileID [16]byte `json:"-"`
+}
+
+type SecurePrincipalKind uint8
+
+const (
+	SecurePrincipalUID SecurePrincipalKind = iota + 1
+	SecurePrincipalSID
+)
+
+type SecurePrincipal struct {
+	Kind      SecurePrincipalKind
+	UID       uint64
+	SIDLength uint8
+	SID       [68]byte
 }
 
 // ExclusiveLock is held for the lifetime of its underlying file descriptor.
@@ -89,6 +104,42 @@ type SecurePathInspector interface {
 	EffectiveUID() uint64
 	FileOwnerUID(info os.FileInfo) (uint64, bool)
 	FileIdentity(info os.FileInfo) (SecureFileIdentity, bool)
+}
+
+type SecurePrincipalInspector interface {
+	EffectivePrincipal() (SecurePrincipal, bool)
+	FileOwnerPrincipal(os.FileInfo) (SecurePrincipal, bool)
+}
+
+type SecureAncestorInspector interface {
+	ValidateRetainedAncestor(os.FileInfo) error
+}
+
+type SecureExternalPathInspector interface {
+	ValidateExternalCredentialDirectoryInfo(os.FileInfo) error
+	ValidateExternalCredential(os.FileInfo) error
+	ValidateExternalCache(os.FileInfo) error
+	ValidateRetainedExternalImportFileInfo(os.FileInfo) error
+}
+
+type RetainedReadDirectory interface {
+	Stat() (os.FileInfo, error)
+	OpenDirectory(name string) (RetainedReadDirectory, error)
+	OpenNoFollow(name string) (SecureReadFile, error)
+	Close() error
+}
+
+type RetainedReadDirectoryOpener interface {
+	OpenRetainedReadDirectory(name string) (RetainedReadDirectory, error)
+}
+
+type IdentityBoundRenamer interface {
+	RenameChecked(oldName, newName string, expected SecureFileIdentity) error
+	RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error
+}
+
+type IdentityBoundRemover interface {
+	RemoveChecked(name string, expected SecureFileIdentity) error
 }
 
 // NoFollowFileOpener opens a final path component without following links.
