@@ -292,7 +292,7 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		if !validProxyRescueArguments(argv[2:]) {
 			return terminatingOrdinary("ordinary_usage_error"), nil
 		}
-		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_rescue", Deadline: CommandDeadlineV1{Total: 10 * time.Second, Forward: 10 * time.Second}}, nil
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_rescue", Deadline: CommandDeadlineV1{Total: proxyRescueControlTimeout, Forward: proxyRescueControlTimeout}}, nil
 	}
 	if len(argv) >= 2 && argv[1] == "policy" {
 		if helpRequested(argv[2:]) {

@@ -46,6 +46,27 @@ func TestRuntimeProcessWorkerBootCancellationInterruptsPrivateSocket(t *testing.
 	}
 }
 
+func TestRuntimeProcessWorkerStopAndReapAfterControlFailure(t *testing.T) {
+	secret, err := NewRuntimeSecret(bytes.Repeat([]byte{0x52}, RuntimeSecretSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := os.OpenFile(t.TempDir()+"/lifecycle.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone := make(chan struct{})
+	close(waitDone)
+	worker := &runtimeProcessWorker{
+		secret: secret, receiver: NewRuntimeControlReceiver(secret), lifecycle: lifecycle,
+		holder: LifecycleHolderProof{DescriptionID: "worker"}, waitDone: waitDone,
+	}
+
+	if release, err := worker.StopAndReap(context.Background()); err != nil || !release.valid() {
+		t.Fatalf("StopAndReap() = (%#v, %v)", release, err)
+	}
+}
+
 func runtimeHolder(description string) LifecycleHolderProof {
 	return LifecycleHolderProof{
 		LockIdentity:  fsutil.SecureFileIdentity{Device: 7, Inode: 11, Links: 1},

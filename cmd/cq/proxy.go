@@ -27,7 +27,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-func normalCallerCredentials(cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory) ([]proxy.NormalCallerCredentialV1, error) {
+func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory, codexSecrets codexprov.ExactSecretResolver) ([]proxy.NormalCallerCredentialV1, error) {
 	if cfg == nil || cfg.LocalToken == "" {
 		return nil, proxy.ErrNormalCallerAuthUnavailable
 	}
@@ -63,8 +63,19 @@ func normalCallerCredentials(cfg *proxy.Config, claudeAccounts []keyring.ClaudeO
 	}
 	for _, account := range codexInventory.Accounts {
 		for _, candidate := range account.Candidates {
+			accessToken := candidate.Credential.AccessToken
+			if accessToken == "" && candidate.Routable {
+				if codexSecrets == nil {
+					return nil, errors.New("Codex caller credential resolver unavailable")
+				}
+				material, resolveErr := codexSecrets.ResolveExact(ctx, codexprov.PlanCandidate(account, candidate))
+				if resolveErr != nil {
+					return nil, fmt.Errorf("resolve Codex caller credential: %w", resolveErr)
+				}
+				accessToken = material.AccessToken
+			}
 			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision)
-			if err := appendCredential(proxy.NormalCallerCodex, candidate.Credential.AccessToken, identity, candidate.AccessExpiresAt); err != nil {
+			if err := appendCredential(proxy.NormalCallerCodex, accessToken, identity, candidate.AccessExpiresAt); err != nil {
 				return nil, err
 			}
 		}
@@ -78,6 +89,9 @@ var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.Li
 }
 var runProxyAdoptedRuntimeFn = func(context.Context, net.Listener, func(context.Context, net.Listener, http.Handler) error) error {
 	return proxy.ErrRuntimeRoleUnavailable
+}
+var runProxyOwnedRuntimeFn = func(context.Context, int, func(context.Context, net.Listener, http.Handler) error) (bool, error) {
+	return false, nil
 }
 
 var adoptProxyListenerFn = func() (net.Listener, error) { return nil, nil }
@@ -670,12 +684,18 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if intent != nil {
 		return runInstalledHTTPValidationStartupFn(context.Background(), cfg, version, intent)
 	}
+	if workerRole == nil {
+		handled, err := runProxyOwnedRuntimeFn(context.Background(), cfg.Port, serveRuntimeSupervisor)
+		if handled {
+			return err
+		}
+	}
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
 	var resilienceState *proxy.ProxyResilienceState
 	if stateDir := cfg.ResolvedProxyResilienceStateDir(); stateDir != "" {
 		resilienceState, err = proxy.OpenProxyResilienceState(context.Background(), proxy.ProxyResilienceStateOptions{
-			FS: fsys, Root: stateDir, Random: rand.Reader, Now: time.Now,
+			FS: fsys, Root: stateDir, Random: rand.Reader, Now: time.Now, SkipRuntimeMode: workerRole != nil,
 		})
 		if err != nil {
 			return fmt.Errorf("proxy resilience state: %w", err)
@@ -803,7 +823,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
 		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
 	}
-	runtimeCallerCredentials, err := normalCallerCredentials(cfg, accounts, codexInventory)
+	runtimeCallerCredentials, err := normalCallerCredentials(context.Background(), cfg, accounts, codexInventory, credentialControl)
 	if err != nil {
 		return fmt.Errorf("normal caller index: %w", err)
 	}
@@ -1089,7 +1109,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			if listErr != nil {
 				return nil, listErr
 			}
-			return normalCallerCredentials(cfg, accounts, current)
+			return normalCallerCredentials(ctx, cfg, accounts, current, credentialControl)
 		})
 		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
 		workerFiles = proxy.RuntimeRoleFiles{}

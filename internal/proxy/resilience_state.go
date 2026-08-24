@@ -24,10 +24,11 @@ const (
 )
 
 type ProxyResilienceStateOptions struct {
-	FS     fsutil.FileSystem
-	Root   string
-	Random io.Reader
-	Now    func() time.Time
+	FS              fsutil.FileSystem
+	Root            string
+	Random          io.Reader
+	Now             func() time.Time
+	SkipRuntimeMode bool
 }
 
 type ProxyResilienceState struct {
@@ -212,7 +213,11 @@ func InitialiseProxyResilienceState(ctx context.Context, options ProxyResilience
 			return errors.New("proxy resilience authority key invalid")
 		}
 	}
-	for _, name := range []string{proxyRoutingDirectoryName, proxyDispatchDirectoryName, proxyModeDirectoryName} {
+	directories := []string{proxyRoutingDirectoryName, proxyDispatchDirectoryName}
+	if !options.SkipRuntimeMode {
+		directories = append(directories, proxyModeDirectoryName)
+	}
+	for _, name := range directories {
 		if err := fsutil.EnsureSecureDirectory(options.FS, filepath.Join(options.Root, name)); err != nil {
 			return err
 		}
@@ -310,23 +315,25 @@ func OpenProxyResilienceState(ctx context.Context, options ProxyResilienceStateO
 	if err != nil {
 		return nil, err
 	}
-	state.modeDir, err = opener.OpenSecureDirectory(filepath.Join(options.Root, proxyModeDirectoryName))
-	if err != nil {
-		return nil, err
-	}
-	state.modeLock, err = AcquireSelectorCASLock(inspector, state.modeDir, proxyModeLockName)
-	if err != nil {
-		return nil, err
-	}
-	modeKey, err := DeriveAuthorityKey(key, "cq/proxy-resilience/runtime-mode/v1", sha256.Size)
-	if err != nil {
-		return nil, err
-	}
-	modePublisher := NewAuthorityObjectPublisher(inspector, options.Random, state.modeLock)
-	state.RuntimeMode, err = OpenRuntimeModeEvidenceStore(ctx, inspector, state.modeDir, modePublisher, modeKey)
-	zeroRuntimeBytes(modeKey)
-	if err != nil {
-		return nil, err
+	if !options.SkipRuntimeMode {
+		state.modeDir, err = opener.OpenSecureDirectory(filepath.Join(options.Root, proxyModeDirectoryName))
+		if err != nil {
+			return nil, err
+		}
+		state.modeLock, err = AcquireSelectorCASLock(inspector, state.modeDir, proxyModeLockName)
+		if err != nil {
+			return nil, err
+		}
+		modeKey, err := DeriveAuthorityKey(key, "cq/proxy-resilience/runtime-mode/v1", sha256.Size)
+		if err != nil {
+			return nil, err
+		}
+		modePublisher := NewAuthorityObjectPublisher(inspector, options.Random, state.modeLock)
+		state.RuntimeMode, err = OpenRuntimeModeEvidenceStore(ctx, inspector, state.modeDir, modePublisher, modeKey)
+		zeroRuntimeBytes(modeKey)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return state, nil
 }
