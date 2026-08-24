@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -127,6 +128,7 @@ func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
 		case request.Method == http.MethodPost && request.URL.Path == "/backend-api/codex/responses":
 			upstreamResponses++
 			writer.Header().Set("Content-Type", "text/event-stream")
+			writer.Header()["X-Codex-Secondary-Reset-At"] = []string{""}
 			_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"rescue-validation-response\"}}\n\n")
 			_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"rescue-validation-message\",\"content\":[{\"type\":\"output_text\",\"text\":\"PONG\"}]}}\n\n")
 			_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"rescue-validation-response\",\"end_turn\":true,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n")
@@ -183,6 +185,89 @@ func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
 	upstreamMu.Unlock()
 	if models == 0 || responses != 1 {
 		t.Fatalf("rescue upstream calls = models %d responses %d", models, responses)
+	}
+}
+
+func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE") != "1" {
+		t.Skip("live Codex rescue acceptance requires explicit opt-in")
+	}
+	authPath := os.Getenv("CQ_CODEX_LIVE_AUTH_FILE")
+	if !filepath.IsAbs(authPath) {
+		t.Fatal("live Codex auth file must be absolute")
+	}
+	auth, err := os.ReadFile(authPath)
+	if err != nil || len(auth) == 0 || len(auth) > 1<<20 || !json.Valid(auth) {
+		t.Fatal("live Codex auth file is unavailable or invalid")
+	}
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	localToken, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerHandler := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "normal worker used during rescue", http.StatusInternalServerError)
+	})
+	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServer(t, workerHandler, localToken)
+	listenerURL, err := url.Parse(listener.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fairnessKey := sha256.Sum256([]byte("installed-codex-live-rescue-acceptance"))
+	relay := &RescueRelay{
+		Transport: &http.Client{
+			Transport: http.DefaultTransport,
+			Timeout:   60 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("rescue redirect refused")
+			},
+		},
+		Origin: origin, LoopbackHost: listenerURL.Host, ForwardingAcknowledged: true,
+		DenyBearer: func(bearer []byte) bool { return string(bearer) == localToken },
+		Budget:     NewRescueBudget(time.Now, fairnessKey),
+	}
+	if err := supervisor.ConfigureRescue(context.Background(), relay, &runtimeEvidenceTestStore{}); err != nil {
+		t.Fatal(err)
+	}
+	enter, err := http.NewRequest(http.MethodPost, listener.URL+RuntimeRescueEnterPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enter.Header.Set("Authorization", "Bearer "+localToken)
+	enterResponse, err := http.DefaultClient.Do(enter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = enterResponse.Body.Close()
+	if enterResponse.StatusCode != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescue {
+		t.Fatalf("enter rescue = %d mode %q", enterResponse.StatusCode, supervisor.TrafficMode())
+	}
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, localToken)
+	isolationAuth := filepath.Join(isolation.codexHome, "auth.json")
+	if err := os.WriteFile(isolationAuth, auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(isolationAuth, nil, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("clear isolated live Codex auth: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := runCodexTaskAffinityAcceptanceTurn(ctx, codexTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, "PONG"); err != nil {
+		t.Fatalf("live Codex rescue turn: %v", err)
 	}
 }
 

@@ -64,13 +64,20 @@ cq uses [semver](https://semver.org/) starting at `v0.1.0`. Bump minor for featu
 To release a new version:
 
 1. Ensure `main` is green (CI passing).
-2. Tag the commit: `git tag v0.x.y`
-3. Push the tag: `git push origin v0.x.y`
-4. GitHub Actions runs GoReleaser, which:
+2. Validate rescue against live upstream on an isolated port with current installed Codex:
+   ```bash
+   CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
+   CQ_CODEX_LIVE_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json" \
+   CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" \
+   go test -race -count=1 ./internal/proxy -run '^TestCodexInstalledRescuePassesThroughLiveUpstream$'
+   ```
+3. Tag the commit: `git tag v0.x.y`
+4. Push the tag: `git push origin v0.x.y`
+5. GitHub Actions runs GoReleaser, which:
    - Builds cross-platform binaries (darwin/linux amd64+arm64, windows amd64)
    - Creates a GitHub Release with auto-generated changelog
    - Opens a PR against [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap) to update the formula
-5. Merge the Homebrew formula PR.
+6. Merge the Homebrew formula PR.
 
 ## Homebrew Proxy Service
 

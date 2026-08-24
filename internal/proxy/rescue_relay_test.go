@@ -111,8 +111,11 @@ func TestRescueRelayForwardsCurrentCodexHeadersWithoutCQAuthentication(t *testin
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": {"text/event-stream"}},
-				Body:       io.NopCloser(strings.NewReader("data: done\n\n")),
+				Header: http.Header{
+					"Content-Type":               {"text/event-stream"},
+					"X-Codex-Secondary-Reset-At": {""},
+				},
+				Body: io.NopCloser(strings.NewReader("data: done\n\n")),
 			}, nil
 		}),
 		Origin:                 origin,
@@ -131,6 +134,9 @@ func TestRescueRelayForwardsCurrentCodexHeadersWithoutCQAuthentication(t *testin
 
 	if recorder.Code != http.StatusOK || calls.Load() != 1 {
 		t.Fatalf("response/calls = %d/%d, want 200/1; body %q", recorder.Code, calls.Load(), recorder.Body.String())
+	}
+	if got := recorder.Header().Values("X-Codex-Secondary-Reset-At"); len(got) != 1 || got[0] != "" {
+		t.Fatalf("secondary reset header = %q, want one empty value", got)
 	}
 }
 
