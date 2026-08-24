@@ -164,8 +164,11 @@ func OpenCodexLeaseStore(fsys fsutil.DurableFileSystem, path, keyPath string) (*
 }
 
 func OpenDefaultCodexLeaseStore(fsys fsutil.DurableFileSystem) (*CodexLeaseStore, error) {
-	dir := configDir()
-	return OpenCodexLeaseStore(fsys, filepath.Join(dir, "codex-turn-leases.json"), filepath.Join(dir, "codex-turn-leases.key"))
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return nil, err
+	}
+	return OpenCodexLeaseStore(fsys, filepath.Join(paths.StateDir, "codex-turn-leases.json"), filepath.Join(paths.StateDir, "codex-turn-leases.key"))
 }
 
 func OpenCodexRuntimeObserver(runtime *CodexRoutingRuntime, fsys fsutil.DurableFileSystem) (*CodexTurnObserver, error) {

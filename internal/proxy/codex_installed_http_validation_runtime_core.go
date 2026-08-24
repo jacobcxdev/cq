@@ -101,11 +101,12 @@ func newCodexInstalledHTTPValidationRuntimeCore(ctx context.Context) (core *code
 	if err := fsutil.EnsureSecureDirectory(fsys, ownerDir); err != nil {
 		return nil, errors.New("prepare isolated Codex credential authority")
 	}
+	cqStateDir := filepath.Join(root, "cq-state")
 	store, err := codex.NewManagedStore(fsys)
 	if err != nil {
 		return nil, errors.New("prepare isolated Codex managed store")
 	}
-	credentialCoordinator, err := codex.NewCredentialCoordinator(store)
+	credentialCoordinator, err := codex.NewCredentialCoordinator(store, cqStateDir)
 	if err != nil {
 		return nil, errors.New("prepare isolated Codex credential coordinator")
 	}

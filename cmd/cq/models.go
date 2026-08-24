@@ -16,11 +16,13 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type modelsDeps struct {
 	FS       fsutil.FileSystem
 	HomeDir  string
+	Roots    userdirs.Roots
 	Env      func(string) string
 	Stdout   io.Writer
 	Stderr   io.Writer
@@ -30,6 +32,10 @@ type modelsDeps struct {
 }
 
 func runModelsCommand(args []string) error {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return fmt.Errorf("resolve CQ directories: %w", err)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home dir: %w", err)
@@ -37,11 +43,12 @@ func runModelsCommand(args []string) error {
 	deps := modelsDeps{
 		FS:      fsutil.OSFileSystem{},
 		HomeDir: home,
+		Roots:   roots,
 		Env:     os.Getenv,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
 		Natives: func() []modelregistry.Entry { return nil },
-		Refresh: runModelsRefresh,
+		Refresh: func() error { return runModelsRefresh(roots) },
 		UseProxy: func() bool {
 			cfg, err := proxy.LoadConfig()
 			if err != nil {
@@ -122,11 +129,15 @@ func attemptProxyRegistryRefresh(ctx context.Context, client httputil.Doer, port
 	}
 }
 
-func runModelsRefresh() error {
-	deps := normaliseModelsDeps(modelsDeps{})
+func runModelsRefresh(roots userdirs.Roots) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	deps := normaliseModelsDeps(modelsDeps{HomeDir: home, Roots: roots, Env: os.Getenv})
 	if err := runRegistryRefresh(registryRefreshStrategy{
 		TryProxy:     defaultTryProxyRegistryRefresh,
-		LocalRefresh: defaultLocalRegistryRefresh,
+		LocalRefresh: func() error { return defaultLocalRegistryRefresh(roots) },
 	}); err != nil {
 		return err
 	}
@@ -153,12 +164,12 @@ func defaultTryProxyRegistryRefresh() (bool, error) {
 	return attemptProxyRegistryRefresh(ctx, client, cfg.Port, cfg.LocalToken)
 }
 
-func defaultLocalRegistryRefresh() error {
+func defaultLocalRegistryRefresh(roots userdirs.Roots) error {
 	cfg, err := proxy.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load proxy config: %w", err)
 	}
-	reg, err := buildLocalRegistry(cfg, version)
+	reg, err := buildLocalRegistry(cfg, version, roots)
 	if err != nil {
 		return err
 	}
@@ -467,7 +478,7 @@ func pruneOverlayModels(deps modelsDeps) error {
 }
 
 func loadModelsOverlayFile(deps modelsDeps) (modelregistry.OverlayFile, error) {
-	path := modelregistry.OverlayPath(deps.Env, deps.HomeDir)
+	path := modelregistry.OverlayPath(deps.Roots)
 	overlays, err := modelregistry.LoadOverlays(deps.FS, path)
 	if err != nil {
 		return modelregistry.OverlayFile{}, err
@@ -479,8 +490,30 @@ func loadModelsOverlayFile(deps modelsDeps) (modelregistry.OverlayFile, error) {
 }
 
 func saveModelsOverlayFile(deps modelsDeps, overlays modelregistry.OverlayFile) error {
-	path := modelregistry.OverlayPath(deps.Env, deps.HomeDir)
+	path := modelregistry.OverlayPath(deps.Roots)
 	return modelregistry.SaveOverlays(deps.FS, path, overlays)
+}
+
+func codexModelCachePath(deps modelsDeps) string {
+	codexHome := deps.Env("CODEX_HOME")
+	if codexHome == "" && deps.HomeDir != "" {
+		codexHome = filepath.Join(deps.HomeDir, ".codex")
+	}
+	if codexHome == "" {
+		return ""
+	}
+	return filepath.Join(codexHome, "models_cache.json")
+}
+
+func claudeModelCachePath(deps modelsDeps) string {
+	claudeHome := deps.Env("CLAUDE_CONFIG_DIR")
+	if claudeHome == "" && deps.HomeDir != "" {
+		claudeHome = filepath.Join(deps.HomeDir, ".claude")
+	}
+	if claudeHome == "" {
+		return ""
+	}
+	return filepath.Join(claudeHome, "cache", "model-capabilities.json")
 }
 
 // loadCachedNativeEntries reads the Codex models_cache.json and Claude Code
@@ -490,24 +523,16 @@ func saveModelsOverlayFile(deps modelsDeps, overlays modelregistry.OverlayFile) 
 func loadCachedNativeEntries(deps modelsDeps) ([]modelregistry.Entry, error) {
 	var all []modelregistry.Entry
 
-	codexHome := deps.Env("CODEX_HOME")
-	if codexHome == "" && deps.HomeDir != "" {
-		codexHome = filepath.Join(deps.HomeDir, ".codex")
-	}
-	if codexHome != "" {
-		codex, err := modelregistry.LoadCodexEntriesFromCache(deps.FS, filepath.Join(codexHome, "models_cache.json"))
+	if path := codexModelCachePath(deps); path != "" {
+		codex, err := modelregistry.LoadCodexEntriesFromCache(deps.FS, path)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, codex...)
 	}
 
-	claudeHome := deps.Env("CLAUDE_CONFIG_DIR")
-	if claudeHome == "" && deps.HomeDir != "" {
-		claudeHome = filepath.Join(deps.HomeDir, ".claude")
-	}
-	if claudeHome != "" {
-		claude, err := modelregistry.LoadClaudeEntriesFromCapabilities(deps.FS, filepath.Join(claudeHome, "cache", "model-capabilities.json"))
+	if path := claudeModelCachePath(deps); path != "" {
+		claude, err := modelregistry.LoadClaudeEntriesFromCapabilities(deps.FS, path)
 		if err != nil {
 			return nil, err
 		}

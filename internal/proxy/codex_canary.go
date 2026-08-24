@@ -125,8 +125,16 @@ type CodexCanaryRecorder struct {
 	ownerInspector fsutil.SecurePathInspector
 }
 
-func DefaultCodexCanaryPath() string {
-	return filepath.Join(configDir(), "codex-routing-canary.json")
+func CodexCanaryPath(stateDir string) string {
+	return filepath.Join(stateDir, "codex-routing-canary.json")
+}
+
+func DefaultCodexCanaryPath() (string, error) {
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return "", err
+	}
+	return CodexCanaryPath(paths.StateDir), nil
 }
 
 func CodexCanaryFileProtection(kind CodexCanaryProtectionKind, path string) CodexCanaryProtection {

@@ -348,7 +348,8 @@ func TestCodexLeaseV2OwnerCloseWaitsForAdmissionCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentialCoordinator, err := codex.NewCredentialCoordinator(managed)
+	stateDir := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "cq-state")
+	credentialCoordinator, err := codex.NewCredentialCoordinator(managed, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,21 +13,22 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const legacyEndpointProofMaxBytes = 16 << 10
 
 type proxyEndpointMaintenanceDependencies struct {
-	homeDir    func() (string, error)
-	stdin      io.Reader
-	stdout     io.Writer
-	stderr     io.Writer
-	stdinIsTTY func() bool
+	resolveRoots func() (userdirs.Roots, error)
+	stdin        io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
+	stdinIsTTY   func() bool
 }
 
 func defaultProxyEndpointMaintenanceDependencies() proxyEndpointMaintenanceDependencies {
 	return proxyEndpointMaintenanceDependencies{
-		homeDir: os.UserHomeDir, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, stdinIsTTY: isStdinTerminal,
+		resolveRoots: userdirs.Default, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, stdinIsTTY: isStdinTerminal,
 	}
 }
 
@@ -40,7 +41,7 @@ func runProxyEndpoint(args []string) error {
 }
 
 func runProxyEndpointWithDependencies(ctx context.Context, args []string, deps proxyEndpointMaintenanceDependencies) error {
-	if deps.homeDir == nil || deps.stdin == nil || deps.stdout == nil || deps.stderr == nil || deps.stdinIsTTY == nil {
+	if deps.resolveRoots == nil || deps.stdin == nil || deps.stdout == nil || deps.stderr == nil || deps.stdinIsTTY == nil {
 		return fmt.Errorf("proxy endpoint: missing command dependency")
 	}
 	if len(args) == 0 || helpRequested(args) {
@@ -52,11 +53,11 @@ func runProxyEndpointWithDependencies(ctx context.Context, args []string, deps p
 		}
 		return writeManualHelp(deps.stdout, path)
 	}
-	home, err := deps.homeDir()
+	roots, err := deps.resolveRoots()
 	if err != nil {
-		return fmt.Errorf("resolve home directory: %w", err)
+		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	endpointPath := codexprov.DefaultCredentialControlPath(home)
+	endpointPath := codexprov.DefaultCredentialControlPath(roots.State)
 	switch args[0] {
 	case "inspect-legacy":
 		if len(args) != 1 {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 type durableFakeFS struct {
 	*fakeFS
 	modes        map[string]os.FileMode
+	dirs         map[string]os.FileMode
 	failStep     string
 	failRenameAt int
 	renameCount  int
@@ -30,7 +32,25 @@ type managedStoreSecureFS struct {
 func (fs *managedStoreSecureFS) UserHomeDir() (string, error) { return fs.home, nil }
 
 func newDurableFakeFS() *durableFakeFS {
-	return &durableFakeFS{fakeFS: newFakeFS(), modes: make(map[string]os.FileMode)}
+	return &durableFakeFS{
+		fakeFS: newFakeFS(),
+		modes:  make(map[string]os.FileMode),
+		dirs:   map[string]os.FileMode{string(filepath.Separator): 0o755},
+	}
+}
+
+func (f *durableFakeFS) MkdirAll(path string, mode os.FileMode) error {
+	clean := filepath.Clean(path)
+	for current := clean; ; current = filepath.Dir(current) {
+		if _, ok := f.dirs[current]; !ok {
+			f.dirs[current] = mode.Perm()
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return nil
 }
 
 func (f *durableFakeFS) WriteFile(name string, data []byte, mode os.FileMode) error {
@@ -144,6 +164,9 @@ type durableFileInfo struct {
 func (i durableFileInfo) Mode() os.FileMode { return i.mode }
 
 func (f *durableFakeFS) Stat(name string) (os.FileInfo, error) {
+	if mode, ok := f.dirs[filepath.Clean(name)]; ok {
+		return durableDirectoryInfo{name: filepath.Clean(name), mode: mode}, nil
+	}
 	if _, ok := f.files[name]; !ok {
 		return nil, os.ErrNotExist
 	}
@@ -163,6 +186,9 @@ func (i durableDirectoryInfo) IsDir() bool        { return true }
 func (i durableDirectoryInfo) Sys() any           { return nil }
 
 func (f *durableFakeFS) Lstat(name string) (os.FileInfo, error) {
+	if mode, ok := f.dirs[filepath.Clean(name)]; ok {
+		return durableDirectoryInfo{name: filepath.Clean(name), mode: mode}, nil
+	}
 	if name == "/fake/home/.codex" || name == "/fake/home/.codex/accounts" {
 		mode := os.FileMode(0o700)
 		if configured, ok := f.modes[name]; ok {
@@ -172,6 +198,43 @@ func (f *durableFakeFS) Lstat(name string) (os.FileInfo, error) {
 	}
 	return f.Stat(name)
 }
+
+func (f *durableFakeFS) OpenDurableDirectory(name string) (fsutil.DurableDirectory, error) {
+	clean := filepath.Clean(name)
+	if _, ok := f.dirs[clean]; !ok {
+		return nil, os.ErrNotExist
+	}
+	return &durableFakeDirectory{fs: f, path: clean}, nil
+}
+
+type durableFakeDirectory struct {
+	fs   *durableFakeFS
+	path string
+}
+
+func (d *durableFakeDirectory) Stat() (os.FileInfo, error) { return d.fs.Lstat(d.path) }
+
+func (d *durableFakeDirectory) OpenDirectory(name string) (fsutil.DurableDirectory, error) {
+	return d.fs.OpenDurableDirectory(filepath.Join(d.path, name))
+}
+
+func (d *durableFakeDirectory) Mkdir(name string, mode os.FileMode) error {
+	path := filepath.Join(d.path, name)
+	if _, ok := d.fs.dirs[path]; ok {
+		return os.ErrExist
+	}
+	d.fs.dirs[path] = mode.Perm()
+	return nil
+}
+
+func (d *durableFakeDirectory) Sync() error {
+	if d.fs.failStep == "directory sync" {
+		return os.ErrPermission
+	}
+	return nil
+}
+
+func (d *durableFakeDirectory) Close() error { return nil }
 
 func (f *durableFakeFS) EffectiveUID() uint64 { return 1 }
 

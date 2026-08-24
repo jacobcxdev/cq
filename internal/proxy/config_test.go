@@ -10,7 +10,56 @@ import (
 	"testing"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
+
+func TestPathsForRootsSeparatesCQOwnedData(t *testing.T) {
+	roots := userdirs.Roots{
+		Config:  "/cq/config",
+		State:   "/cq/state",
+		Cache:   "/cq/cache",
+		Runtime: "/cq/runtime",
+		Logs:    "/cq/logs",
+	}
+	want := DefaultPaths{
+		ConfigFile:      filepath.Join("/cq/config", "proxy.json"),
+		RescueBootstrap: filepath.Join("/cq/state", "proxy-rescue.json"),
+		StateDir:        "/cq/state",
+		CacheDir:        "/cq/cache",
+		RuntimeDir:      "/cq/runtime",
+		LogsDir:         "/cq/logs",
+	}
+	if got := PathsForRoots(roots); got != want {
+		t.Fatalf("PathsForRoots() = %#v, want %#v", got, want)
+	}
+}
+
+func TestSaveConfigSeparatesNormalAndRescueRoots(t *testing.T) {
+	configBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configBase)
+	resilienceRoot := filepath.Join(t.TempDir(), "resilience")
+	if err := SaveConfig(&Config{
+		LocalToken:              "local-token",
+		ClaudeUpstream:          DefaultUpstream,
+		CodexUpstream:           DefaultCodexUpstream,
+		CodexLeaseRetentionDays: 7,
+		ProxyResilienceStateDir: resilienceRoot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(configBase, "cq", "proxy.json"),
+		filepath.Join(configBase, "cq", "state", "proxy-rescue.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(configBase, "cq", "proxy-rescue.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy rescue path exists: %v", err)
+	}
+}
 
 func TestLoadExistingConfigDoesNotCreateMissingState(t *testing.T) {
 	root := t.TempDir()
@@ -250,15 +299,13 @@ func TestConfigRejectsInvalidCodexLeaseRetention(t *testing.T) {
 }
 
 func TestConfigResolvesCodexContinuityStateDirectory(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/config")
-
 	var defaults Config
-	if got := defaults.ResolvedCodexContinuityStateDir(); got != "/config/cq" {
-		t.Fatalf("default continuity state directory = %q, want /config/cq", got)
+	if got := defaults.ResolvedCodexContinuityStateDir("/cq/state"); got != "/cq/state" {
+		t.Fatalf("default continuity state directory = %q, want /cq/state", got)
 	}
 
 	configured := Config{CodexContinuityStateDir: "/private/candidate-cq"}
-	if got := configured.ResolvedCodexContinuityStateDir(); got != "/private/candidate-cq" {
+	if got := configured.ResolvedCodexContinuityStateDir("/cq/state"); got != "/private/candidate-cq" {
 		t.Fatalf("configured continuity state directory = %q", got)
 	}
 }

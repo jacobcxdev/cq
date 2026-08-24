@@ -5,12 +5,12 @@ import (
 	"crypto/rand"
 	"errors"
 	"net/rpc"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 var (
@@ -95,11 +95,8 @@ type credentialRPCClient interface {
 	Close() error
 }
 
-func DefaultCredentialControlPath(home string) string {
-	if configHome := os.Getenv("XDG_CONFIG_HOME"); configHome != "" && filepath.IsAbs(configHome) {
-		return filepath.Join(configHome, "cq", "state", "credential.sock")
-	}
-	return filepath.Join(home, ".config", "cq", "state", "credential.sock")
+func DefaultCredentialControlPath(stateDir string) string {
+	return filepath.Join(stateDir, "credential.sock")
 }
 
 // OpenDefaultCredentialControl connects to the per-user credential owner or
@@ -146,18 +143,22 @@ func OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifierAndRecov
 }
 
 func newDefaultCredentialCoordinator(fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialCoordinator, string, error) {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return nil, "", err
+	}
 	store, err := NewManagedStore(fs)
 	if err != nil {
 		return nil, "", err
 	}
-	coordinator, err := NewCredentialCoordinator(store)
+	coordinator, err := NewCredentialCoordinator(store, roots.State)
 	if err != nil {
 		return nil, "", err
 	}
 	if len(exchanges) > 0 {
 		coordinator.RefreshExchange = exchanges[0]
 	}
-	return coordinator, DefaultCredentialControlPath(store.Home), nil
+	return coordinator, DefaultCredentialControlPath(roots.State), nil
 }
 
 func initialiseCredentialOwner(ctx context.Context, coordinator *CredentialCoordinator, capability CredentialOwnerCapability) error {

@@ -26,6 +26,13 @@ type codexInstalledWebSocketValidationDependencies struct {
 // listener with exact installed Codex CLI. It never inspects, stops, replaces,
 // or restarts configured proxy service.
 func RunCodexInstalledWebSocketValidation(ctx context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
+	if strings.TrimSpace(markerDir) == "" {
+		paths, err := ResolveDefaultPaths()
+		if err != nil {
+			return CodexReadinessMarker{}, err
+		}
+		markerDir = paths.StateDir
+	}
 	resolveExecutable := resolveCodexInstalledClientExecutable
 	if strings.TrimSpace(clientExecutable) != "" {
 		resolveExecutable = func() (string, error) { return clientExecutable, nil }
@@ -47,7 +54,7 @@ func runCodexInstalledWebSocketValidationWithDependencies(
 	dependencies codexInstalledWebSocketValidationDependencies,
 ) (marker CodexReadinessMarker, returnErr error) {
 	if strings.TrimSpace(markerDir) == "" {
-		markerDir = configDir()
+		return marker, errCodexInstalledListenerAcceptance
 	}
 	markerDir = filepath.Clean(markerDir)
 	if !filepath.IsAbs(markerDir) {

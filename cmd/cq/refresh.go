@@ -18,6 +18,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/provider"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // refreshMarginMs is how far ahead of expiry we proactively refresh (30 min).
@@ -33,6 +34,7 @@ var (
 	storeCQAccountFn          = keyring.StoreCQAccount
 	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
 	isStdinTerminalFn         = isStdinTerminal
+	resolveRefreshRootsFn     = userdirs.Default
 )
 
 func runRefreshCommand(args []string) error {
@@ -46,6 +48,9 @@ func runRefreshCommand(args []string) error {
 }
 
 func runRefresh() error {
+	if _, err := resolveRefreshRootsFn(); err != nil {
+		return fmt.Errorf("resolve CQ directories: %w", err)
+	}
 	accounts := discoverClaudeAccountsFn()
 	httpClient := newHTTPClientFn(10*time.Second, version)
 	ctx := context.Background()

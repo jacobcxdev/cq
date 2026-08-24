@@ -479,7 +479,7 @@ func TestInventoryExternalSourceOrderDoesNotChangeIdentity(t *testing.T) {
 
 func TestCredentialCoordinatorResolvesExternalCandidateWithoutListingSecrets(t *testing.T) {
 	fs := newDurableFakeFS()
-	coordinator, err := NewCredentialCoordinator(testManagedStore(t, fs))
+	coordinator, err := NewCredentialCoordinator(testManagedStore(t, fs), testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}

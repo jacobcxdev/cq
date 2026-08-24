@@ -242,6 +242,8 @@ func TestFetchMissingAuthFile(t *testing.T) {
 func TestFetchStaleDefaultCredentialCoordinatorReturnsFetchErrorWithoutDispatch(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
+	configBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configBase)
 	fs := fixedHomeDurableFS{home: home}
 	authDir := filepath.Join(home, ".codex")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
@@ -252,7 +254,7 @@ func TestFetchStaleDefaultCredentialCoordinatorReturnsFetchErrorWithoutDispatch(
 	if err := os.WriteFile(authPath, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	controlPath := DefaultCredentialControlPath(home)
+	controlPath := DefaultCredentialControlPath(filepath.Join(configBase, "cq", "state"))
 	if err := os.MkdirAll(filepath.Dir(controlPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +394,7 @@ func TestFetchResolvesMetadataOnlyExternalCandidate(t *testing.T) {
 }
 
 func TestNewCredentialCoordinatorIncludesDefaultCodexBarSource(t *testing.T) {
-	coordinator, err := NewCredentialCoordinator(testManagedStore(t, newDurableFakeFS()))
+	coordinator, err := NewCredentialCoordinator(testManagedStore(t, newDurableFakeFS()), testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -412,11 +412,11 @@ func discoverCredentialsFile(seen map[string]bool) []ClaudeOAuth {
 func discoverCQKeyring(seen map[string]bool) []ClaudeOAuth {
 	// cq-managed accounts are stored with known service names.
 	// We track them in a manifest file since go-keyring doesn't support enumeration.
-	home, err := os.UserHomeDir()
+	manifestPath, err := defaultCQManifestPath()
 	if err != nil {
 		return nil
 	}
-	manifest := loadManifest(filepath.Join(home, ".cache", "cq", "accounts.json"))
+	manifest := loadManifest(manifestPath)
 	var accounts []ClaudeOAuth
 	for _, entry := range manifest {
 		service := ServicePrefix + Hash8(entry.UUID)
@@ -484,6 +484,10 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	if acct.AccountUUID == "" {
 		return fmt.Errorf("account UUID required for keyring storage")
 	}
+	manifestPath, err := defaultCQManifestPath()
+	if err != nil {
+		return fmt.Errorf("resolve manifest path: %w", err)
+	}
 	service := ServicePrefix + Hash8(acct.AccountUUID)
 	data, err := json.Marshal(acct)
 	if err != nil {
@@ -499,11 +503,6 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	}
 
 	// Update manifest
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("user home dir: %w", err)
-	}
-	manifestPath := filepath.Join(home, ".cache", "cq", "accounts.json")
 	entries := loadManifest(manifestPath)
 	found := false
 	for i, e := range entries {
@@ -528,11 +527,10 @@ func RemoveCQClaudeAccountsByEmail(email string) error {
 	if email == "" {
 		return nil
 	}
-	home, err := os.UserHomeDir()
+	manifestPath, err := defaultCQManifestPath()
 	if err != nil {
-		return fmt.Errorf("user home dir: %w", err)
+		return fmt.Errorf("resolve manifest path: %w", err)
 	}
-	manifestPath := filepath.Join(home, ".cache", "cq", "accounts.json")
 	entries := loadManifest(manifestPath)
 	if len(entries) == 0 {
 		return nil

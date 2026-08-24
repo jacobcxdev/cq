@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"text/template"
+
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const agentLabel = "dev.jacobcx.cq.refresh"
@@ -48,12 +50,8 @@ func agentPlistPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", agentLabel+".plist"), nil
 }
 
-func agentLogPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "Logs", "cq", "refresh.log"), nil
+func agentLogPath(logsDir string) string {
+	return filepath.Join(logsDir, "refresh.log")
 }
 
 func resolveExecutable() (string, error) {
@@ -70,6 +68,10 @@ func installAgent(interval int) error {
 	if interval <= 0 {
 		interval = 1800
 	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		return err
+	}
 
 	exe, err := resolveExecutable()
 	if err != nil {
@@ -80,10 +82,7 @@ func installAgent(interval int) error {
 	if err != nil {
 		return err
 	}
-	logPath, err := agentLogPath()
-	if err != nil {
-		return err
-	}
+	logPath := agentLogPath(roots.Logs)
 
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)

@@ -1,11 +1,24 @@
 package codex
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestCQStatePathsDoNotUseProviderHome(t *testing.T) {
+	journal := RemovalJournal{StateDir: "/cq/state"}
+	if got := journal.path(); got != filepath.Join("/cq/state", "codex_removal.json") {
+		t.Fatalf("journal = %q", got)
+	}
+	if got := DefaultCredentialControlPath("/cq/state"); got != filepath.Join("/cq/state", "credential.sock") {
+		t.Fatalf("endpoint = %q", got)
+	}
+}
 
 func TestRemovalJournalRoundTripAndClear(t *testing.T) {
 	fs := newDurableFakeFS()
 	store := testManagedStore(t, fs)
-	journal := RemovalJournal{FS: fs, Home: "/fake/home", Store: store}
+	journal := RemovalJournal{FS: fs, StateDir: testCQStateDir(), Store: store}
 	plan := RemovalPlan{
 		Version: 1, OperationID: "op-1", AccountKey: "acct-opaque",
 		Candidates:             []RemovalCandidate{{CandidateID: "cand-1", Revision: "rev-1"}},
@@ -32,7 +45,7 @@ func TestRemovalJournalRoundTripAndClear(t *testing.T) {
 func TestRemovalJournalDirectorySyncFailureRemainsRecoverable(t *testing.T) {
 	fs := newDurableFakeFS()
 	store := testManagedStore(t, fs)
-	journal := RemovalJournal{FS: fs, Home: "/fake/home", Store: store}
+	journal := RemovalJournal{FS: fs, StateDir: testCQStateDir(), Store: store}
 	fs.failStep = "directory sync"
 	err := journal.Save(RemovalPlan{Version: 1, OperationID: "op", AccountKey: "acct"})
 	if err == nil {

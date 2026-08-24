@@ -71,6 +71,13 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	}
 }
 
+func TestProxyAgentLogPathUsesResolvedLogsRoot(t *testing.T) {
+	logs := filepath.Join(string(filepath.Separator), "cq", "logs")
+	if got, want := proxyAgentLogPath(logs), filepath.Join(logs, "proxy.log"); got != want {
+		t.Fatalf("proxy log path = %q, want %q", got, want)
+	}
+}
+
 func TestInstallProxyAgentRejectsHomebrewExecutable(t *testing.T) {
 	oldExecutable := currentExecutable
 	oldRunner := runProxyLaunchctl
