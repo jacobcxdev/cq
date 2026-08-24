@@ -221,3 +221,15 @@ func TestNormalCallerCredentialsFailWhenExternalCodexBearerCannotResolve(t *test
 		t.Fatalf("normalCallerCredentials error = %v, want %v", err, want)
 	}
 }
+
+func TestRescueDenyOnlyMatchesLocalControlToken(t *testing.T) {
+	deny := denyExactRescueBearer("local-control-token")
+	if !deny([]byte("local-control-token")) {
+		t.Fatal("local control token was not denied")
+	}
+	for _, bearer := range [][]byte{nil, []byte(""), []byte("local-control-tokenx"), []byte("upstream-account-token")} {
+		if deny(bearer) {
+			t.Fatalf("non-local bearer was denied: length %d", len(bearer))
+		}
+	}
+}

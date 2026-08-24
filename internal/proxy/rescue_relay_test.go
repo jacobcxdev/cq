@@ -94,6 +94,75 @@ func TestRescueRelayForwardsOpaqueBearerOnce(t *testing.T) {
 	}
 }
 
+func TestRescueRelayForwardsCurrentCodexHeadersWithoutCQAuthentication(t *testing.T) {
+	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	relay := &RescueRelay{
+		Transport: rescueDoerFunc(func(request *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			if got := request.Header.Get("Authorization"); got != "Bearer current-upstream-token" {
+				t.Fatalf("authorization = %q", got)
+			}
+			if got := request.Header.Get("X-Codex-New-Transport"); got != "current" {
+				t.Fatalf("new transport header = %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("data: done\n\n")),
+			}, nil
+		}),
+		Origin:                 origin,
+		LoopbackHost:           "127.0.0.1:29280",
+		ForwardingAcknowledged: true,
+		Budget:                 NewRescueBudget(time.Now, [sha256.Size]byte{1}),
+	}
+	request := testRescueRequest(t, http.MethodPost, "/responses", []byte(`{"model":"gpt-5"}`))
+	request.Header.Set("Authorization", "Bearer current-upstream-token")
+	request.Header.Set("User-Agent", "codex/0.148.0 (darwin 25.0; arm64) Terminal")
+	request.Header.Set("Version", "0.148.0")
+	request.Header.Set("X-Codex-New-Transport", "current")
+	recorder := httptest.NewRecorder()
+
+	relay.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("response/calls = %d/%d, want 200/1; body %q", recorder.Code, calls.Load(), recorder.Body.String())
+	}
+}
+
+func TestRescueRelayLetsUpstreamDecideMissingAuthentication(t *testing.T) {
+	origin, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	var calls atomic.Int32
+	relay := &RescueRelay{
+		Transport: rescueDoerFunc(func(request *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			if got := request.Header.Get("Authorization"); got != "" {
+				t.Fatalf("authorization = %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{"Content-Type": {"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"upstream":"unauthorized"}`)),
+			}, nil
+		}),
+		Origin: origin, LoopbackHost: "127.0.0.1:29280", ForwardingAcknowledged: true,
+		Budget: NewRescueBudget(time.Now, [sha256.Size]byte{1}),
+	}
+	request := testRescueRequest(t, http.MethodPost, "/responses", []byte(`{"model":"gpt-5"}`))
+	request.Header.Del("Authorization")
+	recorder := httptest.NewRecorder()
+
+	relay.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized || recorder.Body.String() != `{"upstream":"unauthorized"}` || calls.Load() != 1 {
+		t.Fatalf("response/calls = %d/%q/%d", recorder.Code, recorder.Body.String(), calls.Load())
+	}
+}
+
 func TestRescueRelayRefusesRedirectWithoutExposingLocation(t *testing.T) {
 	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
 	if err != nil {
@@ -173,8 +242,8 @@ func TestRescueRelayRouteAndQueryCatalogue(t *testing.T) {
 		code   string
 	}{
 		{name: "models exact", method: http.MethodGet, target: "/models?client_version=0.147.0", status: http.StatusOK},
-		{name: "models missing query", method: http.MethodGet, target: "/models", status: http.StatusBadRequest, code: "rescue_query_unsupported"},
-		{name: "models encoded query", method: http.MethodGet, target: "/models?client_version=0%2E147%2E0", status: http.StatusBadRequest, code: "rescue_query_unsupported"},
+		{name: "models missing query", method: http.MethodGet, target: "/models", status: http.StatusOK},
+		{name: "models encoded query", method: http.MethodGet, target: "/models?client_version=0%2E147%2E0", status: http.StatusOK},
 		{name: "v1 models unsupported", method: http.MethodGet, target: "/v1/models?client_version=0.147.0", status: http.StatusNotFound, code: "rescue_route_unsupported"},
 		{name: "compact wrong method", method: http.MethodGet, target: "/responses/compact", status: http.StatusMethodNotAllowed, code: "rescue_method_unsupported"},
 	}
@@ -196,7 +265,7 @@ func TestRescueRelayRouteAndQueryCatalogue(t *testing.T) {
 			}
 		})
 	}
-	if calls.Load() != 1 {
+	if calls.Load() != 3 {
 		t.Fatalf("upstream calls = %d", calls.Load())
 	}
 }
