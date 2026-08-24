@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -83,12 +84,20 @@ func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccou
 				accessToken = material.AccessToken
 			}
 			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision)
-			if err := appendCredential(proxy.NormalCallerCodex, accessToken, identity, candidate.AccessExpiresAt); err != nil {
+			if err := appendCredential(proxy.NormalCallerCodex, accessToken, identity, codexCallerBearerExpiry(accessToken)); err != nil {
 				return nil, err
 			}
 		}
 	}
 	return credentials, nil
+}
+
+func codexCallerBearerExpiry(accessToken string) time.Time {
+	expiresAt := auth.DecodeCodexClaims(accessToken).ExpiresAt
+	if expiresAt <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(expiresAt, 0)
 }
 
 var runProxyRuntimeRoleFn = runProxyRuntimeRole

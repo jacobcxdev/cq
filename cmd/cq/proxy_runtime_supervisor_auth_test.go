@@ -204,6 +204,52 @@ func TestNormalCallerCredentialsResolveExternalCodexBearer(t *testing.T) {
 	}
 }
 
+func TestNormalCallerCredentialsUseCodexBearerExpiry(t *testing.T) {
+	accessExpiry := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	identityExpiry := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	accessToken := registryAccessJWT(accessExpiry)
+	account := codexprov.LogicalAccount{
+		Key:      "account-key",
+		Identity: codexprov.AccountIdentity{AccountID: "account-id", UserID: "user-id"},
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "system-candidate"},
+			Revision: "revision", Source: codexprov.SourceSystem, Routable: true,
+			AccessExpiresAt: identityExpiry,
+		}},
+	}
+	credentials, err := normalCallerCredentials(context.Background(), &proxy.Config{LocalToken: "local-token"}, nil, codexprov.Inventory{Accounts: []codexprov.LogicalAccount{account}}, runtimeSupervisorCallerResolver(func(context.Context, codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+		return codexprov.CredentialMaterial{AccessToken: accessToken}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 2 || !credentials[1].ValidUntil.Equal(accessExpiry) {
+		t.Fatalf("Codex caller expiry = %v, want bearer expiry %v", credentials[1].ValidUntil, accessExpiry)
+	}
+}
+
+func TestNormalCallerCredentialsDoNotUseIdentityExpiryForOpaqueCodexBearer(t *testing.T) {
+	identityExpiry := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	account := codexprov.LogicalAccount{
+		Key:      "account-key",
+		Identity: codexprov.AccountIdentity{AccountID: "account-id", UserID: "user-id"},
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "external-candidate"},
+			Revision: "revision", Source: codexprov.SourceExternal, Routable: true,
+			AccessExpiresAt: identityExpiry,
+		}},
+	}
+	credentials, err := normalCallerCredentials(context.Background(), &proxy.Config{LocalToken: "local-token"}, nil, codexprov.Inventory{Accounts: []codexprov.LogicalAccount{account}}, runtimeSupervisorCallerResolver(func(context.Context, codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+		return codexprov.CredentialMaterial{AccessToken: "opaque-access-token"}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 2 || !credentials[1].ValidUntil.IsZero() {
+		t.Fatalf("opaque Codex caller expiry = %v, want unknown", credentials[1].ValidUntil)
+	}
+}
+
 func TestNormalCallerCredentialsFailWhenExternalCodexBearerCannotResolve(t *testing.T) {
 	want := errors.New("resolve failed")
 	account := codexprov.LogicalAccount{
