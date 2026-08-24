@@ -61,7 +61,10 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct candidate runtime handler: %v", err)
 	}
-	listener, _ := newCodexRuntimeSupervisorAcceptanceServer(t, handler, localToken)
+	listener, _ := newCodexRuntimeSupervisorAcceptanceServerWithCredential(t, handler, NormalCallerCredentialV1{
+		Domain: NormalCallerCodex, Bearer: localToken, SubjectID: "validation-codex",
+		ValidUntil: time.Now().Add(time.Hour),
+	})
 
 	isolation := newCodexTaskAffinityAcceptanceIsolation(t, localToken)
 	runner := codexTaskAffinityAcceptanceRunner{}
@@ -261,8 +264,13 @@ func (consumer *codexRuntimeSupervisorAcceptanceConsumer) Consume(_ context.Cont
 
 func newCodexRuntimeSupervisorAcceptanceServer(t *testing.T, handler http.Handler, localToken string) (*httptest.Server, *RuntimeSupervisor) {
 	t.Helper()
-	events := []string{}
 	credential := NormalCallerCredentialV1{Domain: NormalCallerLocal, Bearer: localToken, SubjectID: "validation-local"}
+	return newCodexRuntimeSupervisorAcceptanceServerWithCredential(t, handler, credential)
+}
+
+func newCodexRuntimeSupervisorAcceptanceServerWithCredential(t *testing.T, handler http.Handler, credential NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor) {
+	t.Helper()
+	events := []string{}
 	worker := &codexRuntimeSupervisorAcceptanceWorker{
 		holder:  runtimeHolder("validation-worker"),
 		handler: normalWorkerHandler(handler, []NormalCallerCredentialV1{credential}),
@@ -280,7 +288,7 @@ func newCodexRuntimeSupervisorAcceptanceServer(t *testing.T, handler http.Handle
 	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "validation-artifact"}); err != nil {
 		t.Fatal(err)
 	}
-	key := sha256.Sum256([]byte(localToken))
+	key := sha256.Sum256([]byte(credential.Bearer))
 	authority, err := NewNormalCallerAuthority(
 		key[:],
 		1,
