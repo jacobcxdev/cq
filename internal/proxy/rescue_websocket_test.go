@@ -27,7 +27,11 @@ func TestRescueWebSocketRelaysOneConnectionWithoutNormalRuntime(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		upstreamConnections.Add(1)
 		upstreamAuthorization.Store(request.Header.Get("Authorization"))
-		connection, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		connection, err := (&websocket.Upgrader{
+			CheckOrigin:       func(*http.Request) bool { return true },
+			EnableCompression: true,
+			Subprotocols:      []string{"responses"},
+		}).Upgrade(writer, request, nil)
 		if err != nil {
 			return
 		}
@@ -47,7 +51,11 @@ func TestRescueWebSocketRelaysOneConnectionWithoutNormalRuntime(t *testing.T) {
 			if target != "wss://chatgpt.com/backend-api/codex/responses" {
 				t.Fatalf("upstream target = %q", target)
 			}
-			return (&websocket.Dialer{HandshakeTimeout: time.Second}).DialContext(ctx, upstreamURL, header)
+			return (&websocket.Dialer{
+				HandshakeTimeout:  time.Second,
+				EnableCompression: true,
+				Subprotocols:      []string{"responses"},
+			}).DialContext(ctx, upstreamURL, header)
 		}),
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -57,18 +65,21 @@ func TestRescueWebSocketRelaysOneConnectionWithoutNormalRuntime(t *testing.T) {
 	defer server.Close()
 	dialTarget := "ws" + strings.TrimPrefix(server.URL, "http") + "/responses"
 	header := http.Header{
-		"Authorization":            {"Bearer opaque-websocket-token"},
-		"User-Agent":               {"codex/0.147.0 (darwin 25.0; arm64) Terminal"},
-		"Originator":               {"codex"},
-		"Version":                  {"0.147.0"},
-		"OpenAI-Beta":              {"responses_websockets=2026-02-06"},
-		"Session-Id":               {"session"},
-		"Thread-Id":                {"thread"},
-		"X-Client-Request-Id":      {"request"},
-		"X-Codex-Window-Id":        {"window"},
-		"Sec-WebSocket-Extensions": {"permessage-deflate; client_max_window_bits"},
+		"Authorization":       {"Bearer opaque-websocket-token"},
+		"User-Agent":          {"codex/0.147.0 (darwin 25.0; arm64) Terminal"},
+		"Originator":          {"codex"},
+		"Version":             {"0.147.0"},
+		"OpenAI-Beta":         {"responses_websockets=2026-02-06"},
+		"Session-Id":          {"session"},
+		"Thread-Id":           {"thread"},
+		"X-Client-Request-Id": {"request"},
+		"X-Codex-Window-Id":   {"window"},
 	}
-	client, response, err := (&websocket.Dialer{HandshakeTimeout: time.Second}).Dial(dialTarget, header)
+	client, response, err := (&websocket.Dialer{
+		HandshakeTimeout:  time.Second,
+		EnableCompression: true,
+		Subprotocols:      []string{"responses"},
+	}).Dial(dialTarget, header)
 	if err != nil {
 		if response != nil {
 			t.Fatalf("dial: %v (status %d)", err, response.StatusCode)
@@ -76,6 +87,12 @@ func TestRescueWebSocketRelaysOneConnectionWithoutNormalRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	if client.Subprotocol() != "responses" {
+		t.Fatalf("subprotocol = %q", client.Subprotocol())
+	}
+	if response.Header.Get("Sec-WebSocket-Extensions") == "" {
+		t.Fatal("compression was not negotiated")
+	}
 	if err := client.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
 		t.Fatal(err)
 	}

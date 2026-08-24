@@ -150,7 +150,9 @@ func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerA
 	if caller.Domain != NormalCallerLocal && caller.Domain != NormalCallerCodex {
 		return SessionPolicyDecision{}, ErrSessionPolicyUnavailable
 	}
-	if caller.Domain == NormalCallerCodex {
+	// Empty delegation state preserves existing authenticated Codex pooling.
+	// Worker-keyed caller subjects cannot be named by persistent session policy.
+	if caller.Domain == NormalCallerCodex && len(policy.Delegations) != 0 {
 		allowed := make(map[providerCodex.AccountKey]struct{})
 		matched := false
 		for _, delegation := range policy.Delegations {

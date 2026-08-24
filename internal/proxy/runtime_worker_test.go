@@ -67,6 +67,52 @@ func TestRuntimeProcessWorkerStopAndReapAfterControlFailure(t *testing.T) {
 	}
 }
 
+func TestRuntimeProcessWorkerStopAndReapToleratesPartialCleanup(t *testing.T) {
+	waitDone := make(chan struct{})
+	close(waitDone)
+	worker := &runtimeProcessWorker{
+		holder:   LifecycleHolderProof{DescriptionID: "partial-worker"},
+		waitDone: waitDone,
+	}
+
+	if release, err := worker.StopAndReap(context.Background()); err != nil || !release.valid() {
+		t.Fatalf("StopAndReap() = (%#v, %v)", release, err)
+	}
+}
+
+func TestRuntimeProcessWorkerStopAndReapSynchronisesControlCleanup(t *testing.T) {
+	control, peer := net.Pipe()
+	defer peer.Close()
+	waitDone := make(chan struct{})
+	close(waitDone)
+	worker := &runtimeProcessWorker{
+		control:  control,
+		holder:   LifecycleHolderProof{DescriptionID: "concurrent-worker"},
+		waitDone: waitDone,
+	}
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		close(started)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				worker.mu.Lock()
+				worker.control = nil
+				worker.mu.Unlock()
+			}
+		}
+	}()
+	<-started
+	_, _ = worker.StopAndReap(context.Background())
+	close(stop)
+	<-done
+}
+
 func runtimeHolder(description string) LifecycleHolderProof {
 	return LifecycleHolderProof{
 		LockIdentity:  fsutil.SecureFileIdentity{Device: 7, Inode: 11, Links: 1},

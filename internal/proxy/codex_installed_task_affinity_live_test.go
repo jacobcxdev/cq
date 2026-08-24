@@ -169,9 +169,10 @@ func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = enterResponse.Body.Close()
-	if enterResponse.StatusCode != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescue {
+	if enterResponse.StatusCode != http.StatusOK {
 		t.Fatalf("enter rescue = %d mode %q", enterResponse.StatusCode, supervisor.TrafficMode())
 	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 
 	isolation := newCodexTaskAffinityAcceptanceIsolation(t, upstreamToken)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -250,9 +251,10 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = enterResponse.Body.Close()
-	if enterResponse.StatusCode != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescue {
+	if enterResponse.StatusCode != http.StatusOK {
 		t.Fatalf("enter rescue = %d mode %q", enterResponse.StatusCode, supervisor.TrafficMode())
 	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 
 	isolation := newCodexTaskAffinityAcceptanceIsolation(t, localToken)
 	isolationAuth := filepath.Join(isolation.codexHome, "auth.json")
@@ -266,7 +268,7 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	if err := runCodexTaskAffinityAcceptanceTurn(ctx, codexTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, "PONG"); err != nil {
+	if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, codexTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, true, "PONG"); err != nil {
 		t.Fatalf("live Codex rescue turn: %v", err)
 	}
 }
@@ -626,8 +628,21 @@ func runCodexTaskAffinityAcceptanceTurn(
 	resume bool,
 	output string,
 ) error {
+	return runCodexTaskAffinityAcceptanceTurnForTransport(ctx, runner, client, baseURL, isolation, resume, false, output)
+}
+
+func runCodexTaskAffinityAcceptanceTurnForTransport(
+	ctx context.Context,
+	runner codexAcceptanceRunner,
+	client codexInstalledExecutableProof,
+	baseURL string,
+	isolation codexTaskAffinityAcceptanceIsolation,
+	resume bool,
+	webSocket bool,
+	output string,
+) error {
 	outputPath := filepath.Join(isolation.root, strings.ToLower(output)+".txt")
-	args := codexAcceptanceExecArguments(baseURL, isolation.work, outputPath)
+	args := codexAcceptanceExecArgumentsForTransport(baseURL, isolation.work, outputPath, webSocket)
 	args = slices.DeleteFunc(args, func(value string) bool { return value == "--ephemeral" })
 	args[len(args)-1] = "Reply with exactly " + output + " and no other text."
 	if resume {
