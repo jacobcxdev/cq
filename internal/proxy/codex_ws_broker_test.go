@@ -117,10 +117,12 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 		{err: io.EOF},
 	}}
 	prewarmUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"prewarm-state"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
 	}}
 	turnUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"turn-state"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-a","end_turn":true}}`)},
 	}}
@@ -166,7 +168,7 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 	if got := turnUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{forwardedTurn}) {
 		t.Fatalf("turn upstream writes = %#v", got)
 	}
-	if got := downstream.writtenPayloads(); len(got) != 4 {
+	if got := downstream.writtenPayloads(); len(got) != 6 {
 		t.Fatalf("downstream writes = %#v", got)
 	}
 	restored, err := coordinator.store.LoadLane(
@@ -179,6 +181,9 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 	}
 	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm || restored.ResolvedRecords[0].Record.UpstreamSocketGeneration != 2 {
 		t.Fatalf("durable prewarm adoption = %#v", restored.ResolvedRecords)
+	}
+	if record := restored.ResolvedRecords[0].Record; !record.HasTurnState || record.TurnStateHash != coordinator.store.hash("turn-state", "turn-state") {
+		t.Fatalf("replacement turn state = (%t, %q), want replacement authority", record.HasTurnState, record.TurnStateHash)
 	}
 	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
 	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
