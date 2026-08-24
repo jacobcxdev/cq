@@ -48,7 +48,20 @@ func TestRunCodexInstalledWebSocketValidationUsesIsolatedCandidate(t *testing.T)
 			return nil, err
 		}
 		defer connection.Close()
-		frame := codexTerminatingWSFrame("installed-turn", "")
+		prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+		if err := connection.WriteMessage(websocket.TextMessage, prewarm); err != nil {
+			return nil, err
+		}
+		for {
+			_, reply, err := connection.ReadMessage()
+			if err != nil {
+				return nil, err
+			}
+			if strings.Contains(string(reply), `"type":"response.completed"`) {
+				break
+			}
+		}
+		frame := codexTerminatingWSFrame("installed-turn", `,"previous_response_id":"acceptance-prewarm"`)
 		if err := connection.WriteMessage(websocket.TextMessage, frame); err != nil {
 			return nil, err
 		}
@@ -88,6 +101,55 @@ func TestRunCodexInstalledWebSocketValidationUsesIsolatedCandidate(t *testing.T)
 	}
 	if !reflect.DeepEqual(loaded, marker) {
 		t.Fatalf("loaded marker = %#v, want %#v", loaded, marker)
+	}
+}
+
+func TestRunCodexInstalledWebSocketAcceptanceRejectsClientWithoutPrewarm(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "codex")
+	material := "exact client"
+	if err := os.WriteFile(executable, []byte(material), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	runner := testCodexAcceptanceRunner(func(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
+		authBytes, err := os.ReadFile(filepath.Join(commandEnv(command.env, "CODEX_HOME"), "auth.json"))
+		if err != nil {
+			return nil, err
+		}
+		var auth struct {
+			Tokens struct {
+				AccessToken string `json:"access_token"`
+			} `json:"tokens"`
+		}
+		if err := json.Unmarshal(authBytes, &auth); err != nil {
+			return nil, err
+		}
+		header := make(http.Header)
+		header.Set("Authorization", "Bearer "+auth.Tokens.AccessToken)
+		address := "ws" + strings.TrimPrefix(command.endpoint, "http")
+		connection, _, err := websocket.DefaultDialer.DialContext(ctx, address, header)
+		if err != nil {
+			return nil, err
+		}
+		defer connection.Close()
+		if err := connection.WriteMessage(websocket.TextMessage, codexTerminatingWSFrame("installed-turn", "")); err != nil {
+			return nil, err
+		}
+		for {
+			_, reply, err := connection.ReadMessage()
+			if err != nil {
+				return nil, err
+			}
+			if strings.Contains(string(reply), `"type":"response.completed"`) {
+				break
+			}
+		}
+		return nil, os.WriteFile(command.outputPath, []byte("PONG\n"), 0o600)
+	})
+	_, err := runCodexInstalledWebSocketAcceptance(
+		context.Background(), "cq-build", "0.146.0", testCodexInstalledExecutableProof(executable, material), runner,
+	)
+	if !errors.Is(err, errCodexInstalledListenerAcceptance) {
+		t.Fatalf("acceptance error = %v, want listener acceptance failure", err)
 	}
 }
 

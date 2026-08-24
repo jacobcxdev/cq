@@ -104,6 +104,7 @@ type codexInstalledWebSocketTraffic struct {
 	webSocketRequests     atomic.Uint64
 	upstreamDials         atomic.Uint64
 	unexpectedRoutes      atomic.Uint64
+	completedPrewarm      atomic.Bool
 }
 
 func runCodexInstalledWebSocketAcceptance(
@@ -206,6 +207,9 @@ func runCodexInstalledWebSocketAcceptance(
 		EgressAttempts:        outcome.egressAttempts.Load(),
 		PongVerified:          outcome.exactPong.Load(),
 	}
+	if !traffic.completedPrewarm.Load() || acceptance.WebSocketRequests < 2 || acceptance.UpstreamDials < 2 {
+		return evidence, errCodexInstalledListenerAcceptance
+	}
 	return CodexWebSocketReadinessEvidence{
 		Source: CodexWebSocketReadinessEvidenceInstalledIsolated,
 		Tuple:  readinessTupleForBuilds(cqBuild, clientBuild, CodexRoutingWebSocket),
@@ -259,8 +263,27 @@ func (traffic *codexInstalledWebSocketTraffic) serveUpstream(writer http.Respons
 			traffic.unexpectedRoutes.Add(1)
 			return
 		}
+		prewarm := pending.prewarm
+		previousResponseID := pending.request.PreviousResponseID
 		pending.Release()
 		traffic.webSocketRequests.Add(1)
+		if prewarm {
+			traffic.completedPrewarm.Store(true)
+			for _, reply := range [][]byte{
+				[]byte(`{"type":"response.created","response":{"id":"acceptance-prewarm"}}`),
+				[]byte(`{"type":"response.completed","response":{"id":"acceptance-prewarm"}}`),
+			} {
+				if err := connection.WriteMessage(websocket.TextMessage, reply); err != nil {
+					return
+				}
+			}
+			return
+		}
+		if traffic.completedPrewarm.Load() && previousResponseID != "" {
+			traffic.unexpectedRoutes.Add(1)
+			_ = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error"}}`))
+			return
+		}
 		for _, reply := range [][]byte{
 			[]byte(`{"type":"response.created","response":{"id":"acceptance-response"}}`),
 			[]byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","id":"acceptance-message","content":[{"type":"output_text","text":"PONG"}]}}`),
