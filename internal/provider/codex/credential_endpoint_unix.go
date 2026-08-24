@@ -1033,9 +1033,18 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 
 	effectiveSidecar := sidecar
 	deviceRollover := false
-	if err := e.validateCrashState(sidecar, finalIdentity, finalExists); err != nil {
+	if crashErr := e.validateCrashState(sidecar, finalIdentity, finalExists); crashErr != nil {
+		if errors.Is(crashErr, ErrCredentialEndpointIdentityChanged) {
+			heldErr := fsutil.ValidateExclusiveLockHeldInDirectory(e.fs, e.secureDirectory, filepath.Base(credentialEndpointLockPath(e.path)), sidecar.lockFileIdentity())
+			if heldErr == nil {
+				client, waitErr := e.waitForLiveOwner(credentialEndpointDialTimeout)
+				if client != nil || !errors.Is(waitErr, fsutil.ErrExclusiveLockNotHeld) {
+					return client, waitErr
+				}
+			}
+		}
 		if !allowRecovery || !e.canRecoverDarwinDeviceRollover(sidecar, finalIdentity, finalExists) {
-			return nil, err
+			return nil, crashErr
 		}
 		if e.hasBoundActivatedMaintenanceGate() {
 			return nil, ErrCredentialEndpointMaintenancePending
@@ -1239,9 +1248,6 @@ func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Clien
 			return nil, err
 		}
 		if sidecarExists {
-			if err := e.validateCrashState(sidecar, finalIdentity, finalExists); err != nil {
-				return nil, err
-			}
 			heldErr := fsutil.ValidateExclusiveLockHeldInDirectory(e.fs, e.secureDirectory, filepath.Base(credentialEndpointLockPath(e.path)), sidecar.lockFileIdentity())
 			if errors.Is(heldErr, fsutil.ErrExclusiveLockNotHeld) {
 				return nil, heldErr
@@ -1249,7 +1255,13 @@ func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Clien
 			if heldErr != nil {
 				return nil, errors.Join(ErrCredentialOwnerStale, heldErr)
 			}
-			if sidecar.State == credentialEndpointPublished && finalExists && finalIdentity == sidecar.credentialEndpointIdentity {
+			crashErr := e.validateCrashState(sidecar, finalIdentity, finalExists)
+			if crashErr != nil && !errors.Is(crashErr, ErrCredentialEndpointIdentityChanged) {
+				return nil, crashErr
+			}
+			if crashErr != nil {
+				lastErr = crashErr
+			} else if sidecar.State == credentialEndpointPublished && finalExists && finalIdentity == sidecar.credentialEndpointIdentity {
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
 					return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, lastErr)
