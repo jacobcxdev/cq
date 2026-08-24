@@ -75,6 +75,76 @@ func TestCodexWSPendingFrameAcceptsInstalledPrewarmWithoutLeaseKey(t *testing.T)
 	}
 }
 
+func TestCodexWSFrameWithoutPrewarmAnchorPreservesOtherFields(t *testing.T) {
+	payload := []byte(`{"type":"response.create","x":1,"x":2,"model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"input":[{"previous_response_id":"nested"}],"previous_response_id":"prewarm-a"}`)
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+
+	rewritten, err := codexWSFrameWithoutPrewarmAnchor(pending, "prewarm-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rewritten.Release()
+	want := `{"type":"response.create","x":1,"x":2,"model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"input":[{"previous_response_id":"nested"}]}`
+	if string(rewritten.encoded) != want || rewritten.request.PreviousResponseID != "" || !rewritten.portable {
+		t.Fatalf("rewritten frame = %s, request = %+v, portable = %v", rewritten.encoded, rewritten.request, rewritten.portable)
+	}
+	if string(pending.encoded) != string(payload) {
+		t.Fatal("original frame changed")
+	}
+}
+
+func TestCodexWSFrameWithoutPrewarmAnchorRemovesParamsAuthority(t *testing.T) {
+	tests := []struct {
+		name    string
+		encoded string
+		want    string
+	}{
+		{
+			name:    "params only",
+			encoded: `{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"params":{"x":1,"previous_response_id":"prewarm-a","x":2},"input":[]}`,
+			want:    `{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"params":{"x":1,"x":2},"input":[]}`,
+		},
+		{
+			name:    "matching root and params",
+			encoded: `{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"prewarm-a","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"params":{"previous_response_id":"prewarm-a","nested":{"previous_response_id":"keep"}},"input":[]}`,
+			want:    `{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"params":{"nested":{"previous_response_id":"keep"}},"input":[]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pending, err := newCodexWSPendingFrame(websocket.TextMessage, []byte(test.encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pending.Release()
+			rewritten, err := codexWSFrameWithoutPrewarmAnchor(pending, "prewarm-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rewritten.Release()
+			if string(rewritten.encoded) != test.want || rewritten.request.PreviousResponseID != "" || rewritten.request.HasPreviousResponseID {
+				t.Fatalf("rewritten frame = %s, request = %+v", rewritten.encoded, rewritten.request)
+			}
+		})
+	}
+}
+
+func TestCodexWSFrameWithoutPrewarmAnchorRejectsMismatch(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}},"input":[],"previous_response_id":"prewarm-a"}`)
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+	if rewritten, err := codexWSFrameWithoutPrewarmAnchor(pending, "prewarm-b"); rewritten != nil || !errors.Is(err, ErrCodexWSInvalidFrame) {
+		t.Fatalf("rewritten=%+v error=%v", rewritten, err)
+	}
+}
+
 func TestCodexWSPendingFrameRejectsInvalidPrewarmGenerateAuthority(t *testing.T) {
 	metadata := `"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"","request_kind":"prewarm"}}`
 	for _, test := range []struct {

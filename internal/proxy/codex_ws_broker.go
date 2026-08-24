@@ -196,6 +196,7 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		AcceptedRevision: broker.config.AcceptedRevision,
 	}
 	var prepared CodexPreparedHTTPRequest
+	retiredPrewarmAnchor := ""
 	var err error
 	if active.prewarm.State == CodexPrewarmReady {
 		planner, ok := broker.config.Plans.(codexWebSocketPrewarmPlanner)
@@ -210,6 +211,9 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 				prepared, err = broker.config.Plans.Build(ctx, input)
 			}
 		} else {
+			if active.prewarmRetired {
+				retiredPrewarmAnchor = active.prewarm.ResponseAnchor
+			}
 			prepared, err = planner.adoptWebSocketPrewarm(ctx, input, active.prewarm, func(ctx context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
 				if (active.conn == nil && !active.prewarmRetired) || active.account != account || active.generation != fence.UpstreamSocketGeneration ||
 					broker.config.DownstreamGeneration != fence.DownstreamSocketGeneration || active.prewarm.Generation != fence.ReservationGeneration {
@@ -227,24 +231,31 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 	if err != nil {
 		return err
 	}
-	emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
 	if prepared.Frozen != nil {
 		defer prepared.Frozen.Release()
 	}
 	requestFrame, err := codexWSPreparedPendingFrame(prepared.Frozen, pending)
 	if err != nil {
-		return err
+		return codexWSAbandonPrepared(ctx, prepared.Lifecycle, err)
 	}
 	if requestFrame != pending {
 		defer requestFrame.Release()
 	}
+	if retiredPrewarmAnchor != "" {
+		requestFrame, err = codexWSFrameWithoutPrewarmAnchor(requestFrame, retiredPrewarmAnchor)
+		if err != nil {
+			return codexWSAbandonPrepared(ctx, prepared.Lifecycle, err)
+		}
+		defer requestFrame.Release()
+	}
 	if prepared.leaseHandle == nil {
-		return ErrCodexLeaseWriterUnavailable
+		return codexWSAbandonPrepared(ctx, prepared.Lifecycle, ErrCodexLeaseWriterUnavailable)
 	}
 	accounts := prepared.Dispatch.Accounts()
 	if len(accounts) == 0 {
-		return prepared.Dispatch.TerminalError()
+		return codexWSAbandonPrepared(ctx, prepared.Lifecycle, prepared.Dispatch.TerminalError())
 	}
+	emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
 	accountIndex := 0
 	for {
 		dial := broker.connect(ctx, prepared.leaseHandle, prepared.receipt, accounts[accountIndex], active)
@@ -292,6 +303,14 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		}
 		prepared.leaseHandle = lifecycle.handle
 	}
+}
+
+func codexWSAbandonPrepared(ctx context.Context, lifecycle CodexHTTPRequestLifecycle, cause error) error {
+	if lifecycle == nil {
+		return cause
+	}
+	_, err := lifecycle.AbandonBeforeDispatchContext(context.WithoutCancel(ctx))
+	return errors.Join(cause, err)
 }
 
 func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, active *codexWSActiveUpstream) error {

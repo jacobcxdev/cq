@@ -55,6 +55,104 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 	}, nil
 }
 
+// codexWSFrameWithoutPrewarmAnchor removes the connection-scoped anchor after
+// CQ retires a completed prewarm upstream and opens its replacement.
+func codexWSFrameWithoutPrewarmAnchor(original *codexWSPendingFrame, anchor string) (*codexWSPendingFrame, error) {
+	if original == nil || original.prewarm || anchor == "" || original.request.PreviousResponseID != anchor {
+		return nil, ErrCodexWSInvalidFrame
+	}
+	encoded, removed, err := codexWSObjectWithoutPrewarmAnchor(original.encoded, anchor, true)
+	if err != nil {
+		return nil, err
+	}
+	defer clearBytes(encoded)
+	if removed == 0 {
+		return nil, ErrCodexWSInvalidFrame
+	}
+	rewritten, err := newCodexWSPendingFrame(original.messageType, encoded)
+	if err != nil {
+		return nil, err
+	}
+	if rewritten.request.PreviousResponseID != "" || rewritten.request.HasPreviousResponseID || rewritten.key != original.key || rewritten.request.Model != original.request.Model {
+		rewritten.Release()
+		return nil, ErrCodexWSInvalidFrame
+	}
+	return rewritten, nil
+}
+
+func codexWSObjectWithoutPrewarmAnchor(source []byte, anchor string, rewriteParams bool) (result []byte, removed int, returnErr error) {
+	decoder := json.NewDecoder(bytes.NewReader(source))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, 0, errors.Join(ErrCodexWSInvalidFrame, err)
+	}
+	var encoded bytes.Buffer
+	encoded.Grow(len(source))
+	encoded.WriteByte('{')
+	defer func() { clearBytes(encoded.Bytes()) }()
+	written := 0
+	previousFound := false
+	for decoder.More() {
+		keyToken, tokenErr := decoder.Token()
+		key, ok := keyToken.(string)
+		if tokenErr != nil || !ok {
+			return nil, 0, errors.Join(ErrCodexWSInvalidFrame, tokenErr)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			clearBytes(value)
+			return nil, 0, errors.Join(ErrCodexWSInvalidFrame, err)
+		}
+		if key == "previous_response_id" {
+			if previousFound {
+				clearBytes(value)
+				return nil, 0, ErrCodexWSInvalidFrame
+			}
+			previousFound = true
+			var previous string
+			valueErr := json.Unmarshal(value, &previous)
+			clearBytes(value)
+			if valueErr != nil || previous != anchor {
+				return nil, 0, errors.Join(ErrCodexWSInvalidFrame, valueErr)
+			}
+			removed++
+			continue
+		}
+		if rewriteParams && key == "params" && len(bytes.TrimSpace(value)) > 0 && bytes.TrimSpace(value)[0] == '{' {
+			rewritten, paramsRemoved, rewriteErr := codexWSObjectWithoutPrewarmAnchor(value, anchor, false)
+			clearBytes(value)
+			if rewriteErr != nil {
+				return nil, 0, rewriteErr
+			}
+			value = rewritten
+			removed += paramsRemoved
+		}
+		encodedKey, marshalErr := json.Marshal(key)
+		if marshalErr != nil {
+			clearBytes(value)
+			return nil, 0, errors.Join(ErrCodexWSInvalidFrame, marshalErr)
+		}
+		if written > 0 {
+			encoded.WriteByte(',')
+		}
+		encoded.Write(encodedKey)
+		encoded.WriteByte(':')
+		encoded.Write(value)
+		clearBytes(encodedKey)
+		clearBytes(value)
+		written++
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return nil, 0, errors.Join(ErrCodexWSInvalidFrame, err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, 0, errors.Join(ErrCodexWSInvalidFrame, err)
+	}
+	encoded.WriteByte('}')
+	return append([]byte(nil), encoded.Bytes()...), removed, nil
+}
+
 func validateCodexWSPrewarmRequest(payload []byte, request CodexProtocolRequest) (CodexProtocolRequest, error) {
 	authority, code, err := extractCodexFrozenAuthority(payload, "", false, nil)
 	if err == nil {
