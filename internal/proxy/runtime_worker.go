@@ -697,8 +697,12 @@ func (worker *runtimeProcessWorker) StopAndReap(ctx context.Context) (RuntimeWor
 	}
 	worker.cleanup.Do(func() {
 		worker.receiver.Close()
-		if worker.control != nil {
-			_ = worker.control.Close()
+		worker.mu.Lock()
+		control := worker.control
+		worker.control = nil
+		worker.mu.Unlock()
+		if control != nil {
+			_ = control.Close()
 		}
 		_ = worker.lifecycle.Close()
 		if worker.transport != nil {

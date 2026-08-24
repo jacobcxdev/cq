@@ -44,11 +44,14 @@ func (a runtimeTestAddr) Network() string { return "tcp" }
 func (a runtimeTestAddr) String() string  { return string(a) }
 
 type runtimeTestWorker struct {
-	holder   LifecycleHolderProof
-	events   *[]string
-	response RuntimeHTTPResponseV1
-	bootAck  RuntimeBootAckV1
-	exited   chan struct{}
+	holder            LifecycleHolderProof
+	events            *[]string
+	response          RuntimeHTTPResponseV1
+	bootAck           RuntimeBootAckV1
+	exited            chan struct{}
+	beginDrainStarted chan struct{}
+	beginDrainBlock   <-chan struct{}
+	beginDrainOnce    sync.Once
 }
 
 func (w *runtimeTestWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
@@ -59,8 +62,18 @@ func (w *runtimeTestWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBoot
 	ack.Holder = w.holder
 	return ack, nil
 }
-func (w *runtimeTestWorker) BeginDrain(context.Context, TrafficMode, uint64) error {
+func (w *runtimeTestWorker) BeginDrain(ctx context.Context, _ TrafficMode, _ uint64) error {
 	*w.events = append(*w.events, "drain:"+w.holder.DescriptionID)
+	if w.beginDrainStarted != nil {
+		w.beginDrainOnce.Do(func() { close(w.beginDrainStarted) })
+	}
+	if w.beginDrainBlock != nil {
+		select {
+		case <-w.beginDrainBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 func (w *runtimeTestWorker) AwaitQuiescence(context.Context, uint64) (RuntimeQuiescenceAckV1, error) {

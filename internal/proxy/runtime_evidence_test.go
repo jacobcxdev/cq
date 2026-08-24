@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 type runtimeEvidenceTestStore struct {
@@ -56,6 +57,7 @@ func TestRescueLifecycleRoutesNewIngressAndReapsWorker(t *testing.T) {
 	if err := supervisor.EnterRescue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 	response := httptest.NewRecorder()
 	supervisor.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
 	if response.Code != http.StatusAccepted || rescueCalls != 1 {
@@ -76,6 +78,127 @@ func TestRescueLifecycleRoutesNewIngressAndReapsWorker(t *testing.T) {
 			t.Fatalf("events = %#v", events)
 		}
 	}
+}
+
+func TestRescueEntryReturnsBeforeStuckWorkerDrain(t *testing.T) {
+	events := []string{}
+	drainStarted := make(chan struct{})
+	drainBlock := make(chan struct{})
+	worker := &runtimeTestWorker{
+		holder: runtimeHolder("worker"), events: &events,
+		beginDrainStarted: drainStarted, beginDrainBlock: drainBlock,
+	}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}}, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &runtimeEvidenceTestStore{}
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+	}), store); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan error, 1)
+	go func() { entered <- supervisor.EnterRescue(context.Background()) }()
+	select {
+	case err := <-entered:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(drainBlock)
+		<-entered
+		t.Fatal("rescue entry blocked on worker drain")
+	}
+	select {
+	case <-drainStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker drain did not start")
+	}
+	if err := supervisor.EnterRescue(context.Background()); err != nil {
+		t.Fatalf("repeated rescue entry = %v", err)
+	}
+	response := httptest.NewRecorder()
+	supervisor.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/responses", nil))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("rescue response = %d", response.Code)
+	}
+	close(drainBlock)
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+}
+
+func TestRescueEntryForcesReapAfterDrainDeadline(t *testing.T) {
+	events := []string{}
+	worker := &runtimeTestWorker{
+		holder: runtimeHolder("worker"), events: &events,
+		beginDrainBlock: make(chan struct{}),
+	}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}}, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &runtimeEvidenceTestStore{}
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), store); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.EnterRescue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(runtimeRescueDrainLimit + time.Second)
+	for time.Now().Before(deadline) {
+		if supervisor.TrafficMode() == TrafficModeRescue {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("mode remained %q after drain deadline", supervisor.TrafficMode())
+}
+
+func TestRuntimeSupervisorReportsHealthDuringRescue(t *testing.T) {
+	events := []string{}
+	worker := &runtimeTestWorker{holder: runtimeHolder("worker"), events: &events}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}}, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &runtimeEvidenceTestStore{}
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeRescueError(writer, http.StatusNotFound, "rescue_route_unsupported")
+	}), store); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.EnterRescue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+
+	response := httptest.NewRecorder()
+	supervisor.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/json" || response.Body.String() != "{\"status\":\"ok\",\"supervisor_alive\":true,\"data_plane_ready\":true,\"mode\":\"rescue\"}\n" {
+		t.Fatalf("rescue health = %d %q %q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+}
+
+func waitForRuntimeMode(t *testing.T, supervisor *RuntimeSupervisor, want TrafficMode) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if supervisor.TrafficMode() == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("mode = %q, want %q", supervisor.TrafficMode(), want)
 }
 
 func TestRescueLifecycleExitBlocksIngressUntilWorkerReady(t *testing.T) {

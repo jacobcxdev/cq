@@ -44,9 +44,10 @@ func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
 	enter.Header.Set("Authorization", "Bearer local-token")
 	enterResponse := httptest.NewRecorder()
 	supervisor.ServeHTTP(enterResponse, enter)
-	if enterResponse.Code != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescue {
+	if enterResponse.Code != http.StatusOK {
 		t.Fatalf("enter = %d mode=%q body=%q", enterResponse.Code, supervisor.TrafficMode(), enterResponse.Body.String())
 	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 	rescue := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}"))
 	rescueResponse := httptest.NewRecorder()
 	supervisor.ServeHTTP(rescueResponse, rescue)

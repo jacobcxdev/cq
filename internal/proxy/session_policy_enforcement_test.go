@@ -58,6 +58,25 @@ func TestSessionPolicyEnforcementPreservesUnboundParity(t *testing.T) {
 	}
 }
 
+func TestSessionPolicyEnforcementAllowsCodexCallerWithoutDelegation(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	session := []byte("bound-session")
+	resolver := NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV1{{Name: "cyber", Members: []codex.AccountKey{"account-a", "account-b"}}},
+		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, session), Pool: "cyber"}},
+	})
+	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "worker-keyed-caller"}
+
+	decision, err := enforceSessionPolicy(resolver, caller, session, []codex.AccountKey{"account-a", "account-b", "account-c"}, "", time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Status != PolicyDecisionSelected || decision.Pool != "cyber" || len(decision.Allowed) != 2 || decision.Allowed[0] != "account-a" || decision.Allowed[1] != "account-b" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
 func TestSessionPolicyResolverAllowsExplicitPoolWithoutCapabilityEvidence(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	session := []byte("explicit-session")
@@ -107,7 +126,7 @@ func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 	permits := &sessionPolicyPermitRecorder{}
 	factory.DispatchPermits = permits
 	caller := RuntimeCallerAuthorityV1{
-		Domain: NormalCallerLocal, SubjectID: "local-caller", ConsumptionDigest: strings.Repeat("a", 64),
+		Domain: NormalCallerCodex, SubjectID: "worker-keyed-caller", ConsumptionDigest: strings.Repeat("a", 64),
 	}
 
 	prepared, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{

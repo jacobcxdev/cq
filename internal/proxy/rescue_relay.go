@@ -501,7 +501,8 @@ func (relay *RescueRelay) serveWebSocket(writer http.ResponseWriter, request *ht
 	dialer := relay.DialWS
 	if dialer == nil {
 		dialer = rescueGorillaWebSocketDialer{dialer: websocket.Dialer{
-			Proxy: nil, HandshakeTimeout: 15 * time.Second, EnableCompression: false,
+			Proxy: nil, HandshakeTimeout: 15 * time.Second, EnableCompression: true,
+			Subprotocols: websocket.Subprotocols(request),
 		}}
 	}
 	upstream, response, err := dialer.DialContext(ctx, target.String(), sanitiseRescueRequestHeaders(request.Header))
@@ -522,11 +523,15 @@ func (relay *RescueRelay) serveWebSocket(writer http.ResponseWriter, request *ht
 		writeRescueError(writer, http.StatusBadGateway, "rescue_ws_handshake_invalid")
 		return
 	}
-	downstream, err := (&websocket.Upgrader{
+	upgrader := &websocket.Upgrader{
 		HandshakeTimeout:  15 * time.Second,
-		EnableCompression: false,
+		EnableCompression: true,
 		CheckOrigin:       func(*http.Request) bool { return true },
-	}).Upgrade(writer, request, responseHeaders)
+	}
+	if protocol := upstream.Subprotocol(); protocol != "" {
+		upgrader.Subprotocols = []string{protocol}
+	}
+	downstream, err := upgrader.Upgrade(writer, request, responseHeaders)
 	if err != nil {
 		_ = upstream.Close()
 		return
@@ -568,7 +573,9 @@ func validateRescueWebSocket101(input http.Header) (http.Header, error) {
 		switch lower {
 		case "upgrade", "connection", "sec-websocket-accept":
 			continue
-		case "sec-websocket-extensions", "sec-websocket-protocol", "set-cookie", "location", "www-authenticate":
+		case "sec-websocket-extensions", "sec-websocket-protocol":
+			continue
+		case "set-cookie", "location", "www-authenticate":
 			return nil, errors.New("unsupported websocket response header")
 		}
 		if allowedRescueResponseHeader(lower, rescueRouteResponse) {
