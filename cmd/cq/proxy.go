@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,13 +27,6 @@ import (
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
-
-func denyExactRescueBearer(localToken string) func([]byte) bool {
-	expected := []byte(localToken)
-	return func(bearer []byte) bool {
-		return len(expected) != 0 && len(bearer) == len(expected) && subtle.ConstantTimeCompare(bearer, expected) == 1
-	}
-}
 
 func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory, codexSecrets codexprov.ExactSecretResolver) ([]proxy.NormalCallerCredentialV1, error) {
 	if cfg == nil || cfg.LocalToken == "" {

@@ -112,13 +112,14 @@ type NormalCallerAdmissionConsumer interface {
 }
 
 type NormalCallerAuthority struct {
-	mu       sync.RWMutex
-	key      []byte
-	epoch    uint64
-	entries  []normalCallerIndexEntry
-	consumer NormalCallerAdmissionConsumer
-	now      func() time.Time
-	random   io.Reader
+	mu        sync.RWMutex
+	key       []byte
+	epoch     uint64
+	entries   []normalCallerIndexEntry
+	published []normalCallerIndexEntry
+	consumer  NormalCallerAdmissionConsumer
+	now       func() time.Time
+	random    io.Reader
 }
 
 // DeriveNormalCallerAuthorityKey derives the caller-index key from already
@@ -161,6 +162,7 @@ func NewNormalCallerAuthority(key []byte, epoch uint64, credentials []NormalCall
 			authority.entries = append(authority.entries, entry)
 		}
 	}
+	authority.published = append([]normalCallerIndexEntry(nil), authority.entries...)
 	return authority, nil
 }
 
@@ -216,6 +218,7 @@ func NewNormalCallerAuthorityFromIndex(key []byte, index NormalCallerIndexV1, co
 		return nil, err
 	}
 	authority.entries = entries
+	authority.published = append([]normalCallerIndexEntry(nil), entries...)
 	return authority, nil
 }
 
@@ -236,14 +239,32 @@ func (authority *NormalCallerAuthority) UpdateFromIndex(index NormalCallerIndexV
 		return ErrNormalCallerAuthUnavailable
 	}
 	if index.IndexEpoch == authority.epoch {
-		if !normalCallerEntriesEqual(authority.entries, entries) {
+		if !normalCallerEntriesEqual(authority.published, entries) {
 			return ErrNormalCallerAuthUnavailable
 		}
 		return nil
 	}
+	accepted := append([]normalCallerIndexEntry(nil), entries...)
+	now := authority.now()
+	for _, existing := range authority.entries {
+		if existing.validUntil.IsZero() || !now.Before(existing.validUntil) || normalCallerFingerprintExists(accepted, existing) {
+			continue
+		}
+		accepted = append(accepted, existing)
+	}
 	authority.epoch = index.IndexEpoch
-	authority.entries = entries
+	authority.entries = accepted
+	authority.published = append([]normalCallerIndexEntry(nil), entries...)
 	return nil
+}
+
+func normalCallerFingerprintExists(entries []normalCallerIndexEntry, candidate normalCallerIndexEntry) bool {
+	for _, entry := range entries {
+		if entry.domain == candidate.domain && entry.fingerprint == candidate.fingerprint {
+			return true
+		}
+	}
+	return false
 }
 
 func normalCallerEntriesFromIndex(index NormalCallerIndexV1) ([]normalCallerIndexEntry, error) {

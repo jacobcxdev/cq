@@ -145,16 +145,9 @@ func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	listenerURL, err := url.Parse(listener.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fairnessKey := sha256.Sum256([]byte("installed-codex-rescue-acceptance"))
 	relay := &RescueRelay{
-		Transport: &http.Client{Transport: &codexRescueAcceptanceTransport{target: target, inner: http.DefaultTransport}},
-		Origin:    origin, LoopbackHost: listenerURL.Host, ForwardingAcknowledged: true,
-		DenyBearer: func(bearer []byte) bool { return string(bearer) == localToken },
-		Budget:     NewRescueBudget(time.Now, fairnessKey),
+		Transport: &codexRescueAcceptanceTransport{target: target, inner: http.DefaultTransport},
+		Origin:    origin,
 	}
 	if err := supervisor.ConfigureRescue(context.Background(), relay, &runtimeEvidenceTestStore{}); err != nil {
 		t.Fatal(err)
@@ -217,26 +210,13 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 		http.Error(writer, "normal worker used during rescue", http.StatusInternalServerError)
 	})
 	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServer(t, workerHandler, localToken)
-	listenerURL, err := url.Parse(listener.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fairnessKey := sha256.Sum256([]byte("installed-codex-live-rescue-acceptance"))
 	relay := &RescueRelay{
-		Transport: &http.Client{
-			Transport: http.DefaultTransport,
-			Timeout:   60 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return errors.New("rescue redirect refused")
-			},
-		},
-		Origin: origin, LoopbackHost: listenerURL.Host, ForwardingAcknowledged: true,
-		DenyBearer: func(bearer []byte) bool { return string(bearer) == localToken },
-		Budget:     NewRescueBudget(time.Now, fairnessKey),
+		Transport: http.DefaultTransport,
+		Origin:    origin,
 	}
 	if err := supervisor.ConfigureRescue(context.Background(), relay, &runtimeEvidenceTestStore{}); err != nil {
 		t.Fatal(err)

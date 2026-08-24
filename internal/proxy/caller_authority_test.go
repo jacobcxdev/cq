@@ -87,6 +87,38 @@ func TestCallerAuthorityAcceptsOnlyAuthenticatedMonotonicIndexUpdates(t *testing
 	}
 }
 
+func TestCallerAuthorityRetainsSupersededBearerUntilExpiry(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 32)
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	authority, err := NewNormalCallerAuthority(key, 1, []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "old-bearer", SubjectID: "codex-old", ValidUntil: now.Add(time.Hour),
+	}}, consumer, func() time.Time { return now }, bytes.NewReader(bytes.Repeat([]byte{0x31}, 256)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := BuildNormalCallerIndexV1(key, 2, []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "new-bearer", SubjectID: "codex-new", ValidUntil: now.Add(2 * time.Hour),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.UpdateFromIndex(updated); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRequest := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	oldRequest.Header.Set("Authorization", "Bearer old-bearer")
+	if _, err := authority.authenticate(oldRequest, normalCallerRouteCodex); err != nil {
+		t.Fatalf("unexpired superseded bearer rejected: %v", err)
+	}
+
+	now = now.Add(2 * time.Hour)
+	if _, err := authority.authenticate(oldRequest, normalCallerRouteCodex); !errors.Is(err, ErrNormalCallerAuthRequired) {
+		t.Fatalf("expired superseded bearer error = %v", err)
+	}
+}
+
 func TestCallerAuthorityRejectsAmbiguousBearerBeforeBodyOrWorker(t *testing.T) {
 	events := []string{}
 	worker := &runtimeTestWorker{holder: runtimeHolder("worker"), events: &events}

@@ -69,16 +69,14 @@ func TestProxyResilienceIsolatedRehearsal29280(t *testing.T) {
 	origin, _ := url.Parse("https://chatgpt.com/backend-api/codex")
 	upstreamCalls := 0
 	relay := &RescueRelay{
-		Transport: rescueDoerFunc(func(request *http.Request) (*http.Response, error) {
+		Transport: rescueRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
 			upstreamCalls++
 			if request.URL.String() != "https://chatgpt.com/backend-api/codex/models?client_version=0.147.0" || request.Header.Get("Authorization") != "Bearer synthetic-candidate-token" {
 				t.Fatalf("synthetic upstream request = %s auth=%q", request.URL, request.Header.Get("Authorization"))
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"synthetic"}]}`))}, nil
 		}),
-		Origin: origin, LoopbackHost: "127.0.0.1:29280", ForwardingAcknowledged: true,
-		DenyBearer: supervisor.DeniesNormalBearer, Budget: NewRescueBudget(time.Now, state.RescueFairnessKey()),
-		Admission: func(*http.Request) RescueIngressKind { return RescueIngressUnverified },
+		Origin: origin,
 	}
 	if err := supervisor.ConfigureRescue(context.Background(), relay, state.RuntimeMode); err != nil {
 		t.Fatal(err)

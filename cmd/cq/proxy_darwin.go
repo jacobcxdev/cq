@@ -20,7 +20,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"golang.org/x/sys/unix"
@@ -148,22 +147,13 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 	if err != nil {
 		return err
 	}
-	transport := &http.Client{
-		Transport: http.DefaultTransport,
-		Timeout:   60 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("rescue redirect refused")
-		},
-	}
 	return proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, func(supervisor *proxy.RuntimeSupervisor) error {
 		if err := supervisor.SetCallerAuthority(callerAuthority); err != nil {
 			return err
 		}
 		relay := &proxy.RescueRelay{
-			Transport: transport, DialWS: websocket.DefaultDialer, Origin: origin,
-			LoopbackHost: listener.Addr().String(), ForwardingAcknowledged: true,
-			DenyBearer: denyExactRescueBearer(bootstrap.LocalToken), Budget: proxy.NewRescueBudget(time.Now, state.RescueFairnessKey()),
-			Admission: func(*http.Request) proxy.RescueIngressKind { return proxy.RescueIngressUnverified },
+			Transport: http.DefaultTransport,
+			Origin:    origin,
 		}
 		return supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode)
 	}, serve)
