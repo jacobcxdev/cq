@@ -1,197 +1,548 @@
 # cq
 
-A CLI tool to check AI provider quota usage at a glance. Supports **Claude**, **Codex**, and **Gemini**, with optional local proxy support for quota-aware routing and model registry publishing.
+`cq` is a quota dashboard, account manager, model-registry publisher, and local Claude/Codex API router. It checks **Claude**, **Codex**, and **Gemini** quota in parallel, presents per-account and aggregate burn information, and can keep local AI clients on healthy accounts without exposing provider credentials.
+
+![cq output](assets/screenshot.png)
 
 ## Install
 
+Homebrew is the supported macOS installation and service-management path:
+
 ```bash
 brew install jacobcxdev/tap/cq
+brew services start cq            # Optional local proxy service
 ```
 
-Or with Go:
+Or install a development build with Go:
 
 ```bash
 go install github.com/jacobcxdev/cq/cmd/cq@latest
 ```
 
-Gemini quota requires an authenticated [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) account. cq reads Antigravity's existing Keychain credential and project cache, then calls Antigravity's quota API directly. It never writes either store.
+Release builds include the private OAuth material needed to refresh Antigravity access in memory. A `go install` build can use an existing, still-valid Antigravity access token but cannot refresh it after expiry.
 
-## Usage
-
-Start with help if you are new to cq:
+## Quick start
 
 ```bash
-cq --help                    # Show every command family
-cq check --help              # Provider quota checks
-cq claude --help             # Claude account commands
-cq codex --help              # Codex account commands
-cq proxy --help              # Local proxy commands
-cq models --help             # Model registry commands
-cq agent --help              # Background refresh agent commands
-cq refresh --help            # One-shot token refresh
+cq                                # Check Claude, Codex, and Gemini
+cq check claude codex             # Check selected providers
+cq check gemini                   # Check Gemini through Antigravity HTTP APIs
+cq --json                         # Machine-readable report
+cq --refresh                      # Bypass quota cache
+cq --version
 ```
 
-Every command path has its own help text, including leaves such as `cq proxy pin --help`, `cq models overlay add --help`, and `cq claude login --help`.
+`check` accepts `claude`, `codex`, and `gemini`. Provider fetches run concurrently. Multi-account work also runs concurrently within each provider.
+
+Use context-sensitive help for exact flags and safety confirmations:
 
 ```bash
-cq                         # Check all providers
-cq check claude codex      # Check specific providers
-cq check gemini            # Check Gemini quota through Antigravity HTTP API
-cq --json                  # JSON output
-cq --refresh               # Bypass cached quota results
-cq --version               # Print version
+cq --help
+cq check --help
+cq claude --help
+cq codex --help
+cq gemini --help
+cq proxy --help
+cq models --help
+cq operation --help
 ```
 
-`check` accepts `claude`, `codex`, and `gemini` provider names.
+## Capability map
 
-Common command families:
+| Area | Capabilities |
+|------|--------------|
+| Quota | Parallel Claude, Codex, and Gemini checks; provider selection; cache bypass; stale-account backfill; TTY and JSON output. |
+| Analysis | Remaining quota, reset times, pace, smoothed burn rate, projected burndown, correction-deadline gauge, multi-account aggregate, provider availability. |
+| Accounts | Claude and Codex OAuth login, listing, activation, switching, removal, and token refresh; read-only Gemini account inspection. |
+| Background work | One-shot OAuth refresh and macOS background refresh LaunchAgent. |
+| Proxy | Loopback Claude/Codex routing, Anthropic Messages compatibility, native Codex Responses HTTP/WebSocket routing, model discovery, local authentication, health/status inspection. |
+| Routing controls | Claude/Codex pins, Codex default, account allowlist, quota/fairness selection, durable continuity, quota-window priming, capability pools, session bindings, rescue mode. |
+| Codex assurance | Installed HTTP/WebSocket validation, routing canary, candidate runtime lifecycle, client-bearer barrier, release receipts, durable operation recovery, legacy endpoint transition. |
+| Efficiency feedback | Privacy-safe Codex request-shape telemetry, turn receipts, observational no-affinity comparison, Codex Stop-hook output. |
+| Model registry | Anthropic/Codex source merge, local listing, refresh, overlays, Codex cache publication, Claude Code capability and picker publication. |
+| Diagnostics | Strict proxy snapshot, routing metadata JSONL, opt-in raw payload JSONL, health and runtime evidence, safe error classification. |
 
-| Command | Purpose |
-|---------|---------|
-| `cq` / `cq check` | Fetch quota usage for all or selected providers. |
-| `cq claude ...` | Add, list, switch, or remove Claude accounts. |
-| `cq codex ...` | Add, list, switch, or remove Codex accounts. |
-| `cq check gemini` | Fetch Gemini quota using an authenticated Antigravity account. |
-| `cq refresh` | Refresh stored OAuth tokens before they expire. |
-| `cq agent ...` | Install or uninstall background quota refresh. |
-| `cq proxy ...` | Run, inspect, install, or configure the local proxy. |
-| `cq models ...` | Refresh, list, or override local model registry entries. |
+## Quota checks and output
 
-### JSON availability
+### Providers
 
-`cq --json` includes a provider-level `availability` object for agents and other automated consumers. Use `availability.state` and `availability.guidance` to decide whether to send new work to a provider:
+- **Claude** discovers stored accounts, fetches profile and usage data in parallel, refreshes eligible tokens, and reports each account.
+- **Codex** discovers system, CQ-managed, and declared read-only external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
+- **Gemini** reads Antigravity Keychain credential and cached project ID concurrently, calls Antigravity OAuth and quota HTTP APIs directly, and never invokes `agy`. Credential/project stores remain read-only; refreshed tokens live only in process memory.
 
-- `available`: provider is available for normal work.
-- `limited`: provider can route work, but quota is low; conserve it for small, necessary, or user-approved work.
-- `exhausted`: provider is exhausted or unavailable for new work.
+### Cache and history
 
-Account-level `active` fields are retained for compatibility and mean credential default/current account. They are not proxy routing decisions and should not be used as provider availability signals; the proxy may route differently because of quota, manual pins, or failover.
+Successful quota rows are cached by provider. Default TTL is 30 seconds; `--refresh` bypasses it. If one account has a transient fetch failure and a matching usable cached row exists, cq shows stale quota with original error context instead of hiding that account. Auth errors are never written as fresh cache data.
 
-## Account Management
+cq also keeps per-account/window EWMA burn history for trend display and a secondary imminent-block gauge override. Pace, burndown, and the main gauge derive from the current quota window and remain available without history. Cache and history failures degrade to uncached/cold-start behaviour.
 
-Claude and Codex support stored account management:
+### TTY report
+
+For each provider/account, cq can show:
+
+- plan/account identity and active credential marker;
+- remaining percentage and reset time for each quota window;
+- usage pace and smoothed burn rate;
+- projected burndown;
+- aggregate coverage across two or more usable accounts;
+- correction-deadline gauge: overburn deadline on left, on-pace centre, projected waste on right;
+- Codex proxy-eligible subset when discovery and routing eligibility differ;
+- cached/stale and error context.
+
+TTY icons require a [Nerd Font](https://www.nerdfonts.com/). Recommended: [`jacobcxdev/tap/liga-sf-mono-nerd-font`](https://github.com/jacobcxdev/homebrew-tap).
+
+### JSON report
 
 ```bash
-cq claude login --activate # Add Claude account via OAuth and make it active
-cq claude accounts         # List Claude accounts
-cq claude switch EMAIL     # Switch active Claude account
-cq claude remove EMAIL     # Remove Claude account
-
-cq codex login --activate  # Add Codex account via OAuth and make it active
-cq codex accounts          # List Codex accounts
-cq codex switch EMAIL      # Switch active Codex account
-cq codex remove EMAIL      # Remove Codex account
+cq --json
+cq --json check codex
+cq codex accounts --json
+cq gemini accounts --json
 ```
 
-Gemini authentication and account selection stay externally managed by Antigravity. cq reads its existing credential and cached project ID concurrently, never invokes `agy`, and preserves provider name `gemini` in commands, JSON output, and cache keys.
+JSON includes provider results, aggregates, cache age, error codes, proxy eligibility, and an `availability` object for automated consumers:
 
-> **Note:** After switching accounts, MCP servers that use the provider's credentials (for example Codex MCP) may need to be reconnected to pick up the new active account.
+- `available`: normal work is safe.
+- `limited`: quota is low; conserve it for small, necessary, or approved work.
+- `exhausted`: new work should not route there without explicit override.
 
-## Proxy
+Account-level `active` means credential default/current account. It is not a proxy routing decision; pins, bindings, eligibility, continuity, and failover can select another account.
 
-`cq proxy` runs a local Anthropic-compatible proxy for Claude Code and other clients. It can route runtime traffic through cq while preserving provider credentials and quota awareness.
+## Accounts and authentication
+
+### Claude
 
 ```bash
-cq proxy start             # Start the proxy
+cq claude login --activate
+cq claude accounts
+cq claude switch EMAIL
+cq claude remove EMAIL
+```
+
+Claude login uses browser OAuth. Stored account credentials support multi-account checks and proxy routing.
+
+### Codex
+
+```bash
+cq codex login --activate
+cq codex accounts
+cq codex switch EMAIL
+cq codex remove EMAIL
+```
+
+CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
+
+### Gemini
+
+```bash
+cq gemini accounts
+cq gemini accounts --json
+```
+
+Gemini authentication and project selection remain owned by Antigravity. cq reads Keychain service `gemini`, account `antigravity`, plus Antigravity's project cache. It does not provide Gemini login, switch, or removal commands.
+
+### Token refresh
+
+```bash
+cq refresh
+cq agent install
+cq agent uninstall
+```
+
+`cq refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. `cq agent install` installs a per-user macOS LaunchAgent that runs refresh work periodically. Expired Claude accounts can still require interactive login.
+
+On macOS, a successful ordinary quota/account command also installs the refresh agent on first use if it is absent. Run `cq agent uninstall` to disable it.
+
+After an explicit account switch, already-running clients or MCP servers may need reconnection to reload credential state.
+
+## Local proxy
+
+`cq proxy` binds to loopback, routes Claude and Codex traffic, and publishes local model metadata. It supports Anthropic Messages clients plus native Codex Responses HTTP and WebSocket traffic, including compact, search, image, and realtime/live routes used by supported clients. The retired `/app-server` compatibility endpoint returns `410 Gone` with guidance to run Codex app-server locally and route its outbound Responses traffic through cq.
+
+### Service lifecycle and status
+
+Homebrew installs must use Homebrew service management:
+
+```bash
+brew services start cq
+brew services restart cq
+brew services stop cq
+cq proxy status --strict --json
+```
+
+Manual/non-Homebrew installations can use:
+
+```bash
+cq proxy start
 cq proxy start --port 19280
-cq proxy status            # Check proxy health
-cq proxy status --port 19280
-cq proxy install           # Install the user launch agent
-cq proxy uninstall         # Remove the user launch agent
-cq proxy restart           # Restart the user launch agent
-cq proxy pin               # Show the pinned Claude account, if any
-cq proxy pin <email-or-account-uuid>
-cq proxy pin --clear       # Clear the pinned Claude account
+cq proxy start --migrate-legacy-managed
+cq proxy install
+cq proxy restart
+cq proxy uninstall
 ```
 
-Use `cq proxy pin --clear` to clear a pin. `clear` and `remove` are reserved words, not valid literal pin values.
+`--migrate-legacy-managed` explicitly adds routing identity metadata to legacy CQ-managed Codex records. Ordinary startup does not perform this migration.
 
-The proxy config is stored at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json` when `XDG_CONFIG_HOME` is not set. If it does not exist, `cq proxy start` creates it with a random local token.
-
-Important `proxy.json` fields:
-
-| JSON field | Default | Description |
-|------------|---------|-------------|
-| `port` | `19280` | Local proxy listen port. |
-| `claude_upstream` | `https://api.anthropic.com` | Anthropic API upstream. |
-| `codex_upstream` | `https://chatgpt.com/backend-api/codex` | Codex backend upstream. |
-| `local_token` | generated | Required bearer token for local proxy requests. |
-| `pinned_claude_account` | unset | Optional Claude account email or UUID to force proxy selection. |
-| `diagnostics_log` | unset | Optional JSONL routing diagnostics log path for advanced local debugging. |
-| `payload_diagnostics_log` | unset | Optional JSONL payload diagnostics log path. **Disabled by default.** See warning below. |
-| `headroom` | `false` | Enables the headroom compression bridge when true. |
-| `headroom_mode` | `cache` | Compression strategy when set; valid values are `cache` and `token`. |
-
-Routing diagnostics are disabled by default. To enable them, set `diagnostics_log` in `proxy.json` to a local file path and restart the proxy. The log is append-only JSONL containing redacted route metadata such as method, path, provider, route kind, status, latency, selected-account hint, failover flag, and safe error code. It is intended for advanced local debugging and UAT, and enabling it does not change routing policy.
-
-**Payload diagnostics** (`payload_diagnostics_log`) are disabled by default. To enable them, set `payload_diagnostics_log` in `proxy.json` to a local file path and **restart the proxy** (hot reload is not supported). Each entry in the log is a JSONL record with fields including `time`, `method`, `path`, `provider`, `route_kind`, `model`, `client_kind`, `session_key`, `session_source`, `session_signal`, `frame_index`, `body_bytes`, and `body`. Codex WebSocket client text frames are logged with `route_kind: codex_websocket_frame` so native Codex sessions can expose signals such as new session, continuation, long session, clear, and compact transitions.
-
-> **WARNING:** The payload diagnostics log contains **raw request bodies** including prompts, tool inputs, system prompts, compact summaries, and message content. It is unsafe to share without careful review. The log does not record headers, tokens, or credential values by itself, but the body content may contain sensitive information. The `session_key` and `session_source` fields are derived correlation metadata — `session_key` is a deterministic 12-hex-character hash of a session identifier (never the raw value), and `session_source` identifies which signal was used (e.g. `x-claude-code-session-id`, `session_id`, `x-codex-window-id`, `body:conversation_id`, `body:thread_id`, `body:previous_response_id`, `ws:thread_id`, `ws:previous_response_id`). Payload diagnostics can derive the key from known conversation/thread identifiers in JSON request bodies or Codex WebSocket frames when otherwise-identical local client sessions have no differentiating session header.
-
-## Model Registry
-
-`cq models` manages the local model registry used by the proxy, Claude Code model caches, and Codex model cache integration.
+Bare `cq proxy status` performs a compatibility health probe. Inspection forms with flags reconcile desired configuration, service owner, listener, process, runtime health, and data-plane evidence:
 
 ```bash
-cq models refresh                         # Refresh registry data and publish caches
-cq models list                            # List active registry models
-cq models list --json                     # JSON model list
-cq models list --provider codex           # Filter by provider
+cq proxy status                    # Compatibility /health JSON probe
+cq proxy status --human            # Reconciled human summary
+cq proxy status --json             # Reconciled stable JSON envelope
+cq proxy status --strict --json    # Non-zero when reconciled state is unhealthy
+cq proxy status --timeout 10s
+cq proxy status --instance-state-root PATH
+```
+
+`GET /health` proves runtime reachability only; strict status checks broader ownership and runtime facts.
+
+### Client routing
+
+Point Claude Code-compatible traffic at `http://127.0.0.1:19280` with `ANTHROPIC_BASE_URL`. cq accepts its generated local bearer token and known Claude OAuth tokens, routes Anthropic models to Claude, and translates supported GPT/o-series Anthropic Messages requests to Codex Responses. Native Codex clients use Codex HTTP/WebSocket routes without Anthropic translation.
+
+Core behaviour includes:
+
+- model-registry-first provider selection with prefix fallback;
+- Claude and Codex multi-account routing;
+- quota/capacity-aware fair selection;
+- account eligibility and explicit allowlists;
+- hard continuity for bound Codex turns/sessions;
+- HTTP per-turn routing and WebSocket connection-aware routing;
+- bounded failover before response commitment;
+- optional request headroom compression (`cache` or `token` mode);
+- durable leases and retention for Codex continuity;
+- automatic model-registry publication and drift repair.
+
+### Pins, defaults, and priming
+
+```bash
+cq proxy pin                              # Show Claude and Codex pins
+cq proxy pin claude EMAIL_OR_UUID
+cq proxy pin claude --clear
+cq proxy pin codex EMAIL_ALIAS_OR_KEY
+cq proxy pin codex --clear
+
+cq proxy default codex EMAIL_ALIAS_OR_KEY
+cq proxy default codex --clear
+
+cq proxy prime status
+cq proxy prime enable
+cq proxy prime disable
+```
+
+Claude pin changes hot-reload. Codex pin/default/priming changes require proxy restart. A Codex pin affects new and unbound work but does not break existing hard continuity.
+
+### Capability policy and session pools
+
+Advanced policy commands manage authenticated, capability-aware Codex account pools and privacy-safe session bindings:
+
+```bash
+cq proxy policy initialise --state-root DIR
+cq proxy policy apply --file FILE
+cq proxy policy status
+cq proxy policy pool set NAME --account ACCOUNT --account ACCOUNT
+cq proxy policy session bind --pool NAME --session-id ID
+cq proxy policy session show --session-id ID
+cq proxy policy session list
+cq proxy policy session unbind --session-id ID
+cq proxy policy session digest --session-id ID
+```
+
+Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-root` supports offline state.
+
+### Rescue mode
+
+```bash
+cq proxy rescue enter
+cq proxy rescue status
+cq proxy rescue exit
+```
+
+Rescue mode is durable, local-token authenticated, and loopback-only. It lets operators move traffic through a bounded recovery path without sending control credentials upstream.
+
+## Codex validation and operational controls
+
+These commands exist for controlled validation, rollout, and recovery. Use each command's help before mutation.
+
+### Installed routing validation
+
+```bash
+cq codex validate capture --input FILE --output FILE --content-encoding ENCODING --metadata FILE
+cq codex validate http --client-build BUILD [--state-dir DIR]
+cq codex validate websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]
+cq proxy validate-http --port CANDIDATE_PORT
+```
+
+Validation checks current installed-listener readiness against cq/client builds, request/response evidence, and process attestation. `proxy validate-http` refuses live port `19280` and does not change shared proxy configuration.
+
+### Routing canary
+
+```bash
+cq codex canary start
+cq codex canary status
+cq codex canary stop
+```
+
+Canary start requires enforced HTTP routing and disabled payload diagnostics. Stop requests a drain; it does not discard active continuity.
+
+### Isolated candidate lifecycle
+
+```bash
+cq proxy candidate prepare ...
+cq proxy candidate status --instance-state-root PATH
+cq proxy candidate client-bearer-barrier refresh ...
+cq proxy candidate start ...
+cq proxy candidate artifact switch ...
+cq proxy candidate validate-release ...
+cq proxy candidate receipt show ...
+cq proxy candidate stop ...
+cq proxy candidate remove ...
+```
+
+Candidate validation uses an isolated state root, explicit port, pinned source/release/client digests, explicit credential mode, bounded timeouts, authenticated runtime control, client-bearer barrier, and retained receipts. It never uses installed listener or ambient credentials. Read-only credentials and payload capture require explicit confirmation; removal requires explicit state-loss confirmation.
+
+### Durable operations
+
+```bash
+cq operation status
+cq operation status --operation-id ID --json
+cq operation recover --operation-id ID --json
+```
+
+Durable operation inspection returns active, retained terminal, or idle state. Recovery reconciles exact operation identity instead of starting unrelated work.
+
+### Legacy credential endpoint maintenance
+
+```bash
+cq proxy endpoint inspect-legacy
+cq proxy endpoint transition-legacy prepare ...
+cq proxy endpoint transition-legacy resume ...
+cq proxy endpoint transition-legacy activate ...
+cq proxy endpoint transition-legacy finalise ...
+cq proxy endpoint transition-legacy rollback ...
+```
+
+Ordinary cq/proxy startup never performs legacy endpoint maintenance. Inspection is read-only. Transition steps require explicit snapshots/tickets, stopped-and-drained or healthy-candidate confirmations, and retain rollback state.
+
+### Codex Stop hook and efficiency receipt
+
+```bash
+cq proxy hook codex-stop
+```
+
+Configured as a Codex `Stop` hook, this command reads hook JSON from stdin, performs an authenticated loopback lookup, and returns a privacy-safe `systemMessage`. Receipt summarises recorded route state, transport, pool/account hint, model/effort, route reason, and observational no-affinity comparison. Recorded state can be planned, attempted, completed, failed, rejected, or indeterminate. Receipt does not include prompts, transcripts, raw IDs, or credentials and does not change routing.
+
+## Model registry
+
+```bash
+cq models refresh
+cq models list
+cq models list --json
+cq models list --provider codex
 cq models list --provider anthropic
 
 cq models overlay add --provider codex --id gpt-5.5 --clone-from gpt-5.4
 cq models overlay remove --provider codex --id gpt-5.5
-cq models overlay prune                   # Remove overlays shadowed by native models
+cq models overlay prune
 ```
 
-Registry overlays are stored at `$XDG_CONFIG_HOME/cq/models.json`, or `~/.config/cq/models.json` when `XDG_CONFIG_HOME` is not set.
+Registry refresh merges provider sources with local overlays, validates entries, and publishes:
 
-A registry refresh publishes provider-specific caches where supported:
+- Codex model cache at `$CODEX_HOME/models_cache.json` or `~/.codex/models_cache.json`;
+- Claude Code capability cache at `$CLAUDE_CONFIG_DIR/cache/model-capabilities.json` or `~/.claude/cache/model-capabilities.json`;
+- managed Claude Code picker entries in `~/.claude.json`.
 
-- Codex model cache: `$CODEX_HOME/models_cache.json`, or `~/.codex/models_cache.json`.
-- Claude Code model capabilities: `$CLAUDE_CONFIG_DIR/cache/model-capabilities.json`, or `~/.claude/cache/model-capabilities.json`.
-- Claude Code picker options: `additionalModelOptionsCache` in `~/.claude.json`.
+Overlays expose not-yet-native model IDs and can clone metadata from an existing model. `prune` removes overlays now supplied natively. Overlay store: `$XDG_CONFIG_HOME/cq/models.json` or `~/.config/cq/models.json`.
 
-Claude Code still needs `ANTHROPIC_BASE_URL` pointed at the running proxy for runtime API traffic. The `/model` picker is populated from Claude Code config/cache files, so `cq models refresh` and the proxy publish registry-backed picker entries there. The proxy also re-publishes picker entries automatically when it detects drift.
+Proxy endpoints also expose model metadata and authenticated registry refresh/snapshot APIs for local clients.
 
-## Background Agent
+## Proxy configuration
 
-```bash
-cq agent install           # Install the quota refresh launch agent
-cq agent uninstall         # Remove the quota refresh launch agent
-cq refresh                 # Run a one-shot refresh
-```
+Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. First `cq proxy start` creates it with a random local token. Unknown fields are preserved across writes for version compatibility.
 
-## What It Shows
+| JSON field | Default | Purpose |
+|------------|---------|---------|
+| `port` | `19280` | Loopback listen port. |
+| `claude_upstream` | `https://api.anthropic.com` | Claude API upstream. |
+| `codex_upstream` | `https://chatgpt.com/backend-api/codex` | ChatGPT OAuth-compatible Codex upstream. |
+| `local_token` | generated | Local control/proxy bearer token. |
+| `headroom` | `false` | Enable request headroom compression. |
+| `headroom_mode` | `cache` | `cache` or `token` compression strategy. |
+| `pinned_claude_account` | unset | Claude email/account UUID pin. Prefer `cq proxy pin claude`. |
+| `codex_turn_routing` | `off` | Codex HTTP routing mode: `off`, `observe`, or `enforce`. |
+| `codex_ws_turn_routing` | `off` | Codex WebSocket routing mode: `off`, `observe`, or `enforce`. |
+| `codex_routing_default_account_key` | unset | Default opaque Codex account key. |
+| `codex_routing_pinned_account_key` | unset | Pinned opaque Codex account key. |
+| `codex_routing_account_keys` | unset | Explicit eligible Codex account allowlist. |
+| `codex_lease_retention_days` | `7` | Durable continuity retention, valid from 1 to 365 days. |
+| `codex_continuity_state_dir` | cq config directory | Optional Codex lease/continuity state-root override. |
+| `proxy_resilience_state_dir` | unset | Optional policy/runtime authority root; resilience controls stay inactive while unset. |
+| `codex_window_priming` | disabled | Priming enablement and per-window model overrides. |
+| `diagnostics_log` | unset | Redacted routing metadata JSONL path. |
+| `payload_diagnostics_log` | unset | Raw payload JSONL path; restart required. |
 
-For each provider, cq displays remaining quota as a percentage bar, pace indicator, and burndown estimate for each rate-limit window. Requires a [Nerd Font](https://www.nerdfonts.com/) for icons to render correctly. Recommended: [`jacobcxdev/tap/liga-sf-mono-nerd-font`](https://github.com/jacobcxdev/homebrew-tap).
+## Diagnostics and privacy
 
-![cq output](assets/screenshot.png)
+### Routing diagnostics
 
-## Configuration
+Set `diagnostics_log` and restart. JSONL entries contain redacted route metadata: method, path, provider, route kind, model, status, latency, selected-account hint, failover state, session correlation, and safe error code. Enabling it does not change routing policy.
+
+### Payload diagnostics
+
+`payload_diagnostics_log` is disabled by default and requires restart. It records request/frame bodies plus correlation metadata for supported HTTP and Codex WebSocket traffic.
+
+> **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, and other sensitive content. Do not share without review. cq does not intentionally add headers, tokens, or credential values to this log, but request bodies can themselves contain secrets.
+
+Session keys in diagnostics are short deterministic hashes, not raw session identifiers. `session_source` records which header/body/WebSocket signal supplied correlation.
+
+## Environment and files
 
 ### Environment variables
 
-| Environment variable | Default | Description |
-|----------------------|---------|-------------|
-| `CQ_TTL` | `30` | Quota cache duration in seconds, e.g. `60`, `300`. |
-| `XDG_CONFIG_HOME` | `~/.config` | Base directory for cq config files. |
-| `XDG_CACHE_HOME` | platform cache dir | Base directory for cq quota cache files. |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory for model capability cache publication. |
-| `CODEX_HOME` | `~/.codex` | Codex config directory for model cache reads/writes. |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CQ_TTL` | `30` | Quota cache TTL in seconds. |
+| `XDG_CONFIG_HOME` | `~/.config` | cq config/state base. Must be absolute when supplied. |
+| `XDG_CACHE_HOME` | platform user-cache directory | Quota cache and burn-history base; supplied value must be absolute. |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code model-capability cache base. CQ credential discovery still uses macOS Keychain and `~/.claude`. |
+| `CODEX_HOME` | `~/.codex` | Codex model-cache and client-discovery base. CQ managed/system credential discovery still uses `~/.codex`. |
+| `ANTHROPIC_BASE_URL` | unset | Point compatible clients at cq proxy. |
 
-### Config and cache files
+### Important paths
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/cq/proxy.json` | Local proxy port, upstreams, token, and headroom settings. |
-| `~/.config/cq/models.json` | User-managed model registry overlays. |
-| `~/.cache/cq/*.json` | Cached quota results and account metadata. |
-| `~/.claude/.credentials.json` | Claude credentials read/written for account management. |
-| `~/.claude.json` | Claude Code global config; cq writes managed model picker entries. |
-| `~/.codex/models_cache.json` | Codex model cache populated by registry refresh. |
-| `~/Library/Logs/cq/proxy.log` | macOS launch agent log for the proxy service. |
-| `~/Library/Logs/cq/refresh.log` | macOS launch agent log for quota refresh. |
+| `~/.config/cq/proxy.json` | Proxy configuration and local token. |
+| `~/.config/cq/models.json` | User model overlays. |
+| `~/.config/cq/state/` | Compatibility epoch, credential-control endpoint, and Codex removal journal. |
+| `~/.config/cq/` | Default live-runtime lifecycle, canary, normal-caller admission, config, and overlay files. |
+| Configured `codex_continuity_state_dir`, defaulting to `~/.config/cq/` | Durable Codex continuity and lease state. |
+| Configured `proxy_resilience_state_dir` | Routing policy, dispatch-permit, and runtime-mode/rescue authority. No default is assumed; `cq proxy policy initialise --state-root DIR` configures it. |
+| Command-supplied `--instance-state-root` | Isolated candidate lifecycle, validation, staged-release, and receipt state. |
+| `$XDG_CACHE_HOME/cq/*.json` or platform cache equivalent | Provider quota cache. On macOS, default base is `~/Library/Caches/cq`. |
+| `$XDG_CACHE_HOME/cq/burn_state_v2.json` or platform cache equivalent | Smoothed burn history. |
+| `~/.claude/.credentials.json` | Claude account credentials. |
+| `~/.claude.json` | Claude Code global config and managed picker entries. |
+| `~/.codex/auth.json` | System Codex credential, read automatically but not rewritten by routing. |
+| `~/.codex/accounts/` | CQ-managed Codex accounts and registry. |
+| `~/.codex/models_cache.json` | Published Codex model cache. |
+| `~/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist` | Background refresh agent on macOS. |
+| `~/Library/Logs/cq/refresh.log` | Background refresh log. |
+| `~/Library/Logs/cq/proxy.log` | Proxy service log. |
+
+Secret/state writes use owner-only permissions and atomic replacement. External Gemini and declared external Codex credential stores remain read-only.
+
+## Complete command index
+
+This index is checked against CQ's Kong model and production dispatchers in both directions.
+
+<details>
+<summary>Show every command path</summary>
+
+<!-- public-command-index:start -->
+```text
+cq agent
+cq agent install
+cq agent uninstall
+cq check
+cq claude accounts
+cq claude login
+cq claude remove
+cq claude switch
+cq codex
+cq codex accounts
+cq codex canary
+cq codex canary start
+cq codex canary status
+cq codex canary stop
+cq codex login
+cq codex remove
+cq codex switch
+cq codex validate
+cq codex validate capture
+cq codex validate http
+cq codex validate websocket
+cq gemini accounts
+cq models
+cq models list
+cq models overlay
+cq models overlay add
+cq models overlay prune
+cq models overlay remove
+cq models refresh
+cq operation
+cq operation recover
+cq operation status
+cq proxy
+cq proxy candidate
+cq proxy candidate artifact
+cq proxy candidate artifact switch
+cq proxy candidate client-bearer-barrier
+cq proxy candidate client-bearer-barrier refresh
+cq proxy candidate prepare
+cq proxy candidate receipt
+cq proxy candidate receipt show
+cq proxy candidate remove
+cq proxy candidate start
+cq proxy candidate status
+cq proxy candidate stop
+cq proxy candidate validate-release
+cq proxy default
+cq proxy default codex
+cq proxy endpoint
+cq proxy endpoint inspect-legacy
+cq proxy endpoint transition-legacy
+cq proxy endpoint transition-legacy activate
+cq proxy endpoint transition-legacy finalise
+cq proxy endpoint transition-legacy prepare
+cq proxy endpoint transition-legacy resume
+cq proxy endpoint transition-legacy rollback
+cq proxy hook
+cq proxy hook codex-stop
+cq proxy install
+cq proxy pin
+cq proxy pin claude
+cq proxy pin codex
+cq proxy policy
+cq proxy policy apply
+cq proxy policy initialise
+cq proxy policy pool
+cq proxy policy pool set
+cq proxy policy session
+cq proxy policy session bind
+cq proxy policy session digest
+cq proxy policy session list
+cq proxy policy session show
+cq proxy policy session unbind
+cq proxy policy status
+cq proxy prime
+cq proxy prime disable
+cq proxy prime enable
+cq proxy prime status
+cq proxy rescue
+cq proxy rescue enter
+cq proxy rescue exit
+cq proxy rescue status
+cq proxy restart
+cq proxy start
+cq proxy status
+cq proxy uninstall
+cq proxy validate-http
+cq refresh
+```
+<!-- public-command-index:end -->
+
+</details>
+
+## Development
+
+```bash
+go build ./...
+go vet ./...
+go test -race -count=1 ./...
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, review, release, and Homebrew service rules.
 
 ## Licence
 

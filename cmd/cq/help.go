@@ -100,6 +100,7 @@ Commands:
   proxy endpoint      Explicitly inspect or transition the credential endpoint
   proxy policy        Initialise, apply, or inspect routing policy
   proxy rescue        Enter, exit, or inspect rescue mode
+  proxy hook          Emit privacy-safe Codex turn receipts for hooks
   proxy candidate     Prepare and control isolated candidate validation
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
@@ -111,11 +112,19 @@ Options:
   --migrate-legacy-managed       Explicitly add routing identity metadata to legacy CQ-managed records
 `,
 	"proxy status": `Usage: cq proxy status [--port PORT]
+       cq proxy status [--human | --json] [--strict] [--timeout DURATION] [--instance-state-root PATH]
 
-Show proxy health as JSON.
+Without reconciled-status flags, request the compatibility /health JSON probe.
+With any reconciled-status flag, inspect desired configuration, service,
+listener, process, runtime, and data-plane evidence.
 
 Options:
-  --port PORT         Override configured health-check port
+  --port PORT                    Override compatibility health-check port
+  --human                       Render reconciled human summary
+  --json                        Render reconciled stable JSON envelope
+  --strict                      Exit non-zero when reconciled state is unhealthy
+  --timeout DURATION            Bound reconciled inspection (default 10s)
+  --instance-state-root PATH    Inspect an isolated candidate state root
 `,
 	"proxy install": `Usage: cq proxy install
 
@@ -160,6 +169,11 @@ Session selectors:
 
 Control durable rescue mode on the loopback proxy. Requests require the local
 proxy token and never send it upstream.
+`,
+	"proxy hook": `Usage: cq proxy hook codex-stop
+
+Read Codex Stop-hook JSON from stdin and emit a privacy-safe turn receipt.
+The lookup is authenticated against the loopback proxy and does not change routing.
 `,
 	"proxy candidate": `Usage: cq proxy candidate <command>
 
@@ -650,6 +664,11 @@ func validateProxyLexicalGrammar(args []string) error {
 			return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
 		}
 		return nil
+	case "hook":
+		if len(args) != 2 || args[1] != "codex-stop" {
+			return errors.New("usage: cq proxy hook codex-stop")
+		}
+		return nil
 	case "install", "uninstall", "restart":
 		return nil
 	default:
@@ -1032,7 +1051,7 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
 		"validate-http": true, "status": true, "pin": true,
-		"policy": true, "rescue": true,
+		"policy": true, "rescue": true, "hook": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)
 }

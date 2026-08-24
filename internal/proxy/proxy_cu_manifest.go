@@ -109,6 +109,7 @@ func CanonicalCUManifestV1(cuID string) ([]byte, error) {
 		"TestManualHelpTextDocumentsEachCommandPath/models_overlay_add",
 		"TestManualHelpTextDocumentsEachCommandPath/models_overlay_remove",
 		"TestManualHelpTextDocumentsEachCommandPath/proxy_codex_default",
+		"TestManualHelpTextDocumentsEachCommandPath/proxy_hook",
 		"TestManualHelpTextDocumentsEachCommandPath/proxy_pin",
 		"TestManualHelpTextDocumentsEachCommandPath/proxy_prime",
 		"TestManualHelpTextDocumentsEachCommandPath/proxy_start",
