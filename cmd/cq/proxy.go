@@ -63,6 +63,7 @@ func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccou
 		}
 	}
 	for _, account := range codexInventory.Accounts {
+		seenBearers := make(map[string]struct{}, len(account.Candidates))
 		for _, candidate := range account.Candidates {
 			accessToken := candidate.Credential.AccessToken
 			if accessToken == "" && candidate.Routable {
@@ -75,6 +76,10 @@ func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccou
 				}
 				accessToken = material.AccessToken
 			}
+			if _, duplicate := seenBearers[accessToken]; duplicate {
+				continue
+			}
+			seenBearers[accessToken] = struct{}{}
 			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision)
 			if err := appendCredential(proxy.NormalCallerCodex, accessToken, identity, codexCallerBearerExpiry(accessToken)); err != nil {
 				return nil, err
@@ -996,6 +1001,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexNativeHTTP, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
 		Status:            codexRouting.HTTP,
+		PeerStatus:        codexRouting.WebSocket,
 		Inventory:         codexContinuityInventory,
 		Capacity:          codexCapacity,
 		Routes:            codexRoutes,
@@ -1017,6 +1023,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexWebSocketBroker, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
 		Status:            codexRouting.WebSocket,
+		PeerStatus:        codexRouting.HTTP,
 		Inventory:         codexContinuityInventory,
 		Capacity:          codexCapacity,
 		Routes:            codexRoutes,

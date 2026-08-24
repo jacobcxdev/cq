@@ -148,6 +148,18 @@ func TestCallerAuthorityRejectsAmbiguousBearerBeforeBodyOrWorker(t *testing.T) {
 	}
 }
 
+func TestCallerAuthorityRejectsCrossAccountCodexBearer(t *testing.T) {
+	authority := testNormalCallerAuthority(t, []NormalCallerCredentialV1{
+		{Domain: NormalCallerCodex, Bearer: "same-bearer", SubjectID: "account-a"},
+		{Domain: NormalCallerCodex, Bearer: "same-bearer", SubjectID: "account-b"},
+	}, &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)})
+	request := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	request.Header.Set("Authorization", "Bearer same-bearer")
+	if _, err := authority.authenticate(request, normalCallerRouteCodex); !errors.Is(err, ErrNormalCallerAuthScope) {
+		t.Fatalf("cross-account bearer error = %v, want %v", err, ErrNormalCallerAuthScope)
+	}
+}
+
 func TestCallerAuthorityConsumesOneUseAdmissionBeforeWorkerDispatch(t *testing.T) {
 	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
 	worker := &callerAuthorityObservingWorker{holder: runtimeHolder("worker"), consumer: consumer}

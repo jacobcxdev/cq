@@ -407,6 +407,62 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 	}
 }
 
+func TestProxyCodexEnforcedTransportsShareContinuityAuthority(t *testing.T) {
+	t.Parallel()
+
+	httpStatus := proxy.CodexModeStatus{
+		Configured:                  proxy.CodexRoutingEnforce,
+		Effective:                   proxy.CodexRoutingEnforce,
+		ModeEpoch:                   149,
+		AuthoritativeEpoch:          149,
+		RetainedAuthoritativeEpochs: []uint64{29, 84},
+	}
+	webSocketStatus := proxy.CodexModeStatus{
+		Configured:                  proxy.CodexRoutingEnforce,
+		Effective:                   proxy.CodexRoutingEnforce,
+		ModeEpoch:                   151,
+		AuthoritativeEpoch:          151,
+		RetainedAuthoritativeEpochs: []uint64{132, 146},
+	}
+	dependency := &proxyCodexNativeHTTPTestDependency{}
+	capacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
+	var httpPlanner, webSocketPlanner *proxy.CodexHTTPRequestPlanFactory
+
+	_, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
+		Status: httpStatus, PeerStatus: webSocketStatus,
+		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
+		Executor: dependency, Refresher: dependency, Upstream: "https://codex.example", Now: time.Now,
+		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, _ proxy.CodexNativeHTTPRequestSession, _ string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+			httpPlanner, _ = planner.(*proxy.CodexHTTPRequestPlanFactory)
+			return &proxyCodexNativeHTTPTestHandler{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
+		Status: webSocketStatus, PeerStatus: httpStatus,
+		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
+		Executor: proxyCodexWebSocketTestExecutor{}, Upstream: "https://codex.example", Now: time.Now,
+		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, _ proxy.ExplicitWebSocketExecutor, _ string) (proxy.CodexWebSocketRoutingHandler, error) {
+			webSocketPlanner, _ = planner.(*proxy.CodexHTTPRequestPlanFactory)
+			return &proxyCodexWebSocketTestHandler{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := proxy.CodexLeaseAuthorityPolicy{
+		ModeEpoch:                   151,
+		Authoritative:               true,
+		RetainedAuthoritativeEpochs: []uint64{29, 84, 132, 146, 149},
+	}
+	if httpPlanner == nil || webSocketPlanner == nil || !reflect.DeepEqual(httpPlanner.Authority, want) || !reflect.DeepEqual(webSocketPlanner.Authority, want) {
+		t.Fatalf("cross-transport authorities = HTTP %#v WebSocket %#v, want %#v", httpPlanner.Authority, webSocketPlanner.Authority, want)
+	}
+}
+
 func TestNewProxyCodexV2ObserversAreObserveOnlyAndNonPersistent(t *testing.T) {
 	t.Parallel()
 

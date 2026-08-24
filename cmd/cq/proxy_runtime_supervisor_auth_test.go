@@ -204,6 +204,52 @@ func TestNormalCallerCredentialsResolveExternalCodexBearer(t *testing.T) {
 	}
 }
 
+func TestNormalCallerCredentialsDeduplicateSharedAccountBearer(t *testing.T) {
+	account := codexprov.LogicalAccount{
+		Key:      "account-key",
+		Identity: codexprov.AccountIdentity{AccountID: "account-id", UserID: "user-id"},
+		Candidates: []codexprov.CredentialCandidate{
+			{Ref: codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "system-candidate"}, Revision: "system-revision", Source: codexprov.SourceSystem, Routable: true},
+			{Ref: codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "external-candidate"}, Revision: "external-revision", Source: codexprov.SourceExternal, Routable: true},
+		},
+	}
+	credentials, err := normalCallerCredentials(context.Background(), &proxy.Config{LocalToken: "local-token"}, nil, codexprov.Inventory{Accounts: []codexprov.LogicalAccount{account}}, runtimeSupervisorCallerResolver(func(context.Context, codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+		return codexprov.CredentialMaterial{AccessToken: "shared-account-token"}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 2 || credentials[1].Domain != proxy.NormalCallerCodex || credentials[1].Bearer != "shared-account-token" || credentials[1].SubjectID != "account-key\x00system-candidate\x00system-revision" {
+		t.Fatalf("shared-account caller credentials = %#v", credentials)
+	}
+}
+
+func TestNormalCallerCredentialsPreserveCrossAccountBearerAmbiguity(t *testing.T) {
+	accounts := []codexprov.LogicalAccount{
+		{
+			Key: "account-a",
+			Candidates: []codexprov.CredentialCandidate{{
+				Ref: codexprov.CandidateRef{AccountKey: "account-a", CandidateID: "candidate-a"}, Revision: "revision-a", Source: codexprov.SourceSystem, Routable: true,
+			}},
+		},
+		{
+			Key: "account-b",
+			Candidates: []codexprov.CredentialCandidate{{
+				Ref: codexprov.CandidateRef{AccountKey: "account-b", CandidateID: "candidate-b"}, Revision: "revision-b", Source: codexprov.SourceExternal, Routable: true,
+			}},
+		},
+	}
+	credentials, err := normalCallerCredentials(context.Background(), &proxy.Config{LocalToken: "local-token"}, nil, codexprov.Inventory{Accounts: accounts}, runtimeSupervisorCallerResolver(func(context.Context, codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+		return codexprov.CredentialMaterial{AccessToken: "cross-account-token"}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 3 || credentials[1].Bearer != "cross-account-token" || credentials[2].Bearer != "cross-account-token" || credentials[1].SubjectID == credentials[2].SubjectID {
+		t.Fatalf("cross-account caller credentials = %#v", credentials)
+	}
+}
+
 func TestNormalCallerCredentialsUseCodexBearerExpiry(t *testing.T) {
 	accessExpiry := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
 	identityExpiry := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)

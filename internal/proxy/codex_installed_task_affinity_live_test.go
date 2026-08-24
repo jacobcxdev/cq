@@ -49,14 +49,71 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	core.continuity.Store().mu.Lock()
+	core.continuity.Store().modes = CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{1, 149, 151}}
+	core.continuity.Store().mu.Unlock()
+	httpPlanner := &CodexHTTPRequestPlanFactory{
+		Inventory: core.inventory, Capacity: core.capacity, Routes: core.continuity, Runtime: core.leaseRuntime,
+		DefaultAccountKey: codexInstalledHTTPValidationDefault,
+		Authority: CodexLeaseAuthorityPolicy{
+			ModeEpoch: 151, Authoritative: true, RetainedAuthoritativeEpochs: []uint64{149},
+		},
+		Headroom: codexInstalledHTTPValidationHeadroom{}, HeadroomMode: HeadroomModeToken,
+		TransportKind: "http",
+		Now:           time.Now,
+	}
+	httpHandler, err := NewCodexNativeHTTPHandler(httpPlanner, &CodexHTTPRequestSession{
+		Executor: &CodexAttemptExecutor{
+			Inventory: core.inventory,
+			Secrets:   core.inventory,
+			Transport: &CodexTokenTransport{Inner: newCodexInstalledHTTPValidationRoundTripper(core.upstream.address)},
+		},
+		Refresher: core.inventory,
+		Capacity:  core.capacity,
+	}, "http://"+core.upstream.address)
+	if err != nil {
+		t.Fatalf("construct HTTP acceptance handler: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := httpHandler.CloseAndDrain(ctx); err != nil {
+			t.Errorf("close HTTP acceptance handler: %v", err)
+		}
+	})
 	server := &Server{
 		Config: &Config{
 			LocalToken:     localToken,
 			ClaudeUpstream: "http://" + core.upstream.address,
 			CodexUpstream:  "http://" + core.upstream.address,
 		},
-		CodexNativeHTTP: core.nativeHTTPHandler(),
+		CodexRouting: &CodexRoutingRuntime{
+			HTTP:      CodexModeStatus{Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 149, AuthoritativeEpoch: 149},
+			WebSocket: CodexModeStatus{Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 151, AuthoritativeEpoch: 151},
+		},
+		CodexNativeHTTP: httpHandler,
 		Catalog:         modelregistry.NewCatalog(modelregistry.Snapshot{}),
+	}
+	traffic := &codexInstalledWebSocketTraffic{}
+	webSocketUpstream, webSocketServer, webSocketErrors, err := startCodexAcceptanceHTTP(http.HandlerFunc(traffic.serveUpstream))
+	if err != nil {
+		t.Fatalf("start WebSocket acceptance upstream: %v", err)
+	}
+	t.Cleanup(func() { shutdownCodexAcceptanceServer(webSocketServer) })
+	webSocketPlanner := &CodexHTTPRequestPlanFactory{
+		Inventory: core.inventory, Capacity: core.capacity, Routes: core.continuity, Runtime: core.leaseRuntime,
+		DefaultAccountKey: codexInstalledHTTPValidationDefault,
+		Authority: CodexLeaseAuthorityPolicy{
+			ModeEpoch: 151, Authoritative: true, RetainedAuthoritativeEpochs: []uint64{149},
+		},
+		TransportKind: "websocket",
+		Now:           time.Now,
+	}
+	webSocketExecutor := NewCodexWebSocketAttemptExecutor(core.inventory, core.inventory)
+	webSocketExecutor.Dialer.Proxy = nil
+	server.CodexWebSocketBroker, err = NewCodexTerminatingWebSocketHandler(webSocketPlanner, webSocketExecutor, "http://"+webSocketUpstream.Addr().String())
+	if err != nil {
+		t.Fatalf("construct WebSocket acceptance handler: %v", err)
 	}
 	handler, err := server.RuntimeHandler()
 	if err != nil {
@@ -71,17 +128,36 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 	runner := codexTaskAffinityAcceptanceRunner{}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	if err := runCodexCompactionAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, false, "Reply with exactly PONG and no other text.", "PONG"); err != nil {
-		t.Fatalf("first Codex compaction turn: %v", err)
-	}
-	if err := runCodexCompactionAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, true, "Reply with exactly PONG and no other text.", "PONG"); err != nil {
-		t.Fatalf("second Codex compaction turn: %v", err)
+	if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, runner, clientProof, listener.URL, isolation, false, true, "PONG"); err != nil {
+		t.Fatalf("first Codex WebSocket turn: %v", err)
 	}
 	core.upstream.mu.Lock()
-	compact := core.upstream.compact
+	responsesAfterWebSocket, compactAfterWebSocket := core.upstream.responses, core.upstream.compact
 	core.upstream.mu.Unlock()
-	if compact == 0 {
-		t.Fatal("installed Codex did not issue remote compaction request")
+	if responsesAfterWebSocket != 0 || compactAfterWebSocket != 0 {
+		t.Fatalf("HTTP traffic after WebSocket turn = responses %d compact %d, want 0/0", responsesAfterWebSocket, compactAfterWebSocket)
+	}
+	if err := runCodexCompactionAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, true, "Reply with exactly PONG and no other text.", "PONG"); err != nil {
+		t.Fatalf("resumed Codex HTTP turn: %v", err)
+	}
+	core.upstream.mu.Lock()
+	responsesAfterResume, compactAfterResume := core.upstream.responses, core.upstream.compact
+	core.upstream.mu.Unlock()
+	if responsesAfterResume != 1 || compactAfterResume != 0 {
+		t.Fatalf("HTTP traffic after resumed turn = responses %d compact %d, want 1/0", responsesAfterResume, compactAfterResume)
+	}
+	if err := runCodexCompactionAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, true, "Reply with exactly PONG and no other text.", "PONG"); err != nil {
+		t.Fatalf("resumed Codex HTTP compaction turn: %v", err)
+	}
+	shutdownCodexAcceptanceServer(webSocketServer)
+	if err := codexAcceptanceServeError(webSocketErrors); err != nil {
+		t.Fatalf("WebSocket acceptance upstream: %v", err)
+	}
+	core.upstream.mu.Lock()
+	responses, compact := core.upstream.responses, core.upstream.compact
+	core.upstream.mu.Unlock()
+	if traffic.webSocketRequests.Load() == 0 || responses != 2 || compact != 1 {
+		t.Fatalf("installed Codex cross-transport requests = WebSocket %d responses %d compact %d, want positive/2/1", traffic.webSocketRequests.Load(), responses, compact)
 	}
 }
 

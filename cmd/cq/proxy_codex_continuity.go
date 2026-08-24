@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -43,6 +44,7 @@ type proxyCodexContinuity struct {
 
 type proxyCodexNativeHTTPDependencies struct {
 	Status            proxy.CodexModeStatus
+	PeerStatus        proxy.CodexModeStatus
 	Inventory         codexprov.CredentialInventory
 	Capacity          *proxy.CodexCapacityLedger
 	Routes            proxy.CodexHTTPRequestRouteSnapshotter
@@ -65,6 +67,7 @@ type proxyCodexNativeHTTPDependencies struct {
 
 type proxyCodexWebSocketDependencies struct {
 	Status            proxy.CodexModeStatus
+	PeerStatus        proxy.CodexModeStatus
 	Inventory         codexprov.CredentialInventory
 	Capacity          *proxy.CodexCapacityLedger
 	Routes            proxy.CodexHTTPRequestRouteSnapshotter
@@ -79,6 +82,31 @@ type proxyCodexWebSocketDependencies struct {
 	Now               func() time.Time
 
 	newHandler func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, string) (proxy.CodexWebSocketRoutingHandler, error)
+}
+
+func proxyCodexEnforcementAuthority(status, peer proxy.CodexModeStatus) proxy.CodexLeaseAuthorityPolicy {
+	authority := proxy.CodexLeaseAuthorityPolicy{
+		ModeEpoch:                   status.ModeEpoch,
+		Authoritative:               status.Effective == proxy.CodexRoutingEnforce,
+		RetainedAuthoritativeEpochs: append([]uint64(nil), status.RetainedAuthoritativeEpochs...),
+	}
+	if !authority.Authoritative || peer.Effective != proxy.CodexRoutingEnforce || peer.ModeEpoch == 0 || peer.AuthoritativeEpoch != peer.ModeEpoch {
+		return authority
+	}
+
+	authority.ModeEpoch = max(status.ModeEpoch, peer.ModeEpoch)
+	epochs := append([]uint64(nil), status.RetainedAuthoritativeEpochs...)
+	epochs = append(epochs, peer.RetainedAuthoritativeEpochs...)
+	epochs = append(epochs, status.ModeEpoch, peer.ModeEpoch)
+	slices.Sort(epochs)
+	epochs = slices.Compact(epochs)
+	authority.RetainedAuthoritativeEpochs = epochs[:0]
+	for _, epoch := range epochs {
+		if epoch != 0 && epoch < authority.ModeEpoch {
+			authority.RetainedAuthoritativeEpochs = append(authority.RetainedAuthoritativeEpochs, epoch)
+		}
+	}
+	return authority
 }
 
 func (continuity *proxyCodexContinuity) Close() error {
@@ -112,14 +140,10 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		DispatchPermits:   deps.DispatchPermits,
 		TurnReceipts:      deps.TurnReceipts,
 		TransportKind:     "http",
-		Authority: proxy.CodexLeaseAuthorityPolicy{
-			ModeEpoch:                   deps.Status.ModeEpoch,
-			Authoritative:               enforcing,
-			RetainedAuthoritativeEpochs: append([]uint64(nil), deps.Status.RetainedAuthoritativeEpochs...),
-		},
-		Headroom:     deps.Headroom,
-		HeadroomMode: deps.HeadroomMode,
-		Now:          deps.Now,
+		Authority:         proxyCodexEnforcementAuthority(deps.Status, deps.PeerStatus),
+		Headroom:          deps.Headroom,
+		HeadroomMode:      deps.HeadroomMode,
+		Now:               deps.Now,
 	}
 	session := &proxy.CodexHTTPRequestSession{
 		Executor:  deps.Executor,
@@ -179,12 +203,8 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 		DispatchPermits:   deps.DispatchPermits,
 		TurnReceipts:      deps.TurnReceipts,
 		TransportKind:     "websocket",
-		Authority: proxy.CodexLeaseAuthorityPolicy{
-			ModeEpoch:                   deps.Status.ModeEpoch,
-			Authoritative:               true,
-			RetainedAuthoritativeEpochs: append([]uint64(nil), deps.Status.RetainedAuthoritativeEpochs...),
-		},
-		Now: deps.Now,
+		Authority:         proxyCodexEnforcementAuthority(deps.Status, deps.PeerStatus),
+		Now:               deps.Now,
 	}
 	newHandler := deps.newHandler
 	if newHandler == nil {
