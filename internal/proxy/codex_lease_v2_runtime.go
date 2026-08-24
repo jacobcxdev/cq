@@ -378,6 +378,37 @@ func (handle *CodexLeaseRequestHandle) MarkDispatchedContext(ctx context.Context
 	return handle.transitionAttemptWithFence(fence, CodexAttemptPrepared, CodexAttemptDispatched, nil)
 }
 
+func (handle *CodexLeaseRequestHandle) markWebSocketReplacementDispatchedContext(ctx context.Context, downstreamGeneration, upstreamGeneration uint64) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil || handle.account == "" {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil WebSocket replacement context", ErrCodexLeaseInvalidMutation)
+	}
+	if downstreamGeneration == 0 || upstreamGeneration == 0 || !handle.record.AdoptedPrewarm ||
+		handle.record.DownstreamSocketGeneration != downstreamGeneration || handle.record.UpstreamSocketGeneration == 0 ||
+		handle.record.UpstreamSocketGeneration == upstreamGeneration {
+		return nil, ErrCodexWSStaleGeneration
+	}
+	release, err := handle.runtime.beginAccountMutation(ctx, handle.account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	if err := handle.runtime.revalidateAccountForCommit(ctx, handle.account); err != nil {
+		return nil, err
+	}
+	return handle.transitionAttemptWithFence(fence, CodexAttemptPrepared, CodexAttemptDispatched, func(desired *CodexJournalRecordV2) error {
+		desired.UpstreamSocketGeneration = upstreamGeneration
+		desired.SocketLineageExtinct = false
+		return nil
+	})
+}
+
 // AbandonBeforeDispatch records that a prepared request was cancelled before
 // any upstream send could occur. It releases every request reference so a
 // later explicit BeginRequest can safely replace the abandoned generation.
