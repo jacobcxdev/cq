@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,7 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
 		t.Skip("installed Codex supervisor acceptance requires explicit opt-in")
 	}
-	clientPath, err := resolveCodexInstalledClientExecutable()
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
 	if err != nil {
 		t.Fatalf("resolve installed Codex client: %v", err)
 	}
@@ -84,7 +85,7 @@ func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
 		t.Skip("installed Codex rescue acceptance requires explicit opt-in")
 	}
-	clientPath, err := resolveCodexInstalledClientExecutable()
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
 	if err != nil {
 		t.Fatalf("resolve installed Codex client: %v", err)
 	}
@@ -385,6 +386,56 @@ func TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover(t *testing.T) {
 
 type codexTaskAffinityAcceptanceRunner struct{}
 
+type codexAcceptanceDiagnosticBuffer struct {
+	data []byte
+}
+
+func TestCodexAcceptanceDiagnosticsAreBoundedAndRedacted(t *testing.T) {
+	buffer := &codexAcceptanceDiagnosticBuffer{}
+	input := make([]byte, 20<<10)
+	if written, err := buffer.Write(input); err != nil || written != len(input) || len(buffer.data) != 16<<10 {
+		t.Fatalf("diagnostic write = %d/%d bytes, error %v", written, len(buffer.data), err)
+	}
+	diagnostic := sanitiseCodexAcceptanceDiagnostic("safe detail\nAuthorization: secret\nBearer secret\naccess_token=secret")
+	if !strings.Contains(diagnostic, "safe detail") || strings.Contains(diagnostic, "secret") || strings.Count(diagnostic, "[redacted credential diagnostic]") != 3 {
+		t.Fatalf("diagnostic was not safely sanitised: %q", diagnostic)
+	}
+}
+
+func (buffer *codexAcceptanceDiagnosticBuffer) Write(value []byte) (int, error) {
+	const limit = 16 << 10
+	remaining := limit - len(buffer.data)
+	if remaining > 0 {
+		buffer.data = append(buffer.data, value[:min(len(value), remaining)]...)
+	}
+	return len(value), nil
+}
+
+func resolveCodexAcceptanceClientExecutable() (string, error) {
+	path := os.Getenv("CQ_CODEX_ACCEPTANCE_EXECUTABLE")
+	if path == "" {
+		return resolveCodexInstalledClientExecutable()
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New("Codex acceptance executable must be absolute")
+	}
+	return path, nil
+}
+
+func sanitiseCodexAcceptanceDiagnostic(value string) string {
+	lines := strings.Split(value, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "authorization") || strings.Contains(lower, "bearer") || strings.Contains(lower, "token") {
+			kept = append(kept, "[redacted credential diagnostic]")
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
 func (runner codexTaskAffinityAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
 	if runtime.GOOS != "darwin" || command.executable == "" || !command.expectedExecutable.valid() || !command.loopbackOnly {
 		return nil, errors.New("Codex task-affinity runner unavailable")
@@ -403,13 +454,18 @@ func (runner codexTaskAffinityAcceptanceRunner) Run(ctx context.Context, command
 	child.Dir = command.dir
 	child.Stdin = strings.NewReader("")
 	child.Stdout = io.Discard
-	child.Stderr = io.Discard
+	stderr := &codexAcceptanceDiagnosticBuffer{}
+	child.Stderr = stderr
 	child.WaitDelay = 2 * time.Second
 	if err := child.Run(); err != nil {
 		if ctx.Err() != nil {
 			return nil, errors.New("Codex task-affinity command timed out")
 		}
-		return nil, errors.New("Codex task-affinity command failed")
+		diagnostic := sanitiseCodexAcceptanceDiagnostic(string(stderr.data))
+		if diagnostic == "" {
+			return nil, fmt.Errorf("Codex task-affinity command failed: %w", err)
+		}
+		return nil, fmt.Errorf("Codex task-affinity command failed: %w: %s", err, diagnostic)
 	}
 	after, err := captureCodexInstalledExecutable(command.executable)
 	if err != nil || after != command.expectedExecutable {

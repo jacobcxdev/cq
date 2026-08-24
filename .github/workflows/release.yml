@@ -18,12 +18,15 @@ jobs:
           go-version: stable
 
       - name: Install current Codex client
-        run: brew install --cask codex
+        run: |
+          brew update
+          brew install --cask codex
+          codex --version
 
       - name: Validate normal, compaction, and rescue routing
         env:
           CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"
-        run: go test -race -count=1 ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledRescuePassesThroughCurrentClient)$'
+        run: CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" go test -race -count=1 ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledRescuePassesThroughCurrentClient)$'
 
   release:
     needs: validate-codex
@@ -41,7 +44,7 @@ jobs:
         run: go test -race -count=1 ./internal/proxy -run '^(TestCodexStage11LifecycleCorpusUsesProductionHandlers|TestCodexStage11LifecycleCorpusSmoke|TestCodexStage11ReviewedManifestMatchesCorpusAuthority)$'
 
       - name: Bind reviewed Codex corpus provenance
-        run: echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go ${GITHUB_REF_NAME#v} ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
+        run: echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "${GITHUB_REF_NAME#v}" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
 
       - name: Verify Gemini OAuth client secret
         env:
