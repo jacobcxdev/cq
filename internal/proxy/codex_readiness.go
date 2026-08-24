@@ -301,21 +301,10 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 // OpenCodexRoutingRuntime resolves modes once for process lifetime.
 func OpenCodexRoutingRuntime(cfg *Config, cqBuild, clientBuild string) (*CodexRoutingRuntime, error) {
 	httpReq, wsReq := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
-	return openCodexRoutingRuntimeAtWithArtifactCapture(configDir(), cfg, httpReq, wsReq, captureCurrentCodexInstalledArtifacts)
+	return openCodexRoutingRuntimeAt(configDir(), cfg, httpReq, wsReq)
 }
 
 func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTransportRequirements) (*CodexRoutingRuntime, error) {
-	return openCodexRoutingRuntimeAtWithArtifactCapture(dir, cfg, httpReq, wsReq, nil)
-}
-
-type codexInstalledArtifactCapture func(context.Context, string) (codexInstalledArtifactRequirement, error)
-
-func openCodexRoutingRuntimeAtWithArtifactCapture(
-	dir string,
-	cfg *Config,
-	httpReq, wsReq CodexTransportRequirements,
-	capture codexInstalledArtifactCapture,
-) (*CodexRoutingRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("proxy config is nil")
 	}
@@ -333,27 +322,29 @@ func openCodexRoutingRuntimeAtWithArtifactCapture(
 	if err := configuredWS.validate("codex_ws_turn_routing"); err != nil {
 		return nil, err
 	}
-	if configuredHTTP == CodexRoutingEnforce && capture != nil {
-		httpReq.installedArtifacts = codexInstalledArtifactRequirement{}
-		if installedArtifacts, err := captureCodexInstalledArtifactsSafely(capture, httpReq.ClientBuild); err == nil && installedArtifacts.valid() {
-			httpReq.installedArtifacts = installedArtifacts
-		}
-	}
 
 	journal, err := loadCodexRoutingJournal(dir)
 	if err != nil {
 		return nil, err
 	}
-	httpEffective, httpReason, httpFingerprint := resolveCodexMode(dir, configuredHTTP, httpReq)
-	wsEffective, wsReason, wsFingerprint := resolveCodexMode(dir, configuredWS, wsReq)
-	journal.HTTP = advanceCodexModeTrack(journal.HTTP, configuredHTTP, httpEffective, httpReason, httpFingerprint, &journal.NextEpoch)
-	journal.WebSocket = advanceCodexModeTrack(journal.WebSocket, configuredWS, wsEffective, wsReason, wsFingerprint, &journal.NextEpoch)
+	httpEffective, httpFingerprint, err := resolveCodexMode(configuredHTTP, httpReq)
+	if err != nil {
+		return nil, err
+	}
+	wsEffective, wsFingerprint, err := resolveCodexMode(configuredWS, wsReq)
+	if err != nil {
+		return nil, err
+	}
+	journal.HTTP = advanceCodexModeTrack(journal.HTTP, configuredHTTP, httpEffective, "", httpFingerprint, &journal.NextEpoch)
+	journal.WebSocket = advanceCodexModeTrack(journal.WebSocket, configuredWS, wsEffective, "", wsFingerprint, &journal.NextEpoch)
 	journal.Version = CodexRoutingJournalVersion
 	if err := saveJSONFile(filepath.Join(dir, "codex-routing-mode.json"), &journal); err != nil {
 		return nil, fmt.Errorf("save Codex routing mode journal: %w", err)
 	}
 	return &CodexRoutingRuntime{HTTP: journal.HTTP.CodexModeStatus, WebSocket: journal.WebSocket.CodexModeStatus}, nil
 }
+
+type codexInstalledArtifactCapture func(context.Context, string) (codexInstalledArtifactRequirement, error)
 
 func captureCodexInstalledArtifactsSafely(capture codexInstalledArtifactCapture, clientBuild string) (installedArtifacts codexInstalledArtifactRequirement, returnErr error) {
 	if capture == nil {
@@ -370,39 +361,29 @@ func captureCodexInstalledArtifactsSafely(capture codexInstalledArtifactCapture,
 	return capture(ctx, clientBuild)
 }
 
-func resolveCodexMode(dir string, configured CodexRoutingMode, requirements CodexTransportRequirements) (CodexRoutingMode, string, string) {
+func resolveCodexMode(configured CodexRoutingMode, requirements CodexTransportRequirements) (CodexRoutingMode, string, error) {
+	transport := string(requirements.Transport)
+	switch requirements.Transport {
+	case CodexRoutingHTTP:
+		transport = "HTTP"
+	case CodexRoutingWebSocket:
+		transport = "WebSocket"
+	}
 	switch configured {
 	case CodexRoutingOff:
-		return CodexRoutingOff, "", ""
+		return CodexRoutingOff, "", nil
 	case CodexRoutingObserve:
 		if !requirements.ObserveImplemented {
-			return CodexRoutingOff, "observe implementation unavailable", ""
+			return CodexRoutingOff, "", fmt.Errorf("Codex %s observation implementation unavailable", transport)
 		}
-		return CodexRoutingObserve, "", requirementsFingerprint(requirements)
+		return CodexRoutingObserve, requirementsFingerprint(requirements), nil
 	case CodexRoutingEnforce:
-		fallback := CodexRoutingOff
-		if requirements.ObserveImplemented {
-			fallback = CodexRoutingObserve
-		}
 		if !requirements.EnforceImplemented {
-			return fallback, "enforcement implementation unavailable", requirementsFingerprint(requirements)
+			return CodexRoutingOff, "", fmt.Errorf("Codex %s enforcement implementation unavailable", transport)
 		}
-		if requirements.Transport == CodexRoutingHTTP && !requirements.installedArtifacts.valid() {
-			return fallback, "installed artifact identity unavailable", requirementsFingerprint(requirements)
-		}
-		marker, err := LoadCodexReadinessMarker(dir, requirements.Transport)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fallback, "readiness marker missing", requirementsFingerprint(requirements)
-			}
-			return fallback, "readiness marker unreadable", requirementsFingerprint(requirements)
-		}
-		if err := ValidateCodexReadinessMarker(marker, requirements); err != nil {
-			return fallback, err.Error(), requirementsFingerprint(requirements)
-		}
-		return CodexRoutingEnforce, "", markerFingerprint(marker)
+		return CodexRoutingEnforce, requirementsFingerprint(requirements), nil
 	default:
-		return CodexRoutingOff, "invalid configured mode", ""
+		return CodexRoutingOff, "", fmt.Errorf("invalid configured Codex routing mode %q", configured)
 	}
 }
 
@@ -881,36 +862,18 @@ func codexReadinessPoisonName(transport CodexRoutingTransport) string {
 }
 
 func requirementsFingerprint(requirements CodexTransportRequirements) string {
-	gates := append([]string(nil), requirements.RequiredGates...)
-	sort.Strings(gates)
 	value := struct {
-		Transport              CodexRoutingTransport
-		CQBuild                string
-		ParserSchema           int
-		LeaseSchema            int
-		SemanticsRevision      string
-		ClientBuild            string
-		RetryBudget            int
-		FixtureHash            string
-		Gates                  []string
-		CQExecutableSHA256     string
-		ClientExecutableSHA256 string
-		ServiceKind            codexInstalledListenerServiceKind
-		ServiceIdentitySHA256  string
+		Transport         CodexRoutingTransport
+		ParserSchema      int
+		LeaseSchema       int
+		SemanticsRevision string
+		RetryBudget       int
 	}{
-		Transport:              requirements.Transport,
-		CQBuild:                requirements.CQBuild,
-		ParserSchema:           requirements.ParserSchema,
-		LeaseSchema:            requirements.LeaseSchema,
-		SemanticsRevision:      requirements.SemanticsRevision,
-		ClientBuild:            requirements.ClientBuild,
-		RetryBudget:            requirements.RetryBudget,
-		FixtureHash:            requirements.FixtureHash,
-		Gates:                  gates,
-		CQExecutableSHA256:     requirements.installedArtifacts.cqExecutableHex(),
-		ClientExecutableSHA256: requirements.installedArtifacts.clientExecutableHex(),
-		ServiceKind:            requirements.installedArtifacts.serviceKind,
-		ServiceIdentitySHA256:  requirements.installedArtifacts.serviceIdentityHex(),
+		Transport:         requirements.Transport,
+		ParserSchema:      requirements.ParserSchema,
+		LeaseSchema:       requirements.LeaseSchema,
+		SemanticsRevision: requirements.SemanticsRevision,
+		RetryBudget:       requirements.RetryBudget,
 	}
 	data, _ := json.Marshal(value)
 	return hashBytes(data)

@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"os"
@@ -417,24 +416,45 @@ func TestSaveCodexWebSocketReadinessMarkerDurablyRoundTrips(t *testing.T) {
 	}
 }
 
-func TestCodexReadinessFingerprintChangesWithSemanticsOrGates(t *testing.T) {
+func TestCodexRoutingFingerprintTracksRuntimeContractOnly(t *testing.T) {
 	required, _ := DefaultCodexRoutingRequirements("cq-build", "codex-cli 0.146.0")
 	baseline := requirementsFingerprint(required)
 
-	changedRevision := required
-	changedRevision.SemanticsRevision = "changed"
-	if got := requirementsFingerprint(changedRevision); got == baseline {
-		t.Fatal("semantics revision did not change readiness fingerprint")
+	for name, mutate := range map[string]func(*CodexTransportRequirements){
+		"CQ build":     func(value *CodexTransportRequirements) { value.CQBuild = "next-build" },
+		"client build": func(value *CodexTransportRequirements) { value.ClientBuild = "codex-cli 0.147.0" },
+		"fixture":      func(value *CodexTransportRequirements) { value.FixtureHash = "changed" },
+		"gates":        func(value *CodexTransportRequirements) { value.RequiredGates = []string{"changed"} },
+		"artifacts": func(value *CodexTransportRequirements) {
+			value.installedArtifacts = testCodexInstalledArtifacts
+		},
+	} {
+		t.Run("ignores "+name, func(t *testing.T) {
+			changed := required
+			mutate(&changed)
+			if got := requirementsFingerprint(changed); got != baseline {
+				t.Fatalf("runtime fingerprint changed: %q != %q", got, baseline)
+			}
+		})
 	}
 
-	changedGates := required
-	changedGates.RequiredGates = append(append([]string(nil), required.RequiredGates...), "changed")
-	if got := requirementsFingerprint(changedGates); got == baseline {
-		t.Fatal("gate tuple did not change readiness fingerprint")
+	for name, mutate := range map[string]func(*CodexTransportRequirements){
+		"parser schema":      func(value *CodexTransportRequirements) { value.ParserSchema++ },
+		"lease schema":       func(value *CodexTransportRequirements) { value.LeaseSchema++ },
+		"semantics revision": func(value *CodexTransportRequirements) { value.SemanticsRevision = "changed" },
+		"retry budget":       func(value *CodexTransportRequirements) { value.RetryBudget++ },
+	} {
+		t.Run("tracks "+name, func(t *testing.T) {
+			changed := required
+			mutate(&changed)
+			if got := requirementsFingerprint(changed); got == baseline {
+				t.Fatal("runtime contract change did not change fingerprint")
+			}
+		})
 	}
 }
 
-func TestCodexEnforceInhibitedWithoutMarker(t *testing.T) {
+func TestCodexEnforceDoesNotRequireReadinessMarker(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingOff}
 	httpReq, wsReq := DefaultCodexRoutingRequirements("build", "client")
@@ -442,75 +462,53 @@ func TestCodexEnforceInhibitedWithoutMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.HTTP.Configured != CodexRoutingEnforce || runtime.HTTP.Effective != CodexRoutingObserve || runtime.HTTP.InhibitionReason != "installed artifact identity unavailable" {
+	if runtime.HTTP.Configured != CodexRoutingEnforce || runtime.HTTP.Effective != CodexRoutingEnforce || runtime.HTTP.InhibitionReason != "" || runtime.HTTP.AuthoritativeEpoch == 0 {
 		t.Fatalf("HTTP status = %+v", runtime.HTTP)
 	}
 }
 
-func TestCodexRoutingRuntimeCapturesInstalledArtifactsOnlyForEnforce(t *testing.T) {
-	for _, mode := range []CodexRoutingMode{CodexRoutingOff, CodexRoutingObserve} {
-		t.Run(string(mode), func(t *testing.T) {
-			calls := 0
-			capture := func(context.Context, string) (codexInstalledArtifactRequirement, error) {
-				calls++
-				return testCodexInstalledArtifacts, nil
-			}
-			httpReq, wsReq := DefaultCodexRoutingRequirements("dev", "0.146.0")
-			if _, err := openCodexRoutingRuntimeAtWithArtifactCapture(t.TempDir(), &Config{CodexTurnRouting: mode}, httpReq, wsReq, capture); err != nil {
-				t.Fatal(err)
-			}
-			if calls != 0 {
-				t.Fatalf("artifact capture calls = %d, want 0", calls)
-			}
-		})
-	}
-
-	t.Run("enforce capture failure", func(t *testing.T) {
-		calls := 0
-		capture := func(context.Context, string) (codexInstalledArtifactRequirement, error) {
-			calls++
-			return codexInstalledArtifactRequirement{}, os.ErrNotExist
-		}
-		httpReq, wsReq := DefaultCodexRoutingRequirements("dev", "0.146.0")
-		runtime, err := openCodexRoutingRuntimeAtWithArtifactCapture(t.TempDir(), &Config{CodexTurnRouting: CodexRoutingEnforce}, httpReq, wsReq, capture)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if calls != 1 || runtime.HTTP.Effective != CodexRoutingObserve || runtime.HTTP.InhibitionReason != "installed artifact identity unavailable" {
-			t.Fatalf("calls/runtime = %d/%+v", calls, runtime.HTTP)
-		}
-	})
-
-	t.Run("enforce capture success", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "state")
-		httpReq, wsReq := DefaultCodexRoutingRequirements("dev", "0.146.0")
-		bound := httpReq
-		bound.installedArtifacts = testCodexInstalledArtifacts
-		if err := saveCodexHTTPReadinessMarkerDurably(dir, testCodexMarker(bound)); err != nil {
-			t.Fatal(err)
-		}
-		calls := 0
-		capture := func(context.Context, string) (codexInstalledArtifactRequirement, error) {
-			calls++
-			return testCodexInstalledArtifacts, nil
-		}
-		runtime, err := openCodexRoutingRuntimeAtWithArtifactCapture(dir, &Config{CodexTurnRouting: CodexRoutingEnforce}, httpReq, wsReq, capture)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if calls != 1 || runtime.HTTP.Effective != CodexRoutingEnforce {
-			t.Fatalf("calls/runtime = %d/%+v", calls, runtime.HTTP)
-		}
-	})
-}
-
-func TestCodexRoutingEpochsNeverPromoteShadowState(t *testing.T) {
+func TestCodexRoutingUpgradeIgnoresReadinessMarkerDrift(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	httpReq := testCodexRequirements(CodexRoutingHTTP)
 	wsReq := testCodexRequirements(CodexRoutingWebSocket)
 	if err := saveCodexHTTPReadinessMarkerDurably(dir, testCodexMarker(httpReq)); err != nil {
 		t.Fatal(err)
 	}
+	cfg := &Config{CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingOff}
+	before, err := openCodexRoutingRuntimeAt(dir, cfg, httpReq, wsReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	httpReq.CQBuild = "next-cq-build"
+	httpReq.ClientBuild = "next-client-build"
+	httpReq.FixtureHash = "next-fixture"
+	httpReq.RequiredGates = []string{"next-gate"}
+	after, err := openCodexRoutingRuntimeAt(dir, cfg, httpReq, wsReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.HTTP.Effective != CodexRoutingEnforce || after.HTTP.InhibitionReason != "" {
+		t.Fatalf("upgraded HTTP status = %+v", after.HTTP)
+	}
+	if after.HTTP.ModeEpoch != before.HTTP.ModeEpoch {
+		t.Fatalf("upgrade changed routing epoch: %d != %d", after.HTTP.ModeEpoch, before.HTTP.ModeEpoch)
+	}
+}
+
+func TestCodexRoutingRejectsUnavailableConfiguredMode(t *testing.T) {
+	httpReq, wsReq := DefaultCodexRoutingRequirements("build", "client")
+	httpReq.EnforceImplemented = false
+	_, err := openCodexRoutingRuntimeAt(t.TempDir(), &Config{CodexTurnRouting: CodexRoutingEnforce}, httpReq, wsReq)
+	if err == nil || !strings.Contains(err.Error(), "HTTP enforcement implementation unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCodexRoutingEpochsNeverPromoteShadowState(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	httpReq := testCodexRequirements(CodexRoutingHTTP)
+	wsReq := testCodexRequirements(CodexRoutingWebSocket)
 
 	cfg := &Config{CodexTurnRouting: CodexRoutingObserve, CodexWSTurnRouting: CodexRoutingOff}
 	observed, err := openCodexRoutingRuntimeAt(dir, cfg, httpReq, wsReq)
@@ -569,8 +567,8 @@ func TestCodexRoutingRuntimeDoesNotCreateReadinessMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.HTTP.Effective != CodexRoutingObserve || runtime.WebSocket.Effective != CodexRoutingObserve {
-		t.Fatalf("runtime = %+v, want observe fallback", runtime)
+	if runtime.HTTP.Effective != CodexRoutingEnforce || runtime.WebSocket.Effective != CodexRoutingEnforce {
+		t.Fatalf("runtime = %+v, want configured enforcement", runtime)
 	}
 	for _, transport := range []CodexRoutingTransport{CodexRoutingHTTP, CodexRoutingWebSocket} {
 		if _, err := os.Stat(codexReadinessPath(dir, transport)); !os.IsNotExist(err) {
