@@ -663,9 +663,12 @@ func validateRescueResponseHeaders(input http.Header, route rescueRouteKind) (ht
 				return nil, errors.New("invalid rate limit percent")
 			}
 		}
-		if strings.HasSuffix(lower, "-window-minutes") || strings.HasSuffix(lower, "-reset-at") {
-			if _, err := strconv.ParseInt(values[0], 10, 64); err != nil {
-				return nil, errors.New("invalid rate limit integer")
+		isResetAt := strings.HasSuffix(lower, "-reset-at")
+		if strings.HasSuffix(lower, "-window-minutes") || isResetAt {
+			if values[0] != "" || !isResetAt {
+				if _, err := strconv.ParseInt(values[0], 10, 64); err != nil {
+					return nil, errors.New("invalid rate limit integer")
+				}
 			}
 		}
 		output[name] = append([]string(nil), values...)
