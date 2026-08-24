@@ -233,13 +233,15 @@ func (store *CodexLeaseStore) commitCodexPrewarmAdoptionLocked(request CodexPrew
 	for index, input := range request.AttemptSlots {
 		slots[index] = CodexAttemptSlot{Index: uint32(index + 1), AccountHash: accountHash, CandidateHash: store.hash("candidate", string(input.CandidateID)), Kind: input.Kind}
 	}
+	// Prewarm turn state belongs to the retired upstream socket. The replacement
+	// socket must admit its own turn state while retaining the adopted account.
 	record := CodexJournalRecordV2{
 		SessionHash: sessionHash, ThreadHash: threadHash, NamespaceHash: namespaceHash, TurnHash: turnHash,
 		AccountHash: accountHash, CorrelationHash: store.hash("correlation", request.ResponseAnchor),
 		RecordGeneration: 1, LaneGeneration: lane.Generation, LeaseGeneration: 1,
 		ModeEpoch: request.Policy.ModeEpoch, DownstreamSocketGeneration: request.DownstreamSocketGeneration, UpstreamSocketGeneration: request.UpstreamSocketGeneration,
 		State: LeaseProvisional, ProtocolSchema: CurrentCodexLeaseSchema, Authoritative: true,
-		HasResponseAnchor: true, HasTurnState: request.TurnState != "", NonMigratable: true,
+		HasResponseAnchor: true, NonMigratable: true,
 		AdoptedPrewarm: true, PrewarmAdoptionJournalGeneration: commitGeneration,
 		CreatedAt: now, LastObservedAt: now,
 		CodexCurrentRequest: CodexCurrentRequest{
@@ -251,9 +253,6 @@ func (store *CodexLeaseStore) commitCodexPrewarmAdoptionLocked(request CodexPrew
 			RoutingRefs:              1,
 			Attempts:                 []CodexJournalAttempt{{Generation: 1, Revision: 1, Slot: 1, State: CodexAttemptPrepared, CreatedAt: now, LastObservedAt: now}},
 		},
-	}
-	if request.TurnState != "" {
-		record.TurnStateHash = store.hash("turn-state", request.TurnState)
 	}
 	record.AttemptEnvelope.PlanDigest = codexLeaseAttemptPlanDigest(store.key, record.AttemptEnvelope.Slots)
 	if laneIndex >= 0 {
