@@ -153,10 +153,15 @@ func (r *CodexRequestRouter) doPinned(ctx context.Context, choice RouteChoice, r
 // Do executes a request with same-identity 401 recovery, one eligible refresh,
 // and account failover only for exact pre-admission hard quota rejection.
 func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequirements, req *http.Request) (*http.Response, RouteChoice, CandidateAttempt, error) {
+	return r.do(ctx, requirements, req, nil)
+}
+
+func (r *CodexRequestRouter) do(ctx context.Context, requirements CodexRouteRequirements, req *http.Request, initialExclusions []codex.SelectionExclusion) (*http.Response, RouteChoice, CandidateAttempt, error) {
 	if r == nil || r.Scope == nil || r.Executor == nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("Codex request router unavailable")
 	}
-	var excluded []codex.SelectionExclusion
+	excluded := append([]codex.SelectionExclusion(nil), initialExclusions...)
+	initialExclusionCount := len(excluded)
 	var rejected *http.Response
 	var rejectedChoice RouteChoice
 	var rejectedAttempt CandidateAttempt
@@ -179,7 +184,7 @@ func (r *CodexRequestRouter) Do(ctx context.Context, requirements CodexRouteRequ
 			}
 			return nil, RouteChoice{}, CandidateAttempt{}, err
 		}
-		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > 0)
+		noteRouteAccount(ctx, redactedAccountHint("codex", string(plan.Choice.AccountKey)), len(excluded) > initialExclusionCount)
 
 		accountHardLimited := false
 		refreshAttempt := cloneCandidateAttempt(plan.refreshAttempt)

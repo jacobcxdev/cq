@@ -789,6 +789,40 @@ func TestCodexHTTPObserveReusesFirstActualRouteForSameTurn(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPObserveRestrictsBoundSessionToPool(t *testing.T) {
+	chooser := &sequenceRouteChooser{choices: []RouteChoice{
+		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+		{AccountKey: "two", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},
+	}}
+	executor := &enforcementExecutor{results: map[codex.AccountKey][]attemptResult{
+		"two": {{status: http.StatusOK, body: completedSSE("response-two")}},
+	}}
+	router := testHTTPRouter(chooser, executor)
+	observer := newCodexTurnObserverWithKey(NewCodexTurnLeaseManager(9, false, nil), nil, []byte("01234567890123456789012345678901"))
+	key := []byte("abcdefghijklmnopqrstuvwxyz012345")
+	server := &Server{
+		CodexRequests: router,
+		CodexObserver: observer,
+		SessionPolicy: NewSessionPolicyResolver(key, RoutingPolicyV1{
+			SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+			Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"two"}}},
+			SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "team"}},
+		}),
+	}
+	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
+
+	response, choice, observation, err := server.doCodexHTTPRoute(ctx, request.Model, request, protocolHTTPRequest(request), body, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if choice.AccountKey != "two" || observation == nil || chooser.calls != 1 || !slices.Equal(executor.accounts, []codex.AccountKey{"two"}) {
+		t.Fatalf("choice=%q observation=%v selector calls=%d attempts=%v", choice.AccountKey, observation, chooser.calls, executor.accounts)
+	}
+}
+
 func TestCodexHTTPObserveBlocksSuccessorUntilAttemptDrains(t *testing.T) {
 	chooser := &sequenceRouteChooser{choices: []RouteChoice{
 		{AccountKey: "one", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"},

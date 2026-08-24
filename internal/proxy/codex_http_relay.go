@@ -5,25 +5,34 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func (s *Server) doCodexRequest(ctx context.Context, requestedModel string, req *http.Request, additionalModels ...string) (*http.Response, RouteChoice, CandidateAttempt, error) {
+	return s.doCodexRequestExcluding(ctx, requestedModel, req, nil, additionalModels...)
+}
+
+func (s *Server) doCodexRequestExcluding(ctx context.Context, requestedModel string, req *http.Request, exclusions []codex.SelectionExclusion, additionalModels ...string) (*http.Response, RouteChoice, CandidateAttempt, error) {
 	if s == nil {
 		return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("no Codex accounts configured")
 	}
 	// Compatibility seam for embedders supplying an already-authenticated
 	// transport. CQ production always uses CodexRequests.
 	if s.CodexRequests == nil {
+		if len(exclusions) != 0 {
+			return nil, RouteChoice{}, CandidateAttempt{}, ErrSessionPolicyUnavailable
+		}
 		if s.CodexTransport == nil {
 			return nil, RouteChoice{}, CandidateAttempt{}, fmt.Errorf("no Codex accounts configured")
 		}
 		response, err := s.CodexTransport.RoundTrip(req)
 		return response, RouteChoice{}, CandidateAttempt{}, err
 	}
-	return s.CodexRequests.Do(ctx, CodexRouteRequirements{
+	return s.CodexRequests.do(ctx, CodexRouteRequirements{
 		RequestedModel: requestedModel,
 		RequiredModels: additionalModels,
-	}, req)
+	}, req, exclusions)
 }
 
 func (s *Server) codexHTTPAvailable() bool {
