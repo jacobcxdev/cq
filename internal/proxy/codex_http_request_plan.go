@@ -726,7 +726,7 @@ func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, prot
 		return "", "", nil
 	}
 	if snapshot.AffinityAccountKey == "" {
-		return "", "", ErrCodexLeaseAuthorityMismatch
+		return "", "", nil
 	}
 	return snapshot.AffinityAccountKey, "", nil
 }

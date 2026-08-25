@@ -201,7 +201,7 @@ func waitForRuntimeMode(t *testing.T, supervisor *RuntimeSupervisor, want Traffi
 	t.Fatalf("mode = %q, want %q", supervisor.TrafficMode(), want)
 }
 
-func TestRescueLifecycleExitBlocksIngressUntilWorkerReady(t *testing.T) {
+func TestRescueLifecycleExitBootsWorkerBeforeCutover(t *testing.T) {
 	events := []string{}
 	worker := &runtimeTestWorker{holder: runtimeHolder("worker"), events: &events}
 	store := &runtimeEvidenceTestStore{records: []RuntimeModeEvidenceV1{{SchemaVersion: 1, Generation: 4, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescue, Phase: RuntimeModePhaseEffective}}}
@@ -215,7 +215,8 @@ func TestRescueLifecycleExitBlocksIngressUntilWorkerReady(t *testing.T) {
 	if err := supervisor.ExitRescue(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
 		t.Fatal(err)
 	}
-	if mode := supervisor.TrafficMode(); mode != TrafficModeNormal || !supervisor.AdmissionReady() {
+	waitForRuntimeMode(t, supervisor, TrafficModeNormal)
+	if mode := supervisor.TrafficMode(); !supervisor.AdmissionReady() {
 		t.Fatalf("mode=%q ready=%v", mode, supervisor.AdmissionReady())
 	}
 	if len(store.records) != 3 || store.records[1].EffectiveMode != TrafficModeRescueExitDraining || store.records[2].EffectiveMode != TrafficModeNormal {

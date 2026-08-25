@@ -3,11 +3,13 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
@@ -58,11 +60,146 @@ func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
 	exit.Header.Set("Authorization", "Bearer local-token")
 	exitResponse := httptest.NewRecorder()
 	supervisor.ServeHTTP(exitResponse, exit)
-	if exitResponse.Code != http.StatusOK || supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
+	if exitResponse.Code != http.StatusOK {
 		t.Fatalf("exit = %d mode=%q ready=%v body=%q", exitResponse.Code, supervisor.TrafficMode(), supervisor.AdmissionReady(), exitResponse.Body.String())
+	}
+	waitForRuntimeMode(t, supervisor, TrafficModeNormal)
+	if !supervisor.AdmissionReady() {
+		t.Fatal("normal admission unavailable after rescue exit")
 	}
 	if len(consumer.consumed) != 2 {
 		t.Fatalf("control consumptions = %d", len(consumer.consumed))
+	}
+}
+
+func TestRuntimeSupervisorRescueExitHandsOffNewIngressWhileSessionDrains(t *testing.T) {
+	key := bytes.Repeat([]byte{0x53}, 32)
+	index, err := BuildNormalCallerIndexV1(key, 5, []NormalCallerCredentialV1{{
+		Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	worker := &runtimeTestWorker{
+		holder: runtimeHolder("worker"), events: &events,
+		response: RuntimeHTTPResponseV1{StatusCode: http.StatusAccepted, Body: []byte("normal")},
+		bootAck:  RuntimeBootAckV1{CallerAuthorityKey: key, CallerIndex: index},
+	}
+	store := &runtimeEvidenceTestStore{records: []RuntimeModeEvidenceV1{{
+		SchemaVersion: 1, Generation: 4, DesiredMode: TrafficModeRescue,
+		EffectiveMode: TrafficModeRescue, Phase: RuntimeModePhaseEffective,
+	}}}
+	supervisor, err := NewRuntimeSupervisor(
+		&runtimeTestListener{}, runtimeHolder("supervisor"),
+		&runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}},
+		&runtimeTestCheckpointStore{events: &events},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	if err := supervisor.SetCallerAdmissionConsumer(consumer); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerAuthority(testNormalCallerAuthority(t, []NormalCallerCredentialV1{{
+		Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
+	}}, consumer)); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerClassifier(NewNormalCallerBranchClassifier(nil)); err != nil {
+		t.Fatal(err)
+	}
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		close(admitted)
+		<-release
+		writer.WriteHeader(http.StatusAccepted)
+	}), store); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.mu.Lock()
+	supervisor.workerManifest = WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}
+	supervisor.mu.Unlock()
+
+	rescueDone := make(chan struct{})
+	go func() {
+		defer close(rescueDone)
+		request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString("{}"))
+		request.Header.Set("X-Codex-Window-Id", "existing-window")
+		supervisor.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	<-admitted
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		<-rescueDone
+	})
+
+	exitContext, cancelExit := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelExit()
+	exit := httptest.NewRequest(http.MethodPost, RuntimeRescueExitPath, nil).WithContext(exitContext)
+	exit.Header.Set("Authorization", "Bearer local-token")
+	exitResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(exitResponse, exit)
+	if exitResponse.Code != http.StatusOK {
+		t.Fatalf("exit = %d mode=%q body=%q", exitResponse.Code, supervisor.TrafficMode(), exitResponse.Body.String())
+	}
+	var exitStatus struct {
+		Mode                 TrafficMode `json:"mode"`
+		Generation           uint64      `json:"generation"`
+		ActiveRescueRequests int         `json:"active_rescue_requests"`
+		DrainingSessions     []string    `json:"draining_sessions"`
+	}
+	if err := json.Unmarshal(exitResponse.Body.Bytes(), &exitStatus); err != nil {
+		t.Fatal(err)
+	}
+	wantSession := hashPrefix("codex-window", "existing-window")
+	if exitStatus.Mode != TrafficModeRescueExitDraining || exitStatus.Generation != 5 || exitStatus.ActiveRescueRequests != 1 || len(exitStatus.DrainingSessions) != 1 || exitStatus.DrainingSessions[0] != wantSession {
+		t.Fatalf("exit status = %#v", exitStatus)
+	}
+
+	repeatedExit := httptest.NewRequest(http.MethodPost, RuntimeRescueExitPath, nil)
+	repeatedExit.Header.Set("Authorization", "Bearer local-token")
+	repeatedExitResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(repeatedExitResponse, repeatedExit)
+	if repeatedExitResponse.Code != http.StatusOK {
+		t.Fatalf("repeated exit = %d mode=%q body=%q", repeatedExitResponse.Code, supervisor.TrafficMode(), repeatedExitResponse.Body.String())
+	}
+
+	normal := httptest.NewRequest(http.MethodPost, "/normal?x=1", bytes.NewBufferString("body"))
+	normal.Header.Set("Authorization", "Bearer local-token")
+	normalResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(normalResponse, normal)
+	if normalResponse.Code != http.StatusAccepted || normalResponse.Body.String() != "normal" {
+		t.Fatalf("new ingress = %d %q", normalResponse.Code, normalResponse.Body.String())
+	}
+
+	healthResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(healthResponse, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var health struct {
+		Status               string      `json:"status"`
+		DataPlaneReady       bool        `json:"data_plane_ready"`
+		Mode                 TrafficMode `json:"mode"`
+		ActiveRescueRequests int         `json:"active_rescue_requests"`
+		DrainingSessions     []string    `json:"draining_sessions"`
+	}
+	if err := json.Unmarshal(healthResponse.Body.Bytes(), &health); err != nil {
+		t.Fatal(err)
+	}
+	if healthResponse.Code != http.StatusOK || health.Status != "ok" || !health.DataPlaneReady || health.Mode != TrafficModeRescueExitDraining || health.ActiveRescueRequests != 1 || len(health.DrainingSessions) != 1 || health.DrainingSessions[0] != wantSession {
+		t.Fatalf("draining health = %d %#v", healthResponse.Code, health)
+	}
+
+	close(release)
+	<-rescueDone
+	waitForRuntimeMode(t, supervisor, TrafficModeNormal)
+	if !supervisor.AdmissionReady() || len(store.records) != 3 || store.records[2].EffectiveMode != TrafficModeNormal {
+		t.Fatalf("completed exit = mode %q ready %v records %#v", supervisor.TrafficMode(), supervisor.AdmissionReady(), store.records)
 	}
 }
 
