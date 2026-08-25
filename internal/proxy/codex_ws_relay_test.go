@@ -35,10 +35,11 @@ func (c *blockingRelayConn) ReadMessage() (int, []byte, error) {
 	return 0, nil, errors.New("closed")
 }
 
-func (*blockingRelayConn) WriteMessage(int, []byte) error   { return nil }
-func (*blockingRelayConn) SetReadDeadline(time.Time) error  { return nil }
-func (*blockingRelayConn) SetWriteDeadline(time.Time) error { return nil }
-func (c *blockingRelayConn) Close() error                   { c.once.Do(func() { close(c.closed) }); return nil }
+func (*blockingRelayConn) WriteMessage(int, []byte) error            { return nil }
+func (*blockingRelayConn) WriteControl(int, []byte, time.Time) error { return nil }
+func (*blockingRelayConn) SetReadDeadline(time.Time) error           { return nil }
+func (*blockingRelayConn) SetWriteDeadline(time.Time) error          { return nil }
+func (c *blockingRelayConn) Close() error                            { c.once.Do(func() { close(c.closed) }); return nil }
 
 func TestRelayWebSocketPairJoinsPumpsAcrossRepeatedCancellation(t *testing.T) {
 	baseline := runtime.NumGoroutine()

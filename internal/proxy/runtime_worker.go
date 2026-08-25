@@ -327,6 +327,7 @@ func normalCallerKeyFromRuntimeSecret(secret *RuntimeSecret) ([]byte, error) {
 func bindRuntimeCallerCredentials(key []byte, credentials []NormalCallerCredentialV1) ([]NormalCallerCredentialV1, error) {
 	bound := make([]NormalCallerCredentialV1, 0, len(credentials))
 	for _, credential := range credentials {
+		credential.identity = credential.SubjectID
 		subjectID, err := NormalCallerSubjectID(key, credential.Domain, credential.SubjectID)
 		if err != nil {
 			return nil, err

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -712,14 +713,40 @@ func TestCodexHTTPRequestPlanFactoryAdoptsAuthenticatedCallerContinuity(t *testi
 		`,"previous_response_id":"rescue-response","input":`,
 		1,
 	))
-	caller := RuntimeCallerAuthorityV1{
+	bound, err := bindRuntimeCallerCredentials(bytes.Repeat([]byte{0x42}, sha256.Size), []NormalCallerCredentialV1{{
 		Domain:    NormalCallerCodex,
+		Bearer:    "caller-token",
 		SubjectID: "account-a\x00candidate-a\x00revision-a",
-	}
-
-	prepared, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{Encoded: body})
+	}})
 	if err != nil {
-		t.Fatalf("Build: %v", err)
+		t.Fatal(err)
+	}
+	caller := RuntimeCallerAuthorityV1{
+		SchemaVersion:     1,
+		Kind:              "provider_branch_admission_consumed_v1",
+		Domain:            NormalCallerCodex,
+		SubjectID:         bound[0].SubjectID,
+		BearerFingerprint: "fingerprint",
+		IndexEpoch:        1,
+		AdmissionID:       strings.Repeat("a", 32),
+		SingleUseNonce:    strings.Repeat("b", 32),
+		RequestNonce:      strings.Repeat("c", 32),
+		Method:            http.MethodPost,
+		RequestURI:        "/responses",
+		ValidUntil:        time.Now().Add(time.Hour),
+		ConsumptionDigest: "consumption",
+		MAC:               "mac",
+	}
+	var prepared CodexPreparedHTTPRequest
+	var buildErr error
+	handler := normalWorkerHandler(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		prepared, buildErr = factory.Build(request.Context(), CodexHTTPRequestPlanInput{Encoded: body})
+	}), bound)
+	request := httptest.NewRequest(http.MethodPost, "http://cq.test/responses", nil)
+	request = request.WithContext(withRuntimeCallerAuthority(request.Context(), caller))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if buildErr != nil {
+		t.Fatalf("Build through bound normal caller: %v", buildErr)
 	}
 	defer prepared.Frozen.Release()
 	accounts := prepared.Dispatch.Accounts()

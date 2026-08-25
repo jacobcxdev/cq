@@ -7,6 +7,7 @@ import (
 )
 
 type runtimeCallerContextKey struct{}
+type runtimeCallerIdentityContextKey struct{}
 
 func withRuntimeCallerAuthority(ctx context.Context, caller RuntimeCallerAuthorityV1) context.Context {
 	return context.WithValue(ctx, runtimeCallerContextKey{}, caller)
@@ -15,6 +16,15 @@ func withRuntimeCallerAuthority(ctx context.Context, caller RuntimeCallerAuthori
 func runtimeCallerAuthority(ctx context.Context) (RuntimeCallerAuthorityV1, bool) {
 	caller, ok := ctx.Value(runtimeCallerContextKey{}).(RuntimeCallerAuthorityV1)
 	return caller, ok
+}
+
+func withRuntimeCallerIdentity(ctx context.Context, identity string) context.Context {
+	return context.WithValue(ctx, runtimeCallerIdentityContextKey{}, identity)
+}
+
+func runtimeCallerIdentity(ctx context.Context) (string, bool) {
+	identity, ok := ctx.Value(runtimeCallerIdentityContextKey{}).(string)
+	return identity, ok && identity != ""
 }
 
 func validRuntimeCallerAuthority(caller RuntimeCallerAuthorityV1, method, requestURI string, now time.Time) bool {
@@ -49,13 +59,15 @@ func normalWorkerHandlerWithSource(handler http.Handler, credentials func(contex
 			return
 		}
 		var bearer string
+		var identity string
 		for _, credential := range current {
 			if credential.Domain == caller.Domain && credential.SubjectID == caller.SubjectID {
-				if bearer != "" && bearer != credential.Bearer {
+				if bearer != "" && (bearer != credential.Bearer || identity != credential.identity) {
 					http.Error(writer, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 					return
 				}
 				bearer = credential.Bearer
+				identity = credential.identity
 			}
 		}
 		if bearer == "" {
@@ -63,6 +75,9 @@ func normalWorkerHandlerWithSource(handler http.Handler, credentials func(contex
 			return
 		}
 		request.Header.Set("Authorization", "Bearer "+bearer)
+		if identity != "" {
+			request = request.WithContext(withRuntimeCallerIdentity(request.Context(), identity))
+		}
 		handler.ServeHTTP(writer, request)
 		request.Header.Del("Authorization")
 	})
