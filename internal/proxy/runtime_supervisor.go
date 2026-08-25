@@ -564,7 +564,7 @@ func (supervisor *RuntimeSupervisor) writeRuntimeSupervisorHealth(writer http.Re
 		Mode                 TrafficMode `json:"mode"`
 		ActiveRescueRequests int         `json:"active_rescue_requests,omitempty"`
 		DrainingSessions     []string    `json:"draining_sessions,omitempty"`
-	}{Status: status, SupervisorAlive: true, DataPlaneReady: ready, Mode: mode, ActiveRescueRequests: active, DrainingSessions: sessions})
+	}{Status: status, SupervisorAlive: true, DataPlaneReady: ready, Mode: reportedTrafficMode(mode), ActiveRescueRequests: active, DrainingSessions: sessions})
 }
 
 func (supervisor *RuntimeSupervisor) refreshCallerAuthority(ctx context.Context, authority *NormalCallerAuthority) error {
@@ -653,7 +653,7 @@ func (supervisor *RuntimeSupervisor) serveRescueControl(writer http.ResponseWrit
 		Generation           uint64      `json:"generation"`
 		ActiveRescueRequests int         `json:"active_rescue_requests"`
 		DrainingSessions     []string    `json:"draining_sessions,omitempty"`
-	}{Mode: supervisor.trafficMode, Generation: supervisor.modeGeneration, ActiveRescueRequests: active, DrainingSessions: sessions}
+	}{Mode: reportedTrafficMode(supervisor.trafficMode), Generation: supervisor.modeGeneration, ActiveRescueRequests: active, DrainingSessions: sessions}
 	supervisor.mu.RUnlock()
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(response)
@@ -708,6 +708,13 @@ func waitRuntimeAdmissions(ctx context.Context, zero <-chan struct{}) error {
 	}
 }
 
+func reportedTrafficMode(mode TrafficMode) TrafficMode {
+	if mode == TrafficModeRescueDraining {
+		return TrafficModeRescue
+	}
+	return mode
+}
+
 func (supervisor *RuntimeSupervisor) EnterRescue(ctx context.Context) error {
 	if supervisor == nil || ctx == nil {
 		return ErrRuntimeSupervisorUnavailable
@@ -725,6 +732,26 @@ func (supervisor *RuntimeSupervisor) EnterRescue(ctx context.Context) error {
 		if !supervisor.rescueEntryRun {
 			supervisor.startRescueEntryLocked(supervisor.modeGeneration)
 		}
+		supervisor.mu.Unlock()
+		return nil
+	}
+	if supervisor.trafficMode == TrafficModeRescueExitDraining {
+		if supervisor.worker == nil {
+			supervisor.mu.Unlock()
+			return ErrRuntimeSupervisorUnavailable
+		}
+		supervisor.modeGeneration++
+		generation := supervisor.modeGeneration
+		intent := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescueDraining, Phase: RuntimeModePhaseIntent}
+		if err := supervisor.modeEvidence.Commit(ctx, intent); err != nil {
+			supervisor.modeGeneration--
+			supervisor.mu.Unlock()
+			return err
+		}
+		supervisor.trafficMode = TrafficModeRescueDraining
+		supervisor.admissionReady = false
+		supervisor.rescueExitRun = false
+		supervisor.startRescueEntryLocked(generation)
 		supervisor.mu.Unlock()
 		return nil
 	}

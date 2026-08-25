@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,6 +50,15 @@ func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
 	if enterResponse.Code != http.StatusOK {
 		t.Fatalf("enter = %d mode=%q body=%q", enterResponse.Code, supervisor.TrafficMode(), enterResponse.Body.String())
 	}
+	var enterStatus struct {
+		Mode TrafficMode `json:"mode"`
+	}
+	if err := json.Unmarshal(enterResponse.Body.Bytes(), &enterStatus); err != nil {
+		t.Fatal(err)
+	}
+	if enterStatus.Mode != TrafficModeRescue {
+		t.Fatalf("reported enter mode = %q, want rescue", enterStatus.Mode)
+	}
 	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 	rescue := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}"))
 	rescueResponse := httptest.NewRecorder()
@@ -70,6 +80,116 @@ func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
 	if len(consumer.consumed) != 2 {
 		t.Fatalf("control consumptions = %d", len(consumer.consumed))
 	}
+}
+
+func TestRuntimeSupervisorRescueEnterCancelsExitDrain(t *testing.T) {
+	key := bytes.Repeat([]byte{0x54}, 32)
+	index, err := BuildNormalCallerIndexV1(key, 8, []NormalCallerCredentialV1{{
+		Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	worker := &runtimeTestWorker{
+		holder: runtimeHolder("worker"), events: &events,
+		response: RuntimeHTTPResponseV1{StatusCode: http.StatusAccepted, Body: []byte("normal")},
+		bootAck:  RuntimeBootAckV1{CallerAuthorityKey: key, CallerIndex: index},
+	}
+	store := &runtimeEvidenceTestStore{records: []RuntimeModeEvidenceV1{{
+		SchemaVersion: 1, Generation: 7, DesiredMode: TrafficModeRescue,
+		EffectiveMode: TrafficModeRescue, Phase: RuntimeModePhaseEffective,
+	}}}
+	supervisor, err := NewRuntimeSupervisor(
+		&runtimeTestListener{}, runtimeHolder("supervisor"),
+		&runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}},
+		&runtimeTestCheckpointStore{events: &events},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	if err := supervisor.SetCallerAdmissionConsumer(consumer); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerAuthority(testNormalCallerAuthority(t, []NormalCallerCredentialV1{{
+		Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
+	}}, consumer)); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerClassifier(NewNormalCallerBranchClassifier(nil)); err != nil {
+		t.Fatal(err)
+	}
+	admitted := make(chan struct{})
+	release := make(chan struct{})
+	var first sync.Once
+	rescueCalls := 0
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		rescueCalls++
+		if request.URL.EscapedPath() == "/responses" {
+			first.Do(func() { close(admitted) })
+			<-release
+		}
+		writer.WriteHeader(http.StatusAccepted)
+	}), store); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.mu.Lock()
+	supervisor.workerManifest = WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}
+	supervisor.mu.Unlock()
+
+	rescueDone := make(chan struct{})
+	go func() {
+		defer close(rescueDone)
+		request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString("{}"))
+		request.Header.Set("X-Codex-Window-Id", "existing-window")
+		supervisor.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	<-admitted
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		<-rescueDone
+	})
+
+	exit := httptest.NewRequest(http.MethodPost, RuntimeRescueExitPath, nil)
+	exit.Header.Set("Authorization", "Bearer local-token")
+	exitResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(exitResponse, exit)
+	if exitResponse.Code != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescueExitDraining {
+		t.Fatalf("exit = %d mode=%q body=%q", exitResponse.Code, supervisor.TrafficMode(), exitResponse.Body.String())
+	}
+
+	enter := httptest.NewRequest(http.MethodPost, RuntimeRescueEnterPath, nil)
+	enter.Header.Set("Authorization", "Bearer local-token")
+	enterResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(enterResponse, enter)
+	if enterResponse.Code != http.StatusOK {
+		t.Fatalf("cancel enter = %d mode=%q body=%q", enterResponse.Code, supervisor.TrafficMode(), enterResponse.Body.String())
+	}
+	var entered struct {
+		Mode TrafficMode `json:"mode"`
+	}
+	if err := json.Unmarshal(enterResponse.Body.Bytes(), &entered); err != nil {
+		t.Fatal(err)
+	}
+	if entered.Mode != TrafficModeRescue {
+		t.Fatalf("cancel enter reported mode = %q, want rescue", entered.Mode)
+	}
+
+	newRequest := httptest.NewRequest(http.MethodPost, "/new-rescue", bytes.NewBufferString("{}"))
+	newResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(newResponse, newRequest)
+	if newResponse.Code != http.StatusAccepted || rescueCalls != 2 {
+		t.Fatalf("new ingress = %d rescue calls=%d, want rescue", newResponse.Code, rescueCalls)
+	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+
+	close(release)
+	<-rescueDone
 }
 
 func TestRuntimeSupervisorRescueExitHandsOffNewIngressWhileSessionDrains(t *testing.T) {

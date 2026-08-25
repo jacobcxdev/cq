@@ -258,6 +258,104 @@ func TestCodexInstalledRescuePassesThroughCurrentClient(t *testing.T) {
 	}
 }
 
+func TestCodexInstalledRescueTaskResumesInNormal(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
+		t.Skip("installed Codex rescue handoff acceptance requires explicit opt-in")
+	}
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
+	if err != nil {
+		t.Fatalf("open authoritative validation runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := core.close(); err != nil {
+			t.Errorf("close authoritative validation runtime: %v", err)
+		}
+	})
+	controlToken, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const callerToken = "validation-token-a"
+	server := &Server{
+		Config: &Config{
+			LocalToken:     controlToken,
+			ClaudeUpstream: "http://" + core.upstream.address,
+			CodexUpstream:  "http://" + core.upstream.address,
+		},
+		CodexRouting: &CodexRoutingRuntime{
+			HTTP: CodexModeStatus{Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 1, AuthoritativeEpoch: 1},
+		},
+		CodexNativeHTTP: core.nativeHTTPHandler(),
+		Catalog:         modelregistry.NewCatalog(modelregistry.Snapshot{}),
+	}
+	handler, err := server.RuntimeHandler()
+	if err != nil {
+		t.Fatalf("construct candidate runtime handler: %v", err)
+	}
+	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t, handler, []NormalCallerCredentialV1{
+		{Domain: NormalCallerLocal, Bearer: controlToken, SubjectID: "validation-local"},
+		{Domain: NormalCallerCodex, Bearer: callerToken, SubjectID: string(codexInstalledHTTPValidationAccountA) + "\x00validation-candidate-a\x00validation-revision-1"},
+	})
+	target, err := url.Parse("http://" + core.upstream.address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if err := supervisor.ConfigureRescue(context.Background(), &RescueRelay{
+		Transport: &codexRescueValidationTransport{
+			codexRescueAcceptanceTransport: codexRescueAcceptanceTransport{target: target, inner: transport},
+		},
+		Origin: origin,
+	}, &runtimeEvidenceTestStore{}); err != nil {
+		t.Fatal(err)
+	}
+	rescueControlRequest(t, listener.URL, RuntimeRescueEnterPath, controlToken)
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, callerToken)
+	runner := codexTaskAffinityAcceptanceRunner{}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := runCodexTaskAffinityAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, false, "PONG"); err != nil {
+		t.Fatalf("Codex rescue turn: %v", err)
+	}
+	rescueControlRequest(t, listener.URL, RuntimeRescueExitPath, controlToken)
+	waitForRuntimeMode(t, supervisor, TrafficModeNormal)
+	if err := runCodexTaskAffinityAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, true, "PONG"); err != nil {
+		t.Fatalf("Codex normal resume after rescue: %v", err)
+	}
+}
+
+func rescueControlRequest(t *testing.T, baseURL, path, token string) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, baseURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("rescue control %s = %d", path, response.StatusCode)
+	}
+}
+
 func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE") != "1" {
 		t.Skip("live Codex rescue acceptance requires explicit opt-in")
@@ -270,6 +368,7 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 	if err != nil || len(auth) == 0 || len(auth) > 1<<20 || !json.Valid(auth) {
 		t.Fatal("live Codex auth file is unavailable or invalid")
 	}
+	defer clearBytes(auth)
 	clientPath, err := resolveCodexAcceptanceClientExecutable()
 	if err != nil {
 		t.Fatalf("resolve installed Codex client: %v", err)
@@ -381,9 +480,83 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 	}
 }
 
+func TestCodexInstalledLiveRescueTaskResumesInNormal(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE") != "1" {
+		t.Skip("live Codex rescue handoff acceptance requires explicit opt-in")
+	}
+	authPath := os.Getenv("CQ_CODEX_LIVE_AUTH_FILE")
+	credential, err := readCodexLiveAcceptanceCredential(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := os.ReadFile(authPath)
+	if err != nil || len(auth) == 0 || len(auth) > 1<<20 || !json.Valid(auth) {
+		t.Fatal("live Codex auth file is unavailable or invalid")
+	}
+	defer clearBytes(auth)
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	now := time.Now()
+	listener, supervisor, _ := newCodexLiveNormalAcceptanceServerWithCallers(t, credential, []NormalCallerCredentialV1{
+		{Domain: NormalCallerLocal, Bearer: credential.localToken, SubjectID: "live-control"},
+		{
+			Domain: NormalCallerCodex, Bearer: credential.material.AccessToken,
+			SubjectID:  string(codexLiveNormalAccount) + "\x00live-normal-candidate\x00live-normal-revision",
+			ValidUntil: now.Add(10 * time.Minute),
+		},
+	})
+	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if err := supervisor.ConfigureRescue(context.Background(), &RescueRelay{Transport: transport, Origin: origin}, &runtimeEvidenceTestStore{}); err != nil {
+		t.Fatal(err)
+	}
+	rescueControlRequest(t, listener.URL, RuntimeRescueEnterPath, credential.localToken)
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.material.AccessToken)
+	isolationAuth := filepath.Join(isolation.codexHome, "auth.json")
+	if err := os.WriteFile(isolationAuth, auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	runner := codexTaskAffinityAcceptanceRunner{}
+	if err := runCodexTaskAffinityAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, false, "LIVE-RESCUE-PONG"); err != nil {
+		t.Fatalf("live Codex rescue turn: %v", err)
+	}
+	rescueControlRequest(t, listener.URL, RuntimeRescueExitPath, credential.localToken)
+	waitForRuntimeMode(t, supervisor, TrafficModeNormal)
+	if err := runCodexTaskAffinityAcceptanceTurn(ctx, runner, clientProof, listener.URL, isolation, true, "LIVE-NORMAL-PONG"); err != nil {
+		t.Fatalf("live Codex normal resume after rescue: %v", err)
+	}
+}
+
 type codexRescueAcceptanceTransport struct {
 	target *url.URL
 	inner  http.RoundTripper
+}
+
+type codexRescueValidationTransport struct {
+	codexRescueAcceptanceTransport
+}
+
+func (transport *codexRescueValidationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	clone := request.Clone(request.Context())
+	clone.URL = new(url.URL)
+	*clone.URL = *request.URL
+	clone.URL.Path = strings.TrimPrefix(clone.URL.Path, "/backend-api/codex")
+	clone.Header.Set("ChatGPT-Account-ID", "validation-upstream-a")
+	return transport.codexRescueAcceptanceTransport.RoundTrip(clone)
 }
 
 func (transport *codexRescueAcceptanceTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -464,11 +637,18 @@ func newCodexRuntimeSupervisorAcceptanceServer(t *testing.T, handler http.Handle
 }
 
 func newCodexRuntimeSupervisorAcceptanceServerWithCredential(t *testing.T, handler http.Handler, credential NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor) {
+	return newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t, handler, []NormalCallerCredentialV1{credential})
+}
+
+func newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t *testing.T, handler http.Handler, credentials []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor) {
 	t.Helper()
+	if len(credentials) == 0 {
+		t.Fatal("Codex acceptance caller credentials are empty")
+	}
 	events := []string{}
 	worker := &codexRuntimeSupervisorAcceptanceWorker{
 		holder:  runtimeHolder("validation-worker"),
-		handler: normalWorkerHandler(handler, []NormalCallerCredentialV1{credential}),
+		handler: normalWorkerHandler(handler, credentials),
 		exited:  make(chan struct{}),
 	}
 	supervisor, err := NewRuntimeSupervisor(
@@ -483,11 +663,11 @@ func newCodexRuntimeSupervisorAcceptanceServerWithCredential(t *testing.T, handl
 	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "validation-artifact"}); err != nil {
 		t.Fatal(err)
 	}
-	key := sha256.Sum256([]byte(credential.Bearer))
+	key := sha256.Sum256([]byte(credentials[0].Bearer))
 	authority, err := NewNormalCallerAuthority(
 		key[:],
 		1,
-		[]NormalCallerCredentialV1{credential},
+		credentials,
 		&codexRuntimeSupervisorAcceptanceConsumer{consumed: make(map[string]struct{})},
 		time.Now,
 		rand.Reader,

@@ -58,7 +58,7 @@ CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
 CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
 CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
 go test -race -count=1 ./internal/proxy \
-	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledRescuePassesThroughLiveUpstream)$'
+	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal)$'
 
 production_after=$(production_snapshot)
 [ "$production_before" = "$production_after" ] || fail "production proxy changed during validation"
@@ -66,7 +66,7 @@ production_after=$(production_snapshot)
 gh api --method POST "repos/$repo/statuses/$sha" \
 	-f state=success \
 	-f context="$status_context" \
-	-f description='Live normal and rescue Codex routing passed' >/dev/null
+	-f description='Live normal, rescue, and handoff routing passed' >/dev/null
 
 status_finished=true
 trap - EXIT HUP INT TERM
