@@ -667,7 +667,8 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		}
 		if nextAttempt != 0 {
 			previousCurrent, found := codexLeaseAttemptByGeneration(attempts, old.CurrentAttemptGeneration)
-			if old.EverAdmitted || old.NonMigratable || old.State != LeaseProvisional || result.State != LeaseProvisional || !found || previousCurrent.State != CodexAttemptProviderFailed {
+			pinnedAccountChanged := old.NonMigratable && !constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash)
+			if old.EverAdmitted || pinnedAccountChanged || old.State != LeaseProvisional || result.State != LeaseProvisional || !found || previousCurrent.State != CodexAttemptProviderFailed {
 				return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: terminal request replacement requires BeginRequest", ErrCodexLeaseInvalidMutation)
 			}
 		}

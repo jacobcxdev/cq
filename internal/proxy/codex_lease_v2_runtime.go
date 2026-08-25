@@ -480,19 +480,19 @@ func (handle *CodexLeaseRequestHandle) RejectAndPrepareContext(ctx context.Conte
 	if nextSlot == 0 || int(nextSlot) > len(handle.record.AttemptEnvelope.Slots) {
 		return nil, fmt.Errorf("%w: retry slot is outside the frozen envelope", ErrCodexLeaseInvalidMutation)
 	}
-	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
-	if !ok || current.State != CodexAttemptDispatched || handle.record.State != LeaseProvisional || handle.record.EverAdmitted || handle.record.NonMigratable {
-		return nil, ErrCodexLeaseTransition
-	}
 	if int(nextSlot) > len(handle.slotAccounts) || handle.slotAccounts[nextSlot-1] == "" {
 		return nil, fmt.Errorf("%w: retry slot account is unavailable", ErrCodexLeaseAuthorityMismatch)
+	}
+	nextAccount := handle.slotAccounts[nextSlot-1]
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !ok || current.State != CodexAttemptDispatched || handle.record.State != LeaseProvisional || handle.record.EverAdmitted || (handle.record.NonMigratable && nextAccount != handle.account) {
+		return nil, ErrCodexLeaseTransition
 	}
 	for _, attempt := range handle.record.Attempts {
 		if attempt.Slot == nextSlot {
 			return nil, fmt.Errorf("%w: retry slot is already used", ErrCodexLeaseInvalidMutation)
 		}
 	}
-	nextAccount := handle.slotAccounts[nextSlot-1]
 	manager := handle.runtime.leases
 	if manager == nil || manager.accountGates == nil {
 		return nil, ErrCodexLeaseWriterUnavailable
@@ -1166,13 +1166,17 @@ func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) 
 		Slots:         slots,
 	}
 	envelope.PlanDigest = codexLeaseAttemptPlanDigest(runtime.store.key, slots)
+	dispatchPermitDigest := ""
+	if plan.DispatchPermitDigest != "" {
+		dispatchPermitDigest = runtime.store.hash("dispatch-permit", plan.DispatchPermitDigest)
+	}
 	return CodexCurrentRequest{
 		RequestKind:          plan.RequestKind,
 		CompactionPhase:      plan.CompactionPhase,
 		RequestedModelHash:   runtime.store.hash("requested-model", plan.RequestedModel),
 		EffectiveModel:       plan.EffectiveModel,
 		RequiredBuckets:      append([]CapacityBucket(nil), plan.RequiredBuckets...),
-		DispatchPermitDigest: plan.DispatchPermitDigest,
+		DispatchPermitDigest: dispatchPermitDigest,
 		AttemptEnvelope:      envelope,
 		RoutingRefs:          1,
 		Attempts:             []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
@@ -1276,8 +1280,14 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 	if evidence.PreviousResponseID != "" {
 		return false, fmt.Errorf("%w: live upstream generation unavailable for previous response", ErrCodexContinuity)
 	}
-	if newTurn && evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
-		return false, fmt.Errorf("%w: encrypted response affinity unavailable", ErrCodexContinuity)
+	if evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
+		if restored.Affinity == nil || !restored.Affinity.Resolved || restored.Affinity.AccountKey == "" {
+			return false, fmt.Errorf("%w: encrypted response affinity unavailable", ErrCodexContinuity)
+		}
+		if restored.Affinity.AccountKey != selected {
+			return true, fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
+		}
+		return true, nil
 	}
 	requiresAccount := evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
@@ -1370,6 +1380,9 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	}
 	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
+	}
+	if plan.DispatchPermitDigest != "" && !lowerHexDigest(plan.DispatchPermitDigest) {
+		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid dispatch permit digest", ErrCodexLeaseInvalidMutation)
 	}
 	accounts := make(map[codex.AccountKey]struct{}, len(plan.Accounts))
 	for _, account := range plan.Accounts {

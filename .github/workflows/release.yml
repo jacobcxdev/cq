@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  statuses: read
 
 jobs:
   validate-codex:
@@ -39,6 +40,14 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: stable
+
+      - name: Require live Codex routing validation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/status" |
+            go run ./internal/tools/releasestatus --sha "${sha}"
 
       - name: Verify Codex Stage 11 corpus
         run: go test -race -count=1 ./internal/proxy -run '^(TestCodexStage11LifecycleCorpusUsesProductionHandlers|TestCodexStage11LifecycleCorpusSmoke|TestCodexStage11ReviewedManifestMatchesCorpusAuthority)$'

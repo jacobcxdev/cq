@@ -1,0 +1,73 @@
+#!/bin/sh
+
+set -eu
+
+status_context=cq/live-normal-routing
+production_port=19280
+
+fail() {
+	printf 'cq release validation: %s\n' "$1" >&2
+	exit 1
+}
+
+[ "$(uname -s)" = Darwin ] || fail "macOS is required"
+
+for command in codex gh git go lsof; do
+	command -v "$command" >/dev/null 2>&1 || fail "$command is required"
+done
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+[ -z "$(git status --porcelain=v1 --untracked-files=all)" ] || fail "worktree must be clean"
+sha=$(git rev-parse HEAD)
+repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+auth_file=${CQ_CODEX_LIVE_AUTH_FILE:-${CODEX_HOME:-$HOME/.codex}/auth.json}
+codex_executable=$(command -v codex)
+
+production_snapshot() {
+	pid=$(lsof -nP -tiTCP:"$production_port" -sTCP:LISTEN 2>/dev/null || true)
+	mode=
+	if [ -n "$pid" ]; then
+		mode=$(cq proxy rescue status 2>/dev/null) || fail "cannot read production proxy mode"
+	fi
+	printf '%s\n%s\n' "$pid" "$mode"
+}
+
+production_before=$(production_snapshot)
+status_finished=false
+publish_failure() {
+	rc=$?
+	trap - EXIT HUP INT TERM
+	if [ "$status_finished" != true ]; then
+		gh api --method POST "repos/$repo/statuses/$sha" \
+			-f state=failure \
+			-f context="$status_context" \
+			-f description='Live Codex routing validation failed' >/dev/null 2>&1 || true
+	fi
+	exit "$rc"
+}
+trap publish_failure EXIT HUP INT TERM
+
+gh api --method POST "repos/$repo/statuses/$sha" \
+	-f state=pending \
+	-f context="$status_context" \
+	-f description='Live Codex routing validation running' >/dev/null
+
+CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
+CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
+CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
+go test -race -count=1 ./internal/proxy \
+	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledRescuePassesThroughLiveUpstream)$'
+
+production_after=$(production_snapshot)
+[ "$production_before" = "$production_after" ] || fail "production proxy changed during validation"
+
+gh api --method POST "repos/$repo/statuses/$sha" \
+	-f state=success \
+	-f context="$status_context" \
+	-f description='Live normal and rescue Codex routing passed' >/dev/null
+
+status_finished=true
+trap - EXIT HUP INT TERM
+printf 'cq release validation: passed for %s\n' "$sha"

@@ -599,8 +599,43 @@ func TestCodexLeaseV2RetentionKeepsOpaqueAffinityUntilFinalLaneExpires(t *testin
 	if err != nil || restored.Affinity == nil || restored.Affinity.Resolved || restored.Affinity.AccountKey != "" || restored.Affinity.Source != admitted.Identity() {
 		t.Fatalf("pruned-source unresolved affinity = %#v error %v", restored.Affinity, err)
 	}
+	resolved, err := store.LoadLane(key, []codex.AccountKey{"account"}, CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true})
+	if err != nil || resolved.Affinity == nil || !resolved.Affinity.Resolved || resolved.Affinity.AccountKey != "account" {
+		t.Fatalf("pruned-source resolved affinity = %#v error %v", resolved.Affinity, err)
+	}
 	leases := NewCodexTurnLeaseManager(9, true, store.policy.Now)
 	coordinator := &CodexContinuityCoordinator{store: store, leases: leases}
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	requiresAccount, err := runtimeLease.validateRequestContinuity(
+		resolved,
+		codexLeaseRuntimeRequestIdentity(resolved),
+		"account",
+		CodexLeaseRequestEvidence{HasEncryptedState: true},
+	)
+	if err != nil || !requiresAccount {
+		t.Fatalf("pruned-source encrypted affinity = required %v error %v", requiresAccount, err)
+	}
+	currentKey := key
+	currentKey.Turn = "retention-anchor"
+	current, err := store.LoadLane(currentKey, []codex.AccountKey{"account"}, CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true})
+	if err != nil || current.Classification != CodexRestoredLaneCurrent || current.Affinity == nil || !current.Affinity.Resolved {
+		t.Fatalf("pruned-source current affinity = %#v error %v", current, err)
+	}
+	requiresAccount, err = runtimeLease.validateRequestContinuity(
+		current,
+		codexLeaseRuntimeRequestIdentity(current),
+		"account",
+		CodexLeaseRequestEvidence{HasEncryptedState: true},
+	)
+	if err != nil || !requiresAccount {
+		t.Fatalf("pruned-source current encrypted affinity = required %v error %v", requiresAccount, err)
+	}
+	if _, err := runtimeLease.validateRequestContinuity(resolved, codexLeaseRuntimeRequestIdentity(resolved), "other", CodexLeaseRequestEvidence{HasEncryptedState: true}); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("pruned-source account mismatch = %v, want continuity error", err)
+	}
+	if _, err := runtimeLease.validateRequestContinuity(restored, codexLeaseRuntimeRequestIdentity(restored), "account", CodexLeaseRequestEvidence{HasEncryptedState: true}); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("unresolved pruned-source affinity = %v, want continuity error", err)
+	}
 	removal, summary, err := coordinator.BeginAccountRemoval(context.Background(), "account")
 	if err != nil {
 		t.Fatal(err)

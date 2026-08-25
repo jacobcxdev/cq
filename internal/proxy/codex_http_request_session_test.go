@@ -74,6 +74,63 @@ func TestCodexHTTPRequestSessionRetriesSameAccountBeforeAdmission(t *testing.T) 
 	}
 }
 
+func TestCodexHTTPRequestSessionRetriesPinnedAccountBeforeAdmission(t *testing.T) {
+	choice := codexHTTPSessionChoice("account-a")
+	first := codexHTTPSessionAttempt("account-a", "candidate-one", "revision-one", 1)
+	second := codexHTTPSessionAttempt("account-a", "candidate-two", "revision-two", 2)
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   choice,
+			attempts: []CandidateAttempt{first, second},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+	events := make([]string, 0, 2)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t:      t,
+		events: &events,
+		outcomes: []codexHTTPSessionOutcome{
+			{response: &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader("stale"))}},
+			{response: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("accepted"))}},
+		},
+		wantBody: encoded,
+	}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	leasePlan := codexLeaseRuntimeTestPlan("pinned-session-turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-one", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-two", Kind: CodexAttemptSlotDirect},
+	})
+	leasePlan.RequiresAccountContinuity = true
+	handle, err := runtimeLease.BeginRequest(leasePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(
+		context.Background(), template, plan, frozen, NewCodexHTTPRequestLifecycle(handle),
+	)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Attempt.Candidate.CandidateID != "candidate-two" || !result.Lifecycle.EverAdmitted() {
+		t.Fatalf("result = %#v", result)
+	}
+	_ = result.Response.Body.Close()
+	lifecycle, err := result.Lifecycle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexHTTPRequestSessionRefreshesManagedCandidateOnce(t *testing.T) {
 	choice := codexHTTPSessionChoice("account-a")
 	direct := codexHTTPSessionAttempt("account-a", "candidate-managed", "revision-one", 1)

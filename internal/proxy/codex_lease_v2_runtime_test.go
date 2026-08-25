@@ -108,6 +108,69 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseRuntimePersistsOpaqueDispatchPermitDigest(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	permitDigest := strings.Repeat("d", 64)
+	plan := codexLeaseRuntimeTestPlan("permit-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	plan.DispatchPermitDigest = permitDigest
+
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.hash("dispatch-permit", permitDigest)
+	if handle.record.DispatchPermitDigest != want || bytes.Contains(store.journalBytes, []byte(permitDigest)) {
+		t.Fatalf("persisted permit digest = %q, want opaque store digest", handle.record.DispatchPermitDigest)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatalf("MarkDispatched = %v", err)
+	}
+	invalid := codexLeaseRuntimeTestPlan("invalid-permit-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect,
+	}})
+	invalid.DispatchPermitDigest = "invalid"
+	before := append([]byte(nil), store.journalBytes...)
+	if _, err := runtimeLease.BeginRequest(invalid); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("invalid permit digest = %v, want invalid mutation", err)
+	}
+	if !bytes.Equal(before, store.journalBytes) {
+		t.Fatal("invalid permit digest changed journal")
+	}
+}
+
+func TestCodexLeaseRuntimeRetriesPinnedAccountCandidate(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("pinned-retry-turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	plan.RequiresAccountContinuity = true
+
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RejectAndPrepare(2)
+	if err != nil {
+		t.Fatalf("same-account retry = %v", err)
+	}
+	if handle.AccountKey() != "account-a" || !handle.record.NonMigratable || handle.record.Attempts[0].State != CodexAttemptProviderFailed || handle.record.Attempts[1].State != CodexAttemptPrepared {
+		t.Fatalf("same-account retry handle = %#v", handle.record)
+	}
+}
+
 func TestCodexLeaseRuntimePersistsInheritedAccountContinuityWithoutRawState(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
