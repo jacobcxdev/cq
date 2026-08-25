@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -241,10 +242,12 @@ type RuntimeSupervisor struct {
 	rescueHandler    http.Handler
 	normalAdmitted   int
 	rescueAdmitted   int
+	rescueSessions   map[string]int
 	normalZero       chan struct{}
 	rescueZero       chan struct{}
 	lifetimeCtx      context.Context
 	rescueEntryRun   bool
+	rescueExitRun    bool
 }
 
 func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
@@ -297,7 +300,7 @@ func NewRuntimeSupervisor(listener net.Listener, supervisorHolder LifecycleHolde
 		listener: listener, listenerIdentity: listener.Addr().Network() + "|" + listener.Addr().String(),
 		supervisorHolder: supervisorHolder, launcher: launcher, checkpoints: checkpoints, now: time.Now,
 		trafficMode: TrafficModeNormal, normalZero: closedRuntimeWaitChannel(), rescueZero: closedRuntimeWaitChannel(),
-		lifetimeCtx: context.Background(),
+		rescueSessions: make(map[string]int), lifetimeCtx: context.Background(),
 	}, nil
 }
 
@@ -406,7 +409,7 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		mode := supervisor.trafficMode
 		supervisor.mu.RUnlock()
 		if mode != TrafficModeNormal {
-			writeRuntimeSupervisorHealth(writer, mode)
+			supervisor.writeRuntimeSupervisorHealth(writer)
 			return
 		}
 	}
@@ -422,16 +425,17 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		if supervisor.rescueAdmitted == 0 {
 			supervisor.rescueZero = make(chan struct{})
 		}
+		sessionKey, _ := headerSessionCorrelation(request.Header, true)
+		if sessionKey == "" {
+			sessionKey = "unidentified"
+		}
 		supervisor.rescueAdmitted++
+		supervisor.rescueSessions[sessionKey]++
 		supervisor.mu.Unlock()
-		defer supervisor.releaseRescueAdmission()
+		defer supervisor.releaseRescueAdmission(sessionKey)
 		handler.ServeHTTP(writer, request)
 		return
-	case TrafficModeRescueExitDraining:
-		supervisor.mu.Unlock()
-		http.Error(writer, "mode changed", http.StatusServiceUnavailable)
-		return
-	case TrafficModeNormal:
+	case TrafficModeRescueExitDraining, TrafficModeNormal:
 		supervisor.mu.Unlock()
 	default:
 		supervisor.mu.Unlock()
@@ -538,8 +542,13 @@ func writeRuntimeWorkerUnavailable(writer http.ResponseWriter, request *http.Req
 	http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 }
 
-func writeRuntimeSupervisorHealth(writer http.ResponseWriter, mode TrafficMode) {
-	ready := mode == TrafficModeRescue || mode == TrafficModeRescueDraining
+func (supervisor *RuntimeSupervisor) writeRuntimeSupervisorHealth(writer http.ResponseWriter) {
+	supervisor.mu.RLock()
+	mode := supervisor.trafficMode
+	ready := mode == TrafficModeRescue || mode == TrafficModeRescueDraining ||
+		(mode == TrafficModeRescueExitDraining && supervisor.admissionReady && supervisor.worker != nil)
+	active, sessions := supervisor.rescueDrainStatusLocked()
+	supervisor.mu.RUnlock()
 	status := "ok"
 	statusCode := http.StatusOK
 	if !ready {
@@ -549,11 +558,13 @@ func writeRuntimeSupervisorHealth(writer http.ResponseWriter, mode TrafficMode) 
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(statusCode)
 	_ = json.NewEncoder(writer).Encode(struct {
-		Status          string      `json:"status"`
-		SupervisorAlive bool        `json:"supervisor_alive"`
-		DataPlaneReady  bool        `json:"data_plane_ready"`
-		Mode            TrafficMode `json:"mode"`
-	}{Status: status, SupervisorAlive: true, DataPlaneReady: ready, Mode: mode})
+		Status               string      `json:"status"`
+		SupervisorAlive      bool        `json:"supervisor_alive"`
+		DataPlaneReady       bool        `json:"data_plane_ready"`
+		Mode                 TrafficMode `json:"mode"`
+		ActiveRescueRequests int         `json:"active_rescue_requests,omitempty"`
+		DrainingSessions     []string    `json:"draining_sessions,omitempty"`
+	}{Status: status, SupervisorAlive: true, DataPlaneReady: ready, Mode: mode, ActiveRescueRequests: active, DrainingSessions: sessions})
 }
 
 func (supervisor *RuntimeSupervisor) refreshCallerAuthority(ctx context.Context, authority *NormalCallerAuthority) error {
@@ -636,10 +647,13 @@ func (supervisor *RuntimeSupervisor) serveRescueControl(writer http.ResponseWrit
 		return
 	}
 	supervisor.mu.RLock()
+	active, sessions := supervisor.rescueDrainStatusLocked()
 	response := struct {
-		Mode       TrafficMode `json:"mode"`
-		Generation uint64      `json:"generation"`
-	}{Mode: supervisor.trafficMode, Generation: supervisor.modeGeneration}
+		Mode                 TrafficMode `json:"mode"`
+		Generation           uint64      `json:"generation"`
+		ActiveRescueRequests int         `json:"active_rescue_requests"`
+		DrainingSessions     []string    `json:"draining_sessions,omitempty"`
+	}{Mode: supervisor.trafficMode, Generation: supervisor.modeGeneration, ActiveRescueRequests: active, DrainingSessions: sessions}
 	supervisor.mu.RUnlock()
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(response)
@@ -654,13 +668,32 @@ func (supervisor *RuntimeSupervisor) releaseNormalAdmission() {
 	}
 }
 
-func (supervisor *RuntimeSupervisor) releaseRescueAdmission() {
+func (supervisor *RuntimeSupervisor) releaseRescueAdmission(sessionKey string) {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
 	supervisor.rescueAdmitted--
+	if supervisor.rescueSessions[sessionKey] <= 1 {
+		delete(supervisor.rescueSessions, sessionKey)
+	} else {
+		supervisor.rescueSessions[sessionKey]--
+	}
 	if supervisor.rescueAdmitted == 0 {
 		close(supervisor.rescueZero)
 	}
+}
+
+func (supervisor *RuntimeSupervisor) rescueDrainStatusLocked() (int, []string) {
+	if supervisor.trafficMode != TrafficModeRescueExitDraining || supervisor.rescueAdmitted == 0 {
+		return 0, nil
+	}
+	sessions := make([]string, 0, len(supervisor.rescueSessions))
+	for session, requests := range supervisor.rescueSessions {
+		if requests > 0 {
+			sessions = append(sessions, session)
+		}
+	}
+	sort.Strings(sessions)
+	return supervisor.rescueAdmitted, sessions
 }
 
 func waitRuntimeAdmissions(ctx context.Context, zero <-chan struct{}) error {
@@ -777,9 +810,26 @@ func (supervisor *RuntimeSupervisor) ExitRescue(ctx context.Context, manifest Wo
 		return ErrRuntimeSupervisorUnavailable
 	}
 	supervisor.mu.Lock()
-	if supervisor.modeEvidence == nil || supervisor.trafficMode != TrafficModeRescue || supervisor.worker != nil {
+	if supervisor.modeEvidence == nil {
 		supervisor.mu.Unlock()
 		return ErrRuntimeSupervisorUnavailable
+	}
+	if supervisor.trafficMode == TrafficModeRescueExitDraining {
+		if !supervisor.rescueExitRun {
+			supervisor.startRescueExitLocked(supervisor.modeGeneration, manifest)
+		}
+		supervisor.mu.Unlock()
+		return nil
+	}
+	if supervisor.trafficMode != TrafficModeRescue || (supervisor.worker != nil && !supervisor.admissionReady) {
+		supervisor.mu.Unlock()
+		return ErrRuntimeSupervisorUnavailable
+	}
+	if supervisor.worker == nil {
+		if _, err := supervisor.bootLocked(ctx, manifest, "rescue_exit", supervisor.pendingRelease); err != nil {
+			supervisor.mu.Unlock()
+			return err
+		}
 	}
 	supervisor.modeGeneration++
 	generation := supervisor.modeGeneration
@@ -790,12 +840,28 @@ func (supervisor *RuntimeSupervisor) ExitRescue(ctx context.Context, manifest Wo
 		return err
 	}
 	supervisor.trafficMode = TrafficModeRescueExitDraining
-	zero := supervisor.rescueZero
+	supervisor.startRescueExitLocked(generation, manifest)
 	supervisor.mu.Unlock()
-	if err := waitRuntimeAdmissions(ctx, zero); err != nil {
-		return err
+	return nil
+}
+
+func (supervisor *RuntimeSupervisor) startRescueExitLocked(generation uint64, manifest WorkerManifestV1) {
+	lifetime := supervisor.lifetimeCtx
+	if lifetime == nil {
+		lifetime = context.Background()
 	}
-	return supervisor.completeRescueExit(ctx, generation, manifest)
+	zero := supervisor.rescueZero
+	supervisor.rescueExitRun = true
+	go func() {
+		if waitRuntimeAdmissions(lifetime, zero) == nil {
+			_ = supervisor.completeRescueExit(lifetime, generation, manifest)
+		}
+		supervisor.mu.Lock()
+		if supervisor.modeGeneration == generation {
+			supervisor.rescueExitRun = false
+		}
+		supervisor.mu.Unlock()
+	}()
 }
 
 func (supervisor *RuntimeSupervisor) completeRescueExit(ctx context.Context, generation uint64, manifest WorkerManifestV1) error {
@@ -944,7 +1010,8 @@ func (supervisor *RuntimeSupervisor) monitorWorkerLocked(worker RuntimeWorkerPro
 			return
 		}
 		supervisor.mu.RLock()
-		current := supervisor.worker == worker && supervisor.admissionReady && supervisor.trafficMode == TrafficModeNormal
+		current := supervisor.worker == worker && supervisor.admissionReady &&
+			(supervisor.trafficMode == TrafficModeNormal || supervisor.trafficMode == TrafficModeRescueExitDraining)
 		supervisor.mu.RUnlock()
 		if !current {
 			return
