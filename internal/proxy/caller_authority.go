@@ -43,6 +43,8 @@ type NormalCallerCredentialV1 struct {
 	SubjectID  string
 	ValidFrom  time.Time
 	ValidUntil time.Time
+
+	identity string
 }
 
 type normalCallerIndexEntry struct {

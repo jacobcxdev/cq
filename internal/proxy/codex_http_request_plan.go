@@ -263,7 +263,8 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
 	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && callerOK {
-		continuityAccountKey = codexAuthenticatedCallerAccount(inventory, caller)
+		identity, _ := runtimeCallerIdentity(ctx)
+		continuityAccountKey = codexAuthenticatedCallerAccount(inventory, caller, identity)
 		if continuityAccountKey != "" {
 			err = nil
 		}
@@ -737,11 +738,11 @@ func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, prot
 	return snapshot.AffinityAccountKey, "", nil
 }
 
-func codexAuthenticatedCallerAccount(inventory codex.Inventory, caller RuntimeCallerAuthorityV1) codex.AccountKey {
+func codexAuthenticatedCallerAccount(inventory codex.Inventory, caller RuntimeCallerAuthorityV1, identity string) codex.AccountKey {
 	if caller.Domain != NormalCallerCodex {
 		return ""
 	}
-	parts := strings.Split(caller.SubjectID, "\x00")
+	parts := strings.Split(identity, "\x00")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return ""
 	}

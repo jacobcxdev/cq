@@ -100,6 +100,7 @@ func executeCodexWebSocketAttempt(executor ExplicitWebSocketExecutor, ctx contex
 type websocketRelayConn interface {
 	ReadMessage() (int, []byte, error)
 	WriteMessage(int, []byte) error
+	WriteControl(int, []byte, time.Time) error
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
 	Close() error

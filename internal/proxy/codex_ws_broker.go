@@ -106,6 +106,11 @@ type codexTerminatingWSBroker struct {
 	upstreamGeneration uint64
 }
 
+const (
+	codexWSIdleKeepAliveInterval = 30 * time.Second
+	codexWSControlWriteTimeout   = time.Second
+)
+
 type codexWSFrameObservationSinkContextKey struct{}
 
 type codexWSFrameObservationSink func(*routeDiagnostics)
@@ -128,6 +133,11 @@ type codexWSActiveUpstream struct {
 	conn       websocketRelayConn
 	account    codex.AccountKey
 	generation uint64
+	readCancel context.CancelFunc
+	readFrames <-chan codexWSUpstreamRead
+	readDone   <-chan struct{}
+	idleCancel context.CancelFunc
+	idleDone   <-chan error
 	prewarm    CodexPrewarmReservation
 	// prewarmRetired preserves adoption authority after its request-scoped
 	// upstream has completed and before the real turn reconnects.
@@ -140,6 +150,12 @@ type codexWSDialResult struct {
 	response  *http.Response
 	body      []byte
 	err       error
+}
+
+type codexWSUpstreamRead struct {
+	messageType int
+	payload     []byte
+	err         error
 }
 
 func newCodexTerminatingWSBroker(config codexTerminatingWSBrokerConfig) (*codexTerminatingWSBroker, error) {
@@ -159,10 +175,8 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	}
 	var active codexWSActiveUpstream
 	defer func() {
-		if active.conn != nil {
-			_ = active.conn.Close()
-		}
 		broker.cancelActivePrewarm(&active)
+		closeCodexWSActiveUpstream(&active)
 	}()
 	for {
 		messageType, encoded, err := readCodexWSMessage(ctx, downstream)
@@ -187,7 +201,178 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	}
 }
 
+func startCodexWSUpstreamReader(ctx context.Context, active *codexWSActiveUpstream) {
+	if active == nil || active.conn == nil || active.readCancel != nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	frames := make(chan codexWSUpstreamRead)
+	done := make(chan struct{})
+	conn := active.conn
+	active.readCancel = cancel
+	active.readFrames = frames
+	active.readDone = done
+	go func() {
+		defer close(done)
+		defer close(frames)
+		defer func() {
+			if recover() != nil {
+				select {
+				case frames <- codexWSUpstreamRead{err: errors.New("Codex upstream WebSocket read failed")}:
+				case <-readCtx.Done():
+				}
+			}
+		}()
+		for {
+			messageType, payload, err := conn.ReadMessage()
+			select {
+			case frames <- codexWSUpstreamRead{messageType: messageType, payload: payload, err: err}:
+			case <-readCtx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func readCodexWSActiveMessage(ctx context.Context, active *codexWSActiveUpstream) (int, []byte, error) {
+	if active == nil || active.conn == nil {
+		return 0, nil, ErrCodexLeaseWriterUnavailable
+	}
+	if active.readFrames == nil {
+		return readCodexWSMessage(ctx, active.conn)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case result, ok := <-active.readFrames:
+		if !ok {
+			return 0, nil, errors.New("Codex upstream WebSocket read failed")
+		}
+		return result.messageType, result.payload, result.err
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	}
+}
+
+func codexWSIdleUpstreamError(active *codexWSActiveUpstream) error {
+	if active == nil || active.readFrames == nil {
+		return nil
+	}
+	select {
+	case result, ok := <-active.readFrames:
+		if !ok || result.err != nil {
+			return errors.New("Codex upstream WebSocket closed while idle")
+		}
+		return ErrCodexWSInvalidFrame
+	default:
+		return nil
+	}
+}
+
+func closeCodexWSActiveConnection(active *codexWSActiveUpstream) {
+	if active == nil {
+		return
+	}
+	if active.idleCancel != nil {
+		active.idleCancel()
+		if active.idleDone != nil {
+			<-active.idleDone
+		}
+	}
+	active.idleCancel = nil
+	active.idleDone = nil
+	if active.readCancel != nil {
+		active.readCancel()
+	}
+	if active.conn != nil {
+		_ = active.conn.Close()
+	}
+	if active.readDone != nil {
+		<-active.readDone
+	}
+	active.conn = nil
+	active.readCancel = nil
+	active.readFrames = nil
+	active.readDone = nil
+}
+
+func closeCodexWSActiveUpstream(active *codexWSActiveUpstream) {
+	if active == nil {
+		return
+	}
+	closeCodexWSActiveConnection(active)
+	*active = codexWSActiveUpstream{}
+}
+
+func serveCodexWSIdleKeepalive(ctx context.Context, upstream websocketRelayConn, ticks <-chan time.Time) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if upstream == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticks:
+			if err := upstream.WriteControl(websocket.PingMessage, nil, time.Now().Add(codexWSControlWriteTimeout)); err != nil {
+				return fmt.Errorf("Codex upstream WebSocket idle keepalive failed")
+			}
+		}
+	}
+}
+
+func (broker *codexTerminatingWSBroker) startIdleUpstreamKeepalive(ctx context.Context, active *codexWSActiveUpstream) {
+	if broker == nil || active == nil || active.conn == nil || active.idleCancel != nil {
+		return
+	}
+	idleCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	upstream := active.conn
+	active.idleCancel = cancel
+	active.idleDone = done
+	go func() {
+		var err error
+		defer func() {
+			if recover() != nil {
+				err = fmt.Errorf("Codex upstream WebSocket idle keepalive failed")
+			}
+			done <- err
+		}()
+		ticker := time.NewTicker(codexWSIdleKeepAliveInterval)
+		defer ticker.Stop()
+		err = serveCodexWSIdleKeepalive(idleCtx, upstream, ticker.C)
+	}()
+}
+
+func (broker *codexTerminatingWSBroker) stopIdleUpstreamKeepalive(active *codexWSActiveUpstream) error {
+	if broker == nil || active == nil || active.idleCancel == nil || active.idleDone == nil {
+		return nil
+	}
+	active.idleCancel()
+	err := <-active.idleDone
+	active.idleCancel = nil
+	active.idleDone = nil
+	return err
+}
+
 func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, active *codexWSActiveUpstream) error {
+	if err := broker.stopIdleUpstreamKeepalive(active); err != nil {
+		closeCodexWSActiveUpstream(active)
+		return err
+	}
+	if err := codexWSIdleUpstreamError(active); err != nil {
+		closeCodexWSActiveUpstream(active)
+		return err
+	}
 	if pending.prewarm {
 		return broker.servePrewarm(ctx, downstream, pending, active)
 	}
@@ -354,9 +539,8 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 			return nil
 		}
 		if err := writeCodexWSMessage(ctx, active.conn, pending.messageType, pending.encoded); err != nil {
-			_ = active.conn.Close()
 			broker.cancelActivePrewarm(active)
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -379,10 +563,7 @@ func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, acco
 		return codexWSDialResult{response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}}
 	}
 	if active.conn != nil {
-		_ = active.conn.Close()
-		active.conn = nil
-		active.account = ""
-		active.generation = 0
+		closeCodexWSActiveUpstream(active)
 	}
 	var last codexWSDialResult
 	for _, attempt := range account.Attempts() {
@@ -409,42 +590,35 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx context.Context,
 	responseAnchor := ""
 	turnState := ""
 	for {
-		messageType, frame, err := readCodexWSMessage(ctx, active.conn)
+		messageType, frame, err := readCodexWSActiveMessage(ctx, active)
 		if err != nil {
-			_ = active.conn.Close()
 			broker.cancelActivePrewarm(active)
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			if ctx.Err() != nil {
 				return false, ctx.Err()
 			}
 			return false, fmt.Errorf("Codex upstream WebSocket prewarm failed")
 		}
 		if messageType != websocket.TextMessage {
-			_ = active.conn.Close()
 			broker.cancelActivePrewarm(active)
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			return false, ErrCodexWSInvalidFrame
 		}
 		observation := classifyCodexSSEData(frame)
 		if observation.Kind == CodexSSEError && !relayed && canRotate && (observation.Error.HardUsageLimit || observation.Error.AuthFailure) {
-			_ = active.conn.Close()
-			active.conn = nil
-			active.account = ""
-			active.generation = 0
+			closeCodexWSActiveUpstream(active)
 			return true, nil
 		}
 		if observation.Kind == CodexSSEMalformed || observation.Kind == CodexSSEUnknown {
-			_ = active.conn.Close()
 			broker.cancelActivePrewarm(active)
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			return false, ErrCodexWSInvalidFrame
 		}
 		if observation.Kind != CodexSSEError && active.prewarm.State == CodexPrewarmCreating {
 			reservation, bindErr := planner.bindWebSocketPrewarm(active.prewarm, active.account, broker.config.DownstreamGeneration, active.generation)
 			if bindErr != nil {
-				_ = active.conn.Close()
 				broker.cancelActivePrewarm(active)
-				*active = codexWSActiveUpstream{}
+				closeCodexWSActiveUpstream(active)
 				return false, bindErr
 			}
 			active.prewarm = reservation
@@ -462,21 +636,18 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx context.Context,
 		if observation.Kind == CodexSSECompleted {
 			reservation, readyErr := planner.readyWebSocketPrewarm(active.prewarm, responseAnchor, turnState)
 			if readyErr != nil {
-				_ = active.conn.Close()
 				broker.cancelActivePrewarm(active)
-				*active = codexWSActiveUpstream{}
+				closeCodexWSActiveUpstream(active)
 				return false, readyErr
 			}
 			active.prewarm = reservation
-			_ = active.conn.Close()
-			active.conn = nil
+			closeCodexWSActiveConnection(active)
 			active.prewarmRetired = true
 			return false, nil
 		}
 		if observation.Kind == CodexSSEError {
-			_ = active.conn.Close()
 			broker.cancelActivePrewarm(active)
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			return false, nil
 		}
 	}
@@ -511,8 +682,7 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 		return codexWSDialResult{lifecycle: lifecycle, response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}, err: err}
 	}
 	if active.conn != nil {
-		_ = active.conn.Close()
-		*active = codexWSActiveUpstream{}
+		closeCodexWSActiveUpstream(active)
 	}
 	var last codexWSDialResult
 	for _, attempt := range account.Attempts() {
@@ -565,14 +735,14 @@ func (broker *codexTerminatingWSBroker) connectRetiredPrewarm(ctx context.Contex
 			break
 		}
 	}
-	*active = codexWSActiveUpstream{}
+	closeCodexWSActiveUpstream(active)
 	last.lifecycle = lifecycle
 	return last
 }
 
 func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, active *codexWSActiveUpstream) (bool, error) {
 	for {
-		messageType, frame, err := readCodexWSMessage(ctx, active.conn)
+		messageType, frame, err := readCodexWSActiveMessage(ctx, active)
 		if err != nil {
 			_ = lifecycle.Indeterminate(context.WithoutCancel(ctx), active.generation)
 			if ctx.Err() != nil {
@@ -592,8 +762,7 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			if err := lifecycle.RejectAndPrepare(ctx, active.generation, uint32(*accountIndex+2)); err != nil {
 				return false, err
 			}
-			_ = active.conn.Close()
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			*accountIndex++
 			return true, nil
 		}
@@ -604,8 +773,7 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
 				return false, fmt.Errorf("Codex downstream WebSocket write failed")
 			}
-			_ = active.conn.Close()
-			*active = codexWSActiveUpstream{}
+			closeCodexWSActiveUpstream(active)
 			return false, nil
 		}
 		if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
@@ -615,6 +783,8 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			if err := lifecycle.Drain(); err != nil {
 				return false, err
 			}
+			startCodexWSUpstreamReader(ctx, active)
+			broker.startIdleUpstreamKeepalive(ctx, active)
 			return false, nil
 		}
 	}
@@ -645,8 +815,7 @@ func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Conte
 	}
 	_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, http.StatusText(status)))
 	if active.conn != nil {
-		_ = active.conn.Close()
-		*active = codexWSActiveUpstream{}
+		closeCodexWSActiveUpstream(active)
 	}
 	return false, nil
 }

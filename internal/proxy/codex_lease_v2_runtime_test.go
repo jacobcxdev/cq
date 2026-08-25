@@ -58,13 +58,13 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	}
 
 	matching := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-next", Kind: CodexAttemptSlotDirect}})
-	matching.Evidence = CodexLeaseRequestEvidence{TurnState: turnState, HasTurnState: true, HasEncryptedState: true}
+	matching.Evidence = CodexLeaseRequestEvidence{PreviousResponseID: responseAnchor, TurnState: turnState, HasTurnState: true, HasEncryptedState: true}
 	for _, test := range []struct {
 		name    string
 		mutate  func(*CodexLeaseRequestPlan)
 		private string
 	}{
-		{name: "previous response without live generation", private: responseAnchor, mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.PreviousResponseID = responseAnchor }},
+		{name: "previous response mismatch", private: "wrong-response-anchor", mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.PreviousResponseID = "wrong-response-anchor" }},
 		{name: "turn state mismatch", private: "wrong-private-state", mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.TurnState = "wrong-private-state" }},
 		{name: "missing turn state", mutate: func(plan *CodexLeaseRequestPlan) { plan.Evidence.TurnState = ""; plan.Evidence.HasTurnState = false }},
 		{name: "account mismatch", mutate: func(plan *CodexLeaseRequestPlan) {

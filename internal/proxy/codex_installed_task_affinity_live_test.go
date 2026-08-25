@@ -645,10 +645,15 @@ func newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t *testing.T, hand
 	if len(credentials) == 0 {
 		t.Fatal("Codex acceptance caller credentials are empty")
 	}
+	key := sha256.Sum256([]byte(credentials[0].Bearer))
+	boundCredentials, err := bindRuntimeCallerCredentials(key[:], credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
 	events := []string{}
 	worker := &codexRuntimeSupervisorAcceptanceWorker{
 		holder:  runtimeHolder("validation-worker"),
-		handler: normalWorkerHandler(handler, credentials),
+		handler: normalWorkerHandler(handler, boundCredentials),
 		exited:  make(chan struct{}),
 	}
 	supervisor, err := NewRuntimeSupervisor(
@@ -663,11 +668,10 @@ func newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t *testing.T, hand
 	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "validation-artifact"}); err != nil {
 		t.Fatal(err)
 	}
-	key := sha256.Sum256([]byte(credentials[0].Bearer))
 	authority, err := NewNormalCallerAuthority(
 		key[:],
 		1,
-		credentials,
+		boundCredentials,
 		&codexRuntimeSupervisorAcceptanceConsumer{consumed: make(map[string]struct{})},
 		time.Now,
 		rand.Reader,

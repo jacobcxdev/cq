@@ -584,14 +584,16 @@ func (handler *codexWebSocketRoutingHandlerStub) Serve(_ context.Context, connec
 func TestCodexTerminatingWSBrokerNeverRotatesNonPortableOrAdmittedTurn(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name  string
-		frame []byte
-		reads []codexWSBrokerRead
+		name       string
+		frame      []byte
+		reads      []codexWSBrokerRead
+		seedAnchor string
 	}{
 		{
-			name:  "incremental request",
-			frame: codexTerminatingWSFrame("turn-incremental", `,"previous_response_id":"response-old"`),
-			reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexWSBrokerHard429()}},
+			name:       "incremental request",
+			frame:      codexTerminatingWSFrame("turn-incremental", `,"previous_response_id":"response-old"`),
+			reads:      []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexWSBrokerHard429()}},
+			seedAnchor: "response-old",
 		},
 		{
 			name:  "admitted request",
@@ -604,12 +606,38 @@ func TestCodexTerminatingWSBrokerNeverRotatesNonPortableOrAdmittedTurn(t *testin
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			slots := []CodexLeaseAttemptSlotPlan{
+				{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+				{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+			}
+			if test.seedAnchor != "" {
+				slots = slots[:1]
+				predecessor, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-predecessor", slots))
+				if err != nil {
+					t.Fatal(err)
+				}
+				predecessor, err = predecessor.MarkDispatched()
+				if err != nil {
+					t.Fatal(err)
+				}
+				predecessor, err = predecessor.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				predecessor, err = predecessor.ProviderCompleted(CodexHTTPCompletionEvidence{
+					CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: test.seedAnchor, HasResponseAnchor: true},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if predecessor, err = predecessor.Drain(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			planner := &codexWSBrokerPlannerStub{
-				runtime: newCodexLeaseRuntimeTest(t, coordinator),
-				slots: []CodexLeaseAttemptSlotPlan{
-					{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
-					{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
-				},
+				runtime: runtimeLease,
+				slots:   slots,
 			}
 			downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: test.frame}, {err: io.EOF}}}
 			upstream := &codexWSBrokerConnStub{reads: test.reads}
@@ -640,18 +668,18 @@ func TestCodexTerminatingWSBrokerReusesAccountBoundUpstreamForSuccessor(t *testi
 		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
 	}
 	first := codexTerminatingWSFrame("turn-a", "")
-	second := codexTerminatingWSFrame("turn-b", "")
+	second := codexTerminatingWSFrame("turn-b", `,"previous_response_id":"response-a"`)
 	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: first},
 		{messageType: websocket.TextMessage, payload: second},
 		{err: io.EOF},
 	}}
-	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+	upstream := newCodexWSBrokerSuccessorConn([]codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-b"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)},
-	}}
+	})
 	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
 	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
 	if err != nil {
@@ -665,6 +693,139 @@ func TestCodexTerminatingWSBrokerReusesAccountBoundUpstreamForSuccessor(t *testi
 	}
 	if got := upstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{first, second}) {
 		t.Fatalf("upstream writes = %#v", got)
+	}
+}
+
+func TestServeCodexWSIdleKeepalivePingsUpstream(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time, 1)
+	controls := make(chan codexWSBrokerWrite, 1)
+	upstream := &codexWSBrokerConnStub{controlWrites: controls}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveCodexWSIdleKeepalive(ctx, upstream, ticks)
+	}()
+	ticks <- time.Now()
+	select {
+	case control := <-controls:
+		if control.messageType != websocket.PingMessage || len(control.payload) != 0 {
+			t.Fatalf("control = %#v", control)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle upstream did not receive keepalive ping")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("keepalive did not stop with context")
+	}
+}
+
+func TestCodexWSUpstreamReaderAnswersIdlePing(t *testing.T) {
+	t.Parallel()
+	pong := make(chan string, 1)
+	serverDone := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetPongHandler(func(payload string) error {
+			pong <- payload
+			return nil
+		})
+		readDone := make(chan struct{})
+		go func() {
+			defer close(readDone)
+			_, _, _ = conn.ReadMessage()
+		}()
+		if err := conn.WriteControl(websocket.PingMessage, []byte("idle"), time.Now().Add(time.Second)); err != nil {
+			serverDone <- err
+			return
+		}
+		select {
+		case payload := <-pong:
+			if payload != "idle" {
+				serverDone <- fmt.Errorf("pong payload = %q", payload)
+				return
+			}
+			serverDone <- nil
+		case <-time.After(time.Second):
+			serverDone <- errors.New("idle upstream ping was not answered")
+		}
+	}))
+	defer server.Close()
+
+	upstream, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := codexWSActiveUpstream{conn: upstream}
+	startCodexWSUpstreamReader(context.Background(), &active)
+	defer closeCodexWSActiveUpstream(&active)
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle upstream ping test timed out")
+	}
+}
+
+func TestCodexTerminatingWSBrokerRejectsKnownClosedIdleUpstreamBeforeDispatch(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
+	}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             &codexWSBrokerDialerStub{},
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, codexTerminatingWSFrame("turn-b", `,"previous_response_id":"response-a"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+	readDone := make(chan struct{})
+	close(readDone)
+	readFrames := make(chan codexWSUpstreamRead, 1)
+	readFrames <- codexWSUpstreamRead{err: io.EOF}
+	close(readFrames)
+	upstream := &codexWSBrokerConnStub{}
+	active := codexWSActiveUpstream{
+		conn:       upstream,
+		account:    "account-a",
+		generation: 1,
+		readCancel: func() {},
+		readFrames: readFrames,
+		readDone:   readDone,
+	}
+	defer closeCodexWSActiveUpstream(&active)
+
+	err = broker.serveFrame(context.Background(), &codexWSBrokerConnStub{}, pending, &active)
+	if err == nil {
+		t.Fatal("known-closed idle upstream was reused")
+	}
+	if planner.buildCalls != 0 {
+		t.Fatalf("planner builds = %d, want no successor dispatch", planner.buildCalls)
+	}
+	if writes := upstream.writtenPayloads(); len(writes) != 0 {
+		t.Fatalf("known-closed upstream writes = %#v", writes)
 	}
 }
 
@@ -856,7 +1017,14 @@ func (planner *codexWSBrokerPlannerStub) Build(_ context.Context, input CodexHTT
 	if err != nil {
 		return CodexPreparedHTTPRequest{}, err
 	}
-	handle, err := planner.runtime.BeginRequest(codexLeaseRuntimeTestPlan(request.Metadata.Metadata.TurnID, planner.slots))
+	plan := codexLeaseRuntimeTestPlan(request.Metadata.Metadata.TurnID, planner.slots)
+	plan.Evidence = CodexLeaseRequestEvidence{
+		PreviousResponseID: request.PreviousResponseID,
+		TurnState:          request.TurnState,
+		HasTurnState:       request.HasTurnState,
+		HasEncryptedState:  request.HasEncryptedState,
+	}
+	handle, err := planner.runtime.BeginRequest(plan)
 	if err != nil {
 		return CodexPreparedHTTPRequest{}, err
 	}
@@ -972,10 +1140,11 @@ type codexWSBrokerWrite struct {
 }
 
 type codexWSBrokerConnStub struct {
-	mu     sync.Mutex
-	reads  []codexWSBrokerRead
-	writes []codexWSBrokerWrite
-	closed bool
+	mu            sync.Mutex
+	reads         []codexWSBrokerRead
+	writes        []codexWSBrokerWrite
+	controlWrites chan<- codexWSBrokerWrite
+	closed        bool
 }
 
 func (conn *codexWSBrokerConnStub) ReadMessage() (int, []byte, error) {
@@ -996,6 +1165,18 @@ func (conn *codexWSBrokerConnStub) WriteMessage(messageType int, payload []byte)
 		return errors.New("closed")
 	}
 	conn.writes = append(conn.writes, codexWSBrokerWrite{messageType: messageType, payload: append([]byte(nil), payload...)})
+	return nil
+}
+
+func (conn *codexWSBrokerConnStub) WriteControl(messageType int, payload []byte, _ time.Time) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if conn.closed {
+		return errors.New("closed")
+	}
+	if conn.controlWrites != nil {
+		conn.controlWrites <- codexWSBrokerWrite{messageType: messageType, payload: append([]byte(nil), payload...)}
+	}
 	return nil
 }
 
@@ -1040,6 +1221,47 @@ type codexWSBrokerBlockingConn struct {
 	once    sync.Once
 }
 
+type codexWSBrokerSuccessorConn struct {
+	*codexWSBrokerConnStub
+	gate       chan struct{}
+	gateOnce   sync.Once
+	mu         sync.Mutex
+	readCount  int
+	writeCount int
+}
+
+func newCodexWSBrokerSuccessorConn(reads []codexWSBrokerRead) *codexWSBrokerSuccessorConn {
+	return &codexWSBrokerSuccessorConn{
+		codexWSBrokerConnStub: &codexWSBrokerConnStub{reads: reads},
+		gate:                  make(chan struct{}),
+	}
+}
+
+func (conn *codexWSBrokerSuccessorConn) ReadMessage() (int, []byte, error) {
+	conn.mu.Lock()
+	conn.readCount++
+	readCount := conn.readCount
+	conn.mu.Unlock()
+	if readCount == 3 {
+		<-conn.gate
+	}
+	return conn.codexWSBrokerConnStub.ReadMessage()
+}
+
+func (conn *codexWSBrokerSuccessorConn) WriteMessage(messageType int, payload []byte) error {
+	if err := conn.codexWSBrokerConnStub.WriteMessage(messageType, payload); err != nil {
+		return err
+	}
+	conn.mu.Lock()
+	conn.writeCount++
+	writeCount := conn.writeCount
+	conn.mu.Unlock()
+	if writeCount == 2 {
+		conn.gateOnce.Do(func() { close(conn.gate) })
+	}
+	return nil
+}
+
 func newCodexWSBrokerBlockingConn() *codexWSBrokerBlockingConn {
 	return &codexWSBrokerBlockingConn{started: make(chan struct{}), release: make(chan struct{})}
 }
@@ -1051,6 +1273,9 @@ func (conn *codexWSBrokerBlockingConn) ReadMessage() (int, []byte, error) {
 }
 
 func (*codexWSBrokerBlockingConn) WriteMessage(int, []byte) error { return nil }
+func (*codexWSBrokerBlockingConn) WriteControl(int, []byte, time.Time) error {
+	return nil
+}
 func (conn *codexWSBrokerBlockingConn) SetReadDeadline(time.Time) error {
 	select {
 	case <-conn.release:

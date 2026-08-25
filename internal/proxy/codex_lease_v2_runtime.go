@@ -1278,7 +1278,9 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		}
 	}
 	if evidence.PreviousResponseID != "" {
-		return false, fmt.Errorf("%w: live upstream generation unavailable for previous response", ErrCodexContinuity)
+		if !found || !authority.Record.HasResponseAnchor || !constantTimeCodexLeaseDigestEqual(authority.Record.CorrelationHash, runtime.store.hash("correlation", evidence.PreviousResponseID)) {
+			return false, fmt.Errorf("%w: previous response mismatch", ErrCodexContinuity)
+		}
 	}
 	if evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
 		if restored.Affinity == nil || !restored.Affinity.Resolved || restored.Affinity.AccountKey == "" {
