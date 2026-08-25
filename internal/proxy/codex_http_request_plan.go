@@ -262,6 +262,12 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
+	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && callerOK {
+		continuityAccountKey = codexAuthenticatedCallerAccount(inventory, caller)
+		if continuityAccountKey != "" {
+			err = nil
+		}
+	}
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 	}
@@ -729,6 +735,30 @@ func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, prot
 		return "", "", nil
 	}
 	return snapshot.AffinityAccountKey, "", nil
+}
+
+func codexAuthenticatedCallerAccount(inventory codex.Inventory, caller RuntimeCallerAuthorityV1) codex.AccountKey {
+	if caller.Domain != NormalCallerCodex {
+		return ""
+	}
+	parts := strings.Split(caller.SubjectID, "\x00")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	accountKey := codex.AccountKey(parts[0])
+	candidateID := codex.CandidateID(parts[1])
+	revision := codex.Revision(parts[2])
+	for _, account := range inventory.Accounts {
+		if account.Key != accountKey || !account.Routable || account.Unstable {
+			continue
+		}
+		for _, candidate := range account.Candidates {
+			if candidate.Ref.AccountKey == accountKey && candidate.Ref.CandidateID == candidateID && candidate.Revision == revision && candidate.Routable && !candidate.DispatchBlocked {
+				return accountKey
+			}
+		}
+	}
+	return ""
 }
 
 func codexGPT56PromptCacheModel(model string) bool {

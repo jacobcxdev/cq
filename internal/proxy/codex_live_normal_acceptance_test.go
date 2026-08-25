@@ -105,9 +105,10 @@ func readCodexLiveAcceptanceCredential(path string) (codexLiveAcceptanceCredenti
 		return result, errors.New("decode live Codex auth file")
 	}
 	claims := auth.DecodeCodexClaims(document.Tokens.IDToken)
+	accessClaims := auth.DecodeCodexClaims(document.Tokens.AccessToken)
 	if document.Tokens.AccessToken == "" || document.Tokens.IDToken == "" || claims.AccountID == "" || claims.UserID == "" ||
 		(document.Tokens.AccountID != "" && document.Tokens.AccountID != claims.AccountID) ||
-		(claims.ExpiresAt != 0 && time.Unix(claims.ExpiresAt, 0).Before(time.Now().Add(5*time.Minute))) {
+		(accessClaims.ExpiresAt != 0 && time.Unix(accessClaims.ExpiresAt, 0).Before(time.Now().Add(5*time.Minute))) {
 		return result, errors.New("live Codex auth credential is incomplete or expired")
 	}
 	localToken, err := newCodexInstalledHTTPValidationToken()
@@ -132,6 +133,12 @@ func readCodexLiveAcceptanceCredential(path string) (codexLiveAcceptanceCredenti
 }
 
 func newCodexLiveNormalAcceptanceServer(t *testing.T, credential codexLiveAcceptanceCredential) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic) {
+	return newCodexLiveNormalAcceptanceServerWithCallers(t, credential, []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: credential.localToken, SubjectID: "live-normal-codex", ValidUntil: time.Now().Add(10 * time.Minute),
+	}})
+}
+
+func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential codexLiveAcceptanceCredential, callers []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic) {
 	t.Helper()
 	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
 	if err != nil {
@@ -217,11 +224,9 @@ func newCodexLiveNormalAcceptanceServer(t *testing.T, credential codexLiveAccept
 		t.Fatalf("construct live Codex normal candidate: %v", err)
 	}
 	traffic := &codexLiveNormalTraffic{}
-	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServerWithCredential(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		traffic.serveHTTP(handler, writer, request)
-	}), NormalCallerCredentialV1{
-		Domain: NormalCallerCodex, Bearer: credential.localToken, SubjectID: "live-normal-codex", ValidUntil: now.Add(10 * time.Minute),
-	})
+	}), callers)
 	return listener, supervisor, traffic
 }
 

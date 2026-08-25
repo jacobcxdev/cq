@@ -688,6 +688,66 @@ func TestCodexHTTPRequestPlanFactoryPrefersExactBoundForRawContinuity(t *testing
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryAdoptsAuthenticatedCallerContinuity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	account := frozenDispatchTestLogicalAccount(
+		"account-a",
+		frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{account}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration: 1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	body := []byte(strings.Replace(
+		string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")),
+		`,"input":`,
+		`,"previous_response_id":"rescue-response","input":`,
+		1,
+	))
+	caller := RuntimeCallerAuthorityV1{
+		Domain:    NormalCallerCodex,
+		SubjectID: "account-a\x00candidate-a\x00revision-a",
+	}
+
+	prepared, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{Encoded: body})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-a" {
+		t.Fatalf("dispatch accounts = %#v, want authenticated account-a", accounts)
+	}
+	if !runtime.plan.RequiresAccountContinuity {
+		t.Fatal("adopted rescue continuation was not durably account-bound")
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRejectsUnverifiedCallerContinuity(t *testing.T) {
+	t.Parallel()
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})
+	body := []byte(strings.Replace(
+		string(frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")),
+		`,"input":`,
+		`,"previous_response_id":"rescue-response","input":`,
+		1,
+	))
+	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "account\x00wrong-candidate\x00wrong-revision"}
+
+	_, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{Encoded: body})
+	if !errors.Is(err, ErrCodexLeaseAuthorityMismatch) {
+		t.Fatalf("Build error = %v, want authority mismatch", err)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryReleasesInspectionBeforeFreeze(t *testing.T) {
 	t.Parallel()
 
