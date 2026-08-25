@@ -329,6 +329,58 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 	}
 }
 
+func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE") != "1" {
+		t.Skip("live Codex normal acceptance requires explicit opt-in")
+	}
+	authPath := os.Getenv("CQ_CODEX_LIVE_AUTH_FILE")
+	credential, err := readCodexLiveAcceptanceCredential(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	listener, supervisor, traffic := newCodexLiveNormalAcceptanceServer(t, credential)
+	if listener.URL == "http://127.0.0.1:19280" || supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
+		t.Fatal("live Codex normal acceptance did not use isolated normal proxy")
+	}
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
+	runner := codexTaskAffinityAcceptanceRunner{}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	for _, turn := range []struct {
+		resume    bool
+		webSocket bool
+		output    string
+	}{
+		{webSocket: true, output: "LIVE-WS-PONG"},
+		{resume: true, output: "LIVE-HTTP-PONG-1"},
+		{resume: true, output: "LIVE-HTTP-PONG-2"},
+	} {
+		if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, runner, clientProof, listener.URL, isolation, turn.resume, turn.webSocket, turn.output); err != nil {
+			t.Fatalf("live Codex normal turn %s: %v", turn.output, err)
+		}
+	}
+	compactionIsolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
+	if err := runCodexAppServerCompactionAcceptance(ctx, clientProof, listener.URL, compactionIsolation); err != nil {
+		t.Fatalf("live Codex normal compaction: %v", err)
+	}
+	if supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
+		t.Fatal("live Codex normal acceptance lost candidate worker")
+	}
+	webSockets, responses, compactions := traffic.snapshot()
+	if webSockets != 1 || responses != 3 || compactions < 1 {
+		t.Fatalf("live Codex normal traffic = websocket %d responses %d compactions %d, want 1/3/positive", webSockets, responses, compactions)
+	}
+}
+
 type codexRescueAcceptanceTransport struct {
 	target *url.URL
 	inner  http.RoundTripper
@@ -707,6 +759,7 @@ func runCodexTaskAffinityAcceptanceTurnForTransport(
 	}
 	environment := append(codexAcceptanceBaseEnvironment(isolation.home, isolation.codexHome, isolation.tmp, isolation.cache, isolation.config),
 		"XDG_DATA_HOME="+isolation.data,
+		"OPENAI_BASE_URL="+baseURL,
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
 	)
@@ -758,6 +811,7 @@ func runCodexCompactionAcceptanceTurn(
 	}
 	environment := append(codexAcceptanceBaseEnvironment(isolation.home, isolation.codexHome, isolation.tmp, isolation.cache, isolation.config),
 		"XDG_DATA_HOME="+isolation.data,
+		"OPENAI_BASE_URL="+baseURL,
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
 	)

@@ -64,13 +64,11 @@ cq uses [semver](https://semver.org/) starting at `v0.1.0`. Bump minor for featu
 To release a new version:
 
 1. Ensure `main` is green (CI passing).
-2. Validate rescue WebSocket passthrough against live upstream on an isolated port with current installed Codex:
+2. Validate current installed Codex against live upstream:
    ```bash
-   CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
-   CQ_CODEX_LIVE_AUTH_FILE="${CODEX_HOME:-$HOME/.codex}/auth.json" \
-   CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" \
-   go test -race -count=1 ./internal/proxy -run '^TestCodexInstalledRescuePassesThroughLiveUpstream$'
+   scripts/validate-codex-release
    ```
+   This runs normal WebSocket, repeated HTTP, compaction, and rescue traffic through isolated proxy listeners. It leaves any production listener unchanged and publishes the commit-bound `cq/live-normal-routing` status required by the tag workflow.
 3. Tag the commit: `git tag v0.x.y`
 4. Push the tag: `git push origin v0.x.y`
 5. GitHub Actions runs GoReleaser, which:
