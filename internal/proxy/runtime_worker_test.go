@@ -160,6 +160,7 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD, WorkFD: RuntimeNoWorkFD,
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
+	var workerCommand *exec.Cmd
 	launcher := &RuntimeProcessWorkerLauncher{
 		Executable: os.Args[0], BaseManifest: base, SupervisorHolder: supervisorProof,
 		Random: bytes.NewReader(bytes.Repeat([]byte{0x6e}, RuntimeSecretSize)),
@@ -176,12 +177,16 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 			return file, proof, err
 		},
 		Command: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
-			return exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=TestRuntimeWorkerRoleHelperProcess", "--"}, args...)...)
+			workerCommand = exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=TestRuntimeWorkerRoleHelperProcess", "--"}, args...)...)
+			return workerCommand
 		},
 	}
 	process, err := launcher.Launch(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if workerCommand == nil || workerCommand.Stderr != os.Stderr {
+		t.Fatal("worker stderr is not connected to supervisor stderr")
 	}
 	boot, err := process.Boot(context.Background(), WorkerManifestV1{})
 	if err != nil {

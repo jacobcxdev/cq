@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -280,23 +281,30 @@ func TestCodexNativeHTTPPlanFailureIsClaimedAndPrivate(t *testing.T) {
 
 func TestCodexNativeHTTPPlanFailureReportsSafeStage(t *testing.T) {
 	const private = "private-route-snapshot-error"
-	planner := &codexNativeHTTPPlannerStub{err: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, errors.New(private))}
+	planner := &codexNativeHTTPPlannerStub{err: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, fmt.Errorf("%w: %s", ErrCodexLeaseAuthorityMismatch, private))}
 	handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{}, "https://codex.example")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reported CodexHTTPRequestPlanErrorCode
-	handler.reportPlanFailure = func(code CodexHTTPRequestPlanErrorCode) { reported = code }
+	var reported CodexHTTPRequestPlanFailure
+	handler.reportPlanFailure = func(failure CodexHTTPRequestPlanFailure) { reported = failure }
 	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", strings.NewReader(`{"input":"`+private+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, diagnostics := withRouteDiagnostics(request.Context())
+	request = request.WithContext(ctx)
 	writer := newCodexNativeHTTPOrderWriter(new([]string))
 
 	handler.TryServe(writer, request, false)
 
-	if reported != CodexHTTPRequestPlanRouteSnapshot {
-		t.Fatalf("reported stage = %q, want %q", reported, CodexHTTPRequestPlanRouteSnapshot)
+	if reported.Stage != CodexHTTPRequestPlanDispatch || reported.Reason != CodexRequestFailureLeaseAuthorityMismatch {
+		t.Fatalf("reported failure = %+v, want dispatch/lease authority mismatch", reported)
+	}
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.Decision != "plan_failed" || event.Reason != string(CodexRequestFailureLeaseAuthorityMismatch) {
+		t.Fatalf("diagnostics = decision %q reason %q, want plan_failed/lease_authority_mismatch", event.Decision, event.Reason)
 	}
 	if strings.Contains(writer.body.String(), private) {
 		t.Fatalf("private failure reached response: %q", writer.body.String())
@@ -309,8 +317,8 @@ func TestCodexNativeHTTPPlanFailureRedactsUnknownStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reported CodexHTTPRequestPlanErrorCode
-	handler.reportPlanFailure = func(code CodexHTTPRequestPlanErrorCode) { reported = code }
+	var reported CodexHTTPRequestPlanFailure
+	handler.reportPlanFailure = func(failure CodexHTTPRequestPlanFailure) { reported = failure }
 	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", strings.NewReader(`{"input":"hello"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -318,8 +326,8 @@ func TestCodexNativeHTTPPlanFailureRedactsUnknownStage(t *testing.T) {
 
 	handler.TryServe(newCodexNativeHTTPOrderWriter(new([]string)), request, false)
 
-	if reported != codexHTTPRequestPlanUnknown {
-		t.Fatalf("reported stage = %q, want %q", reported, codexHTTPRequestPlanUnknown)
+	if reported.Stage != codexHTTPRequestPlanUnknown || reported.Reason != CodexRequestFailureUnknown {
+		t.Fatalf("reported failure = %+v, want unknown/unknown", reported)
 	}
 }
 

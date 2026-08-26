@@ -20,6 +20,95 @@ type CodexWebSocketRoutingHandler interface {
 	Serve(context.Context, *websocket.Conn, http.Header) error
 }
 
+type codexWebSocketFailureStage string
+
+const (
+	codexWebSocketFailureStageUnknown        codexWebSocketFailureStage = "unknown"
+	codexWebSocketFailureStageDownstreamRead codexWebSocketFailureStage = "downstream_read"
+	codexWebSocketFailureStageFrameDecode    codexWebSocketFailureStage = "frame_decode"
+	codexWebSocketFailureStageUpstreamIdle   codexWebSocketFailureStage = "upstream_idle"
+	codexWebSocketFailureStageUpstreamRead   codexWebSocketFailureStage = "upstream_read"
+)
+
+type codexWebSocketFailureReason string
+
+const (
+	codexWebSocketFailureReasonUnknown                      codexWebSocketFailureReason = "unknown"
+	codexWebSocketFailureReasonUpstreamClosed               codexWebSocketFailureReason = "upstream_closed"
+	codexWebSocketFailureReasonUpstreamOutcomeIndeterminate codexWebSocketFailureReason = "upstream_outcome_indeterminate"
+	codexWebSocketFailureReasonInvalidFrame                 codexWebSocketFailureReason = "invalid_frame"
+	codexWebSocketFailureReasonDownstreamReadFailed         codexWebSocketFailureReason = "downstream_read_failed"
+)
+
+type codexWebSocketFailure struct {
+	Stage  codexWebSocketFailureStage
+	Reason codexWebSocketFailureReason
+	plan   bool
+}
+
+type codexWebSocketBrokerError struct {
+	failure codexWebSocketFailure
+}
+
+func (err *codexWebSocketBrokerError) Error() string {
+	return "Codex WebSocket broker failed"
+}
+
+func newCodexWebSocketBrokerError(stage codexWebSocketFailureStage, reason codexWebSocketFailureReason) error {
+	return &codexWebSocketBrokerError{failure: codexWebSocketFailure{
+		Stage:  safeCodexWebSocketFailureStage(stage),
+		Reason: safeCodexWebSocketFailureReason(reason),
+	}}
+}
+
+func classifyCodexWebSocketFailure(err error) codexWebSocketFailure {
+	var planErr *CodexHTTPRequestPlanError
+	if errors.As(err, &planErr) {
+		return codexWebSocketFailure{
+			Stage:  codexWebSocketFailureStage(safeCodexHTTPRequestPlanErrorCode(planErr.Code)),
+			Reason: codexWebSocketFailureReason(safeCodexRequestFailureReason(planErr.Reason)),
+			plan:   true,
+		}
+	}
+	var brokerErr *codexWebSocketBrokerError
+	if errors.As(err, &brokerErr) {
+		return codexWebSocketFailure{
+			Stage:  safeCodexWebSocketFailureStage(brokerErr.failure.Stage),
+			Reason: safeCodexWebSocketFailureReason(brokerErr.failure.Reason),
+		}
+	}
+	if errors.Is(err, ErrCodexWSInvalidFrame) {
+		return codexWebSocketFailure{Stage: codexWebSocketFailureStageFrameDecode, Reason: codexWebSocketFailureReasonInvalidFrame}
+	}
+	return codexWebSocketFailure{Stage: codexWebSocketFailureStageUnknown, Reason: codexWebSocketFailureReasonUnknown}
+}
+
+func safeCodexWebSocketFailureStage(stage codexWebSocketFailureStage) codexWebSocketFailureStage {
+	switch stage {
+	case codexWebSocketFailureStageUnknown,
+		codexWebSocketFailureStageDownstreamRead,
+		codexWebSocketFailureStageFrameDecode,
+		codexWebSocketFailureStageUpstreamIdle,
+		codexWebSocketFailureStageUpstreamRead:
+		return stage
+	default:
+		return codexWebSocketFailureStageUnknown
+	}
+}
+
+func safeCodexWebSocketFailureReason(reason codexWebSocketFailureReason) codexWebSocketFailureReason {
+	switch reason {
+	case codexWebSocketFailureReasonUnknown,
+		codexWebSocketFailureReasonUpstreamClosed,
+		codexWebSocketFailureReasonUpstreamOutcomeIndeterminate,
+		codexWebSocketFailureReasonInvalidFrame,
+		codexWebSocketFailureReasonDownstreamReadFailed:
+		return reason
+	default:
+		return codexWebSocketFailureReasonUnknown
+	}
+}
+
 type codexTerminatingWebSocketHandler struct {
 	plans       CodexNativeHTTPRequestPlanner
 	upstream    codexWSUpstreamDialer
@@ -181,13 +270,14 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	for {
 		messageType, encoded, err := readCodexWSMessage(ctx, downstream)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			var closeErr *websocket.CloseError
+			if errors.Is(err, io.EOF) || errors.As(err, &closeErr) {
 				return nil
 			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			return fmt.Errorf("Codex downstream WebSocket read failed")
+			return newCodexWebSocketBrokerError(codexWebSocketFailureStageDownstreamRead, codexWebSocketFailureReasonDownstreamReadFailed)
 		}
 		pending, err := newCodexWSPendingFrame(messageType, encoded)
 		if err != nil {
@@ -268,7 +358,7 @@ func codexWSIdleUpstreamError(active *codexWSActiveUpstream) error {
 	select {
 	case result, ok := <-active.readFrames:
 		if !ok || result.err != nil {
-			return errors.New("Codex upstream WebSocket closed while idle")
+			return newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamIdle, codexWebSocketFailureReasonUpstreamClosed)
 		}
 		return ErrCodexWSInvalidFrame
 	default:
@@ -748,7 +838,7 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			if ctx.Err() != nil {
 				return false, ctx.Err()
 			}
-			return false, fmt.Errorf("Codex upstream WebSocket outcome indeterminate")
+			return false, newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamRead, codexWebSocketFailureReasonUpstreamOutcomeIndeterminate)
 		}
 		if messageType != websocket.TextMessage {
 			_ = lifecycle.Indeterminate(ctx, active.generation)
