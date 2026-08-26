@@ -439,6 +439,7 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 		commandFactory = exec.CommandContext
 	}
 	command := commandFactory(ctx, launcher.Executable, append([]string{"proxy", "start"}, arguments...)...)
+	command.Stderr = os.Stderr
 	command.ExtraFiles = []*os.File{placeholder, lifecycle, workerControlFile, secretReader, workFile}
 	spawnDigest, spawnStat, err := runtimeExecutableDigest(launcher.Executable)
 	if err != nil || spawnStat != verifiedStat || spawnDigest != verifiedDigest {

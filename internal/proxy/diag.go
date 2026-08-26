@@ -730,7 +730,7 @@ func safeCodexLeasePhase(value string) bool {
 
 func safeCodexDecision(value string) bool {
 	switch value {
-	case "", "affinity_reuse", "fairness_select", "terminal_default", "shadow_unknown", "shadow_parsed", "shadow_rejected", "shadow_selected", "shadow_continuity_error", "shadow_admitted", "shadow_sampling_complete", "shadow_unadmitted":
+	case "", "affinity_reuse", "broker_failed", "fairness_select", "terminal_default", "plan_failed", "shadow_unknown", "shadow_parsed", "shadow_rejected", "shadow_selected", "shadow_continuity_error", "shadow_admitted", "shadow_sampling_complete", "shadow_unadmitted":
 		return true
 	default:
 		return false
@@ -738,8 +738,11 @@ func safeCodexDecision(value string) bool {
 }
 
 func safeCodexReason(value string) bool {
+	if safeCodexRequestFailureReason(CodexRequestFailureReason(value)) != CodexRequestFailureUnknown || value == string(CodexRequestFailureUnknown) {
+		return true
+	}
 	switch value {
-	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "upstream_rejected", "unadmitted_end":
+	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "invalid_frame", "downstream_read_failed", "unknown":
 		return true
 	}
 	if suffix, ok := strings.CutPrefix(value, "candidate_attempt_"); ok {

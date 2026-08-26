@@ -470,6 +470,83 @@ func TestServerCodexWebSocketEnforceUsesTerminatingBroker(t *testing.T) {
 	}
 }
 
+func TestServerCodexWebSocketEnforceTracesSafeBrokerFailure(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		brokerErr    error
+		wantDecision string
+		wantReason   string
+	}{
+		{
+			name:         "plan failure",
+			brokerErr:    fmt.Errorf("private wrapped cause: %w", newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)),
+			wantDecision: "plan_failed",
+			wantReason:   "lease_authority_mismatch",
+		},
+		{
+			name:         "unknown broker failure",
+			brokerErr:    errors.New("private broker failure token-should-not-leak"),
+			wantDecision: "broker_failed",
+			wantReason:   "unknown",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			diagnostics, err := OpenDiagnosticsWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = diagnostics.Close() })
+			server := &Server{
+				Config: &Config{ClaudeUpstream: "https://claude.test", CodexUpstream: "https://codex.test", LocalToken: "local-token"},
+				CodexRouting: &CodexRoutingRuntime{WebSocket: CodexModeStatus{
+					Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce, ModeEpoch: 41, AuthoritativeEpoch: 41,
+				}},
+				CodexWebSocketBroker: &codexWebSocketFailingHandlerStub{err: test.brokerErr},
+				Diag:                 diagnostics,
+			}
+			handler, err := server.handler()
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxyServer := httptest.NewServer(handler)
+			t.Cleanup(proxyServer.Close)
+
+			header := make(http.Header)
+			header.Set("X-Codex-Window-Id", "private-window-id")
+			client, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxyServer.URL, "http")+legacyCodexResponsesPath, header)
+			if err != nil {
+				t.Fatalf("downstream WebSocket upgrade: %v", err)
+			}
+			t.Cleanup(func() { _ = client.Close() })
+			if response == nil || response.StatusCode != http.StatusSwitchingProtocols {
+				t.Fatalf("downstream upgrade response = %v, want 101", response)
+			}
+			if err := client.WriteMessage(websocket.TextMessage, codexTerminatingWSFrame("turn-private", "")); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseInternalServerErr) {
+				t.Fatalf("downstream close = %v, want 1011", err)
+			}
+
+			events := waitForDiagnosticsEvents(t, path, 1)
+			if len(events) != 1 {
+				t.Fatalf("diagnostics events = %d, want 1", len(events))
+			}
+			event := events[0]
+			if event.RouteKind != "codex_websocket_broker" || event.StatusCode != http.StatusSwitchingProtocols || event.Decision != test.wantDecision || event.Reason != test.wantReason {
+				t.Fatalf("broker event = %+v, want decision=%q reason=%q", event, test.wantDecision, test.wantReason)
+			}
+			if event.SessionKey != "codex-window:83b0f854cdc5" || event.SessionSource != "x-codex-window-id" {
+				t.Fatalf("session correlation = %q/%q", event.SessionKey, event.SessionSource)
+			}
+			assertDiagnosticsLogDoesNotContain(t, path, "private-window-id")
+			assertDiagnosticsLogDoesNotContain(t, path, "private wrapped cause")
+			assertDiagnosticsLogDoesNotContain(t, path, "token-should-not-leak")
+		})
+	}
+}
+
 func TestServerCodexWebSocketEnforcePersistsEachAcceptedFrameSeparately(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 	diagnostics, err := OpenDiagnosticsWriter(path)
@@ -555,6 +632,10 @@ type codexWebSocketRoutingHandlerStub struct {
 	header http.Header
 }
 
+type codexWebSocketFailingHandlerStub struct {
+	err error
+}
+
 type codexWebSocketFrameSinkHandlerStub struct{}
 
 func (*codexWebSocketFrameSinkHandlerStub) Serve(ctx context.Context, connection *websocket.Conn, _ http.Header) error {
@@ -579,6 +660,13 @@ func (handler *codexWebSocketRoutingHandlerStub) Serve(_ context.Context, connec
 		return err
 	}
 	return connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed"}`))
+}
+
+func (handler *codexWebSocketFailingHandlerStub) Serve(_ context.Context, connection *websocket.Conn, _ http.Header) error {
+	if _, _, err := connection.ReadMessage(); err != nil {
+		return err
+	}
+	return handler.err
 }
 
 func TestCodexTerminatingWSBrokerNeverRotatesNonPortableOrAdmittedTurn(t *testing.T) {
@@ -821,6 +909,10 @@ func TestCodexTerminatingWSBrokerRejectsKnownClosedIdleUpstreamBeforeDispatch(t 
 	if err == nil {
 		t.Fatal("known-closed idle upstream was reused")
 	}
+	failure := classifyCodexWebSocketFailure(err)
+	if failure.Stage != "upstream_idle" || failure.Reason != "upstream_closed" {
+		t.Fatalf("idle upstream failure = %s/%s, want upstream_idle/upstream_closed", failure.Stage, failure.Reason)
+	}
 	if planner.buildCalls != 0 {
 		t.Fatalf("planner builds = %d, want no successor dispatch", planner.buildCalls)
 	}
@@ -910,6 +1002,110 @@ func TestCodexTerminatingWSBrokerCancellationUnblocksUpstreamRead(t *testing.T) 
 		_ = upstream.Close()
 		<-done
 		t.Fatal("cancellation did not unblock upstream read")
+	}
+}
+
+func TestCodexTerminatingWSBrokerClassifiesUpstreamCloseBeforeCompletion(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
+	}
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{err: errors.New("private upstream read token-should-not-leak")}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = broker.Serve(context.Background(), downstream)
+	if err == nil {
+		t.Fatal("upstream close before completion succeeded")
+	}
+	failure := classifyCodexWebSocketFailure(err)
+	if failure.Stage != "upstream_read" || failure.Reason != "upstream_outcome_indeterminate" {
+		t.Fatalf("upstream close failure = %s/%s, want upstream_read/upstream_outcome_indeterminate", failure.Stage, failure.Reason)
+	}
+	if strings.Contains(err.Error(), "token-should-not-leak") {
+		t.Fatalf("broker error leaked private upstream text: %q", err)
+	}
+}
+
+func TestCodexTerminatingWSBrokerTreatsNormalDownstreamCloseAfterCompletedTurnAsClean(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
+	}
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")},
+		{err: &websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "done"}},
+	}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatalf("normal downstream close after completed turn = %v, want clean return", err)
+	}
+	if writes := downstream.writtenPayloads(); len(writes) != 2 {
+		t.Fatalf("completed turn writes = %#v, want created and completed", writes)
+	}
+}
+
+func TestCodexTerminatingWSBrokerTreatsAbnormalDownstreamCloseAfterCompletedTurnAsClean(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
+	}
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")},
+		{err: &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}},
+	}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatalf("abnormal downstream close after completed turn = %v, want clean return", err)
+	}
+	if writes := downstream.writtenPayloads(); len(writes) != 2 {
+		t.Fatalf("completed turn writes = %#v, want created and completed", writes)
+	}
+}
+
+func TestCodexTerminatingWSBrokerClassifiesAbnormalDownstreamReadWithoutPrivateData(t *testing.T) {
+	t.Parallel()
+	broker := &codexTerminatingWSBroker{}
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{err: errors.New("private downstream read token-should-not-leak")}}}
+
+	err := broker.Serve(context.Background(), downstream)
+	if err == nil {
+		t.Fatal("abnormal downstream read succeeded")
+	}
+	failure := classifyCodexWebSocketFailure(err)
+	if failure.Stage != "downstream_read" || failure.Reason != "downstream_read_failed" {
+		t.Fatalf("downstream read failure = %s/%s, want downstream_read/downstream_read_failed", failure.Stage, failure.Reason)
+	}
+	if strings.Contains(err.Error(), "token-should-not-leak") {
+		t.Fatalf("broker error leaked private downstream text: %q", err)
 	}
 }
 

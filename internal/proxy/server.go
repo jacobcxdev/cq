@@ -1177,6 +1177,17 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			s.emitCodexWebSocketFrameObservation(diagnostics)
 		})
 		if err := s.CodexWebSocketBroker.Serve(brokerContext, clientConn, r.Header); err != nil {
+			failure := classifyCodexWebSocketFailure(err)
+			decision := "broker_failed"
+			if failure.plan {
+				decision = "plan_failed"
+			}
+			noteCodexObservation(r.Context(), codexObservationFields{Decision: decision, Reason: string(failure.Reason)})
+			sessionKey, _ := sessionCorrelation(r.Header)
+			if sessionKey == "" {
+				sessionKey = "none"
+			}
+			fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=websocket session=%s event=%s stage=%s reason=%s\n", sessionKey, decision, failure.Stage, failure.Reason)
 			diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing failed")
 			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		}

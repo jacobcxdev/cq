@@ -53,7 +53,7 @@ type CodexNativeHTTPHandler struct {
 	upstream          url.URL
 	requests          *codexNativeHTTPRequestGate
 	installedProbe    atomic.Pointer[codexInstalledHTTPGateProbe]
-	reportPlanFailure func(CodexHTTPRequestPlanErrorCode)
+	reportPlanFailure func(CodexHTTPRequestPlanFailure)
 }
 
 func (handler *CodexNativeHTTPHandler) installCodexInstalledHTTPGateProbe(probe *codexInstalledHTTPGateProbe) (func(), error) {
@@ -83,8 +83,8 @@ func NewCodexNativeHTTPHandler(planner CodexNativeHTTPRequestPlanner, session Co
 	}, nil
 }
 
-func reportCodexNativeHTTPPlanFailure(code CodexHTTPRequestPlanErrorCode) {
-	fmt.Fprintf(os.Stderr, "cq: Codex native HTTP plan failed: %s\n", code)
+func reportCodexNativeHTTPPlanFailure(failure CodexHTTPRequestPlanFailure) {
+	fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=http event=plan_failed stage=%s reason=%s\n", failure.Stage, failure.Reason)
 }
 
 const codexHTTPRequestPlanUnknown CodexHTTPRequestPlanErrorCode = "unknown"
@@ -159,16 +159,20 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		status := http.StatusServiceUnavailable
 		errorType := "api_error"
 		message := "Codex native HTTP routing unavailable"
+		failure := CodexHTTPRequestPlanFailure{Stage: codexHTTPRequestPlanUnknown, Reason: CodexRequestFailureUnknown}
 		var planErr *CodexHTTPRequestPlanError
 		if errors.As(err, &planErr) {
-			if handler.reportPlanFailure != nil {
-				handler.reportPlanFailure(safeCodexHTTPRequestPlanErrorCode(planErr.Code))
-			}
+			failure.Stage = safeCodexHTTPRequestPlanErrorCode(planErr.Code)
+			failure.Reason = safeCodexRequestFailureReason(planErr.Reason)
 			if planErr.Code == CodexHTTPRequestPlanInspect {
 				status = http.StatusBadRequest
 				errorType = "invalid_request_error"
 				message = "invalid Codex Responses request"
 			}
+		}
+		noteCodexObservation(request.Context(), codexObservationFields{Decision: "plan_failed", Reason: string(failure.Reason)})
+		if handler.reportPlanFailure != nil {
+			handler.reportPlanFailure(failure)
 		}
 		writeError(writer, status, errorType, message)
 		return true, ""

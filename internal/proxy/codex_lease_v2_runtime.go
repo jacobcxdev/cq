@@ -28,6 +28,33 @@ type CodexLeaseRequestEvidence struct {
 	HasEncryptedState  bool
 }
 
+type codexContinuityReason string
+
+const (
+	codexContinuityUnexpectedTurnState       codexContinuityReason = "unexpected_turn_state"
+	codexContinuityTurnStatePresenceMismatch codexContinuityReason = "turn_state_presence_mismatch"
+	codexContinuityTurnStateMismatch         codexContinuityReason = "turn_state_mismatch"
+	codexContinuityPreviousResponseMismatch  codexContinuityReason = "previous_response_mismatch"
+	codexContinuityEncryptedAffinityMissing  codexContinuityReason = "encrypted_affinity_unavailable"
+	codexContinuityAccountAffinityMismatch   codexContinuityReason = "account_affinity_mismatch"
+	codexContinuityAdmissionStateMismatch    codexContinuityReason = "admission_turn_state_mismatch"
+)
+
+type codexContinuityError struct {
+	reason codexContinuityReason
+}
+
+func (err *codexContinuityError) Error() string {
+	if err == nil {
+		return ErrCodexContinuity.Error()
+	}
+	return ErrCodexContinuity.Error() + ": " + string(err.reason)
+}
+
+func (err *codexContinuityError) Unwrap() error {
+	return ErrCodexContinuity
+}
+
 // CodexLeaseBoundExpectation fences a request to one already observed exact
 // turn binding. It prevents a read-only retained probe from becoming an
 // unseen route after the probe and before BeginRequest.
@@ -41,20 +68,21 @@ type CodexLeaseBoundExpectation struct {
 // upstream dispatch. Raw account and candidate values are HMACed before they
 // enter the journal.
 type CodexLeaseRequestPlan struct {
-	Key                       LeaseKey
-	Accounts                  []codex.AccountKey
-	Authority                 CodexLeaseAuthorityPolicy
-	RequestKind               CodexRequestKind
-	CompactionPhase           CodexCompactionPhase
-	RequestedModel            string
-	EffectiveModel            string
-	RequiredBuckets           []CapacityBucket
-	Slots                     []CodexLeaseAttemptSlotPlan
-	InitialSlot               uint32
-	Evidence                  CodexLeaseRequestEvidence
-	ExpectedBound             *CodexLeaseBoundExpectation
-	RequiresAccountContinuity bool
-	DispatchPermitDigest      string
+	Key                           LeaseKey
+	Accounts                      []codex.AccountKey
+	Authority                     CodexLeaseAuthorityPolicy
+	RequestKind                   CodexRequestKind
+	CompactionPhase               CodexCompactionPhase
+	RequestedModel                string
+	EffectiveModel                string
+	RequiredBuckets               []CapacityBucket
+	Slots                         []CodexLeaseAttemptSlotPlan
+	InitialSlot                   uint32
+	Evidence                      CodexLeaseRequestEvidence
+	ExpectedBound                 *CodexLeaseBoundExpectation
+	RequiresAccountContinuity     bool
+	authenticatedCallerContinuity bool
+	DispatchPermitDigest          string
 }
 
 // CodexLeaseRuntime performs the high-level durable request lifecycle over the
@@ -179,7 +207,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if restored.Classification == CodexRestoredLaneHistorical {
 		return nil, ErrCodexStaleTurn
 	}
-	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence)
+	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity)
 	if err != nil {
 		return nil, err
 	}
@@ -1254,7 +1282,7 @@ func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, ide
 	return CodexRestoredRecord{}, false
 }
 
-func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence) (bool, error) {
+func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool) (bool, error) {
 	var authority CodexRestoredRecord
 	var found bool
 	newTurn := restored.Classification == CodexRestoredLaneUnseen
@@ -1267,33 +1295,36 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 	}
 
 	if newTurn && evidence.HasTurnState {
-		return false, fmt.Errorf("%w: unexpected request turn state", ErrCodexContinuity)
+		return false, &codexContinuityError{reason: codexContinuityUnexpectedTurnState}
+	}
+	if newTurn && authenticatedCallerContinuity && (!found || !authority.Record.Authoritative) {
+		return true, nil
 	}
 	if !newTurn && found {
 		if authority.Record.HasTurnState != evidence.HasTurnState {
-			return false, fmt.Errorf("%w: request turn state presence mismatch", ErrCodexContinuity)
+			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) {
-			return false, fmt.Errorf("%w: request turn state mismatch", ErrCodexContinuity)
+			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
 		}
 	}
 	if evidence.PreviousResponseID != "" {
 		if !found || !authority.Record.HasResponseAnchor || !constantTimeCodexLeaseDigestEqual(authority.Record.CorrelationHash, runtime.store.hash("correlation", evidence.PreviousResponseID)) {
-			return false, fmt.Errorf("%w: previous response mismatch", ErrCodexContinuity)
+			return false, &codexContinuityError{reason: codexContinuityPreviousResponseMismatch}
 		}
 	}
 	if evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
 		if restored.Affinity == nil || !restored.Affinity.Resolved || restored.Affinity.AccountKey == "" {
-			return false, fmt.Errorf("%w: encrypted response affinity unavailable", ErrCodexContinuity)
+			return false, &codexContinuityError{reason: codexContinuityEncryptedAffinityMissing}
 		}
 		if restored.Affinity.AccountKey != selected {
-			return true, fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
+			return true, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 		}
 		return true, nil
 	}
 	requiresAccount := evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
-		return requiresAccount, fmt.Errorf("%w: request account affinity mismatch", ErrCodexContinuity)
+		return requiresAccount, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 	}
 	return requiresAccount, nil
 }
@@ -1317,7 +1348,7 @@ func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJourn
 	}
 	digest := handle.runtime.store.hash("turn-state", evidence.TurnState)
 	if record.HasTurnState && !constantTimeCodexLeaseDigestEqual(record.TurnStateHash, digest) {
-		return fmt.Errorf("%w: admitted turn state mismatch", ErrCodexContinuity)
+		return &codexContinuityError{reason: codexContinuityAdmissionStateMismatch}
 	}
 	record.TurnStateHash = digest
 	record.HasTurnState = true
@@ -1382,6 +1413,9 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	}
 	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
+	}
+	if plan.authenticatedCallerContinuity && (!plan.RequiresAccountContinuity || !plan.Authority.Authoritative || (plan.Evidence.PreviousResponseID == "" && !plan.Evidence.HasTurnState && !plan.Evidence.HasEncryptedState)) {
+		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid authenticated caller continuity", ErrCodexLeaseInvalidMutation)
 	}
 	if plan.DispatchPermitDigest != "" && !lowerHexDigest(plan.DispatchPermitDigest) {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid dispatch permit digest", ErrCodexLeaseInvalidMutation)

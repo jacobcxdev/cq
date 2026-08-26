@@ -108,6 +108,146 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseRuntimeAdoptsAuthenticatedCallerAfterShadowTurn(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+
+	shadowPlan := codexLeaseRuntimeTestPlan("shadow-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "shadow-candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	shadowPlan.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 8}
+	shadowPlan.RequiresAccountContinuity = true
+	shadow, err := runtimeLease.BeginRequest(shadowPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadow, err = shadow.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadow, err = shadow.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadow, err = shadow.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{
+			ResponseAnchor: "shadow-response", HasResponseAnchor: true, HasEncryptedState: true,
+		},
+		EndTurn: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadow, err = shadow.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shadow.EverAdmitted() || shadow.record.Authoritative || !shadow.record.NonMigratable {
+		t.Fatalf("shadow predecessor = %#v", shadow.record)
+	}
+	for _, lane := range store.v2.Lanes {
+		if lane.SessionHash == shadow.record.SessionHash && lane.ThreadHash == shadow.record.ThreadHash && lane.LastAdmittedAccountHash != "" {
+			t.Fatalf("shadow predecessor unexpectedly installed admitted affinity: %#v", lane)
+		}
+	}
+
+	normalPlan := codexLeaseRuntimeTestPlan("normal-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-b", CandidateID: "caller-candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	normalPlan.Evidence = CodexLeaseRequestEvidence{PreviousResponseID: "rescue-response", HasEncryptedState: true}
+	normalPlan.RequiresAccountContinuity = true
+	before := append([]byte(nil), store.journalBytes...)
+	if _, err := runtimeLease.BeginRequest(normalPlan); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("unproved shadow adoption = %T %v, want continuity error", err, err)
+	} else {
+		var continuityErr *codexContinuityError
+		if !errors.As(err, &continuityErr) || continuityErr.reason != codexContinuityPreviousResponseMismatch {
+			t.Fatalf("unproved shadow adoption reason = %T %v, want previous response mismatch", err, err)
+		}
+	}
+	if !bytes.Equal(before, store.journalBytes) {
+		t.Fatal("rejected shadow adoption changed journal")
+	}
+
+	normalPlan.authenticatedCallerContinuity = true
+	adopted, err := runtimeLease.BeginRequest(normalPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adopted.newTurn || adopted.AccountKey() != "account-b" || !adopted.record.Authoritative || !adopted.record.NonMigratable || !adopted.record.HasEncryptedState {
+		t.Fatalf("adopted caller continuation = %#v", adopted.record)
+	}
+	if _, err := adopted.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexLeaseRuntimeDoesNotAdoptAuthenticatedCallerOverAuthoritativeTurn(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+
+	predecessorPlan := codexLeaseRuntimeTestPlan("authoritative-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	predecessor, err := runtimeLease.BeginRequest(predecessorPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{
+			ResponseAnchor: "authoritative-response", HasResponseAnchor: true, HasEncryptedState: true,
+		},
+		EndTurn: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := predecessor.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	successor := codexLeaseRuntimeTestPlan("successor-turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect,
+	}})
+	successor.Evidence = CodexLeaseRequestEvidence{PreviousResponseID: "different-response", HasEncryptedState: true}
+	successor.RequiresAccountContinuity = true
+	successor.authenticatedCallerContinuity = true
+	before := append([]byte(nil), store.journalBytes...)
+	if _, err := runtimeLease.BeginRequest(successor); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("authoritative caller override = %T %v, want continuity error", err, err)
+	}
+	if !bytes.Equal(before, store.journalBytes) {
+		t.Fatal("rejected authoritative caller override changed journal")
+	}
+}
+
+func TestCodexLeaseRuntimeRejectsAuthenticatedCallerAdoptionWithoutEvidence(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	plan.RequiresAccountContinuity = true
+	plan.authenticatedCallerContinuity = true
+
+	if _, err := runtimeLease.BeginRequest(plan); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("caller adoption without evidence = %T %v, want invalid mutation", err, err)
+	}
+}
+
 func TestCodexLeaseRuntimePersistsOpaqueDispatchPermitDigest(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

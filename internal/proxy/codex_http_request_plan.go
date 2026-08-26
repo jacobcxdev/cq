@@ -108,9 +108,40 @@ const (
 	CodexHTTPRequestPlanBegin         CodexHTTPRequestPlanErrorCode = "begin_request"
 )
 
+// CodexRequestFailureReason is a credential-free reason suitable for route
+// diagnostics and stderr. Unknown dependency text is never retained.
+type CodexRequestFailureReason string
+
+const (
+	CodexRequestFailureUnknown                        CodexRequestFailureReason = "unknown"
+	CodexRequestFailureContextCanceled                CodexRequestFailureReason = "context_canceled"
+	CodexRequestFailureDeadlineExceeded               CodexRequestFailureReason = "deadline_exceeded"
+	CodexRequestFailureFrozenRequestReleased          CodexRequestFailureReason = "frozen_request_released"
+	CodexRequestFailureLeaseWriterUnavailable         CodexRequestFailureReason = "lease_writer_unavailable"
+	CodexRequestFailureLeaseTrustLost                 CodexRequestFailureReason = "lease_trust_lost"
+	CodexRequestFailureLegacyQuarantine               CodexRequestFailureReason = "legacy_quarantine"
+	CodexRequestFailureStaleTurn                      CodexRequestFailureReason = "stale_turn"
+	CodexRequestFailureConcurrentTurn                 CodexRequestFailureReason = "concurrent_turn"
+	CodexRequestFailureContinuity                     CodexRequestFailureReason = "continuity"
+	CodexRequestFailureLeaseAuthorityMismatch         CodexRequestFailureReason = "lease_authority_mismatch"
+	CodexRequestFailureLeaseInvalidMutation           CodexRequestFailureReason = "lease_invalid_mutation"
+	CodexRequestFailureCredentialAuthorityUnavailable CodexRequestFailureReason = "credential_authority_unavailable"
+	CodexRequestFailureSessionPolicyUnavailable       CodexRequestFailureReason = "session_policy_unavailable"
+	CodexRequestFailureSessionPolicyContinuity        CodexRequestFailureReason = "session_policy_continuity"
+	CodexRequestFailureCapabilityRouteUnavailable     CodexRequestFailureReason = "capability_route_unavailable"
+	CodexRequestFailureDispatchPermitInvalid          CodexRequestFailureReason = "dispatch_permit_invalid"
+	CodexRequestFailureDispatchPermitReplayed         CodexRequestFailureReason = "dispatch_permit_replayed"
+)
+
+type CodexHTTPRequestPlanFailure struct {
+	Stage  CodexHTTPRequestPlanErrorCode
+	Reason CodexRequestFailureReason
+}
+
 // CodexHTTPRequestPlanError deliberately retains only safe sentinel identity.
 type CodexHTTPRequestPlanError struct {
 	Code     CodexHTTPRequestPlanErrorCode
+	Reason   CodexRequestFailureReason
 	identity error
 }
 
@@ -126,7 +157,104 @@ func (err *CodexHTTPRequestPlanError) Is(target error) bool {
 }
 
 func newCodexHTTPRequestPlanError(code CodexHTTPRequestPlanErrorCode, cause error) error {
-	return &CodexHTTPRequestPlanError{Code: code, identity: codexHTTPRequestPlanSafeIdentity(cause)}
+	return &CodexHTTPRequestPlanError{
+		Code:     code,
+		Reason:   codexRequestFailureReason(cause),
+		identity: codexHTTPRequestPlanSafeIdentity(cause),
+	}
+}
+
+func codexRequestFailureReason(cause error) CodexRequestFailureReason {
+	var continuityErr *codexContinuityError
+	if errors.As(cause, &continuityErr) {
+		return safeCodexRequestFailureReason(CodexRequestFailureReason(continuityErr.reason))
+	}
+	switch {
+	case errors.Is(cause, context.Canceled):
+		return CodexRequestFailureContextCanceled
+	case errors.Is(cause, context.DeadlineExceeded):
+		return CodexRequestFailureDeadlineExceeded
+	case errors.Is(cause, ErrCodexFrozenRequestReleased):
+		return CodexRequestFailureFrozenRequestReleased
+	case errors.Is(cause, ErrCodexLeaseWriterUnavailable):
+		return CodexRequestFailureLeaseWriterUnavailable
+	case errors.Is(cause, ErrCodexLeaseTrustLost):
+		return CodexRequestFailureLeaseTrustLost
+	case errors.Is(cause, ErrCodexLegacyQuarantine):
+		return CodexRequestFailureLegacyQuarantine
+	case errors.Is(cause, ErrCodexStaleTurn):
+		return CodexRequestFailureStaleTurn
+	case errors.Is(cause, ErrCodexConcurrentTurn):
+		return CodexRequestFailureConcurrentTurn
+	case errors.Is(cause, ErrCodexContinuity):
+		return CodexRequestFailureContinuity
+	case errors.Is(cause, ErrCodexLeaseAuthorityMismatch):
+		return CodexRequestFailureLeaseAuthorityMismatch
+	case errors.Is(cause, ErrCodexLeaseInvalidMutation):
+		return CodexRequestFailureLeaseInvalidMutation
+	case errors.Is(cause, codex.ErrCredentialAuthorityUnavailable):
+		return CodexRequestFailureCredentialAuthorityUnavailable
+	case errors.Is(cause, ErrSessionPolicyUnavailable):
+		return CodexRequestFailureSessionPolicyUnavailable
+	case errors.Is(cause, ErrSessionPolicyContinuity):
+		return CodexRequestFailureSessionPolicyContinuity
+	case errors.Is(cause, ErrCapabilityRouteUnavailable):
+		return CodexRequestFailureCapabilityRouteUnavailable
+	case errors.Is(cause, ErrCallerDispatchPermitInvalid):
+		return CodexRequestFailureDispatchPermitInvalid
+	case errors.Is(cause, ErrCallerDispatchPermitReplayed):
+		return CodexRequestFailureDispatchPermitReplayed
+	}
+	var routeErr *CodexRoutePolicyError
+	if errors.As(cause, &routeErr) {
+		return safeCodexRequestFailureReason(CodexRequestFailureReason(routeErr.Status))
+	}
+	return CodexRequestFailureUnknown
+}
+
+func safeCodexRequestFailureReason(reason CodexRequestFailureReason) CodexRequestFailureReason {
+	switch reason {
+	case CodexRequestFailureUnknown,
+		CodexRequestFailureContextCanceled,
+		CodexRequestFailureDeadlineExceeded,
+		CodexRequestFailureFrozenRequestReleased,
+		CodexRequestFailureLeaseWriterUnavailable,
+		CodexRequestFailureLeaseTrustLost,
+		CodexRequestFailureLegacyQuarantine,
+		CodexRequestFailureStaleTurn,
+		CodexRequestFailureConcurrentTurn,
+		CodexRequestFailureContinuity,
+		CodexRequestFailureLeaseAuthorityMismatch,
+		CodexRequestFailureLeaseInvalidMutation,
+		CodexRequestFailureCredentialAuthorityUnavailable,
+		CodexRequestFailureSessionPolicyUnavailable,
+		CodexRequestFailureSessionPolicyContinuity,
+		CodexRequestFailureCapabilityRouteUnavailable,
+		CodexRequestFailureDispatchPermitInvalid,
+		CodexRequestFailureDispatchPermitReplayed,
+		CodexRequestFailureReason(codexContinuityUnexpectedTurnState),
+		CodexRequestFailureReason(codexContinuityTurnStatePresenceMismatch),
+		CodexRequestFailureReason(codexContinuityTurnStateMismatch),
+		CodexRequestFailureReason(codexContinuityPreviousResponseMismatch),
+		CodexRequestFailureReason(codexContinuityEncryptedAffinityMissing),
+		CodexRequestFailureReason(codexContinuityAccountAffinityMismatch),
+		CodexRequestFailureReason(codexContinuityAdmissionStateMismatch),
+		CodexRequestFailureReason(CodexRoutePlanDefaultMissing),
+		CodexRequestFailureReason(CodexRoutePlanDefaultUnresolved),
+		CodexRequestFailureReason(CodexRoutePlanDefaultIncompatible),
+		CodexRequestFailureReason(CodexRoutePlanDefaultUnroutable),
+		CodexRequestFailureReason(CodexRoutePlanBoundUnresolved),
+		CodexRequestFailureReason(CodexRoutePlanBoundIncompatible),
+		CodexRequestFailureReason(CodexRoutePlanBoundUnroutable),
+		CodexRequestFailureReason(CodexRoutePlanAffinityUnresolved),
+		CodexRequestFailureReason(CodexRoutePlanAffinityIncompatible),
+		CodexRequestFailureReason(CodexRoutePlanAffinityUnroutable),
+		CodexRequestFailureReason(CodexRoutePlanCanceled),
+		CodexRequestFailureReason(CodexRoutePlanInvalidCandidate):
+		return reason
+	default:
+		return CodexRequestFailureUnknown
+	}
 }
 
 func codexHTTPRequestPlanSafeIdentity(cause error) error {
@@ -262,10 +390,12 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
+	authenticatedCallerContinuity := false
 	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && callerOK {
 		identity, _ := runtimeCallerIdentity(ctx)
 		continuityAccountKey = codexAuthenticatedCallerAccount(inventory, caller, identity)
 		if continuityAccountKey != "" {
+			authenticatedCallerContinuity = true
 			err = nil
 		}
 	}
@@ -369,7 +499,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		}
 		permitDigest = permit.Digest
 	}
-	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound, continuityAccountKey != "", permitDigest)
+	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound, continuityAccountKey != "", authenticatedCallerContinuity, permitDigest)
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
 		if handle != nil {
@@ -822,7 +952,7 @@ func cloneCodexHTTPRequestPlanProvisional(source map[codex.AccountKey]int) map[c
 	return clone
 }
 
-func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity bool, dispatchPermitDigest string) CodexLeaseRequestPlan {
+func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity, authenticatedCallerContinuity bool, dispatchPermitDigest string) CodexLeaseRequestPlan {
 	httpSlots := CodexHTTPAttemptSlots(dispatch)
 	slots := make([]CodexLeaseAttemptSlotPlan, len(httpSlots))
 	for index, slot := range httpSlots {
@@ -839,19 +969,20 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		expectedClone = &clone
 	}
 	return CodexLeaseRequestPlan{
-		Key:                       key,
-		Accounts:                  append([]codex.AccountKey(nil), accounts...),
-		Authority:                 cloneCodexLeaseAuthorityPolicy(authority),
-		RequestKind:               metadata.RequestKind,
-		CompactionPhase:           metadata.CompactionPhase,
-		RequestedModel:            protocol.Model,
-		EffectiveModel:            choice.EffectiveModel,
-		RequiredBuckets:           append([]CapacityBucket(nil), choice.RequiredBuckets...),
-		Slots:                     slots,
-		InitialSlot:               1,
-		ExpectedBound:             expectedClone,
-		RequiresAccountContinuity: requiresAccountContinuity,
-		DispatchPermitDigest:      dispatchPermitDigest,
+		Key:                           key,
+		Accounts:                      append([]codex.AccountKey(nil), accounts...),
+		Authority:                     cloneCodexLeaseAuthorityPolicy(authority),
+		RequestKind:                   metadata.RequestKind,
+		CompactionPhase:               metadata.CompactionPhase,
+		RequestedModel:                protocol.Model,
+		EffectiveModel:                choice.EffectiveModel,
+		RequiredBuckets:               append([]CapacityBucket(nil), choice.RequiredBuckets...),
+		Slots:                         slots,
+		InitialSlot:                   1,
+		ExpectedBound:                 expectedClone,
+		RequiresAccountContinuity:     requiresAccountContinuity,
+		authenticatedCallerContinuity: authenticatedCallerContinuity,
+		DispatchPermitDigest:          dispatchPermitDigest,
 		Evidence: CodexLeaseRequestEvidence{
 			PreviousResponseID: protocol.PreviousResponseID,
 			TurnState:          protocol.TurnState,

@@ -756,6 +756,9 @@ func TestCodexHTTPRequestPlanFactoryAdoptsAuthenticatedCallerContinuity(t *testi
 	if !runtime.plan.RequiresAccountContinuity {
 		t.Fatal("adopted rescue continuation was not durably account-bound")
 	}
+	if !runtime.plan.authenticatedCallerContinuity {
+		t.Fatal("authenticated caller adoption was not carried into the durable request plan")
+	}
 }
 
 func TestCodexHTTPRequestPlanFactoryRejectsUnverifiedCallerContinuity(t *testing.T) {
@@ -970,6 +973,26 @@ func TestCodexHTTPRequestPlanFactoryErrorsAreTypedPrivateAndPreserveCancellation
 	assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanInspect, "private-body")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error does not preserve cancellation: %v", err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFailureProjectsSafeContinuityReason(t *testing.T) {
+	t.Parallel()
+	private := "private-continuity-cause"
+	err := newCodexHTTPRequestPlanError(
+		CodexHTTPRequestPlanBegin,
+		fmt.Errorf("%w: %s", &codexContinuityError{reason: codexContinuityPreviousResponseMismatch}, private),
+	)
+	var planErr *CodexHTTPRequestPlanError
+	if !errors.As(err, &planErr) {
+		t.Fatalf("error = %T, want plan error", err)
+	}
+	want := CodexRequestFailureReason(codexContinuityPreviousResponseMismatch)
+	if planErr.Reason != want {
+		t.Fatalf("reason = %q, want %q", planErr.Reason, want)
+	}
+	if strings.Contains(planErr.Error(), private) {
+		t.Fatal("plan error exposed private continuity cause")
 	}
 }
 
