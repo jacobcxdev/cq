@@ -238,7 +238,6 @@ func safeCodexRequestFailureReason(reason CodexRequestFailureReason) CodexReques
 		CodexRequestFailureReason(codexContinuityPreviousResponseMismatch),
 		CodexRequestFailureReason(codexContinuityEncryptedAffinityMissing),
 		CodexRequestFailureReason(codexContinuityAccountAffinityMismatch),
-		CodexRequestFailureReason(codexContinuityAdmissionStateMismatch),
 		CodexRequestFailureReason(CodexRoutePlanDefaultMissing),
 		CodexRequestFailureReason(CodexRoutePlanDefaultUnresolved),
 		CodexRequestFailureReason(CodexRoutePlanDefaultIncompatible),
@@ -390,17 +389,31 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
-	authenticatedCallerContinuity := false
-	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && callerOK {
+	authenticatedCallerAccount := codex.AccountKey("")
+	if callerOK {
 		identity, _ := runtimeCallerIdentity(ctx)
-		continuityAccountKey = codexAuthenticatedCallerAccount(inventory, caller, identity)
-		if continuityAccountKey != "" {
-			authenticatedCallerContinuity = true
-			err = nil
-		}
+		authenticatedCallerAccount = codexAuthenticatedCallerAccount(inventory, caller, identity)
+	}
+	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && authenticatedCallerAccount != "" {
+		continuityAccountKey = authenticatedCallerAccount
+		err = nil
 	}
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+	}
+	authenticatedBoundContinuation := authenticatedCallerAccount != "" &&
+		snapshot.Classification == CodexRestoredLaneCurrent &&
+		snapshot.BoundAccountKey != "" && snapshot.BoundIdentity.Authoritative && snapshot.BoundRecordGeneration != 0
+	authenticatedCallerContinuity := authenticatedBoundContinuation ||
+		(authenticatedCallerAccount != "" && continuityAccountKey != "" &&
+			(protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState))
+	expectedBound := input.ExpectedBound
+	if expectedBound == nil && authenticatedBoundContinuation {
+		expectedBound = &CodexLeaseBoundExpectation{
+			Identity:         snapshot.BoundIdentity,
+			AccountKey:       snapshot.BoundAccountKey,
+			RecordGeneration: snapshot.BoundRecordGeneration,
+		}
 	}
 	boundAccountKey := snapshot.BoundAccountKey
 	if continuityAccountKey != "" {
@@ -499,7 +512,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		}
 		permitDigest = permit.Digest
 	}
-	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, input.ExpectedBound, continuityAccountKey != "", authenticatedCallerContinuity, permitDigest)
+	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, expectedBound, continuityAccountKey != "" || authenticatedBoundContinuation, authenticatedCallerContinuity, permitDigest)
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
 		if handle != nil {

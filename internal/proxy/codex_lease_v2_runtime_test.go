@@ -91,6 +91,37 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 		})
 	}
 
+	authenticatedRetry := matching
+	authenticatedRetry.Evidence.TurnState = ""
+	authenticatedRetry.Evidence.HasTurnState = false
+	authenticatedRetry.RequiresAccountContinuity = true
+	authenticatedRetry.authenticatedCallerContinuity = true
+	authenticatedRetry.ExpectedBound = &CodexLeaseBoundExpectation{
+		Identity: handle.identity, AccountKey: "account-a", RecordGeneration: handle.record.RecordGeneration,
+	}
+	resumed, err := runtimeLease.BeginRequest(authenticatedRetry)
+	if err != nil {
+		t.Fatalf("authenticated retry without turn state = %T %v", err, err)
+	}
+	if resumed.AccountKey() != "account-a" || resumed.identity != handle.identity {
+		t.Fatalf("authenticated retry authority = account %q identity %#v, want account-a %#v", resumed.AccountKey(), resumed.identity, handle.identity)
+	}
+	if _, err := resumed.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+	authenticatedMismatch := matching
+	authenticatedMismatch.Evidence.TurnState = "wrong-private-state"
+	authenticatedMismatch.RequiresAccountContinuity = true
+	authenticatedMismatch.authenticatedCallerContinuity = true
+	if _, err := runtimeLease.BeginRequest(authenticatedMismatch); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("authenticated retry with mismatched turn state = %T %v, want continuity error", err, err)
+	} else {
+		var continuityErr *codexContinuityError
+		if !errors.As(err, &continuityErr) || continuityErr.reason != codexContinuityTurnStateMismatch {
+			t.Fatalf("authenticated retry mismatch reason = %T %v, want turn-state mismatch", err, err)
+		}
+	}
+
 	next, err := runtimeLease.BeginRequest(matching)
 	if err != nil {
 		t.Fatal(err)
@@ -99,12 +130,13 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	beforeMismatch := append([]byte(nil), store.journalBytes...)
-	if _, err := next.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "wrong-response-state", HasTurnState: true}); !errors.Is(err, ErrCodexContinuity) {
-		t.Fatalf("mismatched admission = %T %v, want continuity error", err, err)
+	nextState := "next-response-state"
+	next, err = next.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: nextState, HasTurnState: true})
+	if err != nil {
+		t.Fatalf("rotated admission state = %T %v", err, err)
 	}
-	if !bytes.Equal(beforeMismatch, store.journalBytes) {
-		t.Fatal("mismatched admission changed journal")
+	if !next.record.HasTurnState || next.record.TurnStateHash != store.hash("turn-state", nextState) {
+		t.Fatalf("rotated admission state = %#v", next.record)
 	}
 }
 

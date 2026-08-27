@@ -761,6 +761,143 @@ func TestCodexHTTPRequestPlanFactoryAdoptsAuthenticatedCallerContinuity(t *testi
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryCarriesAuthenticatedBoundRetryContinuity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 27, 5, 0, 0, 0, time.UTC)
+	callerAccount := frozenDispatchTestLogicalAccount(
+		"account-a",
+		frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	boundAccount := frozenDispatchTestLogicalAccount(
+		"account-b",
+		frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{callerAccount, boundAccount}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			Classification:    CodexRestoredLaneCurrent,
+			BoundAccountKey:   "account-b",
+			JournalGeneration: 1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	body := []byte(strings.Replace(
+		string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")),
+		`,"input":`,
+		`,"previous_response_id":"response-a","encrypted_content":"opaque","input":`,
+		1,
+	))
+	bound, err := bindRuntimeCallerCredentials(bytes.Repeat([]byte{0x43}, sha256.Size), []NormalCallerCredentialV1{{
+		Domain:    NormalCallerCodex,
+		Bearer:    "caller-token",
+		SubjectID: "account-a\x00candidate-a\x00revision-a",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := RuntimeCallerAuthorityV1{
+		SchemaVersion:     1,
+		Kind:              "provider_branch_admission_consumed_v1",
+		Domain:            NormalCallerCodex,
+		SubjectID:         bound[0].SubjectID,
+		BearerFingerprint: "fingerprint",
+		IndexEpoch:        1,
+		AdmissionID:       strings.Repeat("a", 32),
+		SingleUseNonce:    strings.Repeat("b", 32),
+		RequestNonce:      strings.Repeat("c", 32),
+		Method:            http.MethodPost,
+		RequestURI:        "/responses",
+		ValidUntil:        time.Now().Add(time.Hour),
+		ConsumptionDigest: "consumption",
+		MAC:               "mac",
+	}
+	var prepared CodexPreparedHTTPRequest
+	var buildErr error
+	handler := normalWorkerHandler(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		prepared, buildErr = factory.Build(request.Context(), CodexHTTPRequestPlanInput{Encoded: body})
+	}), bound)
+	request := httptest.NewRequest(http.MethodPost, "http://cq.test/responses", nil)
+	request = request.WithContext(withRuntimeCallerAuthority(request.Context(), caller))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if buildErr != nil {
+		t.Fatalf("Build through bound normal caller: %v", buildErr)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("bound retry dispatch = %#v, want account-b", accounts)
+	}
+	if !runtime.plan.RequiresAccountContinuity || !runtime.plan.authenticatedCallerContinuity {
+		t.Fatalf("bound retry continuity = required %t authenticated %t, want true/true", runtime.plan.RequiresAccountContinuity, runtime.plan.authenticatedCallerContinuity)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryContinuesAuthenticatedTurnAfterWebSocketTurnStateAdmission(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	factory := codexHTTPRequestPlanTestFactory(runtimeLease)
+	factory.Routes = coordinator
+	factory.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true}
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerCodex})
+	ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate\x00revision")
+
+	first, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "first request"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Frozen.Release()
+	admitted, err := first.leaseHandle.MarkDispatchedContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err = admitted.AdmitWebSocketContext(ctx, CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: 1,
+		UpstreamGeneration:   1,
+		TurnState:            "private-websocket-turn-state",
+		HasTurnState:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err = admitted.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{
+			ResponseAnchor:    "response-a",
+			HasResponseAnchor: true,
+		},
+		EndTurn: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admitted.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	continuationBody := frozenRequestBody("gpt-5", CodexRequestTurn, "tool result")
+	continuation, err := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: continuationBody})
+	if err != nil {
+		var planErr *CodexHTTPRequestPlanError
+		if errors.As(err, &planErr) {
+			t.Fatalf("continuation after WebSocket turn-state admission = stage %s reason %s", planErr.Code, planErr.Reason)
+		}
+		t.Fatalf("continuation after WebSocket turn-state admission = %T %v", err, err)
+	}
+	defer continuation.Frozen.Release()
+	if continuation.leaseHandle.AccountKey() != "account" || continuation.leaseHandle.RequestGeneration() != 2 {
+		t.Fatalf("continuation authority = account %q generation %d, want account/2", continuation.leaseHandle.AccountKey(), continuation.leaseHandle.RequestGeneration())
+	}
+	if _, err := continuation.Lifecycle.AbandonBeforeDispatchContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryRejectsUnverifiedCallerContinuity(t *testing.T) {
 	t.Parallel()
 	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})

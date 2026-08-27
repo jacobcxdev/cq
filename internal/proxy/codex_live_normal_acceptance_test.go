@@ -140,6 +140,10 @@ func newCodexLiveNormalAcceptanceServer(t *testing.T, credential codexLiveAccept
 
 func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential codexLiveAcceptanceCredential, callers []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic) {
 	t.Helper()
+	modelSnapshot, err := codexLiveAcceptanceModelSnapshot(os.Getenv("CQ_CODEX_LIVE_AUTH_FILE"), "gpt-5.6-sol")
+	if err != nil {
+		t.Fatalf("load live Codex model catalogue: %v", err)
+	}
 	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
 	if err != nil {
 		t.Fatalf("open live Codex normal runtime: %v", err)
@@ -217,7 +221,7 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 		},
 		CodexNativeHTTP:      httpHandler,
 		CodexWebSocketBroker: webSocketBroker,
-		Catalog:              modelregistry.NewCatalog(modelregistry.Snapshot{}),
+		Catalog:              modelregistry.NewCatalog(modelSnapshot),
 	}
 	handler, err := server.RuntimeHandler()
 	if err != nil {
@@ -228,6 +232,58 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 		traffic.serveHTTP(handler, writer, request)
 	}), callers)
 	return listener, supervisor, traffic
+}
+
+func codexLiveAcceptanceModelSnapshot(authPath, model string) (modelregistry.Snapshot, error) {
+	cachePath := filepath.Join(filepath.Dir(authPath), "models_cache.json")
+	before, err := os.Lstat(cachePath)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return modelregistry.Snapshot{}, errors.New("live Codex model cache is unavailable")
+	}
+	file, err := os.Open(cachePath)
+	if err != nil {
+		return modelregistry.Snapshot{}, errors.New("open live Codex model cache")
+	}
+	body, readErr := io.ReadAll(io.LimitReader(file, (4<<20)+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(body) == 0 || len(body) > 4<<20 {
+		return modelregistry.Snapshot{}, errors.New("read live Codex model cache")
+	}
+	defer clearBytes(body)
+	after, err := os.Lstat(cachePath)
+	if err != nil || !os.SameFile(before, after) {
+		return modelregistry.Snapshot{}, errors.New("live Codex model cache changed during read")
+	}
+	var envelope struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return modelregistry.Snapshot{}, errors.New("decode live Codex model cache")
+	}
+	for _, raw := range envelope.Models {
+		var info struct {
+			Slug             string `json:"slug"`
+			DisplayName      string `json:"display_name"`
+			Description      string `json:"description"`
+			ContextWindow    int    `json:"context_window"`
+			MaxContextWindow int    `json:"max_context_window"`
+			Priority         int    `json:"priority"`
+			Visibility       string `json:"visibility"`
+		}
+		if json.Unmarshal(raw, &info) != nil || info.Slug != model {
+			continue
+		}
+		return modelregistry.Snapshot{
+			Entries: []modelregistry.Entry{{
+				Provider: modelregistry.ProviderCodex, ID: info.Slug, DisplayName: info.DisplayName,
+				Description: info.Description, ContextWindow: info.ContextWindow, MaxContextWindow: info.MaxContextWindow,
+				Priority: info.Priority, Visibility: info.Visibility, Source: modelregistry.SourceNative,
+			}},
+			CodexRawByID: map[string]json.RawMessage{info.Slug: append(json.RawMessage(nil), raw...)},
+			FetchedAt:    time.Now(),
+		}, nil
+	}
+	return modelregistry.Snapshot{}, errors.New("live Codex model is unavailable")
 }
 
 func runCodexAppServerCompactionAcceptance(
