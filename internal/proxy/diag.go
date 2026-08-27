@@ -742,7 +742,7 @@ func safeCodexReason(value string) bool {
 		return true
 	}
 	switch value {
-	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "invalid_frame", "downstream_read_failed", "unknown":
+	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "invalid_frame", "downstream_read_failed", "unknown":
 		return true
 	}
 	if suffix, ok := strings.CutPrefix(value, "candidate_attempt_"); ok {

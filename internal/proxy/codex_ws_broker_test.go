@@ -89,7 +89,7 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	}
 }
 
-func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing.T) {
+func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	t.Parallel()
 	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("p", 32)), time.Now)
 	if err != nil {
@@ -110,7 +110,6 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 	}
 	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
 	turn := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"prewarm-a"`)
-	forwardedTurn := codexTerminatingWSFrame("turn-a", "")
 	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: prewarm},
 		{messageType: websocket.TextMessage, payload: turn},
@@ -120,13 +119,11 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"prewarm-state"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
-	}}
-	turnUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"turn-state"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-a","end_turn":true}}`)},
 	}}
-	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream, turnUpstream}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream}}}
 	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
 		Plans:                planner,
 		Upstream:             dialer,
@@ -156,17 +153,11 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 	if planner.prewarmHeaders.Get(codexTurnMetadataKey) != "" || planner.buildHeaders.Get(codexTurnMetadataKey) != "" {
 		t.Fatalf("connection metadata reached per-frame planner: prewarm=%v build=%v", planner.prewarmHeaders, planner.buildHeaders)
 	}
-	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-a"}) {
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a"}) {
 		t.Fatalf("dial accounts = %#v", got)
 	}
-	if got := prewarmUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{prewarm}) {
+	if got := prewarmUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{prewarm, turn}) {
 		t.Fatalf("prewarm upstream writes = %#v", got)
-	}
-	if !prewarmUpstream.closed {
-		t.Fatal("completed prewarm upstream was not retired")
-	}
-	if got := turnUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{forwardedTurn}) {
-		t.Fatalf("turn upstream writes = %#v", got)
 	}
 	if got := downstream.writtenPayloads(); len(got) != 6 {
 		t.Fatalf("downstream writes = %#v", got)
@@ -179,75 +170,15 @@ func TestCodexTerminatingWSBrokerReopensUpstreamAfterInstalledPrewarm(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm || restored.ResolvedRecords[0].Record.UpstreamSocketGeneration != 2 {
+	if len(restored.ResolvedRecords) != 1 || !restored.ResolvedRecords[0].Record.AdoptedPrewarm || restored.ResolvedRecords[0].Record.UpstreamSocketGeneration != 1 {
 		t.Fatalf("durable prewarm adoption = %#v", restored.ResolvedRecords)
 	}
 	if record := restored.ResolvedRecords[0].Record; !record.HasTurnState || record.TurnStateHash != coordinator.store.hash("turn-state", "turn-state") {
-		t.Fatalf("replacement turn state = (%t, %q), want replacement authority", record.HasTurnState, record.TurnStateHash)
+		t.Fatalf("turn state = (%t, %q), want real-turn authority", record.HasTurnState, record.TurnStateHash)
 	}
 	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
 	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
 		t.Fatalf("reconnected receipt = (%+v, %v)", gotReceipt, found)
-	}
-}
-
-func TestCodexTerminatingWSBrokerAbandonsAdoptionWhenReplacementFrameFails(t *testing.T) {
-	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("a", 32)), time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiptValue := testCodexTurnReceipt()
-	receiptValue.Transport = CodexTurnReceiptTransportWebSocket
-	receipt := receiptStore.register([]byte("session-a"), []byte("turn-a"), receiptValue)
-	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
-	inspection, err := InspectCodexNativeRequest(context.Background(), codexTerminatingWSFrame("turn-a", ""), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	frozen, err := inspection.Freeze(context.Background(), frozenRequestChoice("gpt-5.6-sol", "gpt-5.6-sol"), nil, HeadroomModeCache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	planner := &codexWSBrokerPlannerStub{
-		runtime:        newCodexLeaseRuntimeTest(t, coordinator),
-		receipt:        receipt,
-		adoptionFrozen: frozen,
-		slots:          []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
-	}
-	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
-	turn := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"prewarm-a"`)
-	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
-		{messageType: websocket.TextMessage, payload: prewarm},
-		{messageType: websocket.TextMessage, payload: turn},
-	}}
-	prewarmUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
-		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
-		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
-	}}
-	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream}}}
-	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
-		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := broker.Serve(context.Background(), downstream); !errors.Is(err, ErrCodexWSInvalidFrame) {
-		t.Fatalf("Serve error = %v, want invalid replacement frame", err)
-	}
-	restored, err := coordinator.store.LoadLane(
-		LeaseKey{Lane: LaneKey{Session: "session-a", Thread: "thread-a", Namespace: CodexResponsesNamespace}, Turn: "turn-a"},
-		[]codex.AccountKey{"account-a"},
-		CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(restored.ResolvedRecords) != 1 || codexLeaseCurrentAttemptState(restored.ResolvedRecords[0].Record) != CodexAttemptAbandonedBeforeDispatch {
-		t.Fatalf("replacement failure authority = %#v, want abandoned before dispatch", restored.ResolvedRecords)
-	}
-	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
-	if !found || gotReceipt.State != CodexTurnReceiptRejected {
-		t.Fatalf("replacement failure receipt = (%+v, %v), want rejected", gotReceipt, found)
 	}
 }
 
@@ -289,53 +220,6 @@ func TestCodexTerminatingWSBrokerDoesNotInventActualBeforeDispatch(t *testing.T)
 	got, _ = receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
 	if got.State != CodexTurnReceiptIndeterminate || got.ActualAccountHint != "" {
 		t.Fatalf("indeterminate receipt = %+v", got)
-	}
-}
-
-func TestCodexTerminatingWSBrokerReplacementDialFailureUsesReplacementGeneration(t *testing.T) {
-	t.Parallel()
-	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
-	planner := &codexWSBrokerPlannerStub{
-		runtime: newCodexLeaseRuntimeTest(t, coordinator),
-		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
-	}
-	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
-	turn := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"prewarm-a"`)
-	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
-		{messageType: websocket.TextMessage, payload: prewarm},
-		{messageType: websocket.TextMessage, payload: turn},
-		{err: io.EOF},
-	}}
-	prewarmUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
-		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
-		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
-	}}
-	dialer := &codexWSBrokerDialerStub{
-		outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{"account-a": {
-			{conn: prewarmUpstream, response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}},
-			{response: &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header)}, err: errors.New("unavailable")},
-		}},
-	}
-	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
-		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := coordinator.store.LoadLane(
-		LeaseKey{Lane: LaneKey{Session: "session-a", Thread: "thread-a", Namespace: CodexResponsesNamespace}, Turn: "turn-a"},
-		[]codex.AccountKey{"account-a"},
-		CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(restored.ResolvedRecords) != 1 || restored.ResolvedRecords[0].Record.UpstreamSocketGeneration != 2 ||
-		codexLeaseCurrentAttemptState(restored.ResolvedRecords[0].Record) != CodexAttemptProviderFailed {
-		t.Fatalf("replacement failure authority = %#v, want generation 2 provider failure", restored.ResolvedRecords)
 	}
 }
 
@@ -385,12 +269,10 @@ func TestCodexTerminatingWSBrokerRoutesTurnWithoutPrewarmAdoption(t *testing.T) 
 	prewarmUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
-	}}
-	turnUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-a","end_turn":true}}`)},
 	}}
-	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream, turnUpstream}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream}}}
 	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
 		Plans:                planner,
 		Upstream:             dialer,
@@ -406,14 +288,11 @@ func TestCodexTerminatingWSBrokerRoutesTurnWithoutPrewarmAdoption(t *testing.T) 
 	if planner.prewarmCalls != 1 || planner.adoptionCalls != 0 || planner.cancelCalls != 1 || planner.buildCalls != 1 {
 		t.Fatalf("planner calls = prewarm %d adoption %d cancel %d build %d, want 1/0/1/1", planner.prewarmCalls, planner.adoptionCalls, planner.cancelCalls, planner.buildCalls)
 	}
-	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-a"}) {
-		t.Fatalf("dial accounts = %#v, want same-account reconnect", got)
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("dial accounts = %#v, want one persistent connection", got)
 	}
-	if got := prewarmUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{prewarm}) {
+	if got := prewarmUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{prewarm, turn}) {
 		t.Fatalf("prewarm upstream writes = %#v", got)
-	}
-	if got := turnUpstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{turn}) {
-		t.Fatalf("turn upstream writes = %#v", got)
 	}
 	if got := downstream.writtenPayloads(); len(got) != 4 {
 		t.Fatalf("downstream writes = %#v", got)
@@ -488,6 +367,18 @@ func TestServerCodexWebSocketEnforceTracesSafeBrokerFailure(t *testing.T) {
 			brokerErr:    errors.New("private broker failure token-should-not-leak"),
 			wantDecision: "broker_failed",
 			wantReason:   "unknown",
+		},
+		{
+			name:         "lease transition",
+			brokerErr:    ErrCodexLeaseTransition,
+			wantDecision: "broker_failed",
+			wantReason:   "lease_transition",
+		},
+		{
+			name:         "concurrent turn",
+			brokerErr:    ErrCodexConcurrentTurn,
+			wantDecision: "broker_failed",
+			wantReason:   "concurrent_turn",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

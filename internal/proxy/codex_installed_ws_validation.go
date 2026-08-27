@@ -207,7 +207,7 @@ func runCodexInstalledWebSocketAcceptance(
 		EgressAttempts:        outcome.egressAttempts.Load(),
 		PongVerified:          outcome.exactPong.Load(),
 	}
-	if !traffic.completedPrewarm.Load() || acceptance.WebSocketRequests < 2 || acceptance.UpstreamDials < 2 {
+	if !traffic.completedPrewarm.Load() || acceptance.WebSocketRequests < 2 || acceptance.UpstreamDials != 1 {
 		return evidence, errCodexInstalledListenerAcceptance
 	}
 	return CodexWebSocketReadinessEvidence{
@@ -277,9 +277,9 @@ func (traffic *codexInstalledWebSocketTraffic) serveUpstream(writer http.Respons
 					return
 				}
 			}
-			return
+			continue
 		}
-		if traffic.completedPrewarm.Load() && previousResponseID != "" {
+		if traffic.completedPrewarm.Load() && previousResponseID != "acceptance-prewarm" {
 			traffic.unexpectedRoutes.Add(1)
 			_ = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error"}}`))
 			return

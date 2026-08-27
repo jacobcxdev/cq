@@ -37,7 +37,6 @@ const (
 	codexContinuityPreviousResponseMismatch  codexContinuityReason = "previous_response_mismatch"
 	codexContinuityEncryptedAffinityMissing  codexContinuityReason = "encrypted_affinity_unavailable"
 	codexContinuityAccountAffinityMismatch   codexContinuityReason = "account_affinity_mismatch"
-	codexContinuityAdmissionStateMismatch    codexContinuityReason = "admission_turn_state_mismatch"
 )
 
 type codexContinuityError struct {
@@ -1301,7 +1300,8 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		return true, nil
 	}
 	if !newTurn && found {
-		if authority.Record.HasTurnState != evidence.HasTurnState {
+		missingAuthenticatedState := authenticatedCallerContinuity && authority.Record.HasTurnState && !evidence.HasTurnState
+		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState {
 			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) {
@@ -1322,7 +1322,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		}
 		return true, nil
 	}
-	requiresAccount := evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
+	requiresAccount := authenticatedCallerContinuity || evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
 		return requiresAccount, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 	}
@@ -1346,11 +1346,7 @@ func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJourn
 	if !evidence.HasTurnState {
 		return nil
 	}
-	digest := handle.runtime.store.hash("turn-state", evidence.TurnState)
-	if record.HasTurnState && !constantTimeCodexLeaseDigestEqual(record.TurnStateHash, digest) {
-		return &codexContinuityError{reason: codexContinuityAdmissionStateMismatch}
-	}
-	record.TurnStateHash = digest
+	record.TurnStateHash = handle.runtime.store.hash("turn-state", evidence.TurnState)
 	record.HasTurnState = true
 	return nil
 }
@@ -1414,7 +1410,8 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
 	}
-	if plan.authenticatedCallerContinuity && (!plan.RequiresAccountContinuity || !plan.Authority.Authoritative || (plan.Evidence.PreviousResponseID == "" && !plan.Evidence.HasTurnState && !plan.Evidence.HasEncryptedState)) {
+	hasCallerContinuityEvidence := plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState || plan.Evidence.HasEncryptedState
+	if plan.authenticatedCallerContinuity && (!plan.RequiresAccountContinuity || !plan.Authority.Authoritative || (!hasCallerContinuityEvidence && plan.ExpectedBound == nil)) {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid authenticated caller continuity", ErrCodexLeaseInvalidMutation)
 	}
 	if plan.DispatchPermitDigest != "" && !lowerHexDigest(plan.DispatchPermitDigest) {

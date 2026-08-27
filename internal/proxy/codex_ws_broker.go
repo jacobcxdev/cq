@@ -38,6 +38,8 @@ const (
 	codexWebSocketFailureReasonUpstreamOutcomeIndeterminate codexWebSocketFailureReason = "upstream_outcome_indeterminate"
 	codexWebSocketFailureReasonInvalidFrame                 codexWebSocketFailureReason = "invalid_frame"
 	codexWebSocketFailureReasonDownstreamReadFailed         codexWebSocketFailureReason = "downstream_read_failed"
+	codexWebSocketFailureReasonLeaseTransition              codexWebSocketFailureReason = "lease_transition"
+	codexWebSocketFailureReasonStaleGeneration              codexWebSocketFailureReason = "stale_generation"
 )
 
 type codexWebSocketFailure struct {
@@ -80,6 +82,15 @@ func classifyCodexWebSocketFailure(err error) codexWebSocketFailure {
 	if errors.Is(err, ErrCodexWSInvalidFrame) {
 		return codexWebSocketFailure{Stage: codexWebSocketFailureStageFrameDecode, Reason: codexWebSocketFailureReasonInvalidFrame}
 	}
+	if errors.Is(err, ErrCodexLeaseTransition) {
+		return codexWebSocketFailure{Stage: codexWebSocketFailureStageUnknown, Reason: codexWebSocketFailureReasonLeaseTransition}
+	}
+	if errors.Is(err, ErrCodexWSStaleGeneration) {
+		return codexWebSocketFailure{Stage: codexWebSocketFailureStageUnknown, Reason: codexWebSocketFailureReasonStaleGeneration}
+	}
+	if reason := codexRequestFailureReason(err); reason != CodexRequestFailureUnknown {
+		return codexWebSocketFailure{Stage: codexWebSocketFailureStageUnknown, Reason: codexWebSocketFailureReason(reason)}
+	}
 	return codexWebSocketFailure{Stage: codexWebSocketFailureStageUnknown, Reason: codexWebSocketFailureReasonUnknown}
 }
 
@@ -102,9 +113,15 @@ func safeCodexWebSocketFailureReason(reason codexWebSocketFailureReason) codexWe
 		codexWebSocketFailureReasonUpstreamClosed,
 		codexWebSocketFailureReasonUpstreamOutcomeIndeterminate,
 		codexWebSocketFailureReasonInvalidFrame,
-		codexWebSocketFailureReasonDownstreamReadFailed:
+		codexWebSocketFailureReasonDownstreamReadFailed,
+		codexWebSocketFailureReasonLeaseTransition,
+		codexWebSocketFailureReasonStaleGeneration:
 		return reason
 	default:
+		requestReason := safeCodexRequestFailureReason(CodexRequestFailureReason(reason))
+		if requestReason != CodexRequestFailureUnknown {
+			return codexWebSocketFailureReason(requestReason)
+		}
 		return codexWebSocketFailureReasonUnknown
 	}
 }
@@ -228,9 +245,6 @@ type codexWSActiveUpstream struct {
 	idleCancel context.CancelFunc
 	idleDone   <-chan error
 	prewarm    CodexPrewarmReservation
-	// prewarmRetired preserves adoption authority after its request-scoped
-	// upstream has completed and before the real turn reconnects.
-	prewarmRetired bool
 }
 
 type codexWSDialResult struct {
@@ -471,7 +485,6 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		AcceptedRevision: broker.config.AcceptedRevision,
 	}
 	var prepared CodexPreparedHTTPRequest
-	retiredPrewarmAnchor := ""
 	var err error
 	if active.prewarm.State == CodexPrewarmReady {
 		planner, ok := broker.config.Plans.(codexWebSocketPrewarmPlanner)
@@ -482,15 +495,11 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 			err = planner.cancelWebSocketPrewarm(active.prewarm)
 			if err == nil {
 				active.prewarm = CodexPrewarmReservation{}
-				active.prewarmRetired = false
 				prepared, err = broker.config.Plans.Build(ctx, input)
 			}
 		} else {
-			if active.prewarmRetired {
-				retiredPrewarmAnchor = active.prewarm.ResponseAnchor
-			}
 			prepared, err = planner.adoptWebSocketPrewarm(ctx, input, active.prewarm, func(ctx context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
-				if (active.conn == nil && !active.prewarmRetired) || active.account != account || active.generation != fence.UpstreamSocketGeneration ||
+				if active.conn == nil || active.account != account || active.generation != fence.UpstreamSocketGeneration ||
 					broker.config.DownstreamGeneration != fence.DownstreamSocketGeneration || active.prewarm.Generation != fence.ReservationGeneration {
 					return ErrCodexContinuity
 				}
@@ -514,13 +523,6 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		return codexWSAbandonPrepared(ctx, prepared.Lifecycle, err)
 	}
 	if requestFrame != pending {
-		defer requestFrame.Release()
-	}
-	if retiredPrewarmAnchor != "" {
-		requestFrame, err = codexWSFrameWithoutPrewarmAnchor(requestFrame, retiredPrewarmAnchor)
-		if err != nil {
-			return codexWSAbandonPrepared(ctx, prepared.Lifecycle, err)
-		}
 		defer requestFrame.Release()
 	}
 	if prepared.leaseHandle == nil {
@@ -731,8 +733,6 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx context.Context,
 				return false, readyErr
 			}
 			active.prewarm = reservation
-			closeCodexWSActiveConnection(active)
-			active.prewarmRetired = true
 			return false, nil
 		}
 		if observation.Kind == CodexSSEError {
@@ -756,12 +756,6 @@ func (broker *codexTerminatingWSBroker) cancelActivePrewarm(active *codexWSActiv
 
 func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *CodexLeaseRequestHandle, receipt *codexTurnReceiptHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {
 	choice := account.Choice()
-	if active.conn == nil && active.prewarmRetired {
-		if active.account != choice.AccountKey {
-			return codexWSDialResult{err: ErrCodexContinuity}
-		}
-		return broker.connectRetiredPrewarm(ctx, handle, receipt, account, active)
-	}
 	marked, err := handle.MarkDispatchedContext(ctx)
 	if err != nil {
 		return codexWSDialResult{err: err}
@@ -797,39 +791,6 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 	}
 	return last
 }
-
-func (broker *codexTerminatingWSBroker) connectRetiredPrewarm(ctx context.Context, handle *CodexLeaseRequestHandle, receipt *codexTurnReceiptHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {
-	choice := account.Choice()
-	broker.upstreamGeneration++
-	generation := broker.upstreamGeneration
-	marked, err := handle.markWebSocketReplacementDispatchedContext(ctx, broker.config.DownstreamGeneration, generation)
-	if err != nil {
-		return codexWSDialResult{err: err}
-	}
-	lifecycle, err := newCodexWSLifecycle(marked, broker.config.DownstreamGeneration, generation, receipt)
-	if err != nil {
-		return codexWSDialResult{err: err}
-	}
-	var last codexWSDialResult
-	for _, attempt := range account.Attempts() {
-		conn, response, body, _, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers, func(actual CandidateAttempt) {
-			receipt.attempt(actual.AccountKey)
-		})
-		if dialErr == nil && conn != nil {
-			*active = codexWSActiveUpstream{conn: conn, account: choice.AccountKey, generation: generation}
-			return codexWSDialResult{lifecycle: lifecycle, response: response}
-		}
-		wrapped, parseErr := codexWSDialError(response, body)
-		last = codexWSDialResult{wrapped: wrapped, response: response, body: append([]byte(nil), body...), err: errors.Join(dialErr, parseErr)}
-		if !wrapped.AuthFailure {
-			break
-		}
-	}
-	closeCodexWSActiveUpstream(active)
-	last.lifecycle = lifecycle
-	return last
-}
-
 func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, active *codexWSActiveUpstream) (bool, error) {
 	for {
 		messageType, frame, err := readCodexWSActiveMessage(ctx, active)

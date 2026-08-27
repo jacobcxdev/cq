@@ -58,7 +58,7 @@ CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
 CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
 CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
 go test -race -count=1 ./internal/proxy \
-	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal)$'
+	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal)$'
 
 production_after=$(production_snapshot)
 [ "$production_before" = "$production_after" ] || fail "production proxy changed during validation"

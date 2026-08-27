@@ -622,8 +622,8 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		if old.HasEncryptedState && !input.HasEncryptedState {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: encrypted-state authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
-		if old.HasTurnState && (!input.HasTurnState || !constantTimeCodexLeaseDigestEqual(old.TurnStateHash, input.TurnStateHash)) {
-			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: first turn-state anchor changed", ErrCodexLeaseInvalidMutation)
+		if old.HasTurnState && !input.HasTurnState {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
 		if old.HasResponseAnchor && (!input.HasResponseAnchor || input.CorrelationHash == "") {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: response anchor was cleared", ErrCodexLeaseInvalidMutation)
@@ -675,6 +675,15 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		result.Attempts = attempts
 		result.CurrentAttemptGeneration = current
 		appended = nextAttempt
+	}
+	turnStateChanged := input.HasTurnState && (!old.HasTurnState || !constantTimeCodexLeaseDigestEqual(old.TurnStateHash, input.TurnStateHash))
+	if exists && turnStateChanged {
+		oldAttempt, oldFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+		resultAttempt, resultFound := codexLeaseAttemptByGeneration(result.Attempts, result.CurrentAttemptGeneration)
+		oldAdmitted := oldAttempt.State == CodexAttemptDispatched || oldAttempt.State == CodexAttemptStreaming
+		if beginRequest || !oldFound || !resultFound || !oldAdmitted || resultAttempt.State != CodexAttemptStreaming || result.CurrentAttemptGeneration != old.CurrentAttemptGeneration || !codexLeaseExactCurrentAttemptFence(fence, old) {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state authority changed outside provider admission", ErrCodexLeaseInvalidMutation)
+		}
 	}
 	if codexLeaseCurrentAttemptState(result) == CodexAttemptIndeterminate && !result.NonMigratable {
 		result.NonMigratable = true

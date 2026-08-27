@@ -480,6 +480,62 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 	}
 }
 
+func TestCodexInstalledNormalContinuesAfterLiveToolCall(t *testing.T) {
+	if os.Getenv("CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE") != "1" {
+		t.Skip("live Codex normal tool continuation acceptance requires explicit opt-in")
+	}
+	authPath := os.Getenv("CQ_CODEX_LIVE_AUTH_FILE")
+	credential, err := readCodexLiveAcceptanceCredential(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := os.ReadFile(authPath)
+	if err != nil || len(auth) == 0 || len(auth) > 1<<20 || !json.Valid(auth) {
+		t.Fatal("live Codex auth file is unavailable or invalid")
+	}
+	defer clearBytes(auth)
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	listener, supervisor, traffic := newCodexLiveNormalAcceptanceServerWithCallers(t, credential, []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: credential.material.AccessToken,
+		SubjectID:  string(codexLiveNormalAccount) + "\x00live-normal-candidate\x00live-normal-revision",
+		ValidUntil: time.Now().Add(10 * time.Minute),
+	}})
+	if listener.URL == "http://127.0.0.1:19280" || supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
+		t.Fatal("live Codex tool acceptance did not use isolated normal proxy")
+	}
+
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.material.AccessToken)
+	if err := os.WriteFile(filepath.Join(isolation.codexHome, "auth.json"), auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const output = "LIVE-TOOL-PONG"
+	if err := os.WriteFile(filepath.Join(isolation.work, "message.txt"), []byte(output+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	prompt := "Use the shell to read `message.txt`, then reply with only its contents and no other text."
+	if err := runCodexTaskAffinityAcceptancePromptForTransport(ctx, codexReadOnlyTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, true, true, prompt, output); err != nil {
+		actual, _ := os.ReadFile(filepath.Join(isolation.root, strings.ToLower(output)+".txt"))
+		actual = actual[:min(len(actual), 256)]
+		t.Fatalf("live Codex tool continuation: %v; bounded output %q", err, strings.TrimSpace(string(actual)))
+	}
+	if supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
+		t.Fatal("live Codex tool continuation lost candidate worker")
+	}
+	webSockets, responses, compactions := traffic.snapshot()
+	if webSockets != 1 || responses != 0 || compactions != 0 {
+		t.Fatalf("live Codex tool traffic = websocket %d responses %d compactions %d, want 1/0/0", webSockets, responses, compactions)
+	}
+}
+
 func TestCodexInstalledLiveRescueTaskResumesInNormal(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE") != "1" {
 		t.Skip("live Codex rescue handoff acceptance requires explicit opt-in")
@@ -861,6 +917,45 @@ func (runner codexTaskAffinityAcceptanceRunner) Run(ctx context.Context, command
 	return nil, nil
 }
 
+type codexReadOnlyTaskAffinityAcceptanceRunner struct{}
+
+func (codexReadOnlyTaskAffinityAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
+	if command.executable == "" || !command.expectedExecutable.valid() || !command.loopbackOnly {
+		return nil, errors.New("Codex read-only task-affinity runner unavailable")
+	}
+	if _, err := codexAcceptanceSandboxLoopbackAddress(command.endpoint); err != nil {
+		return nil, errors.New("Codex read-only task-affinity endpoint unavailable")
+	}
+	before, err := captureCodexInstalledExecutable(command.executable)
+	if err != nil || before != command.expectedExecutable {
+		return nil, errors.New("Codex task-affinity executable changed")
+	}
+	child := exec.CommandContext(ctx, command.executable, command.args...)
+	child.Env = append([]string(nil), command.env...)
+	child.Dir = command.dir
+	child.Stdin = strings.NewReader("")
+	stdout := &codexAcceptanceDiagnosticBuffer{}
+	child.Stdout = stdout
+	stderr := &codexAcceptanceDiagnosticBuffer{}
+	child.Stderr = stderr
+	child.WaitDelay = 2 * time.Second
+	if err := child.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, errors.New("Codex task-affinity command timed out")
+		}
+		diagnostic := sanitiseCodexAcceptanceDiagnostic(string(stderr.data))
+		if diagnostic == "" {
+			return nil, fmt.Errorf("Codex task-affinity command failed: %w", err)
+		}
+		return nil, fmt.Errorf("Codex task-affinity command failed: %w: %s", err, diagnostic)
+	}
+	after, err := captureCodexInstalledExecutable(command.executable)
+	if err != nil || after != command.expectedExecutable {
+		return nil, errors.New("Codex task-affinity executable changed")
+	}
+	return stdout.data, nil
+}
+
 type codexTaskAffinityAcceptanceIsolation struct {
 	root      string
 	home      string
@@ -933,10 +1028,40 @@ func runCodexTaskAffinityAcceptanceTurnForTransport(
 	webSocket bool,
 	output string,
 ) error {
+	return runCodexTaskAffinityAcceptancePromptForTransport(
+		ctx,
+		runner,
+		client,
+		baseURL,
+		isolation,
+		resume,
+		webSocket,
+		false,
+		"Reply with exactly "+output+" and no other text.",
+		output,
+	)
+}
+
+func runCodexTaskAffinityAcceptancePromptForTransport(
+	ctx context.Context,
+	runner codexAcceptanceRunner,
+	client codexInstalledExecutableProof,
+	baseURL string,
+	isolation codexTaskAffinityAcceptanceIsolation,
+	resume bool,
+	webSocket bool,
+	allowTools bool,
+	prompt string,
+	output string,
+) error {
 	outputPath := filepath.Join(isolation.root, strings.ToLower(output)+".txt")
 	args := codexAcceptanceExecArgumentsForTransport(baseURL, isolation.work, outputPath, webSocket)
+	if allowTools {
+		args = slices.Insert(args, 1, "--json")
+		args = slices.Insert(args, len(args)-1, "-c", "features.apps=false")
+	}
 	args = slices.DeleteFunc(args, func(value string) bool { return value == "--ephemeral" })
-	args[len(args)-1] = "Reply with exactly " + output + " and no other text."
+	args[len(args)-1] = prompt
 	if resume {
 		args = slices.Insert(args, 1, "resume", "--last")
 		args = removeCodexTaskAffinityUnsupportedResumeArguments(args)
@@ -947,7 +1072,7 @@ func runCodexTaskAffinityAcceptanceTurnForTransport(
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
 	)
-	_, err := runner.Run(ctx, codexAcceptanceCommand{
+	events, err := runner.Run(ctx, codexAcceptanceCommand{
 		executable:         client.path,
 		expectedExecutable: client,
 		args:               args,
@@ -956,19 +1081,38 @@ func runCodexTaskAffinityAcceptanceTurnForTransport(
 		endpoint:           baseURL + legacyCodexResponsesPath,
 		outputPath:         outputPath,
 		sandboxWriteRoot:   isolation.root,
+		captureOutput:      allowTools,
 		loopbackOnly:       true,
 	})
 	if err != nil {
 		return err
+	}
+	if allowTools && !codexAcceptanceCompletedCommand(events) {
+		return fmt.Errorf("Codex task-affinity shell command did not complete: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))
 	}
 	result, err := os.ReadFile(outputPath)
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(string(result)) != output {
-		return errors.New("Codex task-affinity output mismatch")
+		return fmt.Errorf("Codex task-affinity output mismatch: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))
 	}
 	return nil
+}
+
+func codexAcceptanceCompletedCommand(events []byte) bool {
+	for _, line := range strings.Split(string(events), "\n") {
+		var event struct {
+			Item struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"item"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Item.Type == "command_execution" && event.Item.Status == "completed" {
+			return true
+		}
+	}
+	return false
 }
 
 func runCodexCompactionAcceptanceTurn(
