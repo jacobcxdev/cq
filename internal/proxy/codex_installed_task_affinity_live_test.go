@@ -483,8 +483,8 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 			if webSocketDelta != 1 || responseDelta != 0 || compactionDelta != 0 {
 				t.Fatalf("live Codex app-server websocket traffic = %d handshakes/%d HTTP responses/%d HTTP compactions, want 1/0/0", webSocketDelta, responseDelta, compactionDelta)
 			}
-		} else if webSocketDelta != 0 || responseDelta < 2 {
-			t.Fatalf("live Codex app-server HTTP traffic = %d handshakes/%d responses, want 0/at least 2", webSocketDelta, responseDelta)
+		} else if webSocketDelta != 0 || responseDelta < 3 {
+			t.Fatalf("live Codex app-server HTTP traffic = %d handshakes/%d responses, want 0/at least 3", webSocketDelta, responseDelta)
 		}
 		if !webSocket && compactionDelta < 1 {
 			t.Fatalf("live Codex app-server compaction traffic = %d, want positive", compactionDelta)

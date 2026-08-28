@@ -244,6 +244,7 @@ func codexAcceptanceSandboxProfile(command codexAcceptanceCommand) (string, erro
 		if !filepath.IsAbs(root) || root == string(filepath.Separator) || filepath.Dir(root) == root {
 			return "", errCodexInstalledListenerAcceptance
 		}
+		profile += ` (allow file-write* (literal "/dev/null"))`
 		profile += ` (allow file-write* (subpath ` + strconv.Quote(root) + `))`
 	}
 	return profile, nil
