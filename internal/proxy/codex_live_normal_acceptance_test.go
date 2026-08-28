@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -242,8 +243,6 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 		t.Fatal("seed live Codex normal capacity")
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
 	planner := &CodexHTTPRequestPlanFactory{
 		Inventory: inventory, Capacity: core.capacity, Routes: core.continuity, Runtime: core.leaseRuntime,
 		DefaultAccountKey: codexLiveNormalAccount,
@@ -254,7 +253,7 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 		Executor: &CodexAttemptExecutor{
 			Inventory: inventory,
 			Secrets:   inventory,
-			Transport: &CodexTokenTransport{Inner: transport},
+			Transport: &CodexTokenTransport{Inner: http.DefaultTransport},
 		},
 		Refresher: core.inventory,
 		Capacity:  core.capacity,
@@ -345,16 +344,24 @@ func codexLiveAcceptanceModelSnapshot(authPath, model string) (modelregistry.Sna
 	return modelregistry.Snapshot{}, errors.New("live Codex model is unavailable")
 }
 
-func runCodexAppServerCompactionAcceptance(
+func runCodexAppServerContinuityAcceptance(
 	ctx context.Context,
 	client codexInstalledExecutableProof,
 	baseURL string,
 	isolation codexTaskAffinityAcceptanceIsolation,
+	webSocket bool,
 ) (returnErr error) {
+	const (
+		initialText = "LIVE-APP-SERVER-STARTING"
+		finalText   = "LIVE-APP-SERVER-TOOL-PONG"
+	)
+	if err := os.WriteFile(filepath.Join(isolation.work, "message.txt"), []byte(finalText+"\n"), 0o600); err != nil {
+		return errors.New("write Codex app-server tool input")
+	}
 	command := codexAcceptanceCommand{
 		executable:         client.path,
 		expectedExecutable: client,
-		args:               codexLiveAppServerArguments(baseURL),
+		args:               codexLiveAppServerArguments(baseURL, webSocket),
 		env: append(codexAcceptanceBaseEnvironment(isolation.home, isolation.codexHome, isolation.tmp, isolation.cache, isolation.config),
 			"XDG_DATA_HOME="+isolation.data,
 			"OPENAI_BASE_URL="+baseURL,
@@ -449,12 +456,16 @@ func runCodexAppServerCompactionAcceptance(
 		"id": 3, "method": "turn/start",
 		"params": map[string]any{
 			"threadId": thread.Thread.ID,
-			"input":    []map[string]string{{"type": "text", "text": "Reply with exactly LIVE-COMPACT-SEED-PONG and no other text."}},
+			"input": []map[string]string{{
+				"type": "text",
+				"text": "Before using tools, send exactly " + initialText + " as a standalone progress update. " +
+					"Then use the shell to read `message.txt`. After the tool returns, reply with exactly the file contents and no other text.",
+			}},
 		},
 	}); err != nil {
-		return errors.New("start Codex app-server seed turn")
+		return errors.New("start Codex app-server tool turn")
 	}
-	if err := awaitCodexAppServerTurn(decoder, 3, thread.Thread.ID); err != nil {
+	if err := awaitCodexAppServerToolTurn(decoder, 3, thread.Thread.ID, initialText, finalText); err != nil {
 		return err
 	}
 	if err := encoder.Encode(map[string]any{
@@ -465,7 +476,7 @@ func runCodexAppServerCompactionAcceptance(
 	return awaitCodexAppServerTurn(decoder, 4, thread.Thread.ID)
 }
 
-func codexLiveAppServerArguments(baseURL string) []string {
+func codexLiveAppServerArguments(baseURL string, webSocket bool) []string {
 	provider := "model_providers.cq_acceptance."
 	return []string{
 		"app-server", "--stdio", "--strict-config",
@@ -474,7 +485,7 @@ func codexLiveAppServerArguments(baseURL string) []string {
 		"-c", provider + "base_url=" + strconv.Quote(baseURL),
 		"-c", provider + `wire_api="responses"`,
 		"-c", provider + `requires_openai_auth=true`,
-		"-c", provider + `supports_websockets=false`,
+		"-c", provider + "supports_websockets=" + strconv.FormatBool(webSocket),
 		"-c", provider + `supports_standalone_web_search=false`,
 		"-c", provider + `request_max_retries=0`,
 		"-c", provider + `stream_max_retries=0`,
@@ -548,6 +559,80 @@ func awaitCodexAppServerTurn(decoder *json.Decoder, id int, threadID string) err
 	return nil
 }
 
+func awaitCodexAppServerToolTurn(decoder *json.Decoder, id int, threadID, initialText, finalText string) error {
+	responseSeen := false
+	initialTextSeen := false
+	toolSeen := false
+	continuationSeen := false
+	for {
+		message, err := decodeCodexAppServerMessage(decoder)
+		if err != nil {
+			return err
+		}
+		if string(message.ID) == strconv.Itoa(id) {
+			if len(message.Error) != 0 && string(message.Error) != "null" {
+				return errors.New("Codex app-server tool turn request failed")
+			}
+			responseSeen = true
+		}
+		switch message.Method {
+		case "item/completed":
+			var notification struct {
+				ThreadID string `json:"threadId"`
+				Item     struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Status   string `json:"status"`
+					ExitCode *int   `json:"exitCode"`
+				} `json:"item"`
+			}
+			if json.Unmarshal(message.Params, &notification) != nil || notification.ThreadID != threadID {
+				continue
+			}
+			switch notification.Item.Type {
+			case "agentMessage":
+				switch notification.Item.Text {
+				case initialText:
+					if toolSeen || continuationSeen {
+						return errors.New("Codex app-server initial text arrived after tool execution")
+					}
+					initialTextSeen = true
+				case finalText:
+					if !toolSeen {
+						return errors.New("Codex app-server continuation arrived before tool execution")
+					}
+					continuationSeen = true
+				}
+			case "commandExecution":
+				if !initialTextSeen {
+					return errors.New("Codex app-server tool executed before initial text")
+				}
+				if notification.Item.Status != "completed" || notification.Item.ExitCode == nil || *notification.Item.ExitCode != 0 {
+					return errors.New("Codex app-server tool execution failed")
+				}
+				toolSeen = true
+			}
+		case "turn/completed":
+			var notification struct {
+				ThreadID string `json:"threadId"`
+				Turn     struct {
+					Status string `json:"status"`
+				} `json:"turn"`
+			}
+			if json.Unmarshal(message.Params, &notification) != nil || notification.ThreadID != threadID {
+				continue
+			}
+			if notification.Turn.Status != "completed" {
+				return errors.New("Codex app-server tool turn did not complete")
+			}
+			if !responseSeen || !initialTextSeen || !toolSeen || !continuationSeen {
+				return errors.New("Codex app-server tool turn evidence incomplete")
+			}
+			return nil
+		}
+	}
+}
+
 func decodeCodexAppServerMessage(decoder *json.Decoder) (codexAppServerMessage, error) {
 	var message codexAppServerMessage
 	if err := decoder.Decode(&message); err != nil {
@@ -557,4 +642,31 @@ func decodeCodexAppServerMessage(decoder *json.Decoder) (codexAppServerMessage, 
 		return message, errors.New("Codex app-server reported an error")
 	}
 	return message, nil
+}
+
+func TestAwaitCodexAppServerToolTurnRequiresOrderedEvidence(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"id":3,"result":{"turn":{"id":"turn-1"}}}`,
+		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-1","type":"agentMessage","text":"LIVE-APP-SERVER-STARTING"}}}`,
+		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"command-1","type":"commandExecution","command":"read message","commandActions":[],"cwd":"/tmp","status":"completed","exitCode":0}}}`,
+		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-2","type":"agentMessage","text":"LIVE-APP-SERVER-TOOL-PONG"}}}`,
+		`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed"}}}`,
+	}, "\n")
+	decoder := json.NewDecoder(strings.NewReader(stream))
+	if err := awaitCodexAppServerToolTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-STARTING", "LIVE-APP-SERVER-TOOL-PONG"); err != nil {
+		t.Fatalf("ordered app-server tool turn: %v", err)
+	}
+}
+
+func TestAwaitCodexAppServerToolTurnRejectsMissingInitialText(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"id":3,"result":{"turn":{"id":"turn-1"}}}`,
+		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"command-1","type":"commandExecution","command":"read message","commandActions":[],"cwd":"/tmp","status":"completed","exitCode":0}}}`,
+		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-2","type":"agentMessage","text":"LIVE-APP-SERVER-TOOL-PONG"}}}`,
+		`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed"}}}`,
+	}, "\n")
+	decoder := json.NewDecoder(strings.NewReader(stream))
+	if err := awaitCodexAppServerToolTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-STARTING", "LIVE-APP-SERVER-TOOL-PONG"); err == nil {
+		t.Fatal("app-server tool turn without initial text succeeded")
+	}
 }

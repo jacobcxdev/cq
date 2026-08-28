@@ -894,6 +894,96 @@ func TestCodexLeaseRuntimeHTTPAdmissionAndObserverDrain(t *testing.T) {
 	assertCodexLeaseRuntimeRefs(t, second, 1, 0, 0, false)
 }
 
+func TestCodexLeaseRuntimeRetriesSameAccountAfterAdmission(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-initial", Kind: CodexAttemptSlotDirect,
+	}})
+
+	handle, err := runtimeLease.BeginRequest(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionJournalGeneration := handle.record.AdmissionJournalGeneration
+	admissionRequestGeneration := handle.record.AdmissionRequestGeneration
+	admittedAt := handle.record.AdmittedAt
+
+	crossAccount := initial
+	crossAccount.Slots = []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-other-account", Kind: CodexAttemptSlotDirect},
+	}
+	if _, err := runtimeLease.BeginRequest(crossAccount); !errors.Is(err, ErrCodexLeaseAuthorityMismatch) {
+		t.Fatalf("cross-account retry plan = %T %v, want authority mismatch", err, err)
+	}
+
+	continuation := initial
+	continuation.Slots = []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-current", Kind: CodexAttemptSlotDirect},
+	}
+	handle, err = runtimeLease.BeginRequest(continuation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RejectAndPrepare(2)
+	if err != nil {
+		t.Fatalf("same-account retry after admission = %T %v", err, err)
+	}
+	if handle.State() != LeaseBoundActive || !handle.EverAdmitted() || handle.AccountKey() != "account-a" || handle.RequestGeneration() != 2 || handle.AttemptGeneration() != 2 {
+		t.Fatalf("retry handle = state %v admitted %t account %q request %d attempt %d", handle.State(), handle.EverAdmitted(), handle.AccountKey(), handle.RequestGeneration(), handle.AttemptGeneration())
+	}
+	if len(handle.record.Attempts) != 2 || handle.record.Attempts[0].State != CodexAttemptProviderFailed || handle.record.Attempts[1].State != CodexAttemptPrepared {
+		t.Fatalf("retry attempts = %#v", handle.record.Attempts)
+	}
+	if handle.record.AdmissionJournalGeneration != admissionJournalGeneration || handle.record.AdmissionRequestGeneration != admissionRequestGeneration || handle.record.AdmittedAt != admittedAt {
+		t.Fatalf("retry changed first-admission authority: %#v", handle.record)
+	}
+	assertCodexLeaseRuntimeRefs(t, handle, 1, 0, 0, false)
+
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.State() != LeaseContinuationPending || !handle.EverAdmitted() || handle.record.AdmissionJournalGeneration != admissionJournalGeneration || handle.record.AdmissionRequestGeneration != admissionRequestGeneration || handle.record.AdmittedAt != admittedAt {
+		t.Fatalf("completed retry changed admission authority: %#v", handle.record)
+	}
+}
+
 func TestCodexLeaseRuntimeResumesRetainedAuthoritativeTurnInObserveMode(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

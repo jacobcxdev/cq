@@ -43,9 +43,13 @@ const (
 )
 
 type codexWebSocketFailure struct {
-	Stage  codexWebSocketFailureStage
-	Reason codexWebSocketFailureReason
-	plan   bool
+	Stage       codexWebSocketFailureStage
+	Reason      codexWebSocketFailureReason
+	Origin      codexWSInvalidFrameOrigin
+	FrameType   codexWSFrameType
+	FrameSize   codexWSFrameSize
+	FrameDetail codexWSInvalidFrameDetail
+	plan        bool
 }
 
 type codexWebSocketBrokerError struct {
@@ -77,6 +81,17 @@ func classifyCodexWebSocketFailure(err error) codexWebSocketFailure {
 		return codexWebSocketFailure{
 			Stage:  safeCodexWebSocketFailureStage(brokerErr.failure.Stage),
 			Reason: safeCodexWebSocketFailureReason(brokerErr.failure.Reason),
+		}
+	}
+	var frameErr *codexWSInvalidFrameError
+	if errors.As(err, &frameErr) {
+		return codexWebSocketFailure{
+			Stage:       codexWebSocketFailureStageFrameDecode,
+			Reason:      codexWebSocketFailureReasonInvalidFrame,
+			Origin:      frameErr.Origin,
+			FrameType:   frameErr.Type,
+			FrameSize:   frameErr.Size,
+			FrameDetail: frameErr.Detail,
 		}
 	}
 	if errors.Is(err, ErrCodexWSInvalidFrame) {
@@ -369,14 +384,37 @@ func codexWSIdleUpstreamError(active *codexWSActiveUpstream) error {
 	if active == nil || active.readFrames == nil {
 		return nil
 	}
-	select {
-	case result, ok := <-active.readFrames:
-		if !ok || result.err != nil {
-			return newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamIdle, codexWebSocketFailureReasonUpstreamClosed)
+	for {
+		select {
+		case result, ok := <-active.readFrames:
+			if !ok || result.err != nil {
+				return newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamIdle, codexWebSocketFailureReasonUpstreamClosed)
+			}
+			if !codexWSIdleMaintenanceFrame(result) {
+				return ErrCodexWSInvalidFrame
+			}
+		default:
+			return nil
 		}
-		return ErrCodexWSInvalidFrame
+	}
+}
+
+func codexWSIdleMaintenanceFrame(result codexWSUpstreamRead) bool {
+	if result.messageType != websocket.TextMessage {
+		return false
+	}
+	observation := classifyCodexSSEData(result.payload)
+	switch observation.Type {
+	case "codex.rate_limits":
+		if observation.Kind != CodexSSERateLimits {
+			return false
+		}
+		_, err := ParseCodexRateLimitEvent(result.payload)
+		return err == nil
+	case "keepalive", "responsesapi.websocket_timing":
+		return observation.Kind == CodexSSEIgnored
 	default:
-		return nil
+		return false
 	}
 }
 

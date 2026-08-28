@@ -667,8 +667,17 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		}
 		if nextAttempt != 0 {
 			previousCurrent, found := codexLeaseAttemptByGeneration(attempts, old.CurrentAttemptGeneration)
+			appendedAttempt, appendedFound := codexLeaseAttemptByGeneration(attempts, nextAttempt)
 			pinnedAccountChanged := old.NonMigratable && !constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash)
-			if old.EverAdmitted || pinnedAccountChanged || old.State != LeaseProvisional || result.State != LeaseProvisional || !found || previousCurrent.State != CodexAttemptProviderFailed {
+			unadmittedReplacement := !old.EverAdmitted && old.State == LeaseProvisional && result.State == LeaseProvisional
+			admittedReplacement := old.EverAdmitted && old.Generation > old.AdmissionRequestGeneration &&
+				old.State == LeaseBoundActive && result.State == LeaseBoundActive &&
+				constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash) && appendedFound &&
+				appendedAttempt.Slot > 0 && int(appendedAttempt.Slot) <= len(result.AttemptEnvelope.Slots) &&
+				constantTimeCodexLeaseDigestEqual(result.AttemptEnvelope.Slots[appendedAttempt.Slot-1].AccountHash, old.AccountHash) &&
+				old.RoutingRefs == result.RoutingRefs && old.AttemptRefs == result.AttemptRefs &&
+				old.ResponseObserverRefs == result.ResponseObserverRefs && old.SocketLineageExtinct == result.SocketLineageExtinct
+			if pinnedAccountChanged || (!unadmittedReplacement && !admittedReplacement) || !found || previousCurrent.State != CodexAttemptProviderFailed {
 				return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: terminal request replacement requires BeginRequest", ErrCodexLeaseInvalidMutation)
 			}
 		}

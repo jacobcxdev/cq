@@ -12,7 +12,7 @@ fail() {
 
 [ "$(uname -s)" = Darwin ] || fail "macOS is required"
 
-for command in codex gh git go lsof; do
+for command in gh git go lsof; do
 	command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 
@@ -23,7 +23,15 @@ cd "$root"
 sha=$(git rev-parse HEAD)
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 auth_file=${CQ_CODEX_LIVE_AUTH_FILE:-${CODEX_HOME:-$HOME/.codex}/auth.json}
-codex_executable=$(command -v codex)
+desktop_codex=/Applications/ChatGPT.app/Contents/Resources/codex
+if [ -x "$desktop_codex" ]; then
+	codex_executable=$desktop_codex
+elif [ -n "${CQ_CODEX_ACCEPTANCE_EXECUTABLE:-}" ]; then
+	codex_executable=$CQ_CODEX_ACCEPTANCE_EXECUTABLE
+else
+	codex_executable=$(command -v codex) || fail "Codex executable is required"
+fi
+[ "${codex_executable#/}" != "$codex_executable" ] || fail "Codex executable must be absolute"
 
 production_snapshot() {
 	pid=$(lsof -nP -tiTCP:"$production_port" -sTCP:LISTEN 2>/dev/null || true)

@@ -48,12 +48,13 @@ type CodexNativeHTTPRoutingHandler interface {
 // CodexNativeHTTPHandler is the authoritative native Responses HTTP vertical.
 // A Server uses it only when startup readiness selected HTTP enforcement.
 type CodexNativeHTTPHandler struct {
-	planner           CodexNativeHTTPRequestPlanner
-	session           CodexNativeHTTPRequestSession
-	upstream          url.URL
-	requests          *codexNativeHTTPRequestGate
-	installedProbe    atomic.Pointer[codexInstalledHTTPGateProbe]
-	reportPlanFailure func(CodexHTTPRequestPlanFailure)
+	planner              CodexNativeHTTPRequestPlanner
+	session              CodexNativeHTTPRequestSession
+	upstream             url.URL
+	requests             *codexNativeHTTPRequestGate
+	installedProbe       atomic.Pointer[codexInstalledHTTPGateProbe]
+	reportPlanFailure    func(CodexHTTPRequestPlanFailure)
+	reportSessionFailure func(*codexHTTPRoundTripError)
 }
 
 func (handler *CodexNativeHTTPHandler) installCodexInstalledHTTPGateProbe(probe *codexInstalledHTTPGateProbe) (func(), error) {
@@ -78,13 +79,35 @@ func NewCodexNativeHTTPHandler(planner CodexNativeHTTPRequestPlanner, session Co
 	}
 	return &CodexNativeHTTPHandler{
 		planner: planner, session: session, upstream: *parsed,
-		requests:          newCodexNativeHTTPRequestGate(),
-		reportPlanFailure: reportCodexNativeHTTPPlanFailure,
+		requests:             newCodexNativeHTTPRequestGate(),
+		reportPlanFailure:    reportCodexNativeHTTPPlanFailure,
+		reportSessionFailure: reportCodexNativeHTTPSessionFailure,
 	}, nil
 }
 
 func reportCodexNativeHTTPPlanFailure(failure CodexHTTPRequestPlanFailure) {
 	fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=http event=plan_failed stage=%s reason=%s\n", failure.Stage, failure.Reason)
+}
+
+func reportCodexNativeHTTPSessionFailure(failure *codexHTTPRoundTripError) {
+	if failure == nil {
+		return
+	}
+	facts := failure.facts
+	fmt.Fprintf(
+		os.Stderr,
+		"cq: Codex route trace transport=http event=session_failed stage=%s reason=%s dispatched=%t got_conn=%t conn_reused=%t conn_was_idle=%t idle_ms=%d wrote_request=%t write_error=%t got_first_response_byte=%t\n",
+		"round_trip",
+		failure.reason,
+		true,
+		facts.GotConn,
+		facts.ConnReused,
+		facts.ConnWasIdle,
+		facts.IdleMS,
+		facts.WroteRequest,
+		facts.WriteError,
+		facts.GotFirstResponseByte,
+	)
 }
 
 const codexHTTPRequestPlanUnknown CodexHTTPRequestPlanErrorCode = "unknown"
@@ -191,6 +214,10 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		prepared.Lifecycle,
 	)
 	if err != nil {
+		var roundTripErr *codexHTTPRoundTripError
+		if errors.As(err, &roundTripErr) && handler.reportSessionFailure != nil {
+			handler.reportSessionFailure(roundTripErr)
+		}
 		writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream request failed")
 		return true, model
 	}

@@ -2,9 +2,16 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"sync"
+	"syscall"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -44,6 +51,149 @@ type CodexHTTPCompletionEvidence struct {
 	EndTurn bool
 }
 
+type codexHTTPTransportFailureReason string
+
+const (
+	codexHTTPTransportFailureUnknown          codexHTTPTransportFailureReason = "unknown"
+	codexHTTPTransportFailureCancelled        codexHTTPTransportFailureReason = "cancelled"
+	codexHTTPTransportFailureDeadline         codexHTTPTransportFailureReason = "deadline"
+	codexHTTPTransportFailureTimeout          codexHTTPTransportFailureReason = "timeout"
+	codexHTTPTransportFailureDNS              codexHTTPTransportFailureReason = "dns"
+	codexHTTPTransportFailureConnect          codexHTTPTransportFailureReason = "connect"
+	codexHTTPTransportFailureConnectionReset  codexHTTPTransportFailureReason = "connection_reset"
+	codexHTTPTransportFailureBrokenPipe       codexHTTPTransportFailureReason = "broken_pipe"
+	codexHTTPTransportFailureServerClosedIdle codexHTTPTransportFailureReason = "server_closed_idle"
+	codexHTTPTransportFailureUnexpectedEOF    codexHTTPTransportFailureReason = "unexpected_eof"
+	codexHTTPTransportFailureEOF              codexHTTPTransportFailureReason = "eof"
+	codexHTTPTransportFailureTLS              codexHTTPTransportFailureReason = "tls"
+	codexHTTPTransportFailureProtocol         codexHTTPTransportFailureReason = "protocol"
+)
+
+type codexHTTPTransportFacts struct {
+	GotConn              bool
+	ConnReused           bool
+	ConnWasIdle          bool
+	IdleMS               int64
+	WroteRequest         bool
+	WriteError           bool
+	GotFirstResponseByte bool
+}
+
+type codexHTTPRoundTripError struct {
+	reason codexHTTPTransportFailureReason
+	facts  codexHTTPTransportFacts
+	cause  error
+}
+
+func (failure *codexHTTPRoundTripError) Error() string { return "Codex HTTP round trip failed" }
+
+func (failure *codexHTTPRoundTripError) Unwrap() error {
+	if failure == nil {
+		return nil
+	}
+	return failure.cause
+}
+
+type codexHTTPTransportTrace struct {
+	mu    sync.Mutex
+	facts codexHTTPTransportFacts
+}
+
+func (trace *codexHTTPTransportTrace) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			trace.mu.Lock()
+			trace.facts.GotConn = true
+			trace.facts.ConnReused = info.Reused
+			trace.facts.ConnWasIdle = info.WasIdle
+			trace.facts.IdleMS = boundedCodexHTTPIdleMilliseconds(info.IdleTime)
+			trace.mu.Unlock()
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			trace.mu.Lock()
+			trace.facts.WroteRequest = trace.facts.WroteRequest || info.Err == nil
+			trace.facts.WriteError = trace.facts.WriteError || info.Err != nil
+			trace.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			trace.mu.Lock()
+			trace.facts.GotFirstResponseByte = true
+			trace.mu.Unlock()
+		},
+	}
+}
+
+func (trace *codexHTTPTransportTrace) snapshot() codexHTTPTransportFacts {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	return trace.facts
+}
+
+func boundedCodexHTTPIdleMilliseconds(idle time.Duration) int64 {
+	const maximum = int64((10 * time.Minute) / time.Millisecond)
+	milliseconds := idle.Milliseconds()
+	if milliseconds < 0 {
+		return 0
+	}
+	if milliseconds > maximum {
+		return maximum
+	}
+	return milliseconds
+}
+
+func newCodexHTTPRoundTripError(cause error, facts codexHTTPTransportFacts) error {
+	return &codexHTTPRoundTripError{
+		reason: classifyCodexHTTPTransportFailure(cause, facts),
+		facts:  facts,
+		cause:  cause,
+	}
+}
+
+func classifyCodexHTTPTransportFailure(cause error, facts codexHTTPTransportFacts) codexHTTPTransportFailureReason {
+	if errors.Is(cause, context.Canceled) {
+		return codexHTTPTransportFailureCancelled
+	}
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return codexHTTPTransportFailureDeadline
+	}
+	var dnsErr *net.DNSError
+	if errors.As(cause, &dnsErr) {
+		return codexHTTPTransportFailureDNS
+	}
+	var timeoutErr interface{ Timeout() bool }
+	if errors.As(cause, &timeoutErr) && timeoutErr.Timeout() {
+		return codexHTTPTransportFailureTimeout
+	}
+	var netErr *net.OpError
+	if errors.As(cause, &netErr) && (netErr.Op == "dial" || netErr.Op == "connect") {
+		return codexHTTPTransportFailureConnect
+	}
+	if errors.Is(cause, syscall.ECONNRESET) {
+		return codexHTTPTransportFailureConnectionReset
+	}
+	if errors.Is(cause, syscall.EPIPE) {
+		return codexHTTPTransportFailureBrokenPipe
+	}
+	if facts.GotConn && facts.ConnReused && facts.ConnWasIdle && !facts.WroteRequest && !facts.WriteError {
+		return codexHTTPTransportFailureServerClosedIdle
+	}
+	if errors.Is(cause, io.ErrUnexpectedEOF) {
+		return codexHTTPTransportFailureUnexpectedEOF
+	}
+	if errors.Is(cause, io.EOF) {
+		return codexHTTPTransportFailureEOF
+	}
+	var tlsErr tls.RecordHeaderError
+	if errors.As(cause, &tlsErr) {
+		return codexHTTPTransportFailureTLS
+	}
+	var protocolErr *http.ProtocolError
+	if errors.As(cause, &protocolErr) {
+		return codexHTTPTransportFailureProtocol
+	}
+	return codexHTTPTransportFailureUnknown
+}
+
 // DispatchFrozen resolves one exact credential and lets the durable lifecycle
 // cross its dispatch fence immediately before RoundTrip.
 func (executor *CodexAttemptExecutor) DispatchFrozen(
@@ -80,7 +230,12 @@ func (executor *CodexAttemptExecutor) DispatchFrozen(
 	if err := markDispatched(actual); err != nil {
 		return nil, actual, false, err
 	}
+	transportTrace := &codexHTTPTransportTrace{}
+	out = out.WithContext(httptrace.WithClientTrace(out.Context(), transportTrace.clientTrace()))
 	response, err := executor.Transport.inner().RoundTrip(out)
+	if err != nil {
+		err = newCodexHTTPRoundTripError(err, transportTrace.snapshot())
+	}
 	if err == nil {
 		releaseBody = false
 	}

@@ -3,14 +3,85 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"syscall"
 	"testing"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestCodexHTTPRoundTripFailureClassifiesSafeReason(t *testing.T) {
+	const private = "private-network-detail"
+	privateError := errors.New(private)
+	tests := []struct {
+		name  string
+		cause error
+		facts codexHTTPTransportFacts
+		want  codexHTTPTransportFailureReason
+	}{
+		{name: "cancelled", cause: fmt.Errorf("%w: %s", context.Canceled, private), want: codexHTTPTransportFailureCancelled},
+		{name: "deadline", cause: fmt.Errorf("%w: %s", context.DeadlineExceeded, private), want: codexHTTPTransportFailureDeadline},
+		{name: "timeout", cause: codexHTTPTimeoutTestError{}, want: codexHTTPTransportFailureTimeout},
+		{name: "DNS", cause: &net.DNSError{Err: private, Name: private}, want: codexHTTPTransportFailureDNS},
+		{name: "connect", cause: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, want: codexHTTPTransportFailureConnect},
+		{name: "connection reset", cause: fmt.Errorf("%w: %s", syscall.ECONNRESET, private), want: codexHTTPTransportFailureConnectionReset},
+		{name: "broken pipe", cause: fmt.Errorf("%w: %s", syscall.EPIPE, private), want: codexHTTPTransportFailureBrokenPipe},
+		{
+			name:  "server closed idle connection",
+			cause: privateError,
+			facts: codexHTTPTransportFacts{GotConn: true, ConnReused: true, ConnWasIdle: true},
+			want:  codexHTTPTransportFailureServerClosedIdle,
+		},
+		{name: "unexpected EOF", cause: fmt.Errorf("%w: %s", io.ErrUnexpectedEOF, private), want: codexHTTPTransportFailureUnexpectedEOF},
+		{name: "EOF", cause: fmt.Errorf("%w: %s", io.EOF, private), want: codexHTTPTransportFailureEOF},
+		{name: "TLS", cause: tls.RecordHeaderError{RecordHeader: [5]byte{1, 2, 3, 4, 5}}, want: codexHTTPTransportFailureTLS},
+		{name: "protocol", cause: &http.ProtocolError{ErrorString: private}, want: codexHTTPTransportFailureProtocol},
+		{name: "unknown", cause: privateError, want: codexHTTPTransportFailureUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := newCodexHTTPRoundTripError(test.cause, test.facts)
+			var failure *codexHTTPRoundTripError
+			if !errors.As(err, &failure) {
+				t.Fatalf("error type = %T, want typed round-trip failure", err)
+			}
+			if failure.reason != test.want {
+				t.Fatalf("failure reason = %s, want %s", failure.reason, test.want)
+			}
+			if !errors.Is(err, test.cause) {
+				t.Fatalf("wrapped cause was not preserved: %v", err)
+			}
+			if strings.Contains(err.Error(), private) {
+				t.Fatalf("private cause reached typed error: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestCodexHTTPTransportTraceRetainsWriteOutcomes(t *testing.T) {
+	trace := &codexHTTPTransportTrace{}
+	clientTrace := trace.clientTrace()
+	clientTrace.WroteRequest(httptrace.WroteRequestInfo{Err: errors.New("private write error")})
+	clientTrace.WroteRequest(httptrace.WroteRequestInfo{})
+
+	facts := trace.snapshot()
+	if !facts.WroteRequest || !facts.WriteError {
+		t.Fatalf("write facts = %+v, want successful write and write error", facts)
+	}
+}
+
+type codexHTTPTimeoutTestError struct{}
+
+func (codexHTTPTimeoutTestError) Error() string   { return "private-network-detail" }
+func (codexHTTPTimeoutTestError) Timeout() bool   { return true }
+func (codexHTTPTimeoutTestError) Temporary() bool { return true }
 
 func TestCodexHTTPRequestSessionRetriesSameAccountBeforeAdmission(t *testing.T) {
 	choice := codexHTTPSessionChoice("account-a")
@@ -123,6 +194,87 @@ func TestCodexHTTPRequestSessionRetriesPinnedAccountBeforeAdmission(t *testing.T
 	}
 	_ = result.Response.Body.Close()
 	lifecycle, err := result.Lifecycle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexHTTPRequestSessionRetriesPinnedAccountAfterAdmission(t *testing.T) {
+	choice := codexHTTPSessionChoice("account-a")
+	first := codexHTTPSessionAttempt("account-a", "candidate-stale", "revision-stale", 1)
+	second := codexHTTPSessionAttempt("account-a", "candidate-current", "revision-current", 2)
+	dispatch := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   choice,
+			attempts: []CandidateAttempt{first, second},
+		}},
+	}
+	leasePlan := codexLeaseRuntimeTestPlan("admitted-session-turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-current", Kind: CodexAttemptSlotDirect},
+	})
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	admitted := completeCodexLeaseRuntimeTurn(t, runtimeLease, leasePlan)
+	admissionJournalGeneration := admitted.record.AdmissionJournalGeneration
+	admissionRequestGeneration := admitted.record.AdmissionRequestGeneration
+	admittedAt := admitted.record.AdmittedAt
+	continuation, err := runtimeLease.BeginRequest(leasePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+	rejectedBody := &codexRejectedTrackingBody{reader: strings.NewReader("stale credential")}
+	events := make([]string, 0, 2)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t:      t,
+		events: &events,
+		outcomes: []codexHTTPSessionOutcome{
+			{response: &http.Response{StatusCode: http.StatusUnauthorized, Body: rejectedBody}},
+			{response: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("accepted"))}},
+		},
+		wantBody: encoded,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(
+		context.Background(), template, dispatch, frozen, NewCodexHTTPRequestLifecycle(continuation),
+	)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Attempt.Candidate.CandidateID != "candidate-current" || dispatcher.calls != 2 {
+		t.Fatalf("result = %#v, dispatches %d", result, dispatcher.calls)
+	}
+	leaseLifecycle, ok := result.Lifecycle.(*codexLeaseHTTPRequestLifecycle)
+	if !ok || leaseLifecycle.handle == nil {
+		t.Fatalf("lifecycle = %T, want durable lease", result.Lifecycle)
+	}
+	handle := leaseLifecycle.handle
+	if handle.State() != LeaseBoundActive || !handle.EverAdmitted() || handle.AccountKey() != "account-a" || handle.RequestGeneration() != 2 || handle.AttemptGeneration() != 2 {
+		t.Fatalf("retry handle = state %v admitted %t account %q request %d attempt %d", handle.State(), handle.EverAdmitted(), handle.AccountKey(), handle.RequestGeneration(), handle.AttemptGeneration())
+	}
+	if len(handle.record.Attempts) != 2 || handle.record.Attempts[0].State != CodexAttemptProviderFailed || handle.record.Attempts[1].State != CodexAttemptStreaming {
+		t.Fatalf("retry attempts = %#v", handle.record.Attempts)
+	}
+	if handle.record.AdmissionJournalGeneration != admissionJournalGeneration || handle.record.AdmissionRequestGeneration != admissionRequestGeneration || handle.record.AdmittedAt != admittedAt {
+		t.Fatalf("retry changed first-admission authority: %#v", handle.record)
+	}
+	if rejectedBody.readBytes != len("stale credential") || rejectedBody.closes != 1 {
+		t.Fatalf("discarded rejection read/close = %d/%d", rejectedBody.readBytes, rejectedBody.closes)
+	}
+	if err := result.Response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := result.Lifecycle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
 	if err != nil {
 		t.Fatal(err)
 	}
