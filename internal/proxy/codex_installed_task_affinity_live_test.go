@@ -1091,6 +1091,15 @@ type codexTaskAffinityAcceptanceIsolation struct {
 
 func newCodexTaskAffinityAcceptanceIsolation(t *testing.T, localToken string) codexTaskAffinityAcceptanceIsolation {
 	t.Helper()
+	isolation := newCodexTaskAffinityAcceptanceIsolationDirectories(t)
+	if err := writeCodexAcceptanceAuthWithToken(filepath.Join(isolation.codexHome, "auth.json"), localToken); err != nil {
+		t.Fatal(err)
+	}
+	return isolation
+}
+
+func newCodexTaskAffinityAcceptanceIsolationDirectories(t *testing.T) codexTaskAffinityAcceptanceIsolation {
+	t.Helper()
 	shortTempRoot, err := filepath.EvalSymlinks("/tmp")
 	if err != nil {
 		t.Fatal(err)
@@ -1121,9 +1130,6 @@ func newCodexTaskAffinityAcceptanceIsolation(t *testing.T, localToken string) co
 		if err := os.Mkdir(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := writeCodexAcceptanceAuthWithToken(filepath.Join(isolation.codexHome, "auth.json"), localToken); err != nil {
-		t.Fatal(err)
 	}
 	return isolation
 }

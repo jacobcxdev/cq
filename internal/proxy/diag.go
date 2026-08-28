@@ -42,6 +42,11 @@ type RouteEvent struct {
 	Reason                   string    `json:"reason,omitempty"`
 	Bucket                   string    `json:"bucket,omitempty"`
 	Continuity               string    `json:"continuity,omitempty"`
+	CallerDomain             string    `json:"caller_domain,omitempty"`
+	CallerIdentityPresent    *bool     `json:"caller_identity_present,omitempty"`
+	CallerContinuityMapped   *bool     `json:"caller_continuity_mapped,omitempty"`
+	CallerRoutingMapped      *bool     `json:"caller_routing_mapped,omitempty"`
+	CallerIndexEpoch         uint64    `json:"caller_index_epoch,omitempty"`
 }
 
 type routeDiagnosticsContextKey struct{}
@@ -67,6 +72,12 @@ type codexObservationFields struct {
 	Bucket                   string
 	AccountHint              string
 	Continuity               string
+	CallerMappingObserved    bool
+	CallerDomain             string
+	CallerIdentityPresent    bool
+	CallerContinuityMapped   bool
+	CallerRoutingMapped      bool
+	CallerIndexEpoch         uint64
 }
 
 func withRouteDiagnostics(ctx context.Context) (context.Context, *routeDiagnostics) {
@@ -122,6 +133,14 @@ func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
 	}
 	if fields.Continuity != "" {
 		diag.codex.Continuity = fields.Continuity
+	}
+	if fields.CallerMappingObserved {
+		diag.codex.CallerMappingObserved = true
+		diag.codex.CallerDomain = fields.CallerDomain
+		diag.codex.CallerIdentityPresent = fields.CallerIdentityPresent
+		diag.codex.CallerContinuityMapped = fields.CallerContinuityMapped
+		diag.codex.CallerRoutingMapped = fields.CallerRoutingMapped
+		diag.codex.CallerIndexEpoch = fields.CallerIndexEpoch
 	}
 }
 
@@ -179,6 +198,16 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 	event.Reason = codex.Reason
 	event.Bucket = codex.Bucket
 	event.Continuity = codex.Continuity
+	if codex.CallerMappingObserved {
+		callerIdentityPresent := codex.CallerIdentityPresent
+		callerContinuityMapped := codex.CallerContinuityMapped
+		callerRoutingMapped := codex.CallerRoutingMapped
+		event.CallerDomain = codex.CallerDomain
+		event.CallerIdentityPresent = &callerIdentityPresent
+		event.CallerContinuityMapped = &callerContinuityMapped
+		event.CallerRoutingMapped = &callerRoutingMapped
+		event.CallerIndexEpoch = codex.CallerIndexEpoch
+	}
 }
 
 func (event *RouteEvent) applySessionCorrelation(headers http.Header) {
@@ -627,6 +656,7 @@ func safeCodexRouteEvent(event RouteEvent) bool {
 		safeCodexReason(event.Reason) &&
 		safeCodexBucket(event.Bucket) &&
 		safeCodexContinuity(event.Continuity) &&
+		safeCodexCallerDomain(event.CallerDomain) &&
 		safeCodexDiagnosticsError(event.Error) &&
 		safeCodexModel(event.Model) &&
 		safeCodexDiagnosticsPath(event.Path)
@@ -730,7 +760,7 @@ func safeCodexLeasePhase(value string) bool {
 
 func safeCodexDecision(value string) bool {
 	switch value {
-	case "", "affinity_reuse", "broker_failed", "fairness_select", "terminal_default", "plan_failed", "shadow_unknown", "shadow_parsed", "shadow_rejected", "shadow_selected", "shadow_continuity_error", "shadow_admitted", "shadow_sampling_complete", "shadow_unadmitted":
+	case "", "affinity_reuse", "broker_failed", "fairness_select", "terminal_default", "plan_failed", "session_failed", "shadow_unknown", "shadow_parsed", "shadow_rejected", "shadow_selected", "shadow_continuity_error", "shadow_admitted", "shadow_sampling_complete", "shadow_unadmitted":
 		return true
 	default:
 		return false
@@ -742,7 +772,7 @@ func safeCodexReason(value string) bool {
 		return true
 	}
 	switch value {
-	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "invalid_frame", "downstream_read_failed", "unknown":
+	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "invalid_frame", "downstream_read_failed", "response_unavailable", "cancelled", "deadline", "timeout", "dns", "connect", "connection_reset", "broken_pipe", "server_closed_idle", "unexpected_eof", "eof", "tls", "protocol", "unknown":
 		return true
 	}
 	if suffix, ok := strings.CutPrefix(value, "candidate_attempt_"); ok {
@@ -763,6 +793,15 @@ func safeCodexBucket(value string) bool {
 func safeCodexContinuity(value string) bool {
 	switch value {
 	case "", "fail_closed_if_enforced", "pinned":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeCodexCallerDomain(value string) bool {
+	switch NormalCallerDomain(value) {
+	case "", NormalCallerLocal, NormalCallerClaude, NormalCallerCodex:
 		return true
 	default:
 		return false

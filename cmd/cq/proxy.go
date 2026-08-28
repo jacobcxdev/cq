@@ -851,7 +851,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
 		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
 	}
-	runtimeCallerCredentials, err := normalCallerCredentialsFromInventory(context.Background(), cfg, accounts, codexInventory, codexRoutingInventory, credentialControl)
+	codexCallerInventory, err := codexContinuityInventory.List(context.Background())
+	if err != nil {
+		return fmt.Errorf("Codex caller inventory: %w", err)
+	}
+	runtimeCallerCredentials, err := normalCallerCredentialsFromInventory(context.Background(), cfg, accounts, codexCallerInventory, codexContinuityInventory, credentialControl)
 	if err != nil {
 		return fmt.Errorf("normal caller index: %w", err)
 	}
@@ -1135,11 +1139,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return handlerErr
 		}
 		credentialSource := proxy.NormalCallerCredentialSource(func(ctx context.Context) ([]proxy.NormalCallerCredentialV1, error) {
-			current, listErr := codexRoutingInventory.List(ctx)
+			current, listErr := codexContinuityInventory.List(ctx)
 			if listErr != nil {
 				return nil, listErr
 			}
-			return normalCallerCredentialsFromInventory(ctx, cfg, accounts, current, codexRoutingInventory, credentialControl)
+			return normalCallerCredentialsFromInventory(ctx, cfg, accounts, current, codexContinuityInventory, credentialControl)
 		})
 		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
 		workerFiles = proxy.RuntimeRoleFiles{}

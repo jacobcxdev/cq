@@ -72,34 +72,34 @@ func init() {
 
 func runDarwinProxyOwnedRuntime(ctx context.Context, port int, serve func(context.Context, net.Listener, http.Handler) error) (handled bool, returnErr error) {
 	if err := initialiseDarwinRuntimeLifecycle(); err != nil {
-		return true, err
+		return true, fmt.Errorf("initialise runtime lifecycle: %w", err)
 	}
 	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 	if err != nil {
-		return true, err
+		return true, fmt.Errorf("listen for owned runtime: %w", err)
 	}
 	defer listener.Close()
-	return true, runDarwinProxyAdoptedRuntime(ctx, listener, serve)
+	return true, wrapDarwinProxyRuntimeError("serve owned runtime", runDarwinProxyAdoptedRuntime(ctx, listener, serve))
 }
 
 func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error) error {
 	path := proxy.DefaultRuntimeLifecyclePath()
 	file, holder, err := openDarwinRuntimeLifecycle(path, "supervisor")
 	if err != nil {
-		return err
+		return fmt.Errorf("open supervisor runtime lifecycle: %w", err)
 	}
 	defer file.Close()
 	holderDigest, err := proxy.RuntimeDescriptorIdentityDigest(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("digest supervisor runtime lifecycle: %w", err)
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve runtime executable: %w", err)
 	}
 	artifact, err := os.ReadFile(executable)
 	if err != nil {
-		return err
+		return fmt.Errorf("read runtime executable: %w", err)
 	}
 	manifestDigest := sha256.Sum256(artifact)
 	manifest := proxy.RuntimeRoleManifestV1{
@@ -112,27 +112,27 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 	launcher := newDarwinRuntimeLauncher(executable, manifest, holder, path)
 	admissions, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.DefaultNormalCallerAdmissionPath())
 	if err != nil {
-		return err
+		return fmt.Errorf("open normal caller admissions: %w", err)
 	}
 	defer admissions.Close()
 	workerManifest := proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}
 	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
 	if errors.Is(err, os.ErrNotExist) {
-		return proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, serve)
+		return wrapDarwinProxyRuntimeError("run normal supervisor", proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, serve))
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("load rescue bootstrap: %w", err)
 	}
 	state, err := proxy.OpenProxyRescueState(ctx, proxy.ProxyResilienceStateOptions{
 		FS: fsutil.OSFileSystem{}, Root: bootstrap.StateRoot, Random: rand.Reader, Now: time.Now,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("open rescue state: %w", err)
 	}
 	defer state.Close()
 	callerKey := make([]byte, sha256.Size)
 	if _, err := rand.Read(callerKey); err != nil {
-		return err
+		return fmt.Errorf("create caller authority key: %w", err)
 	}
 	callerAuthority, err := proxy.NewNormalCallerAuthority(callerKey, 1, []proxy.NormalCallerCredentialV1{{
 		Domain: proxy.NormalCallerLocal, Bearer: bootstrap.LocalToken, SubjectID: "local-control",
@@ -141,13 +141,13 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		callerKey[index] = 0
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("create caller authority: %w", err)
 	}
 	origin, err := url.Parse("https://chatgpt.com/backend-api/codex")
 	if err != nil {
-		return err
+		return fmt.Errorf("parse rescue upstream: %w", err)
 	}
-	return proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, func(supervisor *proxy.RuntimeSupervisor) error {
+	return wrapDarwinProxyRuntimeError("run configured supervisor", proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, func(supervisor *proxy.RuntimeSupervisor) error {
 		if err := supervisor.SetCallerAuthority(callerAuthority); err != nil {
 			return err
 		}
@@ -156,7 +156,14 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 			Origin:    origin,
 		}
 		return supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode)
-	}, serve)
+	}, serve))
+}
+
+func wrapDarwinProxyRuntimeError(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", stage, err)
 }
 
 func openDarwinRuntimeLifecycle(path, role string) (*os.File, proxy.LifecycleHolderProof, error) {

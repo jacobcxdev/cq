@@ -1228,8 +1228,7 @@ func TestCodexTerminatingWSBrokerRejectsKnownClosedIdleUpstreamBeforeDispatch(t 
 	}
 }
 
-func TestCodexTerminatingWSBrokerTranslatesHandshakeFailureWithoutPrivateBody(t *testing.T) {
-	t.Parallel()
+func TestCodexTerminatingWSBrokerReportsHandledHandshakeFailure(t *testing.T) {
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: newCodexLeaseRuntimeTest(t, coordinator),
@@ -1247,12 +1246,70 @@ func TestCodexTerminatingWSBrokerTranslatesHandshakeFailureWithoutPrivateBody(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	ctx, routeDiagnostics := withRouteDiagnostics(context.Background())
+	stderr := captureStderr(t, func() {
+		if err := broker.Serve(ctx, downstream); err != nil {
+			t.Fatal(err)
+		}
+	})
+	writes := downstream.writtenPayloads()
+	const wantFrame = `{"type":"error","status":401,"error":{"type":"authentication_error"}}`
+	if len(writes) != 1 || string(writes[0]) != wantFrame {
+		t.Fatalf("translated writes = %q, want %q", writes, wantFrame)
+	}
+	const wantTrace = "cq: Codex route trace transport=websocket event=broker_failed stage=upstream_handshake reason=upstream_rejected response_present=true upstream_status=401 auth_failure=true hard_limit=false\n"
+	if stderr != wantTrace {
+		t.Fatalf("trace = %q, want %q", stderr, wantTrace)
+	}
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(routeDiagnostics)
+	if event.Decision != "broker_failed" || event.Reason != "upstream_rejected" {
+		t.Fatalf("diagnostics = %+v, want broker_failed/upstream_rejected", event)
+	}
+	for _, private := range []string{"private upstream payload", "private dial error"} {
+		if strings.Contains(stderr, private) || strings.Contains(string(writes[0]), private) {
+			t.Fatalf("private handshake detail escaped: trace=%q frame=%q", stderr, writes[0])
+		}
+	}
+}
+
+func TestCodexTerminatingWSBrokerReportsHandledPrewarmTransportFailure(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots:   []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: prewarm}, {err: io.EOF}}}
+	dialer := &codexWSBrokerDialerStub{outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{
+		"account-a": {{err: errors.New("private prewarm dial error")}},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, routeDiagnostics := withRouteDiagnostics(context.Background())
+	stderr := captureStderr(t, func() {
+		if err := broker.Serve(ctx, downstream); err != nil {
+			t.Fatal(err)
+		}
+	})
 	writes := downstream.writtenPayloads()
-	if len(writes) != 1 || string(writes[0]) != `{"type":"error","status":401,"error":{"type":"authentication_error"}}` {
-		t.Fatalf("translated writes = %q", writes)
+	const wantFrame = `{"type":"error","status":502,"error":{"type":"api_error"}}`
+	if len(writes) != 1 || string(writes[0]) != wantFrame {
+		t.Fatalf("translated writes = %q, want %q", writes, wantFrame)
+	}
+	const wantTrace = "cq: Codex route trace transport=websocket event=broker_failed stage=upstream_handshake reason=upstream_outcome_indeterminate response_present=false upstream_status=0 auth_failure=false hard_limit=false\n"
+	if stderr != wantTrace {
+		t.Fatalf("trace = %q, want %q", stderr, wantTrace)
+	}
+	event := RouteEvent{}
+	event.applyRouteDiagnostics(routeDiagnostics)
+	if event.Decision != "broker_failed" || event.Reason != "upstream_outcome_indeterminate" {
+		t.Fatalf("diagnostics = %+v, want broker_failed/upstream_outcome_indeterminate", event)
+	}
+	if strings.Contains(stderr, "private prewarm dial error") || strings.Contains(string(writes[0]), "private prewarm dial error") {
+		t.Fatalf("private prewarm detail escaped: trace=%q frame=%q", stderr, writes[0])
 	}
 }
 

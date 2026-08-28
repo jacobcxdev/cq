@@ -390,12 +390,29 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
 	authenticatedCallerAccount := codex.AccountKey("")
+	authenticatedCodexCaller := false
+	callerIdentity, callerIdentityPresent := runtimeCallerIdentity(ctx)
+	callerDomain := NormalCallerDomain("")
+	callerIndexEpoch := uint64(0)
+	callerContinuityAccount := codex.AccountKey("")
 	if callerOK {
-		identity, _ := runtimeCallerIdentity(ctx)
-		if caller.Domain == NormalCallerCodex && codexAuthenticatedCallerAccount(unfilteredInventory, caller, identity) == "" {
-			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
+		callerDomain = caller.Domain
+		callerIndexEpoch = caller.IndexEpoch
+		if caller.Domain == NormalCallerCodex {
+			callerContinuityAccount, authenticatedCodexCaller = codexAuthenticatedCallerMapping(unfilteredInventory, caller, callerIdentity)
 		}
-		authenticatedCallerAccount = codexAuthenticatedCallerAccount(inventory, caller, identity)
+		authenticatedCallerAccount, _ = codexAuthenticatedCallerMapping(inventory, caller, callerIdentity)
+	}
+	noteCodexObservation(ctx, codexObservationFields{
+		CallerMappingObserved:  true,
+		CallerDomain:           string(callerDomain),
+		CallerIdentityPresent:  callerIdentityPresent,
+		CallerContinuityMapped: callerContinuityAccount != "",
+		CallerRoutingMapped:    authenticatedCallerAccount != "",
+		CallerIndexEpoch:       callerIndexEpoch,
+	})
+	if callerOK && caller.Domain == NormalCallerCodex && !authenticatedCodexCaller {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
 	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && authenticatedCallerAccount != "" {
 		continuityAccountKey = authenticatedCallerAccount
@@ -404,11 +421,11 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 	}
-	authenticatedBoundContinuation := authenticatedCallerAccount != "" &&
+	authenticatedBoundContinuation := authenticatedCodexCaller &&
 		snapshot.Classification == CodexRestoredLaneCurrent &&
 		snapshot.BoundAccountKey != "" && snapshot.BoundIdentity.Authoritative && snapshot.BoundRecordGeneration != 0
 	authenticatedCallerContinuity := authenticatedBoundContinuation ||
-		(authenticatedCallerAccount != "" && continuityAccountKey != "" &&
+		(authenticatedCodexCaller && continuityAccountKey != "" &&
 			(protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState))
 	expectedBound := input.ExpectedBound
 	if expectedBound == nil && authenticatedBoundContinuation {
@@ -884,27 +901,30 @@ func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, prot
 	return snapshot.AffinityAccountKey, "", nil
 }
 
-func codexAuthenticatedCallerAccount(inventory codex.Inventory, caller RuntimeCallerAuthorityV1, identity string) codex.AccountKey {
+func codexAuthenticatedCallerMapping(inventory codex.Inventory, caller RuntimeCallerAuthorityV1, identity string) (codex.AccountKey, bool) {
 	if caller.Domain != NormalCallerCodex {
-		return ""
+		return "", false
 	}
 	parts := strings.Split(identity, "\x00")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return ""
+		return "", false
 	}
 	accountKey := codex.AccountKey(parts[0])
 	candidateID := codex.CandidateID(parts[1])
 	for _, account := range inventory.Accounts {
-		if account.Key != accountKey || !account.Routable || account.Unstable {
+		if account.Key != accountKey || !account.Routable {
 			continue
 		}
 		for _, candidate := range account.Candidates {
 			if candidate.Ref.AccountKey == accountKey && candidate.Ref.CandidateID == candidateID && candidate.Routable && !candidate.DispatchBlocked {
-				return accountKey
+				if account.Unstable {
+					return "", true
+				}
+				return accountKey, true
 			}
 		}
 	}
-	return ""
+	return "", false
 }
 
 func codexGPT56PromptCacheModel(model string) bool {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -678,6 +679,7 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 			if err := writeCodexWSMessage(ctx, downstream, websocket.TextMessage, frame); err != nil {
 				return fmt.Errorf("Codex downstream WebSocket write failed")
 			}
+			reportCodexWSHandshakeFailure(ctx, dial.response, dial.wrapped)
 			_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, http.StatusText(status)))
 			return nil
 		}
@@ -915,6 +917,7 @@ func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Conte
 	if err := writeCodexWSMessage(ctx, downstream, websocket.TextMessage, frame); err != nil {
 		return false, fmt.Errorf("Codex downstream WebSocket write failed")
 	}
+	reportCodexWSHandshakeFailure(ctx, dial.response, dial.wrapped)
 	_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, http.StatusText(status)))
 	if active.conn != nil {
 		closeCodexWSActiveUpstream(active)
@@ -978,6 +981,25 @@ func codexWSPreparedPendingFrame(frozen *CodexFrozenRequest, original *codexWSPe
 		return nil, errors.Join(readErr, closeErr)
 	}
 	return newCodexWSPendingFrame(websocket.TextMessage, encoded)
+}
+
+func reportCodexWSHandshakeFailure(ctx context.Context, response *http.Response, wrapped CodexWrappedError) {
+	status := 0
+	reason := string(codexWebSocketFailureReasonUpstreamOutcomeIndeterminate)
+	if response != nil && response.StatusCode >= 400 && response.StatusCode <= 599 {
+		status = response.StatusCode
+		reason = "upstream_rejected"
+	}
+	noteCodexObservation(ctx, codexObservationFields{Decision: "broker_failed", Reason: reason})
+	fmt.Fprintf(
+		os.Stderr,
+		"cq: Codex route trace transport=websocket event=broker_failed stage=upstream_handshake reason=%s response_present=%t upstream_status=%d auth_failure=%t hard_limit=%t\n",
+		reason,
+		response != nil,
+		status,
+		wrapped.AuthFailure,
+		wrapped.HardUsageLimit,
+	)
 }
 
 func canonicalCodexWSHandshakeError(response *http.Response, wrapped CodexWrappedError) ([]byte, int) {

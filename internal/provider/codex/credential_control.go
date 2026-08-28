@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"net/rpc"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -95,6 +96,9 @@ type credentialRPCClient interface {
 }
 
 func DefaultCredentialControlPath(home string) string {
+	if configHome := os.Getenv("XDG_CONFIG_HOME"); configHome != "" && filepath.IsAbs(configHome) {
+		return filepath.Join(configHome, "cq", "state", "credential.sock")
+	}
 	return filepath.Join(home, ".config", "cq", "state", "credential.sock")
 }
 

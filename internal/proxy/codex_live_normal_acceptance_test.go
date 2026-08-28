@@ -27,6 +27,8 @@ import (
 
 const codexLiveNormalAccount codex.AccountKey = "live-normal-account"
 
+const codexLiveAcceptanceMinimumCredentialLifetime = 15 * time.Minute
+
 type codexLiveAcceptanceCredential struct {
 	identity   codex.AccountIdentity
 	material   codex.CredentialMaterial
@@ -160,7 +162,7 @@ func readCodexLiveAcceptanceCredential(path string) (codexLiveAcceptanceCredenti
 	accessClaims := auth.DecodeCodexClaims(document.Tokens.AccessToken)
 	if document.Tokens.AccessToken == "" || document.Tokens.IDToken == "" || claims.AccountID == "" || claims.UserID == "" ||
 		(document.Tokens.AccountID != "" && document.Tokens.AccountID != claims.AccountID) ||
-		(accessClaims.ExpiresAt != 0 && time.Unix(accessClaims.ExpiresAt, 0).Before(time.Now().Add(5*time.Minute))) {
+		accessClaims.ExpiresAt == 0 || time.Unix(accessClaims.ExpiresAt, 0).Before(time.Now().Add(codexLiveAcceptanceMinimumCredentialLifetime)) {
 		return result, errors.New("live Codex auth credential is incomplete or expired")
 	}
 	localToken, err := newCodexInstalledHTTPValidationToken()
@@ -175,10 +177,9 @@ func readCodexLiveAcceptanceCredential(path string) (codexLiveAcceptanceCredenti
 		RecordKey: claims.RecordKey(),
 	}
 	result.material = codex.CredentialMaterial{
-		AccessToken:  document.Tokens.AccessToken,
-		RefreshToken: document.Tokens.RefreshToken,
-		IDToken:      document.Tokens.IDToken,
-		AccountID:    claims.AccountID,
+		AccessToken: document.Tokens.AccessToken,
+		IDToken:     document.Tokens.IDToken,
+		AccountID:   claims.AccountID,
 	}
 	result.localToken = localToken
 	return result, nil
@@ -700,9 +701,119 @@ func decodeCodexAppServerMessage(decoder *json.Decoder) (codexAppServerMessage, 
 		return message, errors.New("read Codex app-server response")
 	}
 	if message.Method == "error" {
-		return message, errors.New("Codex app-server reported an error")
+		return message, fmt.Errorf("Codex app-server reported an error: %s", codexAppServerSafeErrorClassification(message.Params))
 	}
 	return message, nil
+}
+
+func codexAppServerSafeErrorClassification(params json.RawMessage) string {
+	var notification struct {
+		Error struct {
+			CodexErrorInfo json.RawMessage `json:"codexErrorInfo"`
+			Message        string          `json:"message"`
+		} `json:"error"`
+		WillRetry bool `json:"willRetry"`
+	}
+	if json.Unmarshal(params, &notification) != nil {
+		return "unknown will_retry=unknown"
+	}
+	classification := "unknown"
+	var name string
+	if json.Unmarshal(notification.Error.CodexErrorInfo, &name) == nil {
+		switch name {
+		case "contextWindowExceeded", "sessionBudgetExceeded", "usageLimitExceeded", "serverOverloaded", "cyberPolicy", "misalignmentPolicyViolation", "internalServerError", "unauthorized", "badRequest", "threadRollbackFailed", "sandboxError", "other":
+			classification = name
+		}
+	} else {
+		var connection map[string]struct {
+			HTTPStatusCode *uint16 `json:"httpStatusCode"`
+		}
+		if json.Unmarshal(notification.Error.CodexErrorInfo, &connection) == nil && len(connection) == 1 {
+			for kind, detail := range connection {
+				switch kind {
+				case "httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts":
+					status := "unknown"
+					if detail.HTTPStatusCode != nil {
+						status = strconv.Itoa(int(*detail.HTTPStatusCode))
+					}
+					classification = kind + "(status=" + status + ")"
+				}
+			}
+		}
+	}
+	return classification + " will_retry=" + strconv.FormatBool(notification.WillRetry) + " message=" + codexAppServerSafeMessageClassification(notification.Error.Message)
+}
+
+func codexAppServerSafeMessageClassification(message string) string {
+	lower := strings.ToLower(message)
+	classes := make([]string, 0, 8)
+	if strings.Contains(lower, "websocket") && (strings.Contains(lower, "closed") || strings.Contains(lower, "disconnect")) {
+		classes = append(classes, "websocket_closed")
+	}
+	if strings.Contains(lower, "before response.completed") || strings.Contains(lower, "before completion") {
+		classes = append(classes, "response_incomplete")
+	}
+	for _, status := range []string{"401", "403", "502", "503"} {
+		if strings.Contains(lower, "status "+status) || strings.Contains(lower, "status="+status) {
+			classes = append(classes, "status_"+status)
+		}
+	}
+	if strings.Contains(lower, "authentication required") || strings.Contains(lower, "login required") || strings.Contains(lower, "not logged in") {
+		classes = append(classes, "auth_required")
+	}
+	if strings.Contains(lower, "refresh token") {
+		classes = append(classes, "refresh_token")
+	}
+	if strings.Contains(lower, "failed to refresh") || strings.Contains(lower, "refresh failed") {
+		classes = append(classes, "refresh_failed")
+	}
+	if strings.Contains(lower, "expired") && (strings.Contains(lower, "auth") || strings.Contains(lower, "token")) {
+		classes = append(classes, "auth_expired")
+	}
+	if strings.Contains(lower, "unauthorized") {
+		classes = append(classes, "unauthorized")
+	}
+	if strings.Contains(lower, "forbidden") {
+		classes = append(classes, "forbidden")
+	}
+	if len(classes) == 0 {
+		keywords := make([]string, 0, 8)
+		for _, keyword := range []string{
+			"access", "account", "api", "associated", "audience", "auth", "bearer", "chatgpt", "claim", "config", "credential",
+			"decode", "environment", "error", "exchange", "expired", "failed", "file", "invalid", "issuer", "key", "load", "login",
+			"mismatch", "missing", "oauth", "obtain", "openai", "parse", "permission", "provided", "refresh", "required", "sandbox",
+			"scope", "signed", "stored", "token", "unable", "unknown", "unsupported", "valid",
+		} {
+			if strings.Contains(lower, keyword) {
+				keywords = append(keywords, keyword)
+			}
+		}
+		if len(keywords) == 0 {
+			return "unclassified"
+		}
+		return "keywords_" + strings.Join(keywords, "_")
+	}
+	return strings.Join(classes, ",")
+}
+
+func TestDecodeCodexAppServerMessageReportsSafeErrorClassification(t *testing.T) {
+	decoder := json.NewDecoder(strings.NewReader(`{"method":"error","params":{"error":{"message":"must-not-appear websocket closed by server before response.completed unexpected status 502 Bad Gateway","additionalDetails":"must-not-appear","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}},"threadId":"private","turnId":"private","willRetry":false}}`))
+	_, err := decodeCodexAppServerMessage(decoder)
+	if err == nil || !strings.Contains(err.Error(), "responseStreamDisconnected(status=502)") || !strings.Contains(err.Error(), "will_retry=false") ||
+		!strings.Contains(err.Error(), "message=websocket_closed,response_incomplete,status_502") {
+		t.Fatalf("safe app-server error classification missing: %v", err)
+	}
+	if strings.Contains(err.Error(), "must-not-appear") || strings.Contains(err.Error(), "private") {
+		t.Fatalf("app-server error leaked private details: %v", err)
+	}
+}
+
+func TestCodexAppServerSafeMessageClassificationReportsAuthWithoutRawMessage(t *testing.T) {
+	private := "must-not-appear"
+	got := codexAppServerSafeMessageClassification(private + " authentication required: failed to refresh refresh token")
+	if got != "auth_required,refresh_token,refresh_failed" || strings.Contains(got, private) {
+		t.Fatalf("safe auth classification = %q", got)
+	}
 }
 
 func TestAwaitCodexAppServerToolTurnRequiresOrderedEvidence(t *testing.T) {
