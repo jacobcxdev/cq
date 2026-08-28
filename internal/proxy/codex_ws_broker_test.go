@@ -1129,6 +1129,52 @@ func TestCodexWSUpstreamReaderAnswersIdlePing(t *testing.T) {
 	}
 }
 
+func TestCodexWSIdleUpstreamDropsLateMaintenanceFrame(t *testing.T) {
+	t.Parallel()
+	for _, payload := range []string{
+		`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":20}}}`,
+		`{"type":"keepalive"}`,
+		`{"type":"responsesapi.websocket_timing"}`,
+	} {
+		readFrames := make(chan codexWSUpstreamRead, 1)
+		readFrames <- codexWSUpstreamRead{messageType: websocket.TextMessage, payload: []byte(payload)}
+		active := &codexWSActiveUpstream{
+			conn:       &codexWSBrokerConnStub{},
+			readFrames: readFrames,
+		}
+
+		if err := codexWSIdleUpstreamError(active); err != nil {
+			t.Fatalf("idle maintenance frame %q = %v, want dropped", payload, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, _, err := readCodexWSActiveMessage(ctx, active); !errors.Is(err, context.Canceled) {
+			t.Fatalf("idle maintenance frame %q remained queued: %v", payload, err)
+		}
+	}
+}
+
+func TestCodexWSIdleUpstreamRejectsLateResponseFrame(t *testing.T) {
+	t.Parallel()
+	readFrames := make(chan codexWSUpstreamRead, 2)
+	readFrames <- codexWSUpstreamRead{
+		messageType: websocket.TextMessage,
+		payload:     []byte(`{"type":"keepalive"}`),
+	}
+	readFrames <- codexWSUpstreamRead{
+		messageType: websocket.TextMessage,
+		payload:     []byte(`{"type":"response.output_text.delta","delta":"late"}`),
+	}
+	active := &codexWSActiveUpstream{
+		conn:       &codexWSBrokerConnStub{},
+		readFrames: readFrames,
+	}
+
+	if err := codexWSIdleUpstreamError(active); !errors.Is(err, ErrCodexWSInvalidFrame) {
+		t.Fatalf("idle response frame = %v, want %v", err, ErrCodexWSInvalidFrame)
+	}
+}
+
 func TestCodexTerminatingWSBrokerRejectsKnownClosedIdleUpstreamBeforeDispatch(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

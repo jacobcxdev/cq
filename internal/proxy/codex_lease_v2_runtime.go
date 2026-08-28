@@ -513,7 +513,9 @@ func (handle *CodexLeaseRequestHandle) RejectAndPrepareContext(ctx context.Conte
 	}
 	nextAccount := handle.slotAccounts[nextSlot-1]
 	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
-	if !ok || current.State != CodexAttemptDispatched || handle.record.State != LeaseProvisional || handle.record.EverAdmitted || (handle.record.NonMigratable && nextAccount != handle.account) {
+	unadmittedRetry := handle.record.State == LeaseProvisional && !handle.record.EverAdmitted
+	admittedRetry := handle.record.State == LeaseBoundActive && handle.record.EverAdmitted && nextAccount == handle.account
+	if !ok || current.State != CodexAttemptDispatched || (!unadmittedRetry && !admittedRetry) || (handle.record.NonMigratable && nextAccount != handle.account) {
 		return nil, ErrCodexLeaseTransition
 	}
 	for _, attempt := range handle.record.Attempts {

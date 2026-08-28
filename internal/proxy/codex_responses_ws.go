@@ -242,19 +242,66 @@ func (broker *CodexWSFrameBroker) forwardDecision(kind CodexWSFrameKind, request
 }
 
 func validateCodexWSBrokerRequest(frame []byte, request CodexProtocolRequest) (CodexProtocolRequest, error) {
+	if request.Type != "response.create" {
+		return CodexProtocolRequest{}, newCodexWSAuthorityError(codexWSInvalidFrameResponseType, nil)
+	}
 	authority, code, err := extractCodexFrozenAuthority(frame, "", false, nil)
 	if err == nil {
 		request = authority.protocol
 	} else if request.Metadata.Source != CodexTurnMetadataHandshake || code != CodexFrozenRequestMetadataAuthority {
-		return CodexProtocolRequest{}, fmt.Errorf("%w: %v", ErrCodexWSInvalidFrame, err)
+		return CodexProtocolRequest{}, newCodexWSAuthorityError(codexWSInvalidFrameDetailForFrozenCode(code), err)
 	}
-	if request.Type != "response.create" || request.Model == "" || !request.Metadata.Found || request.Metadata.Metadata.RequestKind != CodexRequestTurn {
-		return CodexProtocolRequest{}, ErrCodexWSInvalidFrame
+	if request.Model == "" {
+		return CodexProtocolRequest{}, newCodexWSAuthorityError(codexWSInvalidFrameModelMissing, nil)
+	}
+	if !request.Metadata.Found {
+		return CodexProtocolRequest{}, newCodexWSAuthorityError(codexWSInvalidFrameMetadataMissing, nil)
+	}
+	requestKind := request.Metadata.Metadata.RequestKind
+	if requestKind != CodexRequestTurn && requestKind != CodexRequestCompaction {
+		detail := codexWSInvalidFrameRequestKindUnknown
+		if requestKind == CodexRequestMemory {
+			detail = codexWSInvalidFrameRequestKindMemory
+		}
+		return CodexProtocolRequest{}, newCodexWSAuthorityError(detail, nil)
 	}
 	if err := NewCodexLeaseKey(request.Metadata.Metadata).validate(); err != nil {
-		return CodexProtocolRequest{}, fmt.Errorf("%w: %v", ErrCodexWSInvalidFrame, err)
+		return CodexProtocolRequest{}, newCodexWSAuthorityError(codexWSInvalidFrameLeaseKey, err)
 	}
 	return request, nil
+}
+
+type codexWSAuthorityError struct {
+	Detail codexWSInvalidFrameDetail
+	cause  error
+}
+
+func (err *codexWSAuthorityError) Error() string {
+	return "Codex WebSocket request authority rejected: " + string(err.Detail)
+}
+
+func (err *codexWSAuthorityError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return errors.Join(ErrCodexWSInvalidFrame, err.cause)
+}
+
+func newCodexWSAuthorityError(detail codexWSInvalidFrameDetail, cause error) error {
+	return &codexWSAuthorityError{Detail: detail, cause: cause}
+}
+
+func codexWSInvalidFrameDetailForFrozenCode(code CodexFrozenRequestErrorCode) codexWSInvalidFrameDetail {
+	switch code {
+	case CodexFrozenRequestMetadataAuthority:
+		return codexWSInvalidFrameMetadataAuthority
+	case CodexFrozenRequestModelAuthority:
+		return codexWSInvalidFrameModelAuthority
+	case CodexFrozenRequestProtocolInvalid:
+		return codexWSInvalidFrameProtocolAuthority
+	default:
+		return codexWSInvalidFrameDetailUnknown
+	}
 }
 
 type CodexWSRotationIntent struct {

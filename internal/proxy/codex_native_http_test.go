@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -328,6 +330,69 @@ func TestCodexNativeHTTPPlanFailureRedactsUnknownStage(t *testing.T) {
 
 	if reported.Stage != codexHTTPRequestPlanUnknown || reported.Reason != CodexRequestFailureUnknown {
 		t.Fatalf("reported failure = %+v, want unknown/unknown", reported)
+	}
+}
+
+func TestCodexNativeHTTPRoundTripFailureReportsSafeTrace(t *testing.T) {
+	const private = "private-round-trip-detail"
+	identity := codex.AccountIdentity{AccountID: "account", UserID: "user"}
+	choice := codexHTTPSessionChoice("account-a")
+	attempt := codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)
+	attempt.Identity = identity
+	dispatch := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   choice,
+			attempts: []CandidateAttempt{attempt},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+	events := make([]string, 0, 5)
+	planner := &codexNativeHTTPPlannerStub{prepared: CodexPreparedHTTPRequest{
+		Dispatch: dispatch,
+		Frozen:   frozen,
+		Lifecycle: &codexHTTPSessionLifecycle{
+			account:      "account-a",
+			slotAccounts: map[uint32]codex.AccountKey{1: "account-a"},
+			events:       &events,
+		},
+	}}
+	executor := &CodexAttemptExecutor{
+		Secrets: &testExactSecretResolver{materials: map[codex.Revision]codex.CredentialMaterial{
+			"revision-a": testExactCredentialMaterial(identity, "private-access-token"),
+		}},
+		Transport: &CodexTokenTransport{Inner: codexTransportRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			trace := httptrace.ContextClientTrace(request.Context())
+			if trace == nil || trace.GotConn == nil || trace.WroteRequest == nil || trace.GotFirstResponseByte == nil {
+				t.Fatal("outbound request has no HTTP transport trace")
+			}
+			trace.GotConn(httptrace.GotConnInfo{Reused: true, WasIdle: true, IdleTime: 2500 * time.Millisecond})
+			trace.WroteRequest(httptrace.WroteRequestInfo{Err: errors.New(private)})
+			trace.GotFirstResponseByte()
+			return nil, fmt.Errorf("%w: %s", syscall.ECONNRESET, private)
+		})},
+	}
+	handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{Executor: executor}, "https://codex.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := newCodexNativeHTTPOrderWriter(&events)
+
+	stderr := captureStderr(t, func() { handler.TryServe(writer, request, false) })
+
+	if writer.status != http.StatusBadGateway || !strings.Contains(writer.body.String(), "Codex upstream request failed") {
+		t.Fatalf("status/body = %d/%q, want generic 502", writer.status, writer.body.String())
+	}
+	wantTrace := "cq: Codex route trace transport=http event=session_failed stage=round_trip reason=connection_reset dispatched=true got_conn=true conn_reused=true conn_was_idle=true idle_ms=2500 wrote_request=false write_error=true got_first_response_byte=true\n"
+	if stderr != wantTrace {
+		t.Fatalf("trace = %q, want %q", stderr, wantTrace)
+	}
+	if strings.Contains(stderr, private) || strings.Contains(writer.body.String(), private) {
+		t.Fatalf("private transport detail escaped: stderr=%q body=%q", stderr, writer.body.String())
 	}
 }
 

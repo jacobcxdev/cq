@@ -469,16 +469,33 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 			t.Fatalf("live Codex normal turn %s: %v", turn.output, err)
 		}
 	}
-	compactionIsolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
-	if err := runCodexAppServerCompactionAcceptance(ctx, clientProof, listener.URL, compactionIsolation); err != nil {
-		t.Fatalf("live Codex normal compaction: %v", err)
+	for _, webSocket := range []bool{true, false} {
+		beforeWebSockets, beforeResponses, beforeCompactions := traffic.snapshot()
+		appServerIsolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
+		if err := runCodexAppServerContinuityAcceptance(ctx, clientProof, listener.URL, appServerIsolation, webSocket); err != nil {
+			t.Fatalf("live Codex normal app-server continuity (websocket=%t): %v", webSocket, err)
+		}
+		afterWebSockets, afterResponses, afterCompactions := traffic.snapshot()
+		webSocketDelta := afterWebSockets - beforeWebSockets
+		responseDelta := afterResponses - beforeResponses
+		compactionDelta := afterCompactions - beforeCompactions
+		if webSocket {
+			if webSocketDelta != 1 || responseDelta != 0 || compactionDelta != 0 {
+				t.Fatalf("live Codex app-server websocket traffic = %d handshakes/%d HTTP responses/%d HTTP compactions, want 1/0/0", webSocketDelta, responseDelta, compactionDelta)
+			}
+		} else if webSocketDelta != 0 || responseDelta < 2 {
+			t.Fatalf("live Codex app-server HTTP traffic = %d handshakes/%d responses, want 0/at least 2", webSocketDelta, responseDelta)
+		}
+		if !webSocket && compactionDelta < 1 {
+			t.Fatalf("live Codex app-server compaction traffic = %d, want positive", compactionDelta)
+		}
 	}
 	if supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
 		t.Fatal("live Codex normal acceptance lost candidate worker")
 	}
 	webSockets, responses, compactions := traffic.snapshot()
-	if webSockets != 2 || responses != 2 || compactions < 1 {
-		t.Fatalf("live Codex normal traffic = websocket %d responses %d compactions %d, want 2/2/positive", webSockets, responses, compactions)
+	if webSockets < 3 || responses < 3 || compactions < 1 {
+		t.Fatalf("live Codex normal traffic = websocket %d responses %d compactions %d, want at least 3/3/1", webSockets, responses, compactions)
 	}
 }
 

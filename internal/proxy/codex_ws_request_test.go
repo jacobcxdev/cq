@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -32,6 +33,27 @@ func TestCodexWSPendingFrameUsesStrongFrameAuthorityWithoutHandshake(t *testing.
 	}
 }
 
+func TestCodexWSPendingFrameAcceptsSupportedCompactionPhases(t *testing.T) {
+	for _, phase := range []string{"standalone_turn", "pre_turn", "mid_turn"} {
+		t.Run(phase, func(t *testing.T) {
+			payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"compaction","compaction":"` + phase + `"}}}`)
+
+			pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pending.Release()
+
+			if pending.key != testCodexLeaseKey("thread", "turn") || pending.prewarm {
+				t.Fatalf("compaction routing = key %+v prewarm %v", pending.key, pending.prewarm)
+			}
+			if pending.request.Metadata.Metadata.RequestKind != CodexRequestCompaction || string(pending.request.Metadata.Metadata.CompactionPhase) != phase {
+				t.Fatalf("compaction metadata = %+v", pending.request.Metadata.Metadata)
+			}
+		})
+	}
+}
+
 func TestCodexWSPendingFrameRejectsInvalidAuthorityAndBounds(t *testing.T) {
 	valid := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
 	tests := []struct {
@@ -44,11 +66,79 @@ func TestCodexWSPendingFrameRejectsInvalidAuthorityAndBounds(t *testing.T) {
 		{name: "wrong type", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.cancel","model":"gpt-5.6-sol"}`)},
 		{name: "missing metadata", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol"}`)},
 		{name: "missing model", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)},
+		{name: "unsupported compaction phase", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"compaction","compaction":"unsupported"}}}`)},
+		{name: "compaction missing lease key", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","request_kind":"compaction","compaction":"mid_turn"}}}`)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if pending, err := newCodexWSPendingFrame(test.messageType, test.payload); pending != nil || !errors.Is(err, ErrCodexWSInvalidFrame) {
 				t.Fatalf("pending=%+v error=%v", pending, err)
+			}
+		})
+	}
+}
+
+func TestCodexWSPendingFrameClassifiesFailureWithoutPayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		messageType int
+		payload     []byte
+		wantOrigin  codexWSInvalidFrameOrigin
+		wantType    codexWSFrameType
+		wantSize    codexWSFrameSize
+		wantDetail  codexWSInvalidFrameDetail
+	}{
+		{
+			name:        "binary envelope",
+			messageType: websocket.BinaryMessage,
+			payload:     []byte("private-binary-frame"),
+			wantOrigin:  codexWSInvalidFrameEnvelope,
+			wantType:    codexWSFrameBinary,
+			wantSize:    codexWSFrameSizeSmall,
+		},
+		{
+			name:        "protocol decode",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":`),
+			wantOrigin:  codexWSInvalidFrameProtocol,
+			wantType:    codexWSFrameText,
+			wantSize:    codexWSFrameSizeSmall,
+		},
+		{
+			name:        "broker authority",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"response.cancel","private":"secret"}`),
+			wantOrigin:  codexWSInvalidFrameBrokerAuthority,
+			wantType:    codexWSFrameText,
+			wantSize:    codexWSFrameSizeSmall,
+			wantDetail:  codexWSInvalidFrameResponseType,
+		},
+		{
+			name:        "memory request kind",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"request_kind":"memory"}}}`),
+			wantOrigin:  codexWSInvalidFrameBrokerAuthority,
+			wantType:    codexWSFrameText,
+			wantSize:    codexWSFrameSizeSmall,
+			wantDetail:  codexWSInvalidFrameRequestKindMemory,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := newCodexWSPendingFrame(test.messageType, test.payload)
+			var frameErr *codexWSInvalidFrameError
+			if !errors.As(err, &frameErr) {
+				t.Fatalf("error = %T, want safe frame error", err)
+			}
+			if frameErr.Origin != test.wantOrigin || frameErr.Type != test.wantType || frameErr.Size != test.wantSize || frameErr.Detail != test.wantDetail {
+				t.Fatalf("failure = %s/%s/%s/%s, want origin/type/size/detail %s/%s/%s/%s", frameErr.Origin, frameErr.Type, frameErr.Size, frameErr.Detail, test.wantOrigin, test.wantType, test.wantSize, test.wantDetail)
+			}
+			if strings.Contains(frameErr.Error(), "private") || strings.Contains(frameErr.Error(), "secret") {
+				t.Fatalf("failure exposed payload: %q", frameErr.Error())
+			}
+			failure := classifyCodexWebSocketFailure(err)
+			if failure.Origin != test.wantOrigin || failure.FrameType != test.wantType || failure.FrameSize != test.wantSize || failure.FrameDetail != test.wantDetail {
+				t.Fatalf("broker failure = %+v, want origin/type/size/detail %s/%s/%s/%s", failure, test.wantOrigin, test.wantType, test.wantSize, test.wantDetail)
 			}
 		})
 	}

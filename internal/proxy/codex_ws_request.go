@@ -21,13 +21,120 @@ type codexWSPendingFrame struct {
 	released    bool
 }
 
+type codexWSInvalidFrameOrigin string
+
+const (
+	codexWSInvalidFrameEnvelope         codexWSInvalidFrameOrigin = "envelope"
+	codexWSInvalidFrameProtocol         codexWSInvalidFrameOrigin = "protocol"
+	codexWSInvalidFramePrewarmAuthority codexWSInvalidFrameOrigin = "prewarm_authority"
+	codexWSInvalidFrameBrokerAuthority  codexWSInvalidFrameOrigin = "broker_authority"
+)
+
+type codexWSFrameType string
+
+const (
+	codexWSFrameUnknown codexWSFrameType = "unknown"
+	codexWSFrameText    codexWSFrameType = "text"
+	codexWSFrameBinary  codexWSFrameType = "binary"
+	codexWSFrameOther   codexWSFrameType = "other"
+)
+
+type codexWSFrameSize string
+
+const (
+	codexWSFrameSizeEmpty    codexWSFrameSize = "empty"
+	codexWSFrameSizeSmall    codexWSFrameSize = "small"
+	codexWSFrameSizeMedium   codexWSFrameSize = "medium"
+	codexWSFrameSizeLarge    codexWSFrameSize = "large"
+	codexWSFrameSizeOversize codexWSFrameSize = "oversize"
+)
+
+type codexWSInvalidFrameDetail string
+
+const (
+	codexWSInvalidFrameDetailUnknown      codexWSInvalidFrameDetail = "unknown"
+	codexWSInvalidFrameMetadataAuthority  codexWSInvalidFrameDetail = "metadata_authority"
+	codexWSInvalidFrameModelAuthority     codexWSInvalidFrameDetail = "model_authority"
+	codexWSInvalidFrameProtocolAuthority  codexWSInvalidFrameDetail = "protocol_authority"
+	codexWSInvalidFrameRequestShape       codexWSInvalidFrameDetail = "request_shape"
+	codexWSInvalidFrameResponseType       codexWSInvalidFrameDetail = "response_type"
+	codexWSInvalidFrameModelMissing       codexWSInvalidFrameDetail = "model_missing"
+	codexWSInvalidFrameMetadataMissing    codexWSInvalidFrameDetail = "metadata_missing"
+	codexWSInvalidFrameRequestKind        codexWSInvalidFrameDetail = "request_kind"
+	codexWSInvalidFrameRequestKindMemory  codexWSInvalidFrameDetail = "request_kind_memory"
+	codexWSInvalidFrameRequestKindUnknown codexWSInvalidFrameDetail = "request_kind_unknown"
+	codexWSInvalidFrameLeaseKey           codexWSInvalidFrameDetail = "lease_key"
+)
+
+type codexWSInvalidFrameError struct {
+	Origin codexWSInvalidFrameOrigin
+	Type   codexWSFrameType
+	Size   codexWSFrameSize
+	Detail codexWSInvalidFrameDetail
+	cause  error
+}
+
+func (err *codexWSInvalidFrameError) Error() string {
+	return "Codex WebSocket frame rejected: " + string(err.Origin)
+}
+
+func (err *codexWSInvalidFrameError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+
+func newCodexWSInvalidFrameError(origin codexWSInvalidFrameOrigin, messageType int, payload []byte, cause error) error {
+	detail := codexWSInvalidFrameDetail("")
+	var authorityErr *codexWSAuthorityError
+	if errors.As(cause, &authorityErr) {
+		detail = authorityErr.Detail
+	}
+	return &codexWSInvalidFrameError{
+		Origin: origin,
+		Type:   classifyCodexWSFrameType(messageType),
+		Size:   classifyCodexWSFrameSize(len(payload)),
+		Detail: detail,
+		cause:  errors.Join(ErrCodexWSInvalidFrame, cause),
+	}
+}
+
+func classifyCodexWSFrameType(messageType int) codexWSFrameType {
+	switch messageType {
+	case websocket.TextMessage:
+		return codexWSFrameText
+	case websocket.BinaryMessage:
+		return codexWSFrameBinary
+	case 0:
+		return codexWSFrameUnknown
+	default:
+		return codexWSFrameOther
+	}
+}
+
+func classifyCodexWSFrameSize(size int) codexWSFrameSize {
+	switch {
+	case size <= 0:
+		return codexWSFrameSizeEmpty
+	case size <= 64<<10:
+		return codexWSFrameSizeSmall
+	case size <= 1<<20:
+		return codexWSFrameSizeMedium
+	case size <= codexWebSocketMessageMaxBytes:
+		return codexWSFrameSizeLarge
+	default:
+		return codexWSFrameSizeOversize
+	}
+}
+
 func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFrame, error) {
 	if messageType != websocket.TextMessage || len(payload) == 0 || codexLimitExceeded(len(payload), codexWebSocketMessageMaxBytes) {
-		return nil, ErrCodexWSInvalidFrame
+		return nil, newCodexWSInvalidFrameError(codexWSInvalidFrameEnvelope, messageType, payload, nil)
 	}
 	request, err := parseCodexProtocolRequest(payload, "", nil, codexWebSocketMessageMaxBytes)
 	if err != nil {
-		return nil, errors.Join(ErrCodexWSInvalidFrame, err)
+		return nil, newCodexWSInvalidFrameError(codexWSInvalidFrameProtocol, messageType, payload, err)
 	}
 	prewarm := request.Metadata.Found && request.Metadata.Metadata.RequestKind == CodexRequestPrewarm
 	if prewarm {
@@ -36,7 +143,11 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 		request, err = validateCodexWSBrokerRequest(payload, request)
 	}
 	if err != nil {
-		return nil, err
+		origin := codexWSInvalidFrameBrokerAuthority
+		if prewarm {
+			origin = codexWSInvalidFramePrewarmAuthority
+		}
+		return nil, newCodexWSInvalidFrameError(origin, messageType, payload, err)
 	}
 	var key LeaseKey
 	if !prewarm {
