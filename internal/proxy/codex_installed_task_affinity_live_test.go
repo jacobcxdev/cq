@@ -121,7 +121,8 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 		t.Fatalf("construct candidate runtime handler: %v", err)
 	}
 	listener, _ := newCodexRuntimeSupervisorAcceptanceServerWithCredential(t, handler, NormalCallerCredentialV1{
-		Domain: NormalCallerCodex, Bearer: localToken, SubjectID: "validation-codex",
+		Domain: NormalCallerCodex, Bearer: localToken,
+		SubjectID:  string(codexInstalledHTTPValidationDefault) + "\x00validation-candidate-default\x00validation-revision-1",
 		ValidUntil: time.Now().Add(time.Hour),
 	})
 
@@ -1192,7 +1193,7 @@ func runCodexTaskAffinityAcceptancePromptForTransport(
 		return err
 	}
 	if webSocket && codexAcceptanceWebSocketTransportFailed(events) {
-		return errors.New("Codex task-affinity WebSocket transport fell back or disconnected before completion")
+		return fmt.Errorf("Codex task-affinity WebSocket transport fell back or disconnected before completion: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))
 	}
 	if allowTools && !codexAcceptanceCompletedCommand(events) {
 		return fmt.Errorf("Codex task-affinity shell command did not complete: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))

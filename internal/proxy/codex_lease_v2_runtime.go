@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 	"time"
 
@@ -1454,7 +1453,7 @@ func (runtime *CodexLeaseRuntime) validateExpectedBound(restored CodexRestoredLa
 		return nil
 	}
 	record, found := runtime.restoredRecord(restored, expected.Identity)
-	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || (!record.Record.EverAdmitted && !record.Record.NonMigratable) || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey || !constantTimeCodexLeaseDigestEqual(record.Record.RequestedModelHash, runtime.store.hash("requested-model", plan.RequestedModel)) || record.Record.EffectiveModel != plan.EffectiveModel || !slices.Equal(record.Record.RequiredBuckets, plan.RequiredBuckets) {
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || (!record.Record.EverAdmitted && !record.Record.NonMigratable) || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey || !constantTimeCodexLeaseDigestEqual(record.Record.RequestedModelHash, runtime.store.hash("requested-model", plan.RequestedModel)) || record.Record.EffectiveModel != plan.EffectiveModel {
 		return fmt.Errorf("%w: expected bound turn changed", ErrCodexLeaseAuthorityMismatch)
 	}
 	return nil

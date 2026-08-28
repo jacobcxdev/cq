@@ -960,6 +960,36 @@ func TestCodexLeaseRuntimeRejectsChangedExpectedBoundRecordBeforeMutation(t *tes
 	}
 }
 
+func TestCodexLeaseRuntimeKeepsExpectedBoundAcrossRequestBuckets(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("expected-bound-buckets", []CodexLeaseAttemptSlotPlan{{
+		AccountKey:  "account-a",
+		CandidateID: "candidate-a",
+		Kind:        CodexAttemptSlotDirect,
+	}})
+	plan.RequiredBuckets = []CapacityBucket{CapacityBucketBase, CapacityBucketForModel(codexSparkModel)}
+	admitted := completeCodexLeaseRuntimeTurn(t, runtimeLease, plan)
+
+	next := plan
+	next.RequiredBuckets = []CapacityBucket{CapacityBucketBase}
+	next.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-next", Kind: CodexAttemptSlotDirect}}
+	next.ExpectedBound = &CodexLeaseBoundExpectation{
+		Identity:         admitted.identity,
+		AccountKey:       admitted.AccountKey(),
+		RecordGeneration: admitted.record.RecordGeneration,
+	}
+
+	resumed, err := runtimeLease.BeginRequest(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.AccountKey() != "account-a" {
+		t.Fatalf("resumed account = %q, want account-a", resumed.AccountKey())
+	}
+}
+
 func TestCodexLeaseRuntimeAbandonsPreparedRequestAfterCancellation(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

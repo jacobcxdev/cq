@@ -1460,6 +1460,39 @@ func TestCodexHTTPRequestPlanFactoryCarriesMatchingExpectedBound(t *testing.T) {
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryCarriesExpectedBoundAcrossRequestBuckets(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true}
+	expected := &CodexLeaseBoundExpectation{Identity: identity, AccountKey: "account", RecordGeneration: 12}
+	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		Classification:        CodexRestoredLaneCurrent,
+		BoundAccountKey:       "account",
+		BoundIdentity:         identity,
+		BoundRecordGeneration: 12,
+		BoundChoice: RouteChoice{
+			AccountKey:      "account",
+			EffectiveModel:  "gpt-5",
+			RequiredBuckets: []CapacityBucket{CapacityBucketBase, CapacityBucketForModel(codexSparkModel)},
+		},
+		JournalGeneration: 13,
+	}}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded:       frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		ExpectedBound: expected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	if runtime.plan.ExpectedBound == nil || *runtime.plan.ExpectedBound != *expected {
+		t.Fatalf("runtime expected bound = %#v, want %#v", runtime.plan.ExpectedBound, expected)
+	}
+}
+
 type codexHTTPRequestPlanTestInventory struct {
 	inventory codex.Inventory
 	err       error

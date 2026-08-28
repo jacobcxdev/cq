@@ -42,7 +42,7 @@ const codexFallbackTruncationBytesLimit = 10000
 //     cloned and slug/display_name are overridden.
 //   - Otherwise a fallback synthetic object is built from the Entry fields.
 func CodexModelsResponse(snap Snapshot) codexModelsResponseOut {
-	var models []json.RawMessage
+	models := make([]json.RawMessage, 0)
 	for _, e := range snap.Entries {
 		if e.Provider != ProviderCodex {
 			continue

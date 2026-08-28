@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -488,7 +487,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			}
 		}
 	}
-	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
+	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
 	shadowAdvice := codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable}
