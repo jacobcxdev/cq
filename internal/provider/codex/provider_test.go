@@ -240,6 +240,7 @@ func TestFetchMissingAuthFile(t *testing.T) {
 }
 
 func TestFetchStaleDefaultCredentialCoordinatorReturnsFetchErrorWithoutDispatch(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
 	home := t.TempDir()
 	fs := fixedHomeDurableFS{home: home}
 	authDir := filepath.Join(home, ".codex")
