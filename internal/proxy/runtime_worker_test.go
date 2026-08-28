@@ -46,6 +46,145 @@ func TestRuntimeProcessWorkerBootCancellationInterruptsPrivateSocket(t *testing.
 	}
 }
 
+func TestRuntimeCallerCredentialStateRetainsKnownExpiryBeyondAdmissionLifetime(t *testing.T) {
+	key := bytes.Repeat([]byte{0x71}, sha256.Size)
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour)
+	current := []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "old-bearer", SubjectID: "account\x00candidate\x00revision-a", ValidUntil: expires,
+	}}
+	state, err := newRuntimeCallerCredentialState(key, func(context.Context) ([]NormalCallerCredentialV1, error) {
+		return append([]NormalCallerCredentialV1(nil), current...), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.now = func() time.Time { return now }
+	bound, _, err := state.snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSubject := bound[0].SubjectID
+	current = []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "new-bearer", SubjectID: "account\x00candidate\x00revision-b", ValidUntil: expires,
+	}}
+	if _, _, err := state.snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(6 * time.Second)
+
+	var forwardedBearer string
+	var forwardedIdentity string
+	handler := normalWorkerHandlerWithSource(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		forwardedBearer = request.Header.Get("Authorization")
+		forwardedIdentity, _ = runtimeCallerIdentity(request.Context())
+		writer.WriteHeader(http.StatusNoContent)
+	}), state.credentials)
+	request := httptest.NewRequest(http.MethodPost, "http://cq.test/responses", nil)
+	request = request.WithContext(withRuntimeCallerAuthority(request.Context(), RuntimeCallerAuthorityV1{
+		SchemaVersion:     1,
+		Kind:              "provider_branch_admission_consumed_v1",
+		Domain:            NormalCallerCodex,
+		SubjectID:         oldSubject,
+		BearerFingerprint: "fingerprint",
+		IndexEpoch:        1,
+		AdmissionID:       strings.Repeat("a", 32),
+		SingleUseNonce:    strings.Repeat("b", 32),
+		RequestNonce:      strings.Repeat("c", 32),
+		Method:            http.MethodPost,
+		RequestURI:        "/responses",
+		ValidUntil:        time.Now().Add(time.Minute),
+		ConsumptionDigest: "consumption",
+		MAC:               "mac",
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("superseded caller status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if forwardedBearer != "Bearer old-bearer" || forwardedIdentity != "account\x00candidate\x00revision-a" {
+		t.Fatalf("superseded caller forwarding = bearer %q identity %q", forwardedBearer, forwardedIdentity)
+	}
+}
+
+func TestRuntimeCallerCredentialStateBoundsOpaqueBearerRollover(t *testing.T) {
+	key := bytes.Repeat([]byte{0x72}, sha256.Size)
+	current := []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "opaque-bearer", SubjectID: "account\x00candidate\x00revision-a",
+	}}
+	state, err := newRuntimeCallerCredentialState(key, func(context.Context) ([]NormalCallerCredentialV1, error) {
+		return append([]NormalCallerCredentialV1(nil), current...), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, _, err := state.snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSubject := initial[0].SubjectID
+	current = []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "opaque-bearer", SubjectID: "account\x00candidate\x00revision-b",
+	}}
+
+	forwardedIdentity := ""
+	handler := normalWorkerHandlerWithSource(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		forwardedIdentity, _ = runtimeCallerIdentity(request.Context())
+		writer.WriteHeader(http.StatusNoContent)
+	}), state.credentials)
+	caller := RuntimeCallerAuthorityV1{
+		SchemaVersion:     1,
+		Kind:              "provider_branch_admission_consumed_v1",
+		Domain:            NormalCallerCodex,
+		SubjectID:         oldSubject,
+		BearerFingerprint: "fingerprint",
+		IndexEpoch:        1,
+		AdmissionID:       strings.Repeat("a", 32),
+		SingleUseNonce:    strings.Repeat("b", 32),
+		RequestNonce:      strings.Repeat("c", 32),
+		Method:            http.MethodPost,
+		RequestURI:        "/responses",
+		ValidUntil:        time.Now().Add(time.Minute),
+		ConsumptionDigest: "consumption",
+		MAC:               "mac",
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://cq.test/responses", nil)
+	request = request.WithContext(withRuntimeCallerAuthority(request.Context(), caller))
+	response := httptest.NewRecorder()
+	rolloverStarted := time.Now()
+	handler.ServeHTTP(response, request)
+	rolloverFinished := time.Now()
+	if response.Code != http.StatusNoContent || forwardedIdentity != "account\x00candidate\x00revision-a" {
+		t.Fatalf("opaque rollover = status %d identity %q", response.Code, forwardedIdentity)
+	}
+
+	foundRetired := false
+	retireAt := time.Time{}
+	state.mu.Lock()
+	for index := range state.bound {
+		if state.bound[index].SubjectID == oldSubject {
+			retireAt = state.bound[index].ValidUntil
+			state.bound[index].ValidUntil = time.Now().Add(-time.Second)
+			foundRetired = true
+		}
+	}
+	state.mu.Unlock()
+	if !foundRetired {
+		t.Fatal("superseded opaque caller lacked bounded retirement")
+	}
+	if retireAt.Before(rolloverStarted.Add(5*time.Second)) || retireAt.After(rolloverFinished.Add(5*time.Second)) {
+		t.Fatalf("opaque caller retirement = %v, want five seconds after rollover", retireAt)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "http://cq.test/responses", nil)
+	request = request.WithContext(withRuntimeCallerAuthority(request.Context(), caller))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expired opaque rollover status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
 func TestRuntimeProcessWorkerStopAndReapAfterControlFailure(t *testing.T) {
 	secret, err := NewRuntimeSecret(bytes.Repeat([]byte{0x52}, RuntimeSecretSize))
 	if err != nil {

@@ -80,6 +80,12 @@ func (resolve runtimeSupervisorCallerResolver) ResolveExact(ctx context.Context,
 	return resolve(ctx, planned)
 }
 
+type runtimeSupervisorCallerInventory func(context.Context) (codexprov.Inventory, error)
+
+func (inventory runtimeSupervisorCallerInventory) List(ctx context.Context) (codexprov.Inventory, error) {
+	return inventory(ctx)
+}
+
 func runtimeSupervisorStartupHolder(description string) proxy.LifecycleHolderProof {
 	identity := fsutil.SecureFileIdentity{Device: 1, Inode: 2, Links: 1}
 	return proxy.LifecycleHolderProof{LockIdentity: identity, DescriptionID: description, Mode: proxy.LifecycleShared}
@@ -201,6 +207,59 @@ func TestNormalCallerCredentialsResolveExternalCodexBearer(t *testing.T) {
 	}
 	if resolverCalls != 1 || len(credentials) != 2 || credentials[1].Domain != proxy.NormalCallerCodex || credentials[1].Bearer != "external-token" {
 		t.Fatalf("caller credentials = %#v, resolver calls = %d", credentials, resolverCalls)
+	}
+}
+
+func TestNormalCallerCredentialsRetryStaleExternalCodexRevision(t *testing.T) {
+	identity := codexprov.AccountIdentity{AccountID: "account-id", UserID: "user-id"}
+	account := codexprov.LogicalAccount{
+		Key:      "account-key",
+		Identity: identity,
+		Routable: true,
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "account-key", CandidateID: "external-candidate"},
+			Revision: "revision-a", Source: codexprov.SourceExternal, Routable: true,
+		}},
+	}
+	refreshed := account
+	refreshed.Candidates = append([]codexprov.CredentialCandidate(nil), account.Candidates...)
+	refreshed.Candidates[0].Revision = "revision-b"
+	listCalls := 0
+	resolverCalls := 0
+	credentials, err := normalCallerCredentialsFromInventory(
+		context.Background(),
+		&proxy.Config{LocalToken: "local-token"},
+		nil,
+		codexprov.Inventory{Accounts: []codexprov.LogicalAccount{account}},
+		runtimeSupervisorCallerInventory(func(context.Context) (codexprov.Inventory, error) {
+			listCalls++
+			return codexprov.Inventory{Accounts: []codexprov.LogicalAccount{refreshed}}, nil
+		}),
+		runtimeSupervisorCallerResolver(func(_ context.Context, planned codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+			resolverCalls++
+			switch planned.Revision {
+			case "revision-a":
+				return codexprov.CredentialMaterial{}, codexprov.ErrStaleRevision
+			case "revision-b":
+				return codexprov.CredentialMaterial{
+					AccessToken: "external-token",
+					IDToken:     registryCredentialJWT(identity),
+					AccountID:   identity.AccountID,
+				}, nil
+			default:
+				t.Fatalf("resolved revision = %q", planned.Revision)
+				return codexprov.CredentialMaterial{}, nil
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listCalls != 1 || resolverCalls != 2 {
+		t.Fatalf("stale retry calls = list %d resolve %d, want 1/2", listCalls, resolverCalls)
+	}
+	if len(credentials) != 2 || credentials[1].Bearer != "external-token" || credentials[1].SubjectID != "account-key\x00external-candidate\x00revision-b" {
+		t.Fatalf("refreshed caller credentials = %#v", credentials)
 	}
 }
 

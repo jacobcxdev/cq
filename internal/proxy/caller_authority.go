@@ -28,6 +28,8 @@ const (
 	NormalCallerLocal  NormalCallerDomain = "local_token_v1"
 	NormalCallerClaude NormalCallerDomain = "claude_access_token_v1"
 	NormalCallerCodex  NormalCallerDomain = "codex_chatgpt_bearer_v1"
+
+	normalCallerAdmissionLifetime = 5 * time.Second
 )
 
 var (
@@ -74,6 +76,7 @@ type normalCallerAuthentication struct {
 	domain      NormalCallerDomain
 	fingerprint string
 	subjectID   string
+	indexEpoch  uint64
 }
 
 type ProviderBranchAdmissionConsumptionV1 struct {
@@ -512,7 +515,7 @@ func (authority *NormalCallerAuthority) authenticate(request *http.Request, poli
 	if len(matches) != 1 || !policyAllowsCaller(policy, matches[0].domain) {
 		return normalCallerAuthentication{}, ErrNormalCallerAuthScope
 	}
-	return normalCallerAuthentication{domain: matches[0].domain, fingerprint: hex.EncodeToString(fingerprint[:]), subjectID: matches[0].subjectID}, nil
+	return normalCallerAuthentication{domain: matches[0].domain, fingerprint: hex.EncodeToString(fingerprint[:]), subjectID: matches[0].subjectID, indexEpoch: authority.epoch}, nil
 }
 
 func policyAllowsCaller(policy normalCallerRoutePolicy, domain NormalCallerDomain) bool {
@@ -532,7 +535,7 @@ func policyAllowsCaller(policy normalCallerRoutePolicy, domain NormalCallerDomai
 
 func (authority *NormalCallerAuthority) consume(ctx context.Context, authentication normalCallerAuthentication, request *http.Request) (RuntimeCallerAuthorityV1, error) {
 	issuedAt := authority.now().UTC()
-	validUntil := issuedAt.Add(5 * time.Second)
+	validUntil := issuedAt.Add(normalCallerAdmissionLifetime)
 	admissionID, err := readNormalCallerNonce(authority.random)
 	if err != nil {
 		return RuntimeCallerAuthorityV1{}, err
@@ -545,13 +548,13 @@ func (authority *NormalCallerAuthority) consume(ctx context.Context, authenticat
 	if err != nil {
 		return RuntimeCallerAuthorityV1{}, err
 	}
-	consumption := ProviderBranchAdmissionConsumptionV1{SchemaVersion: 1, AdmissionID: admissionID, SingleUseNonce: singleUseNonce, Domain: authentication.domain, SubjectID: authentication.subjectID, RequestNonce: requestNonce, Method: request.Method, RequestURI: request.URL.RequestURI(), IndexEpoch: authority.epoch, ConsumedAt: issuedAt, ValidUntil: validUntil}
+	consumption := ProviderBranchAdmissionConsumptionV1{SchemaVersion: 1, AdmissionID: admissionID, SingleUseNonce: singleUseNonce, Domain: authentication.domain, SubjectID: authentication.subjectID, RequestNonce: requestNonce, Method: request.Method, RequestURI: request.URL.RequestURI(), IndexEpoch: authentication.indexEpoch, ConsumedAt: issuedAt, ValidUntil: validUntil}
 	consumption.MAC = authority.mac("cq/normal-caller-admission-consumption-mac/v1\x00", consumption)
 	consumption.ConsumptionDigest = authority.digest("cq/normal-caller-admission-consumption/v1\x00", consumption)
 	if err := authority.consumer.Consume(ctx, consumption); err != nil {
 		return RuntimeCallerAuthorityV1{}, err
 	}
-	runtime := RuntimeCallerAuthorityV1{SchemaVersion: 1, Kind: "provider_branch_admission_consumed_v1", Domain: authentication.domain, SubjectID: authentication.subjectID, BearerFingerprint: authentication.fingerprint, IndexEpoch: authority.epoch, AdmissionID: admissionID, SingleUseNonce: singleUseNonce, RequestNonce: requestNonce, Method: request.Method, RequestURI: request.URL.RequestURI(), ValidUntil: validUntil, ConsumptionDigest: consumption.ConsumptionDigest}
+	runtime := RuntimeCallerAuthorityV1{SchemaVersion: 1, Kind: "provider_branch_admission_consumed_v1", Domain: authentication.domain, SubjectID: authentication.subjectID, BearerFingerprint: authentication.fingerprint, IndexEpoch: authentication.indexEpoch, AdmissionID: admissionID, SingleUseNonce: singleUseNonce, RequestNonce: requestNonce, Method: request.Method, RequestURI: request.URL.RequestURI(), ValidUntil: validUntil, ConsumptionDigest: consumption.ConsumptionDigest}
 	runtime.MAC = authority.mac("cq/runtime-caller-authority-mac/v1\x00", runtime)
 	return runtime, nil
 }

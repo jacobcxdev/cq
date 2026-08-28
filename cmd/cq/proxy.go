@@ -29,6 +29,10 @@ import (
 )
 
 func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory, codexSecrets codexprov.ExactSecretResolver) ([]proxy.NormalCallerCredentialV1, error) {
+	return normalCallerCredentialsFromInventory(ctx, cfg, claudeAccounts, codexInventory, nil, codexSecrets)
+}
+
+func normalCallerCredentialsFromInventory(ctx context.Context, cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory, codexInventorySource codexprov.CredentialInventory, codexSecrets codexprov.ExactSecretResolver) ([]proxy.NormalCallerCredentialV1, error) {
 	if cfg == nil || cfg.LocalToken == "" {
 		return nil, proxy.ErrNormalCallerAuthUnavailable
 	}
@@ -66,21 +70,31 @@ func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccou
 		seenBearers := make(map[string]struct{}, len(account.Candidates))
 		for _, candidate := range account.Candidates {
 			accessToken := candidate.Credential.AccessToken
+			resolvedRevision := candidate.Revision
 			if accessToken == "" && candidate.Routable {
 				if codexSecrets == nil {
 					return nil, errors.New("Codex caller credential resolver unavailable")
 				}
-				material, resolveErr := codexSecrets.ResolveExact(ctx, codexprov.PlanCandidate(account, candidate))
+				planned := codexprov.PlanCandidate(account, candidate)
+				var material codexprov.CredentialMaterial
+				resolved := planned
+				var resolveErr error
+				if codexInventorySource == nil {
+					material, resolveErr = codexSecrets.ResolveExact(ctx, planned)
+				} else {
+					material, resolved, resolveErr = codexprov.ResolvePlannedCandidate(ctx, codexInventorySource, codexSecrets, planned)
+				}
 				if resolveErr != nil {
 					return nil, fmt.Errorf("resolve Codex caller credential: %w", resolveErr)
 				}
 				accessToken = material.AccessToken
+				resolvedRevision = resolved.Revision
 			}
 			if _, duplicate := seenBearers[accessToken]; duplicate {
 				continue
 			}
 			seenBearers[accessToken] = struct{}{}
-			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision)
+			identity := string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(resolvedRevision)
 			if err := appendCredential(proxy.NormalCallerCodex, accessToken, identity, codexCallerBearerExpiry(accessToken)); err != nil {
 				return nil, err
 			}
@@ -837,7 +851,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
 		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
 	}
-	runtimeCallerCredentials, err := normalCallerCredentials(context.Background(), cfg, accounts, codexInventory, credentialControl)
+	runtimeCallerCredentials, err := normalCallerCredentialsFromInventory(context.Background(), cfg, accounts, codexInventory, codexRoutingInventory, credentialControl)
 	if err != nil {
 		return fmt.Errorf("normal caller index: %w", err)
 	}
@@ -1125,7 +1139,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			if listErr != nil {
 				return nil, listErr
 			}
-			return normalCallerCredentials(ctx, cfg, accounts, current, credentialControl)
+			return normalCallerCredentialsFromInventory(ctx, cfg, accounts, current, codexRoutingInventory, credentialControl)
 		})
 		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
 		workerFiles = proxy.RuntimeRoleFiles{}

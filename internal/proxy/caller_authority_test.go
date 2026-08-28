@@ -3,11 +3,13 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -318,6 +320,144 @@ func TestRuntimeSupervisorRefreshesWorkerCallerIndexBeforeAuthentication(t *test
 	}
 }
 
+func TestRuntimeSupervisorAllowsOpaqueCallerDuringCredentialRollover(t *testing.T) {
+	key := bytes.Repeat([]byte{0x55}, sha256.Size)
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	current := []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "old-bearer", SubjectID: "account\x00candidate\x00revision-a",
+	}}
+	state, err := newRuntimeCallerCredentialState(key, func(context.Context) ([]NormalCallerCredentialV1, error) {
+		return append([]NormalCallerCredentialV1(nil), current...), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.now = func() time.Time { return now }
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	worker := &callerAuthorityCredentialStateWorker{
+		callerAuthorityObservingWorker: callerAuthorityObservingWorker{holder: runtimeHolder("worker"), consumer: consumer},
+		key:                            key,
+		state:                          state,
+	}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &callerAuthorityLauncher{worker: worker}, &RuntimeHashCheckpointStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerAdmissionConsumer(consumer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	supervisor.mu.RLock()
+	authority := supervisor.callerAuthority
+	supervisor.mu.RUnlock()
+	authority.mu.Lock()
+	authority.now = func() time.Time { return now }
+	authority.mu.Unlock()
+	current = []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "new-bearer", SubjectID: "account\x00candidate\x00revision-b",
+	}}
+
+	request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString(`{"model":"gpt-5.4"}`))
+	request.Header.Set("Authorization", "Bearer old-bearer")
+	response := httptest.NewRecorder()
+	supervisor.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || worker.calls != 1 {
+		t.Fatalf("overlapping caller = status %d calls %d, want %d/1", response.Code, worker.calls, http.StatusNoContent)
+	}
+
+	now = now.Add(normalCallerAdmissionLifetime)
+	request = httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString(`{"model":"gpt-5.4"}`))
+	request.Header.Set("Authorization", "Bearer old-bearer")
+	response = httptest.NewRecorder()
+	supervisor.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || worker.calls != 1 {
+		t.Fatalf("expired caller = status %d calls %d, want %d/1", response.Code, worker.calls, http.StatusUnauthorized)
+	}
+}
+
+func TestRuntimeSupervisorSerializesCallerIndexRefreshAndApply(t *testing.T) {
+	key := bytes.Repeat([]byte{0x54}, 32)
+	validUntil := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+	bootIndex, err := BuildNormalCallerIndexV1(key, 1, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "boot-bearer", SubjectID: "codex-worker", ValidUntil: validUntil}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderIndex, err := BuildNormalCallerIndexV1(key, 2, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "older-bearer", SubjectID: "codex-worker", ValidUntil: validUntil}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerIndex, err := BuildNormalCallerIndexV1(key, 3, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "newer-bearer", SubjectID: "codex-worker", ValidUntil: validUntil}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := &callerAuthorityConcurrentRefreshWorker{
+		callerAuthorityObservingWorker: callerAuthorityObservingWorker{holder: runtimeHolder("worker")},
+		bootKey:                        append([]byte(nil), key...), bootIndex: bootIndex, olderIndex: olderIndex, newerIndex: newerIndex,
+		firstRefreshStarted: make(chan struct{}), newerRequestExecuted: make(chan struct{}),
+	}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &callerAuthorityLauncher{worker: worker}, &RuntimeHashCheckpointStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerAdmissionConsumer(callerAuthorityConcurrentConsumer{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		bearer string
+		code   int
+	}
+	results := make(chan result, 2)
+	request := func(bearer string) {
+		httpRequest := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString(`{"model":"gpt-5.4"}`))
+		httpRequest.Header.Set("Authorization", "Bearer "+bearer)
+		response := httptest.NewRecorder()
+		supervisor.ServeHTTP(response, httpRequest)
+		results <- result{bearer: bearer, code: response.Code}
+	}
+	go request("older-bearer")
+	select {
+	case <-worker.firstRefreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first caller-index refresh did not start")
+	}
+	go request("newer-bearer")
+
+	for range 2 {
+		select {
+		case got := <-results:
+			if got.code != http.StatusNoContent {
+				t.Fatalf("%s request status = %d, want %d", got.bearer, got.code, http.StatusNoContent)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent caller-index requests did not complete")
+		}
+	}
+	refreshCalls, executeCalls := worker.counts()
+	if refreshCalls != 2 || executeCalls != 2 {
+		t.Fatalf("refresh/execute calls = %d/%d, want 2/2", refreshCalls, executeCalls)
+	}
+	supervisor.mu.RLock()
+	authority := supervisor.callerAuthority
+	supervisor.mu.RUnlock()
+	newerRequest := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	newerRequest.Header.Set("Authorization", "Bearer newer-bearer")
+	if _, err := authority.authenticate(newerRequest, normalCallerRouteCodex); err != nil {
+		t.Fatalf("newest caller index rolled back: %v", err)
+	}
+	authority.mu.RLock()
+	finalEpoch := authority.epoch
+	authority.mu.RUnlock()
+	if finalEpoch != newerIndex.IndexEpoch {
+		t.Fatalf("final caller-index epoch = %d, want %d", finalEpoch, newerIndex.IndexEpoch)
+	}
+}
+
 func TestCallerAuthorityKeepsUnavailableHealthPublic(t *testing.T) {
 	events := []string{}
 	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events}, &runtimeTestCheckpointStore{events: &events})
@@ -354,12 +494,91 @@ type callerAuthorityRefreshingWorker struct {
 	current   NormalCallerIndexV1
 }
 
+type callerAuthorityCredentialStateWorker struct {
+	callerAuthorityObservingWorker
+	key   []byte
+	state *runtimeCallerCredentialState
+}
+
+type callerAuthorityConcurrentConsumer struct{}
+
+func (callerAuthorityConcurrentConsumer) Consume(context.Context, ProviderBranchAdmissionConsumptionV1) error {
+	return nil
+}
+
+type callerAuthorityConcurrentRefreshWorker struct {
+	callerAuthorityObservingWorker
+
+	bootKey              []byte
+	bootIndex            NormalCallerIndexV1
+	olderIndex           NormalCallerIndexV1
+	newerIndex           NormalCallerIndexV1
+	firstRefreshStarted  chan struct{}
+	newerRequestExecuted chan struct{}
+	newerExecutedOnce    sync.Once
+
+	mu           sync.Mutex
+	refreshCalls int
+	executeCalls int
+}
+
+func (worker *callerAuthorityConcurrentRefreshWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
+	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerAuthorityKey: worker.bootKey, CallerIndex: worker.bootIndex}, nil
+}
+
+func (worker *callerAuthorityConcurrentRefreshWorker) CallerIndex(context.Context) (NormalCallerIndexV1, error) {
+	worker.mu.Lock()
+	worker.refreshCalls++
+	call := worker.refreshCalls
+	worker.mu.Unlock()
+	if call == 1 {
+		close(worker.firstRefreshStarted)
+		timer := time.NewTimer(250 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-worker.newerRequestExecuted:
+		case <-timer.C:
+		}
+		return worker.olderIndex, nil
+	}
+	return worker.newerIndex, nil
+}
+
+func (worker *callerAuthorityConcurrentRefreshWorker) ExecuteHTTP(_ context.Context, request RuntimeHTTPRequestV1) (RuntimeHTTPResponseV1, error) {
+	worker.mu.Lock()
+	worker.executeCalls++
+	worker.mu.Unlock()
+	if request.Caller.IndexEpoch == worker.newerIndex.IndexEpoch {
+		worker.newerExecutedOnce.Do(func() { close(worker.newerRequestExecuted) })
+	}
+	return RuntimeHTTPResponseV1{StatusCode: http.StatusNoContent}, nil
+}
+
+func (worker *callerAuthorityConcurrentRefreshWorker) counts() (int, int) {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.refreshCalls, worker.executeCalls
+}
+
 func (worker *callerAuthorityRefreshingWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
 	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerAuthorityKey: worker.bootKey, CallerIndex: worker.bootIndex}, nil
 }
 
 func (worker *callerAuthorityRefreshingWorker) CallerIndex(context.Context) (NormalCallerIndexV1, error) {
 	return worker.current, nil
+}
+
+func (worker *callerAuthorityCredentialStateWorker) Boot(ctx context.Context, _ WorkerManifestV1) (RuntimeBootAckV1, error) {
+	_, index, err := worker.state.snapshot(ctx)
+	if err != nil {
+		return RuntimeBootAckV1{}, err
+	}
+	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerAuthorityKey: append([]byte(nil), worker.key...), CallerIndex: index}, nil
+}
+
+func (worker *callerAuthorityCredentialStateWorker) CallerIndex(ctx context.Context) (NormalCallerIndexV1, error) {
+	_, index, err := worker.state.snapshot(ctx)
+	return index, err
 }
 
 func (worker *callerAuthorityObservingWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {

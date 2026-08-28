@@ -149,6 +149,30 @@ func TestCodexWSLifecycleMalformedEventBecomesIndeterminate(t *testing.T) {
 	}
 }
 
+func TestCodexWSLifecycleMalformedEventDrainsAfterCallerCancellation(t *testing.T) {
+	t.Parallel()
+	lifecycle, _ := newCodexWSLifecycleTest(t, []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := lifecycle.ObserveFrame(ctx, 43, []byte(`{"type":`)); err == nil {
+		t.Fatal("malformed event returned nil error")
+	}
+	if lifecycle.handle.record.State != LeaseOrphaned || !lifecycle.handle.record.NonMigratable ||
+		lifecycle.handle.record.RoutingRefs != 0 || lifecycle.handle.record.AttemptRefs != 0 || lifecycle.handle.record.ResponseObserverRefs != 1 || lifecycle.handle.record.SocketLineageExtinct {
+		t.Fatalf("cancelled malformed after-image = state %s non-migratable %v refs %d/%d/%d",
+			lifecycle.handle.record.State, lifecycle.handle.record.NonMigratable,
+			lifecycle.handle.record.RoutingRefs, lifecycle.handle.record.AttemptRefs, lifecycle.handle.record.ResponseObserverRefs)
+	}
+	if err := lifecycle.cleanupAfterBrokerExit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle.handle.record.RoutingRefs != 0 || lifecycle.handle.record.AttemptRefs != 0 || lifecycle.handle.record.ResponseObserverRefs != 0 || !lifecycle.handle.record.SocketLineageExtinct {
+		t.Fatalf("cancelled malformed cleanup refs = %d/%d/%d extinct %v",
+			lifecycle.handle.record.RoutingRefs, lifecycle.handle.record.AttemptRefs,
+			lifecycle.handle.record.ResponseObserverRefs, lifecycle.handle.record.SocketLineageExtinct)
+	}
+}
+
 func newCodexWSLifecycleTest(t *testing.T, slots []CodexLeaseAttemptSlotPlan) (*codexWSLifecycle, *CodexLeaseStore) {
 	t.Helper()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

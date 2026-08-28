@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +36,56 @@ type codexLiveNormalTraffic struct {
 	webSockets  atomic.Uint64
 	responses   atomic.Uint64
 	compactions atomic.Uint64
+}
+
+type codexLiveRotatingInventory struct {
+	mu       sync.RWMutex
+	base     *codexInstalledHTTPValidationInventory
+	revision codex.Revision
+}
+
+func (inventory *codexLiveRotatingInventory) List(ctx context.Context) (codex.Inventory, error) {
+	view, err := inventory.base.List(ctx)
+	if err != nil {
+		return codex.Inventory{}, err
+	}
+	inventory.mu.RLock()
+	revision := inventory.revision
+	inventory.mu.RUnlock()
+	for accountIndex := range view.Accounts {
+		for candidateIndex := range view.Accounts[accountIndex].Candidates {
+			view.Accounts[accountIndex].Candidates[candidateIndex].Revision = revision
+		}
+	}
+	return view, nil
+}
+
+func (inventory *codexLiveRotatingInventory) ResolveExact(ctx context.Context, planned codex.PlannedCandidate) (codex.CredentialMaterial, error) {
+	view, err := inventory.List(ctx)
+	if err != nil {
+		return codex.CredentialMaterial{}, err
+	}
+	for _, account := range view.Accounts {
+		if account.Key != planned.Ref.AccountKey || account.Identity.AccountID != planned.Identity.AccountID || account.Identity.UserID != planned.Identity.UserID {
+			continue
+		}
+		for _, candidate := range account.Candidates {
+			if candidate.Ref != planned.Ref || candidate.Revision != planned.Revision || candidate.Source != planned.Source || !candidate.Routable || candidate.DispatchBlocked {
+				continue
+			}
+			material, ok := inventory.base.material[account.Key]
+			if ok {
+				return material, nil
+			}
+		}
+	}
+	return codex.CredentialMaterial{}, codex.ErrStaleRevision
+}
+
+func (inventory *codexLiveRotatingInventory) setRevision(revision codex.Revision) {
+	inventory.mu.Lock()
+	inventory.revision = revision
+	inventory.mu.Unlock()
 }
 
 func (traffic *codexLiveNormalTraffic) serveHTTP(next http.Handler, writer http.ResponseWriter, request *http.Request) {
@@ -134,11 +185,18 @@ func readCodexLiveAcceptanceCredential(path string) (codexLiveAcceptanceCredenti
 
 func newCodexLiveNormalAcceptanceServer(t *testing.T, credential codexLiveAcceptanceCredential) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic) {
 	return newCodexLiveNormalAcceptanceServerWithCallers(t, credential, []NormalCallerCredentialV1{{
-		Domain: NormalCallerCodex, Bearer: credential.localToken, SubjectID: "live-normal-codex", ValidUntil: time.Now().Add(10 * time.Minute),
+		Domain: NormalCallerCodex, Bearer: credential.localToken,
+		SubjectID:  string(codexLiveNormalAccount) + "\x00live-normal-candidate\x00live-normal-revision",
+		ValidUntil: time.Now().Add(10 * time.Minute),
 	}})
 }
 
 func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential codexLiveAcceptanceCredential, callers []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic) {
+	listener, supervisor, traffic, _, _ := newCodexLiveNormalAcceptanceServerWithInventory(t, credential, callers)
+	return listener, supervisor, traffic
+}
+
+func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential codexLiveAcceptanceCredential, callers []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic, *codexLiveRotatingInventory, *codexRuntimeSupervisorAcceptanceCallerRotation) {
 	t.Helper()
 	modelSnapshot, err := codexLiveAcceptanceModelSnapshot(os.Getenv("CQ_CODEX_LIVE_AUTH_FILE"), "gpt-5.6-sol")
 	if err != nil {
@@ -175,6 +233,7 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 		Routable:   true,
 	}}}
 	core.inventory.material = map[codex.AccountKey]codex.CredentialMaterial{codexLiveNormalAccount: credential.material}
+	inventory := &codexLiveRotatingInventory{base: core.inventory, revision: candidate.Revision}
 	stream := core.capacity.NewObservationStream()
 	if !core.capacity.Observe(stream.Stamp(CapacityFact{
 		AccountKey: codexLiveNormalAccount, Bucket: CapacityBucketBase, RemainingPct: 100,
@@ -186,15 +245,15 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	planner := &CodexHTTPRequestPlanFactory{
-		Inventory: core.inventory, Capacity: core.capacity, Routes: core.continuity, Runtime: core.leaseRuntime,
+		Inventory: inventory, Capacity: core.capacity, Routes: core.continuity, Runtime: core.leaseRuntime,
 		DefaultAccountKey: codexLiveNormalAccount,
 		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
 		Now:               time.Now,
 	}
 	httpHandler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{
 		Executor: &CodexAttemptExecutor{
-			Inventory: core.inventory,
-			Secrets:   core.inventory,
+			Inventory: inventory,
+			Secrets:   inventory,
 			Transport: &CodexTokenTransport{Inner: transport},
 		},
 		Refresher: core.inventory,
@@ -205,7 +264,7 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 	}
 	core.handler = httpHandler
 
-	webSocketExecutor := NewCodexWebSocketAttemptExecutor(core.inventory, core.inventory)
+	webSocketExecutor := NewCodexWebSocketAttemptExecutor(inventory, inventory)
 	webSocketExecutor.Dialer.Proxy = nil
 	webSocketBroker, err := NewCodexTerminatingWebSocketHandler(planner, webSocketExecutor, DefaultCodexUpstream)
 	if err != nil {
@@ -228,10 +287,10 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 		t.Fatalf("construct live Codex normal candidate: %v", err)
 	}
 	traffic := &codexLiveNormalTraffic{}
-	listener, supervisor := newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	listener, supervisor, callerRotation := newCodexRuntimeSupervisorAcceptanceServerWithRotatingCredentials(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		traffic.serveHTTP(handler, writer, request)
 	}), callers)
-	return listener, supervisor, traffic
+	return listener, supervisor, traffic, inventory, callerRotation
 }
 
 func codexLiveAcceptanceModelSnapshot(authPath, model string) (modelregistry.Snapshot, error) {

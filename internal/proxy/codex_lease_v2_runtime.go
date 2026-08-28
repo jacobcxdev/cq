@@ -275,6 +275,8 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if plan.Evidence.HasEncryptedState {
 		desired.HasEncryptedState = true
 	}
+	desired.DownstreamSocketGeneration = 0
+	desired.UpstreamSocketGeneration = 0
 	desired.SocketLineageExtinct = false
 	fence, err := runtime.mutationFence(restored, current.Record)
 	if err != nil {

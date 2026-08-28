@@ -219,6 +219,46 @@ func (lifecycle *codexWSLifecycle) Drain() error {
 	return nil
 }
 
+// cleanupAfterBrokerExit releases every request reference after an abnormal
+// post-dispatch broker exit. It also handles terminal requests whose final
+// downstream write failed before the response observer could drain.
+func (lifecycle *codexWSLifecycle) cleanupAfterBrokerExit(ctx context.Context) error {
+	if lifecycle == nil || lifecycle.handle == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if lifecycle.handle.record.RoutingRefs == 0 && lifecycle.handle.record.AttemptRefs == 0 && lifecycle.handle.record.ResponseObserverRefs == 0 {
+		return nil
+	}
+	current, ok := codexLeaseAttemptByGeneration(lifecycle.handle.record.Attempts, lifecycle.handle.record.CurrentAttemptGeneration)
+	if !ok {
+		return ErrCodexLeaseTransition
+	}
+	if current.State == CodexAttemptDispatched || current.State == CodexAttemptStreaming {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		handle, err := lifecycle.handle.IndeterminateContext(context.WithoutCancel(ctx), CodexHTTPResponseEvidence{})
+		if err != nil {
+			return err
+		}
+		lifecycle.handle = handle
+		lifecycle.receipt.terminal(CodexTurnReceiptIndeterminate)
+	} else if !codexLeaseAttemptTerminalForRequest(current.State) {
+		return ErrCodexLeaseTransition
+	}
+	if lifecycle.handle.record.ResponseObserverRefs > 0 {
+		handle, err := lifecycle.handle.Drain()
+		if err != nil {
+			return err
+		}
+		lifecycle.handle = handle
+	}
+	if lifecycle.handle.record.RoutingRefs != 0 || lifecycle.handle.record.AttemptRefs != 0 || lifecycle.handle.record.ResponseObserverRefs != 0 {
+		return ErrCodexLeaseTransition
+	}
+	return nil
+}
+
 func (lifecycle *codexWSLifecycle) admit(ctx context.Context, evidence CodexWebSocketAdmissionEvidence) error {
 	if lifecycle == nil || lifecycle.handle == nil {
 		return ErrCodexLeaseWriterUnavailable
@@ -237,7 +277,7 @@ func (lifecycle *codexWSLifecycle) indeterminate(ctx context.Context, reason str
 	if lifecycle == nil || lifecycle.handle == nil {
 		return ErrCodexLeaseWriterUnavailable
 	}
-	handle, err := lifecycle.handle.IndeterminateContext(ctx, CodexHTTPResponseEvidence{})
+	handle, err := lifecycle.handle.IndeterminateContext(context.WithoutCancel(ctx), CodexHTTPResponseEvidence{})
 	if err != nil {
 		return err
 	}

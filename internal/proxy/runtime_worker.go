@@ -90,6 +90,7 @@ type runtimeCallerCredentialState struct {
 	mu     sync.Mutex
 	key    []byte
 	epoch  uint64
+	now    func() time.Time
 	source NormalCallerCredentialSource
 	bound  []NormalCallerCredentialV1
 	index  NormalCallerIndexV1
@@ -99,7 +100,7 @@ func newRuntimeCallerCredentialState(key []byte, source NormalCallerCredentialSo
 	if len(key) != sha256.Size || source == nil {
 		return nil, ErrNormalCallerAuthUnavailable
 	}
-	return &runtimeCallerCredentialState{key: append([]byte(nil), key...), source: source}, nil
+	return &runtimeCallerCredentialState{key: append([]byte(nil), key...), now: time.Now, source: source}, nil
 }
 
 func (state *runtimeCallerCredentialState) snapshot(ctx context.Context) ([]NormalCallerCredentialV1, NormalCallerIndexV1, error) {
@@ -109,9 +110,29 @@ func (state *runtimeCallerCredentialState) snapshot(ctx context.Context) ([]Norm
 	if err != nil {
 		return nil, NormalCallerIndexV1{}, err
 	}
-	bound, err := bindRuntimeCallerCredentials(state.key, credentials)
+	published, err := bindRuntimeCallerCredentials(state.key, credentials)
 	if err != nil {
 		return nil, NormalCallerIndexV1{}, err
+	}
+	bound := append([]NormalCallerCredentialV1(nil), published...)
+	now := state.now()
+	for _, existing := range state.bound {
+		duplicate := false
+		for _, current := range bound {
+			if current.Domain == existing.Domain && current.SubjectID == existing.SubjectID {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		if existing.ValidUntil.IsZero() {
+			existing.ValidUntil = now.Add(normalCallerAdmissionLifetime)
+		}
+		if now.Before(existing.ValidUntil) {
+			bound = append(bound, existing)
+		}
 	}
 	epoch := state.epoch
 	if epoch == 0 {

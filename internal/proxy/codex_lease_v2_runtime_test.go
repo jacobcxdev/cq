@@ -140,6 +140,73 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseRuntimeRebindsSocketGenerationForNewRequest(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+
+	first, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitWebSocketContext(context.Background(), CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: 41,
+		UpstreamGeneration:   51,
+		TurnState:            "turn-state-a",
+		HasTurnState:         true,
+		ResponseID:           "response-a",
+		ResponseCreated:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: "response-a", HasResponseAnchor: true},
+		EndTurn:                   false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nextPlan := plan
+	nextPlan.Evidence = CodexLeaseRequestEvidence{
+		PreviousResponseID: "response-a",
+		TurnState:          "turn-state-a",
+		HasTurnState:       true,
+	}
+	next, err := runtimeLease.BeginRequest(nextPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = next.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = next.AdmitWebSocketContext(context.Background(), CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: 42,
+		UpstreamGeneration:   1,
+		ResponseID:           "response-b",
+		ResponseCreated:      true,
+	})
+	if err != nil {
+		t.Fatalf("new request socket admission: %v", err)
+	}
+	if next.record.DownstreamSocketGeneration != 42 || next.record.UpstreamSocketGeneration != 1 {
+		t.Fatalf("new request socket generations = %d/%d, want 42/1", next.record.DownstreamSocketGeneration, next.record.UpstreamSocketGeneration)
+	}
+}
+
 func TestCodexLeaseRuntimeAdoptsAuthenticatedCallerAfterShadowTurn(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

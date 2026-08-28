@@ -89,6 +89,262 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	}
 }
 
+func TestCodexTerminatingWSBrokerReleasesDispatchedRequestAfterUpgradeAuthorityFailure(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: runtimeLease,
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+		}},
+	}
+	frame := codexTerminatingWSFrame("turn-a", "")
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: frame}}}
+	upstream := &codexWSBrokerConnStub{}
+	dialer := &codexWSBrokerDialerStub{outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{
+		"account-a": {{
+			conn: upstream,
+			response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{
+				"X-Codex-Turn-State": {"state-a", "state-b"},
+			}},
+		}},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err == nil {
+		t.Fatal("invalid upstream authority succeeded")
+	}
+
+	next, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-a", planner.slots))
+	if err != nil {
+		t.Fatalf("request after broker failure: %v", err)
+	}
+	if _, err := next.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexTerminatingWSBrokerReleasesDispatchedRequestAfterUpgradeAdmissionFailure(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: runtimeLease,
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}}}
+	upstream := &codexWSBrokerConnStub{}
+	dialer := &codexWSBrokerDialerStub{
+		onDial: cancel,
+		outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{
+			"account-a": {{
+				conn: upstream,
+				response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: http.Header{
+					"X-Codex-Turn-State": {"state-a"},
+				}},
+			}},
+		},
+	}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(ctx, downstream); !errors.Is(err, context.Canceled) {
+		t.Fatalf("upgrade admission failure = %v, want cancellation", err)
+	}
+
+	assertCodexWSBrokerLaneReleased(t, runtimeLease, planner.slots)
+}
+
+func TestCodexTerminatingWSBrokerReleasesDispatchedRequestAfterFrameAdmissionFailure(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: runtimeLease,
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+		}},
+	}
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{
+		messageType: websocket.TextMessage,
+		payload:     []byte(`{"type":"response.created","response":{"id":"` + strings.Repeat("x", codexTurnIDMaxBytes+1) + `"}}`),
+	}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("frame admission failure = %v, want invalid mutation", err)
+	}
+
+	assertCodexWSBrokerLaneReleased(t, runtimeLease, planner.slots)
+}
+
+func TestCodexTerminatingWSBrokerReleasesDispatchedRequestAfterDownstreamWriteFailure(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: runtimeLease,
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+		}},
+	}
+	downstream := &codexWSBrokerConnStub{
+		reads:    []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}},
+		writeErr: errors.New("downstream unavailable"),
+	}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{
+		messageType: websocket.TextMessage,
+		payload:     []byte(`{"type":"response.created","response":{"id":"response-a"}}`),
+	}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err == nil || !strings.Contains(err.Error(), "downstream WebSocket write failed") {
+		t.Fatalf("downstream write failure = %v", err)
+	}
+
+	assertCodexWSBrokerLaneReleased(t, runtimeLease, planner.slots)
+}
+
+func TestCodexTerminatingWSBrokerDrainsTerminalRequestAfterDownstreamWriteFailure(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: runtimeLease,
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+		}},
+	}
+	downstream := &codexWSBrokerConnStub{
+		reads:       []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}},
+		writeErr:    errors.New("downstream unavailable"),
+		failWriteAt: 2,
+	}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err == nil || !strings.Contains(err.Error(), "downstream WebSocket write failed") {
+		t.Fatalf("downstream write failure = %v", err)
+	}
+
+	assertCodexWSBrokerLaneReleased(t, runtimeLease, planner.slots)
+}
+
+func TestCodexTerminatingWSBrokerRetainsLaneUntilFailedUpstreamCloses(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: runtimeLease,
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+		}},
+	}
+	downstream := &codexWSBrokerConnStub{
+		reads:    []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}},
+		writeErr: errors.New("downstream unavailable"),
+	}
+	upstream := newCodexWSBrokerCloseBlockingConn([]codexWSBrokerRead{{
+		messageType: websocket.TextMessage,
+		payload:     []byte(`{"type":"response.created","response":{"id":"response-a"}}`),
+	}})
+	var releaseOnce sync.Once
+	releaseClose := func() { releaseOnce.Do(func() { close(upstream.closeRelease) }) }
+	defer releaseClose()
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- broker.Serve(context.Background(), downstream) }()
+	select {
+	case <-upstream.closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed upstream close did not start")
+	}
+
+	next, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-a", planner.slots))
+	if err == nil {
+		_, _ = next.AbandonBeforeDispatch()
+	}
+	if !errors.Is(err, ErrCodexConcurrentTurn) {
+		t.Fatalf("request while failed upstream closes = %v, want concurrent turn", err)
+	}
+
+	releaseClose()
+	select {
+	case err := <-serveDone:
+		if err == nil || !strings.Contains(err.Error(), "downstream WebSocket write failed") {
+			t.Fatalf("downstream write failure = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker did not finish after failed upstream closed")
+	}
+	assertCodexWSBrokerLaneReleased(t, runtimeLease, planner.slots)
+}
+
+func assertCodexWSBrokerLaneReleased(t *testing.T, runtimeLease *CodexLeaseRuntime, slots []CodexLeaseAttemptSlotPlan) {
+	t.Helper()
+	next, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("turn-a", slots))
+	if err != nil {
+		t.Fatalf("request after broker failure: %v", err)
+	}
+	if _, err := next.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	t.Parallel()
 	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("p", 32)), time.Now)
@@ -179,6 +435,120 @@ func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	gotReceipt, found := receiptStore.lookup([]byte("session-a"), []byte("turn-a"))
 	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
 		t.Fatalf("reconnected receipt = (%+v, %v)", gotReceipt, found)
+	}
+}
+
+func TestCodexTerminatingWSBrokerResumesAfterCompletedClientDisconnect(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	plannerA := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey:  "account-a",
+			CandidateID: "candidate-a",
+			Kind:        CodexAttemptSlotDirect,
+		}},
+	}
+	plannerB := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey:  "account-b",
+			CandidateID: "candidate-b",
+			Kind:        CodexAttemptSlotDirect,
+		}},
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	firstUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-a","end_turn":true}}`)},
+	}}
+	secondUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-b"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-b"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-b"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-b","end_turn":true}}`)},
+	}}
+	staleUpstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-c"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-c"}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{
+		"account-a": {firstUpstream, staleUpstream},
+		"account-b": {secondUpstream},
+	}}
+	serve := func(planner *codexWSBrokerPlannerStub, downstreamGeneration uint64, turn, anchor string) error {
+		broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+			Plans:                planner,
+			Upstream:             dialer,
+			UpstreamURL:          "wss://example.invalid/responses",
+			DownstreamGeneration: downstreamGeneration,
+		})
+		if err != nil {
+			return err
+		}
+		downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+			{messageType: websocket.TextMessage, payload: prewarm},
+			{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame(turn, `,"previous_response_id":"`+anchor+`"`)},
+			{err: &websocket.CloseError{Code: websocket.CloseNormalClosure}},
+		}}
+		return broker.Serve(context.Background(), downstream)
+	}
+
+	if err := serve(plannerA, 41, "turn-a", "prewarm-a"); err != nil {
+		t.Fatalf("initial broker: %v", err)
+	}
+	completed, err := coordinator.store.LoadLane(
+		LeaseKey{Lane: LaneKey{Session: "session-a", Thread: "thread-a", Namespace: CodexResponsesNamespace}, Turn: "turn-a"},
+		[]codex.AccountKey{"account-a", "account-b"},
+		CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Classification != CodexRestoredLaneCurrent || len(completed.ResolvedRecords) != 1 {
+		t.Fatalf("completed lane = %#v", completed)
+	}
+	completedRecord := completed.ResolvedRecords[0].Record
+	if completedRecord.State != LeaseBoundQuiescent || completedRecord.RoutingRefs != 0 || completedRecord.AttemptRefs != 0 || completedRecord.ResponseObserverRefs != 0 || !completedRecord.SocketLineageExtinct {
+		t.Fatalf("completed turn retained live ownership = %#v", completedRecord)
+	}
+	if err := serve(plannerB, 42, "turn-b", "prewarm-b"); err != nil {
+		t.Fatalf("resumed broker after clean client disconnect: %v", err)
+	}
+	if err := serve(plannerA, 43, "turn-b", "prewarm-c"); !errors.Is(err, ErrCodexStaleTurn) {
+		t.Fatalf("same-turn resumed adoption error = %v, want %v", err, ErrCodexStaleTurn)
+	}
+	if plannerA.prewarmCalls != 2 || plannerA.adoptionCalls != 2 || plannerA.buildCalls != 0 ||
+		plannerB.prewarmCalls != 1 || plannerB.adoptionCalls != 1 || plannerB.buildCalls != 0 {
+		t.Fatalf("planner calls = A prewarm/adoption/build %d/%d/%d, B %d/%d/%d", plannerA.prewarmCalls, plannerA.adoptionCalls, plannerA.buildCalls, plannerB.prewarmCalls, plannerB.adoptionCalls, plannerB.buildCalls)
+	}
+	restored, err := coordinator.store.LoadLane(
+		LeaseKey{Lane: LaneKey{Session: "session-a", Thread: "thread-a", Namespace: CodexResponsesNamespace}, Turn: "turn-b"},
+		[]codex.AccountKey{"account-a", "account-b"},
+		CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Classification != CodexRestoredLaneCurrent || len(restored.ResolvedRecords) != 2 {
+		t.Fatalf("resumed lane = %#v", restored)
+	}
+	for _, resolved := range restored.ResolvedRecords {
+		switch resolved.Record.TurnHash {
+		case coordinator.store.hash("turn", "turn-a"):
+			attempt, found := codexLeaseAttemptByGeneration(resolved.Record.Attempts, resolved.Record.CurrentAttemptGeneration)
+			if resolved.AccountKey != "account-a" || !found || attempt.State != CodexAttemptProviderCompleted || resolved.Record.State != LeaseSuperseded ||
+				resolved.Record.RecordGeneration != completedRecord.RecordGeneration+1 || resolved.Record.LeaseGeneration != completedRecord.LeaseGeneration+1 ||
+				resolved.Record.LaneGeneration != restored.Lane.Generation || resolved.Record.RoutingRefs != 0 || resolved.Record.AttemptRefs != 0 || resolved.Record.ResponseObserverRefs != 0 || !resolved.Record.SocketLineageExtinct {
+				t.Fatalf("completed predecessor = %#v, account %q, attempt %#v", resolved.Record, resolved.AccountKey, attempt)
+			}
+		case coordinator.store.hash("turn", "turn-b"):
+			if resolved.AccountKey != "account-b" || resolved.Record.State != LeaseBoundQuiescent || resolved.Record.PredecessorGeneration != completedRecord.RecordGeneration+1 || resolved.Record.RoutingRefs != 0 || resolved.Record.AttemptRefs != 0 || resolved.Record.ResponseObserverRefs != 0 {
+				t.Fatalf("resumed turn state = %#v, want drained bound quiescent", resolved.Record)
+			}
+		}
 	}
 }
 
@@ -1230,6 +1600,9 @@ type codexWSBrokerConnStub struct {
 	mu            sync.Mutex
 	reads         []codexWSBrokerRead
 	writes        []codexWSBrokerWrite
+	writeErr      error
+	writeCalls    int
+	failWriteAt   int
 	controlWrites chan<- codexWSBrokerWrite
 	closed        bool
 }
@@ -1250,6 +1623,10 @@ func (conn *codexWSBrokerConnStub) WriteMessage(messageType int, payload []byte)
 	defer conn.mu.Unlock()
 	if conn.closed {
 		return errors.New("closed")
+	}
+	conn.writeCalls++
+	if conn.writeErr != nil && (conn.failWriteAt == 0 || conn.writeCalls == conn.failWriteAt) {
+		return conn.writeErr
 	}
 	conn.writes = append(conn.writes, codexWSBrokerWrite{messageType: messageType, payload: append([]byte(nil), payload...)})
 	return nil
@@ -1291,6 +1668,7 @@ func (conn *codexWSBrokerConnStub) writtenPayloads() [][]byte {
 type codexWSBrokerDialerStub struct {
 	connections map[codex.AccountKey][]websocketRelayConn
 	outcomes    map[codex.AccountKey][]codexWSBrokerDialOutcome
+	onDial      func()
 	accounts    []codex.AccountKey
 }
 
@@ -1306,6 +1684,27 @@ type codexWSBrokerBlockingConn struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type codexWSBrokerCloseBlockingConn struct {
+	*codexWSBrokerConnStub
+	closeStarted chan struct{}
+	closeRelease chan struct{}
+	closeOnce    sync.Once
+}
+
+func newCodexWSBrokerCloseBlockingConn(reads []codexWSBrokerRead) *codexWSBrokerCloseBlockingConn {
+	return &codexWSBrokerCloseBlockingConn{
+		codexWSBrokerConnStub: &codexWSBrokerConnStub{reads: reads},
+		closeStarted:          make(chan struct{}),
+		closeRelease:          make(chan struct{}),
+	}
+}
+
+func (conn *codexWSBrokerCloseBlockingConn) Close() error {
+	conn.closeOnce.Do(func() { close(conn.closeStarted) })
+	<-conn.closeRelease
+	return conn.codexWSBrokerConnStub.Close()
 }
 
 type codexWSBrokerSuccessorConn struct {
@@ -1383,6 +1782,9 @@ func (conn *codexWSBrokerBlockingConn) Close() error {
 
 func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoice, attempt CandidateAttempt, _ string, _ http.Header, onDispatch func(CandidateAttempt)) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
 	dialer.accounts = append(dialer.accounts, choice.AccountKey)
+	if dialer.onDial != nil {
+		dialer.onDial()
+	}
 	if outcomes := dialer.outcomes[choice.AccountKey]; len(outcomes) != 0 {
 		outcome := outcomes[0]
 		dialer.outcomes[choice.AccountKey] = outcomes[1:]
