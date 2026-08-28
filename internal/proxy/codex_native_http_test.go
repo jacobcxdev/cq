@@ -10,6 +10,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -396,6 +397,89 @@ func TestCodexNativeHTTPRoundTripFailureReportsSafeTrace(t *testing.T) {
 	}
 }
 
+func TestServerNativeCodexReportsSafeSessionFailure(t *testing.T) {
+	const private = "private-session-failure-detail"
+	diagnosticsPath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(diagnosticsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = diagnostics.Close() })
+	handler, err := NewCodexNativeHTTPHandler(
+		&codexNativeHTTPPlannerStub{},
+		&codexNativeHTTPSessionStub{err: fmt.Errorf("%s: %w", private, ErrCodexLeaseWriterUnavailable)},
+		"https://codex.example",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{CodexNativeHTTP: handler, Diag: diagnostics}
+	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := newCodexNativeHTTPOrderWriter(new([]string))
+
+	stderr := captureStderr(t, func() { server.handleNativeCodex(writer, request) })
+
+	if writer.status != http.StatusBadGateway || !strings.Contains(writer.body.String(), "Codex upstream request failed") {
+		t.Fatalf("status/body = %d/%q, want generic 502", writer.status, writer.body.String())
+	}
+	if stderr != "cq: Codex route trace transport=http event=session_failed stage=session reason=lease_writer_unavailable\n" {
+		t.Fatalf("trace = %q, want safe session failure", stderr)
+	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readDiagnosticsEvents(t, diagnosticsPath)
+	if len(events) != 1 || events[0].Decision != "session_failed" || events[0].Reason != "lease_writer_unavailable" {
+		t.Fatalf("diagnostics = %+v, want session_failed/lease_writer_unavailable", events)
+	}
+	assertDiagnosticsLogDoesNotContain(t, diagnosticsPath, private)
+	if strings.Contains(stderr, private) {
+		t.Fatalf("private session detail escaped: %q", stderr)
+	}
+}
+
+func TestServerNativeCodexReportsUnavailableSessionResponse(t *testing.T) {
+	diagnosticsPath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(diagnosticsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = diagnostics.Close() })
+	handler, err := NewCodexNativeHTTPHandler(
+		&codexNativeHTTPPlannerStub{},
+		&codexNativeHTTPSessionStub{},
+		"https://codex.example",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{CodexNativeHTTP: handler, Diag: diagnostics}
+	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := newCodexNativeHTTPOrderWriter(new([]string))
+
+	stderr := captureStderr(t, func() { server.handleNativeCodex(writer, request) })
+
+	if writer.status != http.StatusBadGateway || !strings.Contains(writer.body.String(), "Codex upstream response unavailable") {
+		t.Fatalf("status/body = %d/%q, want unavailable 502", writer.status, writer.body.String())
+	}
+	if stderr != "cq: Codex route trace transport=http event=session_failed stage=response_validate reason=response_unavailable\n" {
+		t.Fatalf("trace = %q, want safe response validation failure", stderr)
+	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readDiagnosticsEvents(t, diagnosticsPath)
+	if len(events) != 1 || events[0].Decision != "session_failed" || events[0].Reason != "response_unavailable" {
+		t.Fatalf("diagnostics = %+v, want session_failed/response_unavailable", events)
+	}
+}
+
 func TestCodexNativeHTTPCancellationUnblocksRequestBody(t *testing.T) {
 	body := newCodexNativeHTTPBlockingBody()
 	planner := &codexNativeHTTPPlannerStub{}
@@ -528,6 +612,21 @@ type codexNativeHTTPPlannerStub struct {
 	calls    int
 	encoded  []byte
 	headers  http.Header
+}
+
+type codexNativeHTTPSessionStub struct {
+	result CodexHTTPRequestSessionResult
+	err    error
+}
+
+func (session *codexNativeHTTPSessionStub) Do(
+	context.Context,
+	*http.Request,
+	CodexFrozenDispatchPlan,
+	*CodexFrozenRequest,
+	CodexHTTPRequestLifecycle,
+) (CodexHTTPRequestSessionResult, error) {
+	return session.result, session.err
 }
 
 func (planner *codexNativeHTTPPlannerStub) Build(_ context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {

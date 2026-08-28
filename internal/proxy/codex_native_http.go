@@ -54,7 +54,7 @@ type CodexNativeHTTPHandler struct {
 	requests             *codexNativeHTTPRequestGate
 	installedProbe       atomic.Pointer[codexInstalledHTTPGateProbe]
 	reportPlanFailure    func(CodexHTTPRequestPlanFailure)
-	reportSessionFailure func(*codexHTTPRoundTripError)
+	reportSessionFailure func(codexNativeHTTPSessionFailure)
 }
 
 func (handler *CodexNativeHTTPHandler) installCodexInstalledHTTPGateProbe(probe *codexInstalledHTTPGateProbe) (func(), error) {
@@ -89,15 +89,30 @@ func reportCodexNativeHTTPPlanFailure(failure CodexHTTPRequestPlanFailure) {
 	fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=http event=plan_failed stage=%s reason=%s\n", failure.Stage, failure.Reason)
 }
 
-func reportCodexNativeHTTPSessionFailure(failure *codexHTTPRoundTripError) {
-	if failure == nil {
+type codexNativeHTTPSessionFailure struct {
+	stage     string
+	reason    string
+	roundTrip *codexHTTPRoundTripError
+}
+
+func classifyCodexNativeHTTPSessionFailure(err error) codexNativeHTTPSessionFailure {
+	var roundTrip *codexHTTPRoundTripError
+	if errors.As(err, &roundTrip) {
+		return codexNativeHTTPSessionFailure{stage: "round_trip", reason: string(roundTrip.reason), roundTrip: roundTrip}
+	}
+	return codexNativeHTTPSessionFailure{stage: "session", reason: string(codexRequestFailureReason(err))}
+}
+
+func reportCodexNativeHTTPSessionFailure(failure codexNativeHTTPSessionFailure) {
+	if failure.roundTrip == nil {
+		fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=http event=session_failed stage=%s reason=%s\n", failure.stage, failure.reason)
 		return
 	}
-	facts := failure.facts
+	facts := failure.roundTrip.facts
 	fmt.Fprintf(
 		os.Stderr,
 		"cq: Codex route trace transport=http event=session_failed stage=%s reason=%s dispatched=%t got_conn=%t conn_reused=%t conn_was_idle=%t idle_ms=%d wrote_request=%t write_error=%t got_first_response_byte=%t\n",
-		"round_trip",
+		failure.stage,
 		failure.reason,
 		true,
 		facts.GotConn,
@@ -214,14 +229,20 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		prepared.Lifecycle,
 	)
 	if err != nil {
-		var roundTripErr *codexHTTPRoundTripError
-		if errors.As(err, &roundTripErr) && handler.reportSessionFailure != nil {
-			handler.reportSessionFailure(roundTripErr)
+		failure := classifyCodexNativeHTTPSessionFailure(err)
+		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
+		if handler.reportSessionFailure != nil {
+			handler.reportSessionFailure(failure)
 		}
 		writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream request failed")
 		return true, model
 	}
 	if result.Response == nil || result.Response.Body == nil {
+		failure := codexNativeHTTPSessionFailure{stage: "response_validate", reason: "response_unavailable"}
+		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
+		if handler.reportSessionFailure != nil {
+			handler.reportSessionFailure(failure)
+		}
 		writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream response unavailable")
 		return true, model
 	}

@@ -4,6 +4,7 @@ set -eu
 
 status_context=cq/live-normal-routing
 production_port=19280
+validation_root=
 
 fail() {
 	printf 'cq release validation: %s\n' "$1" >&2
@@ -20,9 +21,21 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 
 [ -z "$(git status --porcelain=v1 --untracked-files=all)" ] || fail "worktree must be clean"
+if [ -n "${CQ_CODEX_LIVE_AUTH_FILE:-}" ]; then
+	auth_file=$CQ_CODEX_LIVE_AUTH_FILE
+else
+	auth_file=$HOME/.codex/auth.json
+fi
+case "$auth_file" in
+/*) ;;
+*) fail "auth file must be absolute" ;;
+esac
+[ -f "$auth_file" ] || fail "auth file must be a regular file"
+[ -r "$auth_file" ] || fail "auth file must be readable"
 sha=$(git rev-parse HEAD)
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-auth_file=${CQ_CODEX_LIVE_AUTH_FILE:-${CODEX_HOME:-$HOME/.codex}/auth.json}
+codexbar_root=${CQ_CODEXBAR_LIVE_ROOT:-$HOME/Library/Application Support/CodexBar}
+[ "${codexbar_root#/}" != "$codexbar_root" ] || fail "CodexBar root must be absolute"
 desktop_codex=/Applications/ChatGPT.app/Contents/Resources/codex
 if [ -x "$desktop_codex" ]; then
 	codex_executable=$desktop_codex
@@ -37,16 +50,30 @@ production_snapshot() {
 	pid=$(lsof -nP -tiTCP:"$production_port" -sTCP:LISTEN 2>/dev/null || true)
 	mode=
 	if [ -n "$pid" ]; then
-		mode=$(cq proxy rescue status 2>/dev/null) || fail "cannot read production proxy mode"
+		mode=$(
+			cq proxy rescue status 2>/dev/null |
+				sed -n 's/.*"mode":"\([^"]*\)".*/\1/p'
+		) || fail "cannot read production proxy mode"
+		[ -n "$mode" ] || fail "cannot decode production proxy mode"
 	fi
 	printf '%s\n%s\n' "$pid" "$mode"
 }
 
 production_before=$(production_snapshot)
 status_finished=false
+cleanup_validation_root() {
+	[ -n "$validation_root" ] || return 0
+	case "$validation_root" in
+	/tmp/cq-release-validation.*) ;;
+	*) return 1 ;;
+	esac
+	rm -rf "$validation_root"
+	validation_root=
+}
 publish_failure() {
 	rc=$?
 	trap - EXIT HUP INT TERM
+	cleanup_validation_root || true
 	if [ "$status_finished" != true ]; then
 		gh api --method POST "repos/$repo/statuses/$sha" \
 			-f state=failure \
@@ -62,14 +89,60 @@ gh api --method POST "repos/$repo/statuses/$sha" \
 	-f context="$status_context" \
 	-f description='Live Codex routing validation running' >/dev/null
 
+increment_release_version=true
+if [ -n "${CQ_RELEASE_VALIDATION_VERSION:-}" ]; then
+	build_version=${CQ_RELEASE_VALIDATION_VERSION#v}
+	increment_release_version=false
+else
+	latest_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*') || fail "cannot resolve latest release tag"
+	build_version=${latest_tag#v}
+fi
+
+version_major=${build_version%%.*}
+version_remainder=${build_version#*.}
+[ "$version_remainder" != "$build_version" ] || fail "release validation version must be major.minor.patch"
+version_minor=${version_remainder%%.*}
+version_patch=${version_remainder#*.}
+[ "$version_patch" != "$version_remainder" ] || fail "release validation version must be major.minor.patch"
+case "$version_patch" in
+*.*) fail "release validation version must be major.minor.patch" ;;
+esac
+for component in "$version_major" "$version_minor" "$version_patch"; do
+	case "$component" in
+	'' | *[!0-9]*) fail "release validation version must be major.minor.patch" ;;
+	esac
+done
+if [ "$increment_release_version" = true ]; then
+	version_patch=$((version_patch + 1))
+	build_version=$version_major.$version_minor.$version_patch
+fi
+
+validation_root=$(mktemp -d /tmp/cq-release-validation.XXXXXX) || fail "cannot create validation build directory"
+chmod 700 "$validation_root" || fail "cannot secure validation build directory"
+validation_binary=$validation_root/cq
+stage11_provenance=$(
+	go run ./.github/scripts/codex-stage11-provenance.go \
+		"$build_version" \
+		./internal/proxy/testdata/codex_stage11_reviewed_manifest.json
+) || fail "cannot calculate Codex Stage 11 provenance"
+[ -n "$stage11_provenance" ] || fail "Codex Stage 11 provenance is empty"
+CGO_ENABLED=0 go build \
+	-ldflags "-s -w -X main.version=$build_version -X github.com/jacobcxdev/cq/internal/proxy.codexStage11CorpusBuildProvenanceSHA256=$stage11_provenance" \
+	-o "$validation_binary" \
+	./cmd/cq
+
 CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
+CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE=1 \
 CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
+CQ_CODEXBAR_LIVE_ROOT="$codexbar_root" \
 CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
+CQ_CODEX_PROXY_ACCEPTANCE_EXECUTABLE="$validation_binary" \
 go test -race -count=1 ./internal/proxy \
-	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal)$'
+	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal|TestCodexExactExecutableNormalPassesThroughLiveUpstream)$'
 
 production_after=$(production_snapshot)
 [ "$production_before" = "$production_after" ] || fail "production proxy changed during validation"
+cleanup_validation_root || fail "cannot clean validation build directory"
 
 gh api --method POST "repos/$repo/statuses/$sha" \
 	-f state=success \

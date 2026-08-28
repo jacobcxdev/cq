@@ -31,7 +31,6 @@ func TestReadOnlyLegacyEndpointInspectCommandBypassesCompatibilityEpoch(t *testi
 }
 
 func TestProxyEndpointInspectLegacyDoesNotChangeDirectoryInventory(t *testing.T) {
-	t.Parallel()
 	home, path := createCLIRefusedLegacyEndpoint(t)
 	before := readDirectoryInventory(t, filepath.Dir(path))
 	var output bytes.Buffer
@@ -57,7 +56,6 @@ func TestProxyEndpointInspectLegacyDoesNotChangeDirectoryInventory(t *testing.T)
 }
 
 func TestProxyEndpointTransitionRequiresConfirmationAndKeepsRollbackUntilFinalise(t *testing.T) {
-	t.Parallel()
 	home, path := createCLIRefusedLegacyEndpoint(t)
 	snapshot, err := codexprov.InspectLegacyCredentialEndpoint(context.Background(), path)
 	if err != nil {
@@ -208,6 +206,7 @@ func createCLIRefusedLegacyEndpoint(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("XDG_CONFIG_HOME", "")
 	state := filepath.Join(home, ".config", "cq", "state")
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)

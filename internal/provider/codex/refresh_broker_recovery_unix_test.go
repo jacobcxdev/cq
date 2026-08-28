@@ -12,6 +12,7 @@ import (
 )
 
 func TestDefaultRecoveringRefreshControlForwardsRecoveryRecorder(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
 	home := shortEndpointDir(t)
 	stateDir := filepath.Dir(DefaultCredentialControlPath(home))
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -117,6 +118,7 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 	switch supervisor.TrafficMode() {
 	case TrafficModeNormal:
 		if _, err := supervisor.Boot(ctx, workerManifest); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: runtime worker boot failed: %v\n", err)
 			startupErr = err
 		}
 	case TrafficModeRescue:

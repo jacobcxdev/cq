@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -833,6 +834,128 @@ func TestCodexHTTPRequestPlanFactoryCarriesAuthenticatedBoundRetryContinuity(t *
 	}
 	if !runtime.plan.RequiresAccountContinuity || !runtime.plan.authenticatedCallerContinuity {
 		t.Fatalf("bound retry continuity = required %t authenticated %t, want true/true", runtime.plan.RequiresAccountContinuity, runtime.plan.authenticatedCallerContinuity)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryPreservesAuthenticatedContinuationAcrossSessionPool(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	privateSubject := "private-system-account"
+	privateCandidate := "private-system-candidate"
+	privateRevision := "private-system-revision"
+	callerAccount := frozenDispatchTestLogicalAccount(
+		codex.AccountKey(privateSubject),
+		frozenDispatchCandidate(codex.AccountKey(privateSubject), codex.CandidateID(privateCandidate), codex.Revision(privateRevision), codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	boundAccount := frozenDispatchTestLogicalAccount(
+		"account-b",
+		frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceManaged, false, now.Add(time.Hour)),
+	)
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{callerAccount, boundAccount}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			Classification:        CodexRestoredLaneCurrent,
+			BoundAccountKey:       "account-b",
+			BoundIdentity:         CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 1, Authoritative: true},
+			BoundRecordGeneration: 1,
+			JournalGeneration:     1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-b",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	key := []byte("01234567890123456789012345678901")
+	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV1{{Name: "pool-b", Members: []codex.AccountKey{"account-b"}}},
+		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "pool-b"}},
+	})
+	factory.DispatchPermits = &sessionPolicyPermitRecorder{}
+	caller := RuntimeCallerAuthorityV1{
+		Domain: NormalCallerCodex, SubjectID: privateSubject, IndexEpoch: 42, ConsumptionDigest: strings.Repeat("a", 64),
+	}
+	ctx, diagnostics := withRouteDiagnostics(context.Background())
+	ctx = withRuntimeCallerAuthority(ctx, caller)
+	ctx = withRuntimeCallerIdentity(ctx, privateSubject+"\x00"+privateCandidate+"\x00"+privateRevision)
+
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "tool result without repeated turn state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("continuation dispatch = %#v, want pool-bound account-b", accounts)
+	}
+	if !runtime.plan.RequiresAccountContinuity || !runtime.plan.authenticatedCallerContinuity {
+		t.Fatalf("pool continuation = required %t authenticated %t, want true/true", runtime.plan.RequiresAccountContinuity, runtime.plan.authenticatedCallerContinuity)
+	}
+	event := RouteEvent{Provider: "codex"}
+	event.applyRouteDiagnostics(diagnostics)
+	if event.CallerDomain != string(NormalCallerCodex) || event.CallerIdentityPresent == nil || !*event.CallerIdentityPresent {
+		t.Fatalf("caller trace = %#v, want Codex caller with identity", event)
+	}
+	if event.CallerContinuityMapped == nil || !*event.CallerContinuityMapped || event.CallerRoutingMapped == nil || *event.CallerRoutingMapped {
+		t.Fatalf("caller mapping trace = %#v, want continuity=true routing=false", event)
+	}
+	if event.CallerIndexEpoch != 42 {
+		t.Fatalf("caller index epoch = %d, want 42", event.CallerIndexEpoch)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{privateSubject, privateCandidate, privateRevision} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("caller trace exposed private value %q: %s", private, encoded)
+		}
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRoutesAuthenticatedUnstableCallerThroughPinnedAccount(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	callerAccount := frozenDispatchTestLogicalAccount(
+		"unstable-caller",
+		frozenDispatchCandidate("unstable-caller", "system-candidate", "system-revision", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	callerAccount.Unstable = true
+	routingAccount := frozenDispatchTestLogicalAccount(
+		"managed-route",
+		frozenDispatchCandidate("managed-route", "managed-candidate", "managed-revision", codex.SourceManaged, true, now.Add(time.Hour)),
+	)
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "managed-route"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{callerAccount, routingAccount}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration: 1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "managed-route",
+		PinnedAccountKey:  "managed-route",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerCodex})
+	ctx = withRuntimeCallerIdentity(ctx, "unstable-caller\x00system-candidate\x00system-revision")
+
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "managed-route" {
+		t.Fatalf("dispatch = %#v, want pinned managed route", accounts)
+	}
+	if runtime.calls != 1 || runtime.plan.InitialSlot == 0 || runtime.plan.Slots[runtime.plan.InitialSlot-1].AccountKey != "managed-route" {
+		t.Fatalf("lease begin = calls %d plan %#v, want pinned managed route", runtime.calls, runtime.plan)
 	}
 }
 
