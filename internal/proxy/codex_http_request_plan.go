@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -363,6 +362,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
 	}
+	unfilteredInventory := inventory
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
 	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, accounts, factory.Authority)
 	if err != nil || snapshot.JournalGeneration == 0 {
@@ -392,6 +392,9 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	authenticatedCallerAccount := codex.AccountKey("")
 	if callerOK {
 		identity, _ := runtimeCallerIdentity(ctx)
+		if caller.Domain == NormalCallerCodex && codexAuthenticatedCallerAccount(unfilteredInventory, caller, identity) == "" {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
+		}
 		authenticatedCallerAccount = codexAuthenticatedCallerAccount(inventory, caller, identity)
 	}
 	if errors.Is(err, ErrCodexLeaseAuthorityMismatch) && authenticatedCallerAccount != "" {
@@ -484,7 +487,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			}
 		}
 	}
-	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel || !slices.Equal(choice.RequiredBuckets, snapshot.BoundChoice.RequiredBuckets)) {
+	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
 	}
 	shadowAdvice := codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable}
@@ -891,13 +894,12 @@ func codexAuthenticatedCallerAccount(inventory codex.Inventory, caller RuntimeCa
 	}
 	accountKey := codex.AccountKey(parts[0])
 	candidateID := codex.CandidateID(parts[1])
-	revision := codex.Revision(parts[2])
 	for _, account := range inventory.Accounts {
 		if account.Key != accountKey || !account.Routable || account.Unstable {
 			continue
 		}
 		for _, candidate := range account.Candidates {
-			if candidate.Ref.AccountKey == accountKey && candidate.Ref.CandidateID == candidateID && candidate.Revision == revision && candidate.Routable && !candidate.DispatchBlocked {
+			if candidate.Ref.AccountKey == accountKey && candidate.Ref.CandidateID == candidateID && candidate.Routable && !candidate.DispatchBlocked {
 				return accountKey
 			}
 		}

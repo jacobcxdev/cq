@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -198,12 +199,11 @@ func (store *CodexLeaseStore) commitCodexPrewarmAdoptionLocked(request CodexPrew
 	turnHash := store.hash("turn", request.Key.Turn)
 	laneDigest := codexJournalLaneDigest(sessionHash, threadHash, namespaceHash)
 	var laneIndex = -1
+	var currentIdentity CodexJournalRecordIdentity
 	for index, lane := range next.Lanes {
 		if codexJournalLaneDigest(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash) == laneDigest {
 			laneIndex = index
-			if !codexLaneTupleIdentity(lane, true).IsZero() {
-				return CodexPrewarmAdoptionResult{}, ErrCodexConcurrentTurn
-			}
+			currentIdentity = codexLaneTupleIdentity(lane, true)
 		}
 	}
 	for _, record := range next.Records {
@@ -219,6 +219,30 @@ func (store *CodexLeaseStore) commitCodexPrewarmAdoptionLocked(request CodexPrew
 		lane = next.Lanes[laneIndex]
 	}
 	now := monotonicCodexLeaseTime(wallNow, lane.LastObservedAt)
+	predecessorIndex := -1
+	if !currentIdentity.IsZero() {
+		for index, record := range next.Records {
+			if record.Identity() == currentIdentity {
+				predecessorIndex = index
+				break
+			}
+		}
+		if predecessorIndex < 0 {
+			return CodexPrewarmAdoptionResult{}, fmt.Errorf("%w: current adoption predecessor is absent", ErrCodexLeaseTrustLost)
+		}
+		predecessor := next.Records[predecessorIndex]
+		if predecessor.RoutingRefs != 0 || predecessor.AttemptRefs != 0 || predecessor.ResponseObserverRefs != 0 ||
+			(predecessor.State != LeaseContinuationPending && predecessor.State != LeaseBoundQuiescent && predecessor.State != LeaseOrphaned) ||
+			!codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor)) || !predecessor.SocketLineageExtinct {
+			return CodexPrewarmAdoptionResult{}, ErrCodexConcurrentTurn
+		}
+		if predecessor.RecordGeneration == math.MaxUint64 || predecessor.LeaseGeneration == math.MaxUint64 {
+			return CodexPrewarmAdoptionResult{}, fmt.Errorf("%w: adoption predecessor generation overflow", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	if lane.Generation == math.MaxUint64 {
+		return CodexPrewarmAdoptionResult{}, fmt.Errorf("%w: lane generation overflow", ErrCodexLeaseInvalidMutation)
+	}
 	lane.Generation++
 	lane.CurrentTurnHash = turnHash
 	lane.CurrentModeEpoch = request.Policy.ModeEpoch
@@ -254,6 +278,18 @@ func (store *CodexLeaseStore) commitCodexPrewarmAdoptionLocked(request CodexPrew
 			Attempts:                 []CodexJournalAttempt{{Generation: 1, Revision: 1, Slot: 1, State: CodexAttemptPrepared, CreatedAt: now, LastObservedAt: now}},
 		},
 	}
+	if predecessorIndex >= 0 {
+		predecessor := &next.Records[predecessorIndex]
+		predecessor.State = LeaseSuperseded
+		predecessor.RecordGeneration++
+		predecessor.LeaseGeneration++
+		predecessor.LaneGeneration = lane.Generation
+		predecessor.LastObservedAt = now
+		record.PredecessorTurnHash = predecessor.TurnHash
+		record.PredecessorModeEpoch = predecessor.ModeEpoch
+		record.PredecessorAuthoritative = predecessor.Authoritative
+		record.PredecessorGeneration = predecessor.RecordGeneration
+	}
 	record.AttemptEnvelope.PlanDigest = codexLeaseAttemptPlanDigest(store.key, record.AttemptEnvelope.Slots)
 	if laneIndex >= 0 {
 		next.Lanes[laneIndex] = lane
@@ -264,11 +300,26 @@ func (store *CodexLeaseStore) commitCodexPrewarmAdoptionLocked(request CodexPrew
 	if err := store.commitV2Locked(next.Generation, next); err != nil {
 		return CodexPrewarmAdoptionResult{}, err
 	}
+	var installedRecord CodexJournalRecordV2
+	fence := CodexLeaseGenerationFence{Journal: store.v2.Generation, Lane: lane.Generation, Current: record.Identity(), Last: record.Identity()}
 	for _, installed := range store.v2.Records {
-		if installed.Identity() == record.Identity() {
-			fence := CodexLeaseGenerationFence{Journal: store.v2.Generation, Lane: lane.Generation, Current: installed.Identity(), Last: installed.Identity(), TouchedRecords: []CodexLeaseRecordFence{{Record: installed.Identity(), Revision: installed.RecordGeneration, Lease: installed.LeaseGeneration, RequestGeneration: installed.Generation, CurrentAttempt: installed.CurrentAttemptGeneration, TouchedAttempts: []CodexAttemptFence{{RequestGeneration: installed.Generation, Generation: 1, Revision: 1}}}}}
-			return CodexPrewarmAdoptionResult{Record: cloneCodexJournalRecordV2(installed), Fence: fence}, nil
+		switch installed.Identity() {
+		case record.Identity():
+			installedRecord = cloneCodexJournalRecordV2(installed)
+			fence.TouchedRecords = append(fence.TouchedRecords, CodexLeaseRecordFence{Record: installed.Identity(), Revision: installed.RecordGeneration, Lease: installed.LeaseGeneration, RequestGeneration: installed.Generation, CurrentAttempt: installed.CurrentAttemptGeneration, TouchedAttempts: []CodexAttemptFence{{RequestGeneration: installed.Generation, Generation: 1, Revision: 1}}})
+		case currentIdentity:
+			if !currentIdentity.IsZero() {
+				predecessorFence := codexLeaseFenceForRestoredRecord(installed)
+				predecessorFence.TouchedAttempts = nil
+				fence.TouchedRecords = append(fence.TouchedRecords, predecessorFence)
+			}
 		}
+	}
+	if installedRecord.Identity() == record.Identity() {
+		sort.Slice(fence.TouchedRecords, func(i, j int) bool {
+			return codexRecordIdentityLess(fence.TouchedRecords[i].Record, fence.TouchedRecords[j].Record)
+		})
+		return CodexPrewarmAdoptionResult{Record: installedRecord, Fence: fence}, nil
 	}
 	return CodexPrewarmAdoptionResult{}, errors.New("committed prewarm adoption record missing")
 }

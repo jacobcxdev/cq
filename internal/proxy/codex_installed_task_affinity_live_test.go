@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"golang.org/x/sys/unix"
 )
 
 func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
@@ -120,7 +121,8 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 		t.Fatalf("construct candidate runtime handler: %v", err)
 	}
 	listener, _ := newCodexRuntimeSupervisorAcceptanceServerWithCredential(t, handler, NormalCallerCredentialV1{
-		Domain: NormalCallerCodex, Bearer: localToken, SubjectID: "validation-codex",
+		Domain: NormalCallerCodex, Bearer: localToken,
+		SubjectID:  string(codexInstalledHTTPValidationDefault) + "\x00validation-candidate-default\x00validation-revision-1",
 		ValidUntil: time.Now().Add(time.Hour),
 	})
 
@@ -460,8 +462,8 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 		output    string
 	}{
 		{webSocket: true, output: "LIVE-WS-PONG"},
-		{resume: true, output: "LIVE-HTTP-PONG-1"},
-		{resume: true, output: "LIVE-HTTP-PONG-2"},
+		{resume: true, webSocket: true, output: "LIVE-WS-RESUME-PONG"},
+		{resume: true, output: "LIVE-HTTP-PONG"},
 	} {
 		if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, runner, clientProof, listener.URL, isolation, turn.resume, turn.webSocket, turn.output); err != nil {
 			t.Fatalf("live Codex normal turn %s: %v", turn.output, err)
@@ -475,8 +477,8 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 		t.Fatal("live Codex normal acceptance lost candidate worker")
 	}
 	webSockets, responses, compactions := traffic.snapshot()
-	if webSockets != 1 || responses != 3 || compactions < 1 {
-		t.Fatalf("live Codex normal traffic = websocket %d responses %d compactions %d, want 1/3/positive", webSockets, responses, compactions)
+	if webSockets != 2 || responses != 2 || compactions < 1 {
+		t.Fatalf("live Codex normal traffic = websocket %d responses %d compactions %d, want 2/2/positive", webSockets, responses, compactions)
 	}
 }
 
@@ -502,7 +504,7 @@ func TestCodexInstalledNormalContinuesAfterLiveToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capture installed Codex client: %v", err)
 	}
-	listener, supervisor, traffic := newCodexLiveNormalAcceptanceServerWithCallers(t, credential, []NormalCallerCredentialV1{{
+	listener, supervisor, traffic, inventory, callerRotation := newCodexLiveNormalAcceptanceServerWithInventory(t, credential, []NormalCallerCredentialV1{{
 		Domain: NormalCallerCodex, Bearer: credential.material.AccessToken,
 		SubjectID:  string(codexLiveNormalAccount) + "\x00live-normal-candidate\x00live-normal-revision",
 		ValidUntil: time.Now().Add(10 * time.Minute),
@@ -516,23 +518,58 @@ func TestCodexInstalledNormalContinuesAfterLiveToolCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	const output = "LIVE-TOOL-PONG"
-	if err := os.WriteFile(filepath.Join(isolation.work, "message.txt"), []byte(output+"\n"), 0o600); err != nil {
+	messagePath := filepath.Join(isolation.work, "message.txt")
+	if err := unix.Mkfifo(messagePath, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	rotationDone := make(chan error, 1)
+	go func() {
+		for {
+			fd, openErr := unix.Open(messagePath, unix.O_WRONLY|unix.O_NONBLOCK, 0)
+			if openErr == nil {
+				rotationErr := callerRotation.rotate([]NormalCallerCredentialV1{{
+					Domain: NormalCallerCodex, Bearer: "live-normal-rotated-bearer",
+					SubjectID:  string(codexLiveNormalAccount) + "\x00live-normal-candidate\x00live-normal-revision-after-tool-call",
+					ValidUntil: time.Now().Add(10 * time.Minute),
+				}})
+				inventory.setRevision("live-normal-revision-after-tool-call")
+				_, writeErr := unix.Write(fd, []byte(output+"\n"))
+				closeErr := unix.Close(fd)
+				rotationDone <- errors.Join(rotationErr, writeErr, closeErr)
+				return
+			}
+			if !errors.Is(openErr, unix.ENXIO) {
+				rotationDone <- openErr
+				return
+			}
+			select {
+			case <-ctx.Done():
+				rotationDone <- ctx.Err()
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
 	prompt := "Use the shell to read `message.txt`, then reply with only its contents and no other text."
 	if err := runCodexTaskAffinityAcceptancePromptForTransport(ctx, codexReadOnlyTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, true, true, prompt, output); err != nil {
 		actual, _ := os.ReadFile(filepath.Join(isolation.root, strings.ToLower(output)+".txt"))
 		actual = actual[:min(len(actual), 256)]
 		t.Fatalf("live Codex tool continuation: %v; bounded output %q", err, strings.TrimSpace(string(actual)))
 	}
+	if err := <-rotationDone; err != nil {
+		t.Fatalf("rotate live Codex credential revision: %v", err)
+	}
+	if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, codexReadOnlyTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, true, false, "LIVE-ROTATED-CALLER-PONG"); err != nil {
+		t.Fatalf("live Codex HTTP resume after caller rotation: %v", err)
+	}
 	if supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
 		t.Fatal("live Codex tool continuation lost candidate worker")
 	}
 	webSockets, responses, compactions := traffic.snapshot()
-	if webSockets != 1 || responses != 0 || compactions != 0 {
-		t.Fatalf("live Codex tool traffic = websocket %d responses %d compactions %d, want 1/0/0", webSockets, responses, compactions)
+	if webSockets != 1 || responses != 1 || compactions != 0 {
+		t.Fatalf("live Codex tool traffic = websocket %d responses %d compactions %d, want 1/1/0", webSockets, responses, compactions)
 	}
 }
 
@@ -631,6 +668,19 @@ type codexRuntimeSupervisorAcceptanceWorker struct {
 	exited  chan struct{}
 }
 
+type codexRuntimeSupervisorAcceptanceRefreshingWorker struct {
+	*codexRuntimeSupervisorAcceptanceWorker
+	callerState *runtimeCallerCredentialState
+}
+
+func (worker *codexRuntimeSupervisorAcceptanceRefreshingWorker) CallerIndex(ctx context.Context) (NormalCallerIndexV1, error) {
+	if worker == nil || worker.callerState == nil {
+		return NormalCallerIndexV1{}, ErrNormalCallerAuthUnavailable
+	}
+	_, index, err := worker.callerState.snapshot(ctx)
+	return index, err
+}
+
 func (worker *codexRuntimeSupervisorAcceptanceWorker) Boot(context.Context, WorkerManifestV1) (RuntimeBootAckV1, error) {
 	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder}, nil
 }
@@ -676,6 +726,40 @@ type codexRuntimeSupervisorAcceptanceConsumer struct {
 	consumed map[string]struct{}
 }
 
+type codexRuntimeSupervisorAcceptanceCallerRotation struct {
+	mu          sync.RWMutex
+	key         []byte
+	credentials []NormalCallerCredentialV1
+}
+
+func (rotation *codexRuntimeSupervisorAcceptanceCallerRotation) source(ctx context.Context) ([]NormalCallerCredentialV1, error) {
+	if ctx == nil {
+		return nil, ErrNormalCallerAuthUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rotation.mu.RLock()
+	defer rotation.mu.RUnlock()
+	return append([]NormalCallerCredentialV1(nil), rotation.credentials...), nil
+}
+
+func (rotation *codexRuntimeSupervisorAcceptanceCallerRotation) rotate(credentials []NormalCallerCredentialV1) error {
+	if rotation == nil || len(credentials) == 0 {
+		return ErrNormalCallerAuthUnavailable
+	}
+	rotation.mu.RLock()
+	key := append([]byte(nil), rotation.key...)
+	rotation.mu.RUnlock()
+	if _, err := bindRuntimeCallerCredentials(key, credentials); err != nil {
+		return err
+	}
+	rotation.mu.Lock()
+	rotation.credentials = append(rotation.credentials[:0], credentials...)
+	rotation.mu.Unlock()
+	return nil
+}
+
 func (consumer *codexRuntimeSupervisorAcceptanceConsumer) Consume(_ context.Context, consumption ProviderBranchAdmissionConsumptionV1) error {
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
@@ -697,21 +781,34 @@ func newCodexRuntimeSupervisorAcceptanceServerWithCredential(t *testing.T, handl
 }
 
 func newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t *testing.T, handler http.Handler, credentials []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor) {
+	listener, supervisor, _ := newCodexRuntimeSupervisorAcceptanceServerWithRotatingCredentials(t, handler, credentials)
+	return listener, supervisor
+}
+
+func newCodexRuntimeSupervisorAcceptanceServerWithRotatingCredentials(t *testing.T, handler http.Handler, credentials []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexRuntimeSupervisorAcceptanceCallerRotation) {
 	t.Helper()
 	if len(credentials) == 0 {
 		t.Fatal("Codex acceptance caller credentials are empty")
 	}
 	key := sha256.Sum256([]byte(credentials[0].Bearer))
+	rotation := &codexRuntimeSupervisorAcceptanceCallerRotation{
+		key:         append([]byte(nil), key[:]...),
+		credentials: append([]NormalCallerCredentialV1(nil), credentials...),
+	}
+	callerState, err := newRuntimeCallerCredentialState(key[:], rotation.source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	boundCredentials, err := bindRuntimeCallerCredentials(key[:], credentials)
 	if err != nil {
 		t.Fatal(err)
 	}
 	events := []string{}
-	worker := &codexRuntimeSupervisorAcceptanceWorker{
+	worker := &codexRuntimeSupervisorAcceptanceRefreshingWorker{codexRuntimeSupervisorAcceptanceWorker: &codexRuntimeSupervisorAcceptanceWorker{
 		holder:  runtimeHolder("validation-worker"),
-		handler: normalWorkerHandler(handler, boundCredentials),
+		handler: normalWorkerHandlerWithSource(handler, callerState.credentials),
 		exited:  make(chan struct{}),
-	}
+	}, callerState: callerState}
 	supervisor, err := NewRuntimeSupervisor(
 		&runtimeTestListener{},
 		runtimeHolder("validation-supervisor"),
@@ -745,7 +842,7 @@ func newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t *testing.T, hand
 		t.Fatal("Codex acceptance listener did not use an isolated alternate port")
 	}
 	t.Cleanup(listener.Close)
-	return listener, supervisor
+	return listener, supervisor, rotation
 }
 
 func TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover(t *testing.T) {
@@ -914,7 +1011,7 @@ func (runner codexTaskAffinityAcceptanceRunner) Run(ctx context.Context, command
 	if err != nil || after != command.expectedExecutable {
 		return nil, errors.New("Codex task-affinity executable changed")
 	}
-	return nil, nil
+	return append([]byte(nil), stderr.data...), nil
 }
 
 type codexReadOnlyTaskAffinityAcceptanceRunner struct{}
@@ -953,7 +1050,15 @@ func (codexReadOnlyTaskAffinityAcceptanceRunner) Run(ctx context.Context, comman
 	if err != nil || after != command.expectedExecutable {
 		return nil, errors.New("Codex task-affinity executable changed")
 	}
-	return stdout.data, nil
+	return codexAcceptanceCombinedOutput(stdout.data, stderr.data), nil
+}
+
+func codexAcceptanceCombinedOutput(stdout []byte, stderr []byte) []byte {
+	output := append([]byte(nil), stdout...)
+	if len(output) > 0 && len(stderr) > 0 && output[len(output)-1] != '\n' {
+		output = append(output, '\n')
+	}
+	return append(output, stderr...)
 }
 
 type codexTaskAffinityAcceptanceIsolation struct {
@@ -1087,6 +1192,9 @@ func runCodexTaskAffinityAcceptancePromptForTransport(
 	if err != nil {
 		return err
 	}
+	if webSocket && codexAcceptanceWebSocketTransportFailed(events) {
+		return fmt.Errorf("Codex task-affinity WebSocket transport fell back or disconnected before completion: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))
+	}
 	if allowTools && !codexAcceptanceCompletedCommand(events) {
 		return fmt.Errorf("Codex task-affinity shell command did not complete: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))
 	}
@@ -1098,6 +1206,13 @@ func runCodexTaskAffinityAcceptancePromptForTransport(
 		return fmt.Errorf("Codex task-affinity output mismatch: %s", sanitiseCodexAcceptanceDiagnostic(string(events)))
 	}
 	return nil
+}
+
+func codexAcceptanceWebSocketTransportFailed(output []byte) bool {
+	diagnostic := strings.ToLower(string(output))
+	return strings.Contains(diagnostic, "falling back from websockets to https transport") ||
+		strings.Contains(diagnostic, "stream disconnected before completion") ||
+		strings.Contains(diagnostic, "websocket closed by server before response.completed")
 }
 
 func codexAcceptanceCompletedCommand(events []byte) bool {
@@ -1113,6 +1228,35 @@ func codexAcceptanceCompletedCommand(events []byte) bool {
 		}
 	}
 	return false
+}
+
+func TestCodexTaskAffinityWebSocketRejectsFallbackDespiteValidOutput(t *testing.T) {
+	for _, diagnostic := range []string{
+		"Falling back from WebSockets to HTTPS transport...",
+		"stream disconnected before completion: websocket closed by server before response.completed",
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			isolation := codexTaskAffinityAcceptanceIsolation{
+				root: t.TempDir(),
+				work: t.TempDir(),
+			}
+			runner := testCodexAcceptanceRunner(func(_ context.Context, command codexAcceptanceCommand) ([]byte, error) {
+				if err := os.WriteFile(command.outputPath, []byte("PONG\n"), 0o600); err != nil {
+					return nil, err
+				}
+				return []byte(diagnostic), nil
+			})
+
+			err := runCodexTaskAffinityAcceptancePromptForTransport(
+				context.Background(), runner, codexInstalledExecutableProof{},
+				"http://127.0.0.1:29280", isolation, false, true, false,
+				"Reply with exactly PONG and no other text.", "PONG",
+			)
+			if err == nil || !strings.Contains(err.Error(), "WebSocket transport") {
+				t.Fatalf("WebSocket fallback result = %v, want transport failure", err)
+			}
+		})
+	}
 }
 
 func runCodexCompactionAcceptanceTurn(

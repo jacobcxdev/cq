@@ -216,7 +216,8 @@ type RuntimeLifecycleHolderV1 struct {
 }
 
 type RuntimeSupervisor struct {
-	mu sync.RWMutex
+	mu              sync.RWMutex
+	callerRefreshMu sync.Mutex
 
 	listener         net.Listener
 	listenerIdentity string
@@ -571,6 +572,8 @@ func (supervisor *RuntimeSupervisor) refreshCallerAuthority(ctx context.Context,
 	if supervisor == nil || authority == nil || ctx == nil {
 		return ErrNormalCallerAuthUnavailable
 	}
+	supervisor.callerRefreshMu.Lock()
+	defer supervisor.callerRefreshMu.Unlock()
 	supervisor.mu.RLock()
 	worker := supervisor.worker
 	provider, refreshes := worker.(interface {

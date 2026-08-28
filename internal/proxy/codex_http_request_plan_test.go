@@ -836,7 +836,7 @@ func TestCodexHTTPRequestPlanFactoryCarriesAuthenticatedBoundRetryContinuity(t *
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryContinuesAuthenticatedTurnAfterWebSocketTurnStateAdmission(t *testing.T) {
+func TestCodexHTTPRequestPlanFactorySurvivesCallerRevisionRotation(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
@@ -879,6 +879,7 @@ func TestCodexHTTPRequestPlanFactoryContinuesAuthenticatedTurnAfterWebSocketTurn
 	if _, err := admitted.Drain(); err != nil {
 		t.Fatal(err)
 	}
+	factory.Inventory.(*codexHTTPRequestPlanTestInventory).inventory.Accounts[0].Candidates[0].Revision = "refreshed-revision"
 
 	continuationBody := frozenRequestBody("gpt-5", CodexRequestTurn, "tool result")
 	continuation, err := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: continuationBody})
@@ -893,8 +894,122 @@ func TestCodexHTTPRequestPlanFactoryContinuesAuthenticatedTurnAfterWebSocketTurn
 	if continuation.leaseHandle.AccountKey() != "account" || continuation.leaseHandle.RequestGeneration() != 2 {
 		t.Fatalf("continuation authority = account %q generation %d, want account/2", continuation.leaseHandle.AccountKey(), continuation.leaseHandle.RequestGeneration())
 	}
-	if _, err := continuation.Lifecycle.AbandonBeforeDispatchContext(ctx); err != nil {
+	dispatched, err := continuation.leaseHandle.MarkDispatchedContext(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	continued, err := dispatched.AdmitWebSocketContext(ctx, CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: 1,
+		UpstreamGeneration:   1,
+		ResponseID:           "response-b",
+		ResponseCreated:      true,
+	})
+	if err != nil {
+		t.Fatalf("continuation admission on reconnected socket: %v", err)
+	}
+	continued, err = continued.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: "response-b", HasResponseAnchor: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := continued.Drain(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRejectsAuthenticatedCallerWithoutRoutableCandidate(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	available := frozenDispatchTestLogicalAccount(
+		"account-b",
+		frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	blocked := frozenDispatchTestLogicalAccount(
+		"account-a",
+		frozenDispatchCandidate("account-a", "candidate-a", "revision-b", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	blocked.Candidates[0].DispatchBlocked = true
+
+	for _, test := range []struct {
+		name      string
+		inventory codex.Inventory
+	}{
+		{name: "candidate absent", inventory: codex.Inventory{Accounts: []codex.LogicalAccount{available}}},
+		{name: "candidate blocked", inventory: codex.Inventory{Accounts: []codex.LogicalAccount{blocked, available}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: test.inventory},
+				Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+					JournalGeneration: 1,
+				}},
+				Runtime:           runtime,
+				DefaultAccountKey: "account-b",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+			}
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerCodex})
+			ctx = withRuntimeCallerIdentity(ctx, "account-a\x00candidate-a\x00revision-a")
+
+			result, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+				Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+			})
+			if !errors.Is(err, ErrCodexLeaseAuthorityMismatch) {
+				t.Fatalf("Build error = %v, want authority mismatch", err)
+			}
+			if runtime.calls != 0 || result.Frozen != nil || result.Lifecycle != nil || result.leaseHandle != nil {
+				t.Fatalf("rejected caller retained ownership: begin calls %d result %#v", runtime.calls, result)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRoutesFreshAuthenticatedCallerWithinSessionPool(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+		}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration: 1,
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	key := []byte("01234567890123456789012345678901")
+	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV1{{Name: "pool-b", Members: []codex.AccountKey{"account-b"}}},
+		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "pool-b"}},
+	})
+	factory.DispatchPermits = &sessionPolicyPermitRecorder{}
+	caller := RuntimeCallerAuthorityV1{
+		Domain: NormalCallerCodex, SubjectID: "account-a", ConsumptionDigest: strings.Repeat("a", 64),
+	}
+	ctx := withRuntimeCallerAuthority(context.Background(), caller)
+	ctx = withRuntimeCallerIdentity(ctx, "account-a\x00candidate-a\x00revision-a")
+
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("dispatch = %#v, want account-b", accounts)
+	}
+	if runtime.calls != 1 || runtime.plan.RequiresAccountContinuity || runtime.plan.authenticatedCallerContinuity {
+		t.Fatalf("fresh pool dispatch = calls %d required %t authenticated %t", runtime.calls, runtime.plan.RequiresAccountContinuity, runtime.plan.authenticatedCallerContinuity)
 	}
 }
 
@@ -1342,6 +1457,39 @@ func TestCodexHTTPRequestPlanFactoryCarriesMatchingExpectedBound(t *testing.T) {
 	defer result.Frozen.Release()
 	if runtime.plan.ExpectedBound == nil || *runtime.plan.ExpectedBound != *expected || runtime.plan.ExpectedBound == expected {
 		t.Fatalf("runtime expected bound = %#v, want detached %#v", runtime.plan.ExpectedBound, expected)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryCarriesExpectedBoundAcrossRequestBuckets(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true}
+	expected := &CodexLeaseBoundExpectation{Identity: identity, AccountKey: "account", RecordGeneration: 12}
+	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		Classification:        CodexRestoredLaneCurrent,
+		BoundAccountKey:       "account",
+		BoundIdentity:         identity,
+		BoundRecordGeneration: 12,
+		BoundChoice: RouteChoice{
+			AccountKey:      "account",
+			EffectiveModel:  "gpt-5",
+			RequiredBuckets: []CapacityBucket{CapacityBucketBase, CapacityBucketForModel(codexSparkModel)},
+		},
+		JournalGeneration: 13,
+	}}
+
+	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded:       frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		ExpectedBound: expected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Frozen.Release()
+	if runtime.plan.ExpectedBound == nil || *runtime.plan.ExpectedBound != *expected {
+		t.Fatalf("runtime expected bound = %#v, want %#v", runtime.plan.ExpectedBound, expected)
 	}
 }
 

@@ -538,40 +538,12 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		dial := broker.connect(ctx, prepared.leaseHandle, prepared.receipt, accounts[accountIndex], active)
 		if dial.lifecycle == nil {
 			if dial.err != nil {
-				return dial.err
+				return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, dial.err)
 			}
-			return ErrCodexLeaseWriterUnavailable
+			return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, ErrCodexLeaseWriterUnavailable)
 		}
 		lifecycle := dial.lifecycle
-		if active.conn == nil {
-			rotated, finishErr := broker.finishHandshakeFailure(ctx, downstream, requestFrame, lifecycle, accounts, &accountIndex, active, dial)
-			if finishErr != nil {
-				return finishErr
-			}
-			if rotated {
-				prepared.leaseHandle = lifecycle.handle
-				continue
-			}
-			return nil
-		}
-		if dial.response != nil {
-			turnState, _, stateErr := ParseCodexTurnStateHeader(dial.response.Header)
-			if stateErr != nil {
-				_ = lifecycle.Indeterminate(ctx, active.generation)
-				return fmt.Errorf("Codex upstream WebSocket authority invalid")
-			}
-			if err := lifecycle.ObserveUpstreamUpgrade(ctx, active.generation, turnState); err != nil {
-				return err
-			}
-		}
-		if err := writeCodexWSMessage(ctx, active.conn, requestFrame.messageType, requestFrame.encoded); err != nil {
-			_ = lifecycle.Indeterminate(context.WithoutCancel(ctx), active.generation)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("Codex upstream WebSocket write failed")
-		}
-		rotated, err := broker.readUpstreamRequest(ctx, downstream, requestFrame, lifecycle, accounts, &accountIndex, active)
+		rotated, err := broker.serveDispatchedFrame(ctx, downstream, requestFrame, lifecycle, accounts, &accountIndex, active, dial)
 		if err != nil {
 			return err
 		}
@@ -582,11 +554,52 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 	}
 }
 
+func (broker *codexTerminatingWSBroker) serveDispatchedFrame(ctx context.Context, downstream websocketRelayConn, requestFrame *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, active *codexWSActiveUpstream, dial codexWSDialResult) (rotated bool, err error) {
+	defer func() {
+		if rotated && err == nil {
+			return
+		}
+		if err != nil {
+			closeCodexWSActiveUpstream(active)
+		}
+		err = errors.Join(err, lifecycle.cleanupAfterBrokerExit(ctx))
+	}()
+	if active.conn == nil {
+		return broker.finishHandshakeFailure(ctx, downstream, requestFrame, lifecycle, accounts, accountIndex, active, dial)
+	}
+	if dial.response != nil {
+		turnState, _, stateErr := ParseCodexTurnStateHeader(dial.response.Header)
+		if stateErr != nil {
+			_ = lifecycle.Indeterminate(ctx, active.generation)
+			return false, fmt.Errorf("Codex upstream WebSocket authority invalid")
+		}
+		if err := lifecycle.ObserveUpstreamUpgrade(ctx, active.generation, turnState); err != nil {
+			return false, err
+		}
+	}
+	if err := writeCodexWSMessage(ctx, active.conn, requestFrame.messageType, requestFrame.encoded); err != nil {
+		_ = lifecycle.Indeterminate(context.WithoutCancel(ctx), active.generation)
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, fmt.Errorf("Codex upstream WebSocket write failed")
+	}
+	return broker.readUpstreamRequest(ctx, downstream, requestFrame, lifecycle, accounts, accountIndex, active)
+}
+
 func codexWSAbandonPrepared(ctx context.Context, lifecycle CodexHTTPRequestLifecycle, cause error) error {
 	if lifecycle == nil {
 		return cause
 	}
 	_, err := lifecycle.AbandonBeforeDispatchContext(context.WithoutCancel(ctx))
+	return errors.Join(cause, err)
+}
+
+func codexWSAbandonPreparedHandle(ctx context.Context, handle *CodexLeaseRequestHandle, cause error) error {
+	if handle == nil {
+		return cause
+	}
+	_, err := handle.AbandonBeforeDispatchContext(context.WithoutCancel(ctx))
 	return errors.Join(cause, err)
 }
 

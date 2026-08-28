@@ -128,8 +128,10 @@ func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 	caller := RuntimeCallerAuthorityV1{
 		Domain: NormalCallerCodex, SubjectID: "worker-keyed-caller", ConsumptionDigest: strings.Repeat("a", 64),
 	}
+	ctx := withRuntimeCallerAuthority(context.Background(), caller)
+	ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate-a\x00revision-a")
 
-	prepared, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
 		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
 	})
 	if err != nil {

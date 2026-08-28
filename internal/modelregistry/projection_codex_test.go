@@ -39,6 +39,16 @@ func TestCodexModelsResponse_Shape(t *testing.T) {
 	}
 }
 
+func TestCodexModelsResponse_EmptySnapshotUsesArray(t *testing.T) {
+	data, err := json.Marshal(CodexModelsResponse(Snapshot{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"models":[]}` {
+		t.Fatalf("empty models response = %s", data)
+	}
+}
+
 func TestCodexModelsResponse_NativeRoundTrips(t *testing.T) {
 	// Native entry raw JSON must round-trip exactly.
 	rawJSON := `{"slug":"gpt-5.4","display_name":"GPT-5.4","description":"Flagship","context_window":128000,"shell_type":"default","visibility":"public","priority":10,"supported_in_api":true}`
