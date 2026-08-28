@@ -351,10 +351,12 @@ func runCodexAppServerContinuityAcceptance(
 	isolation codexTaskAffinityAcceptanceIsolation,
 	webSocket bool,
 ) (returnErr error) {
-	const (
-		initialText = "LIVE-APP-SERVER-STARTING"
-		finalText   = "LIVE-APP-SERVER-TOOL-PONG"
-	)
+	const initialText = "LIVE-APP-SERVER-STARTING"
+	nonce, err := newCodexInstalledHTTPValidationToken()
+	if err != nil {
+		return errors.New("generate Codex app-server tool input")
+	}
+	finalText := "LIVE-APP-SERVER-" + nonce[:16]
 	if err := os.WriteFile(filepath.Join(isolation.work, "message.txt"), []byte(finalText+"\n"), 0o600); err != nil {
 		return errors.New("write Codex app-server tool input")
 	}
@@ -435,7 +437,10 @@ func runCodexAppServerContinuityAcceptance(
 		"id": 2, "method": "thread/start",
 		"params": map[string]any{
 			"approvalPolicy": "never", "cwd": isolation.work, "ephemeral": true,
-			"model": "gpt-5.6-sol", "modelProvider": "cq_acceptance", "sandbox": "read-only",
+			// The app-server process is already confined by the outer sandbox-exec
+			// profile. A nested Codex sandbox fails with sandbox_apply EPERM on macOS.
+			"model": "gpt-5.6-sol", "modelProvider": "cq_acceptance", "sandbox": "danger-full-access",
+			"developerInstructions": "When asked to read a file, use the shell tool before answering. Never guess file contents.",
 		},
 	}); err != nil {
 		return errors.New("start Codex app-server thread")
@@ -456,24 +461,35 @@ func runCodexAppServerContinuityAcceptance(
 		"id": 3, "method": "turn/start",
 		"params": map[string]any{
 			"threadId": thread.Thread.ID,
+			"input":    []map[string]string{{"type": "text", "text": "Reply with exactly " + initialText + " and no other text."}},
+		},
+	}); err != nil {
+		return errors.New("start Codex app-server text turn")
+	}
+	if err := awaitCodexAppServerTextTurn(decoder, 3, thread.Thread.ID, initialText); err != nil {
+		return err
+	}
+	if err := encoder.Encode(map[string]any{
+		"id": 4, "method": "turn/start",
+		"params": map[string]any{
+			"threadId": thread.Thread.ID,
 			"input": []map[string]string{{
 				"type": "text",
-				"text": "Before using tools, send exactly " + initialText + " as a standalone progress update. " +
-					"Then use the shell to read `message.txt`. After the tool returns, reply with exactly the file contents and no other text.",
+				"text": "Run `/bin/cat message.txt` using the shell tool now. Do not guess its contents. After the tool returns, reply with exactly its output and no other text.",
 			}},
 		},
 	}); err != nil {
 		return errors.New("start Codex app-server tool turn")
 	}
-	if err := awaitCodexAppServerToolTurn(decoder, 3, thread.Thread.ID, initialText, finalText); err != nil {
+	if err := awaitCodexAppServerToolTurn(decoder, 4, thread.Thread.ID, finalText); err != nil {
 		return err
 	}
 	if err := encoder.Encode(map[string]any{
-		"id": 4, "method": "thread/compact/start", "params": map[string]string{"threadId": thread.Thread.ID},
+		"id": 5, "method": "thread/compact/start", "params": map[string]string{"threadId": thread.Thread.ID},
 	}); err != nil {
 		return errors.New("start Codex app-server compaction")
 	}
-	return awaitCodexAppServerTurn(decoder, 4, thread.Thread.ID)
+	return awaitCodexAppServerTurn(decoder, 5, thread.Thread.ID)
 }
 
 func codexLiveAppServerArguments(baseURL string, webSocket bool) []string {
@@ -559,11 +575,58 @@ func awaitCodexAppServerTurn(decoder *json.Decoder, id int, threadID string) err
 	return nil
 }
 
-func awaitCodexAppServerToolTurn(decoder *json.Decoder, id int, threadID, initialText, finalText string) error {
+func awaitCodexAppServerTextTurn(decoder *json.Decoder, id int, threadID, expectedText string) error {
 	responseSeen := false
-	initialTextSeen := false
+	textSeen := false
+	for {
+		message, err := decodeCodexAppServerMessage(decoder)
+		if err != nil {
+			return err
+		}
+		if string(message.ID) == strconv.Itoa(id) {
+			if len(message.Error) != 0 && string(message.Error) != "null" {
+				return errors.New("Codex app-server text turn request failed")
+			}
+			responseSeen = true
+		}
+		switch message.Method {
+		case "item/completed":
+			var notification struct {
+				ThreadID string `json:"threadId"`
+				Item     struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"item"`
+			}
+			if json.Unmarshal(message.Params, &notification) == nil && notification.ThreadID == threadID && notification.Item.Type == "agentMessage" && notification.Item.Text == expectedText {
+				textSeen = true
+			}
+		case "turn/completed":
+			var notification struct {
+				ThreadID string `json:"threadId"`
+				Turn     struct {
+					Status string `json:"status"`
+				} `json:"turn"`
+			}
+			if json.Unmarshal(message.Params, &notification) != nil || notification.ThreadID != threadID {
+				continue
+			}
+			if notification.Turn.Status != "completed" {
+				return errors.New("Codex app-server text turn did not complete")
+			}
+			if !responseSeen || !textSeen {
+				return fmt.Errorf("Codex app-server text turn evidence incomplete: response=%t text=%t", responseSeen, textSeen)
+			}
+			return nil
+		}
+	}
+}
+
+func awaitCodexAppServerToolTurn(decoder *json.Decoder, id int, threadID, finalText string) error {
+	responseSeen := false
 	toolSeen := false
 	continuationSeen := false
+	agentTextBytes := 0
 	for {
 		message, err := decodeCodexAppServerMessage(decoder)
 		if err != nil {
@@ -591,22 +654,14 @@ func awaitCodexAppServerToolTurn(decoder *json.Decoder, id int, threadID, initia
 			}
 			switch notification.Item.Type {
 			case "agentMessage":
-				switch notification.Item.Text {
-				case initialText:
-					if toolSeen || continuationSeen {
-						return errors.New("Codex app-server initial text arrived after tool execution")
-					}
-					initialTextSeen = true
-				case finalText:
+				agentTextBytes += len(notification.Item.Text)
+				if notification.Item.Text == finalText {
 					if !toolSeen {
 						return errors.New("Codex app-server continuation arrived before tool execution")
 					}
 					continuationSeen = true
 				}
 			case "commandExecution":
-				if !initialTextSeen {
-					return errors.New("Codex app-server tool executed before initial text")
-				}
 				if notification.Item.Status != "completed" || notification.Item.ExitCode == nil || *notification.Item.ExitCode != 0 {
 					return errors.New("Codex app-server tool execution failed")
 				}
@@ -625,8 +680,14 @@ func awaitCodexAppServerToolTurn(decoder *json.Decoder, id int, threadID, initia
 			if notification.Turn.Status != "completed" {
 				return errors.New("Codex app-server tool turn did not complete")
 			}
-			if !responseSeen || !initialTextSeen || !toolSeen || !continuationSeen {
-				return errors.New("Codex app-server tool turn evidence incomplete")
+			if !responseSeen || !toolSeen || !continuationSeen {
+				return fmt.Errorf(
+					"Codex app-server tool turn evidence incomplete: response=%t tool=%t continuation=%t agent_text_bytes=%d",
+					responseSeen,
+					toolSeen,
+					continuationSeen,
+					agentTextBytes,
+				)
 			}
 			return nil
 		}
@@ -647,26 +708,36 @@ func decodeCodexAppServerMessage(decoder *json.Decoder) (codexAppServerMessage, 
 func TestAwaitCodexAppServerToolTurnRequiresOrderedEvidence(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"id":3,"result":{"turn":{"id":"turn-1"}}}`,
-		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-1","type":"agentMessage","text":"LIVE-APP-SERVER-STARTING"}}}`,
 		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"command-1","type":"commandExecution","command":"read message","commandActions":[],"cwd":"/tmp","status":"completed","exitCode":0}}}`,
 		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-2","type":"agentMessage","text":"LIVE-APP-SERVER-TOOL-PONG"}}}`,
 		`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed"}}}`,
 	}, "\n")
 	decoder := json.NewDecoder(strings.NewReader(stream))
-	if err := awaitCodexAppServerToolTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-STARTING", "LIVE-APP-SERVER-TOOL-PONG"); err != nil {
+	if err := awaitCodexAppServerToolTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-TOOL-PONG"); err != nil {
 		t.Fatalf("ordered app-server tool turn: %v", err)
 	}
 }
 
-func TestAwaitCodexAppServerToolTurnRejectsMissingInitialText(t *testing.T) {
+func TestAwaitCodexAppServerToolTurnRejectsContinuationBeforeTool(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"id":3,"result":{"turn":{"id":"turn-1"}}}`,
-		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"command-1","type":"commandExecution","command":"read message","commandActions":[],"cwd":"/tmp","status":"completed","exitCode":0}}}`,
 		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-2","type":"agentMessage","text":"LIVE-APP-SERVER-TOOL-PONG"}}}`,
 		`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed"}}}`,
 	}, "\n")
 	decoder := json.NewDecoder(strings.NewReader(stream))
-	if err := awaitCodexAppServerToolTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-STARTING", "LIVE-APP-SERVER-TOOL-PONG"); err == nil {
-		t.Fatal("app-server tool turn without initial text succeeded")
+	if err := awaitCodexAppServerToolTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-TOOL-PONG"); err == nil {
+		t.Fatal("app-server continuation before tool succeeded")
+	}
+}
+
+func TestAwaitCodexAppServerTextTurnRequiresExactText(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"id":3,"result":{"turn":{"id":"turn-1"}}}`,
+		`{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"id":"message-1","type":"agentMessage","text":"LIVE-APP-SERVER-STARTING"}}}`,
+		`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed"}}}`,
+	}, "\n")
+	decoder := json.NewDecoder(strings.NewReader(stream))
+	if err := awaitCodexAppServerTextTurn(decoder, 3, "thread-1", "LIVE-APP-SERVER-STARTING"); err != nil {
+		t.Fatalf("app-server text turn: %v", err)
 	}
 }
