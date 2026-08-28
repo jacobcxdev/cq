@@ -150,23 +150,15 @@ func NewNormalCallerAuthority(key []byte, epoch uint64, credentials []NormalCall
 	if len(key) != sha256.Size || epoch == 0 || consumer == nil || now == nil || random == nil {
 		return nil, ErrNormalCallerAuthUnavailable
 	}
-	authority := &NormalCallerAuthority{key: append([]byte(nil), key...), epoch: epoch, consumer: consumer, now: now, random: random}
-	for _, credential := range credentials {
-		if !validNormalCallerDomain(credential.Domain) || !validNormalBearer(credential.Bearer) || credential.SubjectID == "" || (!credential.ValidUntil.IsZero() && !credential.ValidFrom.IsZero() && !credential.ValidFrom.Before(credential.ValidUntil)) {
-			return nil, ErrNormalCallerAuthUnavailable
-		}
-		entry := normalCallerIndexEntry{domain: credential.Domain, fingerprint: normalCallerFingerprint(key, credential.Bearer), subjectID: credential.SubjectID, validFrom: credential.ValidFrom, validUntil: credential.ValidUntil}
-		duplicate := false
-		for _, existing := range authority.entries {
-			if existing.domain == entry.domain && existing.fingerprint == entry.fingerprint && existing.subjectID == entry.subjectID && existing.validFrom.Equal(entry.validFrom) && existing.validUntil.Equal(entry.validUntil) {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			authority.entries = append(authority.entries, entry)
-		}
+	index, err := BuildNormalCallerIndexV1(key, epoch, credentials)
+	if err != nil {
+		return nil, err
 	}
+	entries, err := normalCallerEntriesFromIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	authority := &NormalCallerAuthority{key: append([]byte(nil), key...), epoch: epoch, entries: entries, consumer: consumer, now: now, random: random}
 	authority.published = append([]normalCallerIndexEntry(nil), authority.entries...)
 	return authority, nil
 }

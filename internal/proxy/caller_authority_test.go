@@ -89,6 +89,32 @@ func TestCallerAuthorityAcceptsOnlyAuthenticatedMonotonicIndexUpdates(t *testing
 	}
 }
 
+func TestCallerAuthorityAcceptsEquivalentCanonicalCurrentIndex(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, sha256.Size)
+	credentials := []NormalCallerCredentialV1{
+		{Domain: NormalCallerLocal, Bearer: "local-bearer", SubjectID: "local"},
+		{Domain: NormalCallerCodex, Bearer: "codex-bearer", SubjectID: "codex"},
+	}
+	authority, err := NewNormalCallerAuthority(
+		key,
+		1,
+		credentials,
+		&callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)},
+		time.Now,
+		bytes.NewReader(bytes.Repeat([]byte{0x31}, 256)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := BuildNormalCallerIndexV1(key, 1, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.UpdateFromIndex(index); err != nil {
+		t.Fatalf("equivalent current index: %v", err)
+	}
+}
+
 func TestCallerAuthorityRetainsSupersededBearerUntilExpiry(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, 32)
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
