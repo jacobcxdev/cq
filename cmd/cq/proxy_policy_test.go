@@ -187,6 +187,39 @@ func TestProxyPolicyPoolRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestProxyPolicyPoolMutationErrorsNamePools(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		response  string
+		want      string
+	}{
+		{name: "missing rename source", arguments: []string{"pool", "rename", "Missing", "Cyber"}, response: `{"error":"pool_not_found"}`, want: `proxy policy pool rename "Missing" to "Cyber": pool not found`},
+		{name: "duplicate rename target", arguments: []string{"pool", "rename", "Cyber", "Research"}, response: `{"error":"pool_name_conflict"}`, want: `proxy policy pool rename "Cyber" to "Research": pool name already exists`},
+		{name: "invalid rename target", arguments: []string{"pool", "rename", "Cyber", "Bad\nName"}, response: `{"error":"invalid_pool_name"}`, want: `proxy policy pool rename "Cyber" to "Bad\nName": invalid pool name`},
+		{name: "missing value target", arguments: []string{"pool", "value", "Missing", "10"}, response: `{"error":"pool_not_found"}`, want: `proxy policy pool value "Missing": pool not found`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(http.StatusConflict)
+				_, _ = writer.Write([]byte(test.response))
+			}))
+			defer server.Close()
+			port := server.Listener.Addr().(*net.TCPAddr).Port
+			arguments := append(append([]string(nil), test.arguments...), "--port", strconv.Itoa(port))
+			err := runProxyPolicyWithDependencies(context.Background(), arguments, &bytes.Buffer{}, proxyPolicyDependencies{
+				LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{Port: port, LocalToken: "local-token"}, nil },
+				Doer:       server.Client(),
+			})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error = %q, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestProxyPolicyRejectsUnknownAndOversizedInput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if err := runProxyPolicy([]string{"apply", "--unknown", "x"}, &bytes.Buffer{}); err == nil {

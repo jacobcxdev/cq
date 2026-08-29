@@ -202,6 +202,23 @@ func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, metho
 		return proxy.RoutingPolicyDocument{}, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if path == proxy.RuntimePolicyPoolPath {
+			var failure struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(responseBody, &failure) == nil {
+				switch failure.Error {
+				case "invalid_pool_name":
+					return proxy.RoutingPolicyDocument{}, errors.New("invalid pool name")
+				case "pool_not_found":
+					return proxy.RoutingPolicyDocument{}, errors.New("pool not found")
+				case "pool_name_conflict":
+					return proxy.RoutingPolicyDocument{}, errors.New("pool name already exists")
+				case "pool_mutation_rejected":
+					return proxy.RoutingPolicyDocument{}, errors.New("pool mutation rejected")
+				}
+			}
+		}
 		return proxy.RoutingPolicyDocument{}, fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
 	}
 	var policy proxy.RoutingPolicyDocument
@@ -299,7 +316,10 @@ func runProxyPolicyPool(ctx context.Context, args []string, output io.Writer, de
 		}
 		updated, err := proxyPolicyControl(ctx, deps, http.MethodPost, proxy.RuntimePolicyPoolPath, port, mutation)
 		if err != nil {
-			return err
+			if args[0] == "rename" {
+				return fmt.Errorf("proxy policy pool rename %q to %q: %w", args[1], args[2], err)
+			}
+			return fmt.Errorf("proxy policy pool value %q: %w", args[1], err)
 		}
 		return writeProxyPolicyJSON(output, updated)
 	}

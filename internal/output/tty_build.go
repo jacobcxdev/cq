@@ -106,20 +106,20 @@ func ttyLabelWidth(report app.Report) int {
 	width := 7
 	for _, providerReport := range report.Providers {
 		if len(providerReport.Results) != 0 || providerReport.Aggregate != nil {
-			width = max(width, utf8.RuneCountInString(providerDisplayName(providerReport.ID)))
+			width = max(width, lipgloss.Width(providerDisplayName(providerReport.ID)))
 		}
 		if providerReport.ProxyEligibility != nil && providerReport.ProxyEligibility.ExcludedCount > 0 {
-			width = max(width, utf8.RuneCountInString("Proxy"))
+			width = max(width, lipgloss.Width("Proxy"))
 		}
 		for _, pool := range providerReport.ProxyPools {
-			width = max(width, utf8.RuneCountInString(pool.Name))
+			width = max(width, lipgloss.Width(pool.Name))
 		}
 	}
 	return width
 }
 
 func padTTYLabel(label string, width int) string {
-	return strings.Repeat(" ", max(0, width-utf8.RuneCountInString(label))) + label
+	return strings.Repeat(" ", max(0, width-lipgloss.Width(label))) + label
 }
 
 // buildResultBlock builds the header and window rows for a single quota.Result.
@@ -489,25 +489,9 @@ func rowVisibleWidth(row TTYWindowRow) int {
 		2 + visibleWidth(row.Burndown)
 }
 
-// visibleWidth returns the number of visible characters in a styled string
-// by stripping ANSI escape sequences.
+// visibleWidth returns terminal-cell width after ANSI styling is removed.
 func visibleWidth(s string) int {
-	n := 0
-	inEsc := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEsc = true
-			continue
-		}
-		if inEsc {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEsc = false
-			}
-			continue
-		}
-		n++
-	}
-	return n
+	return lipgloss.Width(s)
 }
 
 // headerVisibleWidth calculates the visible character width of a header line.
@@ -519,15 +503,15 @@ func headerVisibleWidth(r quota.Result, id provider.ID) int {
 		label = r.Tier
 	}
 	if label != "" && label != "null" {
-		w += 1 + utf8.RuneCountInString(label)
+		w += 1 + lipgloss.Width(label)
 		if r.RateLimitTier != "" {
 			if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
-				w += utf8.RuneCountInString(fmt.Sprintf(" %dx", m))
+				w += lipgloss.Width(fmt.Sprintf(" %dx", m))
 			}
 		}
 	}
 	if r.Email != "" {
-		w += 3 + utf8.RuneCountInString(r.Email) // " · <email>"
+		w += 3 + lipgloss.Width(r.Email) // " · <email>"
 	}
 	return w
 }

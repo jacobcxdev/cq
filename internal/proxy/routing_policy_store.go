@@ -31,6 +31,9 @@ const (
 
 var (
 	ErrRoutingFeatureInactive = errors.New("feature_inactive")
+	ErrPoolNameInvalid        = errors.New("invalid pool name")
+	ErrPoolNotFound           = errors.New("pool not found")
+	ErrPoolNameConflict       = errors.New("pool name already exists")
 	poolNamePattern           = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 	poolIDPattern             = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
@@ -195,16 +198,16 @@ func (s *RoutingPolicyStore) RenamePool(name, newName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !validPoolName(newName) {
-		return errors.New("invalid account pool name")
+		return ErrPoolNameInvalid
 	}
 	index := poolIndexByName(s.current, name)
 	if index < 0 {
-		return errors.New("account pool not found")
+		return ErrPoolNotFound
 	}
 	newFolded := foldPoolName(newName)
 	for candidate := range s.current.Pools {
 		if candidate != index && foldPoolName(s.current.Pools[candidate].Name) == newFolded {
-			return errors.New("duplicate account pool name")
+			return ErrPoolNameConflict
 		}
 	}
 	policy := cloneRoutingPolicyV2(*s.current)
@@ -218,7 +221,7 @@ func (s *RoutingPolicyStore) SetPoolValue(name string, value PoolValue) error {
 	defer s.mu.Unlock()
 	index := poolIndexByName(s.current, name)
 	if index < 0 {
-		return errors.New("account pool not found")
+		return ErrPoolNotFound
 	}
 	policy := cloneRoutingPolicyV2(*s.current)
 	policy.Pools[index].Value = value
@@ -243,6 +246,9 @@ func advanceRoutingPolicy(policy *RoutingPolicyV2) {
 	policy.AuthorityGeneration++
 	policy.RoutingGeneration++
 	policy.EffectiveGeneration = policy.RoutingGeneration
+	for index := range policy.CapabilityRoutingEvidence {
+		policy.CapabilityRoutingEvidence[index].RoutingGeneration = policy.RoutingGeneration
+	}
 }
 
 func (s *RoutingPolicyStore) publishLocked(policy RoutingPolicyV2) error {

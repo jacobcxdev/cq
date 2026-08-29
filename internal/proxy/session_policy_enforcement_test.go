@@ -1,13 +1,20 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -147,6 +154,112 @@ func TestSessionPolicyResolverKeepsPoolIdentityAcrossRename(t *testing.T) {
 	if after.PoolID != before.PoolID || after.Pool != "Security Research" || !slices.Equal(after.Allowed, before.Allowed) {
 		t.Fatalf("before = %#v after = %#v", before, after)
 	}
+}
+
+func TestCodexHTTPAndWebSocketPoolRoutingSurvivesControlRename(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	root := filepath.Join(t.TempDir(), "state")
+	if err := InitialiseProxyResilienceState(context.Background(), ProxyResilienceStateOptions{
+		FS: fsutil.OSFileSystem{}, Root: root, Random: rand.Reader, Now: func() time.Time { return now },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := OpenProxyResilienceState(context.Background(), ProxyResilienceStateOptions{
+		FS: fsutil.OSFileSystem{}, Root: root, Random: rand.Reader, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	predicate := CapabilityPredicateCoreV1{
+		SchemaVersion: 1, Capability: "model.invoke", ProductSurface: string(NormalCallerLocal), AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5",
+	}
+	if err := state.Routing.PublishDocument(RoutingPolicyDocument{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools: []AccountPoolDocument{{Name: "Cyber", Value: 10, Members: []codex.AccountKey{"account-a", "account-b"}}},
+		SessionBindings: []SessionBindingDocument{{
+			SessionDigest: state.Routing.SessionDigest([]byte("session")), Pool: "Cyber",
+		}},
+		CapabilityPool:       "Cyber",
+		CapabilityPredicates: []CapabilityPredicateCoreV1{predicate},
+		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{
+			capabilityEvidenceForTest("account-a", "workspace-a", predicate, "probe-a", nil, CapabilityEvidenceIneligible, 1, now.Add(-time.Minute)),
+			capabilityEvidenceForTest("account-b", "workspace-b", predicate, "probe-b", nil, CapabilityEvidenceEligible, 1, now.Add(-time.Minute)),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	poolID := state.Routing.Current().Pools[0].ID
+	resolver := state.Routing.Resolver()
+	handler, err := (&Server{
+		Config: &Config{ClaudeUpstream: "https://example.test"}, RoutingPolicy: state.Routing, SessionPolicy: resolver,
+	}).handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runPlans := func(phase string) {
+		t.Helper()
+		for _, transport := range []string{"http", "websocket"} {
+			t.Run(phase+"/"+transport, func(t *testing.T) {
+				accountA := frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour)))
+				accountA.Identity.AccountID = "workspace-a"
+				accountB := frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour)))
+				accountB.Identity.AccountID = "workspace-b"
+				runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+				permits := &sessionPolicyPermitRecorder{}
+				factory := &CodexHTTPRequestPlanFactory{
+					Inventory:         &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{accountA, accountB}}},
+					Routes:            &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{JournalGeneration: 1}},
+					Runtime:           runtime,
+					DefaultAccountKey: "account-a",
+					Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+					SessionPolicy:     resolver,
+					DispatchPermits:   permits,
+					TransportKind:     transport,
+					Now:               func() time.Time { return now },
+				}
+				caller := RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local-caller", ConsumptionDigest: strings.Repeat("a", 64)}
+				prepared, err := factory.Build(withRuntimeCallerAuthority(context.Background(), caller), CodexHTTPRequestPlanInput{
+					Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer prepared.Frozen.Release()
+				accounts := prepared.Dispatch.Accounts()
+				if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+					t.Fatalf("dispatch = %#v, want capability-eligible account-b", accounts)
+				}
+				current := state.Routing.Current()
+				if len(permits.requests) != 1 || permits.requests[0].PoolID != poolID || permits.requests[0].RoutingGeneration != current.RoutingGeneration || !slices.Equal(permits.requests[0].AllowedAccounts, []codex.AccountKey{"account-b"}) {
+					t.Fatalf("permit = %#v, policy = %#v", permits.requests, current)
+				}
+				if runtime.plan.DispatchPermitDigest == "" {
+					t.Fatal("durable route omitted dispatch permit")
+				}
+			})
+		}
+	}
+
+	runPlans("before")
+	renameBody, err := json.Marshal(PoolMutationRequest{Operation: "rename", Name: "Cyber", NewName: "Security Research"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, RuntimePolicyPoolPath, bytes.NewReader(renameBody)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("rename response = %d %q", response.Code, response.Body.String())
+	}
+	current := state.Routing.Current()
+	if current.Pools[0].ID != poolID || current.Pools[0].Name != "Security Research" || current.CapabilityPool != poolID || current.CapabilityRoutingEvidence[0].RoutingGeneration != current.RoutingGeneration {
+		t.Fatalf("renamed policy = %#v", current)
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte(poolID)) || !bytes.Contains(response.Body.Bytes(), []byte(`"name":"Security Research"`)) {
+		t.Fatalf("rename output = %q", response.Body.String())
+	}
+	runPlans("after")
 }
 
 func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {

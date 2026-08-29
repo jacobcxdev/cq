@@ -104,7 +104,7 @@ func (s *Server) handlePolicyPoolControl(writer http.ResponseWriter, request *ht
 		err = errors.New("invalid pool mutation")
 	}
 	if err != nil {
-		http.Error(writer, "pool mutation rejected", http.StatusConflict)
+		writePoolMutationError(writer, err)
 		return
 	}
 	s.SessionPolicy.Replace(s.RoutingPolicy.Current())
@@ -114,6 +114,23 @@ func (s *Server) handlePolicyPoolControl(writer http.ResponseWriter, request *ht
 		return
 	}
 	writePolicyControlJSON(writer, document)
+}
+
+func writePoolMutationError(writer http.ResponseWriter, err error) {
+	code := "pool_mutation_rejected"
+	switch {
+	case errors.Is(err, ErrPoolNameInvalid):
+		code = "invalid_pool_name"
+	case errors.Is(err, ErrPoolNotFound):
+		code = "pool_not_found"
+	case errors.Is(err, ErrPoolNameConflict):
+		code = "pool_name_conflict"
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(writer).Encode(struct {
+		Error string `json:"error"`
+	}{Error: code})
 }
 
 func (s *Server) handlePolicySessionDigest(writer http.ResponseWriter, request *http.Request) {

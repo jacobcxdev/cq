@@ -322,6 +322,31 @@ func TestBuildTTYModelRightAlignsAllSummaryLabelsToLongestPoolName(t *testing.T)
 	}
 }
 
+func TestBuildTTYModelRightAlignsUnicodePoolNameByTerminalWidth(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	report := app.Report{Providers: []app.ProviderReport{{
+		ID:        provider.Codex,
+		Results:   []quota.Result{{Status: quota.StatusOK, Plan: "pro"}},
+		Aggregate: &app.AggregateReport{ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "3 × pro 20x = 60x"}},
+		ProxyPools: []app.ProxyPoolReport{{
+			Name: "安全研究",
+			ProxyEligibilityReport: app.ProxyEligibilityReport{ExcludedCount: 1, Aggregate: &app.AggregateReport{
+				ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "2 × pro 20x = 40x"},
+			}},
+		}},
+	}}}
+	section := BuildTTYModel(report, now).Sections[0]
+	header := stripANSI(section.Header)
+	aggregateHeader := stripANSI(section.AggHeader)
+	poolHeader := stripANSI(section.ProxyPools[0].Header)
+	accountColumn := lipgloss.Width(header[:strings.Index(header, "pro")])
+	aggregateColumn := lipgloss.Width(aggregateHeader[:strings.Index(aggregateHeader, "3 ×")])
+	poolColumn := lipgloss.Width(poolHeader[:strings.Index(poolHeader, "2 ×")])
+	if accountColumn != aggregateColumn || aggregateColumn != poolColumn {
+		t.Fatalf("summary terminal columns differ: account=%d aggregate=%d pool=%d\n%q\n%q\n%q", accountColumn, aggregateColumn, poolColumn, header, aggregateHeader, poolHeader)
+	}
+}
+
 // TestBuildAggRows_UnderburnWithImminentOverrideKeepsUnderburn verifies that
 // when GaugePos is in the underburn range (>= 4) and GaugeOverride is
 // "imminent_block", buildAggRows must render the underburn columns (waste pct
