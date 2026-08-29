@@ -372,6 +372,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST /v1/registry/refresh", s.handleRegistryRefresh)
 	mux.HandleFunc("GET "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("PUT "+RuntimePolicyPath, s.handlePolicyControl)
+	mux.HandleFunc("POST "+RuntimePolicyPoolPath, s.handlePolicyPoolControl)
 	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptV2Path, s.handleCodexTurnReceipt)
