@@ -38,5 +38,22 @@ jobs:
 
       - run: go build ./...
       - run: GOOS=windows GOARCH=amd64 go build ./...
+      - run: GOOS=windows GOARCH=arm64 go build ./...
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - run: go build -o cq.exe ./cmd/cq
+      - run: .\cq.exe --help
+      - run: .\cq.exe --version
+      - run: go vet ./...
+      - run: go test -race -count=1 ./internal/userdirs ./internal/fsutil
+      - run: go test -race -count=1 ./internal/keyring ./internal/proxy -run '^(TestCQManifestPathUsesWindowsCacheRoot|TestDefaultCQManifestPathUsesWindowsCacheRoot|TestCodexInstalledProtectedIdentityWindowsUsesFullFileID)$'

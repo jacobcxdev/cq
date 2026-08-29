@@ -305,7 +305,7 @@ func OpenCodexRoutingRuntime(cfg *Config, cqBuild, clientBuild string) (*CodexRo
 		return nil, err
 	}
 	httpReq, wsReq := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
-	return openCodexRoutingRuntimeAtWithArtifactCapture(paths.StateDir, cfg, httpReq, wsReq, captureCurrentCodexInstalledArtifacts)
+	return openCodexRoutingRuntimeAt(paths.StateDir, cfg, httpReq, wsReq)
 }
 
 func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTransportRequirements) (*CodexRoutingRuntime, error) {
