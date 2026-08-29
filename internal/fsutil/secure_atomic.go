@@ -600,7 +600,7 @@ func validateRetainedDirectoryPath(inspector SecurePathInspector, directory Dura
 	}
 	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
 	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
-	if !heldOK || !pathOK || !SameSecureObject(heldIdentity, pathIdentity) {
+	if !heldOK || !pathOK || !sameSecureDirectoryObject(heldIdentity, pathIdentity) {
 		return fmt.Errorf("%w: retained directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
@@ -892,7 +892,7 @@ func validateSecureDirectoryHandle(inspector SecurePathInspector, directory Secu
 	}
 	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
 	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
-	if !heldOK || !pathOK || !SameSecureObject(heldIdentity, pathIdentity) {
+	if !heldOK || !pathOK || !sameSecureDirectoryObject(heldIdentity, pathIdentity) {
 		return fmt.Errorf("%w: directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
@@ -923,7 +923,7 @@ func ValidateOwnerControlledDirectoryHandle(inspector SecurePathInspector, direc
 	}
 	heldIdentity, heldOK := inspector.FileIdentity(heldInfo)
 	pathIdentity, pathOK := inspector.FileIdentity(pathInfo)
-	if !heldOK || !pathOK || !SameSecureObject(heldIdentity, pathIdentity) {
+	if !heldOK || !pathOK || !sameSecureDirectoryObject(heldIdentity, pathIdentity) {
 		return fmt.Errorf("%w: directory path identity", ErrUnsafeSecurePath)
 	}
 	return nil
@@ -968,6 +968,10 @@ func validateSecureRegularFileInDirectoryIfPresent(inspector SecurePathInspector
 
 func SameSecureObject(first, second SecureFileIdentity) bool {
 	return first == second
+}
+
+func sameSecureDirectoryObject(first, second SecureFileIdentity) bool {
+	return first.Device == second.Device && first.Inode == second.Inode && first.FileID == second.FileID
 }
 
 func validateSecureEntryName(name string) error {

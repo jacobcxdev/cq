@@ -102,6 +102,62 @@ func TestUnixSecureDirectoryRetainsOpenedIdentity(t *testing.T) {
 	}
 }
 
+type directoryLinkCountChangingFS struct {
+	OSFileSystem
+	path  string
+	child string
+	once  sync.Once
+	err   error
+}
+
+func (fsys *directoryLinkCountChangingFS) Lstat(name string) (os.FileInfo, error) {
+	if name == fsys.path {
+		fsys.once.Do(func() { fsys.err = os.Mkdir(fsys.child, 0o700) })
+		if fsys.err != nil {
+			return nil, fsys.err
+		}
+	}
+	return fsys.OSFileSystem.Lstat(name)
+}
+
+func TestValidateSecureDirectoryHandleAllowsLinkCountChange(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := (OSFileSystem{}).OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	fsys := &directoryLinkCountChangingFS{
+		path:  state,
+		child: filepath.Join(state, "child"),
+	}
+	if err := ValidateSecureDirectoryHandle(fsys, directory, state); err != nil {
+		t.Fatalf("validate retained directory after child creation: %v", err)
+	}
+}
+
+func TestValidateRetainedDirectoryPathAllowsLinkCountChange(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := (OSFileSystem{}).OpenDurableDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	fsys := &directoryLinkCountChangingFS{
+		path:  state,
+		child: filepath.Join(state, "child"),
+	}
+	if err := validateRetainedDirectoryPath(fsys, directory, state, true); err != nil {
+		t.Fatalf("validate retained directory after child creation: %v", err)
+	}
+}
+
 func TestUnixRenameNoReplaceCheckedRestoresSourceWhenDestinationExists(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(state, 0o700); err != nil {
