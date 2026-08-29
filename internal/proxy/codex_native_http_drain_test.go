@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -69,6 +70,100 @@ func TestCodexNativeHTTPCloseAndDrainClosesAdmissionBeforeBodyRead(t *testing.T)
 	}
 }
 
+func TestCodexNativeHTTPCloseAndDrainCancelsBlockedPlanning(t *testing.T) {
+	planner := &codexNativeHTTPBlockingPlanner{
+		started: make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{}, "https://codex.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", bytes.NewReader(frozenRequestBody("gpt-5", CodexRequestTurn, "private")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		handler.TryServe(httptest.NewRecorder(), request, false)
+	}()
+	select {
+	case <-planner.started:
+	case <-time.After(time.Second):
+		t.Fatal("native request did not begin planning")
+	}
+
+	drainContext, cancelDrain := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDrain()
+	if err := handler.CloseAndDrain(drainContext); err != nil {
+		t.Fatalf("drain blocked on cancelled planner: %v", err)
+	}
+	select {
+	case <-planner.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("planner did not observe handler shutdown")
+	}
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled native request did not return")
+	}
+}
+
+func TestCodexNativeHTTPRequestPlanningContextCreatedAfterShutdownIsCancelled(t *testing.T) {
+	handler, err := NewCodexNativeHTTPHandler(
+		&codexNativeHTTPPlannerStub{},
+		&CodexHTTPRequestSession{},
+		"https://codex.example",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.CloseAndDrain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	planningContext, release := handler.requestPlanningContext(context.Background())
+	defer release()
+	if err := planningContext.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("planning context error = %v, want synchronous cancellation", err)
+	}
+}
+
+func TestCodexNativeHTTPCloseAndDrainClosesAdmissionBeforeCancellingPlanning(t *testing.T) {
+	handler, err := NewCodexNativeHTTPHandler(
+		&codexNativeHTTPPlannerStub{err: errors.New("stop after request read")},
+		&CodexHTTPRequestSession{},
+		"https://codex.example",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectedBody := &codexNativeHTTPUnreadBody{}
+	rejectedWriter := httptest.NewRecorder()
+	originalCancel := handler.cancelPlanning
+	handler.cancelPlanning = func() {
+		request, requestErr := http.NewRequest(http.MethodPost, "http://localhost/v1/responses", rejectedBody)
+		if requestErr != nil {
+			t.Error(requestErr)
+			return
+		}
+		handler.TryServe(rejectedWriter, request, false)
+		originalCancel()
+	}
+
+	if err := handler.CloseAndDrain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rejectedWriter.Code != http.StatusServiceUnavailable {
+		t.Fatalf("request during planning cancellation status = %d, want 503", rejectedWriter.Code)
+	}
+	if reads, closes := rejectedBody.counts(); reads != 0 || closes != 1 {
+		t.Fatalf("request during planning cancellation reads/closes = %d/%d, want 0/1", reads, closes)
+	}
+}
+
 func TestCodexNativeHTTPPanicReleasesExactlyOneAdmission(t *testing.T) {
 	blockedBody := newCodexNativeHTTPBlockingBody()
 	handler, err := NewCodexNativeHTTPHandler(
@@ -134,6 +229,18 @@ type codexNativeHTTPUnreadBody struct {
 	mu     sync.Mutex
 	reads  int
 	closes int
+}
+
+type codexNativeHTTPBlockingPlanner struct {
+	started chan struct{}
+	stopped chan struct{}
+}
+
+func (planner *codexNativeHTTPBlockingPlanner) Build(ctx context.Context, _ CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
+	close(planner.started)
+	<-ctx.Done()
+	close(planner.stopped)
+	return CodexPreparedHTTPRequest{}, ctx.Err()
 }
 
 func (body *codexNativeHTTPUnreadBody) Read([]byte) (int, error) {

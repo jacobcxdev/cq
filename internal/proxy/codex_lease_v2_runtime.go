@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -91,6 +92,24 @@ type CodexLeaseRuntime struct {
 	leases            *CodexTurnLeaseManager
 	revalidateAccount CodexLeaseAccountRevalidator
 	nativeAdmission   *codexNativeHTTPAdmissionOwner
+	planningGates     *codexLanePlanningGateSet
+}
+
+type codexLanePlanningGateSet struct {
+	mu      sync.Mutex
+	entries map[LaneKey]*codexLanePlanningGateEntry
+}
+
+type codexLanePlanningGateEntry struct {
+	token chan struct{}
+	refs  int
+}
+
+type codexLanePlanningGateGuard struct {
+	set   *codexLanePlanningGateSet
+	lane  LaneKey
+	entry *codexLanePlanningGateEntry
+	once  sync.Once
 }
 
 // CodexLeaseAccountRevalidator proves that an account still exists, remains
@@ -156,13 +175,15 @@ func newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(
 	if coordinator == nil || coordinator.store == nil || coordinator.leases == nil || coordinator.leases.mu == nil || coordinator.leases.lifecycle == nil || coordinator.leases.accountGates == nil || revalidate == nil || coordinator.leases.writerUnavailable() {
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
-	return &CodexLeaseRuntime{
+	runtime := &CodexLeaseRuntime{
 		coordinator:       coordinator,
 		store:             coordinator.store,
 		leases:            coordinator.leases,
 		revalidateAccount: revalidate,
 		nativeAdmission:   newCodexNativeHTTPAdmissionOwner(sink),
-	}, nil
+		planningGates:     &codexLanePlanningGateSet{entries: make(map[LaneKey]*codexLanePlanningGateEntry)},
+	}
+	return runtime, nil
 }
 
 func (runtime *CodexLeaseRuntime) nativeHTTPAdmissionPromotionBlocked() bool {
@@ -171,6 +192,113 @@ func (runtime *CodexLeaseRuntime) nativeHTTPAdmissionPromotionBlocked() bool {
 
 func (runtime *CodexLeaseRuntime) BeginRequest(plan CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
 	return runtime.BeginRequestContext(context.Background(), plan)
+}
+
+const codexLeaseRequestPlanningRetryInterval = 25 * time.Millisecond
+
+// AcquireRequestPlanningContext serialises one lane's prospective request
+// planning and waits until its current durable request has fully drained.
+// The returned ownership must remain held through BeginRequestContext.
+// Every still-live caller proceeds in order; no idempotency authority exists
+// for inferring that equal request bytes are safe to discard or replay.
+func (runtime *CodexLeaseRuntime) AcquireRequestPlanningContext(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (func(), error) {
+	if runtime == nil || runtime.store == nil || ctx == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if err := key.validate(); err != nil {
+		return nil, err
+	}
+	guard, err := runtime.planningGates.acquire(ctx, key.Lane)
+	if err != nil {
+		return nil, err
+	}
+	release := guard.Release
+	for {
+		available, err := runtime.requestPlanningAvailable(key, accounts, authority)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		if available {
+			return release, nil
+		}
+		timer := time.NewTimer(codexLeaseRequestPlanningRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			release()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (set *codexLanePlanningGateSet) acquire(ctx context.Context, lane LaneKey) (*codexLanePlanningGateGuard, error) {
+	if set == nil || ctx == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	set.mu.Lock()
+	entry := set.entries[lane]
+	if entry == nil {
+		entry = &codexLanePlanningGateEntry{token: make(chan struct{}, 1)}
+		entry.token <- struct{}{}
+		set.entries[lane] = entry
+	}
+	entry.refs++
+	set.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		set.releaseReference(lane, entry)
+		return nil, ctx.Err()
+	case <-entry.token:
+		return &codexLanePlanningGateGuard{set: set, lane: lane, entry: entry}, nil
+	}
+}
+
+func (guard *codexLanePlanningGateGuard) Release() {
+	if guard == nil {
+		return
+	}
+	guard.once.Do(func() {
+		guard.entry.token <- struct{}{}
+		guard.set.releaseReference(guard.lane, guard.entry)
+	})
+}
+
+func (set *codexLanePlanningGateSet) releaseReference(lane LaneKey, entry *codexLanePlanningGateEntry) {
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	if entry.refs > 0 {
+		entry.refs--
+	}
+	if entry.refs == 0 && set.entries[lane] == entry {
+		delete(set.entries, lane)
+	}
+}
+
+func (runtime *CodexLeaseRuntime) requestPlanningAvailable(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (bool, error) {
+	restored, err := runtime.store.LoadLane(key, accounts, authority)
+	if err != nil {
+		return false, err
+	}
+	switch restored.Classification {
+	case CodexRestoredLaneCurrent:
+		current, ok := runtime.restoredRecord(restored, restored.Fence.Current)
+		if !ok {
+			return false, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
+		}
+		return codexLeaseRuntimeCanBeginRequest(current.Record), nil
+	case CodexRestoredLaneUnseen:
+		if restored.Fence.Lane == 0 {
+			return true, nil
+		}
+		return runtime.canReserveSuccessor(restored)
+	default:
+		return true, nil
+	}
 }
 
 // BeginRequestContext durably reserves an unseen turn, then atomically installs
@@ -1111,30 +1239,19 @@ func (runtime *CodexLeaseRuntime) reserveUnseen(restored CodexRestoredLane) erro
 }
 
 func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account codex.AccountKey, restored CodexRestoredLane) error {
-	if restored.Fence.Last.IsZero() || restored.Fence.Last == restored.RequestedIdentity {
+	ready, err := runtime.canReserveSuccessor(restored)
+	if err != nil {
+		return err
+	}
+	if !ready {
 		return ErrCodexConcurrentTurn
 	}
-	predecessor, ok := runtime.restoredRecord(restored, restored.Fence.Last)
-	if !ok {
-		return fmt.Errorf("%w: successor predecessor is absent", ErrCodexLeaseTrustLost)
-	}
-	if predecessor.Record.RoutingRefs != 0 || predecessor.Record.AttemptRefs != 0 || predecessor.Record.ResponseObserverRefs != 0 {
-		return ErrCodexConcurrentTurn
-	}
+	predecessor, _ := runtime.restoredRecord(restored, restored.Fence.Last)
 	predecessorCurrent := restored.Fence.Current
 	upserts := make([]CodexJournalRecordV2, 0, 2)
 	switch {
 	case predecessorCurrent.IsZero():
-		if predecessor.Record.State != LeaseFailedUnadmitted && predecessor.Record.State != LeaseSuperseded && predecessor.Record.State != LeaseExpired {
-			return ErrCodexConcurrentTurn
-		}
-		if predecessor.Record.Generation != 0 && !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)) {
-			return ErrCodexConcurrentTurn
-		}
 	case predecessorCurrent == restored.Fence.Last:
-		if (predecessor.Record.State != LeaseContinuationPending && predecessor.Record.State != LeaseBoundQuiescent && predecessor.Record.State != LeaseOrphaned) || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)) || !predecessor.Record.SocketLineageExtinct {
-			return ErrCodexConcurrentTurn
-		}
 		superseded := codexLeaseRuntimeMutationRecord(predecessor.Record)
 		superseded.State = LeaseSuperseded
 		upserts = append(upserts, superseded)
@@ -1186,6 +1303,31 @@ func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account 
 	}
 	_, err = runtime.store.CommitLane(fence, CodexLaneMutation{Lane: &lane, UpsertRecords: upserts})
 	return err
+}
+
+func (runtime *CodexLeaseRuntime) canReserveSuccessor(restored CodexRestoredLane) (bool, error) {
+	if restored.Fence.Last.IsZero() || restored.Fence.Last == restored.RequestedIdentity {
+		return false, nil
+	}
+	predecessor, ok := runtime.restoredRecord(restored, restored.Fence.Last)
+	if !ok {
+		return false, fmt.Errorf("%w: successor predecessor is absent", ErrCodexLeaseTrustLost)
+	}
+	if predecessor.Record.RoutingRefs != 0 || predecessor.Record.AttemptRefs != 0 || predecessor.Record.ResponseObserverRefs != 0 {
+		return false, nil
+	}
+	switch {
+	case restored.Fence.Current.IsZero():
+		if predecessor.Record.State != LeaseFailedUnadmitted && predecessor.Record.State != LeaseSuperseded && predecessor.Record.State != LeaseExpired {
+			return false, nil
+		}
+		return predecessor.Record.Generation == 0 || codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)), nil
+	case restored.Fence.Current == restored.Fence.Last:
+		terminalState := predecessor.Record.State == LeaseContinuationPending || predecessor.Record.State == LeaseBoundQuiescent || predecessor.Record.State == LeaseOrphaned
+		return terminalState && codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)) && predecessor.Record.SocketLineageExtinct, nil
+	default:
+		return false, fmt.Errorf("%w: lane current and last authority diverged", ErrCodexLeaseTrustLost)
+	}
 }
 
 func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) CodexCurrentRequest {

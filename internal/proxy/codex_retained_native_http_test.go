@@ -9,8 +9,11 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func TestCodexRetainedNativeHTTPDeclineRestoresExactRequest(t *testing.T) {
@@ -117,6 +120,198 @@ func TestCodexRetainedNativeHTTPClaimCarriesExactBound(t *testing.T) {
 	}
 }
 
+func TestCodexRetainedNativeHTTPClaimJoinsNativeAdmission(t *testing.T) {
+	body := frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")
+	buildStarted := make(chan struct{})
+	buildRelease := make(chan struct{})
+	planner := &codexRetainedHTTPPlannerStub{
+		expected: &CodexLeaseBoundExpectation{
+			Identity:         CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true},
+			AccountKey:       "account-a",
+			RecordGeneration: 12,
+		},
+		claimed:      true,
+		buildErr:     errors.New("stop after planning"),
+		buildStarted: buildStarted,
+		buildRelease: buildRelease,
+	}
+	handler := newCodexRetainedHTTPTestHandler(t, planner)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		handler.TryServe(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", bytes.NewReader(body)), false)
+	}()
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("claimed retained request did not begin building")
+	}
+
+	drainContext, cancelDrain := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelDrain()
+	if err := handler.native.CloseAndDrain(drainContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("claimed retained drain = %v, want deadline", err)
+	}
+	close(buildRelease)
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("claimed retained request did not return")
+	}
+	if err := handler.native.CloseAndDrain(context.Background()); err != nil {
+		t.Fatalf("claimed retained final drain: %v", err)
+	}
+}
+
+func TestCodexRetainedNativeHTTPClosedAdmissionRejectsClaimBeforeBuild(t *testing.T) {
+	body := frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")
+	planner := &codexRetainedHTTPPlannerStub{
+		expected: &CodexLeaseBoundExpectation{
+			Identity:         CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true},
+			AccountKey:       "account-a",
+			RecordGeneration: 12,
+		},
+		claimed: true,
+	}
+	handler := newCodexRetainedHTTPTestHandler(t, planner)
+	if err := handler.native.CloseAndDrain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writer := httptest.NewRecorder()
+
+	handled, model := handler.TryServe(writer, httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", bytes.NewReader(body)), false)
+
+	if !handled || model != "" || writer.Code != http.StatusServiceUnavailable {
+		t.Fatalf("closed retained claim = handled %t model %q status %d", handled, model, writer.Code)
+	}
+	if planner.probeCalls != 1 || planner.buildCalls != 0 {
+		t.Fatalf("closed retained claim probe/build = %d/%d, want 1/0", planner.probeCalls, planner.buildCalls)
+	}
+}
+
+func TestCodexRetainedNativeHTTPShutdownCancelsPreClaimPlanning(t *testing.T) {
+	body := frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")
+	probeStarted := make(chan struct{})
+	planner := &codexRetainedHTTPPlannerStub{probeStarted: probeStarted, probeWaitForCancellation: true}
+	handler := newCodexRetainedHTTPTestHandler(t, planner)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		handler.TryServe(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", bytes.NewReader(body)), false)
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("retained probe did not begin")
+	}
+
+	if err := handler.native.CloseAndDrain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("pre-claim retained planning did not observe shutdown")
+	}
+}
+
+func TestCodexRetainedNativeHTTPSerialisesProbeThroughBegin(t *testing.T) {
+	body := frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")
+	identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 7, Authoritative: true}
+	routes := &codexRetainedHTTPGenerationSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		Classification:        CodexRestoredLaneCurrent,
+		BoundAccountKey:       "account",
+		BoundIdentity:         identity,
+		BoundRecordGeneration: 12,
+		BoundChoice:           RouteChoice{AccountKey: "account", EffectiveModel: "gpt-5"},
+		JournalGeneration:     13,
+	}}
+	runtime := &codexRetainedHTTPPlanningRuntime{
+		gates:  &codexLanePlanningGateSet{entries: make(map[LaneKey]*codexLanePlanningGateEntry)},
+		routes: routes,
+	}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.Routes = routes
+	factory.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 9, RetainedAuthoritativeEpochs: []uint64{7}}
+	native, err := NewCodexNativeHTTPHandler(factory, &codexNativeHTTPSessionStub{}, "https://codex.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewCodexRetainedNativeHTTPHandler(factory, native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStarted := make(chan struct{})
+	closeRelease := make(chan struct{})
+	requestBody := &codexRetainedHTTPBlockingCloseBody{
+		Reader:  bytes.NewReader(body),
+		started: closeStarted,
+		release: closeRelease,
+	}
+	writer := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		handler.TryServe(writer, httptest.NewRequest(http.MethodPost, "http://localhost/v1/responses", requestBody), false)
+	}()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("retained probe did not reach claimed body close")
+	}
+	probeAcquires := runtime.acquireCount()
+
+	type buildResult struct {
+		prepared CodexPreparedHTTPRequest
+		err      error
+	}
+	competing := make(chan buildResult, 1)
+	go func() {
+		prepared, buildErr := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: bytes.Clone(body)})
+		competing <- buildResult{prepared: prepared, err: buildErr}
+	}()
+	runtime.waitForAcquireCount(t, probeAcquires+1)
+	var early *buildResult
+	select {
+	case result := <-competing:
+		early = &result
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(closeRelease)
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("retained request did not return")
+	}
+	var competitor buildResult
+	if early != nil {
+		competitor = *early
+	} else {
+		select {
+		case competitor = <-competing:
+		case <-time.After(time.Second):
+			t.Fatal("competing request did not begin after retained request")
+		}
+	}
+	if competitor.err == nil {
+		if competitor.prepared.Lifecycle != nil {
+			_, _ = competitor.prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background())
+		}
+		if competitor.prepared.Frozen != nil {
+			competitor.prepared.Frozen.Release()
+		}
+	}
+	if early != nil {
+		t.Fatal("same-lane build escaped retained probe planning guard")
+	}
+	if writer.Code != http.StatusBadGateway {
+		t.Fatalf("retained request status = %d, want post-Begin session failure 502", writer.Code)
+	}
+	if runtime.beginCount() != 2 {
+		t.Fatalf("begin calls = %d, want retained and competitor", runtime.beginCount())
+	}
+}
+
 func TestCodexRetainedNativeHTTPProbeFailureClaimsWithoutBuild(t *testing.T) {
 	t.Parallel()
 	body := frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")
@@ -196,30 +391,50 @@ func TestCodexRetainedNativeHTTPReadPanicFailsClosedPrivately(t *testing.T) {
 }
 
 type codexRetainedHTTPPlannerStub struct {
-	expected      *CodexLeaseBoundExpectation
-	claimed       bool
-	probeErr      error
-	buildErr      error
-	probeCalls    int
-	buildCalls    int
-	buildExpected *CodexLeaseBoundExpectation
-	buildEncoded  []byte
-	mutateProbe   bool
+	expected                 *CodexLeaseBoundExpectation
+	claimed                  bool
+	probeErr                 error
+	buildErr                 error
+	probeCalls               int
+	buildCalls               int
+	buildExpected            *CodexLeaseBoundExpectation
+	buildEncoded             []byte
+	mutateProbe              bool
+	probeStarted             chan struct{}
+	probeWaitForCancellation bool
+	buildStarted             chan struct{}
+	buildRelease             <-chan struct{}
 }
 
-func (planner *codexRetainedHTTPPlannerStub) ProbeRetained(_ context.Context, input CodexHTTPRequestPlanInput) (*CodexLeaseBoundExpectation, bool, error) {
+func (planner *codexRetainedHTTPPlannerStub) ProbeRetained(ctx context.Context, input CodexHTTPRequestPlanInput) (*CodexRetainedHTTPRequestClaim, bool, error) {
 	planner.probeCalls++
+	if planner.probeStarted != nil {
+		close(planner.probeStarted)
+	}
+	if planner.probeWaitForCancellation {
+		<-ctx.Done()
+		return nil, true, ctx.Err()
+	}
 	if planner.mutateProbe {
 		if len(input.Encoded) != 0 {
 			input.Encoded[0] ^= 0xff
 		}
 		input.Headers.Set("X-Private", "mutated")
 	}
-	return planner.expected, planner.claimed, planner.probeErr
+	if planner.expected == nil {
+		return nil, planner.claimed, planner.probeErr
+	}
+	return &CodexRetainedHTTPRequestClaim{ExpectedBound: *planner.expected}, planner.claimed, planner.probeErr
 }
 
 func (planner *codexRetainedHTTPPlannerStub) Build(_ context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
 	planner.buildCalls++
+	if planner.buildStarted != nil {
+		close(planner.buildStarted)
+	}
+	if planner.buildRelease != nil {
+		<-planner.buildRelease
+	}
 	planner.buildEncoded = bytes.Clone(input.Encoded)
 	if input.ExpectedBound != nil {
 		expected := *input.ExpectedBound
@@ -231,6 +446,89 @@ func (planner *codexRetainedHTTPPlannerStub) Build(_ context.Context, input Code
 type codexRetainedHTTPTestBody struct {
 	*bytes.Reader
 	closes int
+}
+
+type codexRetainedHTTPBlockingCloseBody struct {
+	*bytes.Reader
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (body *codexRetainedHTTPBlockingCloseBody) Close() error {
+	body.once.Do(func() { close(body.started) })
+	<-body.release
+	return nil
+}
+
+type codexRetainedHTTPGenerationSnapshotter struct {
+	mu       sync.Mutex
+	snapshot CodexLeaseRouteSnapshot
+}
+
+func (snapshotter *codexRetainedHTTPGenerationSnapshotter) LoadRouteSnapshot(context.Context, LeaseKey, []codex.AccountKey, CodexLeaseAuthorityPolicy) (CodexLeaseRouteSnapshot, error) {
+	snapshotter.mu.Lock()
+	defer snapshotter.mu.Unlock()
+	return snapshotter.snapshot, nil
+}
+
+func (snapshotter *codexRetainedHTTPGenerationSnapshotter) advance() {
+	snapshotter.mu.Lock()
+	snapshotter.snapshot.BoundRecordGeneration++
+	snapshotter.snapshot.JournalGeneration++
+	snapshotter.mu.Unlock()
+}
+
+type codexRetainedHTTPPlanningRuntime struct {
+	mu           sync.Mutex
+	gates        *codexLanePlanningGateSet
+	routes       *codexRetainedHTTPGenerationSnapshotter
+	acquireCalls int
+	beginCalls   int
+}
+
+func (runtime *codexRetainedHTTPPlanningRuntime) AcquireRequestPlanningContext(ctx context.Context, key LeaseKey, _ []codex.AccountKey, _ CodexLeaseAuthorityPolicy) (func(), error) {
+	runtime.mu.Lock()
+	runtime.acquireCalls++
+	runtime.mu.Unlock()
+	guard, err := runtime.gates.acquire(ctx, key.Lane)
+	if err != nil {
+		return nil, err
+	}
+	return guard.Release, nil
+}
+
+func (runtime *codexRetainedHTTPPlanningRuntime) BeginRequestContext(context.Context, CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
+	runtime.mu.Lock()
+	runtime.beginCalls++
+	runtime.mu.Unlock()
+	runtime.routes.advance()
+	return &CodexLeaseRequestHandle{account: "account"}, nil
+}
+
+func (runtime *codexRetainedHTTPPlanningRuntime) acquireCount() int {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.acquireCalls
+}
+
+func (runtime *codexRetainedHTTPPlanningRuntime) beginCount() int {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.beginCalls
+}
+
+func (runtime *codexRetainedHTTPPlanningRuntime) waitForAcquireCount(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for runtime.acquireCount() < want {
+		select {
+		case <-time.After(time.Millisecond):
+		case <-deadline.C:
+			t.Fatalf("planning acquire calls = %d, want at least %d", runtime.acquireCount(), want)
+		}
+	}
 }
 
 type codexRetainedHTTPPanickingReadBody struct {
