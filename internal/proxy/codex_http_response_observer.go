@@ -49,6 +49,7 @@ type codexHTTPResponseObserver struct {
 	mu         sync.Mutex
 	finishOnce sync.Once
 
+	stream    context.Context
 	cleanup   context.Context
 	mode      codexHTTPResponseMode
 	lifecycle CodexHTTPRequestLifecycle
@@ -69,6 +70,7 @@ func newCodexHTTPResponseObserver(ctx context.Context, mode codexHTTPResponseMod
 		ctx = context.Background()
 	}
 	observer := &codexHTTPResponseObserver{
+		stream:    ctx,
 		cleanup:   context.WithoutCancel(ctx),
 		mode:      mode,
 		lifecycle: lifecycle,
@@ -80,22 +82,23 @@ func newCodexHTTPResponseObserver(ctx context.Context, mode codexHTTPResponseMod
 }
 
 // Observe consumes a borrowed byte slice. It never retains or changes the
-// relayed slice, and calls arriving after Finish are ignored.
-func (observer *codexHTTPResponseObserver) Observe(chunk []byte) {
+// relayed slice, and calls arriving after Finish are ignored. Provider-owned
+// continuity metadata is persisted before the caller may relay its bytes.
+func (observer *codexHTTPResponseObserver) Observe(chunk []byte) error {
 	if observer == nil || len(chunk) == 0 {
-		return
+		return nil
 	}
 	observer.mu.Lock()
 	defer observer.mu.Unlock()
 	if observer.finished {
-		return
+		return nil
 	}
 	switch observer.mode {
 	case codexHTTPResponseModeSSE:
-		observer.observeSSELocked(chunk)
+		return observer.observeSSELocked(chunk)
 	case codexHTTPResponseModeCompact:
 		if observer.overflow {
-			return
+			return nil
 		}
 		var ok bool
 		observer.compact, ok = appendCodexObservationBody(observer.compact, chunk, codexProtocolMaxBytes)
@@ -104,22 +107,35 @@ func (observer *codexHTTPResponseObserver) Observe(chunk []byte) {
 			observer.overflow = true
 		}
 	}
+	return nil
 }
 
-func (observer *codexHTTPResponseObserver) observeSSELocked(chunk []byte) {
+func (observer *codexHTTPResponseObserver) observeSSELocked(chunk []byte) error {
 	if observer.parser == nil || observer.evidenceErr != nil {
-		return
+		return nil
 	}
 	observations, err := observer.parser.Feed(chunk)
+	var turnState string
+	for _, observation := range observations {
+		if observation.Kind == CodexSSEMetadata && observation.TurnState != "" {
+			turnState = observation.TurnState
+		}
+	}
 	for _, observation := range observations {
 		observer.observeSSEEventLocked(observation)
 		if observer.evidenceErr != nil {
 			break
 		}
 	}
+	if turnState != "" {
+		if mutationErr := observer.admitStreamedTurnStateLocked(turnState); mutationErr != nil {
+			return mutationErr
+		}
+	}
 	if observer.evidenceErr == nil && err != nil {
 		observer.evidenceErr = errors.Join(errCodexHTTPResponseMalformed, err)
 	}
+	return nil
 }
 
 func (observer *codexHTTPResponseObserver) observeSSEEventLocked(observation CodexSSEObservation) {
@@ -152,6 +168,24 @@ func (observer *codexHTTPResponseObserver) observeSSEEventLocked(observation Cod
 	case CodexSSEError:
 		observer.recordTerminalLocked(codexHTTPResponseOutcomeFailed, false)
 	}
+}
+
+func (observer *codexHTTPResponseObserver) admitStreamedTurnStateLocked(turnState string) error {
+	if observer.lifecycle == nil {
+		return errCodexHTTPResponseUnavailable
+	}
+	next, err := observer.lifecycle.AdmitHTTP2xxContext(observer.stream, CodexHTTPAdmissionEvidence{
+		TurnState:    turnState,
+		HasTurnState: true,
+	})
+	if err != nil {
+		return err
+	}
+	if next == nil {
+		return errCodexHTTPResponseNilHandle
+	}
+	observer.lifecycle = next
+	return nil
 }
 
 func (observer *codexHTTPResponseObserver) recordTerminalLocked(outcome codexHTTPResponseOutcome, endTurn bool) {
@@ -236,11 +270,20 @@ func (observer *codexHTTPResponseObserver) finaliseEvidenceLocked() {
 	case codexHTTPResponseModeSSE:
 		if observer.evidenceErr == nil && observer.parser != nil {
 			observations, err := observer.parser.Finish()
+			var turnState string
+			for _, observation := range observations {
+				if observation.Kind == CodexSSEMetadata && observation.TurnState != "" {
+					turnState = observation.TurnState
+				}
+			}
 			for _, observation := range observations {
 				observer.observeSSEEventLocked(observation)
 				if observer.evidenceErr != nil {
 					break
 				}
+			}
+			if turnState != "" {
+				observer.evidenceErr = observer.admitStreamedTurnStateLocked(turnState)
 			}
 			if observer.evidenceErr == nil && err != nil {
 				observer.evidenceErr = errors.Join(errCodexHTTPResponseMalformed, err)
@@ -335,7 +378,7 @@ func relayCodexAcceptedHTTPResponse(ctx context.Context, writer http.ResponseWri
 	return observer.Finish(errors.Join(relayErr, closeErr, ctx.Err()))
 }
 
-func relayCodexObservedHTTPBody(ctx context.Context, writer http.ResponseWriter, body io.Reader, flush bool, observe func([]byte)) error {
+func relayCodexObservedHTTPBody(ctx context.Context, writer http.ResponseWriter, body io.Reader, flush bool, observe func([]byte) error) error {
 	flusher, canFlush := writer.(http.Flusher)
 	buffer := make([]byte, 4096)
 	for {
@@ -344,7 +387,9 @@ func relayCodexObservedHTTPBody(ctx context.Context, writer http.ResponseWriter,
 		}
 		read, readErr := readCodexHTTPResponseBody(body, buffer)
 		if read > 0 {
-			observe(buffer[:read])
+			if err := observe(buffer[:read]); err != nil {
+				return err
+			}
 			written, writeErr := writer.Write(buffer[:read])
 			if writeErr == nil && written != read {
 				writeErr = io.ErrShortWrite

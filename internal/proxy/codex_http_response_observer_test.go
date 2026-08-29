@@ -94,6 +94,87 @@ func TestRelayCodexAcceptedHTTPResponseRelaysSSETerminalOutcomes(t *testing.T) {
 	}
 }
 
+func TestRelayCodexAcceptedHTTPResponsePersistsStreamedTurnStateBeforeRelay(t *testing.T) {
+	t.Parallel()
+	const turnState = "private-streamed-turn-state"
+	bodyBytes := "data: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"" + turnState + "\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+	calls := &codexHTTPObserverLifecycleCalls{}
+	body := newCodexHTTPObserverBody([]string{bodyBytes}, nil, calls)
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+	writer := newCodexHTTPObserverWriter()
+
+	if err := relayCodexAcceptedHTTPResponse(context.Background(), writer, response, codexHTTPResponseModeSSE, &codexHTTPObserverLifecycle{calls: calls, generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := writer.body.String(); got != bodyBytes {
+		t.Fatalf("relayed body = %q, want exact body", got)
+	}
+	got := calls.snapshot()
+	if got.admissionCalls != 1 || got.admissionEvidence != (CodexHTTPAdmissionEvidence{TurnState: turnState, HasTurnState: true}) {
+		t.Fatalf("streamed admission = calls %d evidence %#v", got.admissionCalls, got.admissionEvidence)
+	}
+	if !reflect.DeepEqual(got.order, []string{"admit@1", "close", "completed@2", "drain@3"}) {
+		t.Fatalf("lifecycle order = %#v", got.order)
+	}
+}
+
+func TestRelayCodexAcceptedHTTPResponseStagesLatestTurnStatePerChunk(t *testing.T) {
+	t.Parallel()
+	const firstState = "private-first-streamed-state"
+	const finalState = "private-final-streamed-state"
+	bodyBytes := "data: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"" + firstState + "\"}}\n\n" +
+		"data: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"" + finalState + "\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+	calls := &codexHTTPObserverLifecycleCalls{}
+	body := newCodexHTTPObserverBody([]string{bodyBytes}, nil, calls)
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+	writer := newCodexHTTPObserverWriter()
+
+	if err := relayCodexAcceptedHTTPResponse(context.Background(), writer, response, codexHTTPResponseModeSSE, &codexHTTPObserverLifecycle{calls: calls, generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := writer.body.String(); got != bodyBytes {
+		t.Fatalf("relayed body = %q, want exact body", got)
+	}
+	got := calls.snapshot()
+	if got.admissionCalls != 1 || got.admissionEvidence != (CodexHTTPAdmissionEvidence{TurnState: finalState, HasTurnState: true}) {
+		t.Fatalf("staged admission = calls %d evidence %#v", got.admissionCalls, got.admissionEvidence)
+	}
+	if !reflect.DeepEqual(got.order, []string{"admit@1", "close", "completed@2", "drain@3"}) {
+		t.Fatalf("lifecycle order = %#v", got.order)
+	}
+}
+
+func TestRelayCodexAcceptedHTTPResponseWithholdsUnpersistedTurnState(t *testing.T) {
+	t.Parallel()
+	const turnState = "private-unpersisted-turn-state"
+	admissionErr := errors.New("streamed admission failed")
+	bodyBytes := "data: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"" + turnState + "\"}}\n\n"
+	calls := &codexHTTPObserverLifecycleCalls{admissionErr: admissionErr}
+	body := newCodexHTTPObserverBody([]string{bodyBytes}, nil, calls)
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+	writer := newCodexHTTPObserverWriter()
+
+	err := relayCodexAcceptedHTTPResponse(context.Background(), writer, response, codexHTTPResponseModeSSE, &codexHTTPObserverLifecycle{calls: calls, generation: 1})
+	if !errors.Is(err, admissionErr) {
+		t.Fatalf("relay error = %v, want admission failure", err)
+	}
+	if writer.body.Len() != 0 {
+		t.Fatalf("relayed unpersisted metadata bytes = %q", writer.body.String())
+	}
+	if strings.Contains(err.Error(), turnState) {
+		t.Fatalf("relay error disclosed private turn state: %v", err)
+	}
+	got := calls.snapshot()
+	if got.admissionCalls != 1 || got.terminalKind != "indeterminate" || got.terminalCalls != 1 || got.drainCalls != 1 {
+		t.Fatalf("lifecycle calls = %#v", got)
+	}
+	if !reflect.DeepEqual(got.order, []string{"admit@1", "close", "indeterminate@1", "drain@2"}) {
+		t.Fatalf("lifecycle order = %#v", got.order)
+	}
+}
+
 func TestRelayCodexAcceptedHTTPResponseRelaysCompactCompletion(t *testing.T) {
 	t.Parallel()
 	const raw = `{"id":"private-response-id","output":[],"encrypted_content":"private-state"}`
@@ -420,16 +501,19 @@ func TestCodexHTTPResponseObserverRedactsProviderControlledCompactParserErrors(t
 }
 
 type codexHTTPObserverLifecycleCalls struct {
-	mu               sync.Mutex
-	order            []string
-	terminalKind     string
-	endTurn          bool
-	responseEvidence CodexHTTPResponseEvidence
-	terminalCalls    int
-	drainCalls       int
-	cleanupCancelled bool
-	terminalErr      error
-	drainErr         error
+	mu                sync.Mutex
+	order             []string
+	admissionEvidence CodexHTTPAdmissionEvidence
+	admissionCalls    int
+	terminalKind      string
+	endTurn           bool
+	responseEvidence  CodexHTTPResponseEvidence
+	terminalCalls     int
+	drainCalls        int
+	cleanupCancelled  bool
+	admissionErr      error
+	terminalErr       error
+	drainErr          error
 }
 
 func (calls *codexHTTPObserverLifecycleCalls) append(value string) {
@@ -439,26 +523,30 @@ func (calls *codexHTTPObserverLifecycleCalls) append(value string) {
 }
 
 type codexHTTPObserverLifecycleSnapshot struct {
-	order            []string
-	terminalKind     string
-	endTurn          bool
-	responseEvidence CodexHTTPResponseEvidence
-	terminalCalls    int
-	drainCalls       int
-	cleanupCancelled bool
+	order             []string
+	admissionEvidence CodexHTTPAdmissionEvidence
+	admissionCalls    int
+	terminalKind      string
+	endTurn           bool
+	responseEvidence  CodexHTTPResponseEvidence
+	terminalCalls     int
+	drainCalls        int
+	cleanupCancelled  bool
 }
 
 func (calls *codexHTTPObserverLifecycleCalls) snapshot() codexHTTPObserverLifecycleSnapshot {
 	calls.mu.Lock()
 	defer calls.mu.Unlock()
 	return codexHTTPObserverLifecycleSnapshot{
-		order:            append([]string(nil), calls.order...),
-		terminalKind:     calls.terminalKind,
-		endTurn:          calls.endTurn,
-		responseEvidence: calls.responseEvidence,
-		terminalCalls:    calls.terminalCalls,
-		drainCalls:       calls.drainCalls,
-		cleanupCancelled: calls.cleanupCancelled,
+		order:             append([]string(nil), calls.order...),
+		admissionEvidence: calls.admissionEvidence,
+		admissionCalls:    calls.admissionCalls,
+		terminalKind:      calls.terminalKind,
+		endTurn:           calls.endTurn,
+		responseEvidence:  calls.responseEvidence,
+		terminalCalls:     calls.terminalCalls,
+		drainCalls:        calls.drainCalls,
+		cleanupCancelled:  calls.cleanupCancelled,
 	}
 }
 
@@ -518,7 +606,16 @@ func (lifecycle *codexHTTPObserverLifecycle) Drain() (CodexHTTPRequestLifecycle,
 	return lifecycle.next(), nil
 }
 
-func (lifecycle *codexHTTPObserverLifecycle) AdmitHTTP2xxContext(context.Context, CodexHTTPAdmissionEvidence) (CodexHTTPRequestLifecycle, error) {
+func (lifecycle *codexHTTPObserverLifecycle) AdmitHTTP2xxContext(_ context.Context, evidence CodexHTTPAdmissionEvidence) (CodexHTTPRequestLifecycle, error) {
+	lifecycle.calls.mu.Lock()
+	lifecycle.calls.admissionEvidence = evidence
+	lifecycle.calls.admissionCalls++
+	lifecycle.calls.order = append(lifecycle.calls.order, "admit@"+strconv.Itoa(lifecycle.generation))
+	err := lifecycle.calls.admissionErr
+	lifecycle.calls.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return lifecycle.next(), nil
 }
 

@@ -140,6 +140,77 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseRuntimeRotatesTurnStateWhileStreaming(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	const initialState = "private-initial-turn-state"
+	const streamedState = "private-streamed-turn-state"
+
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: initialState, HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCodexLeaseRuntimeRefs(t, handle, 1, 1, 1, false)
+	requestGeneration := handle.RequestGeneration()
+	attemptGeneration := handle.AttemptGeneration()
+
+	handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: streamedState, HasTurnState: true})
+	if err != nil {
+		t.Fatalf("streamed turn-state admission = %T %v", err, err)
+	}
+	if handle.RequestGeneration() != requestGeneration || handle.AttemptGeneration() != attemptGeneration || codexLeaseCurrentAttemptState(handle.record) != CodexAttemptStreaming {
+		t.Fatalf("streamed admission changed request identity: request %d attempt %d state %v", handle.RequestGeneration(), handle.AttemptGeneration(), codexLeaseCurrentAttemptState(handle.record))
+	}
+	if !handle.record.HasTurnState || handle.record.TurnStateHash != store.hash("turn-state", streamedState) {
+		t.Fatalf("streamed turn state = %#v", handle.record)
+	}
+	assertCodexLeaseRuntimeRefs(t, handle, 1, 1, 1, false)
+	if bytes.Contains(store.journalBytes, []byte(initialState)) || bytes.Contains(store.journalBytes, []byte(streamedState)) {
+		t.Fatal("raw turn state entered journal")
+	}
+
+	completed, err := handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRejectedAdmission := append([]byte(nil), store.journalBytes...)
+	if _, err := completed.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "private-late-state", HasTurnState: true}); !errors.Is(err, ErrCodexLeaseTransition) {
+		t.Fatalf("terminal streamed admission = %T %v, want transition error", err, err)
+	}
+	if !bytes.Equal(beforeRejectedAdmission, store.journalBytes) {
+		t.Fatal("rejected terminal admission changed journal")
+	}
+	completed, err = completed.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nextPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-next", Kind: CodexAttemptSlotDirect,
+	}})
+	nextPlan.Evidence = CodexLeaseRequestEvidence{TurnState: streamedState, HasTurnState: true}
+	next, err := runtimeLease.BeginRequest(nextPlan)
+	if err != nil {
+		t.Fatalf("follow-up with streamed turn state = %T %v", err, err)
+	}
+	if _, err := next.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexLeaseRuntimeRebindsSocketGenerationForNewRequest(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

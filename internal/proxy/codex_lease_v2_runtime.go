@@ -779,31 +779,39 @@ func (handle *CodexLeaseRequestHandle) AdmitWebSocketContext(ctx context.Context
 
 func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGenerationFence, evidence CodexHTTPAdmissionEvidence) (*CodexLeaseRequestHandle, bool, error) {
 	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
-	if !ok || current.State != CodexAttemptDispatched {
+	if !ok || (current.State != CodexAttemptDispatched && current.State != CodexAttemptStreaming) {
 		return nil, false, ErrCodexLeaseTransition
 	}
+	firstAttemptAdmission := current.State == CodexAttemptDispatched
 	desired := codexLeaseRuntimeMutationRecord(handle.record)
-	for index := range desired.Attempts {
-		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
-			desired.Attempts[index].State = CodexAttemptStreaming
-			break
+	if firstAttemptAdmission {
+		for index := range desired.Attempts {
+			if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+				desired.Attempts[index].State = CodexAttemptStreaming
+				break
+			}
 		}
 	}
 	if err := func(record *CodexJournalRecordV2) error {
-		if record.State != LeaseProvisional && record.State != LeaseBoundActive {
+		if firstAttemptAdmission && record.State != LeaseProvisional && record.State != LeaseBoundActive {
+			return ErrCodexLeaseTransition
+		}
+		if !firstAttemptAdmission && (record.State != LeaseBoundActive || record.AttemptRefs <= 0 || record.ResponseObserverRefs <= 0) {
 			return ErrCodexLeaseTransition
 		}
 		if err := handle.applyAdmissionEvidence(record, evidence); err != nil {
 			return err
 		}
 		record.State = LeaseBoundActive
-		record.AttemptRefs++
-		record.ResponseObserverRefs++
+		if firstAttemptAdmission {
+			record.AttemptRefs++
+			record.ResponseObserverRefs++
+		}
 		return nil
 	}(&desired); err != nil {
 		return nil, false, err
 	}
-	firstAdmission := !handle.record.EverAdmitted && desired.Authoritative && codexLeaseCurrentRequestCacheEligible(desired)
+	firstAdmission := firstAttemptAdmission && !handle.record.EverAdmitted && desired.Authoritative && codexLeaseCurrentRequestCacheEligible(desired)
 	admitted, err := handle.commitRequestMutation(fence, desired, true)
 	return admitted, firstAdmission, err
 }

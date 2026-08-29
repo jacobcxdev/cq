@@ -448,7 +448,11 @@ func TestCodexStage12AMonotonicAdmittedTurn(t *testing.T) {
 		},
 		outcomes: map[codex.AccountKey][]stage12AOutcome{
 			accountA: {
-				stage12AAcceptedOutcome("stage12a-private-response-a", "stage12a-private-turn-state-a"),
+				stage12ARotatingStateAcceptedOutcome(
+					"stage12a-private-response-a",
+					"stage12a-private-turn-state-a",
+					"stage12a-private-turn-state-b",
+				),
 				{status: http.StatusTooManyRequests, header: hard429Headers, body: codexLiveUsageLimitBody},
 			},
 			accountB:       {stage12AAcceptedOutcome("stage12a-private-response-b", "stage12a-private-turn-state-b")},
@@ -535,7 +539,7 @@ func TestCodexStage12AMonotonicAdmittedTurn(t *testing.T) {
 
 	inventory.setActive(accountB, defaultAccount)
 	secondResponse := httptest.NewRecorder()
-	stage12AServeWithWriter(t, server, secondInput, "stage12a-private-session-header", "stage12a-private-turn-state-a", secondResponse)
+	stage12AServeWithWriter(t, server, secondInput, "stage12a-private-session-header", "stage12a-private-turn-state-b", secondResponse)
 	if secondResponse.Code != http.StatusTooManyRequests {
 		t.Fatalf("second response status = %d, want %d", secondResponse.Code, http.StatusTooManyRequests)
 	}
@@ -746,6 +750,12 @@ func stage12AAcceptedOutcome(responseID, turnState string) stage12AOutcome {
 		},
 		body: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"" + responseID + "\"}}\n\n",
 	}
+}
+
+func stage12ARotatingStateAcceptedOutcome(responseID, headerState, streamedState string) stage12AOutcome {
+	outcome := stage12AAcceptedOutcome(responseID, headerState)
+	outcome.body = "data: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"" + streamedState + "\"}}\n\n" + outcome.body
+	return outcome
 }
 
 func stage12AHard429Outcome() stage12AOutcome {
