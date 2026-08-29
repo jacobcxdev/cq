@@ -245,14 +245,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
 	}
 	if c.CodexContinuityStateDir != "" {
-		clean := filepath.Clean(c.CodexContinuityStateDir)
-		if !filepath.IsAbs(c.CodexContinuityStateDir) || clean != c.CodexContinuityStateDir || clean == string(filepath.Separator) {
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.CodexContinuityStateDir) {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
 		}
 	}
 	if c.ProxyResilienceStateDir != "" {
-		clean := filepath.Clean(c.ProxyResilienceStateDir)
-		if !filepath.IsAbs(c.ProxyResilienceStateDir) || clean != c.ProxyResilienceStateDir || clean == string(filepath.Separator) {
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.ProxyResilienceStateDir) {
 			return fmt.Errorf("invalid proxy_resilience_state_dir %q: must be a clean absolute non-root path", c.ProxyResilienceStateDir)
 		}
 	}

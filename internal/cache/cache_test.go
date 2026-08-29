@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -129,8 +130,8 @@ func TestCacheEmptyID(t *testing.T) {
 		t.Fatal("expected error from Put with empty ID")
 	}
 
-	// IDs that filepath.Base reduces to "." or "/" are also invalid.
-	for _, bad := range []string{".", "/", ".."} {
+	// IDs that filepath.Base reduces to "." or the platform root are also invalid.
+	for _, bad := range []string{".", string(filepath.Separator), ".."} {
 		_, _, err := c.Get(ctx, bad)
 		if err == nil {
 			t.Errorf("expected error from Get with ID %q", bad)
@@ -202,7 +203,7 @@ func TestCacheDeleteNonExistent(t *testing.T) {
 
 func TestCacheDeleteEmptyID(t *testing.T) {
 	c, _ := New(fsutil.NewMemFS(), "/cache", 30*time.Second)
-	for _, bad := range []string{"", ".", "/", ".."} {
+	for _, bad := range []string{"", ".", string(filepath.Separator), ".."} {
 		if err := c.Delete(context.Background(), bad); err == nil {
 			t.Errorf("expected error from Delete with ID %q", bad)
 		}

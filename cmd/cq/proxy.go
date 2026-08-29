@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1400,8 +1399,7 @@ func validateProxyStatusConfig(cfg *proxy.Config) error {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", cfg.CodexLeaseRetentionDays)
 	}
 	if cfg.CodexContinuityStateDir != "" {
-		clean := filepath.Clean(cfg.CodexContinuityStateDir)
-		if !filepath.IsAbs(cfg.CodexContinuityStateDir) || clean != cfg.CodexContinuityStateDir || clean == string(filepath.Separator) {
+		if !fsutil.IsCleanAbsoluteNonRootPath(cfg.CodexContinuityStateDir) {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", cfg.CodexContinuityStateDir)
 		}
 	}
