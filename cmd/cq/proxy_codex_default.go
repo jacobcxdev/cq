@@ -11,6 +11,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const proxyCodexDefaultUsageMessage = "usage: cq proxy default codex [--clear | <account-reference>]"
@@ -42,11 +43,15 @@ func runProxyCodexDefault(args []string) error {
 }
 
 func listProxyCodexDefaultInventory(ctx context.Context, fsys fsutil.DurableFileSystem) (codexprov.Inventory, string, error) {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return codexprov.Inventory{}, "", fmt.Errorf("resolve CQ directories: %w", err)
+	}
 	store, err := codexprov.NewManagedStore(fsys)
 	if err != nil {
 		return codexprov.Inventory{}, "", err
 	}
-	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	coordinator, err := codexprov.NewCredentialCoordinator(store, roots.State)
 	if err != nil {
 		return codexprov.Inventory{}, store.Home, err
 	}

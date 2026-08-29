@@ -74,6 +74,7 @@ func TestRegistryPipelinePublishConcurrency(t *testing.T) {
 	pipeline, err := newRegistryPipeline(registryPipelineOptions{
 		FS:                 fsys,
 		HomeDir:            "/home/test",
+		Roots:              testCQRoots(),
 		ClaudeUpstream:     "https://claude.example",
 		CodexUpstream:      "https://codex.example",
 		HTTPClient:         http.DefaultClient,
@@ -126,6 +127,7 @@ func TestNewRegistryPipelineToleratesCrossProviderDuplicateInSeed(t *testing.T) 
 	pipeline, err := newRegistryPipeline(registryPipelineOptions{
 		FS:                 fsys,
 		HomeDir:            "/home/test",
+		Roots:              testCQRoots(),
 		ClaudeUpstream:     "https://claude.example",
 		CodexUpstream:      "https://codex.example",
 		HTTPClient:         http.DefaultClient,

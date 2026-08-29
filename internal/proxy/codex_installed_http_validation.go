@@ -37,8 +37,12 @@ func RunCodexInstalledHTTPValidation(
 	clientBuild string,
 	guard CodexInstalledHTTPValidationGuard,
 ) (returnErr error) {
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return err
+	}
 	return runCodexInstalledHTTPValidationWithDependencies(ctx, cfg, cqBuild, clientBuild, codexInstalledHTTPValidationDependencies{
-		markerDir:  configDir(),
+		markerDir:  paths.StateDir,
 		invalidate: invalidateCodexHTTPReadinessMarkerDurably,
 		run:        runCodexInstalledHTTPValidationListener,
 		guard:      guard,
@@ -48,7 +52,11 @@ func RunCodexInstalledHTTPValidation(
 // InvalidateDefaultCodexHTTPReadinessMarker removes any marker that could
 // have raced ahead of a failed explicit installed-validation request.
 func InvalidateDefaultCodexHTTPReadinessMarker() error {
-	return invalidateCodexHTTPReadinessMarkerDurably(configDir())
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return err
+	}
+	return invalidateCodexHTTPReadinessMarkerDurably(paths.StateDir)
 }
 
 type codexInstalledHTTPValidationDependencies struct {

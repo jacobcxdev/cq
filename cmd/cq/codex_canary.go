@@ -26,12 +26,16 @@ func runCodexCanary(args []string) error {
 	}
 
 	fsys := fsutil.OSFileSystem{}
+	paths, err := proxy.ResolveDefaultPaths()
+	if err != nil {
+		return err
+	}
 	home, err := fsys.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	path := proxy.DefaultCodexCanaryPath()
-	configDirectory := filepath.Dir(path)
+	path := proxy.CodexCanaryPath(paths.StateDir)
+	configDirectory := filepath.Dir(paths.ConfigFile)
 	protected, err := codexCanaryProtections(home, configDirectory)
 	if err != nil {
 		return err
@@ -47,7 +51,7 @@ func runCodexCanary(args []string) error {
 			return err
 		}
 		clientBuild := defaultCodexRoutingClientBuild()
-		marker, err := proxy.LoadCodexReadinessMarker(configDirectory, proxy.CodexRoutingHTTP)
+		marker, err := proxy.LoadCodexReadinessMarker(paths.StateDir, proxy.CodexRoutingHTTP)
 		if err != nil {
 			return fmt.Errorf("load HTTP readiness marker: %w", err)
 		}

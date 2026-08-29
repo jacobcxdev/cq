@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func TestModelMaxInputTokens(t *testing.T) {
@@ -128,5 +130,21 @@ func TestWriteClaudeModelCapabilitiesCache_ReplacesAtomicallyWithoutTempFile(t *
 		if strings.Contains(entry.Name(), ".tmp") {
 			t.Fatalf("unexpected temp file left behind: %s", entry.Name())
 		}
+	}
+}
+
+func TestWriteClaudeModelCapabilitiesCacheRemainsProviderOwned(t *testing.T) {
+	providerDir := filepath.Join(t.TempDir(), "provider", ".claude")
+	cqRoots := userdirs.Roots{Cache: filepath.Join(t.TempDir(), "cq-cache")}
+	t.Setenv("CLAUDE_CONFIG_DIR", providerDir)
+
+	if err := WriteClaudeCodeModelCapabilitiesCache(); err != nil {
+		t.Fatalf("WriteClaudeCodeModelCapabilitiesCache() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(providerDir, "cache", "model-capabilities.json")); err != nil {
+		t.Fatalf("provider cache missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cqRoots.Cache, "model-capabilities.json")); !os.IsNotExist(err) {
+		t.Fatalf("CQ cache unexpectedly written: %v", err)
 	}
 }

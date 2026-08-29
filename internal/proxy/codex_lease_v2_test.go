@@ -19,6 +19,15 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
+func TestSameCodexLeaseObjectUsesHighFileID(t *testing.T) {
+	first := fsutil.SecureFileIdentity{Device: 1, Inode: 2, Links: 1, FileID: [16]byte{15: 9}}
+	second := first
+	second.FileID[15] = 10
+	if sameCodexLeaseObject(first, second) {
+		t.Fatal("lease identities differing in high file ID matched")
+	}
+}
+
 func TestInitialiseCodexContinuityAuthorityCreatesFreshV3Pair(t *testing.T) {
 	t.Parallel()
 	fsys := fsutil.NewMemFS()

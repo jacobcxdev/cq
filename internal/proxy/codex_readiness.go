@@ -300,8 +300,12 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 
 // OpenCodexRoutingRuntime resolves modes once for process lifetime.
 func OpenCodexRoutingRuntime(cfg *Config, cqBuild, clientBuild string) (*CodexRoutingRuntime, error) {
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return nil, err
+	}
 	httpReq, wsReq := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
-	return openCodexRoutingRuntimeAt(configDir(), cfg, httpReq, wsReq)
+	return openCodexRoutingRuntimeAt(paths.StateDir, cfg, httpReq, wsReq)
 }
 
 func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTransportRequirements) (*CodexRoutingRuntime, error) {
@@ -548,7 +552,11 @@ func canonicalCodexReadinessMarkerJSON(marker CodexReadinessMarker) ([]byte, err
 
 // LoadDefaultCodexReadinessMarker reads proof from CQ's runtime state.
 func LoadDefaultCodexReadinessMarker(transport CodexRoutingTransport) (CodexReadinessMarker, error) {
-	return LoadCodexReadinessMarker(configDir(), transport)
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return CodexReadinessMarker{}, err
+	}
+	return LoadCodexReadinessMarker(paths.StateDir, transport)
 }
 
 // ValidateCodexReadinessMarker rejects any stale or incomplete tuple dimension.

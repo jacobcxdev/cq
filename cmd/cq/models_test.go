@@ -8,7 +8,18 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
+
+func testCQRoots() userdirs.Roots {
+	return userdirs.Roots{
+		Config:  "/home/test/.config/cq",
+		State:   "/home/test/.config/cq/state",
+		Cache:   "/home/test/.cache/cq",
+		Runtime: "/home/test/.config/cq/state",
+		Logs:    "/home/test/.config/cq/state/logs",
+	}
+}
 
 func testModelsDeps() (*fsutil.MemFS, *bytes.Buffer, *bytes.Buffer, modelsDeps) {
 	fsys := fsutil.NewMemFS()
@@ -17,6 +28,7 @@ func testModelsDeps() (*fsutil.MemFS, *bytes.Buffer, *bytes.Buffer, modelsDeps) 
 	deps := modelsDeps{
 		FS:       fsys,
 		HomeDir:  "/home/test",
+		Roots:    userdirs.Roots{Config: "/cq/config"},
 		Env:      func(string) string { return "" },
 		Stdout:   stdout,
 		Stderr:   stderr,
@@ -25,6 +37,19 @@ func testModelsDeps() (*fsutil.MemFS, *bytes.Buffer, *bytes.Buffer, modelsDeps) 
 		UseProxy: func() bool { return false },
 	}
 	return fsys, stdout, stderr, deps
+}
+
+func TestModelsDependenciesSeparateCQAndProviderRoots(t *testing.T) {
+	_, _, _, deps := testModelsDeps()
+	if got := modelregistry.OverlayPath(deps.Roots); got != "/cq/config/models.json" {
+		t.Fatalf("CQ overlay = %q, want /cq/config/models.json", got)
+	}
+	if got := codexModelCachePath(deps); got != "/home/test/.codex/models_cache.json" {
+		t.Fatalf("Codex cache = %q, want /home/test/.codex/models_cache.json", got)
+	}
+	if got := claudeModelCachePath(deps); got != "/home/test/.claude/cache/model-capabilities.json" {
+		t.Fatalf("Claude cache = %q, want /home/test/.claude/cache/model-capabilities.json", got)
+	}
 }
 
 func TestRunModels_OverlayCommandsAutoRefresh(t *testing.T) {

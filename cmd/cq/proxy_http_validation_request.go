@@ -441,9 +441,9 @@ func isLowerHexSHA256(value string) bool {
 }
 
 func defaultInstalledHTTPValidationRequestStore() (installedHTTPValidationRequestStore, error) {
-	cacheDir, err := os.UserCacheDir()
+	paths, err := proxy.ResolveDefaultPaths()
 	if err != nil {
-		return installedHTTPValidationRequestStore{}, fmt.Errorf("resolve user cache directory: %w", err)
+		return installedHTTPValidationRequestStore{}, err
 	}
 	fsys, ok := any(fsutil.OSFileSystem{}).(installedHTTPValidationFileSystem)
 	if !ok {
@@ -451,7 +451,7 @@ func defaultInstalledHTTPValidationRequestStore() (installedHTTPValidationReques
 	}
 	return installedHTTPValidationRequestStore{
 		fs:             fsys,
-		path:           filepath.Join(cacheDir, "cq", "installed-http-validation", "request.json"),
+		path:           filepath.Join(paths.RuntimeDir, "installed-http-validation", "request.json"),
 		now:            time.Now,
 		random:         rand.Reader,
 		resolveService: resolveInstalledHTTPValidationService,

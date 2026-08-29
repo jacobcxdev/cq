@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
+	pathpkg "path"
 	"sort"
 	"strings"
 	"sync"
@@ -62,7 +62,7 @@ func (i memFileInfo) Sys() any           { return nil }
 func NewMemFS() *MemFS {
 	return &MemFS{
 		files:     make(map[string]memFile),
-		dirs:      map[string]memFile{string(filepath.Separator): {mode: os.ModeDir | 0o755, owner: 1, inode: 1}},
+		dirs:      map[string]memFile{"/": {mode: os.ModeDir | 0o755, owner: 1, inode: 1}},
 		locks:     make(map[uint64]uint64),
 		euid:      1,
 		nextInode: 2,
@@ -70,16 +70,21 @@ func NewMemFS() *MemFS {
 	}
 }
 
+func cleanMemPath(name string) string {
+	return pathpkg.Clean(strings.ReplaceAll(name, `\`, "/"))
+}
+
 func (m *MemFS) Stat(name string) (os.FileInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	f, ok := m.files[name]
+	clean := cleanMemPath(name)
+	f, ok := m.files[clean]
 	if ok {
-		return m.fileInfo(name, f, false), nil
+		return m.fileInfo(clean, f, false), nil
 	}
-	dir, ok := m.dirs[filepath.Clean(name)]
+	dir, ok := m.dirs[clean]
 	if ok {
-		return m.fileInfo(name, dir, true), nil
+		return m.fileInfo(clean, dir, true), nil
 	}
 	return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 }
@@ -104,7 +109,7 @@ func (m *MemFS) FileIdentity(info os.FileInfo) (SecureFileIdentity, bool) {
 func (m *MemFS) ReadFile(name string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	f, ok := m.files[name]
+	f, ok := m.files[cleanMemPath(name)]
 	if !ok {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
 	}
@@ -116,6 +121,7 @@ func (m *MemFS) ReadFile(name string) ([]byte, error) {
 func (m *MemFS) WriteFile(name string, data []byte, mode os.FileMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	name = cleanMemPath(name)
 	buf := make([]byte, len(data))
 	copy(buf, data)
 	existing, ok := m.files[name]
@@ -133,11 +139,13 @@ func (m *MemFS) WriteFile(name string, data []byte, mode os.FileMode) error {
 func (m *MemFS) Rename(oldpath, newpath string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldpath = cleanMemPath(oldpath)
+	newpath = cleanMemPath(newpath)
 	f, ok := m.files[oldpath]
 	if !ok {
 		return &os.PathError{Op: "rename", Path: oldpath, Err: os.ErrNotExist}
 	}
-	if _, ok := m.dirs[filepath.Clean(newpath)]; ok {
+	if _, ok := m.dirs[newpath]; ok {
 		return &os.PathError{Op: "rename", Path: newpath, Err: os.ErrExist}
 	}
 	m.files[newpath] = f
@@ -148,11 +156,12 @@ func (m *MemFS) Rename(oldpath, newpath string) error {
 func (m *MemFS) Remove(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	name = cleanMemPath(name)
 	if _, ok := m.files[name]; !ok {
-		if _, dirOK := m.dirs[filepath.Clean(name)]; !dirOK {
+		if _, dirOK := m.dirs[name]; !dirOK {
 			return &os.PathError{Op: "remove", Path: name, Err: os.ErrNotExist}
 		}
-		delete(m.dirs, filepath.Clean(name))
+		delete(m.dirs, name)
 		return nil
 	}
 	delete(m.files, name)
@@ -162,12 +171,12 @@ func (m *MemFS) Remove(name string) error {
 func (m *MemFS) MkdirAll(path string, mode os.FileMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	clean := filepath.Clean(path)
+	clean := cleanMemPath(path)
 	if _, ok := m.files[clean]; ok {
 		return &os.PathError{Op: "mkdir", Path: clean, Err: os.ErrExist}
 	}
 	missing := make([]string, 0)
-	for current := clean; ; current = filepath.Dir(current) {
+	for current := clean; ; current = pathpkg.Dir(current) {
 		if _, ok := m.dirs[current]; ok {
 			break
 		}
@@ -175,7 +184,7 @@ func (m *MemFS) MkdirAll(path string, mode os.FileMode) error {
 			return &os.PathError{Op: "mkdir", Path: current, Err: os.ErrExist}
 		}
 		missing = append(missing, current)
-		parent := filepath.Dir(current)
+		parent := pathpkg.Dir(current)
 		if parent == current {
 			break
 		}
@@ -191,14 +200,14 @@ func (m *MemFS) UserHomeDir() (string, error) { return "/home/test", nil }
 func (m *MemFS) ReadDir(name string) ([]os.DirEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	prefix := filepath.Clean(name) + string(filepath.Separator)
+	prefix := cleanMemPath(name) + "/"
 	seen := make(map[string]bool)
 	for path := range m.files {
 		if !strings.HasPrefix(path, prefix) {
 			continue
 		}
 		rest := strings.TrimPrefix(path, prefix)
-		part, tail, _ := strings.Cut(rest, string(filepath.Separator))
+		part, tail, _ := strings.Cut(rest, "/")
 		if part != "" {
 			seen[part] = tail != ""
 		}
@@ -208,7 +217,7 @@ func (m *MemFS) ReadDir(name string) ([]os.DirEntry, error) {
 			continue
 		}
 		rest := strings.TrimPrefix(path, prefix)
-		part, _, _ := strings.Cut(rest, string(filepath.Separator))
+		part, _, _ := strings.Cut(rest, "/")
 		if part != "" {
 			seen[part] = true
 		}
@@ -231,13 +240,14 @@ func (m *MemFS) ReadDir(name string) ([]os.DirEntry, error) {
 func (m *MemFS) Chmod(name string, mode os.FileMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	name = cleanMemPath(name)
 	f, ok := m.files[name]
 	if ok {
 		f.mode = mode.Perm()
 		m.files[name] = f
 		return nil
 	}
-	clean := filepath.Clean(name)
+	clean := name
 	dir, ok := m.dirs[clean]
 	if !ok {
 		return &os.PathError{Op: "chmod", Path: name, Err: os.ErrNotExist}
@@ -255,7 +265,7 @@ func (m *MemFS) SyncFile(name string) error {
 func (m *MemFS) SyncDir(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.dirs[filepath.Clean(name)]; !ok {
+	if _, ok := m.dirs[cleanMemPath(name)]; !ok {
 		return &os.PathError{Op: "sync", Path: name, Err: os.ErrNotExist}
 	}
 	return nil
@@ -268,10 +278,11 @@ func (m *MemFS) CreateExclusive(name string, mode os.FileMode) (DurableFile, err
 }
 
 func (m *MemFS) createExclusiveLocked(name string, mode os.FileMode) (DurableFile, error) {
+	name = cleanMemPath(name)
 	if _, ok := m.files[name]; ok {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrExist}
 	}
-	if _, ok := m.dirs[filepath.Clean(name)]; ok {
+	if _, ok := m.dirs[name]; ok {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrExist}
 	}
 	opened := memFile{modTime: time.Now(), mode: mode.Perm(), owner: m.euid, inode: m.allocateInodeLocked()}
@@ -286,7 +297,8 @@ func (m *MemFS) OpenExclusiveLock(name string, mode os.FileMode) (ExclusiveLock,
 }
 
 func (m *MemFS) openExclusiveLockLocked(name string, mode os.FileMode) (ExclusiveLock, error) {
-	if _, ok := m.dirs[filepath.Clean(name)]; ok {
+	name = cleanMemPath(name)
+	if _, ok := m.dirs[name]; ok {
 		return nil, fmt.Errorf("%w: lock type", ErrUnsafeSecurePath)
 	}
 	if _, ok := m.files[name]; !ok {
@@ -309,14 +321,15 @@ func (m *MemFS) OpenNoFollow(name string) (SecureReadFile, error) {
 }
 
 func (m *MemFS) openNoFollowLocked(name string) (SecureReadFile, error) {
+	name = cleanMemPath(name)
 	file, ok := m.files[name]
 	if ok {
 		data := append([]byte(nil), file.data...)
 		return &memSecureReadFile{Reader: bytes.NewReader(data), fsys: m, path: name, opened: file}, nil
 	}
-	directory, ok := m.dirs[filepath.Clean(name)]
+	directory, ok := m.dirs[name]
 	if ok {
-		return &memSecureReadFile{Reader: bytes.NewReader(nil), fsys: m, path: filepath.Clean(name), opened: directory, isDir: true}, nil
+		return &memSecureReadFile{Reader: bytes.NewReader(nil), fsys: m, path: name, opened: directory, isDir: true}, nil
 	}
 	return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
 }
@@ -324,7 +337,7 @@ func (m *MemFS) openNoFollowLocked(name string) (SecureReadFile, error) {
 func (m *MemFS) OpenDurableDirectory(name string) (DurableDirectory, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	clean := filepath.Clean(name)
+	clean := cleanMemPath(name)
 	directory, ok := m.dirs[clean]
 	if !ok {
 		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrNotExist}
@@ -346,7 +359,7 @@ func (m *MemFS) OpenSecureDirectory(name string) (SecureDirectory, error) {
 }
 
 func (m *MemFS) fileInfo(name string, file memFile, isDir bool) os.FileInfo {
-	return memFileInfo{name: filepath.Base(name), size: int64(len(file.data)), modTime: file.modTime, mode: file.mode, owner: file.owner, inode: file.inode, links: m.linkCountLocked(file.inode, isDir), isDir: isDir}
+	return memFileInfo{name: pathpkg.Base(name), size: int64(len(file.data)), modTime: file.modTime, mode: file.mode, owner: file.owner, inode: file.inode, links: m.linkCountLocked(file.inode, isDir), isDir: isDir}
 }
 
 func (m *MemFS) linkCountLocked(inode uint64, isDir bool) uint64 {
@@ -498,17 +511,17 @@ func (directory *memSecureDirectory) ReadDir() ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	prefix := path + string(filepath.Separator)
+	prefix := path + "/"
 	entries := make([]os.DirEntry, 0)
 	for childPath, file := range directory.fsys.files {
 		name := strings.TrimPrefix(childPath, prefix)
-		if childPath != path && name != childPath && name != "" && !strings.ContainsRune(name, filepath.Separator) {
+		if childPath != path && name != childPath && name != "" && !strings.ContainsRune(name, '/') {
 			entries = append(entries, fs.FileInfoToDirEntry(directory.fsys.fileInfo(childPath, file, false)))
 		}
 	}
 	for childPath, file := range directory.fsys.dirs {
 		name := strings.TrimPrefix(childPath, prefix)
-		if childPath != path && name != childPath && name != "" && !strings.ContainsRune(name, filepath.Separator) {
+		if childPath != path && name != childPath && name != "" && !strings.ContainsRune(name, '/') {
 			entries = append(entries, fs.FileInfoToDirEntry(directory.fsys.fileInfo(childPath, file, true)))
 		}
 	}
@@ -526,7 +539,7 @@ func (directory *memSecureDirectory) OpenDirectory(name string) (DurableDirector
 	if err != nil {
 		return nil, err
 	}
-	childPath := filepath.Join(path, name)
+	childPath := pathpkg.Join(path, name)
 	child, ok := directory.fsys.dirs[childPath]
 	if !ok {
 		if _, fileExists := directory.fsys.files[childPath]; fileExists {
@@ -547,7 +560,7 @@ func (directory *memSecureDirectory) Mkdir(name string, mode os.FileMode) error 
 	if err != nil {
 		return err
 	}
-	childPath := filepath.Join(path, name)
+	childPath := pathpkg.Join(path, name)
 	if _, ok := directory.fsys.files[childPath]; ok {
 		return &os.PathError{Op: "mkdir", Path: childPath, Err: os.ErrExist}
 	}
@@ -573,7 +586,7 @@ func (directory *memSecureDirectory) OpenNoFollow(name string) (SecureReadFile, 
 	if err != nil {
 		return nil, err
 	}
-	return directory.fsys.openNoFollowLocked(filepath.Join(path, name))
+	return directory.fsys.openNoFollowLocked(pathpkg.Join(path, name))
 }
 
 func (directory *memSecureDirectory) CreateExclusive(name string, mode os.FileMode) (DurableFile, error) {
@@ -586,7 +599,7 @@ func (directory *memSecureDirectory) CreateExclusive(name string, mode os.FileMo
 	if err != nil {
 		return nil, err
 	}
-	return directory.fsys.createExclusiveLocked(filepath.Join(path, name), mode)
+	return directory.fsys.createExclusiveLocked(pathpkg.Join(path, name), mode)
 }
 
 func (directory *memSecureDirectory) OpenExclusiveLock(name string, mode os.FileMode) (ExclusiveLock, error) {
@@ -599,7 +612,7 @@ func (directory *memSecureDirectory) OpenExclusiveLock(name string, mode os.File
 	if err != nil {
 		return nil, err
 	}
-	return directory.fsys.openExclusiveLockLocked(filepath.Join(path, name), mode)
+	return directory.fsys.openExclusiveLockLocked(pathpkg.Join(path, name), mode)
 }
 
 func (directory *memSecureDirectory) OpenNewExclusiveLock(name string, mode os.FileMode) (ExclusiveLock, error) {
@@ -612,11 +625,11 @@ func (directory *memSecureDirectory) OpenNewExclusiveLock(name string, mode os.F
 	if err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(path, name)
+	lockPath := pathpkg.Join(path, name)
 	if _, exists := directory.fsys.files[lockPath]; exists {
 		return nil, &os.PathError{Op: "open", Path: lockPath, Err: os.ErrExist}
 	}
-	if _, exists := directory.fsys.dirs[filepath.Clean(lockPath)]; exists {
+	if _, exists := directory.fsys.dirs[lockPath]; exists {
 		return nil, &os.PathError{Op: "open", Path: lockPath, Err: os.ErrExist}
 	}
 	file := memFile{modTime: time.Now(), mode: mode.Perm(), owner: directory.fsys.euid, inode: directory.fsys.allocateInodeLocked()}
@@ -637,7 +650,7 @@ func (directory *memSecureDirectory) ProbeExclusiveLockHeld(name string, mode os
 	if err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(path, name)
+	lockPath := pathpkg.Join(path, name)
 	file, ok := directory.fsys.files[lockPath]
 	if !ok {
 		return nil, &os.PathError{Op: "open", Path: lockPath, Err: os.ErrNotExist}
@@ -662,14 +675,58 @@ func (directory *memSecureDirectory) Rename(oldName, newName string) error {
 	if err != nil {
 		return err
 	}
-	oldPath := filepath.Join(path, oldName)
+	oldPath := pathpkg.Join(path, oldName)
 	file, ok := directory.fsys.files[oldPath]
 	if !ok {
 		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
 	}
-	newPath := filepath.Join(path, newName)
-	if _, ok := directory.fsys.dirs[filepath.Clean(newPath)]; ok {
+	newPath := pathpkg.Join(path, newName)
+	if _, ok := directory.fsys.dirs[newPath]; ok {
 		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+	}
+	directory.fsys.files[newPath] = file
+	delete(directory.fsys.files, oldPath)
+	return nil
+}
+
+func (directory *memSecureDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.renameChecked(oldName, newName, expected, false)
+}
+
+func (directory *memSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.renameChecked(oldName, newName, expected, true)
+}
+
+func (directory *memSecureDirectory) renameChecked(oldName, newName string, expected SecureFileIdentity, noReplace bool) error {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	if err := validateSecureEntryName(oldName); err != nil {
+		return err
+	}
+	if err := validateSecureEntryName(newName); err != nil {
+		return err
+	}
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return err
+	}
+	oldPath := pathpkg.Join(path, oldName)
+	file, ok := directory.fsys.files[oldPath]
+	if !ok {
+		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
+	}
+	identity := SecureFileIdentity{Inode: file.inode, Links: 1}
+	if !SameSecureObject(identity, expected) {
+		return fmt.Errorf("%w: checked rename source identity", ErrUnsafeSecurePath)
+	}
+	newPath := pathpkg.Join(path, newName)
+	if _, exists := directory.fsys.dirs[newPath]; exists {
+		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+	}
+	if noReplace {
+		if _, exists := directory.fsys.files[newPath]; exists {
+			return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
+		}
 	}
 	directory.fsys.files[newPath] = file
 	delete(directory.fsys.files, oldPath)
@@ -689,16 +746,16 @@ func (directory *memSecureDirectory) RenameNoReplace(oldName, newName string) er
 	if err != nil {
 		return err
 	}
-	oldPath := filepath.Join(path, oldName)
+	oldPath := pathpkg.Join(path, oldName)
 	file, ok := directory.fsys.files[oldPath]
 	if !ok {
 		return &os.PathError{Op: "rename", Path: oldPath, Err: os.ErrNotExist}
 	}
-	newPath := filepath.Join(path, newName)
+	newPath := pathpkg.Join(path, newName)
 	if _, exists := directory.fsys.files[newPath]; exists {
 		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
 	}
-	if _, exists := directory.fsys.dirs[filepath.Clean(newPath)]; exists {
+	if _, exists := directory.fsys.dirs[newPath]; exists {
 		return &os.PathError{Op: "rename", Path: newPath, Err: os.ErrExist}
 	}
 	directory.fsys.files[newPath] = file
@@ -716,9 +773,32 @@ func (directory *memSecureDirectory) Remove(name string) error {
 	if err != nil {
 		return err
 	}
-	filePath := filepath.Join(path, name)
+	filePath := pathpkg.Join(path, name)
 	if _, ok := directory.fsys.files[filePath]; !ok {
 		return &os.PathError{Op: "remove", Path: filePath, Err: os.ErrNotExist}
+	}
+	delete(directory.fsys.files, filePath)
+	return nil
+}
+
+func (directory *memSecureDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	directory.fsys.mu.Lock()
+	defer directory.fsys.mu.Unlock()
+	if err := validateSecureEntryName(name); err != nil {
+		return err
+	}
+	path, _, err := directory.resolveLocked()
+	if err != nil {
+		return err
+	}
+	filePath := pathpkg.Join(path, name)
+	file, ok := directory.fsys.files[filePath]
+	if !ok {
+		return &os.PathError{Op: "remove", Path: filePath, Err: os.ErrNotExist}
+	}
+	identity := SecureFileIdentity{Inode: file.inode, Links: 1}
+	if !SameSecureObject(identity, expected) {
+		return fmt.Errorf("%w: checked remove source identity", ErrUnsafeSecurePath)
 	}
 	delete(directory.fsys.files, filePath)
 	return nil

@@ -121,8 +121,11 @@ func OpenCodexPrimerStore(fsys fsutil.DurableFileSystem, path, keyPath string) (
 }
 
 func OpenDefaultCodexPrimerStore(fsys fsutil.DurableFileSystem) (*CodexPrimerStore, error) {
-	dir := configDir()
-	return OpenCodexPrimerStore(fsys, filepath.Join(dir, "codex-window-primer.json"), filepath.Join(dir, "codex-window-primer.key"))
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return nil, err
+	}
+	return OpenCodexPrimerStore(fsys, filepath.Join(paths.StateDir, "codex-window-primer.json"), filepath.Join(paths.StateDir, "codex-window-primer.key"))
 }
 
 func (s *CodexPrimerStore) Observe(account codex.AccountKey, target CodexPrimerTarget) error {

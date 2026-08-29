@@ -81,6 +81,7 @@ func TestBuildLocalRegistryUsesFederatedCredentialAuthority(t *testing.T) {
 	registry, err := buildLocalRegistryFromAuthority(cfg, localRegistryDependencies{
 		FS:                  fsys,
 		HomeDir:             "/home/test",
+		Roots:               testCQRoots(),
 		HTTPClient:          registryModelsDoer{wantToken: token},
 		CodexClientVersion:  "test-client",
 		ClaudeToken:         func() (string, error) { return "", errors.New("Claude unavailable") },

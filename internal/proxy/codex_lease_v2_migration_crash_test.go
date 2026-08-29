@@ -363,6 +363,32 @@ func (directory *codexLeaseMigrationCrashDirectory) Rename(oldName, newName stri
 	return nil
 }
 
+func (directory *codexLeaseMigrationCrashDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	target := codexLeaseMigrationTempTarget(oldName)
+	if target != "" {
+		directory.fsys.events = append(directory.fsys.events, target+":rename")
+		if directory.fsys.fail(target, "rename") {
+			return errors.New("injected migration rename failure")
+		}
+	}
+	if err := directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected); err != nil {
+		return err
+	}
+	if target != "" {
+		directory.fsys.renamed[target] = true
+		directory.fsys.lastRenamed = target
+	}
+	return nil
+}
+
+func (directory *codexLeaseMigrationCrashDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *codexLeaseMigrationCrashDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (directory *codexLeaseMigrationCrashDirectory) Sync() error {
 	target := directory.fsys.lastRenamed
 	if target != "" {
@@ -382,12 +408,13 @@ func (directory *codexLeaseMigrationCrashDirectory) Sync() error {
 
 type codexLeaseMigrationCrashFile struct {
 	fsutil.DurableFile
-	fsys   *codexLeaseMigrationCrashFS
-	target string
+	fsys      *codexLeaseMigrationCrashFS
+	target    string
+	statCalls int
 }
 
 func (file *codexLeaseMigrationCrashFile) Stat() (os.FileInfo, error) {
-	file.fsys.events = append(file.fsys.events, file.target+":temp-descriptor-validation")
+	file.statCalls++
 	inspector, ok := file.DurableFile.(fsutil.DurableFileInspector)
 	if !ok {
 		return nil, fsutil.ErrSecureCapabilityUnavailable
@@ -396,6 +423,10 @@ func (file *codexLeaseMigrationCrashFile) Stat() (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if file.statCalls == 1 {
+		return info, nil
+	}
+	file.fsys.events = append(file.fsys.events, file.target+":temp-descriptor-validation")
 	if file.fsys.fail(file.target, "temp-descriptor-validation") {
 		return codexLeaseMigrationUnsafeDescriptorInfo{FileInfo: info}, nil
 	}

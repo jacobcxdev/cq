@@ -22,7 +22,7 @@ func openRestartableAuthorityCoordinator(t *testing.T, filesystem *fsutil.MemFS,
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewCredentialCoordinatorWithAuthority(store, CredentialAuthorityCapabilities{
+	coordinator, err := NewCredentialCoordinatorWithAuthority(store, testCQStateDir(), CredentialAuthorityCapabilities{
 		Role: CredentialAuthorityPrimary, LifecycleBound: true, RootKey: bytes.Repeat([]byte{0x73}, 32),
 		RefreshMutationBackend: mutationBackend, CredentialOwnerBackend: ownerBackend,
 		RefreshMutationHook: mutationHook, CredentialOwnerHook: ownerHook,
@@ -681,7 +681,7 @@ func TestRefreshUncertainFailureBlocksOldCredentialAndRestart(t *testing.T) {
 	if len(inventory.Accounts) != 1 || len(ResolveCandidate(inventory.Accounts[0], "", time.Now())) != 0 {
 		t.Fatal("uncertain credential remained dispatchable")
 	}
-	restarted, err := NewCredentialCoordinator(coordinator.Store)
+	restarted, err := NewCredentialCoordinator(coordinator.Store, coordinator.StateDir)
 	if err != nil {
 		t.Fatal(err)
 	}

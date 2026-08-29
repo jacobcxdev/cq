@@ -167,7 +167,7 @@ func (lock *SelectorCASLock) validateSelectorCAS(directory fsutil.SecureDirector
 	if err != nil {
 		return fmt.Errorf("%w: directory validation: %v", ErrAuthorityCASCapability, err)
 	}
-	if directoryIdentity.Device != lock.state.directoryIdentity.Device || directoryIdentity.Inode != lock.state.directoryIdentity.Inode {
+	if !fsutil.SameSecureObject(directoryIdentity, lock.state.directoryIdentity) {
 		return fmt.Errorf("%w: directory identity changed", ErrAuthorityCASCapability)
 	}
 	if err := validateSelectorCASLockPath(lock.state.inspector, directory, lock.state.name, lock.state.identity); err != nil {
@@ -212,8 +212,16 @@ func (lock *SelectorCASLock) Close() error {
 	return lock.state.lock.Close()
 }
 
-func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, directory fsutil.SecureDirectory, name string, prior *StableObjectIdentity, body []byte, noReplace bool, validateCAS func() error) (StableObjectIdentity, error) {
+func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, directory fsutil.SecureDirectory, name string, prior *StableObjectIdentity, body []byte, noReplace bool, validateCAS func() error) (result StableObjectIdentity, resultErr error) {
 	if publisher == nil || publisher.inspector == nil || publisher.random == nil || directory == nil {
+		return StableObjectIdentity{}, fsutil.ErrSecureCapabilityUnavailable
+	}
+	renamer, ok := directory.(fsutil.IdentityBoundRenamer)
+	if !ok {
+		return StableObjectIdentity{}, fsutil.ErrSecureCapabilityUnavailable
+	}
+	remover, ok := directory.(fsutil.IdentityBoundRemover)
+	if !ok {
 		return StableObjectIdentity{}, fsutil.ErrSecureCapabilityUnavailable
 	}
 	if err := validateAuthorityEntryName(name); err != nil {
@@ -239,12 +247,35 @@ func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, director
 	if err != nil {
 		return StableObjectIdentity{}, err
 	}
+	temporaryInspector, ok := temporary.(fsutil.DurableFileInspector)
+	if !ok {
+		_ = temporary.Close()
+		return StableObjectIdentity{}, fsutil.ErrSecureCapabilityUnavailable
+	}
+	createdInfo, err := temporaryInspector.Stat()
+	if err != nil {
+		_ = temporary.Close()
+		return StableObjectIdentity{}, fmt.Errorf("stat authority temporary: %w", err)
+	}
+	createdIdentity, err := stableAuthorityLockIdentity(publisher.inspector, createdInfo)
+	if err != nil {
+		_ = temporary.Close()
+		return StableObjectIdentity{}, err
+	}
 	removeTemporary := true
 	defer func() {
-		if removeTemporary {
-			_ = directory.Remove(temporaryName)
-			_ = directory.Sync()
+		if !removeTemporary {
+			return
 		}
+		cleanupErr := remover.RemoveChecked(temporaryName, createdIdentity)
+		if cleanupErr == nil || errors.Is(cleanupErr, os.ErrNotExist) {
+			if cleanupErr == nil {
+				resultErr = errors.Join(resultErr, directory.Sync())
+			}
+			return
+		}
+		result = StableObjectIdentity{}
+		resultErr = errors.Join(resultErr, fmt.Errorf("clean authority temporary: %w", cleanupErr))
 	}()
 	if err := writeAuthorityBody(ctx, temporary, body); err != nil {
 		_ = temporary.Close()
@@ -253,11 +284,6 @@ func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, director
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
 		return StableObjectIdentity{}, fmt.Errorf("sync authority temporary: %w", err)
-	}
-	temporaryInspector, ok := temporary.(fsutil.DurableFileInspector)
-	if !ok {
-		_ = temporary.Close()
-		return StableObjectIdentity{}, fsutil.ErrSecureCapabilityUnavailable
 	}
 	temporaryInfo, err := temporaryInspector.Stat()
 	if err != nil {
@@ -268,6 +294,10 @@ func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, director
 	if err != nil {
 		_ = temporary.Close()
 		return StableObjectIdentity{}, err
+	}
+	if !fsutil.SameSecureObject(temporaryIdentity.File, createdIdentity) {
+		_ = temporary.Close()
+		return StableObjectIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
 	if err := temporary.Close(); err != nil {
 		return StableObjectIdentity{}, fmt.Errorf("close authority temporary: %w", err)
@@ -283,7 +313,7 @@ func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, director
 	if err != nil {
 		return StableObjectIdentity{}, fmt.Errorf("reopen authority temporary: %w", err)
 	}
-	if temporaryFileIdentity != temporaryIdentity.File || !bytes.Equal(temporaryBody, body) {
+	if !fsutil.SameSecureObject(temporaryFileIdentity, temporaryIdentity.File) || !bytes.Equal(temporaryBody, body) {
 		return StableObjectIdentity{}, fmt.Errorf("%w: temporary identity or content drift", fsutil.ErrUnsafeSecurePath)
 	}
 	if prior != nil {
@@ -301,9 +331,9 @@ func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, director
 		}
 	}
 	if noReplace {
-		err = directory.RenameNoReplace(temporaryName, name)
+		err = renamer.RenameNoReplaceChecked(temporaryName, name, temporaryIdentity.File)
 	} else {
-		err = directory.Rename(temporaryName, name)
+		err = renamer.RenameChecked(temporaryName, name, temporaryIdentity.File)
 	}
 	if err != nil {
 		return StableObjectIdentity{}, fmt.Errorf("publish authority object: %w", err)
@@ -316,7 +346,7 @@ func (publisher *AuthorityObjectPublisher) publish(ctx context.Context, director
 	if err != nil {
 		return StableObjectIdentity{}, fmt.Errorf("reopen authority object: %w", err)
 	}
-	if installedIdentity != temporaryIdentity.File || !bytes.Equal(installed, body) {
+	if !fsutil.SameSecureObject(installedIdentity, temporaryIdentity.File) || !bytes.Equal(installed, body) {
 		return StableObjectIdentity{}, fmt.Errorf("%w: installed identity or content drift", fsutil.ErrUnsafeSecurePath)
 	}
 	if err := validateAuthorityDirectory(publisher.inspector, directory); err != nil {
@@ -375,12 +405,18 @@ func authorityDirectoryIdentity(inspector fsutil.SecurePathInspector, directory 
 	if err != nil {
 		return fsutil.SecureFileIdentity{}, fmt.Errorf("stat authority directory: %w", err)
 	}
-	owner, ownerOK := inspector.FileOwnerUID(info)
 	identity, identityOK := inspector.FileIdentity(info)
-	if !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !ownerOK || owner != inspector.EffectiveUID() || !identityOK {
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || fsutil.ValidateSecureOwner(inspector, info) != nil || !identityOK {
 		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
-	return identity, nil
+	return stableDirectoryObjectIdentity(identity), nil
+}
+
+// Directory link counts may change when this transaction creates or removes
+// entries. Device, inode, and file ID remain stable object identity.
+func stableDirectoryObjectIdentity(identity fsutil.SecureFileIdentity) fsutil.SecureFileIdentity {
+	identity.Links = 0
+	return identity
 }
 
 func requireAuthorityEntryAbsent(directory fsutil.SecureDirectory, name string) error {
@@ -396,18 +432,16 @@ func requireAuthorityEntryAbsent(directory fsutil.SecureDirectory, name string) 
 }
 
 func stableAuthorityIdentity(inspector fsutil.SecurePathInspector, info os.FileInfo, body []byte) (StableObjectIdentity, error) {
-	owner, ownerOK := inspector.FileOwnerUID(info)
 	fileIdentity, identityOK := inspector.FileIdentity(info)
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !ownerOK || owner != inspector.EffectiveUID() || !identityOK || fileIdentity.Links != 1 {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || fsutil.ValidateSecureOwner(inspector, info) != nil || !identityOK || fileIdentity.Links != 1 {
 		return StableObjectIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
 	return stableAuthorityIdentityFromParts(fileIdentity, info.Size(), body)
 }
 
 func stableAuthorityLockIdentity(inspector fsutil.SecurePathInspector, info os.FileInfo) (fsutil.SecureFileIdentity, error) {
-	owner, ownerOK := inspector.FileOwnerUID(info)
 	identity, identityOK := inspector.FileIdentity(info)
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !ownerOK || owner != inspector.EffectiveUID() || !identityOK || identity.Links != 1 {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || fsutil.ValidateSecureOwner(inspector, info) != nil || !identityOK || identity.Links != 1 {
 		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
 	return identity, nil

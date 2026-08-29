@@ -14,6 +14,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type registryPipeline struct {
@@ -138,6 +139,7 @@ func firstClaudeAccessTokenFromAccounts(accounts []keyring.ClaudeOAuth) func() (
 type registryPipelineOptions struct {
 	FS                   fsutil.FileSystem
 	HomeDir              string
+	Roots                userdirs.Roots
 	ClaudeUpstream       string
 	CodexUpstream        string
 	HTTPClient           httputil.Doer
@@ -163,6 +165,7 @@ func cachedRegistryEntries(opts registryPipelineOptions) []modelregistry.Entry {
 	deps := modelsDeps{
 		FS:      opts.FS,
 		HomeDir: opts.HomeDir,
+		Roots:   opts.Roots,
 		Env:     opts.Env,
 		Stderr:  opts.Stderr,
 	}
@@ -228,7 +231,7 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		},
 		Overlays: modelregistry.FileOverlayStore{
 			FS:   opts.FS,
-			Path: modelregistry.OverlayPath(opts.Env, opts.HomeDir),
+			Path: modelregistry.OverlayPath(opts.Roots),
 		},
 	}
 

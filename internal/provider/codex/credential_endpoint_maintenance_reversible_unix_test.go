@@ -2817,6 +2817,36 @@ func (d *finaliseStageDirectory) Rename(oldName, newName string) error {
 	return nil
 }
 
+func (d *finaliseStageDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	d.mu.Lock()
+	armed := d.armed && newName == d.recordName
+	d.mu.Unlock()
+	if armed {
+		if d.failRename {
+			d.sequence.add("rename-error")
+			return errors.New("injected finalising receipt rename failure")
+		}
+		d.sequence.add("rename")
+	}
+	if err := d.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected); err != nil {
+		return err
+	}
+	if armed {
+		d.mu.Lock()
+		d.renamed = true
+		d.mu.Unlock()
+	}
+	return nil
+}
+
+func (d *finaliseStageDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return d.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (d *finaliseStageDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return d.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (d *finaliseStageDirectory) Sync() error {
 	d.mu.Lock()
 	receiptSync := d.armed && d.renamed && !d.synced
@@ -2968,6 +2998,18 @@ type replaceFinalisingReceiptOnReadDirectory struct {
 	armOnProbeAt int
 	probeCalls   int
 	replacements atomic.Int32
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return d.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return d.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (d *replaceFinalisingReceiptOnReadDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return d.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (d *replaceFinalisingReceiptOnReadDirectory) arm() {

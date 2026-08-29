@@ -22,6 +22,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"golang.org/x/sys/unix"
 )
 
@@ -83,7 +84,10 @@ func runDarwinProxyOwnedRuntime(ctx context.Context, port int, serve func(contex
 }
 
 func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error) error {
-	path := proxy.DefaultRuntimeLifecyclePath()
+	path, err := proxy.DefaultRuntimeLifecyclePath()
+	if err != nil {
+		return err
+	}
 	file, holder, err := openDarwinRuntimeLifecycle(path, "supervisor")
 	if err != nil {
 		return fmt.Errorf("open supervisor runtime lifecycle: %w", err)
@@ -110,7 +114,11 @@ func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, se
 		LifecycleHolderIdentityDigest: holderDigest,
 	}
 	launcher := newDarwinRuntimeLauncher(executable, manifest, holder, path)
-	admissions, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.DefaultNormalCallerAdmissionPath())
+	admissionPath, err := proxy.DefaultNormalCallerAdmissionPath()
+	if err != nil {
+		return err
+	}
+	admissions, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, admissionPath)
 	if err != nil {
 		return fmt.Errorf("open normal caller admissions: %w", err)
 	}
@@ -398,12 +406,8 @@ func proxyAgentPlistPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", proxyAgentLabel+".plist"), nil
 }
 
-func proxyAgentLogPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "Logs", "cq", "proxy.log"), nil
+func proxyAgentLogPath(logsDir string) string {
+	return filepath.Join(logsDir, "proxy.log")
 }
 
 var runProxyLaunchctl = func(args ...string) error {
@@ -414,6 +418,10 @@ var currentExecutable = os.Executable
 
 func installProxyAgent() error {
 	if err := rejectHomebrewProxyServiceMutation("start"); err != nil {
+		return err
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
 		return err
 	}
 	exe, err := resolveExecutable()
@@ -429,10 +437,7 @@ func installProxyAgent() error {
 	if err != nil {
 		return err
 	}
-	logPath, err := proxyAgentLogPath()
-	if err != nil {
-		return err
-	}
+	logPath := proxyAgentLogPath(roots.Logs)
 
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)
@@ -475,7 +480,10 @@ func installProxyAgent() error {
 }
 
 func initialiseDarwinRuntimeLifecycle() error {
-	path := proxy.DefaultRuntimeLifecyclePath()
+	path, err := proxy.DefaultRuntimeLifecyclePath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

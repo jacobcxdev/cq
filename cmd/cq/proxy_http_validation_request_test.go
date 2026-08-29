@@ -15,6 +15,27 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
+func TestDefaultInstalledHTTPValidationRequestStoreUsesRuntimeRoot(t *testing.T) {
+	home := t.TempDir()
+	configBase := filepath.Join(home, "config")
+	cacheBase := filepath.Join(home, "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configBase)
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+
+	store, err := defaultInstalledHTTPValidationRequestStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(configBase, "cq", "state", "installed-http-validation", "request.json")
+	if store.path != want {
+		t.Fatalf("request path = %q, want runtime path %q", store.path, want)
+	}
+	if strings.HasPrefix(store.path, cacheBase+string(filepath.Separator)) {
+		t.Fatalf("request path = %q, must not use cache root %q", store.path, cacheBase)
+	}
+}
+
 func TestCreateInstalledHTTPValidationRequestWritesPrivateBoundRequest(t *testing.T) {
 	t.Parallel()
 

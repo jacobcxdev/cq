@@ -39,7 +39,7 @@ func (c *Cache) Get(_ context.Context, id string) ([]quota.Result, bool, error) 
 		return nil, false, fmt.Errorf("empty cache ID")
 	}
 	base := filepath.Base(id)
-	if base == "." || base == ".." || base == "/" {
+	if base == "." || base == ".." || base == string(filepath.Separator) {
 		return nil, false, fmt.Errorf("invalid cache ID: %q", id)
 	}
 	path := filepath.Join(c.dir, base+".json")
@@ -67,7 +67,7 @@ func (c *Cache) Age(_ context.Context, id string) (time.Duration, bool) {
 		return 0, false
 	}
 	base := filepath.Base(id)
-	if base == "." || base == ".." || base == "/" {
+	if base == "." || base == ".." || base == string(filepath.Separator) {
 		return 0, false
 	}
 	path := filepath.Join(c.dir, base+".json")
@@ -84,7 +84,7 @@ func (c *Cache) Delete(_ context.Context, id string) error {
 		return fmt.Errorf("empty cache ID")
 	}
 	base := filepath.Base(id)
-	if base == "." || base == ".." || base == "/" {
+	if base == "." || base == ".." || base == string(filepath.Separator) {
 		return fmt.Errorf("invalid cache ID: %q", id)
 	}
 	path := filepath.Join(c.dir, base+".json")
@@ -100,7 +100,7 @@ func (c *Cache) Put(_ context.Context, id string, results []quota.Result) error 
 		return fmt.Errorf("empty cache ID")
 	}
 	base := filepath.Base(id)
-	if base == "." || base == ".." || base == "/" {
+	if base == "." || base == ".." || base == string(filepath.Separator) {
 		return fmt.Errorf("invalid cache ID: %q", id)
 	}
 	path := filepath.Join(c.dir, base+".json")

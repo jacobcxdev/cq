@@ -12,6 +12,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // localRegistry bundles a catalog, the refresher that updates it, and a
@@ -28,6 +29,7 @@ type localRegistry struct {
 type localRegistryDependencies struct {
 	FS                  fsutil.FileSystem
 	HomeDir             string
+	Roots               userdirs.Roots
 	HTTPClient          httputil.Doer
 	CodexClientVersion  string
 	ClaudeToken         func() (string, error)
@@ -40,7 +42,7 @@ type localRegistryDependencies struct {
 // buildLocalRegistry constructs a fresh catalog, refresher, and publisher
 // closure using OS-backed filesystem, httputil client, and Codex account
 // discovery. Intended for cq models refresh when the proxy is not running.
-func buildLocalRegistry(cfg *proxy.Config, versionStr string) (*localRegistry, error) {
+func buildLocalRegistry(cfg *proxy.Config, versionStr string, roots userdirs.Roots) (*localRegistry, error) {
 	fsys := fsutil.OSFileSystem{}
 	home, err := fsys.UserHomeDir()
 	if err != nil {
@@ -56,6 +58,7 @@ func buildLocalRegistry(cfg *proxy.Config, versionStr string) (*localRegistry, e
 	registry, err := buildLocalRegistryFromAuthority(cfg, localRegistryDependencies{
 		FS:                  fsys,
 		HomeDir:             home,
+		Roots:               roots,
 		HTTPClient:          httpClient,
 		CodexClientVersion:  codexClientVersion,
 		ClaudeToken:         firstClaudeAccessToken,
@@ -78,6 +81,7 @@ func buildLocalRegistryFromAuthority(cfg *proxy.Config, deps localRegistryDepend
 	pipeline, err := newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
 		FS:                 deps.FS,
 		HomeDir:            deps.HomeDir,
+		Roots:              deps.Roots,
 		ClaudeUpstream:     cfg.ClaudeUpstream,
 		CodexUpstream:      cfg.CodexUpstream,
 		HTTPClient:         deps.HTTPClient,

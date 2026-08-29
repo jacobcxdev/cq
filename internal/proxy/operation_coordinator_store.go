@@ -390,7 +390,7 @@ func (b *CredentialAuthorityFSBackend) PublishImmutable(ctx context.Context, nam
 }
 
 func (b *CredentialAuthorityFSBackend) ReplaceSelectorExactPrior(ctx context.Context, name string, prior providerCodex.CredentialAuthorityIdentity, body []byte) (providerCodex.CredentialAuthorityIdentity, error) {
-	stablePrior := StableObjectIdentity{File: fsutil.SecureFileIdentity{Device: prior.Device, Inode: prior.Inode, Links: prior.Links}, Size: prior.Size, Digest: prior.Digest}
+	stablePrior := stableCodexAuthorityIdentity(prior)
 	identity, err := b.publisher.ReplaceSelectorExactPrior(ctx, b.directory, name, &stablePrior, body)
 	return codexAuthorityIdentity(identity), err
 }
@@ -433,9 +433,8 @@ func (b *CredentialAuthorityFSBackend) CredentialAuthorityOccupancy(ctx context.
 		if closeErr != nil {
 			return providerCodex.CredentialAuthorityOccupancy{}, closeErr
 		}
-		owner, ownerOK := b.inspector.FileOwnerUID(info)
 		identity, identityOK := b.inspector.FileIdentity(info)
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ownerOK || owner != b.inspector.EffectiveUID() || !identityOK || identity.Links != 1 || info.Size() < 0 || occupancy.Bytes > int64(^uint64(0)>>1)-info.Size() {
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || fsutil.ValidateSecureOwner(b.inspector, info) != nil || !identityOK || identity.Links != 1 || info.Size() < 0 || occupancy.Bytes > int64(^uint64(0)>>1)-info.Size() {
 			return providerCodex.CredentialAuthorityOccupancy{}, fsutil.ErrUnsafeSecurePath
 		}
 		occupancy.Files++
@@ -446,7 +445,11 @@ func (b *CredentialAuthorityFSBackend) CredentialAuthorityOccupancy(ctx context.
 }
 
 func codexAuthorityIdentity(identity StableObjectIdentity) providerCodex.CredentialAuthorityIdentity {
-	return providerCodex.CredentialAuthorityIdentity{Device: identity.File.Device, Inode: identity.File.Inode, Links: identity.File.Links, Size: identity.Size, Digest: identity.Digest}
+	return providerCodex.CredentialAuthorityIdentity{Device: identity.File.Device, Inode: identity.File.Inode, Links: identity.File.Links, FileID: identity.File.FileID, Size: identity.Size, Digest: identity.Digest}
+}
+
+func stableCodexAuthorityIdentity(identity providerCodex.CredentialAuthorityIdentity) StableObjectIdentity {
+	return StableObjectIdentity{File: fsutil.SecureFileIdentity{Device: identity.Device, Inode: identity.Inode, Links: identity.Links, FileID: identity.FileID}, Size: identity.Size, Digest: identity.Digest}
 }
 
 func (s *OperationCoordinatorStore) publishOrAdopt(name string, body []byte) (StableObjectIdentity, error) {

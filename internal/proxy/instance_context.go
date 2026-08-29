@@ -233,9 +233,8 @@ func validateInstanceDirectory(inspector fsutil.SecurePathInspector, directory f
 	if err != nil {
 		return fsutil.SecureFileIdentity{}, err
 	}
-	owner, ownerOK := inspector.FileOwnerUID(info)
 	identity, identityOK := inspector.FileIdentity(info)
-	if !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || !ownerOK || owner != inspector.EffectiveUID() || !identityOK {
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || fsutil.ValidateSecureOwner(inspector, info) != nil || !identityOK {
 		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
 	return identity, nil

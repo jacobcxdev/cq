@@ -84,7 +84,7 @@ func newReadableManagedInventoryCoordinator(t testing.TB) (*codexprov.Credential
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	coordinator, err := codexprov.NewCredentialCoordinator(store, testCQRoots().State)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestRegistryPipelineAllSourceFailurePreservesCodexAuthorityType(t *testing.
 	coordinator, fsys, path, before := newReadableManagedInventoryCoordinator(t)
 	fsys.setFailing(true)
 	pipeline, err := newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
-		FS: fsys, HomeDir: "/home/test", ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example",
+		FS: fsys, HomeDir: "/home/test", Roots: testCQRoots(), ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example",
 		HTTPClient: &scriptedRegistryModelsDoer{}, ClaudeToken: func() (string, error) {
 			return "", errors.New("Anthropic unavailable")
 		}, Env: func(string) string { return "" }, Stderr: io.Discard,
@@ -547,7 +547,7 @@ func TestCodexRegistryModelsExternalSourceDisappearsDuringExactResolution(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	coordinator, err := codexprov.NewCredentialCoordinator(store, testCQRoots().State)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +732,7 @@ func TestCodexRegistryModelsRetriesFreshExternalAfterStaleManaged401WithoutWrite
 	if err != nil {
 		t.Fatalf("NewManagedStore() error = %v", err)
 	}
-	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	coordinator, err := codexprov.NewCredentialCoordinator(store, testCQRoots().State)
 	if err != nil {
 		t.Fatalf("NewCredentialCoordinator() error = %v", err)
 	}
@@ -766,7 +766,7 @@ func TestCodexRegistryModelsRetriesFreshExternalAfterStaleManaged401WithoutWrite
 	authority := &registryCoordinatorAuthority{coordinator: coordinator}
 	doer := &inverseRegistryModelsDoer{staleToken: staleManagedToken, freshToken: freshExternalToken}
 	pipeline, err := newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
-		FS: fsys, HomeDir: "/home/test", ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example",
+		FS: fsys, HomeDir: "/home/test", Roots: testCQRoots(), ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example",
 		HTTPClient: doer, CodexClientVersion: "test-client", ClaudeToken: func() (string, error) {
 			return "", errors.New("Claude unavailable")
 		}, Env: func(string) string { return "" }, Stderr: io.Discard,

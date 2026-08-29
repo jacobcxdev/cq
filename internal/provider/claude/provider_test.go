@@ -14,12 +14,18 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
+func setClaudeTestHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 func TestDiscoverAccounts(t *testing.T) {
 	oldDiscover := discoverClaudeAccounts
 	defer func() { discoverClaudeAccounts = oldDiscover }()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setClaudeTestHome(t, home)
 
 	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
 		return []keyring.ClaudeOAuth{{
@@ -60,7 +66,7 @@ func TestDiscoverAccountsMarksActiveAccount(t *testing.T) {
 	defer func() { discoverClaudeAccounts = oldDiscover }()
 
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setClaudeTestHome(t, home)
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -161,7 +167,7 @@ func TestFetchAccountPanicInInnerGoroutines(t *testing.T) {
 }
 
 func TestFetchAccountUsage(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setClaudeTestHome(t, t.TempDir())
 
 	p := &Provider{client: &Client{http: doerFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/api/oauth/usage" {
@@ -215,13 +221,13 @@ func TestFetchAccountUsage(t *testing.T) {
 
 func TestFetchAccountUsageUsesSandboxedHome(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setClaudeTestHome(t, home)
 
 	p := &Provider{client: &Client{http: doerFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{},
-			Body: io.NopCloser(strings.NewReader(`{"five_hour":{"utilization":25.0,"resets_at":"2026-03-20T12:00:00Z"}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"five_hour":{"utilization":25.0,"resets_at":"2026-03-20T12:00:00Z"}}`)),
 		}, nil
 	})}}
 
@@ -244,7 +250,7 @@ func TestFetchAccountUsageUsesSandboxedHome(t *testing.T) {
 
 func TestFetchAccountRefreshFallbackUsesSandboxedHome(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setClaudeTestHome(t, home)
 
 	// Keep this path read-only for now: the goal is proving sandboxed HOME on the
 	// call path, not exercising real keychain persistence from the provider test.

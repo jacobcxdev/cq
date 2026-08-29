@@ -148,7 +148,7 @@ func discoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, aut
 			if !errors.Is(err, os.ErrNotExist) {
 				return Inventory{}, err
 			}
-		} else if err := fsutil.ValidateOwnerControlledDirectory(fs, coreDir); err != nil {
+		} else if err := fsutil.ValidateExternalCredentialDirectory(fs, coreDir); err != nil {
 			return Inventory{}, err
 		}
 	}
@@ -169,10 +169,10 @@ func discoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, aut
 				return Inventory{}, err
 			}
 		} else {
-			if err := fsutil.ValidateOwnerControlledDirectory(fs, filepath.Dir(accountsDir)); err != nil {
+			if err := fsutil.ValidateExternalCredentialDirectory(fs, filepath.Dir(accountsDir)); err != nil {
 				return Inventory{}, err
 			}
-			if err := fsutil.ValidateSecureDirectory(fs, accountsDir); err != nil {
+			if err := fsutil.ValidateExternalCredentialDirectory(fs, accountsDir); err != nil {
 				return Inventory{}, err
 			}
 			entries, err = fs.ReadDir(accountsDir)
@@ -377,7 +377,7 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 	if authoritative {
 		var present bool
 		var err error
-		data, present, err = readAuthoritativeCredentialFile(fs, path, source == SourceSystem)
+		data, present, err = readAuthoritativeCredentialFile(fs, path)
 		if err != nil || !present {
 			return rawCandidate{}, false, err
 		}
@@ -425,7 +425,9 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 				return rawCandidate{}, false, nil
 			}
 			if !authoritative {
-				if info, err := fs.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+				inspector, inspectorOK := fs.(fsutil.SecurePathInspector)
+				info, infoErr := fs.Stat(path)
+				if !inspectorOK || infoErr != nil || fsutil.ValidateExternalCredentialFile(inspector, info) != nil {
 					return rawCandidate{}, false, nil
 				}
 			}
@@ -439,7 +441,7 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 	}, true, nil
 }
 
-func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string, standardCodexCoreDirectory bool) ([]byte, bool, error) {
+func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte, bool, error) {
 	inspector, ok := fs.(fsutil.SecurePathInspector)
 	if !ok {
 		return nil, false, fsutil.ErrSecureCapabilityUnavailable
@@ -455,19 +457,12 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string, standard
 		}
 		return nil, false, err
 	}
-	directoryValidator := fsutil.ValidateSecureDirectory
-	if standardCodexCoreDirectory {
-		directoryValidator = fsutil.ValidateOwnerControlledDirectory
-	}
-	if err := directoryValidator(fs, filepath.Dir(path)); err != nil {
+	if err := fsutil.ValidateExternalCredentialDirectory(fs, filepath.Dir(path)); err != nil {
 		return nil, false, err
 	}
-	if err := fsutil.ValidateSecureRegularFile(fs, path); err != nil {
+	pathIdentity, err := validateAuthoritativeCredentialInfo(inspector, pathInfo)
+	if err != nil {
 		return nil, false, err
-	}
-	pathIdentity, ok := inspector.FileIdentity(pathInfo)
-	if !ok {
-		return nil, false, fsutil.ErrUnsafeSecurePath
 	}
 	file, err := opener.OpenNoFollow(path)
 	if err != nil {
@@ -479,7 +474,7 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string, standard
 		return nil, false, err
 	}
 	openedIdentity, err := validateAuthoritativeCredentialInfo(inspector, openedInfo)
-	if err != nil || openedIdentity.Device != pathIdentity.Device || openedIdentity.Inode != pathIdentity.Inode {
+	if err != nil || !fsutil.SameSecureObject(openedIdentity, pathIdentity) {
 		if err != nil {
 			return nil, false, err
 		}
@@ -507,11 +502,7 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string, standard
 }
 
 func validateAuthoritativeCredentialInfo(inspector fsutil.SecurePathInspector, info os.FileInfo) (fsutil.SecureFileIdentity, error) {
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
-		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
-	}
-	owner, ok := inspector.FileOwnerUID(info)
-	if !ok || owner != inspector.EffectiveUID() {
+	if err := fsutil.ValidateExternalCredentialFile(inspector, info); err != nil {
 		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
 	identity, ok := inspector.FileIdentity(info)

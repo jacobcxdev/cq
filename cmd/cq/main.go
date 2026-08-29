@@ -20,6 +20,7 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	geminiprov "github.com/jacobcxdev/cq/internal/provider/gemini"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // CLI defines the kong command structure.
@@ -385,7 +386,11 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 // invalidateProviderCache removes the cached result file for a provider.
 // Best-effort: errors are logged to stderr.
 func invalidateProviderCache(id provider.ID) {
-	dir := cache.DefaultDir()
+	dir, err := cache.DefaultDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cq: cache invalidate %s: %v\n", id, err)
+		return
+	}
 	path := filepath.Join(dir, string(id)+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "cq: cache invalidate %s: %v\n", id, err)
@@ -393,6 +398,10 @@ func invalidateProviderCache(id provider.ID) {
 }
 
 func runCheck(cli *CLI) error {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return fmt.Errorf("resolve CQ directories: %w", err)
+	}
 	httpClient := httputil.NewClient(10*time.Second, version)
 	codexProvider := codexprov.New(httpClient)
 
@@ -425,13 +434,13 @@ func runCheck(cli *CLI) error {
 		renderer = ttyRenderer
 	}
 
-	c, err := cache.New(cache.OSFileSystem{}, cache.DefaultDir(), cacheTTL())
+	c, err := cache.New(cache.OSFileSystem{}, roots.Cache, cacheTTL())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cq: cache unavailable, running uncached: %v\n", err)
 		c = nil
 	}
 
-	hist, err := history.New(fsutil.OSFileSystem{}, cache.DefaultDir())
+	hist, err := history.New(fsutil.OSFileSystem{}, roots.Cache)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cq: history unavailable, gauge will cold-start: %v\n", err)
 		hist = nil

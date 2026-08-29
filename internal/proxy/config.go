@@ -15,6 +15,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type CodexWindowPrimingConfig struct {
@@ -40,6 +41,34 @@ type ProxyRescueBootstrapConfig struct {
 	LocalToken    string `json:"local_token"`
 	StateRoot     string `json:"state_root"`
 	Port          int    `json:"port"`
+}
+
+type DefaultPaths struct {
+	ConfigFile      string
+	RescueBootstrap string
+	StateDir        string
+	CacheDir        string
+	RuntimeDir      string
+	LogsDir         string
+}
+
+func PathsForRoots(roots userdirs.Roots) DefaultPaths {
+	return DefaultPaths{
+		ConfigFile:      filepath.Join(roots.Config, "proxy.json"),
+		RescueBootstrap: filepath.Join(roots.State, proxyRescueBootstrapName),
+		StateDir:        roots.State,
+		CacheDir:        roots.Cache,
+		RuntimeDir:      roots.Runtime,
+		LogsDir:         roots.Logs,
+	}
+}
+
+func ResolveDefaultPaths() (DefaultPaths, error) {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return DefaultPaths{}, fmt.Errorf("resolve CQ proxy paths: %w", err)
+	}
+	return PathsForRoots(roots), nil
 }
 
 // Config holds proxy configuration persisted to disk.
@@ -153,11 +182,11 @@ func (c *Config) HeadroomEnabled() bool {
 }
 
 // ResolvedCodexContinuityStateDir returns the process-owned continuity state directory.
-func (c *Config) ResolvedCodexContinuityStateDir() string {
+func (c *Config) ResolvedCodexContinuityStateDir(defaultStateDir string) string {
 	if c != nil && c.CodexContinuityStateDir != "" {
 		return c.CodexContinuityStateDir
 	}
-	return configDir()
+	return defaultStateDir
 }
 
 // ResolvedProxyResilienceStateDir returns configured durable policy/runtime
@@ -216,14 +245,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
 	}
 	if c.CodexContinuityStateDir != "" {
-		clean := filepath.Clean(c.CodexContinuityStateDir)
-		if !filepath.IsAbs(c.CodexContinuityStateDir) || clean != c.CodexContinuityStateDir || clean == string(filepath.Separator) {
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.CodexContinuityStateDir) {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
 		}
 	}
 	if c.ProxyResilienceStateDir != "" {
-		clean := filepath.Clean(c.ProxyResilienceStateDir)
-		if !filepath.IsAbs(c.ProxyResilienceStateDir) || clean != c.ProxyResilienceStateDir || clean == string(filepath.Separator) {
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.ProxyResilienceStateDir) {
 			return fmt.Errorf("invalid proxy_resilience_state_dir %q: must be a clean absolute non-root path", c.ProxyResilienceStateDir)
 		}
 	}
@@ -247,26 +274,36 @@ func (c *Config) validate() error {
 
 // LoadConfig reads proxy config from disk, generating defaults on first run.
 func LoadConfig() (*Config, error) {
-	path := filepath.Join(configDir(), "proxy.json")
-	cfg, err := loadConfigFile(path)
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := loadConfigFile(paths.ConfigFile)
 	if errors.Is(err, os.ErrNotExist) {
-		return generateDefaultConfig(path)
+		return generateDefaultConfig(paths.ConfigFile)
 	}
 	return cfg, err
 }
 
 // LoadExistingConfig reads proxy config without creating state when absent.
 func LoadExistingConfig() (*Config, error) {
-	return loadConfigFile(filepath.Join(configDir(), "proxy.json"))
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return nil, err
+	}
+	return loadConfigFile(paths.ConfigFile)
 }
 
 // LoadProxyRescueBootstrapConfig reads only authority needed to keep rescue
 // control available when normal proxy configuration cannot be loaded.
 func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
-	path := filepath.Join(configDir(), proxyRescueBootstrapName)
-	data, err := os.ReadFile(path)
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(paths.RescueBootstrap)
 	if errors.Is(err, os.ErrNotExist) {
-		return loadProxyRescueBootstrapFromNormalConfig()
+		return loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read proxy rescue bootstrap: %w", err)
@@ -275,15 +312,15 @@ func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
 	if decodeErr == nil {
 		return bootstrap, nil
 	}
-	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig()
+	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
 	if fallbackErr == nil {
 		return fallback, nil
 	}
 	return nil, errors.Join(decodeErr, fallbackErr)
 }
 
-func loadProxyRescueBootstrapFromNormalConfig() (*ProxyRescueBootstrapConfig, error) {
-	data, err := os.ReadFile(filepath.Join(configDir(), "proxy.json"))
+func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBootstrapConfig, error) {
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read proxy config: %w", err)
 	}
@@ -382,15 +419,19 @@ func SaveConfig(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("proxy config is nil")
 	}
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return err
+	}
 	saved := *cfg
 	saved.setDefaults()
 	if err := saved.validate(); err != nil {
 		return err
 	}
-	if err := saveConfig(filepath.Join(configDir(), "proxy.json"), &saved); err != nil {
+	if err := saveConfig(paths.ConfigFile, &saved); err != nil {
 		return err
 	}
-	bootstrapPath := filepath.Join(configDir(), proxyRescueBootstrapName)
+	bootstrapPath := paths.RescueBootstrap
 	if saved.ProxyResilienceStateDir == "" {
 		if err := os.Remove(bootstrapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove proxy rescue bootstrap: %w", err)
@@ -429,15 +470,4 @@ func saveConfig(path string, cfg *Config) error {
 		return fmt.Errorf("rename config: %w", err)
 	}
 	return nil
-}
-
-func configDir() string {
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" && filepath.IsAbs(d) {
-		return filepath.Join(d, "cq")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "cq-config")
-	}
-	return filepath.Join(home, ".config", "cq")
 }

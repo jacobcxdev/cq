@@ -50,15 +50,10 @@ func TestAgentPlistPath(t *testing.T) {
 }
 
 func TestAgentLogPath(t *testing.T) {
-	path, err := agentLogPath()
-	if err != nil {
-		t.Fatalf("agentLogPath: %v", err)
-	}
-	if filepath.Base(path) != "refresh.log" {
-		t.Errorf("base = %q, want refresh.log", filepath.Base(path))
-	}
-	if !strings.Contains(path, filepath.Join("Logs", "cq")) {
-		t.Errorf("path %q missing Logs/cq component", path)
+	logs := filepath.Join(string(filepath.Separator), "cq", "logs")
+	path := agentLogPath(logs)
+	if want := filepath.Join(logs, "refresh.log"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
 	}
 }
 

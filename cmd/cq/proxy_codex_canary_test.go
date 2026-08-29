@@ -18,7 +18,7 @@ import (
 func TestOpenProxyCodexCanaryDoesNotUseOrdinaryPresenceRead(t *testing.T) {
 	fsys := &noOrdinaryCanaryReadFS{MemFS: fsutil.NewMemFS()}
 	required, _ := proxy.DefaultCodexRoutingRequirements("synthetic-build", "synthetic-client")
-	recorder, err := openProxyCodexCanary(fsys, "/state/canary.json", required)
+	recorder, err := openProxyCodexCanary(fsys, "/state/canary.json", "/config", "/state", required)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestOpenProxyCodexCanaryIgnoresProtectedSourceWhenCanaryAbsent(t *testing.T
 	}
 	fsys := &proxyCanaryHomeFS{MemFS: fsutil.NewMemFS(), home: home}
 	required, _ := proxy.DefaultCodexRoutingRequirements("synthetic-build", "synthetic-client")
-	recorder, err := openProxyCodexCanary(fsys, "/state/canary.json", required)
+	recorder, err := openProxyCodexCanary(fsys, "/state/canary.json", "/config", "/state", required)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,11 @@ func TestOpenProxyCodexCanaryValidatesCurrentReadinessBeforeAttachment(t *testin
 	home := filepath.Join(t.TempDir(), "synthetic-home")
 	t.Setenv("HOME", home)
 	configDirectory := filepath.Join(t.TempDir(), "synthetic-config")
+	stateDirectory := filepath.Join(t.TempDir(), "synthetic-state")
 	if err := os.MkdirAll(configDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(configDirectory, "proxy.json"), []byte(`{}`), 0o600); err != nil {
@@ -97,7 +101,7 @@ func TestOpenProxyCodexCanaryValidatesCurrentReadinessBeforeAttachment(t *testin
 		t.Fatal(err)
 	}
 	markerBytes = append(markerBytes, '\n')
-	if err := os.WriteFile(filepath.Join(configDirectory, "codex-readiness-http.json"), markerBytes, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(stateDirectory, "codex-readiness-http.json"), markerBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tuple, err := proxy.BuildCodexCanaryTuple(required, marker)
@@ -108,7 +112,7 @@ func TestOpenProxyCodexCanaryValidatesCurrentReadinessBeforeAttachment(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(configDirectory, "codex-routing-canary.json")
+	statePath := filepath.Join(stateDirectory, "codex-routing-canary.json")
 	started, err := proxy.StartCodexCanary(fsutil.OSFileSystem{}, statePath, protected, tuple, marker.ValidatedAt.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +121,7 @@ func TestOpenProxyCodexCanaryValidatesCurrentReadinessBeforeAttachment(t *testin
 		t.Fatal(err)
 	}
 
-	recorder, err := openProxyCodexCanary(fsutil.OSFileSystem{}, statePath, required)
+	recorder, err := openProxyCodexCanary(fsutil.OSFileSystem{}, statePath, configDirectory, stateDirectory, required)
 	if err != nil || recorder == nil {
 		t.Fatalf("open active canary = %v, %v", recorder, err)
 	}
@@ -126,7 +130,7 @@ func TestOpenProxyCodexCanaryValidatesCurrentReadinessBeforeAttachment(t *testin
 	}
 	drifted := required
 	drifted.SemanticsRevision = "stale-semantics"
-	if _, err := openProxyCodexCanary(fsutil.OSFileSystem{}, statePath, drifted); err == nil {
+	if _, err := openProxyCodexCanary(fsutil.OSFileSystem{}, statePath, configDirectory, stateDirectory, drifted); err == nil {
 		t.Fatal("expected stale current requirements rejection")
 	}
 }

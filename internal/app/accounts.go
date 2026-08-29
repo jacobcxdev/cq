@@ -112,7 +112,7 @@ func RunCodexLogin(ctx context.Context, client httputil.Doer, activate bool) err
 
 type codexLoginFunc func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error)
 
-func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs fsutil.FileSystem, login codexLoginFunc, now func() time.Time, stdout io.Writer) error {
+func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs fsutil.FileSystem, stateDir string, login codexLoginFunc, now func() time.Time, stdout io.Writer) error {
 	durable, ok := fs.(fsutil.DurableFileSystem)
 	if !ok {
 		return errors.New("durable credential storage unavailable")
@@ -121,7 +121,7 @@ func runCodexLogin(ctx context.Context, client httputil.Doer, activate bool, fs 
 	if err != nil {
 		return err
 	}
-	coordinator, err := codexprov.NewCredentialCoordinator(store)
+	coordinator, err := codexprov.NewCredentialCoordinator(store, stateDir)
 	if err != nil {
 		return err
 	}

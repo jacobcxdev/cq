@@ -456,6 +456,27 @@ type freshCodexLeaseFaultDirectory struct {
 	fsys *freshCodexLeaseFaultFS
 }
 
+func (directory *freshCodexLeaseFaultDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *freshCodexLeaseFaultDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	target := freshCodexLeaseRenameTarget(newName)
+	if !directory.fsys.fired && directory.fsys.target == target && directory.fsys.failure == "rename" {
+		directory.fsys.fired = true
+		return fmt.Errorf("injected fresh authority rename failure")
+	}
+	if err := directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected); err != nil {
+		return err
+	}
+	directory.fsys.lastTarget = target
+	return nil
+}
+
+func (directory *freshCodexLeaseFaultDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (directory *freshCodexLeaseFaultDirectory) RenameNoReplace(oldName, newName string) error {
 	target := freshCodexLeaseRenameTarget(newName)
 	if !directory.fsys.fired && directory.fsys.target == target && directory.fsys.failure == "rename" {

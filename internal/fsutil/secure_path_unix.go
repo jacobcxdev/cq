@@ -3,6 +3,9 @@
 package fsutil
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +15,10 @@ import (
 )
 
 func (OSFileSystem) Lstat(name string) (os.FileInfo, error) { return os.Lstat(name) }
+
+func statOSFileSystem(_ OSFileSystem, name string) (os.FileInfo, error) {
+	return os.Stat(name)
+}
 
 func (OSFileSystem) EffectiveUID() uint64 { return uint64(os.Geteuid()) }
 
@@ -153,6 +160,113 @@ func (directory *unixSecureDirectory) RenameNoReplace(oldName, newName string) e
 	}
 	fd := int(directory.file.Fd())
 	return renameNoReplaceAt(fd, oldName, fd, newName)
+}
+
+func (directory *unixSecureDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.renameChecked(oldName, newName, expected, false)
+}
+
+func (directory *unixSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.renameChecked(oldName, newName, expected, true)
+}
+
+func (directory *unixSecureDirectory) renameChecked(oldName, newName string, expected SecureFileIdentity, noReplace bool) error {
+	if err := validateSecureEntryName(oldName); err != nil {
+		return err
+	}
+	if err := validateSecureEntryName(newName); err != nil {
+		return err
+	}
+	quarantine, err := directory.moveToIdentityQuarantine(oldName)
+	if err != nil {
+		return err
+	}
+	restore := func(cause error) error {
+		return restoreIdentityQuarantine(quarantine, oldName, cause, directory.RenameNoReplace)
+	}
+	info, err := directory.OpenNoFollow(quarantine)
+	if err != nil {
+		return restore(err)
+	}
+	stat, statErr := info.Stat()
+	closeErr := info.Close()
+	if statErr != nil {
+		return restore(statErr)
+	}
+	if closeErr != nil {
+		return restore(closeErr)
+	}
+	identity, ok := (OSFileSystem{}).FileIdentity(stat)
+	if !ok || !SameSecureObject(identity, expected) {
+		return restore(fmt.Errorf("%w: checked rename source identity", ErrUnsafeSecurePath))
+	}
+	fd := int(directory.file.Fd())
+	if noReplace {
+		err = renameNoReplaceAt(fd, quarantine, fd, newName)
+	} else {
+		err = unix.Renameat(fd, quarantine, fd, newName)
+	}
+	if err != nil {
+		return restore(err)
+	}
+	return nil
+}
+
+func (directory *unixSecureDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	if err := validateSecureEntryName(name); err != nil {
+		return err
+	}
+	quarantine, err := directory.moveToIdentityQuarantine(name)
+	if err != nil {
+		return err
+	}
+	restore := func(cause error) error {
+		return restoreIdentityQuarantine(quarantine, name, cause, directory.RenameNoReplace)
+	}
+	file, err := directory.OpenNoFollow(quarantine)
+	if err != nil {
+		return restore(err)
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return restore(statErr)
+	}
+	if closeErr != nil {
+		return restore(closeErr)
+	}
+	identity, ok := (OSFileSystem{}).FileIdentity(info)
+	if !ok || !SameSecureObject(identity, expected) {
+		return restore(fmt.Errorf("%w: checked remove source identity", ErrUnsafeSecurePath))
+	}
+	if err := unix.Unlinkat(int(directory.file.Fd()), quarantine, 0); err != nil {
+		return restore(err)
+	}
+	return nil
+}
+
+func (directory *unixSecureDirectory) moveToIdentityQuarantine(name string) (string, error) {
+	fd := int(directory.file.Fd())
+	for range 32 {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		quarantine := ".cq-quarantine-" + hex.EncodeToString(random[:])
+		if err := renameNoReplaceAt(fd, name, fd, quarantine); err == nil {
+			return quarantine, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("allocate identity quarantine: %w", os.ErrExist)
+}
+
+func restoreIdentityQuarantine(quarantine, original string, cause error, restore func(string, string) error) error {
+	if restoreErr := restore(quarantine, original); restoreErr != nil {
+		return fmt.Errorf("%w: quarantine %q: %v; restore: %v", ErrCommitIndeterminate, quarantine, cause, restoreErr)
+	}
+	return cause
 }
 
 func (directory *unixSecureDirectory) Remove(name string) error {

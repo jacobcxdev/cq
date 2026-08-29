@@ -14,11 +14,13 @@ import (
 func TestDefaultRecoveringRefreshControlForwardsRecoveryRecorder(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	home := shortEndpointDir(t)
-	stateDir := filepath.Dir(DefaultCredentialControlPath(home))
+	configBase := shortEndpointDir(t)
+	t.Setenv("XDG_CONFIG_HOME", configBase)
+	stateDir := filepath.Join(configBase, "cq", "state")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := DefaultCredentialControlPath(home)
+	path := DefaultCredentialControlPath(stateDir)
 	makeExactCredentialEndpointOrphan(t, path, "orphan-generation")
 
 	var calls atomic.Int32

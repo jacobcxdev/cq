@@ -3,9 +3,16 @@ package keyring
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func setKeyringTestHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
 
 // ── mergeAnonymousFresh ───────────────────────────────────────────────────────
 
@@ -283,9 +290,9 @@ func TestDropOrphanAnonymousExpired(t *testing.T) {
 
 	t.Run("multiple orphans dropped, identified and fresh anonymous kept", func(t *testing.T) {
 		input := []ClaudeOAuth{
-			{AccessToken: "orphan1", RefreshToken: "rt1", ExpiresAt: 100},  // drop
+			{AccessToken: "orphan1", RefreshToken: "rt1", ExpiresAt: 100}, // drop
 			{Email: "keep@example.com", AccountUUID: "uuid-keep", ExpiresAt: 5000},
-			{AccessToken: "orphan2", RefreshToken: "rt2", ExpiresAt: 200},  // drop
+			{AccessToken: "orphan2", RefreshToken: "rt2", ExpiresAt: 200},     // drop
 			{AccessToken: "fresh-anon", RefreshToken: "rt3", ExpiresAt: 9000}, // keep (fresh)
 		}
 		got := dropOrphanAnonymousExpired(input, now)
@@ -653,7 +660,7 @@ func TestSaveManifest(t *testing.T) {
 func TestWriteCredentialsFile(t *testing.T) {
 	t.Run("writes valid JSON that round-trips", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		creds := &ClaudeCredentials{
 			ClaudeAiOauth: &ClaudeOAuth{
@@ -688,7 +695,7 @@ func TestWriteCredentialsFile(t *testing.T) {
 
 	t.Run("creates .claude directory if missing", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		creds := &ClaudeCredentials{
 			ClaudeAiOauth: &ClaudeOAuth{AccessToken: "tok", RefreshToken: "rt"},
@@ -702,8 +709,11 @@ func TestWriteCredentialsFile(t *testing.T) {
 	})
 
 	t.Run("enforces 0700 permissions on the directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows directory authority uses ACL and owner checks")
+		}
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		// Create dir with permissive mode first to verify chmod is enforced.
 		if err := os.MkdirAll(dir+"/.claude", 0o755); err != nil {
@@ -737,7 +747,7 @@ func TestPersistRefreshedToken(t *testing.T) {
 
 	t.Run("stores cq account when credentials file missing", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		updateKeychainEntryForRefresh = func(service string, creds *ClaudeCredentials) error {
 			t.Fatalf("UpdateKeychainEntry called without matching credentials file")
@@ -775,7 +785,7 @@ func TestPersistRefreshedToken(t *testing.T) {
 
 	t.Run("stores refreshed account UUID when active credentials matched by token", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 		if err := os.MkdirAll(dir+"/.claude", 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -827,7 +837,7 @@ func TestPersistRefreshedToken(t *testing.T) {
 
 	t.Run("does not update active credentials with conflicting stable identifiers", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 		if err := os.MkdirAll(dir+"/.claude", 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -887,7 +897,7 @@ func TestPersistRefreshedToken(t *testing.T) {
 
 	t.Run("stores refreshed active account after credentials update", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 		if err := os.MkdirAll(dir+"/.claude", 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -983,7 +993,7 @@ func TestBackfillCredentialsFile(t *testing.T) {
 
 	t.Run("updates email and UUID when account matches by access token", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		stored := ClaudeOAuth{AccessToken: "tok-shared", RefreshToken: "rt", ExpiresAt: 100}
 		writeInitialCreds(t, dir, stored)
@@ -1010,7 +1020,7 @@ func TestBackfillCredentialsFile(t *testing.T) {
 
 	t.Run("skips update when account does not match", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		stored := ClaudeOAuth{AccessToken: "tok-A", RefreshToken: "rt-A", ExpiresAt: 100}
 		writeInitialCreds(t, dir, stored)
@@ -1033,7 +1043,7 @@ func TestBackfillCredentialsFile(t *testing.T) {
 
 	t.Run("no change when already current", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setKeyringTestHome(t, dir)
 
 		stored := ClaudeOAuth{
 			AccessToken:  "tok-match",

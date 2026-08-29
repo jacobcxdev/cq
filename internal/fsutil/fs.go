@@ -69,6 +69,21 @@ type SecureFileIdentity struct {
 	Device uint64
 	Inode  uint64
 	Links  uint64
+	FileID [16]byte `json:"-"`
+}
+
+type SecurePrincipalKind uint8
+
+const (
+	SecurePrincipalUID SecurePrincipalKind = iota + 1
+	SecurePrincipalSID
+)
+
+type SecurePrincipal struct {
+	Kind      SecurePrincipalKind
+	UID       uint64
+	SIDLength uint8
+	SID       [68]byte
 }
 
 // ExclusiveLock is held for the lifetime of its underlying file descriptor.
@@ -89,6 +104,59 @@ type SecurePathInspector interface {
 	EffectiveUID() uint64
 	FileOwnerUID(info os.FileInfo) (uint64, bool)
 	FileIdentity(info os.FileInfo) (SecureFileIdentity, bool)
+}
+
+type SecurePrincipalInspector interface {
+	EffectivePrincipal() (SecurePrincipal, bool)
+	FileOwnerPrincipal(os.FileInfo) (SecurePrincipal, bool)
+}
+
+type SecureAncestorInspector interface {
+	ValidateRetainedAncestor(os.FileInfo) error
+}
+
+type SecureExternalPathInspector interface {
+	ValidateExternalCredentialDirectoryInfo(os.FileInfo) error
+	ValidateExternalCredential(os.FileInfo) error
+	ValidateExternalCache(os.FileInfo) error
+	ValidateRetainedExternalImportFileInfo(os.FileInfo) error
+}
+
+type RetainedReadDirectory interface {
+	Stat() (os.FileInfo, error)
+	OpenDirectory(name string) (RetainedReadDirectory, error)
+	OpenNoFollow(name string) (SecureReadFile, error)
+	Close() error
+}
+
+type RetainedReadDirectoryOpener interface {
+	OpenRetainedReadDirectory(name string) (RetainedReadDirectory, error)
+}
+
+type RetainedRegularFile interface {
+	io.Reader
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
+type RetainedRegularFilePolicy uint8
+
+const (
+	RetainedRegularFileReadOnly RetainedRegularFilePolicy = iota + 1
+	RetainedRegularFileExecutableDenyReplacement
+)
+
+type RetainedRegularFileOpener interface {
+	OpenRetainedRegularFileNoFollow(path string, policy RetainedRegularFilePolicy) (RetainedRegularFile, error)
+}
+
+type IdentityBoundRenamer interface {
+	RenameChecked(oldName, newName string, expected SecureFileIdentity) error
+	RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error
+}
+
+type IdentityBoundRemover interface {
+	RemoveChecked(name string, expected SecureFileIdentity) error
 }
 
 // NoFollowFileOpener opens a final path component without following links.
@@ -139,10 +207,30 @@ type SecureDirectoryOpener interface {
 	OpenSecureDirectory(name string) (SecureDirectory, error)
 }
 
-// OSFileSystem delegates to the real OS.
-type OSFileSystem struct{}
+type secureBoundaryPurpose uint8
 
-func (OSFileSystem) Stat(name string) (os.FileInfo, error)             { return os.Stat(name) }
+const (
+	secureBoundaryCQPrivate secureBoundaryPurpose = iota + 1
+	secureBoundaryExternalDirectory
+	secureBoundaryExternalFile
+)
+
+type secureBoundarySelection struct {
+	AnchorPath        string
+	PostAnchorPrivate bool
+}
+
+type secureBoundaryResolver interface {
+	ResolveSecureBoundary(string, secureBoundaryPurpose) (secureBoundarySelection, error)
+}
+
+// OSFileSystem delegates to the real OS. The resolver is an unexported,
+// value-scoped Windows test seam; the production zero value resolves roots.
+type OSFileSystem struct {
+	secureBoundaryResolver secureBoundaryResolver
+}
+
+func (fsys OSFileSystem) Stat(name string) (os.FileInfo, error)        { return statOSFileSystem(fsys, name) }
 func (OSFileSystem) ReadFile(name string) ([]byte, error)              { return os.ReadFile(name) }
 func (OSFileSystem) WriteFile(n string, d []byte, p os.FileMode) error { return os.WriteFile(n, d, p) }
 func (OSFileSystem) Rename(o, n string) error                          { return os.Rename(o, n) }

@@ -33,13 +33,13 @@ type RemovalResult struct {
 }
 
 type RemovalJournal struct {
-	FS    fsutil.DurableFileSystem
-	Home  string
-	Store *ManagedStore
+	FS       fsutil.DurableFileSystem
+	StateDir string
+	Store    *ManagedStore
 }
 
 func (j RemovalJournal) path() string {
-	return filepath.Join(j.Home, ".config", "cq", "state", "codex_removal.json")
+	return filepath.Join(j.StateDir, "codex_removal.json")
 }
 
 func (j RemovalJournal) Save(plan RemovalPlan) error {

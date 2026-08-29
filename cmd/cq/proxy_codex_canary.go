@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -12,15 +11,14 @@ import (
 
 // openProxyCodexCanary opens only an active run and validates it against the
 // current readiness marker before any credential endpoint recovery can occur.
-func openProxyCodexCanary(fsys fsutil.DurableFileSystem, path string, required proxy.CodexTransportRequirements) (*proxy.CodexCanaryRecorder, error) {
-	if fsys == nil || path == "" {
+func openProxyCodexCanary(fsys fsutil.DurableFileSystem, path, configDirectory, markerDirectory string, required proxy.CodexTransportRequirements) (*proxy.CodexCanaryRecorder, error) {
+	if fsys == nil || path == "" || configDirectory == "" || markerDirectory == "" {
 		return nil, errors.New("Codex canary startup configuration is unavailable")
 	}
 	home, err := fsys.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolve Codex canary protected state: %w", err)
 	}
-	configDirectory := filepath.Dir(path)
 	protected, err := codexCanaryProtections(home, configDirectory)
 	if err != nil {
 		return nil, err
@@ -41,7 +39,7 @@ func openProxyCodexCanary(fsys fsutil.DurableFileSystem, path string, required p
 	if !recorder.State().Active {
 		return nil, nil
 	}
-	marker, err := proxy.LoadCodexReadinessMarker(configDirectory, proxy.CodexRoutingHTTP)
+	marker, err := proxy.LoadCodexReadinessMarker(markerDirectory, proxy.CodexRoutingHTTP)
 	if err != nil {
 		return nil, fmt.Errorf("load current HTTP readiness marker: %w", err)
 	}

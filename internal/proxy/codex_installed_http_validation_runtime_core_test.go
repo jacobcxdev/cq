@@ -38,6 +38,14 @@ func TestCodexInstalledHTTPValidationRuntimeCoreIsolatesAuthorityAndCleansUp(t *
 	if core.nativeHTTPHandler() == nil {
 		t.Fatal("nativeHTTPHandler() = nil, want production Codex handler")
 	}
+	statePath := filepath.Join(root, "cq-state")
+	info, err := os.Stat(statePath)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("isolated CQ state directory %q = %v, %v", statePath, info, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".codex")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider credential directory mutated during CQ state setup: %v", err)
+	}
 	assertCodexInstalledValidationPrivateTree(t, root)
 
 	if err := core.close(); err != nil {
