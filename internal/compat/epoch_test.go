@@ -140,6 +140,18 @@ func (directory *recordingEpochDirectory) CreateExclusive(name string, mode os.F
 	return directory.SecureDirectory.CreateExclusive(name, mode)
 }
 
+func (directory *recordingEpochDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *recordingEpochDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *recordingEpochDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (f failingFS) WriteFile(string, []byte, os.FileMode) error { return f.writeErr }
 
 func TestEnsureEpochFailsClosedOnWriteFailure(t *testing.T) {
