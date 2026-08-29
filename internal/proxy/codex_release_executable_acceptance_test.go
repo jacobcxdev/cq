@@ -80,9 +80,9 @@ func codexReleaseExecutableRouteEvidenceFromEvents(events []RouteEvent) codexRel
 		if event.Provider != "codex" {
 			continue
 		}
-		isNativeHTTP := event.RouteKind == "codex_native" &&
-			event.Method == http.MethodPost &&
-			(event.Path == legacyCodexResponsesPath || event.Path == legacyCodexCompactResponsesPath)
+		isNativeHTTP := event.Method == http.MethodPost &&
+			((event.RouteKind == "codex_native" && event.Path == legacyCodexResponsesPath) ||
+				(event.RouteKind == "codex_compact" && event.Path == legacyCodexCompactResponsesPath))
 		isWebSocket := event.RouteKind == "codex_websocket_broker" &&
 			event.Method == http.MethodGet &&
 			event.Path == legacyCodexResponsesPath
@@ -119,8 +119,8 @@ func TestCodexReleaseExecutableRouteEvidenceRetainsFailuresBeforeRecovery(t *tes
 	evidence := codexReleaseExecutableRouteEvidenceFromEvents([]RouteEvent{
 		{Provider: "codex", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexResponsesPath, StatusCode: http.StatusServiceUnavailable},
 		{Provider: "codex", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexResponsesPath, StatusCode: http.StatusOK},
-		{Provider: "codex", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexCompactResponsesPath, StatusCode: http.StatusBadGateway},
-		{Provider: "codex", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexCompactResponsesPath, StatusCode: http.StatusOK},
+		{Provider: "codex", RouteKind: "codex_compact", Method: http.MethodPost, Path: legacyCodexCompactResponsesPath, StatusCode: http.StatusBadGateway},
+		{Provider: "codex", RouteKind: "codex_compact", Method: http.MethodPost, Path: legacyCodexCompactResponsesPath, StatusCode: http.StatusOK},
 		{Provider: "codex", RouteKind: "codex_websocket_broker", Method: http.MethodGet, Path: legacyCodexResponsesPath, StatusCode: http.StatusSwitchingProtocols, Error: "api_error:upstream_outcome_indeterminate"},
 		{Provider: "codex", RouteKind: "codex_websocket_broker", Method: http.MethodGet, Path: legacyCodexResponsesPath, StatusCode: http.StatusSwitchingProtocols},
 		{Provider: "claude", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexResponsesPath, StatusCode: http.StatusOK},
