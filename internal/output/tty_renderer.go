@@ -48,7 +48,7 @@ func writeTTY(w io.Writer, model TTYModel) error {
 			writeWindowRow(ew, row)
 		}
 
-		if section.AggHeader != "" || section.ProxyHeader != "" {
+		if section.AggHeader != "" || section.ProxyHeader != "" || len(section.ProxyPools) > 0 {
 			ew.write("\n")
 			ew.write(section.ThinSep)
 			ew.write("\n\n")
@@ -59,8 +59,9 @@ func writeTTY(w io.Writer, model TTYModel) error {
 					writeWindowRow(ew, row)
 				}
 			}
+			wroteBlock := section.AggHeader != ""
 			if section.ProxyHeader != "" {
-				if section.AggHeader != "" {
+				if wroteBlock {
 					ew.write("\n")
 				}
 				ew.write(section.ProxyHeader)
@@ -68,6 +69,18 @@ func writeTTY(w io.Writer, model TTYModel) error {
 				for _, row := range section.ProxyRows {
 					writeWindowRow(ew, row)
 				}
+				wroteBlock = true
+			}
+			for _, pool := range section.ProxyPools {
+				if wroteBlock {
+					ew.write("\n")
+				}
+				ew.write(pool.Header)
+				ew.write("\n")
+				for _, row := range pool.Rows {
+					writeWindowRow(ew, row)
+				}
+				wroteBlock = true
 			}
 		}
 

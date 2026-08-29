@@ -57,11 +57,19 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 			section.AggHeader = buildAggHeader(pr.Aggregate)
 			section.AggRows = buildAggRows(pr.Aggregate.Windows)
 		}
-		if pr.ProxyEligibility != nil {
+		if pr.ProxyEligibility != nil && pr.ProxyEligibility.ExcludedCount > 0 {
 			section.ProxyHeader = buildProxyEligibilityHeader(pr.ID, pr.ProxyEligibility)
 			if pr.ProxyEligibility.Aggregate != nil {
 				section.ProxyRows = buildAggRows(pr.ProxyEligibility.Aggregate.Windows)
 			}
+		}
+		for i := range pr.ProxyPools {
+			pool := &pr.ProxyPools[i]
+			block := TTYProxyBlock{Header: buildProxyPoolHeader(pr.ID, pool)}
+			if pool.Aggregate != nil {
+				block.Rows = buildAggRows(pool.Aggregate.Windows)
+			}
+			section.ProxyPools = append(section.ProxyPools, block)
 		}
 
 		if isFirst {
@@ -82,7 +90,7 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		if firstSet[i] {
 			model.Sections[i].Separator = buildSeparator(sepWidth)
 		}
-		if model.Sections[i].AggHeader != "" || model.Sections[i].ProxyHeader != "" {
+		if model.Sections[i].AggHeader != "" || model.Sections[i].ProxyHeader != "" || len(model.Sections[i].ProxyPools) > 0 {
 			model.Sections[i].ThinSep = buildThinSeparator(sepWidth)
 		}
 	}
@@ -288,6 +296,14 @@ func buildAggHeader(agg *app.AggregateReport) string {
 }
 
 func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibilityReport) string {
+	return buildProxyHeader(id, "Proxy", eligibility)
+}
+
+func buildProxyPoolHeader(id provider.ID, pool *app.ProxyPoolReport) string {
+	return buildProxyHeader(id, "Proxy "+pool.Name, &pool.ProxyEligibilityReport)
+}
+
+func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligibilityReport) string {
 	iconStyle := boldStyle
 	if eligibility.Aggregate != nil {
 		minPct := 100
@@ -300,7 +316,7 @@ func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibili
 	}
 	header := fmt.Sprintf("  %s  %s",
 		iconStyle.Render(providerIcon(id)),
-		boldStyle.Render(fmt.Sprintf("%7s", "Proxy")),
+		boldStyle.Render(fmt.Sprintf("%7s", label)),
 	)
 	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
 		header += " " + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
@@ -416,10 +432,20 @@ func measuredSepWidth(model TTYModel) int {
 			if w := rowVisibleWidth(row); w > maxW {
 				maxW = w
 			}
-			if w := visibleWidth(sec.ProxyHeader); w > maxW {
+		}
+		if w := visibleWidth(sec.ProxyHeader); w > maxW {
+			maxW = w
+		}
+		for _, row := range sec.ProxyRows {
+			if w := rowVisibleWidth(row); w > maxW {
 				maxW = w
 			}
-			for _, row := range sec.ProxyRows {
+		}
+		for _, pool := range sec.ProxyPools {
+			if w := visibleWidth(pool.Header); w > maxW {
+				maxW = w
+			}
+			for _, row := range pool.Rows {
 				if w := rowVisibleWidth(row); w > maxW {
 					maxW = w
 				}

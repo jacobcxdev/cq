@@ -1,6 +1,7 @@
 package output
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -220,6 +221,75 @@ func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
 	}
 	if len(section.ProxyRows) != 1 || !strings.Contains(section.ProxyRows[0].Pct, "49%") {
 		t.Fatalf("proxy rows = %#v", section.ProxyRows)
+	}
+}
+
+func TestBuildTTYModelHidesProxyAggregateWhenAllAccountsEligible(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	report := app.Report{Providers: []app.ProviderReport{{
+		ID: provider.Codex,
+		Results: []quota.Result{{
+			Status: quota.StatusOK,
+			Plan:   "pro",
+		}},
+		Aggregate: &app.AggregateReport{
+			ProviderID: provider.Codex,
+			Summary:    aggregate.AccountSummary{Count: 3, TotalMulti: 60, Label: "3 × pro 20x = 60x"},
+		},
+		ProxyEligibility: &app.ProxyEligibilityReport{
+			DiscoveredCount: 3,
+			EligibleCount:   3,
+			Aggregate: &app.AggregateReport{
+				ProviderID: provider.Codex,
+				Summary:    aggregate.AccountSummary{Count: 3, TotalMulti: 60, Label: "3 × pro 20x = 60x"},
+			},
+		},
+	}}}
+
+	section := BuildTTYModel(report, now).Sections[0]
+	if section.AggHeader == "" {
+		t.Fatal("provider aggregate missing")
+	}
+	if section.ProxyHeader != "" || len(section.ProxyRows) != 0 {
+		t.Fatalf("redundant proxy aggregate rendered: header = %q, rows = %#v", section.ProxyHeader, section.ProxyRows)
+	}
+}
+
+func TestBuildTTYModelShowsNamedProxyPoolAggregate(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	report := app.Report{Providers: []app.ProviderReport{{
+		ID: provider.Codex,
+		Results: []quota.Result{{
+			Status: quota.StatusOK,
+			Plan:   "pro",
+		}},
+		ProxyPools: []app.ProxyPoolReport{{
+			Name: "cyber",
+			ProxyEligibilityReport: app.ProxyEligibilityReport{
+				DiscoveredCount: 3,
+				EligibleCount:   2,
+				ExcludedCount:   1,
+				Aggregate: &app.AggregateReport{
+					ProviderID: provider.Codex,
+					Summary:    aggregate.AccountSummary{Count: 2, TotalMulti: 40, Label: "2 × pro 20x = 40x"},
+					Windows: map[quota.WindowName]quota.AggregateResult{
+						quota.Window7Day: {RemainingPct: 49},
+					},
+				},
+			},
+		}},
+	}}}
+
+	var output bytes.Buffer
+	if err := writeTTY(&output, BuildTTYModel(report, now)); err != nil {
+		t.Fatalf("write TTY: %v", err)
+	}
+	got := stripANSI(output.String())
+	if !strings.Contains(got, "    Proxy cyber 2 × pro 20x = 40x") {
+		t.Fatalf("named proxy pool missing from output:\n%s", got)
+	}
+	if !strings.Contains(got, "49%") {
+		t.Fatalf("named proxy pool rows missing from output:\n%s", got)
 	}
 }
 
