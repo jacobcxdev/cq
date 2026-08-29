@@ -40,10 +40,10 @@ func TestProxyPolicyInitialiseApplyAndStatus(t *testing.T) {
 	if err := state.Close(); err != nil {
 		t.Fatal(err)
 	}
-	policy := proxy.RoutingPolicyV1{
+	policy := proxy.RoutingPolicyDocument{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
-		Pools:              []proxy.AccountPoolV1{{Name: "selected", Members: []codex.AccountKey{"account-a"}}},
-		SessionBindings:    []proxy.SessionBindingV1{{SessionDigest: digest, Pool: "selected"}},
+		Pools:              []proxy.AccountPoolDocument{{Name: "Selected", Value: 3, Members: []codex.AccountKey{"account-a"}}},
+		SessionBindings:    []proxy.SessionBindingDocument{{SessionDigest: digest, Pool: "Selected"}},
 		CapabilityEvidence: []proxy.CapabilityEvidenceV1{{AccountKey: "account-a", State: proxy.CapabilitySupported}},
 	}
 	body, err := json.Marshal(policy)
@@ -62,11 +62,11 @@ func TestProxyPolicyInitialiseApplyAndStatus(t *testing.T) {
 	if err := runProxyPolicy([]string{"status", "--state-root", root}, &output); err != nil {
 		t.Fatal(err)
 	}
-	var got proxy.RoutingPolicyV1
+	var got proxy.RoutingPolicyDocument
 	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.RoutingGeneration != 1 || len(got.Pools) != 1 || got.Pools[0].Name != "selected" {
+	if got.RoutingGeneration != 1 || len(got.Pools) != 1 || got.Pools[0].Name != "Selected" || got.Pools[0].Value != 3 {
 		t.Fatalf("status = %#v", got)
 	}
 }
@@ -113,11 +113,26 @@ func TestProxyPolicyLivePoolAndSessionLifecycle(t *testing.T) {
 		LoadAliasIndex: func() (codex.AccountAliasIndex, error) { return codex.AccountAliasIndex{}, nil },
 	}
 	var output bytes.Buffer
-	if err := runProxyPolicyWithDependencies(context.Background(), []string{"pool", "set", "team", "--account", "a@example.test", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
+	if err := runProxyPolicyWithDependencies(context.Background(), []string{"pool", "set", "Cyber", "--account", "a@example.test", "--value", "10", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
+		t.Fatal(err)
+	}
+	poolID := state.Routing.Current().Pools[0].ID
+	if bytes.Contains(output.Bytes(), []byte(poolID)) {
+		t.Fatalf("pool set leaked UUID: %q", output.String())
+	}
+	output.Reset()
+	if err := runProxyPolicyWithDependencies(context.Background(), []string{"pool", "set", "cyber", "--account", "a@example.test", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
+		t.Fatal(err)
+	}
+	if current := state.Routing.Current(); current.Pools[0].Name != "Cyber" || current.Pools[0].Value != 10 || current.Pools[0].ID != poolID {
+		t.Fatalf("pool set did not preserve identity/value: %#v", current.Pools[0])
+	}
+	output.Reset()
+	if err := runProxyPolicyWithDependencies(context.Background(), []string{"pool", "value", "CYBER", "12", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
 		t.Fatal(err)
 	}
 	output.Reset()
-	if err := runProxyPolicyWithDependencies(context.Background(), []string{"session", "bind", "--pool", "team", "--session-id-stdin", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
+	if err := runProxyPolicyWithDependencies(context.Background(), []string{"session", "bind", "--pool", "cyber", "--session-id-stdin", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuthorization != "Bearer local-token" {
@@ -128,13 +143,20 @@ func TestProxyPolicyLivePoolAndSessionLifecycle(t *testing.T) {
 		t.Fatalf("decision = %#v", decision)
 	}
 	output.Reset()
+	if err := runProxyPolicyWithDependencies(context.Background(), []string{"pool", "rename", "Cyber", "Security Research", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
+		t.Fatal(err)
+	}
+	if current := state.Routing.Current(); current.Pools[0].Name != "Security Research" || current.Pools[0].Value != 12 || current.Pools[0].ID != poolID || current.SessionBindings[0].PoolID != poolID {
+		t.Fatalf("rename changed pool identity: %#v", current)
+	}
+	output.Reset()
 	if err := runProxyPolicyWithDependencies(context.Background(), []string{"session", "list", "--port", strconv.Itoa(port)}, &output, deps); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(output.Bytes(), []byte(`"pool":"team"`)) || bytes.Contains(output.Bytes(), []byte("private-session")) {
+	if !bytes.Contains(output.Bytes(), []byte(`"pool":"Security Research"`)) || bytes.Contains(output.Bytes(), []byte("private-session")) || bytes.Contains(output.Bytes(), []byte(poolID)) {
 		t.Fatalf("session list = %q", output.String())
 	}
-	var bindings []proxy.SessionBindingV1
+	var bindings []proxy.SessionBindingDocument
 	if err := json.Unmarshal(output.Bytes(), &bindings); err != nil || len(bindings) != 1 {
 		t.Fatalf("session list = %q, error = %v", output.String(), err)
 	}
@@ -153,6 +175,48 @@ func TestProxyPolicyLivePoolAndSessionLifecycle(t *testing.T) {
 	decision = resolver.Resolve([]byte("private-session"), []codex.AccountKey{"account-a"})
 	if decision.Status != proxy.PolicyDecisionUnbound {
 		t.Fatalf("unbound decision = %#v", decision)
+	}
+}
+
+func TestProxyPolicyPoolRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{"-1", "1.5", "4294967296", "ten"} {
+		err := runProxyPolicyWithDependencies(context.Background(), []string{"pool", "value", "Cyber", value}, &bytes.Buffer{}, proxyPolicyDependencies{})
+		if err == nil {
+			t.Fatalf("value %q accepted", value)
+		}
+	}
+}
+
+func TestProxyPolicyPoolMutationErrorsNamePools(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		response  string
+		want      string
+	}{
+		{name: "missing rename source", arguments: []string{"pool", "rename", "Missing", "Cyber"}, response: `{"error":"pool_not_found"}`, want: `proxy policy pool rename "Missing" to "Cyber": pool not found`},
+		{name: "duplicate rename target", arguments: []string{"pool", "rename", "Cyber", "Research"}, response: `{"error":"pool_name_conflict"}`, want: `proxy policy pool rename "Cyber" to "Research": pool name already exists`},
+		{name: "invalid rename target", arguments: []string{"pool", "rename", "Cyber", "Bad\nName"}, response: `{"error":"invalid_pool_name"}`, want: `proxy policy pool rename "Cyber" to "Bad\nName": invalid pool name`},
+		{name: "missing value target", arguments: []string{"pool", "value", "Missing", "10"}, response: `{"error":"pool_not_found"}`, want: `proxy policy pool value "Missing": pool not found`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(http.StatusConflict)
+				_, _ = writer.Write([]byte(test.response))
+			}))
+			defer server.Close()
+			port := server.Listener.Addr().(*net.TCPAddr).Port
+			arguments := append(append([]string(nil), test.arguments...), "--port", strconv.Itoa(port))
+			err := runProxyPolicyWithDependencies(context.Background(), arguments, &bytes.Buffer{}, proxyPolicyDependencies{
+				LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{Port: port, LocalToken: "local-token"}, nil },
+				Doer:       server.Client(),
+			})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error = %q, want %q", err, test.want)
+			}
+		})
 	}
 }
 

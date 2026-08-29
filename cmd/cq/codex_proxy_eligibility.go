@@ -18,7 +18,7 @@ import (
 type codexProxyEligibilityDependencies struct {
 	LoadConfig      func() (*proxy.Config, error)
 	RoutingAccounts func(context.Context) ([]codexprov.RoutingAccount, error)
-	LoadPolicy      func(context.Context, *proxy.Config) (proxy.RoutingPolicyV1, error)
+	LoadPolicy      func(context.Context, *proxy.Config) (proxy.RoutingPolicyDocument, error)
 }
 
 func enrichCodexProxyEligibility(ctx context.Context, report *app.Report, codexProvider *codexprov.Provider) error {
@@ -47,7 +47,7 @@ func enrichCodexProxyEligibilityWithDependencies(ctx context.Context, report *ap
 	return nil
 }
 
-func loadLiveCodexRoutingPolicy(ctx context.Context, cfg *proxy.Config) (proxy.RoutingPolicyV1, error) {
+func loadLiveCodexRoutingPolicy(ctx context.Context, cfg *proxy.Config) (proxy.RoutingPolicyDocument, error) {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -60,7 +60,7 @@ func loadLiveCodexRoutingPolicy(ctx context.Context, cfg *proxy.Config) (proxy.R
 	}, http.MethodGet, proxy.RuntimePolicyPath, 0, nil)
 }
 
-func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []codexprov.RoutingAccount, policies ...proxy.RoutingPolicyV1) {
+func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []codexprov.RoutingAccount, policies ...proxy.RoutingPolicyDocument) {
 	if report == nil || cfg == nil {
 		return
 	}

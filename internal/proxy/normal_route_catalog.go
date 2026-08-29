@@ -61,6 +61,9 @@ func normalCallerPolicy(request *http.Request) normalCallerRoutePolicy {
 	if (request.Method == http.MethodGet || request.Method == http.MethodPut) && path == RuntimePolicyPath {
 		return normalCallerRouteLocal
 	}
+	if request.Method == http.MethodPost && path == RuntimePolicyPoolPath {
+		return normalCallerRouteLocal
+	}
 	if request.Method == http.MethodPost && path == RuntimePolicySessionDigestPath {
 		return normalCallerRouteLocal
 	}

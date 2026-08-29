@@ -287,7 +287,7 @@ func TestNewProxyCodexNativeHTTPInstallsForEnforcementAndRetainedAuthority(t *te
 	if err != nil {
 		t.Fatalf("new turn receipt store: %v", err)
 	}
-	sessionPolicy := proxy.NewSessionPolicyResolver(make([]byte, 32), proxy.RoutingPolicyV1{})
+	sessionPolicy := proxy.NewSessionPolicyResolver(make([]byte, 32), proxy.RoutingPolicyV2{})
 	dispatchPermits := &proxy.CallerDispatchPermitStore{}
 	retained := []uint64{4, 7}
 	var planner *proxy.CodexHTTPRequestPlanFactory
@@ -363,7 +363,7 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new turn receipt store: %v", err)
 	}
-	sessionPolicy := proxy.NewSessionPolicyResolver(make([]byte, 32), proxy.RoutingPolicyV1{})
+	sessionPolicy := proxy.NewSessionPolicyResolver(make([]byte, 32), proxy.RoutingPolicyV2{})
 	dispatchPermits := &proxy.CallerDispatchPermitStore{}
 	executor := proxyCodexWebSocketTestExecutor{}
 	wantHandler := &proxyCodexWebSocketTestHandler{}

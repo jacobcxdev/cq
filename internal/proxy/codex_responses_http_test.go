@@ -803,11 +803,11 @@ func TestCodexHTTPObserveRestrictsBoundSessionToPool(t *testing.T) {
 	server := &Server{
 		CodexRequests: router,
 		CodexObserver: observer,
-		SessionPolicy: NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SessionPolicy: NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 			SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
 			Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"two"}}},
 			SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "team"}},
-		}),
+		})),
 	}
 	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
 	body := []byte(`{"type":"response.create","model":"gpt-5.4","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)

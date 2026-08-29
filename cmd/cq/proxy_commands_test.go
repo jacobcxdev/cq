@@ -73,6 +73,8 @@ func TestProxyCommandClassifiesPolicyMutations(t *testing.T) {
 	for _, argv := range [][]string{
 		{"proxy", "policy", "apply", "--file", "/tmp/policy.json"},
 		{"proxy", "policy", "pool", "set", "team", "--account", "account"},
+		{"proxy", "policy", "pool", "rename", "team", "Security Research"},
+		{"proxy", "policy", "pool", "value", "Security Research", "10"},
 		{"proxy", "policy", "session", "list"},
 	} {
 		authority, err := ClassifyProxyCommand(argv)

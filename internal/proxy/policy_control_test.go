@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -48,10 +49,10 @@ func TestPolicyControlMutatesStoreAlreadyOwnedByWorker(t *testing.T) {
 		t.Fatalf("digest response = %q, error = %v", digestResponse.Body.String(), err)
 	}
 
-	policy := RoutingPolicyV1{
+	policy := RoutingPolicyDocument{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
-		Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a"}}},
-		SessionBindings: []SessionBindingV1{{SessionDigest: digest.SessionDigest, Pool: "team"}},
+		Pools:           []AccountPoolDocument{{Name: "Team", Value: 10, Members: []codex.AccountKey{"account-a"}}},
+		SessionBindings: []SessionBindingDocument{{SessionDigest: digest.SessionDigest, Pool: "Team"}},
 	}
 	body, err := json.Marshal(policy)
 	if err != nil {
@@ -66,10 +67,97 @@ func TestPolicyControlMutatesStoreAlreadyOwnedByWorker(t *testing.T) {
 	if decision.Status != PolicyDecisionSelected || len(decision.Allowed) != 1 || decision.Allowed[0] != "account-a" {
 		t.Fatalf("updated decision = %#v", decision)
 	}
+	poolID := state.Routing.Current().Pools[0].ID
+
+	renameBody, _ := json.Marshal(PoolMutationRequest{Operation: "rename", Name: "team", NewName: "Security Research"})
+	renameResponse := httptest.NewRecorder()
+	handler.ServeHTTP(renameResponse, httptest.NewRequest(http.MethodPost, RuntimePolicyPoolPath, bytes.NewReader(renameBody)))
+	if renameResponse.Code != http.StatusOK {
+		t.Fatalf("rename response = %d %q", renameResponse.Code, renameResponse.Body.String())
+	}
+	valueBody, _ := json.Marshal(PoolMutationRequest{Operation: "value", Name: "SECURITY RESEARCH", Value: 12})
+	valueResponse := httptest.NewRecorder()
+	handler.ServeHTTP(valueResponse, httptest.NewRequest(http.MethodPost, RuntimePolicyPoolPath, bytes.NewReader(valueBody)))
+	if valueResponse.Code != http.StatusOK {
+		t.Fatalf("value response = %d %q", valueResponse.Code, valueResponse.Body.String())
+	}
+	current := state.Routing.Current()
+	if current.Pools[0].ID != poolID || current.Pools[0].Name != "Security Research" || current.Pools[0].Value != 12 || current.SessionBindings[0].PoolID != poolID {
+		t.Fatalf("mutated internal policy = %#v", current)
+	}
 
 	getResponse := httptest.NewRecorder()
 	handler.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, RuntimePolicyPath, nil))
 	if getResponse.Code != http.StatusOK {
 		t.Fatalf("GET response = %d %q", getResponse.Code, getResponse.Body.String())
+	}
+	if bytes.Contains(getResponse.Body.Bytes(), []byte(poolID)) || bytes.Contains(getResponse.Body.Bytes(), []byte(`"pool_id"`)) || bytes.Contains(getResponse.Body.Bytes(), []byte(`"mac"`)) {
+		t.Fatalf("GET leaked internal policy: %s", getResponse.Body.String())
+	}
+	var got RoutingPolicyDocument
+	if err := json.Unmarshal(getResponse.Body.Bytes(), &got); err != nil || got.Pools[0].Name != "Security Research" || got.Pools[0].Value != 12 || got.SessionBindings[0].Pool != "Security Research" {
+		t.Fatalf("GET document = %#v, error = %v", got, err)
+	}
+}
+
+func TestPolicyPoolControlReturnsSafeFailureCodes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	if err := InitialiseProxyResilienceState(context.Background(), ProxyResilienceStateOptions{
+		FS: fsutil.OSFileSystem{}, Root: root, Random: bytes.NewReader(bytes.Repeat([]byte{0x61}, 4096)), Now: time.Now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := OpenProxyResilienceState(context.Background(), ProxyResilienceStateOptions{
+		FS: fsutil.OSFileSystem{}, Root: root, Random: rand.Reader, Now: time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.Routing.PublishDocument(RoutingPolicyDocument{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools: []AccountPoolDocument{
+			{Name: "Cyber", Members: []codex.AccountKey{"account-a"}},
+			{Name: "Research", Members: []codex.AccountKey{"account-b"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := (&Server{
+		Config: &Config{ClaudeUpstream: "https://example.test"}, RoutingPolicy: state.Routing, SessionPolicy: state.Routing.Resolver(),
+	}).handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		mutation PoolMutationRequest
+		want     string
+	}{
+		{name: "missing pool", mutation: PoolMutationRequest{Operation: "rename", Name: "Missing", NewName: "Other"}, want: "pool_not_found"},
+		{name: "duplicate name", mutation: PoolMutationRequest{Operation: "rename", Name: "Cyber", NewName: "Research"}, want: "pool_name_conflict"},
+		{name: "invalid name", mutation: PoolMutationRequest{Operation: "rename", Name: "Cyber", NewName: "Bad\nName"}, want: "invalid_pool_name"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := json.Marshal(test.mutation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, RuntimePolicyPoolPath, bytes.NewReader(body)))
+			if response.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
+			}
+			var failure struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure.Error != test.want {
+				t.Fatalf("failure = %q, error = %v, want %q", response.Body.String(), err, test.want)
+			}
+			if bytes.Contains(response.Body.Bytes(), []byte(test.mutation.Name)) || bytes.Contains(response.Body.Bytes(), []byte(state.Routing.Current().Pools[0].ID)) {
+				t.Fatalf("failure leaked policy detail: %q", response.Body.String())
+			}
+		})
 	}
 }

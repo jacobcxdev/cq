@@ -13,10 +13,11 @@ import (
 func TestCodexRoutePolicyAffinityBeatsHigherCapacity(t *testing.T) {
 	t.Parallel()
 
-	candidates := []CodexRoutePolicyCandidate{
-		routePolicyCandidate("account-b", CapacityPositive, 90),
-		routePolicyCandidate("account-a", CapacityPositive, 10),
-	}
+	ordinary := routePolicyCandidate("account-b", CapacityPositive, 90)
+	ordinary.Value = 0
+	affinity := routePolicyCandidate("account-a", CapacityPositive, 10)
+	affinity.Value = 10
+	candidates := []CodexRoutePolicyCandidate{ordinary, affinity}
 
 	plan, err := BuildCodexRoutePlan(context.Background(), candidates, CodexRoutePolicyHints{
 		AffinityAccountKey: "account-a",
@@ -29,6 +30,53 @@ func TestCodexRoutePolicyAffinityBeatsHigherCapacity(t *testing.T) {
 		t.Fatalf("status = %q, want %q", plan.Status(), CodexRoutePlanReady)
 	}
 	assertRoutePolicyAccounts(t, plan, "account-a", "account-b")
+}
+
+func TestCodexRoutePolicyValuePreservesHigherValueCapacity(t *testing.T) {
+	t.Parallel()
+
+	lowerValue := routePolicyCandidate("account-lower-value", CapacityPositive, 10)
+	lowerValue.Value = 0
+	higherValue := routePolicyCandidate("account-higher-value", CapacityPositive, 90)
+	higherValue.Value = 10
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{higherValue, lowerValue}, CodexRoutePolicyHints{DefaultAccountKey: "account-higher-value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRoutePolicyAccounts(t, plan, "account-lower-value", "account-higher-value")
+}
+
+func TestCodexRoutePolicyValueAppliesAfterEligibilityAndAffinity(t *testing.T) {
+	t.Parallel()
+
+	unknown := routePolicyCandidate("account-unknown", CapacityUnknown, -1)
+	unknown.Value = 0
+	depleted := routePolicyCandidate("account-depleted", CapacityZero, 0)
+	depleted.Value = 0
+	valuable := routePolicyCandidate("account-valuable", CapacityPositive, 90)
+	valuable.Value = 10
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{valuable, depleted, unknown}, CodexRoutePolicyHints{
+		AffinityAccountKey: "account-valuable",
+		DefaultAccountKey:  "account-valuable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRoutePolicyAccounts(t, plan, "account-valuable", "account-unknown")
+}
+
+func TestCodexRoutePolicyLowerValueUnknownCapacityStaysFirst(t *testing.T) {
+	t.Parallel()
+
+	unknown := routePolicyCandidate("account-unknown", CapacityUnknown, -1)
+	unknown.Value = 0
+	valuable := routePolicyCandidate("account-valuable", CapacityPositive, 90)
+	valuable.Value = 10
+	plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{valuable, unknown}, CodexRoutePolicyHints{DefaultAccountKey: "account-valuable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRoutePolicyAccounts(t, plan, "account-unknown", "account-valuable")
 }
 
 func TestCodexRoutePolicyWarmAffinityOnlyBreaksForHardQuotaOrModelChange(t *testing.T) {

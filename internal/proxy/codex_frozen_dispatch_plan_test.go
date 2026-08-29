@@ -97,6 +97,30 @@ func TestBuildCodexFrozenDispatchPlanUsesProvisionalCounts(t *testing.T) {
 	}
 }
 
+func TestBuildCodexFrozenDispatchPlanFreezesAccountValues(t *testing.T) {
+	t.Parallel()
+
+	values := map[codex.AccountKey]PoolValue{"account-a": 10, "account-z": 0}
+	plan, err := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{
+		Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceManaged, false, time.Time{})),
+			frozenDispatchTestLogicalAccount("account-z", frozenDispatchCandidate("account-z", "candidate-z", "revision-z", codex.SourceManaged, false, time.Time{})),
+		}},
+		Requirements:      CodexRouteRequirements{RequestedModel: "gpt-5"},
+		AccountValues:     values,
+		DefaultAccountKey: "account-a",
+		Now:               time.Unix(1_700_000_000, 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values["account-z"] = 20
+	accounts := plan.Accounts()
+	if len(accounts) != 2 || accounts[0].Choice().AccountKey != "account-z" || accounts[0].Value() != 0 || accounts[1].Value() != 10 || plan.probe.selectedValue != 0 {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+}
+
 func TestBuildCodexFrozenDispatchPlanRejectsNegativeProvisionalCount(t *testing.T) {
 	t.Parallel()
 

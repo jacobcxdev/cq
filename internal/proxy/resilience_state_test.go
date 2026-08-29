@@ -34,11 +34,11 @@ func TestProxyResilienceStateOpenIsNonCreatingAndReopensPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := RoutingPolicyV1{
-		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
-		Pools: []AccountPoolV1{{Name: "fast", Members: []codex.AccountKey{"account-a"}}},
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "fast", Members: []codex.AccountKey{"account-a"}}},
 	}
-	policy.SessionBindings = []SessionBindingV1{{SessionDigest: state.Routing.SessionDigest([]byte("session-1")), Pool: "fast"}}
+	policy.SessionBindings = []SessionBindingV2{{SessionDigest: state.Routing.SessionDigest([]byte("session-1")), PoolID: testPoolIDA}}
 	policy.CapabilityEvidence = []CapabilityEvidenceV1{{AccountKey: "account-a", State: CapabilitySupported}}
 	if err := state.Routing.Publish(policy); err != nil {
 		t.Fatal(err)
