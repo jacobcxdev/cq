@@ -845,15 +845,15 @@ func TestWindowsRetainedExecutableUsesFixedRightsAndShareReadOnly(t *testing.T) 
 		t.Fatal(err)
 	}
 	executable := filepath.Join(bin, "helper.exe")
-	if err := os.WriteFile(executable, []byte("helper"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	user, err := currentWindowsUserSID()
 	if err != nil {
 		t.Fatal(err)
 	}
 	strict := fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", user.String(), user.String())
 	setWindowsTestSecurity(t, bin, strict)
+	if err := os.WriteFile(executable, []byte("helper"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	setWindowsTestSecurity(t, executable, strict)
 	fys := newWindowsTestFileSystem(t, root)
 	selection, err := fys.resolveSecureBoundary(executable, secureBoundaryExternalFile)
@@ -1223,7 +1223,7 @@ func TestWindowsSecureOpenRejectsBroadIntermediateBelowAnchor(t *testing.T) {
 	anchor := t.TempDir()
 	intermediate := filepath.Join(anchor, "intermediate")
 	target := filepath.Join(intermediate, "target")
-	if err := os.MkdirAll(target, 0o700); err != nil {
+	if err := os.Mkdir(intermediate, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	user, err := currentWindowsUserSID()
@@ -1231,6 +1231,9 @@ func TestWindowsSecureOpenRejectsBroadIntermediateBelowAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	setWindowsTestSecurity(t, intermediate, fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;WD)", user.String(), user.String()))
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	setWindowsTestSecurity(t, target, fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", user.String(), user.String()))
 	fsys := newWindowsTestFileSystem(t, anchor)
 	selection, err := fsys.resolveSecureBoundary(target, secureBoundaryCQPrivate)
