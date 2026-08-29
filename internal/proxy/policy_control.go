@@ -22,14 +22,19 @@ func (s *Server) handlePolicyControl(writer http.ResponseWriter, request *http.R
 	}
 	switch request.Method {
 	case http.MethodGet:
-		writePolicyControlJSON(writer, s.RoutingPolicy.Current())
+		document, err := s.RoutingPolicy.Document()
+		if err != nil {
+			http.Error(writer, "routing policy unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writePolicyControlJSON(writer, document)
 	case http.MethodPut:
 		body, err := io.ReadAll(io.LimitReader(request.Body, routingPolicyMaxBytes+1))
 		if err != nil || len(body) > routingPolicyMaxBytes {
 			http.Error(writer, "invalid routing policy", http.StatusBadRequest)
 			return
 		}
-		var policy RoutingPolicyV1
+		var policy RoutingPolicyDocument
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&policy); err != nil {
@@ -40,13 +45,18 @@ func (s *Server) handlePolicyControl(writer http.ResponseWriter, request *http.R
 			http.Error(writer, "invalid routing policy", http.StatusBadRequest)
 			return
 		}
-		if err := s.RoutingPolicy.Publish(policy); err != nil {
+		if err := s.RoutingPolicy.PublishDocument(policy); err != nil {
 			http.Error(writer, "routing policy rejected", http.StatusConflict)
 			return
 		}
 		current := s.RoutingPolicy.Current()
 		s.SessionPolicy.Replace(current)
-		writePolicyControlJSON(writer, current)
+		document, err := s.RoutingPolicy.Document()
+		if err != nil {
+			http.Error(writer, "routing policy unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writePolicyControlJSON(writer, document)
 	default:
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 	}

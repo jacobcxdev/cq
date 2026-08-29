@@ -274,7 +274,7 @@ func OpenProxyResilienceState(ctx context.Context, options ProxyResilienceStateO
 		return nil, err
 	}
 	routingPublisher := NewAuthorityObjectPublisher(inspector, options.Random, state.routingLock)
-	state.Routing, err = OpenRoutingPolicyStore(ctx, inspector, state.routingDir, routingPublisher, routingKey)
+	state.Routing, err = OpenRoutingPolicyStore(ctx, inspector, state.routingDir, routingPublisher, options.Random, routingKey)
 	zeroRuntimeBytes(routingKey)
 	if err != nil {
 		return nil, err

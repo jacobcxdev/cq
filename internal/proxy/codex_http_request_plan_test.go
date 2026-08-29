@@ -442,11 +442,11 @@ func TestCodexHTTPRequestPlanFactoryAppliesSessionPolicyToWebSocketPrewarm(t *te
 			frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
 		}}},
 		DefaultAccountKey: "account-a",
-		SessionPolicy: NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SessionPolicy: NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 			SchemaVersion: 1, RoutingGeneration: 7,
 			Pools:           []AccountPoolV1{{Name: "bound", Members: []codex.AccountKey{"account-b"}}},
 			SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "bound"}},
-		}),
+		})),
 		Now: func() time.Time { return now },
 	}
 	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
@@ -867,11 +867,11 @@ func TestCodexHTTPRequestPlanFactoryPreservesAuthenticatedContinuationAcrossSess
 		Now:               func() time.Time { return now },
 	}
 	key := []byte("01234567890123456789012345678901")
-	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+	factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
 		Pools:           []AccountPoolV1{{Name: "pool-b", Members: []codex.AccountKey{"account-b"}}},
 		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "pool-b"}},
-	})
+	}))
 	factory.DispatchPermits = &sessionPolicyPermitRecorder{}
 	caller := RuntimeCallerAuthorityV1{
 		Domain: NormalCallerCodex, SubjectID: privateSubject, IndexEpoch: 42, ConsumptionDigest: strings.Repeat("a", 64),
@@ -1108,11 +1108,11 @@ func TestCodexHTTPRequestPlanFactoryRoutesFreshAuthenticatedCallerWithinSessionP
 		Now:               func() time.Time { return now },
 	}
 	key := []byte("01234567890123456789012345678901")
-	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+	factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
 		Pools:           []AccountPoolV1{{Name: "pool-b", Members: []codex.AccountKey{"account-b"}}},
 		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "pool-b"}},
-	})
+	}))
 	factory.DispatchPermits = &sessionPolicyPermitRecorder{}
 	caller := RuntimeCallerAuthorityV1{
 		Domain: NormalCallerCodex, SubjectID: "account-a", ConsumptionDigest: strings.Repeat("a", 64),
@@ -1280,11 +1280,11 @@ func TestCodexHTTPRequestPlanFactoryWaitsForLongRunningPredecessor(t *testing.T)
 	}
 	factory := codexHTTPRequestPlanTestFactory(runtime)
 	key := []byte("01234567890123456789012345678901")
-	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+	factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
 		Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account"}}},
 		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "team"}},
-	})
+	}))
 	permits := &sessionPolicyPermitRecorder{}
 	factory.DispatchPermits = permits
 	inspectCalls := 0

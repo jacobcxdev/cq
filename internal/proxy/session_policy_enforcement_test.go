@@ -22,7 +22,7 @@ func (recorder *sessionPolicyPermitRecorder) IssueAndConsume(_ context.Context, 
 func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinuity(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	session := []byte("private-session")
-	policy := RoutingPolicyV1{
+	policy := routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
 		Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
 		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, session), Pool: "team"}},
@@ -31,7 +31,7 @@ func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinui
 			{AccountKey: "account-b", State: CapabilityUnsupported},
 		},
 		Delegations: []CallerDelegationV1{{Caller: "caller-safe-id", Accounts: []codex.AccountKey{"account-a"}, ExpiresAt: time.Unix(200, 0)}},
-	}
+	})
 	resolver := NewSessionPolicyResolver(key, policy)
 	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "caller-safe-id"}
 	decision, err := enforceSessionPolicy(resolver, caller, session, []codex.AccountKey{"account-a", "account-b", "account-c"}, "account-a", time.Unix(100, 0))
@@ -47,7 +47,7 @@ func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinui
 }
 
 func TestSessionPolicyEnforcementPreservesUnboundParity(t *testing.T) {
-	resolver := NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), RoutingPolicyV1{SchemaVersion: 1})
+	resolver := NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), routingPolicyV2ForTest(RoutingPolicyV1{SchemaVersion: 1}))
 	global := []codex.AccountKey{"account-b", "account-a"}
 	decision, err := enforceSessionPolicy(resolver, RuntimeCallerAuthorityV1{}, []byte("unbound"), global, "", time.Unix(100, 0))
 	if err != nil {
@@ -61,11 +61,11 @@ func TestSessionPolicyEnforcementPreservesUnboundParity(t *testing.T) {
 func TestSessionPolicyEnforcementAllowsCodexCallerWithoutDelegation(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	session := []byte("bound-session")
-	resolver := NewSessionPolicyResolver(key, RoutingPolicyV1{
+	resolver := NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
 		Pools:           []AccountPoolV1{{Name: "cyber", Members: []codex.AccountKey{"account-a", "account-b"}}},
 		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, session), Pool: "cyber"}},
-	})
+	}))
 	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "worker-keyed-caller"}
 
 	decision, err := enforceSessionPolicy(resolver, caller, session, []codex.AccountKey{"account-a", "account-b", "account-c"}, "", time.Unix(100, 0))
@@ -80,11 +80,11 @@ func TestSessionPolicyEnforcementAllowsCodexCallerWithoutDelegation(t *testing.T
 func TestSessionPolicyResolverAllowsExplicitPoolWithoutCapabilityEvidence(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	session := []byte("explicit-session")
-	resolver := NewSessionPolicyResolver(key, RoutingPolicyV1{
+	resolver := NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
 		Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
 		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, session), Pool: "team"}},
-	})
+	}))
 
 	decision := resolver.Resolve(session, []codex.AccountKey{"account-b", "account-c", "account-a"})
 	if decision.Status != PolicyDecisionSelected || len(decision.Allowed) != 2 || decision.Allowed[0] != "account-a" || decision.Allowed[1] != "account-b" {
@@ -94,16 +94,17 @@ func TestSessionPolicyResolverAllowsExplicitPoolWithoutCapabilityEvidence(t *tes
 
 func TestSessionPolicyResolverScopesCapabilityRulesToNamedPool(t *testing.T) {
 	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "local_token_v1", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
-	resolver := NewSessionPolicyResolver(nil, RoutingPolicyV1{
+	policy := routingPolicyV2ForTest(RoutingPolicyV1{
 		RoutingGeneration: 7, CapabilityPool: "cyber",
 		Pools:                     []AccountPoolV1{{Name: "paid", Members: []codex.AccountKey{"paid"}}, {Name: "cyber", Members: []codex.AccountKey{"cyber"}}},
 		CapabilityPredicates:      []CapabilityPredicateCoreV1{predicate},
 		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{{AccountKey: "cyber"}},
 	})
-	if _, _, active := resolver.capabilityPolicy("paid", 7); active {
+	resolver := NewSessionPolicyResolver(nil, policy)
+	if _, _, active := resolver.capabilityPolicy(policy.Pools[0].ID, 7); active {
 		t.Fatal("paid pool inherited cyber capability rules")
 	}
-	if _, _, active := resolver.capabilityPolicy("cyber", 7); !active {
+	if _, _, active := resolver.capabilityPolicy(policy.Pools[1].ID, 7); !active {
 		t.Fatal("cyber pool missing capability rules")
 	}
 }
@@ -117,12 +118,12 @@ func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 		frozenDispatchTestLogicalAccount("other", frozenDispatchCandidate("other", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
 	}}}
 	key := []byte("01234567890123456789012345678901")
-	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+	factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
 		Pools:              []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account"}}},
 		SessionBindings:    []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "team"}},
 		CapabilityEvidence: []CapabilityEvidenceV1{{AccountKey: "account", State: CapabilitySupported}},
-	})
+	}))
 	permits := &sessionPolicyPermitRecorder{}
 	factory.DispatchPermits = permits
 	caller := RuntimeCallerAuthorityV1{
@@ -165,7 +166,7 @@ func TestCapabilityRoutingSelectsFinalAccountBeforeDurableRequestJournal(t *test
 	key := []byte("01234567890123456789012345678901")
 	sessionDigest := keyedSessionDigest(key, []byte("session"))
 	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: string(NormalCallerLocal), AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
-	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+	factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
 		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
 		CapabilityPool:       "team",
 		Pools:                []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
@@ -176,7 +177,7 @@ func TestCapabilityRoutingSelectsFinalAccountBeforeDurableRequestJournal(t *test
 			capabilityEvidenceForTest("account-a", "workspace-a", predicate, "probe-a", nil, CapabilityEvidenceIneligible, 7, now),
 			capabilityEvidenceForTest("account-b", "workspace-b", predicate, "probe-b", nil, CapabilityEvidenceEligible, 7, now),
 		},
-	})
+	}))
 	permits := &sessionPolicyPermitRecorder{}
 	factory.DispatchPermits = permits
 	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local-caller", ConsumptionDigest: strings.Repeat("a", 64)}

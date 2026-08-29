@@ -143,6 +143,12 @@ type routingPolicyAnchorV1 struct {
 	MAC           string `json:"mac,omitempty"`
 }
 
+type routingPolicyAnchorV2 struct {
+	SchemaVersion int    `json:"schema_version"`
+	ObjectDigest  string `json:"object_digest"`
+	MAC           string `json:"mac,omitempty"`
+}
+
 // RoutingPolicyStore publishes authenticated immutable policy snapshots and
 // moves one CAS-protected selector. Raw session identifiers are never accepted.
 type RoutingPolicyStore struct {
@@ -151,16 +157,17 @@ type RoutingPolicyStore struct {
 	inspector fsutil.SecurePathInspector
 	directory fsutil.SecureDirectory
 	publisher DurableObjectPublisher
+	random    io.Reader
 	key       [32]byte
-	current   *RoutingPolicyV1
+	current   *RoutingPolicyV2
 	anchorID  *StableObjectIdentity
 }
 
-func OpenRoutingPolicyStore(ctx context.Context, inspector fsutil.SecurePathInspector, directory fsutil.SecureDirectory, publisher DurableObjectPublisher, key []byte) (*RoutingPolicyStore, error) {
-	if ctx == nil || inspector == nil || directory == nil || publisher == nil || len(key) != 32 {
+func OpenRoutingPolicyStore(ctx context.Context, inspector fsutil.SecurePathInspector, directory fsutil.SecureDirectory, publisher DurableObjectPublisher, random io.Reader, key []byte) (*RoutingPolicyStore, error) {
+	if ctx == nil || inspector == nil || directory == nil || publisher == nil || random == nil || len(key) != 32 {
 		return nil, fsutil.ErrSecureCapabilityUnavailable
 	}
-	store := &RoutingPolicyStore{ctx: ctx, inspector: inspector, directory: directory, publisher: publisher}
+	store := &RoutingPolicyStore{ctx: ctx, inspector: inspector, directory: directory, publisher: publisher, random: random}
 	copy(store.key[:], key)
 	if err := store.reopen(); err != nil {
 		return nil, err
@@ -168,14 +175,28 @@ func OpenRoutingPolicyStore(ctx context.Context, inspector fsutil.SecurePathInsp
 	return store, nil
 }
 
-func (s *RoutingPolicyStore) Publish(policy RoutingPolicyV1) error {
+func (s *RoutingPolicyStore) Publish(policy RoutingPolicyV2) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	policy.MAC = ""
-	if err := validateRoutingPolicy(policy, s.current); err != nil {
+	return s.publishLocked(policy)
+}
+
+func (s *RoutingPolicyStore) PublishDocument(document RoutingPolicyDocument) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	policy, err := compileRoutingPolicyDocument(document, s.current, s.random)
+	if err != nil {
 		return err
 	}
-	body, err := sealRoutingPolicy(policy, s.key[:])
+	return s.publishLocked(policy)
+}
+
+func (s *RoutingPolicyStore) publishLocked(policy RoutingPolicyV2) error {
+	policy.MAC = ""
+	if err := validateRoutingPolicyV2(policy, s.current); err != nil {
+		return err
+	}
+	body, err := sealRoutingPolicyV2(policy, s.key[:])
 	if err != nil {
 		return err
 	}
@@ -185,7 +206,7 @@ func (s *RoutingPolicyStore) Publish(policy RoutingPolicyV1) error {
 	if _, err := s.publishOrAdopt(objectName, body); err != nil {
 		return err
 	}
-	anchorBody, err := sealRoutingAnchor(routingPolicyAnchorV1{SchemaVersion: 1, ObjectDigest: objectDigest}, s.key[:])
+	anchorBody, err := sealRoutingAnchorV2(routingPolicyAnchorV2{SchemaVersion: 2, ObjectDigest: objectDigest}, s.key[:])
 	if err != nil {
 		return err
 	}
@@ -198,7 +219,7 @@ func (s *RoutingPolicyStore) Publish(policy RoutingPolicyV1) error {
 	if err != nil {
 		return err
 	}
-	policy.MAC = policyMAC(policy, s.key[:])
+	policy.MAC = policyMACV2(policy, s.key[:])
 	s.current = &policy
 	s.anchorID = &identity
 	return nil
@@ -206,7 +227,7 @@ func (s *RoutingPolicyStore) Publish(policy RoutingPolicyV1) error {
 
 func (s *RoutingPolicyStore) PublishDelegation(delegation CallerDelegationV1) error {
 	current := s.Current()
-	if current.SchemaVersion != 1 {
+	if current.SchemaVersion != 2 {
 		return ErrRoutingFeatureInactive
 	}
 	current.AuthorityGeneration++
@@ -215,13 +236,22 @@ func (s *RoutingPolicyStore) PublishDelegation(delegation CallerDelegationV1) er
 	return s.Publish(current)
 }
 
-func (s *RoutingPolicyStore) Current() RoutingPolicyV1 {
+func (s *RoutingPolicyStore) Current() RoutingPolicyV2 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.current == nil {
-		return RoutingPolicyV1{}
+		return RoutingPolicyV2{}
 	}
-	return cloneRoutingPolicy(*s.current)
+	return cloneRoutingPolicyV2(*s.current)
+}
+
+func (s *RoutingPolicyStore) Document() (RoutingPolicyDocument, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current == nil {
+		return RoutingPolicyDocument{}, nil
+	}
+	return routingPolicyDocument(*s.current)
 }
 
 func (s *RoutingPolicyStore) SessionDigest(exact []byte) string {
@@ -241,27 +271,83 @@ func (s *RoutingPolicyStore) reopen() error {
 	if err != nil {
 		return err
 	}
-	anchor, err := openRoutingAnchor(anchorBody, s.key[:])
-	if err != nil {
-		return err
+	var header struct {
+		SchemaVersion int `json:"schema_version"`
 	}
-	objectBody, _, err := s.readStable("routing-policy-"+anchor.ObjectDigest+".json", routingPolicyMaxBytes)
+	if err := json.Unmarshal(anchorBody, &header); err != nil {
+		return errors.New("routing policy anchor authentication failed")
+	}
+	objectDigest := ""
+	switch header.SchemaVersion {
+	case 1:
+		anchor, err := openRoutingAnchor(anchorBody, s.key[:])
+		if err != nil {
+			return err
+		}
+		objectDigest = anchor.ObjectDigest
+	case 2:
+		anchor, err := openRoutingAnchorV2(anchorBody, s.key[:])
+		if err != nil {
+			return err
+		}
+		objectDigest = anchor.ObjectDigest
+	default:
+		return errors.New("routing policy anchor authentication failed")
+	}
+	objectBody, _, err := s.readStable("routing-policy-"+objectDigest+".json", routingPolicyMaxBytes)
 	if err != nil {
 		return err
 	}
 	digest := sha256.Sum256(objectBody)
-	if hex.EncodeToString(digest[:]) != anchor.ObjectDigest {
+	if hex.EncodeToString(digest[:]) != objectDigest {
 		return errors.New("routing policy object digest mismatch")
 	}
-	policy, err := openRoutingPolicy(objectBody, s.key[:])
+	if header.SchemaVersion == 2 {
+		policy, err := openRoutingPolicyV2(objectBody, s.key[:])
+		if err != nil {
+			return err
+		}
+		if err := validateRoutingPolicyV2(policy, nil); err != nil {
+			return err
+		}
+		s.current = &policy
+		s.anchorID = &anchorIdentity
+		return nil
+	}
+	legacy, err := openRoutingPolicy(objectBody, s.key[:])
 	if err != nil {
 		return err
 	}
-	if err := validateRoutingPolicy(policy, nil); err != nil {
+	if err := validateRoutingPolicy(legacy, nil); err != nil {
 		return err
 	}
+	policy, err := migrateRoutingPolicyV1(legacy, s.random)
+	if err != nil {
+		return err
+	}
+	if err := validateRoutingPolicyV2(policy, nil); err != nil {
+		return err
+	}
+	body, err := sealRoutingPolicyV2(policy, s.key[:])
+	if err != nil {
+		return err
+	}
+	migratedDigest := sha256.Sum256(body)
+	migratedObjectDigest := hex.EncodeToString(migratedDigest[:])
+	if _, err := s.publishOrAdopt("routing-policy-"+migratedObjectDigest+".json", body); err != nil {
+		return err
+	}
+	anchorBody, err = sealRoutingAnchorV2(routingPolicyAnchorV2{SchemaVersion: 2, ObjectDigest: migratedObjectDigest}, s.key[:])
+	if err != nil {
+		return err
+	}
+	identity, err := s.publisher.ReplaceSelectorExactPrior(s.ctx, s.directory, routingPolicyAnchorName, &anchorIdentity, anchorBody)
+	if err != nil {
+		return err
+	}
+	policy.MAC = policyMACV2(policy, s.key[:])
 	s.current = &policy
-	s.anchorID = &anchorIdentity
+	s.anchorID = &identity
 	return nil
 }
 
@@ -531,6 +617,57 @@ func newPoolID(random io.Reader) (PoolID, error) {
 	return PoolID(raw[:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:]), nil
 }
 
+func migrateRoutingPolicyV1(legacy RoutingPolicyV1, random io.Reader) (RoutingPolicyV2, error) {
+	policy := RoutingPolicyV2{
+		SchemaVersion:             2,
+		AuthorityGeneration:       legacy.AuthorityGeneration,
+		RoutingGeneration:         legacy.RoutingGeneration,
+		EffectiveGeneration:       legacy.EffectiveGeneration,
+		Pools:                     make([]AccountPoolV2, len(legacy.Pools)),
+		SessionBindings:           make([]SessionBindingV2, len(legacy.SessionBindings)),
+		CapabilityEvidence:        append([]CapabilityEvidenceV1(nil), legacy.CapabilityEvidence...),
+		CapabilityPredicates:      append([]CapabilityPredicateCoreV1(nil), legacy.CapabilityPredicates...),
+		CapabilityRoutingEvidence: cloneCapabilityRoutingEvidence(legacy.CapabilityRoutingEvidence),
+		Delegations:               append([]CallerDelegationV1(nil), legacy.Delegations...),
+	}
+	poolIDs := make(map[string]PoolID, len(legacy.Pools))
+	for index, pool := range legacy.Pools {
+		id, err := newPoolID(random)
+		if err != nil {
+			return RoutingPolicyV2{}, err
+		}
+		name := capitaliseLegacyPoolName(pool.Name)
+		poolIDs[pool.Name] = id
+		policy.Pools[index] = AccountPoolV2{ID: id, Name: name, Members: append([]providerCodex.AccountKey(nil), pool.Members...)}
+	}
+	for index, binding := range legacy.SessionBindings {
+		id := poolIDs[binding.Pool]
+		if id == "" {
+			return RoutingPolicyV2{}, errors.New("invalid session binding")
+		}
+		policy.SessionBindings[index] = SessionBindingV2{SessionDigest: binding.SessionDigest, PoolID: id}
+	}
+	capabilityPool := legacy.CapabilityPool
+	if capabilityPool == "" && len(legacy.CapabilityPredicates) > 0 && len(legacy.Pools) == 1 {
+		capabilityPool = legacy.Pools[0].Name
+	}
+	if capabilityPool != "" {
+		policy.CapabilityPool = poolIDs[capabilityPool]
+		if policy.CapabilityPool == "" {
+			return RoutingPolicyV2{}, errors.New("invalid capability pool")
+		}
+	}
+	return policy, nil
+}
+
+func capitaliseLegacyPoolName(name string) string {
+	if name == "" {
+		return ""
+	}
+	first, size := utf8.DecodeRuneInString(name)
+	return string(unicode.ToUpper(first)) + name[size:]
+}
+
 func routingPolicyDocument(policy RoutingPolicyV2) (RoutingPolicyDocument, error) {
 	names := make(map[PoolID]string, len(policy.Pools))
 	document := RoutingPolicyDocument{
@@ -706,6 +843,32 @@ func policyMAC(policy RoutingPolicyV1, key []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+func sealRoutingPolicyV2(policy RoutingPolicyV2, key []byte) ([]byte, error) {
+	policy.MAC = policyMACV2(policy, key)
+	return json.Marshal(policy)
+}
+
+func openRoutingPolicyV2(body, key []byte) (RoutingPolicyV2, error) {
+	var policy RoutingPolicyV2
+	if err := json.Unmarshal(body, &policy); err != nil {
+		return policy, err
+	}
+	want := policyMACV2(policy, key)
+	if !hmac.Equal([]byte(policy.MAC), []byte(want)) {
+		return RoutingPolicyV2{}, errors.New("routing policy authentication failed")
+	}
+	return policy, nil
+}
+
+func policyMACV2(policy RoutingPolicyV2, key []byte) string {
+	policy.MAC = ""
+	body, _ := json.Marshal(policy)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("cq/routing-policy/v2\x00"))
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func sealRoutingAnchor(anchor routingPolicyAnchorV1, key []byte) ([]byte, error) {
 	anchor.MAC = routingAnchorMAC(anchor, key)
 	return json.Marshal(anchor)
@@ -727,6 +890,31 @@ func routingAnchorMAC(anchor routingPolicyAnchorV1, key []byte) string {
 	body, _ := json.Marshal(anchor)
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte("cq/routing-policy-anchor/v1\x00"))
+	_, _ = mac.Write(body)
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
+func sealRoutingAnchorV2(anchor routingPolicyAnchorV2, key []byte) ([]byte, error) {
+	anchor.MAC = routingAnchorMACV2(anchor, key)
+	return json.Marshal(anchor)
+}
+
+func openRoutingAnchorV2(body, key []byte) (routingPolicyAnchorV2, error) {
+	var anchor routingPolicyAnchorV2
+	if err := json.Unmarshal(body, &anchor); err != nil {
+		return anchor, err
+	}
+	if anchor.SchemaVersion != 2 || !lowerHexDigest(anchor.ObjectDigest) || !hmac.Equal([]byte(anchor.MAC), []byte(routingAnchorMACV2(anchor, key))) {
+		return routingPolicyAnchorV2{}, errors.New("routing policy anchor authentication failed")
+	}
+	return anchor, nil
+}
+
+func routingAnchorMACV2(anchor routingPolicyAnchorV2, key []byte) string {
+	anchor.MAC = ""
+	body, _ := json.Marshal(anchor)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("cq/routing-policy-anchor/v2\x00"))
 	_, _ = mac.Write(body)
 	return fmt.Sprintf("%x", mac.Sum(nil))
 }
