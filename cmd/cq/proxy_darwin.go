@@ -517,6 +517,12 @@ func initialiseDarwinRuntimeLifecycle() error {
 
 func restartProxyAgent() error {
 	uid := os.Getuid()
+	if executable, executableErr := currentExecutable(); executableErr == nil && isHomebrewFormulaExecutable(executable) {
+		if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
+			return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
+		}
+		return nil
+	}
 	err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel))
 	if err == nil {
 		return nil
