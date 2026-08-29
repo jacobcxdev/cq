@@ -190,10 +190,30 @@ type SecureDirectoryOpener interface {
 	OpenSecureDirectory(name string) (SecureDirectory, error)
 }
 
-// OSFileSystem delegates to the real OS.
-type OSFileSystem struct{}
+type secureBoundaryPurpose uint8
 
-func (OSFileSystem) Stat(name string) (os.FileInfo, error)             { return os.Stat(name) }
+const (
+	secureBoundaryCQPrivate secureBoundaryPurpose = iota + 1
+	secureBoundaryExternalDirectory
+	secureBoundaryExternalFile
+)
+
+type secureBoundarySelection struct {
+	AnchorPath        string
+	PostAnchorPrivate bool
+}
+
+type secureBoundaryResolver interface {
+	ResolveSecureBoundary(string, secureBoundaryPurpose) (secureBoundarySelection, error)
+}
+
+// OSFileSystem delegates to the real OS. The resolver is an unexported,
+// value-scoped Windows test seam; the production zero value resolves roots.
+type OSFileSystem struct {
+	secureBoundaryResolver secureBoundaryResolver
+}
+
+func (fsys OSFileSystem) Stat(name string) (os.FileInfo, error)        { return statOSFileSystem(fsys, name) }
 func (OSFileSystem) ReadFile(name string) ([]byte, error)              { return os.ReadFile(name) }
 func (OSFileSystem) WriteFile(n string, d []byte, p os.FileMode) error { return os.WriteFile(n, d, p) }
 func (OSFileSystem) Rename(o, n string) error                          { return os.Rename(o, n) }

@@ -16,6 +16,10 @@ import (
 
 func (OSFileSystem) Lstat(name string) (os.FileInfo, error) { return os.Lstat(name) }
 
+func statOSFileSystem(_ OSFileSystem, name string) (os.FileInfo, error) {
+	return os.Stat(name)
+}
+
 func (OSFileSystem) EffectiveUID() uint64 { return uint64(os.Geteuid()) }
 
 func (OSFileSystem) FileOwnerUID(info os.FileInfo) (uint64, bool) {
