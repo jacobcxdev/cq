@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -96,6 +97,9 @@ func TestEnsureEpochRejectsCorruptState(t *testing.T) {
 }
 
 func TestDefaultEpochPathUsesAbsoluteXDGConfigHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG_CONFIG_HOME is a Unix configuration root")
+	}
 	fs := fsutil.NewMemFS()
 	got, err := DefaultEpochPath(fs, func(key string) string {
 		if key == "XDG_CONFIG_HOME" {

@@ -3,6 +3,7 @@ package modelregistry
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -155,7 +156,7 @@ func TestSaveOverlays_PermissionsRealFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o700 {
 		t.Errorf("dir perm = %04o, want 0700", perm)
 	}
 
@@ -164,7 +165,7 @@ func TestSaveOverlays_PermissionsRealFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat file: %v", err)
 	}
-	if perm := finfo.Mode().Perm(); perm != 0o600 {
+	if perm := finfo.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("file perm = %04o, want 0600", perm)
 	}
 

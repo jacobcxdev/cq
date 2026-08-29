@@ -55,5 +55,8 @@ jobs:
       - run: .\cq.exe --help
       - run: .\cq.exe --version
       - run: go vet ./...
-      - run: go test -race -count=1 ./internal/userdirs ./internal/fsutil
-      - run: go test -race -count=1 ./internal/keyring ./internal/proxy -run '^(TestCQManifestPathUsesWindowsCacheRoot|TestDefaultCQManifestPathUsesWindowsCacheRoot|TestCodexInstalledProtectedIdentityWindowsUsesFullFileID)$'
+      - run: go test -race -count=1 ./internal/aggregate ./internal/auth ./internal/cache ./internal/compat ./internal/fsutil ./internal/history ./internal/httputil ./internal/keyring ./internal/modelregistry ./internal/output ./internal/provider ./internal/provider/claude ./internal/provider/gemini ./internal/quota ./internal/userdirs
+      - run: go test -race -count=1 ./internal/app -run '^(TestBuildReport|TestAddProxyEligibility|TestRunner)'
+      - run: go test -race -count=1 ./internal/provider/codex -run '^(TestRegistryAccountAliasIndex|TestResolveAccountReference|TestAccountKeyState|TestParseUsage|TestParseNumericResetAt|TestInventoryRejects)'
+      - run: go test -race -count=1 ./internal/proxy -run '^(TestConfigRejectsWindowsVolumeRootStateDirectories|TestCodexInstalledProtectedIdentityWindowsUsesFullFileID)$'
+      - run: go test -race -count=1 ./cmd/cq -run '^TestProxyStatusRejectsWindowsVolumeRootContinuityDirectory$'
