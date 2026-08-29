@@ -110,14 +110,14 @@ func TestAddCodexProxyEligibilityAddsDistinctBoundSubsetPools(t *testing.T) {
 		{Key: "route-b", AccountID: "account-b"},
 		{Key: "route-c", AccountID: "account-c"},
 	}
-	policy := proxy.RoutingPolicyV1{
-		Pools: []proxy.AccountPoolV1{
+	policy := proxy.RoutingPolicyDocument{
+		Pools: []proxy.AccountPoolDocument{
 			{Name: "zeta", Members: []codexprov.AccountKey{"route-b"}},
 			{Name: "cyber", Members: []codexprov.AccountKey{"route-a", "route-c"}},
 			{Name: "all", Members: []codexprov.AccountKey{"route-a", "route-b", "route-c"}},
 			{Name: "unused", Members: []codexprov.AccountKey{"route-a"}},
 		},
-		SessionBindings: []proxy.SessionBindingV1{
+		SessionBindings: []proxy.SessionBindingDocument{
 			{SessionDigest: "binding-zeta-a", Pool: "zeta"},
 			{SessionDigest: "binding-cyber", Pool: "cyber"},
 			{SessionDigest: "binding-zeta-b", Pool: "zeta"},
@@ -170,15 +170,15 @@ func TestEnrichCodexProxyEligibilityUsesOptionalLivePolicy(t *testing.T) {
 		{Key: "route-b", AccountID: "account-b"},
 		{Key: "route-c", AccountID: "account-c"},
 	}
-	policy := proxy.RoutingPolicyV1{
-		Pools:           []proxy.AccountPoolV1{{Name: "cyber", Members: []codexprov.AccountKey{"route-a", "route-c"}}},
-		SessionBindings: []proxy.SessionBindingV1{{SessionDigest: "binding-cyber", Pool: "cyber"}},
+	policy := proxy.RoutingPolicyDocument{
+		Pools:           []proxy.AccountPoolDocument{{Name: "cyber", Members: []codexprov.AccountKey{"route-a", "route-c"}}},
+		SessionBindings: []proxy.SessionBindingDocument{{SessionDigest: "binding-cyber", Pool: "cyber"}},
 	}
 
 	err := enrichCodexProxyEligibilityWithDependencies(context.Background(), &report, codexProxyEligibilityDependencies{
 		LoadConfig:      func() (*proxy.Config, error) { return &proxy.Config{}, nil },
 		RoutingAccounts: func(context.Context) ([]codexprov.RoutingAccount, error) { return accounts, nil },
-		LoadPolicy:      func(context.Context, *proxy.Config) (proxy.RoutingPolicyV1, error) { return policy, nil },
+		LoadPolicy:      func(context.Context, *proxy.Config) (proxy.RoutingPolicyDocument, error) { return policy, nil },
 	})
 	if err != nil {
 		t.Fatalf("enrich proxy eligibility: %v", err)
@@ -198,8 +198,8 @@ func TestEnrichCodexProxyEligibilityIgnoresUnavailableLivePolicy(t *testing.T) {
 	err := enrichCodexProxyEligibilityWithDependencies(context.Background(), &report, codexProxyEligibilityDependencies{
 		LoadConfig:      func() (*proxy.Config, error) { return &proxy.Config{}, nil },
 		RoutingAccounts: func(context.Context) ([]codexprov.RoutingAccount, error) { return accounts, nil },
-		LoadPolicy: func(context.Context, *proxy.Config) (proxy.RoutingPolicyV1, error) {
-			return proxy.RoutingPolicyV1{}, errors.New("proxy offline")
+		LoadPolicy: func(context.Context, *proxy.Config) (proxy.RoutingPolicyDocument, error) {
+			return proxy.RoutingPolicyDocument{}, errors.New("proxy offline")
 		},
 	})
 	if err != nil {

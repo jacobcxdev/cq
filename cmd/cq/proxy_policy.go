@@ -123,10 +123,14 @@ func runProxyPolicyWithDependencies(ctx context.Context, args []string, output i
 			return err
 		}
 		defer state.Close()
-		if err := state.Routing.Publish(policy); err != nil {
+		if err := state.Routing.PublishDocument(policy); err != nil {
 			return err
 		}
-		return writeProxyPolicyJSON(output, state.Routing.Current())
+		current, err := state.Routing.Document()
+		if err != nil {
+			return err
+		}
+		return writeProxyPolicyJSON(output, current)
 	case "status":
 		if options.File != "" {
 			return errors.New("usage: cq proxy policy status [--state-root DIR]")
@@ -147,19 +151,23 @@ func runProxyPolicyWithDependencies(ctx context.Context, args []string, output i
 			return err
 		}
 		defer state.Close()
-		return writeProxyPolicyJSON(output, state.Routing.Current())
+		current, err := state.Routing.Document()
+		if err != nil {
+			return err
+		}
+		return writeProxyPolicyJSON(output, current)
 	default:
 		return fmt.Errorf("unknown proxy policy command: %s", command)
 	}
 }
 
-func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, method, path string, port int, requestValue any) (proxy.RoutingPolicyV1, error) {
+func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, method, path string, port int, requestValue any) (proxy.RoutingPolicyDocument, error) {
 	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
-		return proxy.RoutingPolicyV1{}, errors.New("proxy policy control unavailable")
+		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy control unavailable")
 	}
 	cfg, err := deps.LoadConfig()
 	if err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -171,34 +179,34 @@ func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, metho
 	if requestValue != nil {
 		encoded, err := json.Marshal(requestValue)
 		if err != nil {
-			return proxy.RoutingPolicyV1{}, err
+			return proxy.RoutingPolicyDocument{}, err
 		}
 		body = bytes.NewReader(encoded)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), body)
 	if err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := deps.Doer.Do(request)
 	if err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	if response == nil || response.Body == nil {
-		return proxy.RoutingPolicyV1{}, errors.New("proxy policy response unavailable")
+		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy response unavailable")
 	}
 	defer response.Body.Close()
 	responseBody, err := httputil.ReadBody(response.Body)
 	if err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return proxy.RoutingPolicyV1{}, fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
+		return proxy.RoutingPolicyDocument{}, fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
 	}
-	var policy proxy.RoutingPolicyV1
+	var policy proxy.RoutingPolicyDocument
 	if err := json.Unmarshal(responseBody, &policy); err != nil {
-		return proxy.RoutingPolicyV1{}, errors.New("proxy policy response invalid")
+		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy response invalid")
 	}
 	return policy, nil
 }
@@ -247,24 +255,62 @@ func proxyPolicySessionDigest(ctx context.Context, deps proxyPolicyDependencies,
 	return result.SessionDigest, nil
 }
 
-func nextProxyRoutingPolicy(current proxy.RoutingPolicyV1) proxy.RoutingPolicyV1 {
+func nextProxyRoutingPolicy(current proxy.RoutingPolicyDocument) proxy.RoutingPolicyDocument {
 	if current.SchemaVersion != 1 {
-		return proxy.RoutingPolicyV1{SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1}
+		return proxy.RoutingPolicyDocument{SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1}
 	}
 	current.AuthorityGeneration++
 	current.RoutingGeneration++
 	current.EffectiveGeneration = current.RoutingGeneration
-	current.MAC = ""
 	return current
 }
 
 func runProxyPolicyPool(ctx context.Context, args []string, output io.Writer, deps proxyPolicyDependencies) error {
+	if len(args) == 0 {
+		return errors.New("usage: cq proxy policy pool <set|rename|value>")
+	}
+	if args[0] == "rename" || args[0] == "value" {
+		if len(args) < 3 {
+			if args[0] == "rename" {
+				return errors.New("usage: cq proxy policy pool rename OLD_NAME NEW_NAME [--port PORT]")
+			}
+			return errors.New("usage: cq proxy policy pool value NAME VALUE [--port PORT]")
+		}
+		port := 0
+		for index := 3; index < len(args); index++ {
+			if args[index] != "--port" || port != 0 {
+				return fmt.Errorf("proxy policy pool: unknown option %s", args[index])
+			}
+			value, next, err := parseProxyPolicyPort(args, index)
+			if err != nil {
+				return errors.New("proxy policy pool: invalid port")
+			}
+			port, index = value, next
+		}
+		mutation := proxy.PoolMutationRequest{Operation: args[0], Name: args[1]}
+		if args[0] == "rename" {
+			mutation.NewName = args[2]
+		} else {
+			value, err := strconv.ParseUint(args[2], 10, 32)
+			if err != nil {
+				return errors.New("proxy policy pool: invalid value")
+			}
+			mutation.Value = proxy.PoolValue(value)
+		}
+		updated, err := proxyPolicyControl(ctx, deps, http.MethodPost, proxy.RuntimePolicyPoolPath, port, mutation)
+		if err != nil {
+			return err
+		}
+		return writeProxyPolicyJSON(output, updated)
+	}
 	if len(args) < 2 || args[0] != "set" {
-		return errors.New("usage: cq proxy policy pool set NAME --account ACCOUNT [--account ACCOUNT ...] [--port PORT]")
+		return errors.New("usage: cq proxy policy pool set NAME --account ACCOUNT [--account ACCOUNT ...] [--value VALUE] [--port PORT]")
 	}
 	name := args[1]
 	var references []string
 	port := 0
+	var value proxy.PoolValue
+	valueSet := false
 	for index := 2; index < len(args); index++ {
 		switch args[index] {
 		case "--account":
@@ -279,12 +325,23 @@ func runProxyPolicyPool(ctx context.Context, args []string, output io.Writer, de
 				return errors.New("proxy policy pool: invalid port")
 			}
 			port, index = value, next
+		case "--value":
+			if index+1 >= len(args) || valueSet {
+				return errors.New("proxy policy pool: invalid value")
+			}
+			parsed, err := strconv.ParseUint(args[index+1], 10, 32)
+			if err != nil {
+				return errors.New("proxy policy pool: invalid value")
+			}
+			value = proxy.PoolValue(parsed)
+			valueSet = true
+			index++
 		default:
 			return fmt.Errorf("proxy policy pool: unknown option %s", args[index])
 		}
 	}
 	if name == "" || len(references) == 0 || deps.ListInventory == nil || deps.LoadAliasIndex == nil {
-		return errors.New("usage: cq proxy policy pool set NAME --account ACCOUNT [--account ACCOUNT ...] [--port PORT]")
+		return errors.New("usage: cq proxy policy pool set NAME --account ACCOUNT [--account ACCOUNT ...] [--value VALUE] [--port PORT]")
 	}
 	inventory, err := deps.ListInventory(ctx)
 	if err != nil || proxyCodexDefaultInventoryIncomplete(inventory) {
@@ -315,13 +372,16 @@ func runProxyPolicyPool(ctx context.Context, args []string, output io.Writer, de
 	next := nextProxyRoutingPolicy(current)
 	replaced := false
 	for index := range next.Pools {
-		if next.Pools[index].Name == name {
+		if strings.EqualFold(next.Pools[index].Name, name) {
 			next.Pools[index].Members = members
+			if valueSet {
+				next.Pools[index].Value = value
+			}
 			replaced = true
 		}
 	}
 	if !replaced {
-		next.Pools = append(next.Pools, proxy.AccountPoolV1{Name: name, Members: members})
+		next.Pools = append(next.Pools, proxy.AccountPoolDocument{Name: name, Value: value, Members: members})
 	}
 	sort.Slice(next.Pools, func(i, j int) bool { return next.Pools[i].Name < next.Pools[j].Name })
 	updated, err := proxyPolicyControl(ctx, deps, http.MethodPut, proxy.RuntimePolicyPath, port, next)
@@ -394,15 +454,17 @@ func runProxyPolicySession(ctx context.Context, args []string, output io.Writer,
 		if options.Pool == "" {
 			return errors.New("proxy policy session bind: --pool is required")
 		}
-		poolExists := false
+		poolName := ""
 		for _, pool := range current.Pools {
-			poolExists = poolExists || pool.Name == options.Pool
+			if strings.EqualFold(pool.Name, options.Pool) {
+				poolName = pool.Name
+			}
 		}
-		if !poolExists {
+		if poolName == "" {
 			return errors.New("proxy policy session bind: pool not found")
 		}
 		next := nextProxyRoutingPolicy(current)
-		binding := proxy.SessionBindingV1{SessionDigest: options.Digest, Pool: options.Pool}
+		binding := proxy.SessionBindingDocument{SessionDigest: options.Digest, Pool: poolName}
 		if match < 0 {
 			next.SessionBindings = append(next.SessionBindings, binding)
 		} else {
@@ -559,32 +621,32 @@ func resolveProxyPolicyRoot(explicit string) (string, error) {
 	return cfg.ProxyResilienceStateDir, nil
 }
 
-func readProxyRoutingPolicy(path string) (proxy.RoutingPolicyV1, error) {
+func readProxyRoutingPolicy(path string) (proxy.RoutingPolicyDocument, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	defer file.Close()
 	body, err := io.ReadAll(io.LimitReader(file, proxyPolicyMaxBytes+1))
 	if err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	if len(body) > proxyPolicyMaxBytes {
-		return proxy.RoutingPolicyV1{}, errors.New("proxy policy exceeds 1 MiB")
+		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy exceeds 1 MiB")
 	}
-	var policy proxy.RoutingPolicyV1
+	var policy proxy.RoutingPolicyDocument
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&policy); err != nil {
-		return proxy.RoutingPolicyV1{}, err
+		return proxy.RoutingPolicyDocument{}, err
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return proxy.RoutingPolicyV1{}, errors.New("proxy policy contains trailing data")
+		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy contains trailing data")
 	}
 	return policy, nil
 }
 
-func writeProxyPolicyJSON(output io.Writer, policy proxy.RoutingPolicyV1) error {
+func writeProxyPolicyJSON(output io.Writer, policy proxy.RoutingPolicyDocument) error {
 	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(policy)

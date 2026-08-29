@@ -155,7 +155,9 @@ Commands:
   initialise --state-root DIR         Create authority state and activate it in proxy config
   apply --file FILE [--state-root DIR] Publish policy through live control; explicit state root is offline
   status [--state-root DIR]           Print live policy; explicit state root is offline
-  pool set NAME --account ACCOUNT...  Replace one explicit account pool
+  pool set NAME --account ACCOUNT...  Replace membership; optional --value VALUE
+  pool rename OLD_NAME NEW_NAME        Rename one pool without changing identity
+  pool value NAME VALUE                Set relative capacity-preservation value
   session bind --pool NAME SELECTOR   Bind one exact session to a pool
   session show SELECTOR               Show one privacy-safe binding
   session list                        List full digests and pool names
