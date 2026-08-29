@@ -20,6 +20,14 @@ type CodexRestoredRecord struct {
 }
 
 func (store *CodexLeaseStore) LoadLane(key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy) (CodexRestoredLane, error) {
+	return store.loadLane(key, accounts, policy, true)
+}
+
+func (store *CodexLeaseStore) loadLaneForIngress(key LeaseKey, policy CodexLeaseAuthorityPolicy) (CodexRestoredLane, error) {
+	return store.loadLane(key, nil, policy, false)
+}
+
+func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy, requireResolvedCurrent bool) (CodexRestoredLane, error) {
 	blocked := CodexRestoredLane{Classification: CodexRestoredLaneRecoveryBlocked}
 	if store == nil {
 		return blocked, ErrCodexLeaseWriterUnavailable
@@ -142,7 +150,7 @@ func (store *CodexLeaseStore) LoadLane(key LeaseKey, accounts []codex.AccountKey
 		fence := codexLeaseFenceForRestoredRecord(clone)
 		resolvedAccount, resolved := store.resolveCodexLeaseAccount(clone.AccountHash, accounts)
 		exactRequestedTurn := constantTimeCodexLeaseDigestEqual(clone.TurnHash, turnHash) && codexLeaseRecordAllowedByPolicy(clone, policy)
-		if clone.AccountHash != "" && !resolved && exactRequestedTurn && codexLeaseRecordRequiresResolvedAccount(clone) {
+		if requireResolvedCurrent && clone.AccountHash != "" && !resolved && exactRequestedTurn && codexLeaseRecordRequiresResolvedAccount(clone) {
 			return blocked, fmt.Errorf("%w: persisted route account is unavailable", ErrCodexLeaseAuthorityMismatch)
 		}
 		choice := RouteChoice{}

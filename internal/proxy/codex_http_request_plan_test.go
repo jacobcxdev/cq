@@ -1352,7 +1352,7 @@ func TestCodexHTTPRequestPlanFactoryWaitsForLongRunningPredecessor(t *testing.T)
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryWaitsForDurableWebSocketPredecessor(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryPreservesQueuedContinuityAcrossWebSocketRotation(t *testing.T) {
 	t.Parallel()
 
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
@@ -1400,13 +1400,21 @@ func TestCodexHTTPRequestPlanFactoryWaitsForDurableWebSocketPredecessor(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := webSocketLifecycle.ObserveUpstreamUpgrade(context.Background(), 1, "private-ws-state"); err != nil {
+	const queuedTurnState = "private-ws-state-a"
+	if err := webSocketLifecycle.ObserveUpstreamUpgrade(context.Background(), 1, queuedTurnState); err != nil {
 		t.Fatal(err)
 	}
 
 	factory := codexHTTPRequestPlanTestFactory(runtime)
 	factory.Routes = coordinator
 	factory.Authority = plan.Authority
+	inventoryEntered := make(chan struct{})
+	inventoryRelease := make(chan struct{})
+	factory.Inventory = &codexHTTPRequestPlanBlockingInventory{
+		inner:   factory.Inventory,
+		entered: inventoryEntered,
+		release: inventoryRelease,
+	}
 	body := bytes.Replace(
 		frozenRequestBody("gpt-5", CodexRequestCompaction, "private-body"),
 		[]byte(`"compaction":"standalone_turn"`),
@@ -1425,26 +1433,29 @@ func TestCodexHTTPRequestPlanFactoryWaitsForDurableWebSocketPredecessor(t *testi
 	ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate\x00revision")
 	result := make(chan buildResult, 1)
 	go func() {
-		prepared, buildErr := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
+		prepared, buildErr := factory.Build(ctx, CodexHTTPRequestPlanInput{
+			Encoded: body,
+			Headers: http.Header{"X-Codex-Turn-State": {queuedTurnState}},
+		})
 		result <- buildResult{prepared: prepared, err: buildErr}
 	}()
 
-	deadline := time.NewTimer(time.Second)
-	defer deadline.Stop()
-	waiting := time.NewTicker(time.Millisecond)
-	defer waiting.Stop()
-	for !codexHTTPRequestPlanPlanningGateHeld(runtime, plan.Key.Lane) {
-		select {
-		case <-waiting.C:
-		case <-deadline.C:
-			t.Fatal("HTTP successor did not acquire lane planning gate")
-		}
+	select {
+	case <-inventoryEntered:
+	case <-ctx.Done():
+		t.Fatal("HTTP successor did not reach credential inventory")
 	}
-	<-time.After(300 * time.Millisecond)
 	select {
 	case got := <-result:
-		t.Fatalf("HTTP successor returned before WebSocket predecessor drained: %v", got.err)
+		t.Fatalf("HTTP successor returned before credential inventory resumed: %v", got.err)
 	default:
+	}
+	if _, err := webSocketLifecycle.ObserveFrame(
+		context.Background(),
+		1,
+		[]byte(`{"type":"response.metadata","headers":{"x-codex-turn-state":"private-ws-state-b"}}`),
+	); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := webSocketLifecycle.ObserveFrame(
 		context.Background(),
@@ -1456,11 +1467,16 @@ func TestCodexHTTPRequestPlanFactoryWaitsForDurableWebSocketPredecessor(t *testi
 	if err := webSocketLifecycle.Drain(); err != nil {
 		t.Fatal(err)
 	}
+	close(inventoryRelease)
 
 	select {
 	case got := <-result:
 		if got.err != nil {
-			t.Fatalf("build after durable predecessor drained: %v", got.err)
+			var planErr *CodexHTTPRequestPlanError
+			if !errors.As(got.err, &planErr) || planErr.Reason != CodexRequestFailureReason(codexContinuityTurnStateMismatch) {
+				t.Fatalf("build after durable predecessor drained = %T %v, want success or current turn-state mismatch", got.err, got.err)
+			}
+			t.Fatalf("queued successor state was invalidated while waiting: %s", planErr.Reason)
 		}
 		if got.prepared.Frozen == nil || got.prepared.Lifecycle == nil {
 			t.Fatalf("prepared result = %#v", got.prepared)
@@ -1928,6 +1944,22 @@ type codexHTTPRequestPlanTestInventory struct {
 	err       error
 	calls     int
 	events    *[]string
+}
+
+type codexHTTPRequestPlanBlockingInventory struct {
+	inner   codex.CredentialInventory
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (inventory *codexHTTPRequestPlanBlockingInventory) List(ctx context.Context) (codex.Inventory, error) {
+	close(inventory.entered)
+	select {
+	case <-inventory.release:
+	case <-ctx.Done():
+		return codex.Inventory{}, ctx.Err()
+	}
+	return inventory.inner.List(ctx)
 }
 
 func (inventory *codexHTTPRequestPlanTestInventory) List(context.Context) (codex.Inventory, error) {
