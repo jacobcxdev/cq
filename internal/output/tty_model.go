@@ -17,6 +17,12 @@ type TTYSection struct {
 	AggRows     []TTYWindowRow // aggregate rows
 	ProxyHeader string         // proxy eligibility summary (empty if unavailable)
 	ProxyRows   []TTYWindowRow // proxy-eligible aggregate rows
+	ProxyPools  []TTYProxyBlock
+}
+
+type TTYProxyBlock struct {
+	Header string
+	Rows   []TTYWindowRow
 }
 
 // TTYWindowRow holds the pre-formatted fields for a single window line.

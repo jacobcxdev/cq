@@ -60,6 +60,7 @@ type ProviderReport struct {
 	Results          []quota.Result          `json:"results"`
 	Aggregate        *AggregateReport        `json:"aggregate,omitempty"`
 	ProxyEligibility *ProxyEligibilityReport `json:"proxy_eligibility,omitempty"`
+	ProxyPools       []ProxyPoolReport       `json:"proxy_pools,omitempty"`
 }
 
 type ProviderAvailabilityState string
@@ -90,6 +91,11 @@ type ProxyEligibilityReport struct {
 	EligibleCount   int              `json:"eligible_count"`
 	ExcludedCount   int              `json:"excluded_count"`
 	Aggregate       *AggregateReport `json:"aggregate,omitempty"`
+}
+
+type ProxyPoolReport struct {
+	Name string `json:"name"`
+	ProxyEligibilityReport
 }
 
 const providerLimitedThresholdPct = 5
@@ -259,26 +265,54 @@ func AddProxyEligibility(report *Report, id provider.ID, eligible func(quota.Res
 		if pr.ID != id {
 			continue
 		}
-		eligibleResults := make([]quota.Result, 0, len(pr.Results))
-		for _, result := range pr.Results {
-			if eligible(result) {
-				eligibleResults = append(eligibleResults, result)
-			}
-		}
-		eligibility := &ProxyEligibilityReport{
-			DiscoveredCount: len(pr.Results),
-			EligibleCount:   len(eligibleResults),
-			ExcludedCount:   len(pr.Results) - len(eligibleResults),
-		}
-		if windows, summary := aggregate.Compute(eligibleResults, report.GeneratedAt.Unix(), string(pr.ID), nil); len(windows) > 0 && summary != nil {
-			eligibility.Aggregate = &AggregateReport{
-				ProviderID: id,
-				Kind:       "proxy_eligible_weighted_pace",
-				Summary:    *summary,
-				Windows:    windows,
-			}
-		}
-		pr.ProxyEligibility = eligibility
+		eligibility := buildProxyEligibilityReport(pr.Results, report.GeneratedAt, id, "proxy_eligible_weighted_pace", eligible)
+		pr.ProxyEligibility = &eligibility
 		return
 	}
+}
+
+// AddProxyPool adds one named, bound routing-pool capacity view when it is a
+// strict subset of the provider's discovered accounts.
+func AddProxyPool(report *Report, id provider.ID, name string, eligible func(quota.Result) bool) {
+	if report == nil || name == "" || eligible == nil {
+		return
+	}
+	for i := range report.Providers {
+		pr := &report.Providers[i]
+		if pr.ID != id {
+			continue
+		}
+		eligibility := buildProxyEligibilityReport(pr.Results, report.GeneratedAt, id, "proxy_pool_weighted_pace", eligible)
+		if eligibility.ExcludedCount == 0 {
+			return
+		}
+		pr.ProxyPools = append(pr.ProxyPools, ProxyPoolReport{
+			Name:                   name,
+			ProxyEligibilityReport: eligibility,
+		})
+		return
+	}
+}
+
+func buildProxyEligibilityReport(results []quota.Result, generatedAt time.Time, id provider.ID, kind string, eligible func(quota.Result) bool) ProxyEligibilityReport {
+	eligibleResults := make([]quota.Result, 0, len(results))
+	for _, result := range results {
+		if eligible(result) {
+			eligibleResults = append(eligibleResults, result)
+		}
+	}
+	report := ProxyEligibilityReport{
+		DiscoveredCount: len(results),
+		EligibleCount:   len(eligibleResults),
+		ExcludedCount:   len(results) - len(eligibleResults),
+	}
+	if windows, summary := aggregate.Compute(eligibleResults, generatedAt.Unix(), string(id), nil); len(windows) > 0 && summary != nil {
+		report.Aggregate = &AggregateReport{
+			ProviderID: id,
+			Kind:       kind,
+			Summary:    *summary,
+			Windows:    windows,
+		}
+	}
+	return report
 }
