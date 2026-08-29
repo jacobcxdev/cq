@@ -461,6 +461,32 @@ func TestCodexHTTPRequestPlanFactoryAppliesSessionPolicyToWebSocketPrewarm(t *te
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryAppliesPoolValueToWebSocketPrewarm(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-valued", frozenDispatchCandidate("account-valued", "candidate-valued", "revision-valued", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-ordinary", frozenDispatchCandidate("account-ordinary", "candidate-ordinary", "revision-ordinary", codex.SourceSystem, false, now.Add(time.Hour))),
+		}}},
+		DefaultAccountKey: "account-valued",
+		SessionPolicy: NewSessionPolicyResolver(make([]byte, 32), RoutingPolicyV2{
+			SchemaVersion: 2, RoutingGeneration: 7,
+			Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"account-valued"}}},
+		}),
+		Now: func() time.Time { return now },
+	}
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	dispatch, err := factory.planWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := dispatch.Accounts()
+	if len(accounts) != 2 || accounts[0].Choice().AccountKey != "account-ordinary" || accounts[0].Value() != 0 || accounts[1].Value() != 10 {
+		t.Fatalf("dispatch = %#v", accounts)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
 	t.Parallel()
 	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)

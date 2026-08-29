@@ -30,6 +30,7 @@ type SessionPolicyDecision struct {
 	Pool           string
 	PoolID         PoolID
 	Allowed        []providerCodex.AccountKey
+	AccountValues  map[providerCodex.AccountKey]PoolValue
 	PolicyRevision uint64
 	Status         PolicyDecisionStatus
 }
@@ -95,7 +96,10 @@ func (r *SessionPolicyResolver) resolveWithPolicy(exactSession []byte, global []
 
 func (r *SessionPolicyResolver) resolveLocked(exactSession []byte, global []providerCodex.AccountKey) SessionPolicyDecision {
 	digest := keyedSessionDigest(r.key[:], exactSession)
-	decision := SessionPolicyDecision{SessionDigest: digest, PolicyRevision: r.policy.RoutingGeneration, Status: PolicyDecisionUnbound}
+	decision := SessionPolicyDecision{
+		SessionDigest: digest, PolicyRevision: r.policy.RoutingGeneration, Status: PolicyDecisionUnbound,
+		AccountValues: r.accountValuesLocked(global),
+	}
 	var poolID PoolID
 	for _, binding := range r.policy.SessionBindings {
 		if hmac.Equal([]byte(binding.SessionDigest), []byte(digest)) {
@@ -135,11 +139,27 @@ func (r *SessionPolicyResolver) resolveLocked(exactSession []byte, global []prov
 	return decision
 }
 
+func (r *SessionPolicyResolver) accountValuesLocked(global []providerCodex.AccountKey) map[providerCodex.AccountKey]PoolValue {
+	available := make(map[providerCodex.AccountKey]struct{}, len(global))
+	for _, account := range global {
+		available[account] = struct{}{}
+	}
+	values := make(map[providerCodex.AccountKey]PoolValue, len(available))
+	for _, pool := range r.policy.Pools {
+		for _, account := range pool.Members {
+			if _, ok := available[account]; ok && pool.Value > values[account] {
+				values[account] = pool.Value
+			}
+		}
+	}
+	return values
+}
+
 // enforceSessionPolicy loads continuity first, then narrows global authority.
 // Unbound sessions preserve existing routing parity.
 func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, exactSession []byte, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
 	if resolver == nil {
-		return SessionPolicyDecision{Allowed: sortedAccountKeys(global), Status: PolicyDecisionUnbound}, nil
+		return SessionPolicyDecision{Allowed: sortedAccountKeys(global), AccountValues: map[providerCodex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}, nil
 	}
 	decision, policy := resolver.resolveWithPolicy(exactSession, global)
 	if decision.Status == PolicyDecisionUnbound {

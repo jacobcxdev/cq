@@ -59,6 +59,20 @@ func TestSessionPolicyEnforcementPreservesUnboundParity(t *testing.T) {
 	}
 }
 
+func TestSessionPolicyResolverProjectsMaximumAccountValue(t *testing.T) {
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, RoutingGeneration: 7,
+		Pools: []AccountPoolV2{
+			{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"account-overlap", "account-cyber"}},
+			{ID: testPoolIDB, Name: "Research", Value: 20, Members: []codex.AccountKey{"account-overlap"}},
+		},
+	}
+	decision := NewSessionPolicyResolver(make([]byte, 32), policy).Resolve([]byte("unbound"), []codex.AccountKey{"account-unpooled", "account-overlap", "account-cyber"})
+	if decision.AccountValues["account-overlap"] != 20 || decision.AccountValues["account-cyber"] != 10 || decision.AccountValues["account-unpooled"] != 0 {
+		t.Fatalf("values = %#v", decision.AccountValues)
+	}
+}
+
 func TestSessionPolicyEnforcementAllowsCodexCallerWithoutDelegation(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	session := []byte("bound-session")

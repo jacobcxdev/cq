@@ -11,6 +11,7 @@ import (
 // CodexRoutePolicyCandidate is a secret-free account/model route considered by policy.
 type CodexRoutePolicyCandidate struct {
 	Choice RouteChoice
+	Value  PoolValue
 	// RequiredCapacity aligns one-to-one with Choice.RequiredBuckets.
 	RequiredCapacity  []CapacityView
 	Compatible        bool
@@ -367,6 +368,9 @@ func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affini
 	rightAffinity := affinity != "" && right.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(right.Choice.EffectiveModel, affinityModel))
 	if leftAffinity != rightAffinity {
 		return leftAffinity
+	}
+	if left.Value != right.Value {
+		return left.Value < right.Value
 	}
 	leftView := codexRoutePolicyCapacity(left)
 	rightView := codexRoutePolicyCapacity(right)

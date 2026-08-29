@@ -459,7 +459,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		now = factory.Now()
 	}
 	caller, callerOK := runtimeCallerAuthority(ctx)
-	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), Status: PolicyDecisionUnbound}
+	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), AccountValues: map[codex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}
 	if factory.SessionPolicy != nil {
 		policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
 		if err != nil {
@@ -532,6 +532,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		Capacity:               factory.Capacity,
 		Requirements:           requirements,
 		Provisional:            cloneCodexHTTPRequestPlanProvisional(snapshot.Provisional),
+		AccountValues:          policyDecision.AccountValues,
 		AffinityAccountKey:     affinityAccountKey,
 		AffinityEffectiveModel: snapshot.AffinityEffectiveModel,
 		DefaultAccountKey:      factory.DefaultAccountKey,
@@ -800,6 +801,7 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 		Inventory:         inventory,
 		Capacity:          factory.Capacity,
 		Requirements:      codexHTTPRequestPlanRequirements(protocol),
+		AccountValues:     decision.AccountValues,
 		DefaultAccountKey: factory.DefaultAccountKey,
 		BoundAccountKey:   factory.PinnedAccountKey,
 		AcceptedRevision:  input.AcceptedRevision,
@@ -908,10 +910,15 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	if factory.Now != nil {
 		now = factory.Now()
 	}
+	accountValues := map[codex.AccountKey]PoolValue{}
+	if factory.SessionPolicy != nil {
+		accountValues = factory.SessionPolicy.Resolve([]byte(metadata.SessionID), accounts).AccountValues
+	}
 	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
 		Inventory:         inventory,
 		Capacity:          factory.Capacity,
 		Requirements:      codexHTTPRequestPlanRequirements(protocol),
+		AccountValues:     accountValues,
 		DefaultAccountKey: factory.DefaultAccountKey,
 		BoundAccountKey:   reservation.AccountKey,
 		AcceptedRevision:  input.AcceptedRevision,

@@ -45,6 +45,7 @@ const (
 
 type codexInstalledHTTPDispatchFacts struct {
 	selection              codexInstalledHTTPSelection
+	selectedValue          PoolValue
 	affinityReuse          bool
 	fairnessSelect         bool
 	eligibleCompetitors    uint32

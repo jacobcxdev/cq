@@ -13,6 +13,7 @@ type CodexFrozenDispatchInput struct {
 	Capacity               *CodexCapacityLedger
 	Requirements           CodexRouteRequirements
 	Provisional            map[codex.AccountKey]int
+	AccountValues          map[codex.AccountKey]PoolValue
 	AffinityAccountKey     codex.AccountKey
 	AffinityEffectiveModel string
 	DefaultAccountKey      codex.AccountKey
@@ -55,6 +56,7 @@ type CodexFrozenDispatchPlan struct {
 // CodexFrozenDispatchAccount binds one frozen route choice to exact credential attempts.
 type CodexFrozenDispatchAccount struct {
 	choice         RouteChoice
+	value          PoolValue
 	attempts       []CandidateAttempt
 	refreshAttempt *CandidateAttempt
 	isDefault      bool
@@ -76,6 +78,9 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 			return CodexFrozenDispatchPlan{status: CodexRoutePlanCanceled}, cancelErr
 		}
 		return CodexFrozenDispatchPlan{}, err
+	}
+	for index := range candidates {
+		candidates[index].Value = input.AccountValues[candidates[index].Choice.AccountKey]
 	}
 	policy, err := BuildCodexRoutePlan(ctx, candidates, CodexRoutePolicyHints{
 		AffinityAccountKey:     input.AffinityAccountKey,
@@ -149,6 +154,7 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		if err != nil {
 			return plan, err
 		}
+		account.value = codexFrozenDispatchCandidateValue(candidates, choice.AccountKey)
 		account.decision = codexFrozenDispatchDecision(input, candidates, account)
 		accounts = append(accounts, account)
 	}
@@ -189,6 +195,15 @@ func codexFrozenDispatchOrdinarilyEligible(candidates []CodexRoutePolicyCandidat
 	return false
 }
 
+func codexFrozenDispatchCandidateValue(candidates []CodexRoutePolicyCandidate, account codex.AccountKey) PoolValue {
+	for _, candidate := range candidates {
+		if candidate.Choice.AccountKey == account {
+			return candidate.Value
+		}
+	}
+	return 0
+}
+
 func codexInstalledHTTPDispatchFactsForPolicy(candidates []CodexRoutePolicyCandidate, policy CodexRoutePlan, hints CodexRoutePolicyHints) codexInstalledHTTPDispatchFacts {
 	choices := policy.Choices()
 	facts := codexInstalledHTTPDispatchFacts{
@@ -196,6 +211,9 @@ func codexInstalledHTTPDispatchFactsForPolicy(candidates []CodexRoutePolicyCandi
 		routeCount: uint32(len(choices)),
 	}
 	facts.terminalDefaultOrdinal = policy.terminalDefaultOrdinal
+	if len(choices) != 0 {
+		facts.selectedValue = codexFrozenDispatchCandidateValue(candidates, choices[0].AccountKey)
+	}
 	ordinaryCount := len(choices)
 	if facts.terminalDefaultOrdinal != 0 {
 		ordinaryCount--
@@ -321,6 +339,10 @@ func (p CodexFrozenDispatchPlan) TerminalError() error {
 
 func (a CodexFrozenDispatchAccount) Choice() RouteChoice {
 	return cloneRoutePolicyChoice(a.choice)
+}
+
+func (a CodexFrozenDispatchAccount) Value() PoolValue {
+	return a.value
 }
 
 func (a CodexFrozenDispatchAccount) Attempts() []CandidateAttempt {
