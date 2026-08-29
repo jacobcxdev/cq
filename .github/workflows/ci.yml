@@ -40,6 +40,16 @@ jobs:
       - run: GOOS=windows GOARCH=amd64 go build ./...
       - run: GOOS=windows GOARCH=arm64 go build ./...
       - run: go vet ./...
+      - name: Gate degraded rescue transport
+        run: |
+          test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
+          test_log="$RUNNER_TEMP/degraded-rescue-transport.log"
+          if ! go test -race -count=1 -v ./internal/proxy -run "^${test_name}$" >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          grep -F -- "--- PASS: ${test_name} " "$test_log"
       - run: go test -race -count=1 ./...
 
   windows:

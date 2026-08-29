@@ -11,16 +11,21 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	stdhttputil "net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	cqhttputil "github.com/jacobcxdev/cq/internal/httputil"
@@ -635,6 +640,229 @@ func TestCodexExactExecutableNormalPassesThroughLiveUpstream(t *testing.T) {
 	}
 	productionChecked = true
 	sourceChecked = true
+}
+
+func TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream(t *testing.T) {
+	if os.Getenv(codexReleaseExecutableAcceptanceEnvironment) != "1" {
+		t.Skip("release executable acceptance requires explicit opt-in")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	productionBefore, err := captureCodexReleaseSystemProxySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionChecked := false
+	t.Cleanup(func() {
+		if productionChecked {
+			return
+		}
+		after, checkErr := captureCodexReleaseSystemProxySnapshot()
+		if checkErr != nil || after != productionBefore {
+			t.Error("system proxy changed during degraded rescue acceptance")
+		}
+	})
+	clientCredential, err := readCodexLiveAcceptanceCredential(os.Getenv("CQ_CODEX_LIVE_AUTH_FILE"))
+	if err != nil {
+		t.Fatalf("snapshot system Codex client auth: %v", err)
+	}
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
+	if err != nil {
+		t.Fatalf("resolve installed Codex client: %v", err)
+	}
+	clientProof, err := captureCodexInstalledExecutable(clientPath)
+	if err != nil {
+		t.Fatalf("capture installed Codex client: %v", err)
+	}
+	cqPath := os.Getenv("CQ_CODEX_PROXY_ACCEPTANCE_EXECUTABLE")
+	if !filepath.IsAbs(cqPath) {
+		t.Fatal("CQ release acceptance executable must be absolute")
+	}
+	cqProof, err := captureCodexInstalledExecutable(cqPath)
+	if err != nil {
+		t.Fatalf("capture CQ release acceptance executable: %v", err)
+	}
+
+	isolation := newCodexReleaseExecutableIsolation(t, clientCredential, clientCredential)
+	if err := fsutil.SecureAtomicWrite(
+		fsutil.OSFileSystem{},
+		filepath.Join(isolation.config, "cq", "codex-routing-mode.json"),
+		[]byte(`{"version":2}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	process, err := startCodexReleaseExecutableProcess(cqProof, isolation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if stopErr := process.Stop(); stopErr != nil {
+			t.Error(stopErr)
+		}
+	})
+	baseURL := "http://127.0.0.1:" + strconv.Itoa(isolation.port)
+	if err := waitCodexReleaseExecutableDegraded(ctx, process, baseURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCodexReleaseExecutableListenerOwnership(process); err != nil {
+		t.Fatal(err)
+	}
+	diagnostic := process.diagnostic()
+	if !strings.Contains(diagnostic, "unsupported Codex routing mode journal version 2") ||
+		!strings.Contains(diagnostic, "runtime worker boot failed") {
+		t.Fatalf("release executable did not fail worker boot through injected routing journal: %s", diagnostic)
+	}
+	if err := enterCodexReleaseExecutableRescue(ctx, process, baseURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitCodexReleaseExecutableRescueReady(ctx, process, baseURL); err != nil {
+		t.Fatal(err)
+	}
+	for _, webSocket := range []bool{false, true} {
+		clientBaseURL := baseURL
+		var webSocketUpgrades atomic.Int32
+		var rejectedFallbacks atomic.Int32
+		var rejectedMu sync.Mutex
+		var rejectedRoutes []string
+		var webSocketOnly *httptest.Server
+		if webSocket {
+			target, err := url.Parse(baseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reverseProxy := stdhttputil.NewSingleHostReverseProxy(target)
+			webSocketOnly = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodGet && request.URL.EscapedPath() == legacyCodexResponsesPath && websocket.IsWebSocketUpgrade(request) {
+					webSocketUpgrades.Add(1)
+					reverseProxy.ServeHTTP(writer, request)
+					return
+				}
+				if request.Method == http.MethodGet && request.URL.EscapedPath() == "/models" {
+					http.Error(writer, "release acceptance model catalogue disabled", http.StatusNotFound)
+					return
+				}
+				rejectedFallbacks.Add(1)
+				rejectedMu.Lock()
+				rejectedRoutes = append(rejectedRoutes, request.Method+" "+request.URL.EscapedPath())
+				rejectedMu.Unlock()
+				http.Error(writer, "release acceptance WebSocket fallback refused", http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(webSocketOnly.Close)
+			clientBaseURL = webSocketOnly.URL
+		}
+		appServerIsolation := newCodexTaskAffinityAcceptanceIsolationDirectories(t)
+		if err := writeCodexReleaseExecutableClientAuthSnapshot(filepath.Join(appServerIsolation.codexHome, "auth.json"), clientCredential); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCodexAppServerContinuityAcceptance(ctx, clientProof, clientBaseURL, appServerIsolation, webSocket); err != nil {
+			t.Fatalf("release executable degraded rescue continuity (websocket=%t): %v; CQ diagnostics: %s", webSocket, err, process.diagnostic())
+		}
+		if webSocketOnly != nil {
+			webSocketOnly.Close()
+			if webSocketUpgrades.Load() != 1 || rejectedFallbacks.Load() != 0 {
+				rejectedMu.Lock()
+				routes := append([]string(nil), rejectedRoutes...)
+				rejectedMu.Unlock()
+				t.Fatalf("release executable degraded rescue WebSocket wire evidence = upgrades %d, rejected fallbacks %d %q, want 1/0", webSocketUpgrades.Load(), rejectedFallbacks.Load(), routes)
+			}
+		}
+		if err := waitCodexReleaseExecutableRescueReady(ctx, process, baseURL); err != nil {
+			t.Fatalf("release executable lost rescue readiness (websocket=%t): %v", webSocket, err)
+		}
+	}
+	afterCQ, err := captureCodexInstalledExecutable(cqProof.path)
+	if err != nil || afterCQ != cqProof {
+		t.Fatal("CQ release acceptance executable changed during validation")
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	productionAfter, err := captureCodexReleaseSystemProxySnapshot()
+	if err != nil || productionAfter != productionBefore {
+		t.Fatal("system proxy changed during degraded rescue acceptance")
+	}
+	productionChecked = true
+}
+
+func waitCodexReleaseExecutableDegraded(ctx context.Context, process *codexReleaseExecutableProcess, baseURL string) error {
+	return waitCodexReleaseExecutableHealth(ctx, process, baseURL, http.StatusServiceUnavailable, "degraded", false, "")
+}
+
+func waitCodexReleaseExecutableRescueReady(ctx context.Context, process *codexReleaseExecutableProcess, baseURL string) error {
+	return waitCodexReleaseExecutableHealth(ctx, process, baseURL, http.StatusOK, "ok", true, TrafficModeRescue)
+}
+
+func waitCodexReleaseExecutableHealth(
+	ctx context.Context,
+	process *codexReleaseExecutableProcess,
+	baseURL string,
+	wantStatusCode int,
+	wantStatus string,
+	wantReady bool,
+	wantMode TrafficMode,
+) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	client := &http.Client{Timeout: 2 * time.Second}
+	for {
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("CQ release acceptance health timed out: %s", process.diagnostic())
+		case <-process.done:
+			return fmt.Errorf("CQ release acceptance exited before expected health: %s", process.diagnostic())
+		default:
+		}
+		request, err := http.NewRequestWithContext(waitCtx, http.MethodGet, baseURL+"/health", nil)
+		if err != nil {
+			return err
+		}
+		response, requestErr := client.Do(request)
+		if requestErr == nil {
+			body, bodyErr := cqhttputil.ReadBody(response.Body)
+			closeErr := response.Body.Close()
+			var health struct {
+				Status          string      `json:"status"`
+				SupervisorAlive bool        `json:"supervisor_alive"`
+				DataPlaneReady  bool        `json:"data_plane_ready"`
+				Mode            TrafficMode `json:"mode"`
+			}
+			if bodyErr == nil && closeErr == nil && response.StatusCode == wantStatusCode && json.Unmarshal(body, &health) == nil &&
+				health.Status == wantStatus && health.SupervisorAlive && health.DataPlaneReady == wantReady && health.Mode == wantMode {
+				return nil
+			}
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("CQ release acceptance health timed out: %s", process.diagnostic())
+		case <-process.done:
+			timer.Stop()
+			return fmt.Errorf("CQ release acceptance exited before expected health: %s", process.diagnostic())
+		case <-timer.C:
+		}
+	}
+}
+
+func enterCodexReleaseExecutableRescue(ctx context.Context, process *codexReleaseExecutableProcess, baseURL string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+RuntimeRescueEnterPath, http.NoBody)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+process.localToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	body, readErr := cqhttputil.ReadBody(response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		return errors.New("read degraded rescue control response")
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("degraded rescue control = %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func writeCodexReleaseExecutableClientAuthSnapshot(path string, credential codexLiveAcceptanceCredential) error {

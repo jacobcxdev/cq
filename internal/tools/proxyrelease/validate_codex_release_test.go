@@ -46,6 +46,20 @@ func TestValidateCodexReleasePrefersExplicitSystemAuth(t *testing.T) {
 	}
 }
 
+func TestValidateCodexReleaseRejectsMissingLiveGate(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+	decoy := filepath.Join(t.TempDir(), "decoy-codex-home")
+	writeValidateCodexReleaseAuth(t, filepath.Join(decoy, "auth.json"), 0o600)
+	const omitted = "TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream"
+
+	_, _, err := runValidateCodexReleaseShellOmittingTest(t, repositoryRoot, home, decoy, "", omitted)
+	if err == nil || !strings.Contains(err.Error(), omitted+" did not execute") {
+		t.Fatalf("validate-codex-release = %v, want missing gate failure", err)
+	}
+}
+
 func TestValidateCodexReleaseRejectsInvalidSystemAuthBeforeStatusOrBuild(t *testing.T) {
 	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
 	home := t.TempDir()
@@ -107,6 +121,10 @@ func writeValidateCodexReleaseAuth(t *testing.T, path string, mode os.FileMode) 
 }
 
 func runValidateCodexReleaseShell(t *testing.T, repositoryRoot, home, codexHome, explicitAuth string) (string, string, error) {
+	return runValidateCodexReleaseShellOmittingTest(t, repositoryRoot, home, codexHome, explicitAuth, "")
+}
+
+func runValidateCodexReleaseShellOmittingTest(t *testing.T, repositoryRoot, home, codexHome, explicitAuth, omittedTest string) (string, string, error) {
 	t.Helper()
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
@@ -144,6 +162,16 @@ case "$1" in
   test)
     printf 'test\n' >>"$CQ_TEST_EVENTS"
     printf '%s\n' "$CQ_CODEX_LIVE_AUTH_FILE" >"$CQ_TEST_AUTH_CAPTURE"
+	for release_test in \
+		TestCodexInstalledNormalPassesThroughLiveUpstream \
+		TestCodexInstalledNormalContinuesAfterLiveToolCall \
+		TestCodexInstalledRescuePassesThroughLiveUpstream \
+		TestCodexInstalledLiveRescueTaskResumesInNormal \
+		TestCodexExactExecutableNormalPassesThroughLiveUpstream \
+		TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream
+	do
+		[ "$release_test" = "$CQ_TEST_OMIT_RELEASE_TEST" ] || printf '%s\n' "--- PASS: $release_test (0.01s)"
+	done
     ;;
   *) printf 'unexpected go arguments: %s\n' "$*" >&2; exit 97 ;;
 esac
@@ -170,6 +198,7 @@ esac
 		"CQ_RELEASE_VALIDATION_VERSION=0.24.20",
 		"CQ_CODEX_ACCEPTANCE_EXECUTABLE=/usr/bin/true",
 		"CQ_CODEXBAR_LIVE_ROOT=" + filepath.Join(home, "CodexBar"),
+		"CQ_TEST_OMIT_RELEASE_TEST=" + omittedTest,
 	}
 	if explicitAuth != "" {
 		env = append(env, "CQ_CODEX_LIVE_AUTH_FILE="+explicitAuth)

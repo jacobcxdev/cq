@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,7 +83,7 @@ func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
 	}
 }
 
-func TestRuntimeSupervisorRescueEnterCancelsExitDrain(t *testing.T) {
+func TestRuntimeSupervisorRescueEnterCancelsExitDrainAfterWorkerLoss(t *testing.T) {
 	key := bytes.Repeat([]byte{0x54}, 32)
 	index, err := BuildNormalCallerIndexV1(key, 8, []NormalCallerCredentialV1{{
 		Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
@@ -96,13 +97,18 @@ func TestRuntimeSupervisorRescueEnterCancelsExitDrain(t *testing.T) {
 		response: RuntimeHTTPResponseV1{StatusCode: http.StatusAccepted, Body: []byte("normal")},
 		bootAck:  RuntimeBootAckV1{CallerAuthorityKey: key, CallerIndex: index},
 	}
+	replacement := &runtimeTestWorker{
+		holder: runtimeHolder("replacement"), events: &events,
+		response: RuntimeHTTPResponseV1{StatusCode: http.StatusAccepted, Body: []byte("normal")},
+		bootAck:  RuntimeBootAckV1{CallerAuthorityKey: key, CallerIndex: index},
+	}
 	store := &runtimeEvidenceTestStore{records: []RuntimeModeEvidenceV1{{
 		SchemaVersion: 1, Generation: 7, DesiredMode: TrafficModeRescue,
 		EffectiveMode: TrafficModeRescue, Phase: RuntimeModePhaseEffective,
 	}}}
 	supervisor, err := NewRuntimeSupervisor(
 		&runtimeTestListener{}, runtimeHolder("supervisor"),
-		&runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}},
+		&runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker, replacement}},
 		&runtimeTestCheckpointStore{events: &events},
 	)
 	if err != nil {
@@ -162,6 +168,10 @@ func TestRuntimeSupervisorRescueEnterCancelsExitDrain(t *testing.T) {
 	if exitResponse.Code != http.StatusOK || supervisor.TrafficMode() != TrafficModeRescueExitDraining {
 		t.Fatalf("exit = %d mode=%q body=%q", exitResponse.Code, supervisor.TrafficMode(), exitResponse.Body.String())
 	}
+	supervisor.mu.Lock()
+	supervisor.worker = nil
+	supervisor.admissionReady = false
+	supervisor.mu.Unlock()
 
 	enter := httptest.NewRequest(http.MethodPost, RuntimeRescueEnterPath, nil)
 	enter.Header.Set("Authorization", "Bearer local-token")
@@ -190,6 +200,145 @@ func TestRuntimeSupervisorRescueEnterCancelsExitDrain(t *testing.T) {
 
 	close(release)
 	<-rescueDone
+}
+
+func TestRuntimeSupervisorRejectsCrashReplacementDuringRescueEntry(t *testing.T) {
+	events := []string{}
+	drainStarted := make(chan struct{})
+	drainRelease := make(chan struct{})
+	worker := &runtimeTestWorker{
+		holder: runtimeHolder("worker"), events: &events,
+		beginDrainStarted: drainStarted, beginDrainBlock: drainRelease,
+	}
+	replacement := &runtimeTestWorker{holder: runtimeHolder("replacement"), events: &events}
+	supervisor, err := NewRuntimeSupervisor(
+		&runtimeTestListener{}, runtimeHolder("supervisor"),
+		&runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker, replacement}},
+		&runtimeTestCheckpointStore{events: &events},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}
+	if _, err := supervisor.Boot(context.Background(), manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+	}), &runtimeEvidenceTestStore{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.EnterRescue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-drainStarted
+
+	_, replacementErr := supervisor.ReplaceFailedWorker(context.Background(), manifest)
+	close(drainRelease)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		supervisor.mu.RLock()
+		running := supervisor.rescueEntryRun
+		supervisor.mu.RUnlock()
+		if !running {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !errors.Is(replacementErr, ErrRuntimeSupervisorUnavailable) {
+		t.Fatalf("crash replacement during rescue entry = %v, want supervisor unavailable", replacementErr)
+	}
+	if supervisor.TrafficMode() != TrafficModeRescue || supervisor.AdmissionReady() {
+		t.Fatalf("mode=%q ready=%v, want effective rescue", supervisor.TrafficMode(), supervisor.AdmissionReady())
+	}
+	for _, event := range events {
+		if event == "boot:replacement" {
+			t.Fatalf("stale crash replacement launched during rescue entry: %#v", events)
+		}
+	}
+}
+
+func TestRuntimeSupervisorCrashLoopEntersRescueAndPreservesReleaseForExit(t *testing.T) {
+	events := []string{}
+	workers := make([]*runtimeTestWorker, runtimeCrashLimit+2)
+	for index := range workers {
+		workers[index] = &runtimeTestWorker{holder: runtimeHolder(fmt.Sprintf("worker-%d", index)), events: &events}
+	}
+	checkpoints := &runtimeTestCheckpointStore{events: &events}
+	supervisor, err := NewRuntimeSupervisor(
+		&runtimeTestListener{}, runtimeHolder("supervisor"),
+		&runtimeTestLauncher{events: &events, workers: workers}, checkpoints,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor.now = func() time.Time { return time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC) }
+	manifest := WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}
+	if _, err := supervisor.Boot(context.Background(), manifest); err != nil {
+		t.Fatal(err)
+	}
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	authority := testNormalCallerAuthority(t, []NormalCallerCredentialV1{{
+		Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
+	}}, consumer)
+	random := make([]byte, 256)
+	for index := range random {
+		random[index] = byte(index)
+	}
+	authority.random = bytes.NewReader(random)
+	if err := supervisor.SetCallerAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	rescueCalls := 0
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		rescueCalls++
+		writer.WriteHeader(http.StatusAccepted)
+	}), &runtimeEvidenceTestStore{}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < runtimeCrashLimit; attempt++ {
+		if _, err := supervisor.ReplaceFailedWorker(context.Background(), manifest); err != nil {
+			t.Fatalf("replacement %d: %v", attempt+1, err)
+		}
+	}
+	if _, err := supervisor.ReplaceFailedWorker(context.Background(), manifest); !errors.Is(err, ErrRuntimeCrashLoop) {
+		t.Fatalf("crash loop = %v", err)
+	}
+	pendingBeforeRescue := supervisor.PendingRelease()
+
+	enter := httptest.NewRequest(http.MethodPost, RuntimeRescueEnterPath, nil)
+	enter.Header.Set("Authorization", "Bearer local-token")
+	enterResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(enterResponse, enter)
+	if enterResponse.Code != http.StatusOK {
+		t.Fatalf("enter after crash loop = %d body=%q", enterResponse.Code, enterResponse.Body.String())
+	}
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+	request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString("{}"))
+	response := httptest.NewRecorder()
+	supervisor.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || rescueCalls != 1 {
+		t.Fatalf("rescue route after crash loop = %d calls=%d", response.Code, rescueCalls)
+	}
+
+	exit := httptest.NewRequest(http.MethodPost, RuntimeRescueExitPath, nil)
+	exit.Header.Set("Authorization", "Bearer local-token")
+	exitResponse := httptest.NewRecorder()
+	supervisor.ServeHTTP(exitResponse, exit)
+	if exitResponse.Code != http.StatusOK {
+		t.Fatalf("exit after crash loop = %d body=%q", exitResponse.Code, exitResponse.Body.String())
+	}
+	waitForRuntimeMode(t, supervisor, TrafficModeNormal)
+	lastCheckpoint := checkpoints.checkpoints[len(checkpoints.checkpoints)-1]
+	if !pendingBeforeRescue.valid() ||
+		lastCheckpoint.PriorWorkerProcessIdentityDigest != "process-worker-3" ||
+		lastCheckpoint.PriorWorkerProcessTreeAbsenceProofDigest != "absence-worker-3" ||
+		lastCheckpoint.PriorWorkerHolderReleaseProofDigest != "release-worker-3" {
+		t.Fatalf("crash-loop release was not bound to rescue exit: pending=%#v checkpoint=%#v", pendingBeforeRescue, lastCheckpoint)
+	}
+	if supervisor.PendingRelease().valid() {
+		t.Fatalf("consumed crash-loop release remained pending: %#v", supervisor.PendingRelease())
+	}
 }
 
 func TestRuntimeSupervisorRescueExitHandsOffNewIngressWhileSessionDrains(t *testing.T) {
@@ -387,6 +536,8 @@ func (launcher runtimeRescueFailingLauncher) Launch(context.Context, WorkerManif
 func TestRunAdoptedRuntimeSupervisorServesRescueControlWhenNormalWorkerBootFails(t *testing.T) {
 	bootErr := errors.New("normal worker boot failed")
 	served := false
+	rescueCalls := 0
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
 	err := RunAdoptedRuntimeSupervisorConfigured(
 		context.Background(),
 		&runtimeTestListener{},
@@ -396,13 +547,34 @@ func TestRunAdoptedRuntimeSupervisorServesRescueControlWhenNormalWorkerBootFails
 		nil,
 		WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"},
 		func(supervisor *RuntimeSupervisor) error {
-			return supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), &runtimeEvidenceTestStore{})
+			if err := supervisor.SetCallerAuthority(testNormalCallerAuthority(t, []NormalCallerCredentialV1{{
+				Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner",
+			}}, consumer)); err != nil {
+				return err
+			}
+			return supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				rescueCalls++
+				writer.WriteHeader(http.StatusAccepted)
+			}), &runtimeEvidenceTestStore{})
 		},
 		func(_ context.Context, _ net.Listener, handler http.Handler) error {
 			served = true
 			supervisor := handler.(*RuntimeSupervisor)
 			if supervisor.AdmissionReady() {
 				t.Fatal("normal admission enabled after failed worker boot")
+			}
+			enter := httptest.NewRequest(http.MethodPost, RuntimeRescueEnterPath, nil)
+			enter.Header.Set("Authorization", "Bearer local-token")
+			enterResponse := httptest.NewRecorder()
+			supervisor.ServeHTTP(enterResponse, enter)
+			if enterResponse.Code != http.StatusOK {
+				t.Fatalf("enter rescue after failed worker boot = %d body=%q", enterResponse.Code, enterResponse.Body.String())
+			}
+			request := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString("{}"))
+			response := httptest.NewRecorder()
+			supervisor.ServeHTTP(response, request)
+			if response.Code != http.StatusAccepted || rescueCalls != 1 {
+				t.Fatalf("rescue route after failed worker boot = %d calls=%d", response.Code, rescueCalls)
 			}
 			return nil
 		},

@@ -305,10 +305,14 @@ func OpenCodexRoutingRuntime(cfg *Config, cqBuild, clientBuild string) (*CodexRo
 		return nil, err
 	}
 	httpReq, wsReq := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
-	return openCodexRoutingRuntimeAt(paths.StateDir, cfg, httpReq, wsReq)
+	return openCodexRoutingRuntimeAtPaths(paths.StateDir, filepath.Dir(paths.ConfigFile), cfg, httpReq, wsReq)
 }
 
 func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTransportRequirements) (*CodexRoutingRuntime, error) {
+	return openCodexRoutingRuntimeAtPaths(dir, "", cfg, httpReq, wsReq)
+}
+
+func openCodexRoutingRuntimeAtPaths(dir, legacyDir string, cfg *Config, httpReq, wsReq CodexTransportRequirements) (*CodexRoutingRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("proxy config is nil")
 	}
@@ -327,9 +331,21 @@ func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTran
 		return nil, err
 	}
 
-	journal, err := loadCodexRoutingJournal(dir)
+	journal, currentExists, err := loadCodexRoutingJournalIfPresent(dir)
 	if err != nil {
 		return nil, err
+	}
+	// v0.26 moved this journal without importing it. Recover only when the new
+	// path is absent or still contains the exact fresh 1/2 reset from that move.
+	if legacyDir != "" && filepath.Clean(legacyDir) != filepath.Clean(dir) &&
+		(!currentExists || isFreshCodexRoutingJournal(journal)) {
+		legacy, legacyExists, legacyErr := loadCodexRoutingJournalIfPresent(legacyDir)
+		if legacyErr != nil {
+			return nil, legacyErr
+		}
+		if legacyExists {
+			journal = legacy
+		}
 	}
 	httpEffective, httpFingerprint, err := resolveCodexMode(configuredHTTP, httpReq)
 	if err != nil {
@@ -346,6 +362,15 @@ func openCodexRoutingRuntimeAt(dir string, cfg *Config, httpReq, wsReq CodexTran
 		return nil, fmt.Errorf("save Codex routing mode journal: %w", err)
 	}
 	return &CodexRoutingRuntime{HTTP: journal.HTTP.CodexModeStatus, WebSocket: journal.WebSocket.CodexModeStatus}, nil
+}
+
+func isFreshCodexRoutingJournal(journal codexRoutingJournal) bool {
+	return journal.Version == CodexRoutingJournalVersion &&
+		journal.NextEpoch == 2 &&
+		journal.HTTP.ModeEpoch == 1 &&
+		journal.WebSocket.ModeEpoch == 2 &&
+		len(journal.HTTP.RetainedAuthoritativeEpochs) == 0 &&
+		len(journal.WebSocket.RetainedAuthoritativeEpochs) == 0
 }
 
 type codexInstalledArtifactCapture func(context.Context, string) (codexInstalledArtifactRequirement, error)
@@ -429,22 +454,27 @@ func appendUniqueEpoch(epochs []uint64, epoch uint64) []uint64 {
 }
 
 func loadCodexRoutingJournal(dir string) (codexRoutingJournal, error) {
+	journal, _, err := loadCodexRoutingJournalIfPresent(dir)
+	return journal, err
+}
+
+func loadCodexRoutingJournalIfPresent(dir string) (codexRoutingJournal, bool, error) {
 	path := filepath.Join(dir, "codex-routing-mode.json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return codexRoutingJournal{Version: CodexRoutingJournalVersion}, nil
+		return codexRoutingJournal{Version: CodexRoutingJournalVersion}, false, nil
 	}
 	if err != nil {
-		return codexRoutingJournal{}, fmt.Errorf("read Codex routing mode journal: %w", err)
+		return codexRoutingJournal{}, false, fmt.Errorf("read Codex routing mode journal: %w", err)
 	}
 	var journal codexRoutingJournal
 	if err := json.Unmarshal(data, &journal); err != nil {
-		return codexRoutingJournal{}, fmt.Errorf("parse Codex routing mode journal: %w", err)
+		return codexRoutingJournal{}, false, fmt.Errorf("parse Codex routing mode journal: %w", err)
 	}
 	if journal.Version != CodexRoutingJournalVersion {
-		return codexRoutingJournal{}, fmt.Errorf("unsupported Codex routing mode journal version %d", journal.Version)
+		return codexRoutingJournal{}, false, fmt.Errorf("unsupported Codex routing mode journal version %d", journal.Version)
 	}
-	return journal, nil
+	return journal, true, nil
 }
 
 type codexReadinessMarkerLoadOps struct {

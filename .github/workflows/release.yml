@@ -49,6 +49,17 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/status" |
             go run ./internal/tools/releasestatus --sha "${sha}"
 
+      - name: Gate degraded rescue transport
+        run: |
+          test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
+          test_log="$RUNNER_TEMP/degraded-rescue-transport.log"
+          if ! go test -race -count=1 -v ./internal/proxy -run "^${test_name}$" >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          grep -F -- "--- PASS: ${test_name} " "$test_log"
+
       - name: Verify Codex Stage 11 corpus
         run: go test -race -count=1 ./internal/proxy -run '^(TestCodexStage11LifecycleCorpusUsesProductionHandlers|TestCodexStage11LifecycleCorpusSmoke|TestCodexStage11ReviewedManifestMatchesCorpusAuthority)$'
 
