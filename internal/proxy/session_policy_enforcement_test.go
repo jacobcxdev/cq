@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,12 +12,12 @@ import (
 )
 
 type sessionPolicyPermitRecorder struct {
-	requests []CallerDispatchPermitRequestV1
+	requests []CallerDispatchPermitRequestV2
 }
 
-func (recorder *sessionPolicyPermitRecorder) IssueAndConsume(_ context.Context, request CallerDispatchPermitRequestV1) (CallerDispatchPermitV1, error) {
+func (recorder *sessionPolicyPermitRecorder) IssueAndConsume(_ context.Context, request CallerDispatchPermitRequestV2) (CallerDispatchPermitV2, error) {
 	recorder.requests = append(recorder.requests, request)
-	return CallerDispatchPermitV1{Digest: strings.Repeat("d", 64)}, nil
+	return CallerDispatchPermitV2{Digest: strings.Repeat("d", 64)}, nil
 }
 
 func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinuity(t *testing.T) {
@@ -109,6 +110,31 @@ func TestSessionPolicyResolverScopesCapabilityRulesToNamedPool(t *testing.T) {
 	}
 }
 
+func TestSessionPolicyResolverKeepsPoolIdentityAcrossRename(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	session := []byte("renamed-session")
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 7,
+		Pools:                     []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Members: []codex.AccountKey{"account-a"}}},
+		SessionBindings:           []SessionBindingV2{{SessionDigest: keyedSessionDigest(key, session), PoolID: testPoolIDA}},
+		CapabilityPool:            testPoolIDA,
+		CapabilityPredicates:      []CapabilityPredicateCoreV1{{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "local_token_v1", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}},
+		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{{AccountKey: "account-a"}},
+	}
+	resolver := NewSessionPolicyResolver(key, policy)
+	before := resolver.Resolve(session, []codex.AccountKey{"account-a", "account-b"})
+	snapshot, _, active := resolver.capabilityPolicy(testPoolIDA, 7)
+	if before.PoolID != testPoolIDA || before.Pool != "Cyber" || !active || snapshot.PoolID != testPoolIDA {
+		t.Fatalf("before = %#v snapshot = %#v active = %t", before, snapshot, active)
+	}
+	policy.Pools[0].Name = "Security Research"
+	resolver.Replace(policy)
+	after := resolver.Resolve(session, []codex.AccountKey{"account-a", "account-b"})
+	if after.PoolID != before.PoolID || after.Pool != "Security Research" || !slices.Equal(after.Allowed, before.Allowed) {
+		t.Fatalf("before = %#v after = %#v", before, after)
+	}
+}
+
 func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account"}}
@@ -143,7 +169,7 @@ func TestSessionPolicyEnforcementPrecedesDurableRequestJournal(t *testing.T) {
 		t.Fatalf("permit requests = %d, want 1", len(permits.requests))
 	}
 	request := permits.requests[0]
-	if request.Pool != "team" || request.RoutingGeneration != 7 || request.SelectedAccount != "account" || len(request.AllowedAccounts) != 1 || request.AllowedAccounts[0] != "account" {
+	if request.PoolID != factory.SessionPolicy.policy.Pools[0].ID || request.RoutingGeneration != 7 || request.SelectedAccount != "account" || len(request.AllowedAccounts) != 1 || request.AllowedAccounts[0] != "account" {
 		t.Fatalf("permit request = %#v", request)
 	}
 	if runtime.plan.DispatchPermitDigest != strings.Repeat("d", 64) {

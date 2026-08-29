@@ -15,6 +15,7 @@ func TestCapabilityRoutingNarrowsAuthorityAndSortsFiniteEvidenceBeforeNull(t *te
 	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "*", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5.1"}
 	policy := RoutingPolicySnapshotV1{
 		SchemaVersion: 1, Active: true, RoutingGeneration: 9,
+		PoolID:     testPoolIDA,
 		Pool:       AccountPoolV1{Name: "capability-model-invoke", Members: []codex.AccountKey{"account-a", "account-b"}},
 		Predicates: []CapabilityPredicateCoreV1{predicate},
 	}
@@ -32,7 +33,7 @@ func TestCapabilityRoutingNarrowsAuthorityAndSortsFiniteEvidenceBeforeNull(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if choice.AccountKey != "account-a" || choice.Pool != "capability-model-invoke" || choice.FinalScope.EffectiveModel != choice.FinalScope.OutboundModel {
+	if choice.AccountKey != "account-a" || choice.PoolID != testPoolIDA || choice.Pool != "capability-model-invoke" || choice.FinalScope.EffectiveModel != choice.FinalScope.OutboundModel {
 		t.Fatalf("choice = %#v", choice)
 	}
 	if len(choice.EvidenceUsed) != 2 || choice.EvidenceUsed[0].Source != "source-finite" || choice.EvidenceUsed[1].Source != "source-null" {
@@ -48,7 +49,7 @@ func TestCapabilityRoutingNarrowsAuthorityAndSortsFiniteEvidenceBeforeNull(t *te
 func TestCapabilityRoutingExcludesConflictingStaleAndDifferentlyScopedEvidence(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
-	policy := RoutingPolicySnapshotV1{SchemaVersion: 1, Active: true, RoutingGeneration: 4, Pool: AccountPoolV1{Name: "derived", Members: []codex.AccountKey{"account"}}, Predicates: []CapabilityPredicateCoreV1{predicate}}
+	policy := RoutingPolicySnapshotV1{SchemaVersion: 1, Active: true, RoutingGeneration: 4, PoolID: testPoolIDA, Pool: AccountPoolV1{Name: "derived", Members: []codex.AccountKey{"account"}}, Predicates: []CapabilityPredicateCoreV1{predicate}}
 	request := CallerRequestAuthorityV1{SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account"}, PreferredAccount: "account", AccountWorkspaces: []CapabilityAccountWorkspaceV1{{AccountKey: "account", Workspace: "workspace"}}, EvaluatedAt: now, FinalScope: CapabilityFinalScopeCoreV1{SchemaVersion: 1, RouteID: "responses", Provider: "codex", TransportKind: "http", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5", OutboundModel: "gpt-5", TransformationDigest: digestBytes([]byte("t")), EncodedRequestDigest: digestBytes([]byte("r")), NormalCredentialOriginBindingDigest: digestBytes([]byte("o"))}}
 	expired := now.Add(-time.Second)
 	evidence := []CapabilityRoutingEvidenceV1{
@@ -65,7 +66,7 @@ func TestCapabilityRoutingExcludesConflictingStaleAndDifferentlyScopedEvidence(t
 func TestCapabilityRoutingPrefersOrdinaryEligibleSelection(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	predicate := CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
-	policy := RoutingPolicySnapshotV1{SchemaVersion: 1, Active: true, RoutingGeneration: 4, Pool: AccountPoolV1{Name: "derived", Members: []codex.AccountKey{"account-a", "account-b"}}, Predicates: []CapabilityPredicateCoreV1{predicate}}
+	policy := RoutingPolicySnapshotV1{SchemaVersion: 1, Active: true, RoutingGeneration: 4, PoolID: testPoolIDA, Pool: AccountPoolV1{Name: "derived", Members: []codex.AccountKey{"account-a", "account-b"}}, Predicates: []CapabilityPredicateCoreV1{predicate}}
 	request := CallerRequestAuthorityV1{
 		SchemaVersion: 1, AllowedAccounts: []codex.AccountKey{"account-a", "account-b"}, PreferredAccount: "account-b", EvaluatedAt: now,
 		AccountWorkspaces: []CapabilityAccountWorkspaceV1{{AccountKey: "account-a", Workspace: "workspace-a"}, {AccountKey: "account-b", Workspace: "workspace-b"}},

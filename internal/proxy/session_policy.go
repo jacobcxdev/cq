@@ -58,7 +58,8 @@ func (r *SessionPolicyResolver) capabilityPolicy(poolID PoolID, revision uint64)
 		}
 		return RoutingPolicySnapshotV1{
 			SchemaVersion: 1, Active: true, RoutingGeneration: r.policy.RoutingGeneration,
-			Pool: AccountPoolV1{Name: candidate.Name, Members: append([]providerCodex.AccountKey(nil), candidate.Members...)}, Predicates: append([]CapabilityPredicateCoreV1(nil), r.policy.CapabilityPredicates...),
+			PoolID: candidate.ID,
+			Pool:   AccountPoolV1{Name: candidate.Name, Members: append([]providerCodex.AccountKey(nil), candidate.Members...)}, Predicates: append([]CapabilityPredicateCoreV1(nil), r.policy.CapabilityPredicates...),
 		}, append([]CapabilityRoutingEvidenceV1(nil), r.policy.CapabilityRoutingEvidence...), true
 	}
 	return RoutingPolicySnapshotV1{}, nil, false

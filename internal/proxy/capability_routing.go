@@ -95,6 +95,7 @@ type RoutingPolicySnapshotV1 struct {
 	SchemaVersion     int                         `json:"schema_version"`
 	Active            bool                        `json:"active"`
 	RoutingGeneration uint64                      `json:"routing_generation"`
+	PoolID            PoolID                      `json:"pool_id"`
 	Pool              AccountPoolV1               `json:"pool"`
 	Predicates        []CapabilityPredicateCoreV1 `json:"predicates"`
 }
@@ -118,6 +119,7 @@ type FinalRouteChoiceV1 struct {
 	AccountKey        providerCodex.AccountKey      `json:"account_key"`
 	AllowedAccounts   []providerCodex.AccountKey    `json:"allowed_accounts"`
 	Pool              string                        `json:"pool"`
+	PoolID            PoolID                        `json:"pool_id"`
 	RoutingGeneration uint64                        `json:"routing_generation"`
 	FinalScope        CapabilityFinalScopeCoreV1    `json:"final_scope"`
 	Predicates        []CapabilityPredicateCoreV1   `json:"predicates"`
@@ -190,7 +192,7 @@ func ResolveCapabilityRoute(policy RoutingPolicySnapshotV1, evidence []Capabilit
 	}
 	choice := FinalRouteChoiceV1{
 		SchemaVersion: 1, AccountKey: selected, AllowedAccounts: eligible,
-		Pool: policy.Pool.Name, RoutingGeneration: policy.RoutingGeneration,
+		Pool: policy.Pool.Name, PoolID: policy.PoolID, RoutingGeneration: policy.RoutingGeneration,
 		FinalScope: request.FinalScope, Predicates: predicates,
 		EvidenceUsed: usedByAccount[selected],
 	}
@@ -207,7 +209,7 @@ func ResolveCapabilityRoute(policy RoutingPolicySnapshotV1, evidence []Capabilit
 }
 
 func validateCapabilityRoutingInputs(policy RoutingPolicySnapshotV1, request CallerRequestAuthorityV1) error {
-	if policy.SchemaVersion != 1 || policy.RoutingGeneration == 0 || !poolNamePattern.MatchString(policy.Pool.Name) || len(policy.Pool.Members) == 0 || len(policy.Predicates) == 0 {
+	if policy.SchemaVersion != 1 || policy.RoutingGeneration == 0 || !validPoolID(policy.PoolID) || !validPoolName(policy.Pool.Name) || len(policy.Pool.Members) == 0 || len(policy.Predicates) == 0 {
 		return errors.New("invalid routing policy")
 	}
 	seenAccounts := make(map[providerCodex.AccountKey]struct{}, len(policy.Pool.Members))

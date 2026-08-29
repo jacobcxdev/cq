@@ -603,9 +603,9 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			frozen.Release()
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCallerDispatchPermitInvalid)
 		}
-		permit, permitErr := factory.DispatchPermits.IssueAndConsume(ctx, CallerDispatchPermitRequestV1{
+		permit, permitErr := factory.DispatchPermits.IssueAndConsume(ctx, CallerDispatchPermitRequestV2{
 			CallerAdmissionDigest: caller.ConsumptionDigest, CallerDomain: caller.Domain, CallerSubjectID: caller.SubjectID,
-			SessionDigest: policyDecision.SessionDigest, Pool: policyDecision.Pool, RoutingGeneration: policyDecision.PolicyRevision,
+			SessionDigest: policyDecision.SessionDigest, PoolID: policyDecision.PoolID, RoutingGeneration: policyDecision.PolicyRevision,
 			AllowedAccounts: policyDecision.Allowed, SelectedAccount: choice.AccountKey,
 		})
 		if permitErr != nil {
