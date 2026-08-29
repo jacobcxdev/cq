@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -211,23 +211,25 @@ func equalCodexObserveRouteChoice(left, right RouteChoice) bool {
 type codexV2ObservedBody struct {
 	body     io.ReadCloser
 	observer *codexHTTPResponseObserver
-	terminal atomic.Bool
+	mu       sync.Mutex
+	terminal bool
 }
 
 func (body *codexV2ObservedBody) Read(buffer []byte) (int, error) {
 	read, readErr := readCodexHTTPResponseBody(body.body, buffer)
 	if read > 0 {
-		body.observer.Observe(buffer[:read])
+		if observeErr := body.observer.Observe(buffer[:read]); observeErr != nil {
+			return 0, errors.Join(observeErr, body.finish(observeErr))
+		}
 	}
 	if readErr == nil {
 		return read, nil
 	}
-	body.terminal.Store(true)
 	cause := readErr
 	if errors.Is(cause, io.EOF) {
 		cause = nil
 	}
-	finishErr := body.observer.Finish(cause)
+	finishErr := body.finish(cause)
 	if finishErr != nil {
 		return read, errors.Join(cause, finishErr)
 	}
@@ -236,9 +238,21 @@ func (body *codexV2ObservedBody) Read(buffer []byte) (int, error) {
 
 func (body *codexV2ObservedBody) Close() error {
 	closeErr := closeCodexHTTPResponseBody(body.body)
+	body.mu.Lock()
+	defer body.mu.Unlock()
 	cause := closeErr
-	if cause == nil && !body.terminal.Load() {
+	if cause == nil && !body.terminal {
 		cause = context.Canceled
 	}
-	return errors.Join(closeErr, body.observer.Finish(cause))
+	finishErr := body.observer.Finish(cause)
+	body.terminal = true
+	return errors.Join(closeErr, finishErr)
+}
+
+func (body *codexV2ObservedBody) finish(cause error) error {
+	body.mu.Lock()
+	defer body.mu.Unlock()
+	finishErr := body.observer.Finish(cause)
+	body.terminal = true
+	return finishErr
 }
