@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -112,15 +113,15 @@ func TestAddCodexProxyEligibilityAddsDistinctBoundSubsetPools(t *testing.T) {
 	}
 	policy := proxy.RoutingPolicyDocument{
 		Pools: []proxy.AccountPoolDocument{
-			{Name: "zeta", Members: []codexprov.AccountKey{"route-b"}},
-			{Name: "cyber", Members: []codexprov.AccountKey{"route-a", "route-c"}},
+			{Name: "Zeta", Members: []codexprov.AccountKey{"route-b"}},
+			{Name: "Cyber", Value: 10, Members: []codexprov.AccountKey{"route-a", "route-c"}},
 			{Name: "all", Members: []codexprov.AccountKey{"route-a", "route-b", "route-c"}},
 			{Name: "unused", Members: []codexprov.AccountKey{"route-a"}},
 		},
 		SessionBindings: []proxy.SessionBindingDocument{
-			{SessionDigest: "binding-zeta-a", Pool: "zeta"},
-			{SessionDigest: "binding-cyber", Pool: "cyber"},
-			{SessionDigest: "binding-zeta-b", Pool: "zeta"},
+			{SessionDigest: "binding-zeta-a", Pool: "Zeta"},
+			{SessionDigest: "binding-cyber", Pool: "Cyber"},
+			{SessionDigest: "binding-zeta-b", Pool: "Zeta"},
 			{SessionDigest: "binding-all", Pool: "all"},
 		},
 	}
@@ -148,11 +149,14 @@ func TestAddCodexProxyEligibilityAddsDistinctBoundSubsetPools(t *testing.T) {
 		t.Fatalf("proxy pools = %s, want two bound subsets", body)
 	}
 	pools := got.Providers[0].ProxyPools
-	if pools[0].Name != "cyber" || pools[0].DiscoveredCount != 3 || pools[0].EligibleCount != 2 || pools[0].ExcludedCount != 1 {
-		t.Fatalf("first proxy pool = %#v, want cyber 2/3", pools[0])
+	if pools[0].Name != "Cyber" || pools[0].DiscoveredCount != 3 || pools[0].EligibleCount != 2 || pools[0].ExcludedCount != 1 {
+		t.Fatalf("first proxy pool = %#v, want Cyber 2/3", pools[0])
 	}
-	if pools[1].Name != "zeta" || pools[1].DiscoveredCount != 3 || pools[1].EligibleCount != 1 || pools[1].ExcludedCount != 2 {
-		t.Fatalf("second proxy pool = %#v, want zeta 1/3", pools[1])
+	if pools[1].Name != "Zeta" || pools[1].DiscoveredCount != 3 || pools[1].EligibleCount != 1 || pools[1].ExcludedCount != 2 {
+		t.Fatalf("second proxy pool = %#v, want Zeta 1/3", pools[1])
+	}
+	if bytes.Contains(body, []byte(`"value"`)) {
+		t.Fatalf("quota report exposed pool value: %s", body)
 	}
 }
 
@@ -171,8 +175,8 @@ func TestEnrichCodexProxyEligibilityUsesOptionalLivePolicy(t *testing.T) {
 		{Key: "route-c", AccountID: "account-c"},
 	}
 	policy := proxy.RoutingPolicyDocument{
-		Pools:           []proxy.AccountPoolDocument{{Name: "cyber", Members: []codexprov.AccountKey{"route-a", "route-c"}}},
-		SessionBindings: []proxy.SessionBindingDocument{{SessionDigest: "binding-cyber", Pool: "cyber"}},
+		Pools:           []proxy.AccountPoolDocument{{Name: "Cyber", Value: 10, Members: []codexprov.AccountKey{"route-a", "route-c"}}},
+		SessionBindings: []proxy.SessionBindingDocument{{SessionDigest: "binding-cyber", Pool: "Cyber"}},
 	}
 
 	err := enrichCodexProxyEligibilityWithDependencies(context.Background(), &report, codexProxyEligibilityDependencies{
@@ -183,8 +187,8 @@ func TestEnrichCodexProxyEligibilityUsesOptionalLivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich proxy eligibility: %v", err)
 	}
-	if pools := report.Providers[0].ProxyPools; len(pools) != 1 || pools[0].Name != "cyber" || pools[0].EligibleCount != 2 {
-		t.Fatalf("proxy pools = %#v, want bound cyber 2/3", pools)
+	if pools := report.Providers[0].ProxyPools; len(pools) != 1 || pools[0].Name != "Cyber" || pools[0].EligibleCount != 2 {
+		t.Fatalf("proxy pools = %#v, want bound Cyber 2/3", pools)
 	}
 }
 

@@ -264,7 +264,7 @@ func TestBuildTTYModelShowsNamedProxyPoolAggregate(t *testing.T) {
 			Plan:   "pro",
 		}},
 		ProxyPools: []app.ProxyPoolReport{{
-			Name: "cyber",
+			Name: "Cyber",
 			ProxyEligibilityReport: app.ProxyEligibilityReport{
 				DiscoveredCount: 3,
 				EligibleCount:   2,
@@ -285,11 +285,40 @@ func TestBuildTTYModelShowsNamedProxyPoolAggregate(t *testing.T) {
 		t.Fatalf("write TTY: %v", err)
 	}
 	got := stripANSI(output.String())
-	if !strings.Contains(got, "    Proxy cyber 2 × pro 20x = 40x") {
+	if !strings.Contains(got, "      Cyber 2 × pro 20x = 40x") {
 		t.Fatalf("named proxy pool missing from output:\n%s", got)
+	}
+	if strings.Contains(got, "Proxy Cyber") {
+		t.Fatalf("named pool retained redundant proxy label:\n%s", got)
 	}
 	if !strings.Contains(got, "49%") {
 		t.Fatalf("named proxy pool rows missing from output:\n%s", got)
+	}
+}
+
+func TestBuildTTYModelRightAlignsAllSummaryLabelsToLongestPoolName(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	report := app.Report{Providers: []app.ProviderReport{{
+		ID:        provider.Codex,
+		Results:   []quota.Result{{Status: quota.StatusOK, Plan: "pro"}},
+		Aggregate: &app.AggregateReport{ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "3 × pro 20x = 60x"}},
+		ProxyPools: []app.ProxyPoolReport{{
+			Name: "Security Research",
+			ProxyEligibilityReport: app.ProxyEligibilityReport{ExcludedCount: 1, Aggregate: &app.AggregateReport{
+				ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "2 × pro 20x = 40x"},
+			}},
+		}},
+	}}}
+	section := BuildTTYModel(report, now).Sections[0]
+	header := stripANSI(section.Header)
+	aggregateHeader := stripANSI(section.AggHeader)
+	poolHeader := stripANSI(section.ProxyPools[0].Header)
+	wantPool := "    Security Research 2 × pro 20x = 40x"
+	if poolHeader != wantPool {
+		t.Fatalf("pool header = %q, want %q", poolHeader, wantPool)
+	}
+	if strings.Index(header, "pro") != strings.Index(aggregateHeader, "3 ×") || strings.Index(aggregateHeader, "3 ×") != strings.Index(poolHeader, "2 ×") {
+		t.Fatalf("summary columns differ:\n%q\n%q\n%q", header, aggregateHeader, poolHeader)
 	}
 }
 
