@@ -12,23 +12,23 @@ import (
 	"github.com/jacobcxdev/cq/internal/auth"
 )
 
-func TestDefaultCredentialControlPathUsesIsolatedConfigHome(t *testing.T) {
-	configHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+func TestDefaultCredentialControlPathUsesStateDirectory(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "cq", "state")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	got := DefaultCredentialControlPath(t.TempDir())
-	want := filepath.Join(configHome, "cq", "state", "credential.sock")
+	got := DefaultCredentialControlPath(stateDir)
+	want := filepath.Join(stateDir, "credential.sock")
 	if got != want {
 		t.Fatalf("credential control path = %q, want %q", got, want)
 	}
 }
 
-func TestDefaultCredentialControlPathIgnoresRelativeConfigHome(t *testing.T) {
-	home := t.TempDir()
+func TestDefaultCredentialControlPathIgnoresEnvironment(t *testing.T) {
+	stateDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", "relative")
 
-	got := DefaultCredentialControlPath(home)
-	want := filepath.Join(home, ".config", "cq", "state", "credential.sock")
+	got := DefaultCredentialControlPath(stateDir)
+	want := filepath.Join(stateDir, "credential.sock")
 	if got != want {
 		t.Fatalf("credential control path = %q, want %q", got, want)
 	}
