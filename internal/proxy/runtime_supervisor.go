@@ -741,10 +741,6 @@ func (supervisor *RuntimeSupervisor) EnterRescue(ctx context.Context) error {
 		return nil
 	}
 	if supervisor.trafficMode == TrafficModeRescueExitDraining {
-		if supervisor.worker == nil {
-			supervisor.mu.Unlock()
-			return ErrRuntimeSupervisorUnavailable
-		}
 		supervisor.modeGeneration++
 		generation := supervisor.modeGeneration
 		intent := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescueDraining, Phase: RuntimeModePhaseIntent}
@@ -760,7 +756,7 @@ func (supervisor *RuntimeSupervisor) EnterRescue(ctx context.Context) error {
 		supervisor.mu.Unlock()
 		return nil
 	}
-	if supervisor.trafficMode != TrafficModeNormal || supervisor.worker == nil {
+	if supervisor.trafficMode != TrafficModeNormal {
 		supervisor.mu.Unlock()
 		return ErrRuntimeSupervisorUnavailable
 	}
@@ -862,6 +858,8 @@ func (supervisor *RuntimeSupervisor) ExitRescue(ctx context.Context, manifest Wo
 			supervisor.mu.Unlock()
 			return err
 		}
+		supervisor.recoveryPending = false
+		supervisor.pendingRelease = RuntimeWorkerReleaseV1{}
 	}
 	supervisor.modeGeneration++
 	generation := supervisor.modeGeneration
@@ -906,6 +904,8 @@ func (supervisor *RuntimeSupervisor) completeRescueExit(ctx context.Context, gen
 		if _, err := supervisor.bootLocked(ctx, manifest, "rescue_exit", supervisor.pendingRelease); err != nil {
 			return err
 		}
+		supervisor.recoveryPending = false
+		supervisor.pendingRelease = RuntimeWorkerReleaseV1{}
 	}
 	receipt := RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: generation, DesiredMode: TrafficModeNormal, EffectiveMode: TrafficModeNormal, Phase: RuntimeModePhaseEffective}
 	if err := supervisor.modeEvidence.Commit(ctx, receipt); err != nil {
@@ -1041,16 +1041,9 @@ func (supervisor *RuntimeSupervisor) monitorWorkerLocked(worker RuntimeWorkerPro
 		case <-lifetime.Done():
 			return
 		}
-		supervisor.mu.RLock()
-		current := supervisor.worker == worker && supervisor.admissionReady &&
-			(supervisor.trafficMode == TrafficModeNormal || supervisor.trafficMode == TrafficModeRescueExitDraining)
-		supervisor.mu.RUnlock()
-		if !current {
-			return
-		}
 		replaceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = supervisor.ReplaceFailedWorker(replaceCtx, manifest)
+		_, _ = supervisor.replaceFailedWorker(replaceCtx, manifest, worker)
 	}()
 }
 
@@ -1113,12 +1106,18 @@ func (supervisor *RuntimeSupervisor) allowCrashStartLocked() bool {
 // ReplaceFailedWorker reaps a failed worker before launching its successor.
 // It never closes or replaces the inherited public listener.
 func (supervisor *RuntimeSupervisor) ReplaceFailedWorker(ctx context.Context, manifest WorkerManifestV1) (RuntimeBootAckV1, error) {
+	return supervisor.replaceFailedWorker(ctx, manifest, nil)
+}
+
+func (supervisor *RuntimeSupervisor) replaceFailedWorker(ctx context.Context, manifest WorkerManifestV1, expected RuntimeWorkerProcess) (RuntimeBootAckV1, error) {
 	if supervisor == nil {
 		return RuntimeBootAckV1{}, ErrRuntimeSupervisorUnavailable
 	}
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	if ctx == nil || supervisor.worker == nil {
+	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady ||
+		(supervisor.trafficMode != TrafficModeNormal && supervisor.trafficMode != TrafficModeRescueExitDraining) ||
+		(expected != nil && supervisor.worker != expected) {
 		return RuntimeBootAckV1{}, ErrRuntimeSupervisorUnavailable
 	}
 	supervisor.admissionReady = false
@@ -1129,6 +1128,7 @@ func (supervisor *RuntimeSupervisor) ReplaceFailedWorker(ctx context.Context, ma
 		}
 		return RuntimeBootAckV1{}, err
 	}
+	supervisor.pendingRelease = release
 	supervisor.worker = nil
 	supervisor.sequence++
 	if !supervisor.allowCrashStartLocked() {
@@ -1138,7 +1138,9 @@ func (supervisor *RuntimeSupervisor) ReplaceFailedWorker(ctx context.Context, ma
 	ack, err := supervisor.bootLocked(ctx, manifest, "worker_switch", release)
 	if err != nil {
 		supervisor.recoveryPending = true
-		supervisor.pendingRelease = release
+	} else {
+		supervisor.recoveryPending = false
+		supervisor.pendingRelease = RuntimeWorkerReleaseV1{}
 	}
 	return ack, err
 }
