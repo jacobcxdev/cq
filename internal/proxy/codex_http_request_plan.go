@@ -30,6 +30,11 @@ type codexHTTPRequestPlanRuntimeWaiter interface {
 	AcquireRequestPlanningContext(context.Context, LeaseKey, []codex.AccountKey, CodexLeaseAuthorityPolicy) (func(), error)
 }
 
+type codexHTTPRequestPlanRuntimeIngressWaiter interface {
+	observeRequestIngressContinuityContext(context.Context, LeaseKey, CodexLeaseAuthorityPolicy, CodexLeaseRequestEvidence) (*codexLeaseIngressContinuityBinding, error)
+	acquireRequestPlanningWithContinuityContext(context.Context, LeaseKey, []codex.AccountKey, CodexLeaseAuthorityPolicy, CodexLeaseRequestEvidence, *codexLeaseIngressContinuityBinding) (*codexLeaseIngressContinuityClaim, func(), error)
+}
+
 type codexWebSocketPrewarmRuntime interface {
 	adoptWebSocketPrewarmContext(context.Context, []codex.AccountKey, CodexPrewarmAdoptionRequest) (*CodexLeaseRequestHandle, error)
 }
@@ -63,26 +68,27 @@ type codexHTTPRequestPlanningGuard struct {
 	mu       sync.Mutex
 	owner    *CodexHTTPRequestPlanFactory
 	key      LeaseKey
+	ingress  *codexLeaseIngressContinuityClaim
 	releasef func()
 	consumed bool
 	released bool
 }
 
-func newCodexHTTPRequestPlanningGuard(factory *CodexHTTPRequestPlanFactory, key LeaseKey, release func()) *codexHTTPRequestPlanningGuard {
-	return &codexHTTPRequestPlanningGuard{owner: factory, key: key, releasef: release}
+func newCodexHTTPRequestPlanningGuard(factory *CodexHTTPRequestPlanFactory, key LeaseKey, ingress *codexLeaseIngressContinuityClaim, release func()) *codexHTTPRequestPlanningGuard {
+	return &codexHTTPRequestPlanningGuard{owner: factory, key: key, ingress: ingress, releasef: release}
 }
 
-func (guard *codexHTTPRequestPlanningGuard) consume(factory *CodexHTTPRequestPlanFactory, key LeaseKey) (func(), error) {
+func (guard *codexHTTPRequestPlanningGuard) consume(factory *CodexHTTPRequestPlanFactory, key LeaseKey) (func(), *codexLeaseIngressContinuityClaim, error) {
 	if guard == nil {
-		return nil, ErrCodexLeaseAuthorityMismatch
+		return nil, nil, ErrCodexLeaseAuthorityMismatch
 	}
 	guard.mu.Lock()
 	defer guard.mu.Unlock()
 	if guard.released || guard.consumed || guard.owner != factory || guard.key != key {
-		return nil, ErrCodexLeaseAuthorityMismatch
+		return nil, nil, ErrCodexLeaseAuthorityMismatch
 	}
 	guard.consumed = true
-	return guard.release, nil
+	return guard.release, guard.ingress, nil
 }
 
 func (guard *codexHTTPRequestPlanningGuard) release() {
@@ -122,16 +128,21 @@ func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, i
 		return nil, false, nil
 	}
 	key := NewCodexLeaseKey(protocol.Metadata.Metadata)
+	evidence := codexLeaseRequestEvidenceFromProtocol(protocol)
+	ingressObservation, err := factory.observeRequestIngressContinuity(ctx, key, evidence)
+	if err != nil {
+		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
+	}
 	inventory, err := factory.Inventory.List(ctx)
 	if err != nil {
 		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
 	}
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
-	releasePlanning, err := factory.acquireRequestPlanning(ctx, key, accounts)
+	releasePlanning, ingressContinuity, err := factory.acquireRequestPlanningWithEvidence(ctx, key, accounts, evidence, ingressObservation)
 	if err != nil {
 		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
 	}
-	planning := newCodexHTTPRequestPlanningGuard(factory, key, releasePlanning)
+	planning := newCodexHTTPRequestPlanningGuard(factory, key, ingressContinuity, releasePlanning)
 	transferred := false
 	defer func() {
 		if !transferred {
@@ -415,6 +426,14 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	metadata := protocol.Metadata.Metadata
 	key := NewCodexLeaseKey(metadata)
+	evidence := codexLeaseRequestEvidenceFromProtocol(protocol)
+	var ingressObservation *codexLeaseIngressContinuityBinding
+	if input.retainedPlanning == nil {
+		ingressObservation, err = factory.observeRequestIngressContinuity(ctx, key, evidence)
+		if err != nil {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
+		}
+	}
 
 	inventory, err := factory.Inventory.List(ctx)
 	if err != nil {
@@ -422,7 +441,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	unfilteredInventory := inventory
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
-	releasePlanning, err := factory.acquireOrConsumeRequestPlanning(ctx, key, accounts, input.retainedPlanning)
+	releasePlanning, ingressContinuity, err := factory.acquireOrConsumeRequestPlanning(ctx, key, accounts, evidence, ingressObservation, input.retainedPlanning)
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
 	}
@@ -596,6 +615,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		permitDigest = permit.Digest
 	}
 	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, expectedBound, continuityAccountKey != "" || authenticatedBoundContinuation, authenticatedCallerContinuity, permitDigest)
+	leasePlan.ingressContinuity = ingressContinuity
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
 		if handle != nil {
@@ -1020,25 +1040,47 @@ func (factory *CodexHTTPRequestPlanFactory) inspect(ctx context.Context, encoded
 }
 
 func (factory *CodexHTTPRequestPlanFactory) acquireRequestPlanning(ctx context.Context, key LeaseKey, accounts []codex.AccountKey) (func(), error) {
+	release, _, err := factory.acquireRequestPlanningWithEvidence(ctx, key, accounts, CodexLeaseRequestEvidence{}, nil)
+	return release, err
+}
+
+func (factory *CodexHTTPRequestPlanFactory) observeRequestIngressContinuity(ctx context.Context, key LeaseKey, evidence CodexLeaseRequestEvidence) (*codexLeaseIngressContinuityBinding, error) {
+	if waiter, ok := factory.Runtime.(codexHTTPRequestPlanRuntimeIngressWaiter); ok {
+		return waiter.observeRequestIngressContinuityContext(ctx, key, factory.Authority, evidence)
+	}
+	return nil, nil
+}
+
+func (factory *CodexHTTPRequestPlanFactory) acquireRequestPlanningWithEvidence(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, evidence CodexLeaseRequestEvidence, observation *codexLeaseIngressContinuityBinding) (func(), *codexLeaseIngressContinuityClaim, error) {
+	if waiter, ok := factory.Runtime.(codexHTTPRequestPlanRuntimeIngressWaiter); ok {
+		ingress, release, err := waiter.acquireRequestPlanningWithContinuityContext(ctx, key, accounts, factory.Authority, evidence, observation)
+		if err != nil {
+			return nil, nil, err
+		}
+		if release == nil {
+			return nil, nil, ErrCodexLeaseWriterUnavailable
+		}
+		return release, ingress, nil
+	}
 	waiter, ok := factory.Runtime.(codexHTTPRequestPlanRuntimeWaiter)
 	if !ok {
-		return func() {}, nil
+		return func() {}, nil, nil
 	}
 	release, err := waiter.AcquireRequestPlanningContext(ctx, key, accounts, factory.Authority)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if release == nil {
-		return nil, ErrCodexLeaseWriterUnavailable
+		return nil, nil, ErrCodexLeaseWriterUnavailable
 	}
-	return release, nil
+	return release, nil, nil
 }
 
-func (factory *CodexHTTPRequestPlanFactory) acquireOrConsumeRequestPlanning(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, retained *codexHTTPRequestPlanningGuard) (func(), error) {
+func (factory *CodexHTTPRequestPlanFactory) acquireOrConsumeRequestPlanning(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, evidence CodexLeaseRequestEvidence, observation *codexLeaseIngressContinuityBinding, retained *codexHTTPRequestPlanningGuard) (func(), *codexLeaseIngressContinuityClaim, error) {
 	if retained != nil {
 		return retained.consume(factory, key)
 	}
-	return factory.acquireRequestPlanning(ctx, key, accounts)
+	return factory.acquireRequestPlanningWithEvidence(ctx, key, accounts, evidence, observation)
 }
 
 func (factory *CodexHTTPRequestPlanFactory) buildDispatch(ctx context.Context, input CodexFrozenDispatchInput) (CodexFrozenDispatchPlan, error) {
@@ -1108,12 +1150,16 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		RequiresAccountContinuity:     requiresAccountContinuity,
 		authenticatedCallerContinuity: authenticatedCallerContinuity,
 		DispatchPermitDigest:          dispatchPermitDigest,
-		Evidence: CodexLeaseRequestEvidence{
-			PreviousResponseID: protocol.PreviousResponseID,
-			TurnState:          protocol.TurnState,
-			HasTurnState:       protocol.HasTurnState,
-			HasEncryptedState:  protocol.HasEncryptedState,
-		},
+		Evidence:                      codexLeaseRequestEvidenceFromProtocol(protocol),
+	}
+}
+
+func codexLeaseRequestEvidenceFromProtocol(protocol CodexProtocolRequest) CodexLeaseRequestEvidence {
+	return CodexLeaseRequestEvidence{
+		PreviousResponseID: protocol.PreviousResponseID,
+		TurnState:          protocol.TurnState,
+		HasTurnState:       protocol.HasTurnState,
+		HasEncryptedState:  protocol.HasEncryptedState,
 	}
 }
 

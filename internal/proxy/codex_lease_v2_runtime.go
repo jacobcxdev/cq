@@ -82,17 +82,19 @@ type CodexLeaseRequestPlan struct {
 	RequiresAccountContinuity     bool
 	authenticatedCallerContinuity bool
 	DispatchPermitDigest          string
+	ingressContinuity             *codexLeaseIngressContinuityClaim
 }
 
 // CodexLeaseRuntime performs the high-level durable request lifecycle over the
 // exact store and shared close/account-gate authority owned by one coordinator.
 type CodexLeaseRuntime struct {
-	coordinator       *CodexContinuityCoordinator
-	store             *CodexLeaseStore
-	leases            *CodexTurnLeaseManager
-	revalidateAccount CodexLeaseAccountRevalidator
-	nativeAdmission   *codexNativeHTTPAdmissionOwner
-	planningGates     *codexLanePlanningGateSet
+	coordinator        *CodexContinuityCoordinator
+	store              *CodexLeaseStore
+	leases             *CodexTurnLeaseManager
+	revalidateAccount  CodexLeaseAccountRevalidator
+	nativeAdmission    *codexNativeHTTPAdmissionOwner
+	planningGates      *codexLanePlanningGateSet
+	turnStateRotations *codexLeaseTurnStateRotationStore
 }
 
 type codexLanePlanningGateSet struct {
@@ -110,6 +112,62 @@ type codexLanePlanningGateGuard struct {
 	lane  LaneKey
 	entry *codexLanePlanningGateEntry
 	once  sync.Once
+}
+
+type codexLeaseIngressContinuityKind uint8
+
+const (
+	codexLeaseIngressContinuityInvalid codexLeaseIngressContinuityKind = iota
+	codexLeaseIngressContinuityCurrent
+	codexLeaseIngressContinuityTerminalDrain
+)
+
+type codexLeaseIngressContinuityBinding struct {
+	owner               *CodexLeaseRuntime
+	key                 LeaseKey
+	authority           CodexLeaseAuthorityPolicy
+	identity            CodexJournalRecordIdentity
+	accountHash         string
+	recordGeneration    uint64
+	requestGeneration   uint64
+	attemptGeneration   uint64
+	attemptRevision     uint64
+	attemptState        CodexAttemptState
+	leaseState          LeaseState
+	turnStateHash       string
+	recordTurnStateHash string
+	correlationHash     string
+	hasTurnState        bool
+	recordHasTurnState  bool
+	kind                codexLeaseIngressContinuityKind
+	hasPreviousResponse bool
+	hasEncryptedState   bool
+}
+
+type codexLeaseTurnStateRotation struct {
+	identity          CodexJournalRecordIdentity
+	accountHash       string
+	requestGeneration uint64
+	attemptGeneration uint64
+	beforeHash        string
+	afterHash         string
+}
+
+type codexLeaseTurnStateRotationStore struct {
+	mu       sync.Mutex
+	byRecord map[CodexJournalRecordIdentity]codexLeaseTurnStateRotation
+}
+
+// codexLeaseIngressContinuityClaim is process-local proof that one queued
+// request carried exact continuity authority before its predecessor rotated
+// that authority while draining. It is never persisted and may be consumed
+// only once while the issuing lane-planning ownership remains live.
+type codexLeaseIngressContinuityClaim struct {
+	mu       sync.Mutex
+	owner    *CodexLeaseRuntime
+	binding  codexLeaseIngressContinuityBinding
+	consumed bool
+	released bool
 }
 
 // CodexLeaseAccountRevalidator proves that an account still exists, remains
@@ -176,12 +234,13 @@ func newCodexLeaseRuntimeWithNativeHTTPAdmissionSink(
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
 	runtime := &CodexLeaseRuntime{
-		coordinator:       coordinator,
-		store:             coordinator.store,
-		leases:            coordinator.leases,
-		revalidateAccount: revalidate,
-		nativeAdmission:   newCodexNativeHTTPAdmissionOwner(sink),
-		planningGates:     &codexLanePlanningGateSet{entries: make(map[LaneKey]*codexLanePlanningGateEntry)},
+		coordinator:        coordinator,
+		store:              coordinator.store,
+		leases:             coordinator.leases,
+		revalidateAccount:  revalidate,
+		nativeAdmission:    newCodexNativeHTTPAdmissionOwner(sink),
+		planningGates:      &codexLanePlanningGateSet{entries: make(map[LaneKey]*codexLanePlanningGateEntry)},
+		turnStateRotations: &codexLeaseTurnStateRotationStore{byRecord: make(map[CodexJournalRecordIdentity]codexLeaseTurnStateRotation)},
 	}
 	return runtime, nil
 }
@@ -202,35 +261,241 @@ const codexLeaseRequestPlanningRetryInterval = 25 * time.Millisecond
 // Every still-live caller proceeds in order; no idempotency authority exists
 // for inferring that equal request bytes are safe to discard or replay.
 func (runtime *CodexLeaseRuntime) AcquireRequestPlanningContext(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (func(), error) {
+	_, release, err := runtime.acquireRequestPlanningWithContinuityContext(ctx, key, accounts, authority, CodexLeaseRequestEvidence{}, nil)
+	return release, err
+}
+
+// acquireRequestPlanningWithContinuityContext additionally captures the exact
+// ingress authority carried by a queued successor. The process-local claim may
+// authorise only a turn-state rotation performed by that request's draining
+// predecessor before the caller reaches BeginRequestContext.
+func (runtime *CodexLeaseRuntime) acquireRequestPlanningWithContinuityContext(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, evidence CodexLeaseRequestEvidence, ingress *codexLeaseIngressContinuityBinding) (*codexLeaseIngressContinuityClaim, func(), error) {
 	if runtime == nil || runtime.store == nil || ctx == nil {
-		return nil, ErrCodexLeaseWriterUnavailable
+		return nil, nil, ErrCodexLeaseWriterUnavailable
 	}
 	if err := key.validate(); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if err := validateCodexLeaseAuthorityPolicy(authority); err != nil {
+		return nil, nil, err
+	}
+	if evidence.HasTurnState != (evidence.TurnState != "") || len(evidence.TurnState) > codexTurnMetadataMaxBytes || len(evidence.PreviousResponseID) > codexTurnIDMaxBytes {
+		return nil, nil, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
 	}
 	guard, err := runtime.planningGates.acquire(ctx, key.Lane)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	release := guard.Release
+	claim := newCodexLeaseIngressContinuityClaim(runtime, ingress)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			claim.release()
+			guard.Release()
+		})
+	}
 	for {
 		available, err := runtime.requestPlanningAvailable(key, accounts, authority)
 		if err != nil {
 			release()
-			return nil, err
+			return nil, nil, err
 		}
 		if available {
-			return release, nil
+			return claim, release, nil
 		}
 		timer := time.NewTimer(codexLeaseRequestPlanningRetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			release()
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-timer.C:
 		}
 	}
+}
+
+func (runtime *CodexLeaseRuntime) observeRequestIngressContinuityContext(ctx context.Context, key LeaseKey, authority CodexLeaseAuthorityPolicy, evidence CodexLeaseRequestEvidence) (*codexLeaseIngressContinuityBinding, error) {
+	if runtime == nil || runtime.store == nil || ctx == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if err := key.validate(); err != nil {
+		return nil, err
+	}
+	if err := validateCodexLeaseAuthorityPolicy(authority); err != nil {
+		return nil, err
+	}
+	if evidence.HasTurnState != (evidence.TurnState != "") || len(evidence.TurnState) > codexTurnMetadataMaxBytes || len(evidence.PreviousResponseID) > codexTurnIDMaxBytes {
+		return nil, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
+	}
+	if !evidence.HasTurnState {
+		return nil, nil
+	}
+	release, err := runtime.beginLifecycleMutationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	restored, err := runtime.store.loadLaneForIngress(key, authority)
+	if err != nil {
+		return nil, err
+	}
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current.IsZero() {
+		return nil, nil
+	}
+	current, ok := runtime.restoredRecord(restored, restored.Fence.Current)
+	if !ok {
+		return nil, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
+	}
+	attempt, ok := codexLeaseAttemptByGeneration(current.Record.Attempts, current.Record.CurrentAttemptGeneration)
+	if !ok || current.Record.AccountHash == "" || current.Record.RecordGeneration == 0 || current.Record.Generation == 0 || current.Record.CurrentAttemptGeneration == 0 {
+		return nil, nil
+	}
+	turnStateHash := runtime.store.hash("turn-state", evidence.TurnState)
+	correlationHash := ""
+	if evidence.PreviousResponseID != "" {
+		correlationHash = runtime.store.hash("correlation", evidence.PreviousResponseID)
+	}
+	active := attempt.State == CodexAttemptDispatched || attempt.State == CodexAttemptStreaming
+	matched := current.Record.HasTurnState && constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, turnStateHash)
+	kind := codexLeaseIngressContinuityInvalid
+	switch {
+	case matched && active:
+		kind = codexLeaseIngressContinuityCurrent
+	case matched:
+		return nil, nil
+	case active:
+		kind = codexLeaseIngressContinuityInvalid
+	case codexLeaseAttemptTerminalForRequest(attempt.State) && current.Record.RoutingRefs == 0 && current.Record.AttemptRefs == 0 &&
+		current.Record.ResponseObserverRefs == 1 && !current.Record.SocketLineageExtinct &&
+		runtime.turnStateRotations.matches(current.Identity, current.Record, turnStateHash):
+		kind = codexLeaseIngressContinuityTerminalDrain
+	default:
+		return nil, nil
+	}
+	return &codexLeaseIngressContinuityBinding{
+		owner:               runtime,
+		key:                 key,
+		authority:           cloneCodexLeaseAuthorityPolicy(authority),
+		identity:            current.Identity,
+		accountHash:         current.Record.AccountHash,
+		recordGeneration:    current.Record.RecordGeneration,
+		requestGeneration:   current.Record.Generation,
+		attemptGeneration:   current.Record.CurrentAttemptGeneration,
+		attemptRevision:     attempt.Revision,
+		attemptState:        attempt.State,
+		leaseState:          current.Record.State,
+		turnStateHash:       turnStateHash,
+		recordTurnStateHash: current.Record.TurnStateHash,
+		correlationHash:     correlationHash,
+		hasTurnState:        evidence.HasTurnState,
+		recordHasTurnState:  current.Record.HasTurnState,
+		kind:                kind,
+		hasPreviousResponse: evidence.PreviousResponseID != "",
+		hasEncryptedState:   evidence.HasEncryptedState,
+	}, nil
+}
+
+func (rotations *codexLeaseTurnStateRotationStore) matches(identity CodexJournalRecordIdentity, record CodexJournalRecordV2, incomingHash string) bool {
+	if rotations == nil || incomingHash == "" {
+		return false
+	}
+	rotations.mu.Lock()
+	defer rotations.mu.Unlock()
+	rotation, ok := rotations.byRecord[identity]
+	return ok && rotation.identity == identity &&
+		constantTimeCodexLeaseDigestEqual(rotation.accountHash, record.AccountHash) &&
+		rotation.requestGeneration == record.Generation && rotation.attemptGeneration == record.CurrentAttemptGeneration &&
+		constantTimeCodexLeaseDigestEqual(rotation.beforeHash, incomingHash) &&
+		constantTimeCodexLeaseDigestEqual(rotation.afterHash, record.TurnStateHash)
+}
+
+func (rotations *codexLeaseTurnStateRotationStore) reconcile(before, after CodexJournalRecordV2) {
+	if rotations == nil {
+		return
+	}
+	identity := after.Identity()
+	rotations.mu.Lock()
+	defer rotations.mu.Unlock()
+	if identity.IsZero() || before.Identity() != identity || before.AccountHash == "" ||
+		!constantTimeCodexLeaseDigestEqual(before.AccountHash, after.AccountHash) ||
+		before.Generation != after.Generation || before.CurrentAttemptGeneration != after.CurrentAttemptGeneration ||
+		after.SocketLineageExtinct {
+		delete(rotations.byRecord, identity)
+		return
+	}
+	if before.HasTurnState && after.HasTurnState &&
+		!constantTimeCodexLeaseDigestEqual(before.TurnStateHash, after.TurnStateHash) {
+		rotations.byRecord[identity] = codexLeaseTurnStateRotation{
+			identity:          identity,
+			accountHash:       after.AccountHash,
+			requestGeneration: after.Generation,
+			attemptGeneration: after.CurrentAttemptGeneration,
+			beforeHash:        before.TurnStateHash,
+			afterHash:         after.TurnStateHash,
+		}
+		return
+	}
+	rotation, ok := rotations.byRecord[identity]
+	if !ok || !constantTimeCodexLeaseDigestEqual(rotation.accountHash, after.AccountHash) ||
+		rotation.requestGeneration != after.Generation || rotation.attemptGeneration != after.CurrentAttemptGeneration ||
+		!after.HasTurnState || !constantTimeCodexLeaseDigestEqual(rotation.afterHash, after.TurnStateHash) {
+		delete(rotations.byRecord, identity)
+	}
+}
+
+func (rotations *codexLeaseTurnStateRotationStore) clear(identity CodexJournalRecordIdentity) {
+	if rotations == nil || identity.IsZero() {
+		return
+	}
+	rotations.mu.Lock()
+	delete(rotations.byRecord, identity)
+	rotations.mu.Unlock()
+}
+
+func newCodexLeaseIngressContinuityClaim(runtime *CodexLeaseRuntime, ingress *codexLeaseIngressContinuityBinding) *codexLeaseIngressContinuityClaim {
+	if ingress == nil {
+		return nil
+	}
+	binding := *ingress
+	binding.authority = cloneCodexLeaseAuthorityPolicy(binding.authority)
+	return &codexLeaseIngressContinuityClaim{owner: runtime, binding: binding}
+}
+
+func (claim *codexLeaseIngressContinuityClaim) release() {
+	if claim == nil {
+		return
+	}
+	claim.mu.Lock()
+	claim.released = true
+	claim.mu.Unlock()
+}
+
+func (claim *codexLeaseIngressContinuityClaim) consume(runtime *CodexLeaseRuntime, key LeaseKey, authority CodexLeaseAuthorityPolicy, evidence CodexLeaseRequestEvidence) (*codexLeaseIngressContinuityBinding, error) {
+	if claim == nil {
+		return nil, nil
+	}
+	claim.mu.Lock()
+	defer claim.mu.Unlock()
+	binding := claim.binding
+	correlationHash := ""
+	if evidence.PreviousResponseID != "" && runtime != nil && runtime.store != nil {
+		correlationHash = runtime.store.hash("correlation", evidence.PreviousResponseID)
+	}
+	turnStateHash := ""
+	if evidence.HasTurnState && runtime != nil && runtime.store != nil {
+		turnStateHash = runtime.store.hash("turn-state", evidence.TurnState)
+	}
+	if claim.released || claim.consumed || claim.owner != runtime || binding.owner != runtime || binding.key != key ||
+		!sameCodexLeaseAuthorityPolicy(binding.authority, authority) ||
+		binding.hasTurnState != evidence.HasTurnState || binding.hasPreviousResponse != (evidence.PreviousResponseID != "") || binding.hasEncryptedState != evidence.HasEncryptedState ||
+		!constantTimeCodexLeaseDigestEqual(binding.turnStateHash, turnStateHash) ||
+		(binding.hasPreviousResponse && !constantTimeCodexLeaseDigestEqual(binding.correlationHash, correlationHash)) ||
+		(!binding.hasPreviousResponse && (binding.correlationHash != "" || correlationHash != "")) {
+		return nil, ErrCodexLeaseAuthorityMismatch
+	}
+	claim.consumed = true
+	binding.authority = cloneCodexLeaseAuthorityPolicy(binding.authority)
+	return &binding, nil
 }
 
 func (set *codexLanePlanningGateSet) acquire(ctx context.Context, lane LaneKey) (*codexLanePlanningGateGuard, error) {
@@ -314,6 +579,10 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
+	ingressContinuity, err := plan.ingressContinuity.consume(runtime, plan.Key, plan.Authority, plan.Evidence)
+	if err != nil {
+		return nil, err
+	}
 	selected := plan.Slots[plan.InitialSlot-1]
 	release, err := runtime.beginAccountMutation(ctx, selected.AccountKey)
 	if err != nil {
@@ -333,7 +602,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if restored.Classification == CodexRestoredLaneHistorical {
 		return nil, ErrCodexStaleTurn
 	}
-	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity)
+	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity, ingressContinuity)
 	if err != nil {
 		return nil, err
 	}
@@ -431,6 +700,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		for _, record := range installed.Records {
 			if record.Identity() == identity {
 				committedRecord = cloneCodexJournalRecordV2(record)
+				runtime.turnStateRotations.clear(identity)
 				return
 			}
 		}
@@ -1063,11 +1333,13 @@ func (handle *CodexLeaseRequestHandle) commitRequestMutation(fence CodexLeaseGen
 		return nil, fmt.Errorf("%w: request mutation fence is absent", ErrCodexLeaseTrustLost)
 	}
 	expectedTouchedAttempts := len(recordFence.TouchedAttempts)
+	before := cloneCodexJournalRecordV2(handle.record)
 	var committedRecord CodexJournalRecordV2
 	post, err := handle.runtime.store.commitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
 		for _, record := range installed.Records {
 			if record.Identity() == identity {
 				committedRecord = cloneCodexJournalRecordV2(record)
+				handle.runtime.turnStateRotations.reconcile(before, record)
 				return
 			}
 		}
@@ -1434,7 +1706,7 @@ func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, ide
 	return CodexRestoredRecord{}, false
 }
 
-func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool) (bool, error) {
+func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool, ingressContinuity ...*codexLeaseIngressContinuityBinding) (bool, error) {
 	var authority CodexRestoredRecord
 	var found bool
 	newTurn := restored.Classification == CodexRestoredLaneUnseen
@@ -1453,11 +1725,16 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		return true, nil
 	}
 	if !newTurn && found {
+		ingress := firstIngressContinuity(ingressContinuity)
+		if ingress != nil && (ingress.kind == codexLeaseIngressContinuityInvalid || !runtime.validIngressContinuityTarget(restored, requestIdentity, selected, ingress)) {
+			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
+		}
 		missingAuthenticatedState := authenticatedCallerContinuity && authority.Record.HasTurnState && !evidence.HasTurnState
 		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState {
 			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
-		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) {
+		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) &&
+			!runtime.validIngressTurnStateRotation(restored, requestIdentity, selected, evidence, firstIngressContinuity(ingressContinuity)) {
 			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
 		}
 	}
@@ -1480,6 +1757,58 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		return requiresAccount, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 	}
 	return requiresAccount, nil
+}
+
+func firstIngressContinuity(bindings []*codexLeaseIngressContinuityBinding) *codexLeaseIngressContinuityBinding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	return bindings[0]
+}
+
+func (runtime *CodexLeaseRuntime) validIngressContinuityTarget(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, binding *codexLeaseIngressContinuityBinding) bool {
+	if runtime == nil || runtime.store == nil || binding == nil || restored.Classification != CodexRestoredLaneCurrent ||
+		restored.Fence.Current != requestIdentity || binding.identity != requestIdentity ||
+		!constantTimeCodexLeaseDigestEqual(binding.accountHash, runtime.store.hash("account", string(selected))) {
+		return false
+	}
+	current, found := runtime.restoredRecord(restored, requestIdentity)
+	return found && current.Identity == binding.identity && current.AccountKey == selected &&
+		constantTimeCodexLeaseDigestEqual(current.Record.AccountHash, binding.accountHash) &&
+		current.Record.RecordGeneration >= binding.recordGeneration &&
+		current.Record.Generation == binding.requestGeneration && current.Record.CurrentAttemptGeneration == binding.attemptGeneration
+}
+
+func (runtime *CodexLeaseRuntime) validIngressTurnStateRotation(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, binding *codexLeaseIngressContinuityBinding) bool {
+	if runtime == nil || runtime.store == nil || binding == nil || restored.Classification != CodexRestoredLaneCurrent ||
+		restored.Fence.Current != requestIdentity || binding.identity != requestIdentity ||
+		binding.recordGeneration == 0 || binding.requestGeneration == 0 || binding.attemptGeneration == 0 ||
+		!binding.hasTurnState || !binding.recordHasTurnState || !evidence.HasTurnState ||
+		!constantTimeCodexLeaseDigestEqual(binding.turnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) {
+		return false
+	}
+	current, found := runtime.restoredRecord(restored, requestIdentity)
+	if !found || current.Identity != binding.identity || current.AccountKey != selected ||
+		!constantTimeCodexLeaseDigestEqual(current.Record.AccountHash, binding.accountHash) ||
+		current.Record.Generation != binding.requestGeneration || current.Record.CurrentAttemptGeneration != binding.attemptGeneration ||
+		!current.Record.HasTurnState || !codexLeaseRuntimeCanBeginRequest(current.Record) {
+		return false
+	}
+	switch binding.kind {
+	case codexLeaseIngressContinuityCurrent:
+		return constantTimeCodexLeaseDigestEqual(binding.turnStateHash, binding.recordTurnStateHash) &&
+			current.Record.RecordGeneration > binding.recordGeneration &&
+			!constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, binding.turnStateHash)
+	case codexLeaseIngressContinuityTerminalDrain:
+		attempt, ok := codexLeaseAttemptByGeneration(current.Record.Attempts, current.Record.CurrentAttemptGeneration)
+		return ok && binding.recordGeneration < ^uint64(0) && current.Record.RecordGeneration == binding.recordGeneration+1 &&
+			attempt.Revision == binding.attemptRevision && attempt.State == binding.attemptState && current.Record.State == binding.leaseState &&
+			constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, binding.recordTurnStateHash) &&
+			!constantTimeCodexLeaseDigestEqual(binding.turnStateHash, binding.recordTurnStateHash) &&
+			current.Record.RoutingRefs == 0 && current.Record.AttemptRefs == 0 && current.Record.ResponseObserverRefs == 0 && current.Record.SocketLineageExtinct
+	default:
+		return false
+	}
 }
 
 func codexLeaseRuntimeRequestIdentity(restored CodexRestoredLane) CodexJournalRecordIdentity {
@@ -1657,4 +1986,16 @@ func codexLeaseRuntimeMutationRecord(record CodexJournalRecordV2) CodexJournalRe
 func cloneCodexLeaseAuthorityPolicy(policy CodexLeaseAuthorityPolicy) CodexLeaseAuthorityPolicy {
 	policy.RetainedAuthoritativeEpochs = append([]uint64(nil), policy.RetainedAuthoritativeEpochs...)
 	return policy
+}
+
+func sameCodexLeaseAuthorityPolicy(left, right CodexLeaseAuthorityPolicy) bool {
+	if left.ModeEpoch != right.ModeEpoch || left.Authoritative != right.Authoritative || len(left.RetainedAuthoritativeEpochs) != len(right.RetainedAuthoritativeEpochs) {
+		return false
+	}
+	for index := range left.RetainedAuthoritativeEpochs {
+		if left.RetainedAuthoritativeEpochs[index] != right.RetainedAuthoritativeEpochs[index] {
+			return false
+		}
+	}
+	return true
 }
