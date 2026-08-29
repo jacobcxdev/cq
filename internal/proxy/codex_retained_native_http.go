@@ -43,17 +43,31 @@ func (handler *CodexRetainedNativeHTTPHandler) TryServe(writer http.ResponseWrit
 		return false, ""
 	}
 
+	planningContext, releasePlanningContext := handler.native.requestPlanningContext(request.Context())
+	defer releasePlanningContext()
 	probeEncoded := bytes.Clone(buffered)
-	expected, claimed, probeErr := handler.planner.ProbeRetained(request.Context(), CodexHTTPRequestPlanInput{
+	claim, claimed, probeErr := handler.planner.ProbeRetained(planningContext, CodexHTTPRequestPlanInput{
 		Encoded: probeEncoded,
 		Headers: request.Header.Clone(),
 	})
 	clearBytes(probeEncoded)
 	if !claimed {
+		if claim != nil {
+			claim.release()
+		}
 		restoreCodexRetainedRequest(request, buffered, owner, originalGetBody, true)
 		return false, ""
 	}
-	if probeErr != nil || expected == nil {
+	defer claim.release()
+	release, admitted := handler.native.requests.enter()
+	if !admitted {
+		clearBytes(buffered)
+		_ = owner.Close()
+		writeError(writer, http.StatusServiceUnavailable, "api_error", "Codex retained HTTP routing unavailable")
+		return true, ""
+	}
+	defer release()
+	if probeErr != nil || claim == nil {
 		clearBytes(buffered)
 		_ = owner.Close()
 		writeError(writer, http.StatusServiceUnavailable, "api_error", "Codex retained HTTP routing unavailable")
@@ -64,7 +78,14 @@ func (handler *CodexRetainedNativeHTTPHandler) TryServe(writer http.ResponseWrit
 		writeError(writer, http.StatusBadRequest, "invalid_request_error", "failed to inspect request body")
 		return true, ""
 	}
-	return handler.native.serveEncoded(writer, request, compact, buffered, expected)
+	return handler.native.serveEncoded(writer, request, compact, buffered, claim)
+}
+
+func (handler *CodexRetainedNativeHTTPHandler) CloseAndDrain(ctx context.Context) error {
+	if handler == nil || handler.native == nil {
+		return errors.New("Codex retained HTTP handler unavailable")
+	}
+	return handler.native.CloseAndDrain(ctx)
 }
 
 type codexRetainedBodyOwner struct {

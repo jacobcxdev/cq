@@ -23,7 +23,7 @@ type CodexNativeHTTPRequestPlanner interface {
 // without selecting a prospective route or mutating durable authority.
 type CodexRetainedNativeHTTPRequestPlanner interface {
 	CodexNativeHTTPRequestPlanner
-	ProbeRetained(context.Context, CodexHTTPRequestPlanInput) (*CodexLeaseBoundExpectation, bool, error)
+	ProbeRetained(context.Context, CodexHTTPRequestPlanInput) (*CodexRetainedHTTPRequestClaim, bool, error)
 }
 
 // CodexNativeHTTPRequestSession executes one prepared request without
@@ -52,6 +52,8 @@ type CodexNativeHTTPHandler struct {
 	session              CodexNativeHTTPRequestSession
 	upstream             url.URL
 	requests             *codexNativeHTTPRequestGate
+	planningContext      context.Context
+	cancelPlanning       context.CancelFunc
 	installedProbe       atomic.Pointer[codexInstalledHTTPGateProbe]
 	reportPlanFailure    func(CodexHTTPRequestPlanFailure)
 	reportSessionFailure func(codexNativeHTTPSessionFailure)
@@ -77,9 +79,12 @@ func NewCodexNativeHTTPHandler(planner CodexNativeHTTPRequestPlanner, session Co
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("Codex native HTTP upstream is invalid")
 	}
+	planningContext, cancelPlanning := context.WithCancel(context.Background())
 	return &CodexNativeHTTPHandler{
 		planner: planner, session: session, upstream: *parsed,
 		requests:             newCodexNativeHTTPRequestGate(),
+		planningContext:      planningContext,
+		cancelPlanning:       cancelPlanning,
 		reportPlanFailure:    reportCodexNativeHTTPPlanFailure,
 		reportSessionFailure: reportCodexNativeHTTPSessionFailure,
 	}, nil
@@ -148,7 +153,14 @@ func (handler *CodexNativeHTTPHandler) CloseAndDrain(ctx context.Context) error 
 	if handler == nil {
 		return errors.New("Codex native HTTP handler unavailable")
 	}
-	return handler.requests.closeAndDrain(ctx)
+	if ctx == nil {
+		return errors.New("Codex native HTTP drain context unavailable")
+	}
+	drained := handler.requests.closeAdmission()
+	if handler.cancelPlanning != nil {
+		handler.cancelPlanning()
+	}
+	return waitForCodexNativeHTTPDrain(ctx, drained)
 }
 
 // TryServe is the enforcement implementation. It claims every request before
@@ -185,13 +197,19 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 	return handler.serveEncoded(writer, request, compact, encoded, nil)
 }
 
-func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, request *http.Request, compact bool, encoded []byte, expected *CodexLeaseBoundExpectation) (bool, string) {
+func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, request *http.Request, compact bool, encoded []byte, claim *CodexRetainedHTTPRequestClaim) (bool, string) {
 	trace := codexInstalledHTTPTraceFromContext(request.Context())
-	prepared, err := handler.planner.Build(request.Context(), CodexHTTPRequestPlanInput{
-		Encoded:       encoded,
-		Headers:       request.Header,
-		ExpectedBound: expected,
-	})
+	prepared, err := func() (CodexPreparedHTTPRequest, error) {
+		ctx, release := handler.requestPlanningContext(request.Context())
+		defer release()
+		input := CodexHTTPRequestPlanInput{Encoded: encoded, Headers: request.Header}
+		if claim != nil {
+			expected := claim.ExpectedBound
+			input.ExpectedBound = &expected
+			input.retainedPlanning = claim.planning
+		}
+		return handler.planner.Build(ctx, input)
+	}()
 	clearBytes(encoded)
 	if err != nil {
 		status := http.StatusServiceUnavailable
@@ -261,6 +279,24 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	relayErr := relayCodexAcceptedHTTPResponse(request.Context(), writer, result.Response, mode, result.Lifecycle)
 	trace.relayedResponse(true, false, relayErr)
 	return true, model
+}
+
+func (handler *CodexNativeHTTPHandler) requestPlanningContext(requestContext context.Context) (context.Context, func()) {
+	if requestContext == nil {
+		requestContext = context.Background()
+	}
+	ctx, cancel := context.WithCancel(requestContext)
+	if handler == nil || handler.planningContext == nil {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(handler.planningContext, cancel)
+	if handler.planningContext.Err() != nil {
+		cancel()
+	}
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (handler *CodexNativeHTTPHandler) requestTemplate(request *http.Request, compact bool) *http.Request {

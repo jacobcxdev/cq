@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -25,6 +26,10 @@ type CodexHTTPRequestPlanRuntime interface {
 	BeginRequestContext(context.Context, CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error)
 }
 
+type codexHTTPRequestPlanRuntimeWaiter interface {
+	AcquireRequestPlanningContext(context.Context, LeaseKey, []codex.AccountKey, CodexLeaseAuthorityPolicy) (func(), error)
+}
+
 type codexWebSocketPrewarmRuntime interface {
 	adoptWebSocketPrewarmContext(context.Context, []codex.AccountKey, CodexPrewarmAdoptionRequest) (*CodexLeaseRequestHandle, error)
 }
@@ -36,11 +41,71 @@ type CodexHTTPRequestPlanInput struct {
 	Headers          http.Header
 	AcceptedRevision codex.Revision
 	ExpectedBound    *CodexLeaseBoundExpectation
+
+	retainedPlanning *codexHTTPRequestPlanningGuard
 }
 
-// ProbeRetained performs the read-only half of retained routing. A claimed
-// result must either carry an exact bound expectation or a fail-closed error.
-func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, input CodexHTTPRequestPlanInput) (*CodexLeaseBoundExpectation, bool, error) {
+// CodexRetainedHTTPRequestClaim transfers one exact retained binding and its
+// lane-planning ownership to the matching request build.
+type CodexRetainedHTTPRequestClaim struct {
+	ExpectedBound CodexLeaseBoundExpectation
+
+	planning *codexHTTPRequestPlanningGuard
+}
+
+func (claim *CodexRetainedHTTPRequestClaim) release() {
+	if claim != nil && claim.planning != nil {
+		claim.planning.release()
+	}
+}
+
+type codexHTTPRequestPlanningGuard struct {
+	mu       sync.Mutex
+	owner    *CodexHTTPRequestPlanFactory
+	key      LeaseKey
+	releasef func()
+	consumed bool
+	released bool
+}
+
+func newCodexHTTPRequestPlanningGuard(factory *CodexHTTPRequestPlanFactory, key LeaseKey, release func()) *codexHTTPRequestPlanningGuard {
+	return &codexHTTPRequestPlanningGuard{owner: factory, key: key, releasef: release}
+}
+
+func (guard *codexHTTPRequestPlanningGuard) consume(factory *CodexHTTPRequestPlanFactory, key LeaseKey) (func(), error) {
+	if guard == nil {
+		return nil, ErrCodexLeaseAuthorityMismatch
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	if guard.released || guard.consumed || guard.owner != factory || guard.key != key {
+		return nil, ErrCodexLeaseAuthorityMismatch
+	}
+	guard.consumed = true
+	return guard.release, nil
+}
+
+func (guard *codexHTTPRequestPlanningGuard) release() {
+	if guard == nil {
+		return
+	}
+	guard.mu.Lock()
+	if guard.released {
+		guard.mu.Unlock()
+		return
+	}
+	guard.released = true
+	release := guard.releasef
+	guard.releasef = nil
+	guard.mu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// ProbeRetained performs the non-mutating half of retained routing. A claimed
+// result owns the exact lane-planning guard until Build consumes or releases it.
+func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, input CodexHTTPRequestPlanInput) (*CodexRetainedHTTPRequestClaim, bool, error) {
 	if factory == nil || factory.Inventory == nil || factory.Routes == nil {
 		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanUnavailable, nil)
 	}
@@ -61,7 +126,19 @@ func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, i
 	if err != nil {
 		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
 	}
-	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, codexHTTPRequestPlanAccountKeys(inventory), factory.Authority)
+	accounts := codexHTTPRequestPlanAccountKeys(inventory)
+	releasePlanning, err := factory.acquireRequestPlanning(ctx, key, accounts)
+	if err != nil {
+		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
+	}
+	planning := newCodexHTTPRequestPlanningGuard(factory, key, releasePlanning)
+	transferred := false
+	defer func() {
+		if !transferred {
+			planning.release()
+		}
+	}()
+	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, accounts, factory.Authority)
 	if err != nil || snapshot.JournalGeneration == 0 {
 		return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, err)
 	}
@@ -72,10 +149,14 @@ func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, i
 		}
 	case CodexRestoredLaneCurrent:
 		if snapshot.BoundIdentity.Authoritative && containsCodexLeaseEpoch(factory.Authority.RetainedAuthoritativeEpochs, snapshot.BoundIdentity.ModeEpoch) && snapshot.BoundAccountKey != "" && snapshot.BoundRecordGeneration != 0 {
-			return &CodexLeaseBoundExpectation{
-				Identity:         snapshot.BoundIdentity,
-				AccountKey:       snapshot.BoundAccountKey,
-				RecordGeneration: snapshot.BoundRecordGeneration,
+			transferred = true
+			return &CodexRetainedHTTPRequestClaim{
+				ExpectedBound: CodexLeaseBoundExpectation{
+					Identity:         snapshot.BoundIdentity,
+					AccountKey:       snapshot.BoundAccountKey,
+					RecordGeneration: snapshot.BoundRecordGeneration,
+				},
+				planning: planning,
 			}, true, nil
 		}
 	}
@@ -304,36 +385,13 @@ type CodexHTTPRequestPlanFactory struct {
 	operations codexHTTPRequestPlanFactoryOperations
 }
 
-const (
-	codexHTTPRequestSuccessorDrainRetryInterval = 2 * time.Millisecond
-	codexHTTPRequestSuccessorDrainWait          = 250 * time.Millisecond
-)
-
 // Build prepares one immutable native HTTP request and commits its first
 // prepared attempt. Success transfers Frozen and Lifecycle ownership.
 func (factory *CodexHTTPRequestPlanFactory) Build(ctx context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	deadline := time.Now().Add(codexHTTPRequestSuccessorDrainWait)
-	for {
-		result, err := factory.buildOnce(ctx, input)
-		if !errors.Is(err, ErrCodexConcurrentTurn) {
-			return result, err
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return result, err
-		}
-		wait := min(remaining, codexHTTPRequestSuccessorDrainRetryInterval)
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, ctx.Err())
-		case <-timer.C:
-		}
-	}
+	return factory.buildOnce(ctx, input)
 }
 
 func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
@@ -364,6 +422,11 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	unfilteredInventory := inventory
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
+	releasePlanning, err := factory.acquireOrConsumeRequestPlanning(ctx, key, accounts, input.retainedPlanning)
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
+	}
+	defer releasePlanning()
 	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, accounts, factory.Authority)
 	if err != nil || snapshot.JournalGeneration == 0 {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, err)
@@ -816,6 +879,11 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
 	}
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
+	releasePlanning, err := factory.acquireRequestPlanning(ctx, key, accounts)
+	if err != nil {
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
+	}
+	defer releasePlanning()
 	now := time.Now()
 	if factory.Now != nil {
 		now = factory.Now()
@@ -949,6 +1017,28 @@ func (factory *CodexHTTPRequestPlanFactory) inspect(ctx context.Context, encoded
 		return factory.operations.inspect(ctx, encoded, headers)
 	}
 	return InspectCodexNativeRequest(ctx, encoded, headers)
+}
+
+func (factory *CodexHTTPRequestPlanFactory) acquireRequestPlanning(ctx context.Context, key LeaseKey, accounts []codex.AccountKey) (func(), error) {
+	waiter, ok := factory.Runtime.(codexHTTPRequestPlanRuntimeWaiter)
+	if !ok {
+		return func() {}, nil
+	}
+	release, err := waiter.AcquireRequestPlanningContext(ctx, key, accounts, factory.Authority)
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	return release, nil
+}
+
+func (factory *CodexHTTPRequestPlanFactory) acquireOrConsumeRequestPlanning(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, retained *codexHTTPRequestPlanningGuard) (func(), error) {
+	if retained != nil {
+		return retained.consume(factory, key)
+	}
+	return factory.acquireRequestPlanning(ctx, key, accounts)
 }
 
 func (factory *CodexHTTPRequestPlanFactory) buildDispatch(ctx context.Context, input CodexFrozenDispatchInput) (CodexFrozenDispatchPlan, error) {

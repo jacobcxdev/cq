@@ -1269,28 +1269,334 @@ func TestCodexHTTPRequestPlanFactoryReleasesFrozenOnBeginFailure(t *testing.T) {
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryRetriesSuccessorWhilePredecessorDrains(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryWaitsForLongRunningPredecessor(t *testing.T) {
 	t.Parallel()
 
-	runtime := &codexHTTPRequestPlanTestRuntime{
-		handle: &CodexLeaseRequestHandle{account: "account"},
-		errs:   []error{ErrCodexConcurrentTurn, nil},
+	release := make(chan struct{})
+	runtime := &codexHTTPRequestPlanBlockingRuntime{
+		release: release,
+		began:   make(chan struct{}, 1),
+		handle:  &CodexLeaseRequestHandle{account: "account"},
 	}
 	factory := codexHTTPRequestPlanTestFactory(runtime)
-
-	result, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
-		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	key := []byte("01234567890123456789012345678901")
+	factory.SessionPolicy = NewSessionPolicyResolver(key, RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account"}}},
+		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "team"}},
 	})
+	permits := &sessionPolicyPermitRecorder{}
+	factory.DispatchPermits = permits
+	inspectCalls := 0
+	freezeCalls := 0
+	factory.operations.inspect = func(ctx context.Context, encoded []byte, headers http.Header) (*CodexFrozenRequestInspection, error) {
+		inspectCalls++
+		return InspectCodexNativeRequest(ctx, encoded, headers)
+	}
+	factory.operations.freeze = func(ctx context.Context, inspection *CodexFrozenRequestInspection, choice RouteChoice, headroom CodexRequestHeadroom, mode HeadroomMode) (*CodexFrozenRequest, error) {
+		freezeCalls++
+		return inspection.Freeze(ctx, choice, headroom, mode)
+	}
+
+	type buildResult struct {
+		prepared CodexPreparedHTTPRequest
+		err      error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ctx = withRuntimeCallerAuthority(ctx, RuntimeCallerAuthorityV1{
+		Domain: NormalCallerCodex, SubjectID: "caller", ConsumptionDigest: strings.Repeat("a", 64),
+	})
+	ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate\x00revision")
+	result := make(chan buildResult, 1)
+	go func() {
+		prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+			Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		})
+		result <- buildResult{prepared: prepared, err: err}
+	}()
+
+	select {
+	case <-runtime.began:
+	case <-ctx.Done():
+		t.Fatal("successor never began waiting for predecessor")
+	}
+	<-time.After(300 * time.Millisecond)
+	select {
+	case got := <-result:
+		close(release)
+		t.Fatalf("successor returned before predecessor completed: %v", got.err)
+	default:
+	}
+	close(release)
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("build after predecessor completed: %v", got.err)
+		}
+		if got.prepared.Frozen == nil || got.prepared.Lifecycle == nil {
+			t.Fatalf("prepared result = %#v", got.prepared)
+		}
+		got.prepared.Frozen.Release()
+		inventory := factory.Inventory.(*codexHTTPRequestPlanTestInventory)
+		snapshotter := factory.Routes.(*codexHTTPRequestPlanTestSnapshotter)
+		if inspectCalls != 1 || inventory.calls != 1 || snapshotter.calls != 1 || freezeCalls != 1 || len(permits.requests) != 1 {
+			t.Fatalf("one-shot planning calls = inspect %d inventory %d snapshot %d freeze %d permits %d", inspectCalls, inventory.calls, snapshotter.calls, freezeCalls, len(permits.requests))
+		}
+		if runtime.calls != 1 {
+			t.Fatalf("begin calls = %d, want one after predecessor drains", runtime.calls)
+		}
+	case <-ctx.Done():
+		t.Fatal("successor did not begin after predecessor completed")
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryWaitsForDurableWebSocketPredecessor(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtime := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	plan.Key.Lane.Session = "session"
+	plan.Key.Lane.Thread = "thread"
+	plan.RequestedModel = "gpt-5"
+	plan.EffectiveModel = "gpt-5"
+
+	turn, err := runtime.BeginRequest(plan)
 	if err != nil {
-		t.Fatalf("build after %d calls: %v", runtime.calls, err)
+		t.Fatal(err)
 	}
-	if runtime.calls != 2 {
-		t.Fatalf("begin calls = %d, want 2", runtime.calls)
+	turn, err = turn.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if result.Frozen == nil || result.Lifecycle == nil {
-		t.Fatalf("prepared result = %#v", result)
+	turn, err = turn.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
 	}
-	result.Frozen.Release()
+	turn, err = turn.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn, err = turn.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	midTurn := plan
+	midTurn.RequestKind = CodexRequestCompaction
+	midTurn.CompactionPhase = CodexCompactionMidTurn
+	predecessor, err := runtime.BeginRequest(midTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	webSocketLifecycle, err := newCodexWSLifecycle(predecessor, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := webSocketLifecycle.ObserveUpstreamUpgrade(context.Background(), 1, "private-ws-state"); err != nil {
+		t.Fatal(err)
+	}
+
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.Routes = coordinator
+	factory.Authority = plan.Authority
+	body := bytes.Replace(
+		frozenRequestBody("gpt-5", CodexRequestCompaction, "private-body"),
+		[]byte(`"compaction":"standalone_turn"`),
+		[]byte(`"compaction":"pre_turn"`),
+		1,
+	)
+	type buildResult struct {
+		prepared CodexPreparedHTTPRequest
+		err      error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ctx = withRuntimeCallerAuthority(ctx, RuntimeCallerAuthorityV1{
+		Domain: NormalCallerCodex, SubjectID: "caller", ConsumptionDigest: strings.Repeat("a", 64),
+	})
+	ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate\x00revision")
+	result := make(chan buildResult, 1)
+	go func() {
+		prepared, buildErr := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
+		result <- buildResult{prepared: prepared, err: buildErr}
+	}()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	waiting := time.NewTicker(time.Millisecond)
+	defer waiting.Stop()
+	for !codexHTTPRequestPlanPlanningGateHeld(runtime, plan.Key.Lane) {
+		select {
+		case <-waiting.C:
+		case <-deadline.C:
+			t.Fatal("HTTP successor did not acquire lane planning gate")
+		}
+	}
+	<-time.After(300 * time.Millisecond)
+	select {
+	case got := <-result:
+		t.Fatalf("HTTP successor returned before WebSocket predecessor drained: %v", got.err)
+	default:
+	}
+	if _, err := webSocketLifecycle.ObserveFrame(
+		context.Background(),
+		1,
+		[]byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":false}}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := webSocketLifecycle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("build after durable predecessor drained: %v", got.err)
+		}
+		if got.prepared.Frozen == nil || got.prepared.Lifecycle == nil {
+			t.Fatalf("prepared result = %#v", got.prepared)
+		}
+		if got.prepared.leaseHandle == nil || got.prepared.leaseHandle.RequestGeneration() != 3 {
+			t.Fatalf("successor generation = %v, want 3", got.prepared.leaseHandle)
+		}
+		if _, err := got.prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		got.prepared.Frozen.Release()
+	case <-ctx.Done():
+		t.Fatal("HTTP successor did not begin after WebSocket predecessor drained")
+	}
+}
+
+func TestCodexLeaseRuntimePlanningGateSerialisesExactLaneOnly(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtime := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	first := plan.Key
+	first.Lane = LaneKey{Session: "session-a", Thread: "thread-a", Namespace: CodexResponsesNamespace}
+	firstDigest := sha256.Sum256([]byte(first.Lane.Session + "\x00" + first.Lane.Thread + "\x00" + first.Lane.Namespace))
+	second := first
+	second.Turn = "turn-b"
+	for index := 0; ; index++ {
+		second.Lane = LaneKey{Session: "session-b", Thread: fmt.Sprintf("thread-%d", index), Namespace: CodexResponsesNamespace}
+		digest := sha256.Sum256([]byte(second.Lane.Session + "\x00" + second.Lane.Thread + "\x00" + second.Lane.Namespace))
+		if digest[0] == firstDigest[0] {
+			break
+		}
+	}
+
+	releaseFirst, err := runtime.AcquireRequestPlanningContext(context.Background(), first, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirst()
+
+	secondContext, cancelSecond := context.WithTimeout(context.Background(), time.Second)
+	defer cancelSecond()
+	releaseSecond, err := runtime.AcquireRequestPlanningContext(secondContext, second, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatalf("unrelated colliding lane blocked: %v", err)
+	}
+	releaseSecond()
+
+	sameLane := first
+	sameLane.Turn = "turn-c"
+	type acquisition struct {
+		release func()
+		err     error
+	}
+	acquired := make(chan acquisition, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go func() {
+		release, acquireErr := runtime.AcquireRequestPlanningContext(ctx, sameLane, plan.Accounts, plan.Authority)
+		acquired <- acquisition{release: release, err: acquireErr}
+	}()
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for codexHTTPRequestPlanPlanningGateReferences(runtime, first.Lane) != 2 {
+		select {
+		case <-time.After(time.Millisecond):
+		case <-deadline.C:
+			t.Fatal("same-lane waiter did not queue")
+		}
+	}
+	select {
+	case got := <-acquired:
+		if got.release != nil {
+			got.release()
+		}
+		t.Fatalf("same lane acquired concurrently: %v", got.err)
+	default:
+	}
+	releaseFirst()
+
+	select {
+	case got := <-acquired:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		got.release()
+	case <-ctx.Done():
+		t.Fatal("same lane did not acquire after release")
+	}
+	if refs := codexHTTPRequestPlanPlanningGateReferences(runtime, first.Lane); refs != 0 {
+		t.Fatalf("released lane retained %d planning references", refs)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryStopsWaitingForCancelledSuccessor(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	runtime := &codexHTTPRequestPlanBlockingRuntime{
+		release: release,
+		began:   make(chan struct{}, 1),
+		handle:  &CodexLeaseRequestHandle{account: "account"},
+	}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+			Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		})
+		result <- err
+	}()
+
+	select {
+	case <-runtime.began:
+	case <-time.After(time.Second):
+		t.Fatal("successor never began waiting for predecessor")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		assertCodexHTTPRequestPlanError(t, err, CodexHTTPRequestPlanBegin, "")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context cancellation", err)
+		}
+		if runtime.calls != 0 {
+			t.Fatalf("begin calls = %d, want none after cancelled wait", runtime.calls)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successor wait ignored context cancellation")
+	}
 }
 
 func TestCodexHTTPRequestPlanFactoryAbandonsCommittedHandleAfterCancellation(t *testing.T) {
@@ -1491,10 +1797,11 @@ func TestCodexHTTPRequestPlanFactoryProbeRetainedClaimsOnlyExactAuthoritativeBin
 	factory.Routes = routes
 	input := CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")}
 
-	expected, claimed, err := factory.ProbeRetained(context.Background(), input)
-	if err != nil || !claimed || expected == nil || expected.Identity != identity || expected.AccountKey != "account" || expected.RecordGeneration != 12 {
-		t.Fatalf("retained probe = %#v, claimed=%t, err=%v", expected, claimed, err)
+	claim, claimed, err := factory.ProbeRetained(context.Background(), input)
+	if err != nil || !claimed || claim == nil || claim.ExpectedBound.Identity != identity || claim.ExpectedBound.AccountKey != "account" || claim.ExpectedBound.RecordGeneration != 12 {
+		t.Fatalf("retained probe = %#v, claimed=%t, err=%v", claim, claimed, err)
 	}
+	claim.release()
 	if routes.calls != 1 {
 		t.Fatalf("route snapshot calls = %d, want 1", routes.calls)
 	}
@@ -1662,6 +1969,31 @@ type codexHTTPRequestPlanTestRuntime struct {
 	beforeReturn func()
 }
 
+type codexHTTPRequestPlanBlockingRuntime struct {
+	release <-chan struct{}
+	began   chan struct{}
+	handle  *CodexLeaseRequestHandle
+	calls   int
+}
+
+func (runtime *codexHTTPRequestPlanBlockingRuntime) AcquireRequestPlanningContext(ctx context.Context, _ LeaseKey, _ []codex.AccountKey, _ CodexLeaseAuthorityPolicy) (func(), error) {
+	select {
+	case runtime.began <- struct{}{}:
+	default:
+	}
+	select {
+	case <-runtime.release:
+		return func() {}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (runtime *codexHTTPRequestPlanBlockingRuntime) BeginRequestContext(_ context.Context, _ CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
+	runtime.calls++
+	return runtime.handle, nil
+}
+
 func (runtime *codexHTTPRequestPlanTestRuntime) BeginRequestContext(_ context.Context, plan CodexLeaseRequestPlan) (*CodexLeaseRequestHandle, error) {
 	runtime.calls++
 	if runtime.events != nil {
@@ -1698,6 +2030,29 @@ func codexHTTPRequestPlanTestFactory(runtime CodexHTTPRequestPlanRuntime) *Codex
 		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
 		Now:               func() time.Time { return now },
 	}
+}
+
+func codexHTTPRequestPlanPlanningGateHeld(runtime *CodexLeaseRuntime, lane LaneKey) bool {
+	if runtime == nil || runtime.planningGates == nil {
+		return false
+	}
+	runtime.planningGates.mu.Lock()
+	defer runtime.planningGates.mu.Unlock()
+	entry := runtime.planningGates.entries[lane]
+	return entry != nil && len(entry.token) == 0
+}
+
+func codexHTTPRequestPlanPlanningGateReferences(runtime *CodexLeaseRuntime, lane LaneKey) int {
+	if runtime == nil || runtime.planningGates == nil {
+		return 0
+	}
+	runtime.planningGates.mu.Lock()
+	defer runtime.planningGates.mu.Unlock()
+	entry := runtime.planningGates.entries[lane]
+	if entry == nil {
+		return 0
+	}
+	return entry.refs
 }
 
 func assertCodexHTTPRequestPlanError(t *testing.T, err error, code CodexHTTPRequestPlanErrorCode, private string) {

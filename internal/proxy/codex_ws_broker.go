@@ -277,6 +277,14 @@ type codexWSUpstreamRead struct {
 	err         error
 }
 
+type codexWSDownstreamReader struct {
+	conn     websocketRelayConn
+	cancel   context.CancelFunc
+	frames   <-chan codexWSUpstreamRead
+	terminal <-chan error
+	done     <-chan struct{}
+}
+
 func newCodexTerminatingWSBroker(config codexTerminatingWSBrokerConfig) (*codexTerminatingWSBroker, error) {
 	if config.Plans == nil || config.Upstream == nil || config.UpstreamURL == "" || config.DownstreamGeneration == 0 {
 		return nil, fmt.Errorf("%w: incomplete terminating WebSocket broker", ErrCodexLeaseWriterUnavailable)
@@ -292,33 +300,122 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	serveCtx, cancelServe := context.WithCancel(ctx)
+	downstreamReader := startCodexWSDownstreamReader(serveCtx, cancelServe, downstream)
+	defer downstreamReader.close()
 	var active codexWSActiveUpstream
 	defer func() {
 		broker.cancelActivePrewarm(&active)
 		closeCodexWSActiveUpstream(&active)
 	}()
 	for {
-		messageType, encoded, err := readCodexWSMessage(ctx, downstream)
+		messageType, encoded, err := downstreamReader.read(ctx, serveCtx)
 		if err != nil {
-			var closeErr *websocket.CloseError
-			if errors.Is(err, io.EOF) || errors.As(err, &closeErr) {
-				return nil
-			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			return newCodexWebSocketBrokerError(codexWebSocketFailureStageDownstreamRead, codexWebSocketFailureReasonDownstreamReadFailed)
+			return classifyCodexWSDownstreamReadError(err)
 		}
 		pending, err := newCodexWSPendingFrame(messageType, encoded)
 		if err != nil {
 			return err
 		}
-		err = broker.serveFrame(ctx, downstream, pending, &active)
+		err = broker.serveFrame(serveCtx, downstream, pending, &active)
 		pending.Release()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if serveCtx.Err() != nil {
+				return classifyCodexWSDownstreamReadError(downstreamReader.terminalError())
+			}
 			return err
 		}
 	}
+}
+
+func startCodexWSDownstreamReader(ctx context.Context, cancel context.CancelFunc, conn websocketRelayConn) *codexWSDownstreamReader {
+	frames := make(chan codexWSUpstreamRead, 1)
+	terminal := make(chan error, 1)
+	done := make(chan struct{})
+	reader := &codexWSDownstreamReader{conn: conn, cancel: cancel, frames: frames, terminal: terminal, done: done}
+	go func() {
+		defer close(done)
+		defer close(frames)
+		defer func() {
+			if recover() != nil {
+				terminal <- errors.New("Codex downstream WebSocket read failed")
+				cancel()
+			}
+		}()
+		for {
+			messageType, payload, err := readCodexWSMessage(ctx, conn)
+			if err != nil {
+				terminal <- err
+				cancel()
+				return
+			}
+			select {
+			case frames <- codexWSUpstreamRead{messageType: messageType, payload: payload}:
+			default:
+				clearBytes(payload)
+				terminal <- ErrCodexWSInvalidFrame
+				cancel()
+				return
+			}
+		}
+	}()
+	return reader
+}
+
+func (reader *codexWSDownstreamReader) read(parent, ctx context.Context) (int, []byte, error) {
+	if reader == nil {
+		return 0, nil, ErrCodexLeaseWriterUnavailable
+	}
+	select {
+	case frame, ok := <-reader.frames:
+		if ok {
+			return frame.messageType, frame.payload, nil
+		}
+		return 0, nil, reader.terminalError()
+	case <-ctx.Done():
+		if parent != nil && parent.Err() != nil {
+			return 0, nil, parent.Err()
+		}
+		return 0, nil, reader.terminalError()
+	}
+}
+
+func (reader *codexWSDownstreamReader) terminalError() error {
+	if reader == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	select {
+	case err := <-reader.terminal:
+		return err
+	default:
+		return context.Canceled
+	}
+}
+
+func (reader *codexWSDownstreamReader) close() {
+	if reader == nil {
+		return
+	}
+	reader.cancel()
+	_ = reader.conn.SetReadDeadline(time.Now())
+	<-reader.done
+	for frame := range reader.frames {
+		clearBytes(frame.payload)
+	}
+}
+
+func classifyCodexWSDownstreamReadError(err error) error {
+	var closeErr *websocket.CloseError
+	if errors.Is(err, io.EOF) || errors.As(err, &closeErr) {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCodexWSInvalidFrame) {
+		return err
+	}
+	return newCodexWebSocketBrokerError(codexWebSocketFailureStageDownstreamRead, codexWebSocketFailureReasonDownstreamReadFailed)
 }
 
 func startCodexWSUpstreamReader(ctx context.Context, active *codexWSActiveUpstream) {

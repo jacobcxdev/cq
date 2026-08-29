@@ -30,18 +30,19 @@ import (
 const codexReleaseExecutableAcceptanceEnvironment = "CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE"
 
 type codexReleaseExecutableIsolation struct {
-	root       string
-	home       string
-	codexHome  string
-	tmp        string
-	cache      string
-	config     string
-	data       string
-	continuity string
-	resilience string
-	claude     string
-	localToken string
-	port       int
+	root        string
+	home        string
+	codexHome   string
+	tmp         string
+	cache       string
+	config      string
+	data        string
+	continuity  string
+	resilience  string
+	claude      string
+	diagnostics string
+	localToken  string
+	port        int
 }
 
 type codexReleaseExecutableProcess struct {
@@ -63,6 +64,77 @@ type codexReleaseSystemProxySnapshot struct {
 type codexReleaseExecutableDiagnosticBuffer struct {
 	mu   sync.Mutex
 	data []byte
+}
+
+type codexReleaseExecutableRouteEvidence struct {
+	httpOK             int
+	webSocketProtocols int
+	failures           int
+	status503          int
+	status502          int
+}
+
+func codexReleaseExecutableRouteEvidenceFromEvents(events []RouteEvent) codexReleaseExecutableRouteEvidence {
+	var evidence codexReleaseExecutableRouteEvidence
+	for _, event := range events {
+		if event.Provider != "codex" {
+			continue
+		}
+		isNativeHTTP := event.Method == http.MethodPost &&
+			((event.RouteKind == "codex_native" && event.Path == legacyCodexResponsesPath) ||
+				(event.RouteKind == "codex_compact" && event.Path == legacyCodexCompactResponsesPath))
+		isWebSocket := event.RouteKind == "codex_websocket_broker" &&
+			event.Method == http.MethodGet &&
+			event.Path == legacyCodexResponsesPath
+		if !isNativeHTTP && !isWebSocket {
+			continue
+		}
+
+		success := event.Error == ""
+		if isNativeHTTP {
+			success = success && event.StatusCode == http.StatusOK
+		} else {
+			success = success && event.StatusCode == http.StatusSwitchingProtocols
+		}
+		if !success {
+			evidence.failures++
+			switch event.StatusCode {
+			case http.StatusServiceUnavailable:
+				evidence.status503++
+			case http.StatusBadGateway:
+				evidence.status502++
+			}
+			continue
+		}
+		if isNativeHTTP {
+			evidence.httpOK++
+		} else {
+			evidence.webSocketProtocols++
+		}
+	}
+	return evidence
+}
+
+func TestCodexReleaseExecutableRouteEvidenceRetainsFailuresBeforeRecovery(t *testing.T) {
+	evidence := codexReleaseExecutableRouteEvidenceFromEvents([]RouteEvent{
+		{Provider: "codex", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexResponsesPath, StatusCode: http.StatusServiceUnavailable},
+		{Provider: "codex", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexResponsesPath, StatusCode: http.StatusOK},
+		{Provider: "codex", RouteKind: "codex_compact", Method: http.MethodPost, Path: legacyCodexCompactResponsesPath, StatusCode: http.StatusBadGateway},
+		{Provider: "codex", RouteKind: "codex_compact", Method: http.MethodPost, Path: legacyCodexCompactResponsesPath, StatusCode: http.StatusOK},
+		{Provider: "codex", RouteKind: "codex_websocket_broker", Method: http.MethodGet, Path: legacyCodexResponsesPath, StatusCode: http.StatusSwitchingProtocols, Error: "api_error:upstream_outcome_indeterminate"},
+		{Provider: "codex", RouteKind: "codex_websocket_broker", Method: http.MethodGet, Path: legacyCodexResponsesPath, StatusCode: http.StatusSwitchingProtocols},
+		{Provider: "claude", RouteKind: "codex_native", Method: http.MethodPost, Path: legacyCodexResponsesPath, StatusCode: http.StatusOK},
+	})
+	if evidence.httpOK != 2 || evidence.webSocketProtocols != 1 || evidence.failures != 3 || evidence.status503 != 1 || evidence.status502 != 1 {
+		t.Fatalf(
+			"release executable route evidence = HTTP %d/WebSocket %d/failures %d/503 %d/502 %d, want 2/1/3/1/1",
+			evidence.httpOK,
+			evidence.webSocketProtocols,
+			evidence.failures,
+			evidence.status503,
+			evidence.status502,
+		)
+	}
 }
 
 type codexReleaseCredentialSource interface {
@@ -396,6 +468,9 @@ func TestNewCodexReleaseExecutableIsolationSeparatesSystemCallerFromRoutingAuth(
 	if config.CodexRoutingPinnedAccountKey != "release-validation-account" {
 		t.Fatalf("validation routing pin = %q, want release-validation-account", config.CodexRoutingPinnedAccountKey)
 	}
+	if config.DiagnosticsLog != isolation.diagnostics || filepath.Dir(config.DiagnosticsLog) != isolation.root {
+		t.Fatalf("validation diagnostics log = %q, want isolated path %q", config.DiagnosticsLog, isolation.diagnostics)
+	}
 	managedBody, err := os.ReadFile(filepath.Join(isolation.codexHome, "accounts", "release-validation.auth.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -533,6 +608,23 @@ func TestCodexExactExecutableNormalPassesThroughLiveUpstream(t *testing.T) {
 	if err := process.Stop(); err != nil {
 		t.Fatal(err)
 	}
+	evidence := codexReleaseExecutableRouteEvidenceFromEvents(readDiagnosticsEvents(t, isolation.diagnostics))
+	if evidence.httpOK == 0 || evidence.webSocketProtocols == 0 || evidence.failures != 0 {
+		t.Fatalf(
+			"release executable normal route evidence = HTTP POST /responses-or-compact 200: %d, WebSocket GET /responses 101: %d, failures: %d (503: %d, 502: %d), want positive/positive/0",
+			evidence.httpOK,
+			evidence.webSocketProtocols,
+			evidence.failures,
+			evidence.status503,
+			evidence.status502,
+		)
+	}
+	t.Logf(
+		"release executable normal route evidence: port=%d HTTP POST /responses-or-compact 200=%d WebSocket GET /responses 101=%d",
+		isolation.port,
+		evidence.httpOK,
+		evidence.webSocketProtocols,
+	)
 	sourceAfter, err := source.ProtectionSnapshot()
 	if err != nil || sourceAfter != sourceBefore {
 		t.Fatal("normal CQ Codex auth changed during release executable acceptance")
@@ -634,7 +726,7 @@ func newCodexReleaseExecutableIsolation(t *testing.T, routingCredential, clientC
 		root: root, home: filepath.Join(root, "home"), tmp: filepath.Join(root, "tmp"),
 		cache: filepath.Join(root, "cache"), config: filepath.Join(root, "config"), data: filepath.Join(root, "data"),
 		continuity: filepath.Join(root, "continuity"), resilience: filepath.Join(root, "resilience"),
-		claude: filepath.Join(root, "claude"), localToken: routingCredential.localToken,
+		claude: filepath.Join(root, "claude"), diagnostics: filepath.Join(root, "routes.jsonl"), localToken: routingCredential.localToken,
 	}
 	isolation.codexHome = filepath.Join(isolation.home, ".codex")
 	for _, directory := range []string{isolation.home, isolation.codexHome, isolation.tmp, isolation.cache, isolation.config, isolation.data, isolation.continuity, isolation.resilience, isolation.claude} {
@@ -660,7 +752,8 @@ func newCodexReleaseExecutableIsolation(t *testing.T, routingCredential, clientC
 	}
 	config := &Config{
 		Port: isolation.port, ClaudeUpstream: DefaultUpstream, CodexUpstream: DefaultCodexUpstream,
-		LocalToken: routingCredential.localToken, CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingEnforce,
+		LocalToken: routingCredential.localToken, DiagnosticsLog: isolation.diagnostics,
+		CodexTurnRouting: CodexRoutingEnforce, CodexWSTurnRouting: CodexRoutingEnforce,
 		CodexRoutingPinnedAccountKey: "release-validation-account",
 		CodexLeaseRetentionDays:      7, CodexContinuityStateDir: isolation.continuity,
 		ProxyResilienceStateDir: isolation.resilience, CodexWindowPriming: CodexWindowPrimingConfig{Enabled: false},

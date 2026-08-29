@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1369,6 +1371,259 @@ func TestCodexTerminatingWSBrokerCancellationUnblocksUpstreamRead(t *testing.T) 
 	}
 }
 
+func TestCodexTerminatingWSBrokerPeerCloseCancelsBlockedPlanning(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	slots := []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}}
+	lane := LaneKey{Session: "session", Thread: "thread", Namespace: CodexResponsesNamespace}
+	predecessorPlan := codexLeaseRuntimeTestPlan("turn", slots)
+	predecessorPlan.Key.Lane = lane
+	predecessorPlan.RequestedModel = "gpt-5"
+	predecessorPlan.EffectiveModel = "gpt-5"
+	turn, err := runtimeLease.BeginRequest(predecessorPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err = turn.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err = turn.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err = turn.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn, err = turn.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	midTurnPlan := predecessorPlan
+	midTurnPlan.RequestKind = CodexRequestCompaction
+	midTurnPlan.CompactionPhase = CodexCompactionMidTurn
+	predecessor, err := runtimeLease.BeginRequest(midTurnPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorLifecycle, err := newCodexWSLifecycle(predecessor, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := predecessorLifecycle.ObserveUpstreamUpgrade(context.Background(), 1, "private-ws-state"); err != nil {
+		t.Fatal(err)
+	}
+
+	planner := codexHTTPRequestPlanTestFactory(runtimeLease)
+	planner.Routes = coordinator
+	planner.Authority = predecessorPlan.Authority
+	planner.TransportKind = "websocket"
+	body := bytes.Replace(
+		frozenRequestBody("gpt-5", CodexRequestCompaction, "private-body"),
+		[]byte(`"compaction":"standalone_turn"`),
+		[]byte(`"compaction":"pre_turn"`),
+		1,
+	)
+	caller := RuntimeCallerAuthorityV1{
+		Domain: NormalCallerCodex, SubjectID: "caller", ConsumptionDigest: strings.Repeat("a", 64),
+	}
+	withCaller := func(ctx context.Context) context.Context {
+		return withRuntimeCallerIdentity(withRuntimeCallerAuthority(ctx, caller), "account\x00candidate\x00revision")
+	}
+	dialer := &codexWSBrokerDialerStub{}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serveDone := make(chan error, 1)
+	cancelBroker := make(chan context.CancelFunc, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		downstream, upgradeErr := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		if upgradeErr != nil {
+			serveDone <- upgradeErr
+			return
+		}
+		defer downstream.Close()
+		brokerContext, cancel := context.WithCancel(withCaller(request.Context()))
+		cancelBroker <- cancel
+		defer cancel()
+		serveDone <- broker.Serve(brokerContext, downstream)
+	}))
+	t.Cleanup(server.Close)
+
+	client, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.StatusCode != http.StatusSwitchingProtocols {
+		_ = client.Close()
+		t.Fatalf("downstream upgrade response = %v, want 101", response)
+	}
+	cancel := <-cancelBroker
+	t.Cleanup(cancel)
+	if err := client.WriteMessage(websocket.TextMessage, body); err != nil {
+		_ = client.Close()
+		t.Fatal(err)
+	}
+
+	waitCodexWSBrokerPlanningGateState(t, runtimeLease, lane, 1, true)
+	type buildResult struct {
+		prepared CodexPreparedHTTPRequest
+		err      error
+	}
+	waiterContext, cancelWaiter := context.WithTimeout(withCaller(context.Background()), 2*time.Second)
+	defer cancelWaiter()
+	waiterResult := make(chan buildResult, 1)
+	go func() {
+		prepared, buildErr := planner.Build(waiterContext, CodexHTTPRequestPlanInput{Encoded: body})
+		waiterResult <- buildResult{prepared: prepared, err: buildErr}
+	}()
+	waitCodexWSBrokerPlanningGateState(t, runtimeLease, lane, 2, true)
+
+	if err := client.Close(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+
+	select {
+	case serveErr := <-serveDone:
+		if serveErr != nil {
+			t.Fatalf("broker after peer close = %T %v, want clean return", serveErr, serveErr)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		select {
+		case <-serveDone:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("peer close did not cancel blocked WebSocket planning")
+	}
+	waitCodexWSBrokerPlanningGateState(t, runtimeLease, lane, 1, true)
+	if len(dialer.accounts) != 0 {
+		t.Fatalf("peer-closed planner dispatched upstream accounts %#v", dialer.accounts)
+	}
+	if _, err := predecessorLifecycle.ObserveFrame(
+		context.Background(),
+		1,
+		[]byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":false}}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := predecessorLifecycle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-waiterResult:
+		if result.err != nil {
+			var planErr *CodexHTTPRequestPlanError
+			if errors.As(result.err, &planErr) {
+				t.Fatalf("queued successor after predecessor drain = %T %v (%s/%s)", result.err, result.err, planErr.Code, planErr.Reason)
+			}
+			t.Fatalf("queued successor after predecessor drain = %T %v", result.err, result.err)
+		}
+		if result.prepared.Frozen == nil || result.prepared.Lifecycle == nil || result.prepared.leaseHandle == nil {
+			t.Fatalf("queued successor ownership = %#v", result.prepared)
+		}
+		if result.prepared.leaseHandle.RequestGeneration() != 3 {
+			t.Fatalf("queued successor generation = %d, want 3", result.prepared.leaseHandle.RequestGeneration())
+		}
+		if _, err := result.prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		result.prepared.Frozen.Release()
+	case <-waiterContext.Done():
+		t.Fatal("queued successor did not continue after predecessor drain")
+	}
+	waitCodexWSBrokerPlanningGateState(t, runtimeLease, lane, 0, false)
+}
+
+func TestCodexTerminatingWSBrokerRejectsSecondQueuedApplicationFrame(t *testing.T) {
+	t.Parallel()
+
+	planner := &codexWSBrokerContextBlockingPlanner{started: make(chan struct{})}
+	dialer := &codexWSBrokerDialerStub{}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		downstream, upgradeErr := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		if upgradeErr != nil {
+			serveDone <- upgradeErr
+			return
+		}
+		defer downstream.Close()
+		serveDone <- broker.Serve(request.Context(), downstream)
+	}))
+	t.Cleanup(server.Close)
+
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.WriteMessage(websocket.TextMessage, codexTerminatingWSFrame("turn-a", "")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-planner.started:
+	case <-time.After(time.Second):
+		t.Fatal("first frame did not enter planning")
+	}
+	for _, turn := range []string{"turn-b", "turn-c"} {
+		if err := client.WriteMessage(websocket.TextMessage, codexTerminatingWSFrame(turn, "")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case serveErr := <-serveDone:
+		if !errors.Is(serveErr, ErrCodexWSInvalidFrame) {
+			t.Fatalf("second queued application frame = %T %v, want invalid frame", serveErr, serveErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second queued application frame did not stop broker")
+	}
+	if len(dialer.accounts) != 0 {
+		t.Fatalf("queued frame overflow dispatched upstream accounts %#v", dialer.accounts)
+	}
+}
+
+func TestCodexWSDownstreamReaderClearsQueuedAndOverflowPayloads(t *testing.T) {
+	t.Parallel()
+	queued := []byte("private-queued-frame")
+	overflow := []byte("private-overflow-frame")
+	conn := &codexWSBrokerPayloadConn{payloads: [][]byte{queued, overflow}}
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := startCodexWSDownstreamReader(ctx, cancel, conn)
+	select {
+	case <-reader.done:
+	case <-time.After(time.Second):
+		reader.close()
+		t.Fatal("downstream overflow reader did not stop")
+	}
+	reader.close()
+	if !bytes.Equal(queued, make([]byte, len(queued))) {
+		t.Fatalf("queued payload retained private bytes: %q", queued)
+	}
+	if !bytes.Equal(overflow, make([]byte, len(overflow))) {
+		t.Fatalf("overflow payload retained private bytes: %q", overflow)
+	}
+}
+
 func TestCodexTerminatingWSBrokerClassifiesUpstreamCloseBeforeCompletion(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
@@ -1570,6 +1825,37 @@ type codexWSBrokerPlannerStub struct {
 	adoptionFrozen *CodexFrozenRequest
 }
 
+type codexWSBrokerContextBlockingPlanner struct {
+	started     chan struct{}
+	startedOnce sync.Once
+}
+
+type codexWSBrokerPayloadConn struct {
+	payloads [][]byte
+	index    int
+}
+
+func (conn *codexWSBrokerPayloadConn) ReadMessage() (int, []byte, error) {
+	if conn.index >= len(conn.payloads) {
+		return 0, nil, io.EOF
+	}
+	payload := conn.payloads[conn.index]
+	conn.index++
+	return websocket.TextMessage, payload, nil
+}
+
+func (*codexWSBrokerPayloadConn) WriteMessage(int, []byte) error            { return nil }
+func (*codexWSBrokerPayloadConn) WriteControl(int, []byte, time.Time) error { return nil }
+func (*codexWSBrokerPayloadConn) SetReadDeadline(time.Time) error           { return nil }
+func (*codexWSBrokerPayloadConn) SetWriteDeadline(time.Time) error          { return nil }
+func (*codexWSBrokerPayloadConn) Close() error                              { return nil }
+
+func (planner *codexWSBrokerContextBlockingPlanner) Build(ctx context.Context, _ CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
+	planner.startedOnce.Do(func() { close(planner.started) })
+	<-ctx.Done()
+	return CodexPreparedHTTPRequest{}, ctx.Err()
+}
+
 func (planner *codexWSBrokerPlannerStub) Build(_ context.Context, input CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
 	planner.buildCalls++
 	planner.buildHeaders = input.Headers.Clone()
@@ -1700,24 +1986,46 @@ type codexWSBrokerWrite struct {
 }
 
 type codexWSBrokerConnStub struct {
-	mu            sync.Mutex
-	reads         []codexWSBrokerRead
-	writes        []codexWSBrokerWrite
-	writeErr      error
-	writeCalls    int
-	failWriteAt   int
-	controlWrites chan<- codexWSBrokerWrite
-	closed        bool
+	mu                    sync.Mutex
+	reads                 []codexWSBrokerRead
+	writes                []codexWSBrokerWrite
+	writeErr              error
+	writeCalls            int
+	failWriteAt           int
+	controlWrites         chan<- codexWSBrokerWrite
+	closed                bool
+	roleKnown             bool
+	downstream            bool
+	downstreamReadBlocked bool
+	downstreamReadWake    chan struct{}
+	readInterrupted       bool
 }
 
 func (conn *codexWSBrokerConnStub) ReadMessage() (int, []byte, error) {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
+	if !conn.roleKnown {
+		conn.roleKnown = true
+		conn.downstream = conn.writeCalls == 0
+	}
+	for conn.downstreamReadBlocked && !conn.closed && !conn.readInterrupted {
+		wake := conn.downstreamReadWake
+		conn.mu.Unlock()
+		<-wake
+		conn.mu.Lock()
+	}
+	if conn.closed || conn.readInterrupted {
+		return 0, nil, errors.New("closed")
+	}
 	if len(conn.reads) == 0 {
 		return 0, nil, io.EOF
 	}
 	read := conn.reads[0]
 	conn.reads = conn.reads[1:]
+	if conn.downstream && read.err == nil {
+		conn.downstreamReadBlocked = true
+		conn.downstreamReadWake = make(chan struct{})
+	}
 	return read.messageType, append([]byte(nil), read.payload...), read.err
 }
 
@@ -1732,6 +2040,9 @@ func (conn *codexWSBrokerConnStub) WriteMessage(messageType int, payload []byte)
 		return conn.writeErr
 	}
 	conn.writes = append(conn.writes, codexWSBrokerWrite{messageType: messageType, payload: append([]byte(nil), payload...)})
+	if conn.downstream && codexWSBrokerDownstreamTerminalWrite(messageType, payload) {
+		conn.releaseDownstreamReadLocked()
+	}
 	return nil
 }
 
@@ -1747,13 +2058,44 @@ func (conn *codexWSBrokerConnStub) WriteControl(messageType int, payload []byte,
 	return nil
 }
 
-func (conn *codexWSBrokerConnStub) SetReadDeadline(time.Time) error  { return nil }
+func (conn *codexWSBrokerConnStub) SetReadDeadline(time.Time) error {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	conn.readInterrupted = true
+	conn.releaseDownstreamReadLocked()
+	return nil
+}
 func (conn *codexWSBrokerConnStub) SetWriteDeadline(time.Time) error { return nil }
 func (conn *codexWSBrokerConnStub) Close() error {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	conn.closed = true
+	conn.releaseDownstreamReadLocked()
 	return nil
+}
+
+func (conn *codexWSBrokerConnStub) releaseDownstreamReadLocked() {
+	if !conn.downstreamReadBlocked {
+		return
+	}
+	conn.downstreamReadBlocked = false
+	close(conn.downstreamReadWake)
+	conn.downstreamReadWake = nil
+}
+
+func codexWSBrokerDownstreamTerminalWrite(messageType int, payload []byte) bool {
+	if messageType == websocket.CloseMessage {
+		return true
+	}
+	if messageType != websocket.TextMessage {
+		return false
+	}
+	switch classifyCodexSSEData(payload).Kind {
+	case CodexSSECompleted, CodexSSEError:
+		return true
+	default:
+		return false
+	}
 }
 
 func (conn *codexWSBrokerConnStub) writtenPayloads() [][]byte {
@@ -1766,6 +2108,27 @@ func (conn *codexWSBrokerConnStub) writtenPayloads() [][]byte {
 		}
 	}
 	return result
+}
+
+func waitCodexWSBrokerPlanningGateState(t *testing.T, runtimeLease *CodexLeaseRuntime, lane LaneKey, wantRefs int, wantHeld bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		runtimeLease.planningGates.mu.Lock()
+		entry := runtimeLease.planningGates.entries[lane]
+		refs := 0
+		held := false
+		if entry != nil {
+			refs = entry.refs
+			held = len(entry.token) == 0
+		}
+		runtimeLease.planningGates.mu.Unlock()
+		if refs == wantRefs && held == wantHeld {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("WebSocket planning gate did not reach refs %d held %v", wantRefs, wantHeld)
 }
 
 type codexWSBrokerDialerStub struct {

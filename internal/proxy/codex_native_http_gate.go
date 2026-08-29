@@ -55,6 +55,11 @@ func (gate *codexNativeHTTPRequestGate) closeAndDrain(ctx context.Context) error
 	if ctx == nil {
 		return errors.New("Codex native HTTP drain context unavailable")
 	}
+	drained := gate.closeAdmission()
+	return waitForCodexNativeHTTPDrain(ctx, drained)
+}
+
+func (gate *codexNativeHTTPRequestGate) closeAdmission() <-chan struct{} {
 	gate.mu.Lock()
 	if !gate.closing {
 		gate.closing = true
@@ -64,6 +69,10 @@ func (gate *codexNativeHTTPRequestGate) closeAndDrain(ctx context.Context) error
 	}
 	drained := gate.drained
 	gate.mu.Unlock()
+	return drained
+}
+
+func waitForCodexNativeHTTPDrain(ctx context.Context, drained <-chan struct{}) error {
 	select {
 	case <-drained:
 		return nil
