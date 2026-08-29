@@ -635,6 +635,199 @@ func TestWindowsRetainedRegularFileClosesEveryHandleOnce(t *testing.T) {
 	}
 }
 
+func TestWindowsExclusiveLockIsNonBlockingAndDescriptorBound(t *testing.T) {
+	if os.Getenv("CQ_WINDOWS_LOCK_HELPER") == "1" {
+		root := os.Getenv("CQ_WINDOWS_LOCK_ROOT")
+		path := os.Getenv("CQ_WINDOWS_LOCK_PATH")
+		fys := newWindowsTestFileSystem(t, root)
+		lock, err := AcquireExclusiveLock(fys, path)
+		if lock != nil {
+			_ = lock.Close()
+		}
+		if errors.Is(err, ErrExclusiveLockHeld) {
+			os.Exit(3)
+		}
+		os.Exit(4)
+	}
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	fys := newWindowsTestFileSystem(t, root)
+	if err := EnsureSecureDirectory(fys, state); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(state, "owner.lock")
+	first, err := AcquireExclusiveLock(fys, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	contended := make(chan error, 1)
+	go func() {
+		second, err := AcquireExclusiveLock(fys, path)
+		if second != nil {
+			_ = second.Close()
+		}
+		contended <- err
+	}()
+	if err := <-contended; !errors.Is(err, ErrExclusiveLockHeld) {
+		t.Fatalf("second error = %v", err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestWindowsExclusiveLockIsNonBlockingAndDescriptorBound$")
+	command.Env = append(os.Environ(), "CQ_WINDOWS_LOCK_HELPER=1", "CQ_WINDOWS_LOCK_ROOT="+root, "CQ_WINDOWS_LOCK_PATH="+path)
+	if err := command.Run(); err == nil {
+		t.Fatal("second process acquired held Windows lock")
+	} else if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 3 {
+		t.Fatalf("second process error = %v, want held-lock exit 3", err)
+	}
+	if err := os.Rename(path, path+".held"); err == nil {
+		t.Fatal("held lock renamed")
+	}
+	if err := os.Remove(path); err == nil {
+		t.Fatal("held lock removed")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := AcquireExclusiveLock(fys, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".held"); err != nil {
+		t.Fatalf("rename after close: %v", err)
+	}
+}
+
+func TestWindowsAcquireNewExclusiveLockNeverOpensExistingFile(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	fys := newWindowsTestFileSystem(t, root)
+	if err := EnsureSecureDirectory(fys, state); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fys.OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	existing, err := directory.CreateExclusive("maintenance.lock", 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := existing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := AcquireNewExclusiveLockInDirectory(fys, directory, "maintenance.lock")
+	if lock != nil {
+		_ = lock.Close()
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("existing create-only lock error = %v", err)
+	}
+}
+
+func TestWindowsAcquireNewExclusiveLockCreatesOnce(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	fys := newWindowsTestFileSystem(t, root)
+	if err := EnsureSecureDirectory(fys, state); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fys.OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	first, err := AcquireNewExclusiveLockInDirectory(fys, directory, "maintenance.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := AcquireNewExclusiveLockInDirectory(fys, directory, "maintenance.lock"); second != nil || !errors.Is(err, os.ErrExist) {
+		if second != nil {
+			_ = second.Close()
+		}
+		t.Fatalf("second create-only lock = %v, %v", second, err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsValidateExclusiveLockHeldRejectsUnlockedFile(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	fys := newWindowsTestFileSystem(t, root)
+	if err := EnsureSecureDirectory(fys, state); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fys.OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	lock, err := AcquireExclusiveLockInDirectory(fys, directory, "owner.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	info, err := lock.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := fys.FileIdentity(info)
+	if !ok {
+		t.Fatal("lock identity unavailable")
+	}
+	if err := ValidateExclusiveLockHeldInDirectory(fys, directory, "owner.lock", identity); err != nil {
+		t.Fatalf("held validation: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExclusiveLockHeldInDirectory(fys, directory, "owner.lock", identity); !errors.Is(err, ErrExclusiveLockNotHeld) {
+		t.Fatalf("unlocked validation error = %v", err)
+	}
+	if _, err := lock.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("post-close lock stat error = %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsLockRejectsBroadDACL(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	fys := newWindowsTestFileSystem(t, root)
+	if err := EnsureSecureDirectory(fys, state); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fys.OpenSecureDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := directory.CreateExclusive("owner.lock", 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestDACL(t, filepath.Join(state, "owner.lock"), "D:P(A;;FA;;;WD)", true)
+	lock, err := AcquireExclusiveLock(fys, filepath.Join(state, "owner.lock"))
+	if lock != nil {
+		_ = lock.Close()
+	}
+	if !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("broad DACL lock error = %v", err)
+	}
+}
+
 func TestWindowsRetainedExecutableHelperProcess(t *testing.T) {
 	if os.Getenv("CQ_WINDOWS_RETAINED_HELPER") != "1" {
 		return

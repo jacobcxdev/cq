@@ -474,10 +474,6 @@ func (directory *windowsSecureDirectory) CreateExclusive(name string, _ os.FileM
 	return &windowsSecureFile{file: result.file}, nil
 }
 
-func (directory *windowsSecureDirectory) OpenExclusiveLock(string, os.FileMode) (ExclusiveLock, error) {
-	return nil, ErrSecureCapabilityUnavailable
-}
-
 func (directory *windowsSecureDirectory) Rename(oldName, newName string) error {
 	return directory.rename(oldName, newName, SecureFileIdentity{}, false, false)
 }
