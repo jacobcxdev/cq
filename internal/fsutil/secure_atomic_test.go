@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1119,7 +1120,7 @@ func (fsys *directoryCreationRecordingFS) OpenDurableDirectory(path string) (Dur
 	if err != nil {
 		return nil, err
 	}
-	return &recordingDurableDirectory{DurableDirectory: directory, fsys: fsys, path: filepath.Clean(path)}, nil
+	return &recordingDurableDirectory{DurableDirectory: directory, fsys: fsys, path: cleanMemPath(path)}, nil
 }
 
 type recordingDurableDirectory struct {
@@ -1133,7 +1134,7 @@ func (directory *recordingDurableDirectory) OpenDirectory(name string) (DurableD
 	if err != nil {
 		return nil, err
 	}
-	return &recordingDurableDirectory{DurableDirectory: child, fsys: directory.fsys, path: filepath.Join(directory.path, name)}, nil
+	return &recordingDurableDirectory{DurableDirectory: child, fsys: directory.fsys, path: cleanMemPath(filepath.Join(directory.path, name))}, nil
 }
 
 func (directory *recordingDurableDirectory) Sync() error {
@@ -1141,12 +1142,12 @@ func (directory *recordingDurableDirectory) Sync() error {
 		return err
 	}
 	directory.fsys.synced = append(directory.fsys.synced, directory.path)
-	if directory.path == filepath.Clean(directory.fsys.failSyncOnce) {
+	if directory.path == cleanMemPath(directory.fsys.failSyncOnce) {
 		directory.fsys.failSyncOnce = ""
 		return errors.New("injected retained directory sync failure")
 	}
-	target := filepath.Clean(directory.fsys.replaceOnParentSync)
-	if directory.fsys.replaceOnParentSync != "" && directory.path == filepath.Dir(target) {
+	target := cleanMemPath(directory.fsys.replaceOnParentSync)
+	if directory.fsys.replaceOnParentSync != "" && directory.path == cleanMemPath(filepath.Dir(target)) {
 		directory.fsys.mu.Lock()
 		original := directory.fsys.dirs[target]
 		delete(directory.fsys.dirs, target)
@@ -1162,6 +1163,9 @@ func (directory *recordingDurableDirectory) Sync() error {
 
 func requireUnixSecureFS(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix secure filesystem contract")
+	}
 	if _, ok := any(OSFileSystem{}).(SecurePathInspector); !ok {
 		t.Skip("secure path inspection is unavailable on this platform")
 	}
@@ -1449,7 +1453,7 @@ func (fsys *replacingDirectoryFS) OpenSecureDirectory(path string) (SecureDirect
 	if err != nil {
 		return nil, err
 	}
-	return &replacingSecureDirectory{fsys: fsys, path: path, info: info}, nil
+	return &replacingSecureDirectory{fsys: fsys, path: cleanMemPath(path), info: info}, nil
 }
 
 type replacingSecureDirectory struct {
@@ -1562,7 +1566,7 @@ func (dir *replacingSecureDirectory) replacePath() {
 	original := dir.fsys.dirs[dir.path]
 	delete(dir.fsys.dirs, dir.path)
 	dir.fsys.dirs[heldPath] = original
-	prefix := dir.path + string(filepath.Separator)
+	prefix := dir.path + "/"
 	for path, file := range dir.fsys.files {
 		if !strings.HasPrefix(path, prefix) {
 			continue

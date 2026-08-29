@@ -133,6 +133,23 @@ type RetainedReadDirectoryOpener interface {
 	OpenRetainedReadDirectory(name string) (RetainedReadDirectory, error)
 }
 
+type RetainedRegularFile interface {
+	io.Reader
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
+type RetainedRegularFilePolicy uint8
+
+const (
+	RetainedRegularFileReadOnly RetainedRegularFilePolicy = iota + 1
+	RetainedRegularFileExecutableDenyReplacement
+)
+
+type RetainedRegularFileOpener interface {
+	OpenRetainedRegularFileNoFollow(path string, policy RetainedRegularFilePolicy) (RetainedRegularFile, error)
+}
+
 type IdentityBoundRenamer interface {
 	RenameChecked(oldName, newName string, expected SecureFileIdentity) error
 	RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error

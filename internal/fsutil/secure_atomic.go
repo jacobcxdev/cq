@@ -407,7 +407,18 @@ func EnsureSecureDirectory(fsys FileSystem, path string) error {
 		return err
 	}
 	var parent DurableDirectory
-	if ancestorParentPath := filepath.Dir(existing); ancestorParentPath != existing {
+	if boundaryOpener, ok := fsys.(interface {
+		openSecureDirectoryAncestor(string) (DurableDirectory, error)
+	}); ok {
+		parent, err = boundaryOpener.openSecureDirectoryAncestor(existing)
+		if err != nil {
+			return fmt.Errorf("open secure directory boundary ancestor: %w", err)
+		}
+		if err := validateRetainedDirectoryPath(inspector, parent, existing, false); err != nil {
+			_ = parent.Close()
+			return fmt.Errorf("validate secure directory boundary ancestor: %w", err)
+		}
+	} else if ancestorParentPath := filepath.Dir(existing); ancestorParentPath != existing {
 		ancestorParent, err := opener.OpenDurableDirectory(ancestorParentPath)
 		if err != nil {
 			return fmt.Errorf("open existing directory ancestor parent: %w", err)
