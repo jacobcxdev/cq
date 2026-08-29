@@ -240,7 +240,9 @@ Advanced policy commands manage authenticated, capability-aware Codex account po
 cq proxy policy initialise --state-root DIR
 cq proxy policy apply --file FILE
 cq proxy policy status
-cq proxy policy pool set NAME --account ACCOUNT --account ACCOUNT
+cq proxy policy pool set NAME --account ACCOUNT --account ACCOUNT [--value VALUE]
+cq proxy policy pool rename OLD_NAME NEW_NAME
+cq proxy policy pool value NAME VALUE
 cq proxy policy session bind --pool NAME --session-id ID
 cq proxy policy session show --session-id ID
 cq proxy policy session list
@@ -249,6 +251,8 @@ cq proxy policy session digest --session-id ID
 ```
 
 Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-root` supports offline state.
+
+Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first. Session bindings and task affinity remain hard constraints.
 
 ### Rescue mode
 
@@ -507,7 +511,9 @@ cq proxy policy
 cq proxy policy apply
 cq proxy policy initialise
 cq proxy policy pool
+cq proxy policy pool rename
 cq proxy policy pool set
+cq proxy policy pool value
 cq proxy policy session
 cq proxy policy session bind
 cq proxy policy session digest
