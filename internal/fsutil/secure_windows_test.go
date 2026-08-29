@@ -1521,19 +1521,19 @@ func setWindowsTestSecurity(t *testing.T, path, sddl string) {
 	t.Helper()
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse security descriptor: %v", err)
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read security descriptor owner: %v", err)
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read security descriptor DACL: %v", err)
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read security descriptor control: %v", err)
 	}
 	information := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
 	protected := control&windows.SE_DACL_PROTECTED != 0
@@ -1543,7 +1543,7 @@ func setWindowsTestSecurity(t *testing.T, path, sddl string) {
 		information |= windows.UNPROTECTED_DACL_SECURITY_INFORMATION
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, information, owner, nil, dacl, nil); err != nil {
-		t.Fatal(err)
+		t.Fatalf("set named security information: %v", err)
 	}
 	assertWindowsTestDACLProtection(t, path, protected)
 }
@@ -1574,28 +1574,28 @@ func assertWindowsTestDACLProtection(t *testing.T, path string, wantProtected bo
 	t.Helper()
 	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("encode security path: %v", err)
 	}
 	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	info, err := os.Lstat(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("inspect secured path: %v", err)
 	}
 	if info.IsDir() {
 		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
 	}
 	handle, err := windows.CreateFile(pointer, windows.READ_CONTROL, windowsShareAll, nil, windows.OPEN_EXISTING, flags, 0)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open secured path for readback: %v", err)
 	}
 	defer windows.CloseHandle(handle)
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read secured path DACL: %v", err)
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read secured path control: %v", err)
 	}
 	if got := control&windows.SE_DACL_PROTECTED != 0; got != wantProtected {
 		t.Fatalf("DACL protected = %v, want %v", got, wantProtected)
