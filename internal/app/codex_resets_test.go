@@ -208,6 +208,25 @@ func TestCodexResetListResolvesOneAccount(t *testing.T) {
 	}
 }
 
+func TestCodexResetListKeepsValidCreditsWithEntryError(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	app, backend, _, _ := completeResetApp(now)
+	backend.credits["account-a"] = codexprov.ResetCreditInventory{
+		Credits:     []codexprov.ResetCredit{resetAppCredit("valid-credit", now.Add(time.Hour))},
+		EntryErrors: []codexprov.ResetCreditEntryError{{Index: 1, Code: "invalid_granted_at"}},
+	}
+	backend.creditErrors["account-a"] = &codexprov.ResetCreditInventoryError{Code: "invalid_credit_entries"}
+
+	got, err := app.List(context.Background(), "a@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Accounts) != 1 || len(got.Accounts[0].Credits) != 1 || got.Accounts[0].Credits[0].ID != "valid-credit" ||
+		got.Accounts[0].Error == nil || got.Accounts[0].Error.Code != "credits_unavailable" {
+		t.Fatalf("list = %+v", got)
+	}
+}
+
 func TestCodexResetRecommendNeverConsumesAndUsesFreshUsage(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	app, backend, usage, _ := completeResetApp(now)

@@ -5,14 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/history"
+	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
@@ -27,6 +32,9 @@ type codexResetCLIBackend struct {
 	creditErrors map[codexprov.AccountKey]error
 	consume      codexprov.ConsumeResetResult
 	consumeCalls int
+	consumeIDs   []string
+	consumeFunc  func(string) (codexprov.ConsumeResetResult, error)
+	listFunc     func(codexprov.ResetAccount) (codexprov.ResetCreditInventory, error)
 }
 
 func (b *codexResetCLIBackend) Snapshot(context.Context) (codexprov.ResetAccountSnapshot, error) {
@@ -34,20 +42,33 @@ func (b *codexResetCLIBackend) Snapshot(context.Context) (codexprov.ResetAccount
 }
 
 func (b *codexResetCLIBackend) ListCredits(_ context.Context, account codexprov.ResetAccount) (codexprov.ResetCreditInventory, error) {
+	if b.listFunc != nil {
+		return b.listFunc(account)
+	}
 	return b.credits[account.AccountKey], b.creditErrors[account.AccountKey]
 }
 
-func (b *codexResetCLIBackend) Consume(context.Context, codexprov.ResetAccount, string, string) (codexprov.ConsumeResetResult, error) {
+func (b *codexResetCLIBackend) Consume(_ context.Context, _ codexprov.ResetAccount, _ string, requestID string) (codexprov.ConsumeResetResult, error) {
 	b.consumeCalls++
+	b.consumeIDs = append(b.consumeIDs, requestID)
+	if b.consumeFunc != nil {
+		return b.consumeFunc(requestID)
+	}
 	return b.consume, nil
 }
 
 type codexResetCLIUsage struct {
-	results []quota.Result
-	err     error
+	results   []quota.Result
+	err       error
+	calls     int
+	fetchFunc func() ([]quota.Result, error)
 }
 
 func (u *codexResetCLIUsage) Fetch(context.Context, time.Time) ([]quota.Result, error) {
+	u.calls++
+	if u.fetchFunc != nil {
+		return u.fetchFunc()
+	}
 	return append([]quota.Result(nil), u.results...), u.err
 }
 
@@ -83,6 +104,23 @@ func (codexResetCLIHistory) UpdateAndGetEstimates(context.Context, map[string][]
 	return nil, nil, nil
 }
 
+type staticCodexResetCLIHistory struct{ estimates history.RateEstimates }
+
+func (h staticCodexResetCLIHistory) UpdateAndGetEstimates(context.Context, map[string][]quota.Result, int64) (history.BurnRates, history.RateEstimates, error) {
+	return nil, h.estimates, nil
+}
+
+type trackingCodexResetCLIHistory struct {
+	store     *history.Store
+	estimates history.RateEstimates
+}
+
+func (h *trackingCodexResetCLIHistory) UpdateAndGetEstimates(ctx context.Context, results map[string][]quota.Result, now int64) (history.BurnRates, history.RateEstimates, error) {
+	rates, estimates, err := h.store.UpdateAndGetEstimates(ctx, results, now)
+	h.estimates = estimates
+	return rates, estimates, err
+}
+
 type codexResetCLICache struct{ deleteCalls int }
 
 func (*codexResetCLICache) Get(context.Context, string) ([]quota.Result, bool, error) {
@@ -99,6 +137,8 @@ type codexResetCLIFixture struct {
 	deps     codexResetsDependencies
 	backend  *codexResetCLIBackend
 	attempts *codexResetCLIAttempts
+	usage    *codexResetCLIUsage
+	cache    *codexResetCLICache
 	out      *bytes.Buffer
 	errOut   *bytes.Buffer
 }
@@ -137,13 +177,14 @@ func newCodexResetCLIFixture(input io.Reader) codexResetCLIFixture {
 	attempts := &codexResetCLIAttempts{pending: map[codexprov.AccountKey][]codexprov.ResetAttempt{}}
 	out := &bytes.Buffer{}
 	errOut := &bytes.Buffer{}
+	resetCache := &codexResetCLICache{}
 	service := &app.CodexResetApp{
 		Backend: backend, Usage: usage, History: codexResetCLIHistory{}, Attempts: attempts,
-		Cache: &codexResetCLICache{}, Clock: codexResetCLIClock{now: now},
+		Cache: resetCache, Clock: codexResetCLIClock{now: now},
 	}
 	return codexResetCLIFixture{
 		deps:    codexResetsDependencies{App: service, In: input, Out: out, ErrOut: errOut},
-		backend: backend, attempts: attempts, out: out, errOut: errOut,
+		backend: backend, attempts: attempts, usage: usage, cache: resetCache, out: out, errOut: errOut,
 	}
 }
 
@@ -359,6 +400,297 @@ func TestCodexResetsCommandsSkipAutomaticAgent(t *testing.T) {
 	if !shouldEnsureAgentAfter("codex accounts") {
 		t.Fatal("ordinary account command unexpectedly skipped agent")
 	}
+}
+
+func TestCodexResetsRecommendIsAdvisoryAcrossLayers(t *testing.T) {
+	fixture := newCodexResetCLIFixture(panicReader{})
+	root := newCodexResetCLITempDir(t)
+	attempts, err := codexprov.NewResetAttemptStore(fsutil.OSFileSystem{}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.deps.App.Attempts = attempts
+
+	if err := runCodexResetsRecommend(context.Background(), true, fixture.deps); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(attempts.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("recommendation created attempts: %v", entries)
+	}
+	if fixture.backend.consumeCalls != 0 || fixture.cache.deleteCalls != 0 || fixture.errOut.Len() != 0 {
+		t.Fatalf("recommendation side effects: consume=%d cache-delete=%d prompt=%q",
+			fixture.backend.consumeCalls, fixture.cache.deleteCalls, fixture.errOut.String())
+	}
+	assertPublicCodexResetJSON(t, fixture.out.Bytes())
+}
+
+func TestCodexResetsUseReplaysLostResponseWithSameRequestID(t *testing.T) {
+	fixture := newCodexResetCLIFixture(panicReader{})
+	root := newCodexResetCLITempDir(t)
+	fs := fsutil.OSFileSystem{}
+	attempts, err := codexprov.NewResetAttemptStore(fs, filepath.Join(root, "attempts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyStore, err := history.New(fs, filepath.Join(root, "history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.deps.App.Clock.Now().UTC()
+	beforeFirst := codexResetCLIUsageResult("acct-1", "user@example.com", 70, 80, now)
+	beforeSecond := codexResetCLIUsageResult("acct-1", "user@example.com", 60, 70, now)
+	_, firstEstimates, err := historyStore.UpdateAndGetEstimates(context.Background(), map[string][]quota.Result{
+		string(provider.Codex): {beforeFirst},
+	}, now.Add(-2*time.Minute).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstEstimates) != 0 {
+		t.Fatalf("first estimate = %+v", firstEstimates)
+	}
+	_, expectedEstimates, err := historyStore.UpdateAndGetEstimates(context.Background(), map[string][]quota.Result{
+		string(provider.Codex): {beforeSecond},
+	}, now.Add(-time.Minute).Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackingHistory := &trackingCodexResetCLIHistory{store: historyStore}
+	fixture.deps.App.Attempts = attempts
+	fixture.deps.App.History = trackingHistory
+
+	redeemed := false
+	originalInventory := fixture.backend.credits["internal-account-key"]
+	fixture.backend.listFunc = func(codexprov.ResetAccount) (codexprov.ResetCreditInventory, error) {
+		if redeemed {
+			return codexprov.ResetCreditInventory{Credits: []codexprov.ResetCredit{}}, nil
+		}
+		return originalInventory, nil
+	}
+	fixture.backend.consumeFunc = func(string) (codexprov.ConsumeResetResult, error) {
+		if !redeemed {
+			redeemed = true
+			return codexprov.ConsumeResetResult{}, errors.New("response lost after upstream redemption")
+		}
+		return codexprov.ConsumeResetResult{Outcome: codexprov.ConsumeAlreadyRedeemed, WindowsReset: 2}, nil
+	}
+	fixture.usage.fetchFunc = func() ([]quota.Result, error) {
+		if redeemed {
+			return []quota.Result{codexResetCLIUsageResult("acct-1", "user@example.com", 100, 100, now)}, nil
+		}
+		return []quota.Result{codexResetCLIUsageResult("acct-1", "user@example.com", 60, 70, now)}, nil
+	}
+
+	firstErr := runCodexResetsUse(context.Background(), CodexResetsUseCmd{
+		Reference: "user@example.com", Yes: true,
+	}, true, fixture.deps)
+	if firstErr == nil || !strings.Contains(firstErr.Error(), "consume_indeterminate") {
+		t.Fatalf("first use error = %v", firstErr)
+	}
+	pending, err := attempts.Pending("internal-account-key")
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending after lost response = %+v, %v", pending, err)
+	}
+
+	secondOut := &bytes.Buffer{}
+	secondErrOut := &bytes.Buffer{}
+	secondDeps := fixture.deps
+	secondDeps.Out = secondOut
+	secondDeps.ErrOut = secondErrOut
+	if err := runCodexResetsUse(context.Background(), CodexResetsUseCmd{
+		Reference: "user@example.com", Yes: true,
+	}, true, secondDeps); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.backend.consumeIDs) != 2 || fixture.backend.consumeIDs[0] != fixture.backend.consumeIDs[1] {
+		t.Fatalf("redeem request IDs = %v", fixture.backend.consumeIDs)
+	}
+	if fixture.backend.consumeIDs[0] != codexprov.ResetIdempotencyKey("internal-account-key", "credit-1") {
+		t.Fatalf("redeem request ID = %q", fixture.backend.consumeIDs[0])
+	}
+	pending, err = attempts.Pending("internal-account-key")
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after replay = %+v, %v", pending, err)
+	}
+	if fixture.cache.deleteCalls != 1 {
+		t.Fatalf("cache deletes = %d, want 1", fixture.cache.deleteCalls)
+	}
+	key := history.BurnRateKey{ProviderID: string(provider.Codex), AccountKey: "acct-1", Window: string(quota.Window5Hour)}
+	wantEstimate, ok := expectedEstimates.Get(key)
+	if !ok {
+		t.Fatalf("missing seeded estimate: %+v", expectedEstimates)
+	}
+	gotEstimate, ok := trackingHistory.estimates.Get(key)
+	if !ok || gotEstimate.Samples != wantEstimate.Samples || gotEstimate.RatePctPerS != wantEstimate.RatePctPerS {
+		t.Fatalf("estimate across replay = %+v, want %+v", gotEstimate, wantEstimate)
+	}
+	assertPublicCodexResetJSON(t, secondOut.Bytes())
+	if !bytes.Contains(secondOut.Bytes(), []byte(`"outcome":"already_redeemed"`)) {
+		t.Fatalf("second output = %s", secondOut.String())
+	}
+}
+
+func TestCodexResetsRecommendSeparatesThreeSameDayExpiries(t *testing.T) {
+	first := newCodexResetCLIFixture(panicReader{})
+	configureThreeAccountCodexResetFixture(&first)
+	beforeEpochs := codexResetCLIUsageEpochs(first.usage.results)
+	if err := runCodexResetsRecommend(context.Background(), true, first.deps); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newCodexResetCLIFixture(panicReader{})
+	configureThreeAccountCodexResetFixture(&second)
+	if err := runCodexResetsRecommend(context.Background(), true, second.deps); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first.out.Bytes(), second.out.Bytes()) {
+		t.Fatalf("recommendations differ:\n%s\n%s", first.out.String(), second.out.String())
+	}
+	var schedule codexResetScheduleJSON
+	if err := json.Unmarshal(first.out.Bytes(), &schedule); err != nil {
+		t.Fatal(err)
+	}
+	deadlines := map[time.Time]bool{}
+	for _, item := range schedule.Items {
+		if item.UseBy != nil {
+			deadlines[*item.UseBy] = true
+		}
+	}
+	if len(schedule.Items) != 3 || len(deadlines) != 3 {
+		t.Fatalf("schedule items/deadlines = %+v / %+v", schedule.Items, deadlines)
+	}
+	if first.backend.consumeCalls != 0 || first.attempts.ensureCalls != 0 || first.cache.deleteCalls != 0 {
+		t.Fatal("recommendation mutated state")
+	}
+	if got := codexResetCLIUsageEpochs(first.usage.results); !equalCodexResetEpochs(got, beforeEpochs) {
+		t.Fatalf("natural reset epochs changed: got=%v want=%v", got, beforeEpochs)
+	}
+}
+
+func TestCodexResetsRecommendIncompletePortfolioIsNonActionable(t *testing.T) {
+	fixture := newCodexResetCLIFixture(panicReader{})
+	configureTwoAccountCodexResetFixture(&fixture)
+	fixture.backend.creditErrors["internal-key-b"] = errors.New("offline")
+
+	err := runCodexResetsRecommend(context.Background(), true, fixture.deps)
+	if err == nil || !strings.Contains(err.Error(), "recommendation_incomplete") {
+		t.Fatalf("error = %v", err)
+	}
+	if !bytes.Contains(fixture.out.Bytes(), []byte(`"complete":false`)) ||
+		!bytes.Contains(fixture.out.Bytes(), []byte(`"credits_unavailable"`)) ||
+		!bytes.Contains(fixture.out.Bytes(), []byte("user@example.com")) ||
+		!bytes.Contains(fixture.out.Bytes(), []byte("b@example.com")) {
+		t.Fatalf("incomplete output = %s", fixture.out.String())
+	}
+	if bytes.Contains(fixture.out.Bytes(), []byte(`"use_at"`)) || bytes.Contains(fixture.out.Bytes(), []byte(`"use_by"`)) {
+		t.Fatalf("incomplete schedule remained actionable: %s", fixture.out.String())
+	}
+	if fixture.backend.consumeCalls != 0 || fixture.attempts.ensureCalls != 0 || fixture.cache.deleteCalls != 0 {
+		t.Fatal("incomplete recommendation mutated state")
+	}
+}
+
+func configureTwoAccountCodexResetFixture(fixture *codexResetCLIFixture) {
+	now := fixture.deps.App.Clock.Now().UTC()
+	expires := now.Add(20 * time.Hour)
+	account := codexprov.ResetAccount{AccountKey: "internal-key-b", AccountID: "acct-b", Email: "b@example.com", PlanType: "pro"}
+	fixture.backend.snapshot.Accounts = append(fixture.backend.snapshot.Accounts, account)
+	fixture.backend.snapshot.Inventory.Accounts = append(fixture.backend.snapshot.Inventory.Accounts, codexprov.LogicalAccount{
+		Key: account.AccountKey, Identity: codexprov.AccountIdentity{AccountID: account.AccountID, Email: account.Email},
+	})
+	fixture.backend.credits[account.AccountKey] = codexprov.ResetCreditInventory{Credits: []codexprov.ResetCredit{{
+		ID: "credit-b", ResetType: codexprov.ResetTypeCodexRateLimits, Status: codexprov.ResetCreditAvailable,
+		GrantedAt: now.Add(-time.Hour), ExpiresAt: &expires,
+	}}, AvailableCount: 1}
+	fixture.usage.results = append(fixture.usage.results, codexResetCLIUsageResult(account.AccountID, account.Email, 10, 10, now))
+}
+
+func configureThreeAccountCodexResetFixture(fixture *codexResetCLIFixture) {
+	now := fixture.deps.App.Clock.Now().UTC()
+	expires := now.Add(20 * time.Hour)
+	estimates := history.RateEstimates{}
+	fixture.backend.snapshot.Accounts = nil
+	fixture.backend.snapshot.Inventory.Accounts = nil
+	fixture.backend.credits = map[codexprov.AccountKey]codexprov.ResetCreditInventory{}
+	fixture.backend.creditErrors = map[codexprov.AccountKey]error{}
+	fixture.usage.results = nil
+	for index, remaining := range []int{5, 10, 15} {
+		suffix := string(rune('a' + index))
+		account := codexprov.ResetAccount{
+			AccountKey: codexprov.AccountKey("internal-key-" + suffix), AccountID: "acct-" + suffix,
+			Email: suffix + "@example.com", PlanType: "pro", Active: index == 0,
+		}
+		fixture.backend.snapshot.Accounts = append(fixture.backend.snapshot.Accounts, account)
+		fixture.backend.snapshot.Inventory.Accounts = append(fixture.backend.snapshot.Inventory.Accounts, codexprov.LogicalAccount{
+			Key: account.AccountKey, Identity: codexprov.AccountIdentity{AccountID: account.AccountID, Email: account.Email},
+		})
+		fixture.backend.credits[account.AccountKey] = codexprov.ResetCreditInventory{Credits: []codexprov.ResetCredit{{
+			ID: "credit-" + suffix, ResetType: codexprov.ResetTypeCodexRateLimits, Status: codexprov.ResetCreditAvailable,
+			GrantedAt: now.Add(-time.Hour), ExpiresAt: &expires,
+		}}, AvailableCount: 1}
+		usage := codexResetCLIUsageResult(account.AccountID, account.Email, remaining, remaining, now)
+		usage.RateLimitTier = fmt.Sprintf("codex_pro_%dx", index+1)
+		fiveHour := usage.Windows[quota.Window5Hour]
+		fiveHour.ResetAtUnix = now.Add(5*time.Hour + time.Duration(index)*15*time.Minute).Unix()
+		usage.Windows[quota.Window5Hour] = fiveHour
+		sevenDay := usage.Windows[quota.Window7Day]
+		sevenDay.ResetAtUnix = now.Add(7*24*time.Hour + time.Duration(index)*time.Hour).Unix()
+		usage.Windows[quota.Window7Day] = sevenDay
+		fixture.usage.results = append(fixture.usage.results, usage)
+		for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+			estimates[history.BurnRateKey{
+				ProviderID: string(provider.Codex), AccountKey: account.AccountID, Window: string(name),
+			}] = history.RateEstimate{RatePctPerS: 0.01 - float64(index)*0.002, Samples: 3, LastSeenUnix: now.Unix()}
+		}
+	}
+	fixture.deps.App.History = staticCodexResetCLIHistory{estimates: estimates}
+}
+
+func codexResetCLIUsageResult(accountID, email string, remaining5Hour, remaining7Day int, now time.Time) quota.Result {
+	return quota.Result{
+		AccountID: accountID, Email: email, Status: quota.StatusOK, RateLimitTier: "codex_pro_1x",
+		Windows: map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: remaining5Hour, ResetAtUnix: now.Add(5 * time.Hour).Unix()},
+			quota.Window7Day:  {RemainingPct: remaining7Day, ResetAtUnix: now.Add(7 * 24 * time.Hour).Unix()},
+		},
+	}
+}
+
+func codexResetCLIUsageEpochs(results []quota.Result) map[string]map[quota.WindowName]int64 {
+	epochs := make(map[string]map[quota.WindowName]int64, len(results))
+	for _, result := range results {
+		epochs[result.AccountID] = map[quota.WindowName]int64{
+			quota.Window5Hour: result.Windows[quota.Window5Hour].ResetAtUnix,
+			quota.Window7Day:  result.Windows[quota.Window7Day].ResetAtUnix,
+		}
+	}
+	return epochs
+}
+
+func equalCodexResetEpochs(left, right map[string]map[quota.WindowName]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for account, leftWindows := range left {
+		rightWindows, ok := right[account]
+		if !ok || leftWindows[quota.Window5Hour] != rightWindows[quota.Window5Hour] || leftWindows[quota.Window7Day] != rightWindows[quota.Window7Day] {
+			return false
+		}
+	}
+	return true
+}
+
+func newCodexResetCLITempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/private/tmp", "cq-reset-cli-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func assertPublicCodexResetJSON(t *testing.T, body []byte) {

@@ -129,12 +129,11 @@ func (a *CodexResetApp) List(ctx context.Context, reference string) (CodexResetL
 	result := CodexResetListResult{Accounts: make([]CodexResetAccountCredits, len(accounts))}
 	for index, account := range accounts {
 		row := CodexResetAccountCredits{
-			AccountID: account.AccountID, Email: account.Email, Credits: []codexprov.ResetCredit{},
+			AccountID: account.AccountID, Email: account.Email,
+			Credits: append([]codexprov.ResetCredit{}, reads[index].inventory.Credits...),
 		}
 		if reads[index].err != nil {
 			row.Error = &CodexResetPublicError{Code: resetReadErrorCode(reads[index].err)}
-		} else {
-			row.Credits = reads[index].inventory.Credits
 		}
 		result.Accounts[index] = row
 	}
