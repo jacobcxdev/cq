@@ -726,11 +726,7 @@ func resolveCodexInstalledClientExecutable() (string, error) {
 			return path, nil
 		}
 	}
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return "", errCodexInstalledProcessAttestation
-	}
-	return path, nil
+	return resolveCodexInstalledClientExecutableFromPath()
 }
 
 func codexInstalledAttestationError(ctx context.Context) error {
