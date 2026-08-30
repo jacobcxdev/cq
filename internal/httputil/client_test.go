@@ -3,6 +3,7 @@ package httputil
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,24 @@ import (
 	"testing"
 	"time"
 )
+
+type failingBodyReader struct {
+	err error
+}
+
+func (reader failingBodyReader) Read([]byte) (int, error) {
+	return 0, reader.err
+}
+
+type closeTrackingReader struct {
+	io.Reader
+	closed bool
+}
+
+func (reader *closeTrackingReader) Close() error {
+	reader.closed = true
+	return nil
+}
 
 func TestNewClientTimeout(t *testing.T) {
 	// Use a very short timeout (1ms) and a very long server delay (10s) to make
@@ -77,6 +96,48 @@ func TestReadBodyEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("ReadBody len = %d, want 0", len(got))
+	}
+}
+
+func TestReadBodyLimitAcceptsExactLimit(t *testing.T) {
+	got, err := ReadBodyLimit(strings.NewReader("12345"), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "12345" {
+		t.Fatalf("ReadBodyLimit = %q", got)
+	}
+}
+
+func TestReadBodyLimitRejectsOneByteOver(t *testing.T) {
+	_, err := ReadBodyLimit(strings.NewReader("123456"), 5)
+	if !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("ReadBodyLimit error = %v", err)
+	}
+}
+
+func TestReadBodyLimitRejectsNegativeLimit(t *testing.T) {
+	_, err := ReadBodyLimit(strings.NewReader(""), -1)
+	if err == nil || !strings.Contains(err.Error(), "invalid body limit") {
+		t.Fatalf("ReadBodyLimit error = %v", err)
+	}
+}
+
+func TestReadBodyLimitReturnsReadError(t *testing.T) {
+	want := errors.New("read failed")
+	_, err := ReadBodyLimit(failingBodyReader{err: want}, 5)
+	if !errors.Is(err, want) {
+		t.Fatalf("ReadBodyLimit error = %v", err)
+	}
+}
+
+func TestReadBodyLimitDoesNotCloseReader(t *testing.T) {
+	reader := &closeTrackingReader{Reader: strings.NewReader("cq")}
+	if _, err := ReadBodyLimit(reader, 2); err != nil {
+		t.Fatal(err)
+	}
+	if reader.closed {
+		t.Fatal("ReadBodyLimit closed caller-owned reader")
 	}
 }
 

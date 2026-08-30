@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"time"
 )
@@ -11,15 +12,27 @@ import (
 // MaxResponseBody is the upper bound on HTTP response body reads (1 MiB).
 const MaxResponseBody = 1 << 20
 
+// ErrBodyTooLarge reports a response body that exceeded its configured limit.
+var ErrBodyTooLarge = errors.New("response body exceeds configured limit")
+
 // ReadBody reads up to MaxResponseBody bytes from r.
 // Returns an error if the body exceeds MaxResponseBody.
 func ReadBody(r io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, MaxResponseBody+1))
+	return ReadBodyLimit(r, MaxResponseBody)
+}
+
+// ReadBodyLimit reads at most limit bytes without closing r.
+func ReadBodyLimit(r io.Reader, limit int64) ([]byte, error) {
+	if limit < 0 || limit == math.MaxInt64 {
+		return nil, fmt.Errorf("invalid body limit %d", limit)
+	}
+	reader := &io.LimitedReader{R: r, N: limit + 1}
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > MaxResponseBody {
-		return nil, fmt.Errorf("response body exceeds %d bytes", MaxResponseBody)
+	if int64(len(data)) > limit {
+		return nil, ErrBodyTooLarge
 	}
 	return data, nil
 }
