@@ -219,6 +219,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		"if ($ownsUninstallRegistration)",
 		"Remove-Item -LiteralPath $temporaryRoot -Recurse -Force",
 		"native-transport-probe.go",
+		`$temporaryCodex = Join-Path $temporaryHome ".codex"`,
 	} {
 		if !strings.Contains(windowsText, required) {
 			t.Errorf("Windows installation script missing cleanup/proof %q", required)
@@ -234,6 +235,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`grep -F "cq-proxy.service" "/proc/$proxy_pid/cgroup"`,
 		"find \"$temporary_root\" -depth -delete",
 		"native-transport-probe.go",
+		`export CODEX_HOME="$HOME/.codex"`,
 	} {
 		if !strings.Contains(linuxText, required) {
 			t.Errorf("Linux installation script missing cleanup/proof %q", required)
