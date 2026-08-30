@@ -220,10 +220,20 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		"Remove-Item -LiteralPath $temporaryRoot -Recurse -Force",
 		"native-transport-probe.go",
 		`$temporaryCodex = Join-Path $temporaryHome ".codex"`,
+		`"install", "--manifest", $PreviousManifestPath`,
+		`"upgrade", "--manifest", $ManifestPath`,
+		`"uninstall", "--id", "jacobcxdev.cq"`,
+		`github.com/jacobcxdev/cq/cmd/cq-install@v$Version`,
+		"GetSecurityDescriptor(4)",
+		"EnginePID",
+		"LocalManifestFiles",
 	} {
 		if !strings.Contains(windowsText, required) {
 			t.Errorf("Windows installation script missing cleanup/proof %q", required)
 		}
+	}
+	if strings.Contains(windowsText, "& $Path install --owner=winget") {
+		t.Fatal("Windows native validation bypasses WinGet")
 	}
 	linuxText := string(linux)
 	for _, required := range []string{
