@@ -53,9 +53,46 @@ func TestCodexHelpShowsImmediateCommands(t *testing.T) {
 		t.Fatalf("codex help = %t, %d, %v", handled, exitCode, err)
 	}
 	help := out.String()
-	for _, want := range []string{"codex login", "codex accounts", "codex switch", "codex remove", "codex validate", "codex canary"} {
+	for _, want := range []string{"codex login", "codex accounts", "codex switch", "codex remove", "codex resets", "codex validate", "codex canary"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("codex help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestCodexResetsHelpDocumentsSafetyAndScope(t *testing.T) {
+	tests := []struct {
+		args []string
+		want []string
+	}{
+		{
+			args: []string{"codex", "resets", "--help"},
+			want: []string{"portfolio-wide", "advisory-only", "resets list", "resets recommend", "resets use"},
+		},
+		{
+			args: []string{"codex", "resets", "list", "--help"},
+			want: []string{"[account-reference]", "every account visible through cq codex accounts"},
+		},
+		{
+			args: []string{"codex", "resets", "recommend", "--help"},
+			want: []string{"whole visible portfolio", "never consumes"},
+		},
+		{
+			args: []string{"codex", "resets", "use", "--help"},
+			want: []string{"--credit CREDIT_ID", "next expiry", "default is No", "--yes"},
+		},
+	}
+
+	for _, test := range tests {
+		out := &bytes.Buffer{}
+		handled, exitCode, err := runPureGlobalInspection(test.args, out, io.Discard)
+		if !handled || exitCode != 0 || err != nil {
+			t.Fatalf("help(%v) = %t, %d, %v", test.args, handled, exitCode, err)
+		}
+		for _, want := range test.want {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("help(%v) missing %q:\n%s", test.args, want, out.String())
+			}
 		}
 	}
 }
@@ -125,6 +162,10 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"claude", "--json", "login", "--help"}},
 		{args: []string{"codex", "validate", "--help"}},
 		{args: []string{"codex", "canary", "--help"}},
+		{args: []string{"codex", "resets", "--help"}},
+		{args: []string{"codex", "resets", "list", "--help"}},
+		{args: []string{"codex", "resets", "recommend", "--help"}},
+		{args: []string{"codex", "resets", "use", "--help"}},
 		{args: []string{"codex", "validate"}},
 		{args: []string{"codex", "canary"}},
 		{args: []string{"codex", "validate", "capture", "ignored", "--help"}},

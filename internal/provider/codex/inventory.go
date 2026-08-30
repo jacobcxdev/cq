@@ -49,6 +49,7 @@ type CredentialCandidate struct {
 	Credential      CodexAccount
 	AccessExpiresAt time.Time
 	CQAuthored      bool
+	RefreshEligible bool
 	Routable        bool
 	DispatchBlocked bool
 	externalRef     *ExternalCandidateRef
@@ -265,6 +266,7 @@ func discoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, aut
 			Ref: ref, Revision: credential.Revision, Source: candidate.source,
 			Credential: credential, AccessExpiresAt: unixMilliTime(credential.ExpiresAt),
 			CQAuthored:      candidate.cqAuthored,
+			RefreshEligible: resetCandidateRefreshEligible(candidate),
 			Routable:        routable,
 			DispatchBlocked: candidate.metadata != nil && candidate.metadata.OperationState != OperationReady,
 		})
@@ -370,6 +372,15 @@ func discoverInventoryWithSources(ctx context.Context, fs fsutil.FileSystem, aut
 		return inventory.Accounts[i].Key < inventory.Accounts[j].Key
 	})
 	return inventory, nil
+}
+
+func resetCandidateRefreshEligible(candidate rawCandidate) bool {
+	metadata := candidate.metadata
+	return candidate.source == SourceManaged && candidate.cqAuthored && metadata != nil &&
+		metadata.Version == 1 && metadata.Provenance == ProvenanceCQOAuth &&
+		metadata.RefreshOwnership == RefreshCQOwnedNeverExported &&
+		metadata.OperationState == OperationReady && metadata.OperationID == "" &&
+		candidate.account.RefreshToken != ""
 }
 
 func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource, sourceName string, authoritative bool) (rawCandidate, bool, error) {

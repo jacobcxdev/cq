@@ -11,7 +11,17 @@ import (
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+type appStaticCodexInventory struct {
+	inventory codexprov.Inventory
+}
+
+func (s appStaticCodexInventory) List(context.Context) (codexprov.Inventory, error) {
+	return s.inventory, nil
+}
 
 func appCodexJWT(email, accountID, userID string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
@@ -77,5 +87,26 @@ func TestRunCodexLoginActivateUsesExactSavedCandidate(t *testing.T) {
 	_ = json.Unmarshal(data, &system)
 	if got := system["tokens"].(map[string]any)["access_token"]; got != "exact" {
 		t.Fatalf("active access token = %#v, want exact saved candidate", got)
+	}
+}
+
+func TestAccountListManagerUsesSharedCodexInventory(t *testing.T) {
+	inventory := appStaticCodexInventory{inventory: codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{
+		Key:      "account-a",
+		Identity: codexprov.AccountIdentity{AccountID: "acct-a", UserID: "user-a", Email: "a@example.com", PlanType: "pro"},
+		Active:   true,
+		Routable: true,
+		Candidates: []codexprov.CredentialCandidate{{
+			Ref:      codexprov.CandidateRef{AccountKey: "account-a", CandidateID: "candidate-a"},
+			Revision: "revision-a", Source: codexprov.SourceSystem, Routable: true,
+		}},
+	}}}}
+	mgr := accountListManager(provider.Codex, nil, inventory)
+	accounts, err := mgr.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].Email != "a@example.com" || !accounts[0].Active {
+		t.Fatalf("accounts = %+v", accounts)
 	}
 }

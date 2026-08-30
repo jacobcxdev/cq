@@ -165,12 +165,24 @@ func runCodexLoginWithAdmin(ctx context.Context, client httputil.Doer, activate 
 
 // RunAccounts lists discovered accounts for the given provider.
 func RunAccounts(id provider.ID, jsonOutput bool) error {
-	mgr := AccountManager(id, nil)
+	ctx := context.Background()
+	var inventory codexprov.CredentialInventory
+	var control *codexprov.CredentialControl
+	if id == provider.Codex {
+		var err error
+		control, err = codexprov.OpenDefaultCredentialControl(ctx, fsutil.OSFileSystem{})
+		if err != nil {
+			return err
+		}
+		defer control.Close()
+		inventory = control
+	}
+	mgr := accountListManager(id, nil, inventory)
 	if mgr == nil {
 		return fmt.Errorf("account management not supported for %s", id)
 	}
 
-	accounts, err := mgr.Discover(context.Background())
+	accounts, err := mgr.Discover(ctx)
 	if err != nil {
 		return err
 	}
@@ -188,6 +200,13 @@ func RunAccounts(id provider.ID, jsonOutput bool) error {
 	activeToken, activeEmail := GetActiveCredentials()
 	PrintAccounts(id, accounts, activeToken, activeEmail)
 	return nil
+}
+
+func accountListManager(id provider.ID, client httputil.Doer, inventory codexprov.CredentialInventory) provider.AccountManager {
+	if id == provider.Codex {
+		return &codexprov.Accounts{Inventory: inventory}
+	}
+	return AccountManager(id, client)
 }
 
 // RunSwitch switches the active account for the given provider.

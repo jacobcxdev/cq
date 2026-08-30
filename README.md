@@ -128,9 +128,17 @@ cq codex login --activate
 cq codex accounts
 cq codex switch EMAIL
 cq codex remove EMAIL
+cq codex resets list
+cq codex resets recommend
+cq codex resets use EMAIL
+cq codex resets use EMAIL --credit CREDIT_ID --yes
 ```
 
 CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
+
+`cq codex resets recommend` plans across every account shown by `cq codex accounts`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Banked resets restore shared-window percentages without changing natural 5-hour or 7-day reset dates.
+
+`cq codex resets use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
 
 ### Gemini
 
@@ -461,6 +469,10 @@ cq codex canary status
 cq codex canary stop
 cq codex login
 cq codex remove
+cq codex resets
+cq codex resets list
+cq codex resets recommend
+cq codex resets use
 cq codex switch
 cq codex validate
 cq codex validate capture

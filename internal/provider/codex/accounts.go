@@ -103,14 +103,27 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 
 // Accounts implements provider.AccountManager for Codex.
 type Accounts struct {
-	FS    fsutil.FileSystem
-	Admin CredentialAdmin
+	FS        fsutil.FileSystem
+	Admin     CredentialAdmin
+	Inventory CredentialInventory
+	Now       func() time.Time
 }
 
 func (a *Accounts) ProviderID() provider.ID { return provider.Codex }
 
 // Discover returns all known Codex accounts.
-func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
+func (a *Accounts) Discover(ctx context.Context) ([]provider.Account, error) {
+	if a.Inventory != nil {
+		inventory, err := a.Inventory.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now()
+		if a.Now != nil {
+			now = a.Now()
+		}
+		return projectVisibleProviderAccounts(ProjectVisibleAccounts(inventory, now)), nil
+	}
 	accts := DiscoverAccounts(a.FS)
 	out := make([]provider.Account, len(accts))
 	for i, acct := range accts {
@@ -123,6 +136,20 @@ func (a *Accounts) Discover(_ context.Context) ([]provider.Account, error) {
 		}
 	}
 	return out, nil
+}
+
+func projectVisibleProviderAccounts(accounts []ResetAccount) []provider.Account {
+	out := make([]provider.Account, len(accounts))
+	for i, account := range accounts {
+		out[i] = provider.Account{
+			AccountID: account.AccountID,
+			Email:     account.Email,
+			Label:     account.PlanType,
+			Active:    account.Active,
+			SwitchID:  account.Email,
+		}
+	}
+	return out
 }
 
 // Switch requires the credential coordinator for all system mutations.

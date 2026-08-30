@@ -547,3 +547,79 @@ func TestStoreWrittenFileVersion(t *testing.T) {
 		t.Errorf("written file missing %s — got %s", want, string(data))
 	}
 }
+
+func TestStoreBankedResetPreservesRateAndSamples(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	now := int64(1_000_000)
+	reset := now + 9_000
+
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{makeResult("acct1", map[quota.WindowName]quota.Window{
+		quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: reset},
+	})}, now)
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{makeResult("acct1", map[quota.WindowName]quota.Window{
+		quota.Window5Hour: {RemainingPct: 70, ResetAtUnix: reset},
+	})}, now+60)
+
+	before, _ := s.load()
+	beforeWindow := *before.Accounts["test\x00acct1"].Windows["5h"]
+	_, estimates, err := s.UpdateAndGetEstimates(ctx, map[string][]quota.Result{"test": {makeResult("acct1", map[quota.WindowName]quota.Window{
+		quota.Window5Hour: {RemainingPct: 95, ResetAtUnix: reset},
+	})}}, now+120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.load()
+	afterWindow := after.Accounts["test\x00acct1"].Windows["5h"]
+	if afterWindow.EWMARatePctPerS != beforeWindow.EWMARatePctPerS || afterWindow.Samples != beforeWindow.Samples {
+		t.Fatalf("rate/sample changed across banked reset: before=%#v after=%#v", beforeWindow, afterWindow)
+	}
+	if afterWindow.LastSeenUnix != now+120 || afterWindow.LastRemainingPct != 95 || afterWindow.LastResetAtUnix != reset {
+		t.Fatalf("snapshot not advanced after banked reset: %#v", afterWindow)
+	}
+	estimate, ok := estimates.Get(BurnRateKey{ProviderID: "test", AccountKey: "acct1", Window: "5h"})
+	if !ok || estimate.RatePctPerS != beforeWindow.EWMARatePctPerS || estimate.Samples != beforeWindow.Samples || estimate.LastSeenUnix != now+120 {
+		t.Fatalf("estimate = %#v, %v", estimate, ok)
+	}
+}
+
+func TestStoreUpwardCorrectionUsesExactPercentage(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	now := int64(1_000_000)
+	reset := now + 9_000
+	exact90 := 90.0
+	exact898 := 89.8
+	exact899 := 89.9
+
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{makeResult("acct1", map[quota.WindowName]quota.Window{
+		quota.Window5Hour: {RemainingPct: 90, RemainingPctExact: &exact90, ResetAtUnix: reset},
+	})}, now)
+	_, _ = updateTestBurnRates(s, ctx, []quota.Result{makeResult("acct1", map[quota.WindowName]quota.Window{
+		quota.Window5Hour: {RemainingPct: 89, RemainingPctExact: &exact898, ResetAtUnix: reset},
+	})}, now+60)
+	before, _ := s.load()
+	beforeWindow := *before.Accounts["test\x00acct1"].Windows["5h"]
+
+	_, _, err := s.UpdateAndGetEstimates(ctx, map[string][]quota.Result{"test": {makeResult("acct1", map[quota.WindowName]quota.Window{
+		quota.Window5Hour: {RemainingPct: 89, RemainingPctExact: &exact899, ResetAtUnix: reset},
+	})}}, now+120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.load()
+	afterWindow := after.Accounts["test\x00acct1"].Windows["5h"]
+	if afterWindow.Samples != beforeWindow.Samples || afterWindow.EWMARatePctPerS != beforeWindow.EWMARatePctPerS {
+		t.Fatalf("exact upward correction changed estimate: before=%#v after=%#v", beforeWindow, afterWindow)
+	}
+	if afterWindow.LastRemainingPctExact == nil || *afterWindow.LastRemainingPctExact != exact899 {
+		t.Fatalf("last exact remaining = %v, want %v", afterWindow.LastRemainingPctExact, exact899)
+	}
+}
+
+func TestRateEstimatesNilSafe(t *testing.T) {
+	var estimates RateEstimates
+	if _, ok := estimates.Get(BurnRateKey{ProviderID: "test", AccountKey: "x", Window: "5h"}); ok {
+		t.Error("nil RateEstimates.Get should return ok=false")
+	}
+}

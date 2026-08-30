@@ -54,10 +54,29 @@ type ClaudeCmd struct {
 
 // CodexCmd groups Codex-specific subcommands.
 type CodexCmd struct {
-	Login    LoginCmd    `cmd:"" help:"Add Codex account"`
-	Accounts AccountsCmd `cmd:"" help:"List Codex accounts"`
-	Switch   SwitchCmd   `cmd:"" help:"Switch active Codex account"`
-	Remove   RemoveCmd   `cmd:"" help:"Remove Codex account"`
+	Login    LoginCmd       `cmd:"" help:"Add Codex account"`
+	Accounts AccountsCmd    `cmd:"" help:"List Codex accounts"`
+	Switch   SwitchCmd      `cmd:"" help:"Switch active Codex account"`
+	Remove   RemoveCmd      `cmd:"" help:"Remove Codex account"`
+	Resets   CodexResetsCmd `cmd:"" help:"Inspect and use banked reset credits"`
+}
+
+type CodexResetsCmd struct {
+	List      CodexResetsListCmd      `cmd:"" help:"List reset credits"`
+	Recommend CodexResetsRecommendCmd `cmd:"" help:"Recommend a portfolio schedule"`
+	Use       CodexResetsUseCmd       `cmd:"" help:"Use one reset credit"`
+}
+
+type CodexResetsListCmd struct {
+	Reference string `arg:"" optional:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
+}
+
+type CodexResetsRecommendCmd struct{}
+
+type CodexResetsUseCmd struct {
+	Reference string  `arg:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
+	Credit    *string `help:"Credit ID; defaults to pending or next expiry" placeholder:"CREDIT_ID"`
+	Yes       bool    `help:"Consume without interactive confirmation"`
 }
 
 // GeminiCmd groups Gemini-specific subcommands.
@@ -292,7 +311,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cq: %v\n", err)
 		os.Exit(1)
 	}
-	ensureAgent()
+	if shouldEnsureAgentAfter(ctx.Command()) {
+		ensureAgent()
+	}
+}
+
+func shouldEnsureAgentAfter(command string) bool {
+	switch command {
+	case "codex resets list", "codex resets list <account-reference>", "codex resets recommend", "codex resets use <account-reference>":
+		return false
+	default:
+		return true
+	}
 }
 
 func ensureCompatibilityEpoch() error {
@@ -376,6 +406,18 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 			invalidateProviderCache(provider.Codex)
 		}
 		return err
+	case "codex resets list", "codex resets list <account-reference>":
+		return withCodexResetsDependencies(context.Background(), func(deps codexResetsDependencies) error {
+			return runCodexResetsList(context.Background(), cli.Codex.Resets.List, cli.JSON, deps)
+		})
+	case "codex resets recommend":
+		return withCodexResetsDependencies(context.Background(), func(deps codexResetsDependencies) error {
+			return runCodexResetsRecommend(context.Background(), cli.JSON, deps)
+		})
+	case "codex resets use <account-reference>":
+		return withCodexResetsDependencies(context.Background(), func(deps codexResetsDependencies) error {
+			return runCodexResetsUse(context.Background(), cli.Codex.Resets.Use, cli.JSON, deps)
+		})
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini, cli.JSON)
 	default:
