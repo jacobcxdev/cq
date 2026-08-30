@@ -1,0 +1,11 @@
+@echo off
+setlocal
+"C:\Users\Test\AppData\Local\Programs\cq\cq-install.exe" uninstall --owner=winget --silent
+set "cq_exit=%ERRORLEVEL%"
+if not "%cq_exit%"=="0" exit /b %cq_exit%
+cd /d "%TEMP%"
+del /f /q "C:\Users\Test\AppData\Local\Programs\cq\cq.exe" >nul 2>&1
+del /f /q "C:\Users\Test\AppData\Local\Programs\cq\cq-install.exe" >nul 2>&1
+del /f /q "C:\Users\Test\AppData\Local\Programs\cq\uninstall.cmd" >nul 2>&1
+rmdir "C:\Users\Test\AppData\Local\Programs\cq" >nul 2>&1
+exit /b 0

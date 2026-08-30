@@ -114,19 +114,34 @@ func cleanAbsoluteTargetPath(value, goos string) bool {
 	if value == "" {
 		return false
 	}
+	if goos == "windows" {
+		normalised := strings.ReplaceAll(value, "/", `\`)
+		if len(normalised) < 3 || normalised[1] != ':' || normalised[2] != '\\' || !isASCIILetter(normalised[0]) {
+			return false
+		}
+		parts := strings.Split(normalised[3:], `\`)
+		for _, part := range parts {
+			if !cleanWindowsPathComponent(part) {
+				return false
+			}
+		}
+		return true
+	}
 	if goos == runtime.GOOS {
 		return filepath.IsAbs(value) && filepath.Clean(value) == value
 	}
 	if goos != "windows" {
 		return strings.HasPrefix(value, "/") && cleanSlashPath(value)
 	}
-	normalised := strings.ReplaceAll(value, "/", `\`)
-	if len(normalised) < 3 || normalised[1] != ':' || normalised[2] != '\\' || !isASCIILetter(normalised[0]) {
+	return false
+}
+
+func cleanWindowsPathComponent(part string) bool {
+	if part == "" || part == "." || part == ".." || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
 		return false
 	}
-	parts := strings.Split(normalised[3:], `\`)
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." {
+	for _, character := range part {
+		if character < 0x20 || strings.ContainsRune(`<>:"|?*`, character) {
 			return false
 		}
 	}
