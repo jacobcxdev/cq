@@ -100,6 +100,43 @@ jobs:
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
 
+      - name: Publish formatted Homebrew Cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cask="dist/homebrew/Casks/cq.rb"
+          test -f "$cask"
+          brew style --fix "$cask"
+          brew style "$cask"
+
+          endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb"
+          encoded="$(base64 <"$cask" | tr -d '\n')"
+          current="$RUNNER_TEMP/cq-cask-current.json"
+          if gh api "$endpoint" >"$current" 2>/dev/null; then
+            current_content="$(jq -r '.content' "$current" | tr -d '\n')"
+            if [ "$current_content" = "$encoded" ]; then
+              echo "Homebrew Cask already current"
+              exit 0
+            fi
+            current_sha="$(jq -r '.sha' "$current")"
+            gh api --method PUT "$endpoint" \
+              -f message="chore: updated cq ${RELEASE_TAG}" \
+              -f content="$encoded" \
+              -f sha="$current_sha"
+          else
+            gh api --method PUT "$endpoint" \
+              -f message="chore: added cq ${RELEASE_TAG}" \
+              -f content="$encoded"
+          fi
+
+      - name: Audit published Homebrew Cask
+        run: |
+          brew tap jacobcxdev/tap
+          brew update
+          brew audit --cask --strict jacobcxdev/tap/cq
+
       - name: Verify published release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

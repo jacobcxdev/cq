@@ -84,6 +84,7 @@ homebrew_casks:
     homepage: "https://github.com/jacobcxdev/cq"
     description: "CLI tool to check AI provider quota usage"
     license: "MIT"
+    skip_upload: true
     binaries:
       - cq
     hooks:

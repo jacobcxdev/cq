@@ -169,6 +169,26 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 			t.Fatalf("Homebrew Cask missing %q", required)
 		}
 	}
+	if !strings.Contains(text, "skip_upload: true") {
+		t.Fatal("GoReleaser publishes the unformatted generated Homebrew Cask")
+	}
+
+	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowText := string(workflow)
+	for _, required := range []string{
+		"brew style --fix",
+		"brew style \"$cask\"",
+		"repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb",
+		"secrets.HOMEBREW_TAP_TOKEN",
+		"brew audit --cask --strict jacobcxdev/tap/cq",
+	} {
+		if !strings.Contains(workflowText, required) {
+			t.Fatalf("Homebrew Cask publish workflow missing %q", required)
+		}
+	}
 }
 
 func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
