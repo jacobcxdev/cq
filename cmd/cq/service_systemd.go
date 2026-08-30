@@ -314,11 +314,12 @@ func (platform *systemdServicePlatform) Inspect(ctx context.Context) (serviceSta
 		runtimeStatus := platform.inspectProxy(ctx, proxyStatus.ConfiguredExecutable)
 		proxyStatus.LiveExecutable = runtimeStatus.LiveExecutable
 		proxyStatus.Listener = runtimeStatus.Listener
-		if runtimeStatus.PID != 0 {
-			proxyStatus.PID = runtimeStatus.PID
-		}
-		proxyStatus.Healthy = runtimeStatus.Healthy && sameServiceExecutable(proxyStatus.LiveExecutable, proxyStatus.ConfiguredExecutable)
 		proxyStatus.Error = runtimeStatus.Error
+		if runtimeStatus.PID != proxyStatus.PID {
+			proxyStatus.Error = fmt.Sprintf("runtime PID %d differs from systemd MainPID %d", runtimeStatus.PID, proxyStatus.PID)
+		} else {
+			proxyStatus.Healthy = runtimeStatus.Running && runtimeStatus.Healthy && proxyStatus.PID > 0 && sameServiceExecutable(proxyStatus.LiveExecutable, proxyStatus.ConfiguredExecutable)
+		}
 	}
 
 	refreshStatus := componentStatus{ID: systemdRefreshTimer, Manager: "systemd-user"}

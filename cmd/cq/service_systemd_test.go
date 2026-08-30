@@ -187,6 +187,39 @@ func TestSystemdServiceInspectCombinesManagerAndRuntime(t *testing.T) {
 	}
 }
 
+func TestSystemdServiceInspectKeepsManagerPIDAuthoritative(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	if err := platform.Preflight(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.show[systemdProxyUnit] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "MainPID": "731", "Result": "success",
+	})
+	runner.show[systemdRefreshService] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "MainPID": "0", "Result": "success",
+	})
+	runner.show[systemdRefreshTimer] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "active", "SubState": "waiting", "MainPID": "0", "Result": "success",
+	})
+	platform.inspectProxy = func(_ context.Context, executable string) componentStatus {
+		return componentStatus{Running: true, Healthy: true, PID: 999, LiveExecutable: executable, Listener: "127.0.0.1:19280"}
+	}
+
+	status, err := platform.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Proxy.PID != 731 || status.Proxy.Healthy || !strings.Contains(status.Proxy.Error, "PID") {
+		t.Fatalf("proxy status = %#v", status.Proxy)
+	}
+}
+
 func newSystemdServiceHarness(t *testing.T) (*systemdServicePlatform, *fakeSystemctl) {
 	t.Helper()
 	root := t.TempDir()
