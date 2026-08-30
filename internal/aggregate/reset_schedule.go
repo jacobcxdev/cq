@@ -3,6 +3,7 @@ package aggregate
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -552,6 +553,481 @@ func sortedSimulationAccountKeys(state simulationState) []string {
 func sortedSimulationCreditIDs(state simulationState) []string {
 	ids := make([]string, 0, len(state.credits))
 	for id := range state.credits {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+const resetScheduleBeamWidth = 512
+
+type resetSearchConsumption struct {
+	accountKey string
+	creditID   string
+	useBy      time.Time
+	eventKind  simulationEventKind
+	restored   map[quota.WindowName]float64
+	avoidedGap int64
+}
+
+type resetSearchNode struct {
+	state        simulationState
+	consumptions []resetSearchConsumption
+	useful       map[string]bool
+}
+
+type resetCreditRecord struct {
+	credit     ResetScheduleCreditInput
+	accountKey string
+	email      string
+	accountID  string
+}
+
+// RecommendResetSchedule returns a deterministic, percentage-only reset plan.
+func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
+	state, blockers := normaliseResetScheduleInput(input)
+	result := ResetSchedule{
+		GeneratedAt: input.Now.UTC(),
+		Horizon:     state.horizon,
+		Exact:       len(blockers) == 0,
+		Complete:    len(blockers) == 0,
+		Confidence:  state.confidence,
+		Blockers:    blockers,
+	}
+	records := resetCreditRecords(input)
+	if len(blockers) != 0 {
+		result.Exact = false
+		result.Items = unfinishedResetScheduleItems(records, nil, nil, input.Now.UTC(), state.confidence)
+		return result
+	}
+
+	node, exact := searchResetSchedule(state)
+	result.Exact = exact
+	result.Objective = node.state.objective
+	consumed := make(map[string]resetSearchConsumption, len(node.consumptions))
+	for _, consumption := range node.consumptions {
+		consumed[consumption.creditID] = consumption
+	}
+	result.Items = projectResetScheduleItems(records, consumed, node.useful, input.Now.UTC(), state.confidence)
+	return result
+}
+
+func searchResetSchedule(initial simulationState) (resetSearchNode, bool) {
+	seed := resetSearchNode{state: initial, useful: make(map[string]bool)}
+	nodes := []resetSearchNode{seed}
+	if simulationActiveMultiplier(initial) == 0 && simulationHasDemand(initial) {
+		nodes = branchImmediateResetConsumptions(seed)
+	}
+	finals := make([]resetSearchNode, 0)
+	exact := true
+	const maximumEvents = 10_000
+	for iteration := 0; len(nodes) > 0 && iteration < maximumEvents; iteration++ {
+		nextNodes := make([]resetSearchNode, 0, len(nodes)*2)
+		for _, node := range nodes {
+			if !node.state.now.Before(node.state.horizon) {
+				finals = append(finals, node)
+				continue
+			}
+			event, ok := nextSimulationEvent(node.state)
+			if !ok {
+				node.state = advanceSimulationTo(node.state, node.state.horizon)
+				finals = append(finals, node)
+				continue
+			}
+			nextNodes = append(nextNodes, expandResetSearchEvent(node, event)...)
+		}
+		if len(nextNodes) == 0 {
+			break
+		}
+		var truncated bool
+		nodes, truncated = pruneResetSearchNodes(nextNodes, resetScheduleBeamWidth)
+		if truncated {
+			exact = false
+		}
+	}
+	for _, node := range nodes {
+		if node.state.now.Before(node.state.horizon) {
+			node.state = advanceSimulationTo(node.state, node.state.horizon)
+		}
+		finals = append(finals, node)
+	}
+	if len(finals) == 0 {
+		return seed, false
+	}
+	sort.SliceStable(finals, func(i, j int) bool { return betterResetSearchNode(finals[i], finals[j]) })
+	return finals[0], exact
+}
+
+func branchImmediateResetConsumptions(node resetSearchNode) []resetSearchNode {
+	useful := usefulResetCredits(node.state)
+	avoidedGap := projectedSimulationGap(node.state)
+	for _, credit := range useful {
+		node.useful[credit.id] = true
+	}
+	branches := make([]resetSearchNode, 0, len(useful))
+	if len(useful) == 0 {
+		branches = append(branches, cloneResetSearchNode(node))
+	}
+	for _, credit := range useful {
+		branch := cloneResetSearchNode(node)
+		state, restored, applied := applySimulationCredit(branch.state, credit.accountKey, credit.id)
+		if !applied {
+			continue
+		}
+		branch.state = state
+		branch.consumptions = append(branch.consumptions, resetSearchConsumption{
+			accountKey: credit.accountKey, creditID: credit.id, useBy: state.now,
+			eventKind: simulationEventConsumption, restored: restored, avoidedGap: avoidedGap,
+		})
+		branches = append(branches, branch)
+	}
+	return branches
+}
+
+func expandResetSearchEvent(node resetSearchNode, event simulationEvent) []resetSearchNode {
+	advanced := cloneResetSearchNode(node)
+	advanced.state = advanceSimulationTo(advanced.state, event.at)
+	useful := usefulResetCredits(advanced.state)
+	for _, credit := range useful {
+		advanced.useful[credit.id] = true
+	}
+
+	wait := cloneResetSearchNode(advanced)
+	if event.kind == simulationEventExpiry {
+		if credit, ok := wait.state.credits[event.creditID]; ok && credit.supported && resetCreditUseful(wait.state, credit) {
+			wait.state.objective.UsefulExpiredUnused++
+		}
+	}
+	wait.state = processSimulationEvent(wait.state, event)
+	avoidedGap := int64(0)
+	if simulationActiveMultiplier(wait.state) == 0 && simulationHasDemand(wait.state) {
+		avoidedGap = projectedSimulationGap(wait.state)
+	}
+	branches := make([]resetSearchNode, 0, len(useful)+1)
+	avoidableGap := event.kind == simulationEventExhaustion && len(useful) > 0 &&
+		simulationActiveMultiplier(wait.state) == 0 && simulationHasDemand(wait.state)
+	if !avoidableGap {
+		branches = append(branches, wait)
+	}
+	for _, credit := range useful {
+		branch := cloneResetSearchNode(advanced)
+		state, restored, applied := applySimulationCredit(branch.state, credit.accountKey, credit.id)
+		if !applied {
+			continue
+		}
+		branch.state = state
+		branch.consumptions = append(branch.consumptions, resetSearchConsumption{
+			accountKey: credit.accountKey, creditID: credit.id, useBy: event.at,
+			eventKind: event.kind, restored: restored, avoidedGap: avoidedGap,
+		})
+		branches = append(branches, branch)
+	}
+	return branches
+}
+
+func projectedSimulationGap(state simulationState) int64 {
+	if simulationActiveMultiplier(state) > 0 || !simulationHasDemand(state) {
+		return 0
+	}
+	end := state.horizon
+	if event, ok := nextSimulationEvent(state); ok && event.at.Before(end) {
+		end = event.at
+	}
+	if !end.After(state.now) {
+		return 0
+	}
+	return int64(end.Sub(state.now) / time.Second)
+}
+
+func usefulResetCredits(state simulationState) []simulationCredit {
+	credits := make([]simulationCredit, 0)
+	for _, id := range sortedSimulationCreditIDs(state) {
+		credit := state.credits[id]
+		if resetCreditUseful(state, credit) {
+			credits = append(credits, credit)
+		}
+	}
+	return credits
+}
+
+func resetCreditUseful(state simulationState, credit simulationCredit) bool {
+	if !credit.supported || credit.grantedAt.After(state.now) {
+		return false
+	}
+	if credit.expiresAt != nil && credit.expiresAt.Before(state.now) {
+		return false
+	}
+	account, ok := state.accounts[credit.accountKey]
+	if !ok {
+		return false
+	}
+	for _, name := range sharedResetWindows() {
+		if 100-account.windows[name].remaining >= 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneResetSearchNode(node resetSearchNode) resetSearchNode {
+	cloned := node
+	cloned.state = cloneSimulationState(node.state)
+	cloned.consumptions = append([]resetSearchConsumption(nil), node.consumptions...)
+	cloned.useful = make(map[string]bool, len(node.useful))
+	for id, useful := range node.useful {
+		cloned.useful[id] = useful
+	}
+	return cloned
+}
+
+func pruneResetSearchNodes(nodes []resetSearchNode, width int) ([]resetSearchNode, bool) {
+	sort.SliceStable(nodes, func(i, j int) bool { return betterResetSearchNode(nodes[i], nodes[j]) })
+	kept := make([]resetSearchNode, 0, min(len(nodes), width))
+	for _, candidate := range nodes {
+		dominated := false
+		for _, existing := range kept {
+			if dominatesResetSearchNode(existing, candidate) {
+				dominated = true
+				break
+			}
+		}
+		if !dominated {
+			kept = append(kept, candidate)
+		}
+	}
+	truncated := len(kept) > width
+	if truncated {
+		kept = kept[:width]
+	}
+	return kept, truncated
+}
+
+func dominatesResetSearchNode(left, right resetSearchNode) bool {
+	if !left.state.now.Equal(right.state.now) || resetCreditFingerprint(left.state) != resetCreditFingerprint(right.state) ||
+		resetUsefulFingerprint(left.useful) != resetUsefulFingerprint(right.useful) {
+		return false
+	}
+	if betterResetObjective(right.state.objective, left.state.objective) {
+		return false
+	}
+	for key, rightAccount := range right.state.accounts {
+		leftAccount, ok := left.state.accounts[key]
+		if !ok {
+			return false
+		}
+		for _, name := range sharedResetWindows() {
+			if leftAccount.windows[name].remaining < rightAccount.windows[name].remaining {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func resetCreditFingerprint(state simulationState) string {
+	return strings.Join(sortedSimulationCreditIDs(state), "\x00")
+}
+
+func resetUsefulFingerprint(useful map[string]bool) string {
+	ids := make([]string, 0, len(useful))
+	for id, value := range useful {
+		if value {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, "\x00")
+}
+
+func betterResetObjective(left, right ResetScheduleObjective) bool {
+	switch {
+	case left.UnmetDemandPctSeconds != right.UnmetDemandPctSeconds:
+		return left.UnmetDemandPctSeconds < right.UnmetDemandPctSeconds
+	case left.GapDurationSeconds != right.GapDurationSeconds:
+		return left.GapDurationSeconds < right.GapDurationSeconds
+	case left.UsefulExpiredUnused != right.UsefulExpiredUnused:
+		return left.UsefulExpiredUnused < right.UsefulExpiredUnused
+	case left.WeightedDiscardedPct != right.WeightedDiscardedPct:
+		return left.WeightedDiscardedPct < right.WeightedDiscardedPct
+	default:
+		return left.RestoredPct > right.RestoredPct
+	}
+}
+
+func betterResetSearchNode(left, right resetSearchNode) bool {
+	if betterResetObjective(left.state.objective, right.state.objective) {
+		return true
+	}
+	if betterResetObjective(right.state.objective, left.state.objective) {
+		return false
+	}
+	leftTimes := resetConsumptionTimes(left.consumptions)
+	rightTimes := resetConsumptionTimes(right.consumptions)
+	for index := 0; index < min(len(leftTimes), len(rightTimes)); index++ {
+		if !leftTimes[index].Equal(rightTimes[index]) {
+			return leftTimes[index].After(rightTimes[index])
+		}
+	}
+	if len(leftTimes) != len(rightTimes) {
+		return len(leftTimes) < len(rightTimes)
+	}
+	leftFingerprint := resetSearchFingerprint(left)
+	rightFingerprint := resetSearchFingerprint(right)
+	return leftFingerprint < rightFingerprint
+}
+
+func resetConsumptionTimes(consumptions []resetSearchConsumption) []time.Time {
+	ordered := append([]resetSearchConsumption(nil), consumptions...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].accountKey != ordered[j].accountKey {
+			return ordered[i].accountKey < ordered[j].accountKey
+		}
+		return ordered[i].creditID < ordered[j].creditID
+	})
+	times := make([]time.Time, len(ordered))
+	for index, consumption := range ordered {
+		times[index] = consumption.useBy
+	}
+	return times
+}
+
+func resetSearchFingerprint(node resetSearchNode) string {
+	parts := []string{node.state.now.Format(time.RFC3339Nano), resetCreditFingerprint(node.state)}
+	for _, consumption := range node.consumptions {
+		parts = append(parts, consumption.accountKey, consumption.creditID, consumption.useBy.Format(time.RFC3339Nano))
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func simulationHasDemand(state simulationState) bool {
+	for _, demand := range state.totalDemand {
+		if demand > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func resetCreditRecords(input ResetScheduleInput) map[string]resetCreditRecord {
+	records := make(map[string]resetCreditRecord)
+	for _, account := range input.Accounts {
+		for _, credit := range account.Credits {
+			if _, exists := records[credit.ID]; exists {
+				continue
+			}
+			records[credit.ID] = resetCreditRecord{
+				credit: credit, accountKey: account.Key, email: account.Email, accountID: account.AccountID,
+			}
+		}
+	}
+	return records
+}
+
+func projectResetScheduleItems(
+	records map[string]resetCreditRecord,
+	consumed map[string]resetSearchConsumption,
+	useful map[string]bool,
+	now time.Time,
+	confidence ResetScheduleConfidence,
+) []ResetScheduleItem {
+	items := make([]ResetScheduleItem, 0, len(records))
+	ids := sortedResetCreditRecordIDs(records)
+	for _, id := range ids {
+		record := records[id]
+		if consumption, ok := consumed[id]; ok {
+			useAt := consumption.useBy.Add(-5 * time.Minute)
+			if useAt.Before(now) {
+				useAt = now
+			}
+			status := ResetScheduled
+			if !useAt.After(now) {
+				status = ResetDueNow
+			}
+			item := ResetScheduleItem{
+				AccountEmail: record.email, AccountID: record.accountID, CreditID: id,
+				UseAt: useAt, UseBy: consumption.useBy, Status: status, Confidence: confidence,
+				RestoredPct: consumption.restored, AvoidedGapSec: consumption.avoidedGap,
+			}
+			item.ReasonCodes = resetConsumptionReasons(record, consumption, confidence)
+			items = append(items, item)
+			continue
+		}
+		status := ResetNotUseful
+		if !record.credit.Supported {
+			status = ResetUnsupported
+		} else if record.credit.ExpiresAt == nil || useful[id] {
+			status = ResetDeferred
+		}
+		items = append(items, ResetScheduleItem{
+			AccountEmail: record.email, AccountID: record.accountID, CreditID: id,
+			Status: status, Confidence: confidence,
+		})
+	}
+	sortResetScheduleItems(items)
+	return items
+}
+
+func unfinishedResetScheduleItems(
+	records map[string]resetCreditRecord,
+	consumed map[string]resetSearchConsumption,
+	useful map[string]bool,
+	now time.Time,
+	confidence ResetScheduleConfidence,
+) []ResetScheduleItem {
+	items := projectResetScheduleItems(records, consumed, useful, now, confidence)
+	for index := range items {
+		if items[index].Status != ResetUnsupported {
+			items[index].Status = ResetDeferred
+			items[index].UseAt = time.Time{}
+			items[index].UseBy = time.Time{}
+		}
+	}
+	return items
+}
+
+func resetConsumptionReasons(record resetCreditRecord, consumption resetSearchConsumption, confidence ResetScheduleConfidence) []ResetScheduleReason {
+	reasons := make([]ResetScheduleReason, 0, 3)
+	switch consumption.eventKind {
+	case simulationEventExpiry:
+		reasons = append(reasons, ResetReasonExpiryPressure)
+	case simulationEventNaturalReset:
+		reasons = append(reasons, ResetReasonNaturalReset)
+	case simulationEventExhaustion, simulationEventConsumption:
+		reasons = append(reasons, ResetReasonGapAvoidance)
+	}
+	if record.credit.ExpiresAt != nil && consumption.useBy.Equal(record.credit.ExpiresAt.UTC()) && consumption.eventKind != simulationEventExpiry {
+		reasons = append(reasons, ResetReasonExpiryPressure)
+	}
+	reasons = append(reasons, ResetReasonWasteReduction)
+	if confidence == ResetConfidenceLow {
+		reasons = append(reasons, ResetReasonRateFallback)
+	}
+	return reasons
+}
+
+func sortResetScheduleItems(items []ResetScheduleItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		leftActionable := items[i].Status == ResetScheduled || items[i].Status == ResetDueNow
+		rightActionable := items[j].Status == ResetScheduled || items[j].Status == ResetDueNow
+		if leftActionable != rightActionable {
+			return leftActionable
+		}
+		if leftActionable && !items[i].UseAt.Equal(items[j].UseAt) {
+			return items[i].UseAt.Before(items[j].UseAt)
+		}
+		if items[i].AccountEmail != items[j].AccountEmail {
+			return items[i].AccountEmail < items[j].AccountEmail
+		}
+		if items[i].AccountID != items[j].AccountID {
+			return items[i].AccountID < items[j].AccountID
+		}
+		return items[i].CreditID < items[j].CreditID
+	})
+}
+
+func sortedResetCreditRecordIDs(records map[string]resetCreditRecord) []string {
+	ids := make([]string, 0, len(records))
+	for id := range records {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)

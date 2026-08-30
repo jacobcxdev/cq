@@ -1,6 +1,7 @@
 package aggregate
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"testing"
@@ -276,5 +277,214 @@ func TestResetScheduleHorizon(t *testing.T) {
 	}
 	if got, want := resetPlanningHorizon(now, []ResetScheduleCreditInput{{ID: "forever"}}), now.Add(7*24*time.Hour); !got.Equal(want) {
 		t.Fatalf("rolling horizon = %s, want %s", got, want)
+	}
+}
+
+func scheduleTestAccount(now time.Time, key string, multiplier int, remaining, rate float64, credit ResetScheduleCreditInput) ResetScheduleAccountInput {
+	return ResetScheduleAccountInput{
+		Key: key, Email: key + "@example.com", AccountID: "id-" + key, Multiplier: multiplier,
+		Windows: map[quota.WindowName]ResetScheduleWindowInput{
+			quota.Window5Hour: resetTestWindow(remaining, now.Add(5*time.Hour), 5*time.Hour, rate),
+			quota.Window7Day:  resetTestWindow(remaining, now.Add(7*24*time.Hour), 7*24*time.Hour, rate),
+		},
+		Credits: []ResetScheduleCreditInput{credit},
+	}
+}
+
+func TestRecommendResetScheduleUsesFiveMinuteLead(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(2 * time.Hour)
+	input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{
+		scheduleTestAccount(now, "account-a", 1, 10, 0.01, ResetScheduleCreditInput{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true}),
+	}}
+	got := RecommendResetSchedule(input)
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %+v", got.Items)
+	}
+	wantBy := now.Add(1_000 * time.Second)
+	if got.Items[0].UseBy != wantBy || got.Items[0].UseAt != wantBy.Add(-5*time.Minute) {
+		t.Fatalf("timing = %s/%s, want %s/%s", got.Items[0].UseAt, got.Items[0].UseBy, wantBy.Add(-5*time.Minute), wantBy)
+	}
+	if got.Items[0].Status != ResetScheduled || got.Items[0].RestoredPct[quota.Window5Hour] != 100 || got.Items[0].AvoidedGapSec <= 0 {
+		t.Fatalf("item = %+v", got.Items[0])
+	}
+}
+
+func TestResetSearchBranchesAtExhaustion(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(2 * time.Hour)
+	input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{
+		scheduleTestAccount(now, "account-a", 1, 10, 0.01, ResetScheduleCreditInput{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true}),
+	}}
+	state, _ := normaliseResetScheduleInput(input)
+	event, ok := nextSimulationEvent(state)
+	if !ok || event.kind != simulationEventExhaustion {
+		t.Fatalf("first event = %+v, %v", event, ok)
+	}
+	branches := expandResetSearchEvent(resetSearchNode{state: state, useful: map[string]bool{}}, event)
+	if len(branches) != 1 {
+		t.Fatalf("branches = %+v", branches)
+	}
+	if len(branches[0].consumptions) != 1 || branches[0].consumptions[0].useBy != event.at {
+		t.Fatalf("consume branch = %+v", branches[0])
+	}
+}
+
+func TestRecommendResetScheduleUsesLatestUsefulExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+	input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{
+		scheduleTestAccount(now, "account-a", 1, 90, 0.001, ResetScheduleCreditInput{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true}),
+	}}
+	got := RecommendResetSchedule(input)
+	if len(got.Items) != 1 || got.Items[0].UseBy != expiresAt || got.Items[0].Status != ResetScheduled {
+		t.Fatalf("schedule = %+v", got)
+	}
+	if got.Items[0].RestoredPct[quota.Window5Hour] < 3.59 {
+		t.Fatalf("restored = %+v", got.Items[0].RestoredPct)
+	}
+}
+
+func TestRecommendResetScheduleDueNowForCurrentGap(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+	input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{
+		scheduleTestAccount(now, "account-a", 1, 0, 0.01, ResetScheduleCreditInput{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true}),
+	}}
+	got := RecommendResetSchedule(input)
+	if len(got.Items) != 1 || got.Items[0].Status != ResetDueNow || got.Items[0].UseAt != now || got.Items[0].UseBy != now {
+		t.Fatalf("schedule = %+v", got)
+	}
+}
+
+func TestRecommendResetScheduleDefersNonExpiringUnusedCredit(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{
+		scheduleTestAccount(now, "account-a", 1, 100, 0, ResetScheduleCreditInput{ID: "credit-a", Supported: true}),
+	}}
+	got := RecommendResetSchedule(input)
+	if len(got.Items) != 1 || got.Items[0].Status != ResetDeferred || !got.Items[0].UseAt.IsZero() {
+		t.Fatalf("schedule = %+v", got)
+	}
+}
+
+func TestRecommendResetScheduleReportsUnsupportedAndNotUseful(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Minute)
+	account := scheduleTestAccount(now, "account-a", 1, 100, 0.0001, ResetScheduleCreditInput{ID: "not-useful", ExpiresAt: &expiresAt, Supported: true})
+	account.Credits = append(account.Credits, ResetScheduleCreditInput{ID: "unsupported", ExpiresAt: &expiresAt})
+	got := RecommendResetSchedule(ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{account}})
+	statuses := map[string]ResetScheduleStatus{}
+	for _, item := range got.Items {
+		statuses[item.CreditID] = item.Status
+	}
+	if statuses["not-useful"] != ResetNotUseful || statuses["unsupported"] != ResetUnsupported {
+		t.Fatalf("statuses = %+v", statuses)
+	}
+}
+
+func TestRecommendResetScheduleRequiresOnePointInOneWindow(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(50 * time.Second)
+	account := scheduleTestAccount(now, "account-a", 1, 100, 0.011, ResetScheduleCreditInput{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true})
+	got := RecommendResetSchedule(ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{account}})
+	if len(got.Items) != 1 || got.Items[0].Status != ResetNotUseful {
+		t.Fatalf("schedule = %+v", got)
+	}
+}
+
+func TestRecommendResetScheduleSeparatesSameDayExpiries(t *testing.T) {
+	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(20 * time.Hour)
+	input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{
+		scheduleTestAccount(now, "account-a", 1, 5, 0.01, ResetScheduleCreditInput{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true}),
+		scheduleTestAccount(now, "account-b", 1, 10, 0.01, ResetScheduleCreditInput{ID: "credit-b", ExpiresAt: &expiresAt, Supported: true}),
+		scheduleTestAccount(now, "account-c", 1, 15, 0.01, ResetScheduleCreditInput{ID: "credit-c", ExpiresAt: &expiresAt, Supported: true}),
+	}}
+	got := RecommendResetSchedule(input)
+	actionable := make([]ResetScheduleItem, 0, 3)
+	for _, item := range got.Items {
+		if item.Status == ResetScheduled || item.Status == ResetDueNow {
+			actionable = append(actionable, item)
+		}
+	}
+	if len(actionable) != 3 {
+		t.Fatalf("actionable = %+v", actionable)
+	}
+	if !(actionable[0].UseBy.Before(actionable[1].UseBy) && actionable[1].UseBy.Before(actionable[2].UseBy)) {
+		t.Fatalf("deadlines were collapsed: %+v", actionable)
+	}
+}
+
+func TestResetScheduleObjectiveIsLexicographic(t *testing.T) {
+	lessGapButMoreUnmet := ResetScheduleObjective{UnmetDemandPctSeconds: 2, GapDurationSeconds: 0}
+	moreGapButLessUnmet := ResetScheduleObjective{UnmetDemandPctSeconds: 1, GapDurationSeconds: 10_000}
+	if betterResetObjective(lessGapButMoreUnmet, moreGapButLessUnmet) {
+		t.Fatal("gap duration overrode unmet demand")
+	}
+	moreRestored := ResetScheduleObjective{RestoredPct: 10}
+	lessRestored := ResetScheduleObjective{RestoredPct: 5}
+	if !betterResetObjective(moreRestored, lessRestored) {
+		t.Fatal("restored percentage was not maximised after earlier ties")
+	}
+}
+
+func TestResetScheduleDominanceRequiresNoLowerCapacity(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	state := simulationState{
+		now: now,
+		accounts: map[string]simulationAccount{"account-a": {
+			key: "account-a", multiplier: 1,
+			windows: map[quota.WindowName]simulationWindow{
+				quota.Window5Hour: {remaining: 80},
+				quota.Window7Day:  {remaining: 70},
+			},
+		}},
+		credits: map[string]simulationCredit{"credit-a": {id: "credit-a"}},
+	}
+	better := resetSearchNode{state: state, useful: map[string]bool{}}
+	worse := cloneResetSearchNode(better)
+	worse.state.accounts["account-a"] = simulationAccount{
+		key: "account-a", multiplier: 1,
+		windows: map[quota.WindowName]simulationWindow{
+			quota.Window5Hour: {remaining: 79},
+			quota.Window7Day:  {remaining: 70},
+		},
+	}
+	if !dominatesResetSearchNode(better, worse) {
+		t.Fatal("higher-capacity state did not dominate")
+	}
+	notDominant := cloneResetSearchNode(better)
+	notDominant.state.accounts["account-a"] = simulationAccount{
+		key: "account-a", multiplier: 1,
+		windows: map[quota.WindowName]simulationWindow{
+			quota.Window5Hour: {remaining: 100},
+			quota.Window7Day:  {remaining: 69},
+		},
+	}
+	if dominatesResetSearchNode(notDominant, better) {
+		t.Fatal("state with lower weekly capacity dominated")
+	}
+}
+
+func TestResetScheduleBeamDeterministic(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	nodes := make([]resetSearchNode, 600)
+	for index := range nodes {
+		id := fmt.Sprintf("credit-%03d", 599-index)
+		nodes[index] = resetSearchNode{
+			state:  simulationState{now: now, accounts: map[string]simulationAccount{}, credits: map[string]simulationCredit{id: {id: id}}},
+			useful: map[string]bool{},
+		}
+	}
+	first, firstTruncated := pruneResetSearchNodes(append([]resetSearchNode(nil), nodes...), resetScheduleBeamWidth)
+	second, secondTruncated := pruneResetSearchNodes(append([]resetSearchNode(nil), nodes...), resetScheduleBeamWidth)
+	if !firstTruncated || !secondTruncated || len(first) != resetScheduleBeamWidth || len(second) != resetScheduleBeamWidth {
+		t.Fatalf("beam sizes = %d/%d truncated=%v/%v", len(first), len(second), firstTruncated, secondTruncated)
+	}
+	for index := range first {
+		if resetSearchFingerprint(first[index]) != resetSearchFingerprint(second[index]) {
+			t.Fatalf("survivor %d differs", index)
+		}
 	}
 }
