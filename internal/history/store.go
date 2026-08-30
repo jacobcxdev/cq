@@ -63,6 +63,24 @@ func (b BurnRates) Get(k BurnRateKey) (float64, bool) {
 	return r, ok
 }
 
+// RateEstimate includes confidence metadata used by reset recommendations.
+type RateEstimate struct {
+	RatePctPerS  float64
+	Samples      int
+	LastSeenUnix int64
+}
+
+// RateEstimates is the rich read-side snapshot for burn-rate consumers.
+type RateEstimates map[BurnRateKey]RateEstimate
+
+func (r RateEstimates) Get(k BurnRateKey) (RateEstimate, bool) {
+	if r == nil {
+		return RateEstimate{}, false
+	}
+	estimate, ok := r[k]
+	return estimate, ok
+}
+
 // BurnState is the on-disk persistence schema.
 type BurnState struct {
 	Version  int                      `json:"version"`
@@ -79,11 +97,12 @@ type AccountState struct {
 // WindowState captures the EWMA plus the minimum metadata needed to compute
 // the next delta sample.
 type WindowState struct {
-	EWMARatePctPerS  float64 `json:"ewma_rate_pct_per_s"`
-	LastSeenUnix     int64   `json:"last_seen_unix"`
-	LastRemainingPct int     `json:"last_remaining_pct"`
-	LastResetAtUnix  int64   `json:"last_reset_at_unix"`
-	Samples          int     `json:"samples"`
+	EWMARatePctPerS       float64  `json:"ewma_rate_pct_per_s"`
+	LastSeenUnix          int64    `json:"last_seen_unix"`
+	LastRemainingPct      int      `json:"last_remaining_pct"`
+	LastRemainingPctExact *float64 `json:"last_remaining_pct_exact,omitempty"`
+	LastResetAtUnix       int64    `json:"last_reset_at_unix"`
+	Samples               int      `json:"samples"`
 }
 
 // Store persists EWMA burn state using fsutil.FileSystem for dependency
@@ -169,6 +188,16 @@ func (s *Store) UpdateAndGetBurnRates(
 	providerResults map[string][]quota.Result,
 	nowEpoch int64,
 ) (BurnRates, error) {
+	rates, _, err := s.UpdateAndGetEstimates(ctx, providerResults, nowEpoch)
+	return rates, err
+}
+
+// UpdateAndGetEstimates updates history and returns burn rates with confidence metadata.
+func (s *Store) UpdateAndGetEstimates(
+	ctx context.Context,
+	providerResults map[string][]quota.Result,
+	nowEpoch int64,
+) (BurnRates, RateEstimates, error) {
 	_ = ctx // reserved for future cancellation support
 
 	state, err := s.load()
@@ -214,11 +243,12 @@ func (s *Store) UpdateAndGetBurnRates(
 				if !have {
 					// First observation: seed state, no rate sample yet.
 					acct.Windows[windowKey] = &WindowState{
-						EWMARatePctPerS:  0,
-						LastSeenUnix:     nowEpoch,
-						LastRemainingPct: w.RemainingPct,
-						LastResetAtUnix:  w.ResetAtUnix,
-						Samples:          1,
+						EWMARatePctPerS:       0,
+						LastSeenUnix:          nowEpoch,
+						LastRemainingPct:      w.RemainingPct,
+						LastRemainingPctExact: cloneExact(w.RemainingPctExact),
+						LastResetAtUnix:       w.ResetAtUnix,
+						Samples:               1,
 					}
 					continue
 				}
@@ -235,11 +265,19 @@ func (s *Store) UpdateAndGetBurnRates(
 					// A gap longer than the window cannot distinguish suspended or
 					// unobserved resets from actual consumption. Cold-start instead.
 					*prev = WindowState{
-						LastSeenUnix:     nowEpoch,
-						LastRemainingPct: w.RemainingPct,
-						LastResetAtUnix:  w.ResetAtUnix,
-						Samples:          1,
+						LastSeenUnix:          nowEpoch,
+						LastRemainingPct:      w.RemainingPct,
+						LastRemainingPctExact: cloneExact(w.RemainingPctExact),
+						LastResetAtUnix:       w.ResetAtUnix,
+						Samples:               1,
 					}
+					continue
+				}
+				if w.ResetAtUnix == prev.LastResetAtUnix && remainingIncreased(prev, w) {
+					prev.LastSeenUnix = nowEpoch
+					prev.LastRemainingPct = w.RemainingPct
+					prev.LastRemainingPctExact = cloneExact(w.RemainingPctExact)
+					prev.LastResetAtUnix = w.ResetAtUnix
 					continue
 				}
 
@@ -249,6 +287,7 @@ func (s *Store) UpdateAndGetBurnRates(
 					// time went backwards) — reseed snapshot, no EWMA update.
 					prev.LastSeenUnix = nowEpoch
 					prev.LastRemainingPct = w.RemainingPct
+					prev.LastRemainingPctExact = cloneExact(w.RemainingPctExact)
 					prev.LastResetAtUnix = w.ResetAtUnix
 					continue
 				}
@@ -264,6 +303,7 @@ func (s *Store) UpdateAndGetBurnRates(
 				// of zero demand. Freeze the EWMA and update only LastSeenUnix.
 				if w.RemainingPct == 0 && deltaPct == 0 && prev.LastRemainingPct == 0 {
 					prev.LastSeenUnix = nowEpoch
+					prev.LastRemainingPctExact = cloneExact(w.RemainingPctExact)
 					prev.LastResetAtUnix = w.ResetAtUnix
 					continue
 				}
@@ -274,6 +314,7 @@ func (s *Store) UpdateAndGetBurnRates(
 				prev.EWMARatePctPerS = alpha*instantRate + (1-alpha)*prev.EWMARatePctPerS
 				prev.LastSeenUnix = nowEpoch
 				prev.LastRemainingPct = w.RemainingPct
+				prev.LastRemainingPctExact = cloneExact(w.RemainingPctExact)
 				prev.LastResetAtUnix = w.ResetAtUnix
 				prev.Samples++
 			}
@@ -288,6 +329,7 @@ func (s *Store) UpdateAndGetBurnRates(
 	}
 
 	rates := make(BurnRates)
+	estimates := make(RateEstimates)
 	for _, acct := range state.Accounts {
 		if acct == nil {
 			continue
@@ -296,15 +338,36 @@ func (s *Store) UpdateAndGetBurnRates(
 			if ws == nil || ws.Samples < 2 {
 				continue
 			}
-			rates[BurnRateKey{
+			key := BurnRateKey{
 				ProviderID: acct.ProviderID,
 				AccountKey: acct.AccountKey,
 				Window:     windowKey,
-			}] = ws.EWMARatePctPerS
+			}
+			rates[key] = ws.EWMARatePctPerS
+			estimates[key] = RateEstimate{
+				RatePctPerS:  ws.EWMARatePctPerS,
+				Samples:      ws.Samples,
+				LastSeenUnix: ws.LastSeenUnix,
+			}
 		}
 	}
 
-	return rates, saveErr
+	return rates, estimates, saveErr
+}
+
+func remainingIncreased(prev *WindowState, current quota.Window) bool {
+	if prev.LastRemainingPctExact != nil && current.RemainingPctExact != nil {
+		return *current.RemainingPctExact > *prev.LastRemainingPctExact
+	}
+	return current.RemainingPct > prev.LastRemainingPct
+}
+
+func cloneExact(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // computeDelta returns the amount consumed since the previous observation in
