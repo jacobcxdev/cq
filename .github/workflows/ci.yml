@@ -39,7 +39,10 @@ jobs:
       - run: go build ./...
       - run: GOOS=windows GOARCH=amd64 go build ./...
       - run: GOOS=windows GOARCH=arm64 go build ./...
+      - run: GOOS=linux GOARCH=amd64 go build ./...
+      - run: GOOS=linux GOARCH=arm64 go build ./...
       - run: go vet ./...
+      - run: go test -race -count=1 ./internal/installer ./cmd/cq-install
       - name: Gate degraded rescue transport
         run: |
           test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
@@ -62,11 +65,11 @@ jobs:
           go-version: stable
 
       - run: go build -o cq.exe ./cmd/cq
+      - run: go build -o cq-install.exe ./cmd/cq-install
       - run: .\cq.exe --help
       - run: .\cq.exe --version
+      - run: .\cq-install.exe --help
       - run: go vet ./...
-      - run: go test -race -count=1 ./internal/aggregate ./internal/auth ./internal/cache ./internal/compat ./internal/fsutil ./internal/history ./internal/httputil ./internal/keyring ./internal/modelregistry ./internal/output ./internal/provider ./internal/provider/claude ./internal/provider/gemini ./internal/quota ./internal/userdirs
-      - run: go test -race -count=1 ./internal/app -run '^(TestBuildReport|TestAddProxyEligibility|TestRunner)'
-      - run: go test -race -count=1 ./internal/provider/codex -run '^(TestRegistryAccountAliasIndex|TestResolveAccountReference|TestAccountKeyState|TestParseUsage|TestParseNumericResetAt|TestInventoryRejects)'
-      - run: go test -race -count=1 ./internal/proxy -run '^(TestConfigRejectsWindowsVolumeRootStateDirectories|TestCodexInstalledProtectedIdentityWindowsUsesFullFileID)$'
-      - run: go test -race -count=1 ./cmd/cq -run '^TestProxyStatusRejectsWindowsVolumeRootContinuityDirectory$'
+      - run: go test -race -count=1 ./internal/installer -run '^TestWindows'
+      - run: go test -race -count=1 ./cmd/cq-install
+      - run: go test -race -count=1 ./...

@@ -170,3 +170,73 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		}
 	}
 }
+
+func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"runs-on: windows-latest",
+		"go build -o cq.exe ./cmd/cq",
+		"go build -o cq-install.exe ./cmd/cq-install",
+		"go test -race -count=1 ./...",
+		"GOOS=windows GOARCH=amd64 go build ./...",
+		"GOOS=windows GOARCH=arm64 go build ./...",
+		"GOOS=linux GOARCH=amd64 go build ./...",
+		"GOOS=linux GOARCH=arm64 go build ./...",
+		"./internal/installer",
+		"./cmd/cq-install",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("CI missing native installer gate %q", required)
+		}
+	}
+	if strings.Contains(text, "self-hosted") || strings.Contains(text, "bespoke") {
+		t.Fatal("CI requires a persistent custom runner")
+	}
+}
+
+func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
+	windows, err := os.ReadFile("../../.github/scripts/validate-windows-install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	linux, err := os.ReadFile("../../.github/scripts/validate-linux-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowsText := string(windows)
+	for _, required := range []string{
+		"finally",
+		`\cq\Proxy`,
+		`\cq\Refresh`,
+		"Get-CimInstance Win32_Process",
+		"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\cq",
+		"CQPathAdded",
+		"if ($ownsCQTasks)",
+		"if ($ownsUninstallRegistration)",
+		"Remove-Item -LiteralPath $temporaryRoot -Recurse -Force",
+		"native-transport-probe.go",
+	} {
+		if !strings.Contains(windowsText, required) {
+			t.Errorf("Windows installation script missing cleanup/proof %q", required)
+		}
+	}
+	linuxText := string(linux)
+	for _, required := range []string{
+		"trap cleanup EXIT INT TERM",
+		"cq-proxy.service",
+		"cq-refresh.service",
+		"cq-refresh.timer",
+		"systemctl --user daemon-reload",
+		`grep -F "cq-proxy.service" "/proc/$proxy_pid/cgroup"`,
+		"find \"$temporary_root\" -depth -delete",
+		"native-transport-probe.go",
+	} {
+		if !strings.Contains(linuxText, required) {
+			t.Errorf("Linux installation script missing cleanup/proof %q", required)
+		}
+	}
+}
