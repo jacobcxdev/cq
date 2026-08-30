@@ -37,15 +37,46 @@ Run "cq <command> --help" for more information on a command.
 `,
 	"codex": `Usage: cq codex <command>
 
-Manage Codex accounts and validation.
+Manage Codex accounts, banked resets, and validation.
 
 Commands:
   codex login       Add Codex account
   codex accounts    List Codex accounts
   codex switch      Switch active Codex account
   codex remove      Remove Codex account
+  codex resets      Inspect and use banked reset credits
   codex validate    Validate installed Codex routing
   codex canary      Manage Codex routing canary
+`,
+	"codex resets": `Usage: cq codex resets <command>
+
+Inspect and use Codex banked reset credits.
+
+Recommendations are portfolio-wide across every account visible through
+cq codex accounts. They are advisory-only and never consume a credit.
+
+Commands:
+  codex resets list        List reset credits
+  codex resets recommend   Recommend a portfolio schedule
+  codex resets use         Use one reset credit after confirmation
+`,
+	"codex resets list": `Usage: cq codex resets list [account-reference]
+
+List banked reset credits for every account visible through cq codex accounts.
+Supply a unique email, CQ alias, or opaque AccountKey to inspect one account.
+`,
+	"codex resets recommend": `Usage: cq codex resets recommend
+
+Recommend timing across the whole visible portfolio. This command fetches
+fresh usage and reset-credit data, is advisory-only, and never consumes a credit.
+`,
+	"codex resets use": `Usage: cq codex resets use <account-reference> [--credit CREDIT_ID] [--yes]
+
+Use one banked reset for one account. When --credit is omitted, CQ resumes an
+unresolved attempt or selects the eligible credit with the next expiry.
+
+Confirmation default is No. Use --yes to consume without an interactive prompt.
+Banked resets restore usage percentages only; natural reset dates do not change.
 `,
 	"codex validate": "Usage: cq codex validate capture ... | http --client-build BUILD [--state-dir DIR] | websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]\n",
 	"codex canary":   "Usage: cq codex canary start|status|stop\n",
@@ -921,6 +952,20 @@ func manualHelpInspectionPath(args []string) ([]string, bool) {
 	case "codex":
 		if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
 			return []string{"codex"}, true
+		}
+		if len(args) >= 3 && args[1] == "resets" && helpRequested(args[2:]) {
+			if args[2] == "--help" || args[2] == "-h" {
+				return []string{"codex", "resets"}, true
+			}
+			if args[2] == "help" {
+				path := append([]string{"codex", "resets"}, args[3:]...)
+				if _, ok := manualHelp(path); ok {
+					return path, true
+				}
+			}
+			if args[2] == "list" || args[2] == "recommend" || args[2] == "use" {
+				return []string{"codex", "resets", args[2]}, true
+			}
 		}
 		if len(args) >= 2 && (args[1] == "validate" || args[1] == "canary") && (len(args) == 2 || helpRequested(args[2:])) {
 			return []string{"codex", args[1]}, true

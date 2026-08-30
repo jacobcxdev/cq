@@ -191,6 +191,12 @@ func TestDispatchUnknownCommandReturnsError(t *testing.T) {
 
 func TestDispatchCodexAccountsJSON(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	shortConfigDir, err := os.MkdirTemp("/private/tmp", "cq-accounts-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(shortConfigDir) })
+	t.Setenv("XDG_CONFIG_HOME", shortConfigDir)
 
 	for _, args := range [][]string{
 		{"codex", "accounts", "--json"},

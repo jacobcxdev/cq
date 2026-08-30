@@ -97,7 +97,8 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 
 var commandDispatcherCoverageOnly = []commandDispatcherCoverage{
 	{commandDispatcherKey{"help.go", "interceptedZeroArgumentUsage", "args[1]"}, []string{"overlay", "prime"}},
-	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[1]"}, []string{"canary", "endpoint", "validate"}},
+	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[1]"}, []string{"canary", "endpoint", "resets", "validate"}},
+	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[2]"}, []string{"list", "recommend", "use"}},
 	{commandDispatcherKey{"help.go", "manualUsageInspectionError", "args[0]"}, []string{"agent", "models", "proxy"}},
 	{commandDispatcherKey{"help.go", "manualUsageInspectionError", "args[1]"}, []string{"install", "list", "overlay", "prime", "refresh", "uninstall"}},
 	{commandDispatcherKey{"help.go", "proxyHelpInspectionPath", "args[1]"}, []string{"artifact", "client-bearer-barrier", "codex", "inspect-legacy", "receipt", "transition-legacy"}},
