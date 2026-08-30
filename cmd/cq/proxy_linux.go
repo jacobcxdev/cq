@@ -3,6 +3,8 @@
 package main
 
 func init() {
+	defaultProxyInspectionTarget = linuxProxyInspectionTarget
+	proxyInspectionTargetForRoot = linuxProxyInspectionTargetForRoot
 	adoptProxyListenerFn = adoptUnixProxyListener
 	newProxyRuntimeWorkerLauncherFn = newUnixProxyRuntimeWorkerLauncher
 	runProxyAdoptedRuntimeFn = runUnixProxyAdoptedRuntime

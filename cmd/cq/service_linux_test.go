@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,9 +63,14 @@ func TestLinuxServiceLifecycleBindsSystemdContract(t *testing.T) {
 
 func TestLinuxProxyRuntimeHookBindsExactKernelIdentity(t *testing.T) {
 	previous := inspectLinuxProxyRuntimeFn
-	t.Cleanup(func() { inspectLinuxProxyRuntimeFn = previous })
+	previousPort := linuxProxyRuntimePortFn
+	t.Cleanup(func() {
+		inspectLinuxProxyRuntimeFn = previous
+		linuxProxyRuntimePortFn = previousPort
+	})
+	linuxProxyRuntimePortFn = func() (int, error) { return 24567, nil }
 	inspectLinuxProxyRuntimeFn = func(_ context.Context, executable string, port int) (proxy.LinuxProxyRuntimeIdentity, error) {
-		if executable != "/home/test/bin/cq" || port != proxy.DefaultPort {
+		if executable != "/home/test/bin/cq" || port != 24567 {
 			t.Fatalf("inspection inputs = %q %d", executable, port)
 		}
 		process := proxy.LinuxProcessIdentity{
@@ -84,6 +90,16 @@ func TestLinuxProxyRuntimeHookBindsExactKernelIdentity(t *testing.T) {
 
 	status := linuxProxyRuntimeInspector(context.Background(), "/home/test/bin/cq")
 	if !status.Healthy || status.PID != 731 || status.LiveExecutable != "/home/test/bin/cq" || status.Listener != "127.0.0.1:19280" || status.Error != "" {
+		t.Fatalf("runtime status = %#v", status)
+	}
+}
+
+func TestLinuxProxyRuntimeInspectorFailsClosedWithoutConfiguredPort(t *testing.T) {
+	previous := linuxProxyRuntimePortFn
+	t.Cleanup(func() { linuxProxyRuntimePortFn = previous })
+	linuxProxyRuntimePortFn = func() (int, error) { return 0, errors.New("missing") }
+	status := linuxProxyRuntimeInspector(context.Background(), "/home/test/bin/cq")
+	if status.Healthy || status.Running || status.Error == "" {
 		t.Fatalf("runtime status = %#v", status)
 	}
 }

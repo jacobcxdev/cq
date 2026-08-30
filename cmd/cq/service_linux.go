@@ -19,13 +19,25 @@ import (
 )
 
 var inspectLinuxProxyRuntimeFn = proxy.InspectLinuxProxyRuntime
+var linuxProxyRuntimePortFn = func() (int, error) {
+	config, err := proxy.LoadExistingConfig()
+	if err != nil || config == nil || config.Port < 1 || config.Port > 65_535 {
+		return 0, fmt.Errorf("load Linux proxy runtime port")
+	}
+	return config.Port, nil
+}
 
 var linuxProxyRuntimeInspector = func(ctx context.Context, executable string) componentStatus {
 	status := componentStatus{
 		ID:      systemdProxyUnit,
 		Manager: "systemd-user",
 	}
-	identity, err := inspectLinuxProxyRuntimeFn(ctx, executable, proxy.DefaultPort)
+	port, err := linuxProxyRuntimePortFn()
+	if err != nil {
+		status.Error = "Linux proxy runtime inspection is unavailable"
+		return status
+	}
+	identity, err := inspectLinuxProxyRuntimeFn(ctx, executable, port)
 	if err != nil || !identity.Valid() {
 		status.Error = "Linux proxy runtime inspection is unavailable"
 		return status
