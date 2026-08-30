@@ -117,7 +117,7 @@ func TestResetCreditClientListUsesWhamContract(t *testing.T) {
 		if got := req.Header.Get("ChatGPT-Account-Id"); got != "acct-1" {
 			t.Fatalf("ChatGPT-Account-Id = %q", got)
 		}
-		return jsonResponse(http.StatusOK, `{"available_reset_count":1,"credits":[{"id":"credit-1","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-08-30T08:00:00Z","expires_at":"2026-08-31T08:00:00Z","title":"Reset","description":"One reset"}]}`), nil
+		return jsonResponse(http.StatusOK, `{"available_count":1,"credits":[{"id":"credit-1","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-08-30T08:00:00Z","expires_at":"2026-08-31T08:00:00Z","title":"Reset","description":"One reset"}]}`), nil
 	})}
 
 	got, err := client.List(context.Background(), CredentialMaterial{AccessToken: "access-token", AccountID: "acct-1"})
@@ -129,7 +129,7 @@ func TestResetCreditClientListUsesWhamContract(t *testing.T) {
 
 - [ ] **Step 2: Add failing POST contract tests**
 
-Cover exact method/path, JSON body fields, content type, 10-second child deadline, all four known outcomes, `windows_reset`, unknown outcome rejection, malformed 2xx response, `401`, `5xx`, cancellation, and bounded body.
+Cover exact method/path, JSON body fields, content type, 10-second child deadline, all four known backend `code` values mapped to CQ outcomes, `windows_reset`, unknown code rejection, malformed 2xx response, `401`, `5xx`, cancellation, and bounded body.
 
 ```go
 func TestResetCreditClientConsumeUsesStableRequest(t *testing.T) {
@@ -144,7 +144,7 @@ func TestResetCreditClientConsumeUsesStableRequest(t *testing.T) {
 		if body.RedeemRequestID != "cq-reset-v1-key" || body.CreditID != "credit-1" {
 			t.Fatalf("body = %+v", body)
 		}
-		return jsonResponse(http.StatusOK, `{"outcome":"reset","windows_reset":2}`), nil
+		return jsonResponse(http.StatusOK, `{"code":"reset","windows_reset":2}`), nil
 	})}
 
 	got, err := client.Consume(context.Background(), CredentialMaterial{AccessToken: "access-token", AccountID: "acct-1"}, "credit-1", "cq-reset-v1-key")
