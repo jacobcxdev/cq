@@ -105,7 +105,10 @@ func listLinuxProcPIDs() ([]int, error) {
 		if err != nil {
 			continue
 		}
-		if pid <= 1 || entry.IsDir() == false {
+		if pid <= 1 {
+			continue
+		}
+		if entry.IsDir() == false {
 			return nil, errLinuxProcIdentity
 		}
 		if _, duplicate := seen[pid]; duplicate {

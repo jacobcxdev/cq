@@ -64,6 +64,18 @@ func TestLinuxRuntimeInspectionRequiresOneExactCandidate(t *testing.T) {
 	}
 }
 
+func TestLinuxRuntimePIDListSkipsInit(t *testing.T) {
+	pids, err := listLinuxProcPIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range pids {
+		if pid <= 1 {
+			t.Fatalf("runtime PID list contains reserved PID %d", pid)
+		}
+	}
+}
+
 func TestLinuxRuntimeInspectionFailsClosed(t *testing.T) {
 	operations := linuxRuntimeInspectionOperations{
 		listPIDs:          func() ([]int, error) { return nil, errors.New("unavailable") },
