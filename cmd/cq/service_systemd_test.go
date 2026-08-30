@@ -239,12 +239,51 @@ func TestSystemdServiceInspectAcceptsAbsentUnitsWithoutMainPID(t *testing.T) {
 	}
 }
 
+func TestSystemdServiceInspectAcceptsWaitingTimerWithoutMainPID(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.show[systemdProxyUnit] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "MainPID": "731", "Result": "success",
+	})
+	runner.show[systemdRefreshService] = []byte("LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nResult=success\n")
+	runner.show[systemdRefreshTimer] = []byte("LoadState=loaded\nActiveState=active\nSubState=waiting\nResult=success\n")
+
+	status, err := platform.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Proxy.Healthy || !status.Refresh.Healthy {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
 func TestSystemdServiceInspectRejectsLoadedUnitWithoutMainPID(t *testing.T) {
 	platform, runner := newSystemdServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
 	runner.show[systemdProxyUnit] = []byte("LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n")
 
 	_, err := platform.Inspect(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "omitted MainPID") {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+}
+
+func TestSystemdServiceInspectRejectsRunningProxyWithZeroMainPID(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.show[systemdProxyUnit] = []byte("LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=0\nResult=success\n")
+
+	_, err := platform.Inspect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid MainPID") {
 		t.Fatalf("Inspect() error = %v", err)
 	}
 }

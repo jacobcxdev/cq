@@ -309,7 +309,18 @@ func (platform *systemdServicePlatform) Inspect(ctx context.Context) (serviceSta
 		proxyStatus.ConfiguredExecutable, _ = parseSystemdExecStartExecutable(proxyDefinition)
 	}
 	proxyStatus.Running = proxyStatus.Registered && proxyProperties["ActiveState"] == "active" && proxyProperties["SubState"] == "running"
-	proxyStatus.PID, _ = strconv.Atoi(proxyProperties["MainPID"])
+	if proxyStatus.Running {
+		mainPID, ok := proxyProperties["MainPID"]
+		if !ok {
+			return serviceStatus{}, fmt.Errorf("systemctl show omitted MainPID")
+		}
+		proxyStatus.PID, err = strconv.Atoi(mainPID)
+		if err != nil || proxyStatus.PID <= 0 {
+			return serviceStatus{}, fmt.Errorf("systemctl show returned invalid MainPID %q", mainPID)
+		}
+	} else {
+		proxyStatus.PID, _ = strconv.Atoi(proxyProperties["MainPID"])
+	}
 	if proxyStatus.Running && platform.inspectProxy != nil {
 		runtimeStatus := platform.inspectProxy(ctx, proxyStatus.ConfiguredExecutable)
 		proxyStatus.LiveExecutable = runtimeStatus.LiveExecutable
@@ -376,12 +387,6 @@ func parseSystemdShow(output []byte) (map[string]string, error) {
 		if _, ok := values[required]; !ok {
 			return nil, fmt.Errorf("systemctl show omitted %s", required)
 		}
-	}
-	if _, ok := values["MainPID"]; !ok {
-		if values["LoadState"] != "not-found" || values["ActiveState"] != "inactive" || values["SubState"] != "dead" {
-			return nil, fmt.Errorf("systemctl show omitted MainPID")
-		}
-		values["MainPID"] = "0"
 	}
 	return values, nil
 }
