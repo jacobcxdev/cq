@@ -31,7 +31,7 @@ jobs:
 
   release:
     needs: validate-codex
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
         with:
@@ -71,7 +71,22 @@ jobs:
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
         run: test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
 
-      - uses: goreleaser/goreleaser-action@v6
+      - name: Verify Apple signing credentials
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+        run: |
+          for name in MACOS_SIGN_P12 MACOS_SIGN_PASSWORD MACOS_NOTARY_ISSUER_ID MACOS_NOTARY_KEY_ID MACOS_NOTARY_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "${name} is required" >&2
+              exit 1
+            fi
+          done
+
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean
@@ -79,6 +94,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
 
       - name: Verify published release
         env:
@@ -96,4 +116,16 @@ jobs:
           test "${tag_name}" = "${RELEASE_TAG}"
           test "${draft}" = "false"
           grep -q '^## Changelog$' <<<"${body}"
-          test "${assets}" -ge 6
+          test "${assets}" -ge 9
+          version="${RELEASE_TAG#v}"
+          for arch in amd64 arm64; do
+            installer="cq-install_${version}_windows_${arch}.exe"
+            jq -e --arg name "${installer}" '.assets[] | select(.name == $name)' <<<"${release}" >/dev/null
+
+            verification_dir="${RUNNER_TEMP}/cq-darwin-${arch}"
+            mkdir -p "${verification_dir}"
+            archive="cq_${version}_darwin_${arch}.tar.gz"
+            gh release download "${RELEASE_TAG}" --pattern "${archive}" --dir "${verification_dir}"
+            tar -xzf "${verification_dir}/${archive}" -C "${verification_dir}"
+            codesign --verify --strict --verbose=2 "${verification_dir}/cq"
+          done
