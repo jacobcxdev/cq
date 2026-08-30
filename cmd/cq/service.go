@@ -56,13 +56,14 @@ type serviceStateStore interface {
 }
 
 type serviceLifecycle struct {
-	Platform       servicePlatform
-	Store          serviceStateStore
-	Executable     string
-	Version        string
-	StatusAttempts int
-	StatusInterval time.Duration
-	Wait           func(context.Context, time.Duration) error
+	Platform         servicePlatform
+	Store            serviceStateStore
+	Executable       string
+	Version          string
+	StatusAttempts   int
+	StatusInterval   time.Duration
+	Wait             func(context.Context, time.Duration) error
+	DigestExecutable func(string) (string, error)
 }
 
 func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installstate.Owner) (returnErr error) {
@@ -89,11 +90,20 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if err != nil {
 		return lifecycle.rollbackNew(ctx, before, err)
 	}
+	digestExecutable := lifecycle.DigestExecutable
+	if digestExecutable == nil {
+		digestExecutable = installstate.DigestFile
+	}
+	binaryDigest, err := digestExecutable(lifecycle.Executable)
+	if err != nil {
+		return lifecycle.rollbackNew(ctx, before, fmt.Errorf("digest service executable: %w", err))
+	}
 	record := installstate.Record{
 		SchemaVersion: installstate.CurrentSchemaVersion,
 		Owner:         owner,
 		Version:       lifecycle.Version,
 		Executable:    lifecycle.Executable,
+		BinaryDigest:  binaryDigest,
 		Services:      []string{status.Proxy.ID, status.Refresh.ID},
 	}
 	if err := lifecycle.Store.Save(record); err != nil {

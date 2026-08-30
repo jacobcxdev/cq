@@ -78,6 +78,7 @@ func TestStoreRejectsInvalidRecords(t *testing.T) {
 		{name: "unclean executable", mutate: func(record *Record) {
 			record.Executable = stateRoot + string(filepath.Separator) + "bin" + string(filepath.Separator) + ".." + string(filepath.Separator) + "cq"
 		}},
+		{name: "binary digest", mutate: func(record *Record) { record.BinaryDigest = "invalid" }},
 		{name: "missing services", mutate: func(record *Record) { record.Services = nil }},
 		{name: "empty service", mutate: func(record *Record) { record.Services[0] = "" }},
 		{name: "duplicate service", mutate: func(record *Record) { record.Services[1] = record.Services[0] }},
@@ -162,6 +163,7 @@ func validRecord(executable string) Record {
 		Owner:         OwnerGo,
 		Version:       "0.27.0",
 		Executable:    executable,
+		BinaryDigest:  "9d8b2be5f0dd3c2a4a58ecf94e4e79db6a62472e1c8b995b4c56170849f0fc61",
 		Services:      []string{"proxy", "refresh"},
 	}
 }

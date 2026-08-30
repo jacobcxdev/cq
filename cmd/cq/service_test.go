@@ -130,6 +130,7 @@ func TestServiceInstallRejectsOwnershipConflictBeforeMutation(t *testing.T) {
 		Owner:         installstate.OwnerGo,
 		Version:       lifecycle.Version,
 		Executable:    lifecycle.Executable,
+		BinaryDigest:  strings.Repeat("0", 64),
 		Services:      []string{"test.proxy", "test.refresh"},
 	}
 	if err := store.Save(record); err != nil {
@@ -246,13 +247,14 @@ func newServiceHarness(t *testing.T) (*serviceLifecycle, *fakeServicePlatform, i
 	executable := filepath.Join(t.TempDir(), "bin", serviceExecutableName())
 	platform := &fakeServicePlatform{executable: executable, proxyHealthy: true, refreshHealthy: true}
 	lifecycle := &serviceLifecycle{
-		Platform:       platform,
-		Store:          store,
-		Executable:     executable,
-		Version:        "0.27.0",
-		StatusAttempts: 1,
-		StatusInterval: time.Millisecond,
-		Wait:           func(context.Context, time.Duration) error { return nil },
+		Platform:         platform,
+		Store:            store,
+		Executable:       executable,
+		Version:          "0.27.0",
+		StatusAttempts:   1,
+		StatusInterval:   time.Millisecond,
+		Wait:             func(context.Context, time.Duration) error { return nil },
+		DigestExecutable: func(string) (string, error) { return strings.Repeat("0", 64), nil },
 	}
 	return lifecycle, platform, store
 }

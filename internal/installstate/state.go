@@ -2,6 +2,8 @@ package installstate
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,7 @@ type Record struct {
 	Owner         Owner    `json:"owner"`
 	Version       string   `json:"version"`
 	Executable    string   `json:"executable"`
+	BinaryDigest  string   `json:"binary_digest"`
 	Services      []string `json:"services"`
 }
 
@@ -137,6 +140,7 @@ func (store Store) CheckClaim(owner Owner, executable string) error {
 		Owner:         owner,
 		Version:       "claim",
 		Executable:    executable,
+		BinaryDigest:  strings.Repeat("0", sha256.Size*2),
 		Services:      []string{"proxy", "refresh"},
 	}
 	if err := claim.Validate(); err != nil {
@@ -175,6 +179,9 @@ func (record Record) Validate() error {
 	if record.Executable == "" || !filepath.IsAbs(record.Executable) || filepath.Clean(record.Executable) != record.Executable {
 		return fmt.Errorf("%w: executable must be a clean absolute path", ErrInvalidRecord)
 	}
+	if !validDigest(record.BinaryDigest) {
+		return fmt.Errorf("%w: invalid binary digest", ErrInvalidRecord)
+	}
 	if len(record.Services) == 0 {
 		return fmt.Errorf("%w: no services", ErrInvalidRecord)
 	}
@@ -189,6 +196,45 @@ func (record Record) Validate() error {
 		seen[service] = struct{}{}
 	}
 	return nil
+}
+
+// DigestFile returns the SHA-256 digest of one bounded regular executable.
+func DigestFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > 512<<20 {
+		return "", fmt.Errorf("invalid executable file")
+	}
+	hash := sha256.New()
+	written, err := io.Copy(hash, io.LimitReader(file, (512<<20)+1))
+	if err != nil {
+		return "", err
+	}
+	if written != info.Size() {
+		return "", fmt.Errorf("executable changed while hashing")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func validDigest(digest string) bool {
+	if len(digest) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range digest {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (store Store) validate() error {
