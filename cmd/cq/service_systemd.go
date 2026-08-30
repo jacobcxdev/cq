@@ -372,10 +372,16 @@ func parseSystemdShow(output []byte) (map[string]string, error) {
 		}
 		values[parts[0]] = parts[1]
 	}
-	for _, required := range []string{"LoadState", "ActiveState", "SubState", "MainPID", "Result"} {
+	for _, required := range []string{"LoadState", "ActiveState", "SubState", "Result"} {
 		if _, ok := values[required]; !ok {
 			return nil, fmt.Errorf("systemctl show omitted %s", required)
 		}
+	}
+	if _, ok := values["MainPID"]; !ok {
+		if values["LoadState"] != "not-found" || values["ActiveState"] != "inactive" || values["SubState"] != "dead" {
+			return nil, fmt.Errorf("systemctl show omitted MainPID")
+		}
+		values["MainPID"] = "0"
 	}
 	return values, nil
 }

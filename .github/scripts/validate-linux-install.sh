@@ -59,6 +59,7 @@ cleanup() {
     wait "$manager_pid" 2>/dev/null
   fi
   if [[ -d "$temporary_root" ]]; then
+    chmod -R u+rwX "$temporary_root" 2>/dev/null
     find "$temporary_root" -depth -delete
   fi
 }

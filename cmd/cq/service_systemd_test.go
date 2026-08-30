@@ -220,6 +220,35 @@ func TestSystemdServiceInspectKeepsManagerPIDAuthoritative(t *testing.T) {
 	}
 }
 
+func TestSystemdServiceInspectAcceptsAbsentUnitsWithoutMainPID(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	absent := []byte("LoadState=not-found\nActiveState=inactive\nSubState=dead\nResult=success\n")
+	for _, unit := range []string{systemdProxyUnit, systemdRefreshService, systemdRefreshTimer} {
+		runner.show[unit] = absent
+	}
+
+	status, err := platform.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Proxy.Registered || status.Proxy.Running || status.Proxy.Healthy || status.Proxy.PID != 0 {
+		t.Fatalf("proxy status = %#v", status.Proxy)
+	}
+	if status.Refresh.Registered || status.Refresh.Running || status.Refresh.Healthy {
+		t.Fatalf("refresh status = %#v", status.Refresh)
+	}
+}
+
+func TestSystemdServiceInspectRejectsLoadedUnitWithoutMainPID(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	runner.show[systemdProxyUnit] = []byte("LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n")
+
+	_, err := platform.Inspect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "omitted MainPID") {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+}
+
 func newSystemdServiceHarness(t *testing.T) (*systemdServicePlatform, *fakeSystemctl) {
 	t.Helper()
 	root := t.TempDir()
