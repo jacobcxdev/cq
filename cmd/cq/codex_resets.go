@@ -99,7 +99,10 @@ func newCodexResetsDependencies(ctx context.Context) (codexResetsDependencies, f
 		return codexResetsDependencies{}, func() {}, err
 	}
 
-	cacheRoot := cache.DefaultDir()
+	cacheRoot, err := cache.DefaultDir()
+	if err != nil {
+		return fail(err)
+	}
 	attempts, err := codexprov.NewResetAttemptStore(fs, cacheRoot)
 	if err != nil {
 		return fail(err)
