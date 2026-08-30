@@ -8,7 +8,25 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
+
+func TestCandidateRuntimeGrantJSONExcludesInMemoryFileID(t *testing.T) {
+	identity := StableObjectIdentity{File: fsutil.SecureFileIdentity{Device: 1, Inode: 2, Links: 1}, Size: 3, Digest: "digest"}
+	withoutFileID, err := json.Marshal(CandidateRuntimeGrantV1{SchemaVersion: 1, RunID: "run", SourceIdentity: identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity.File.FileID[15] = 9
+	withFileID, err := json.Marshal(CandidateRuntimeGrantV1{SchemaVersion: 1, RunID: "run", SourceIdentity: identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(withFileID, withoutFileID) {
+		t.Fatalf("FileID changed runtime grant JSON: %s != %s", withFileID, withoutFileID)
+	}
+}
 
 func TestCandidateControllerExposesOnlyPublicRuntimeAuthority(t *testing.T) {
 	controller, err := NewCandidateController(bytes.NewReader(bytes.Repeat([]byte{0x47}, 128)))

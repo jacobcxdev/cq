@@ -72,7 +72,7 @@ To release a new version:
 3. Tag the commit: `git tag v0.x.y`
 4. Push the tag: `git push origin v0.x.y`
 5. GitHub Actions runs GoReleaser, which:
-   - Builds cross-platform binaries (darwin/linux amd64+arm64, windows amd64)
+   - Builds cross-platform binaries (darwin/linux/windows amd64+arm64)
    - Creates a GitHub Release with auto-generated changelog
    - Opens a PR against [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap) to update the formula
 6. Merge the Homebrew formula PR.

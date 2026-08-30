@@ -47,6 +47,7 @@ type CredentialAuthorityIdentity struct {
 	Device uint64
 	Inode  uint64
 	Links  uint64
+	FileID [16]byte `json:"-"`
 	Size   int64
 	Digest string
 }

@@ -131,14 +131,33 @@ CGO_ENABLED=0 go build \
 	-o "$validation_binary" \
 	./cmd/cq
 
-CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
-CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE=1 \
-CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
-CQ_CODEXBAR_LIVE_ROOT="$codexbar_root" \
-CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
-CQ_CODEX_PROXY_ACCEPTANCE_EXECUTABLE="$validation_binary" \
-go test -race -count=1 ./internal/proxy \
-	-run '^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal|TestCodexExactExecutableNormalPassesThroughLiveUpstream)$'
+release_tests='
+TestCodexInstalledNormalPassesThroughLiveUpstream
+TestCodexInstalledNormalContinuesAfterLiveToolCall
+TestCodexInstalledRescuePassesThroughLiveUpstream
+TestCodexInstalledLiveRescueTaskResumesInNormal
+TestCodexExactExecutableNormalPassesThroughLiveUpstream
+TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream
+'
+release_test_pattern='^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal|TestCodexExactExecutableNormalPassesThroughLiveUpstream|TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream)$'
+release_test_log=$validation_root/live-routing-tests.log
+if ! env \
+	CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
+	CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE=1 \
+	CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
+	CQ_CODEXBAR_LIVE_ROOT="$codexbar_root" \
+	CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
+	CQ_CODEX_PROXY_ACCEPTANCE_EXECUTABLE="$validation_binary" \
+	go test -race -count=1 -timeout=30m -v ./internal/proxy -run "$release_test_pattern" \
+	>"$release_test_log" 2>&1; then
+	cat "$release_test_log" >&2
+	fail "live Codex routing tests failed"
+fi
+cat "$release_test_log"
+for release_test in $release_tests; do
+	grep -F -- "--- PASS: $release_test " "$release_test_log" >/dev/null ||
+		fail "$release_test did not execute"
+done
 
 production_after=$(production_snapshot)
 [ "$production_before" = "$production_after" ] || fail "production proxy changed during validation"

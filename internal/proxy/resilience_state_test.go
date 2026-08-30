@@ -60,7 +60,8 @@ func TestProxyResilienceStateOpenIsNonCreatingAndReopensPolicy(t *testing.T) {
 		t.Fatal("state owner omitted production authorities")
 	}
 	if err := reopened.RuntimeMode.Commit(context.Background(), RuntimeModeEvidenceV1{SchemaVersion: 1, Generation: 1, DesiredMode: TrafficModeRescue, EffectiveMode: TrafficModeRescueDraining, Phase: RuntimeModePhaseIntent}); err != nil {
-		t.Fatalf("runtime mode commit: %v", err)
+		current, currentErr := authorityDirectoryIdentity(options.FS.(fsutil.SecurePathInspector), reopened.modeDir)
+		t.Fatalf("runtime mode commit: %v (recorded=%#v current=%#v currentErr=%v)", err, reopened.modeLock.state.directoryIdentity, current, currentErr)
 	}
 }
 

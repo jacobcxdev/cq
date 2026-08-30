@@ -641,7 +641,7 @@ func TestPureGlobalInspectionLeavesValidCaptureWhitespacePathForHandler(t *testi
 }
 
 func TestPureGlobalInspectionLexicalErrorsMatchHandlers(t *testing.T) {
-	modelDeps := modelsDeps{FS: &fsutil.MemFS{}, HomeDir: "/home", Stdout: io.Discard, Stderr: io.Discard}
+	modelDeps := modelsDeps{FS: &fsutil.MemFS{}, HomeDir: "/home", Roots: testCQRoots(), Stdout: io.Discard, Stderr: io.Discard}
 	for _, fixture := range []struct {
 		name    string
 		args    []string

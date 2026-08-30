@@ -1,21 +1,19 @@
 package cache
 
 import (
-	"os"
-	"path/filepath"
+	"fmt"
+
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
+// Dir returns the shared cache directory from resolved CQ roots.
+func Dir(roots userdirs.Roots) string { return roots.Cache }
+
 // DefaultDir returns the shared cache directory used by cq.
-func DefaultDir() string {
-	if d := os.Getenv("XDG_CACHE_HOME"); d != "" && filepath.IsAbs(d) {
-		return filepath.Join(d, "cq")
-	}
-	if d, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(d, "cq")
-	}
-	home, err := os.UserHomeDir()
+func DefaultDir() (string, error) {
+	roots, err := userdirs.Default()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "cq-cache")
+		return "", fmt.Errorf("resolve CQ cache directory: %w", err)
 	}
-	return filepath.Join(home, ".cache", "cq")
+	return Dir(roots), nil
 }

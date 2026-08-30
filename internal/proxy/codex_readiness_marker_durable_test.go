@@ -370,11 +370,32 @@ func (directory *testCodexReadinessMarkerDirectory) Rename(oldName, newName stri
 	return directory.SecureDirectory.Rename(oldName, newName)
 }
 
+func (directory *testCodexReadinessMarkerDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	if directory.rename != nil {
+		return directory.rename(oldName, newName)
+	}
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *testCodexReadinessMarkerDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	if directory.rename != nil {
+		return directory.rename(oldName, newName)
+	}
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
 func (directory *testCodexReadinessMarkerDirectory) Remove(name string) error {
 	if directory.remove != nil {
 		return directory.remove(name)
 	}
 	return directory.SecureDirectory.Remove(name)
+}
+
+func (directory *testCodexReadinessMarkerDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	if directory.remove != nil {
+		return directory.remove(name)
+	}
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *testCodexReadinessMarkerDirectory) Sync() error {

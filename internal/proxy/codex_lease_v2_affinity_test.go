@@ -348,7 +348,8 @@ func TestCodexLeaseV2OwnerCloseWaitsForAdmissionCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentialCoordinator, err := codex.NewCredentialCoordinator(managed)
+	stateDir := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "cq-state")
+	credentialCoordinator, err := codex.NewCredentialCoordinator(managed, stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1055,6 +1056,18 @@ type blockingCodexLeaseAffinityDirectory struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+func (directory *blockingCodexLeaseAffinityDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *blockingCodexLeaseAffinityDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *blockingCodexLeaseAffinityDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *blockingCodexLeaseAffinityDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {

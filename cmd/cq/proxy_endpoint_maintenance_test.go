@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func TestReadOnlyLegacyEndpointInspectCommandBypassesCompatibilityEpoch(t *testing.T) {
@@ -31,11 +32,12 @@ func TestReadOnlyLegacyEndpointInspectCommandBypassesCompatibilityEpoch(t *testi
 }
 
 func TestProxyEndpointInspectLegacyDoesNotChangeDirectoryInventory(t *testing.T) {
-	home, path := createCLIRefusedLegacyEndpoint(t)
+	t.Parallel()
+	stateDir, path := createCLIRefusedLegacyEndpoint(t)
 	before := readDirectoryInventory(t, filepath.Dir(path))
 	var output bytes.Buffer
 	err := runProxyEndpointWithDependencies(context.Background(), []string{"inspect-legacy"}, proxyEndpointMaintenanceDependencies{
-		homeDir: func() (string, error) { return home, nil }, stdin: bytes.NewReader(nil), stdout: &output,
+		resolveRoots: func() (userdirs.Roots, error) { return userdirs.Roots{State: stateDir}, nil }, stdin: bytes.NewReader(nil), stdout: &output,
 		stderr:     bytes.NewBuffer(nil),
 		stdinIsTTY: func() bool { return false },
 	})
@@ -56,7 +58,8 @@ func TestProxyEndpointInspectLegacyDoesNotChangeDirectoryInventory(t *testing.T)
 }
 
 func TestProxyEndpointTransitionRequiresConfirmationAndKeepsRollbackUntilFinalise(t *testing.T) {
-	home, path := createCLIRefusedLegacyEndpoint(t)
+	t.Parallel()
+	stateDir, path := createCLIRefusedLegacyEndpoint(t)
 	snapshot, err := codexprov.InspectLegacyCredentialEndpoint(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +73,7 @@ func TestProxyEndpointTransitionRequiresConfirmationAndKeepsRollbackUntilFinalis
 		t.Fatal(err)
 	}
 	deps := proxyEndpointMaintenanceDependencies{
-		homeDir: func() (string, error) { return home, nil }, stdin: bytes.NewReader(nil), stdout: &bytes.Buffer{},
+		resolveRoots: func() (userdirs.Roots, error) { return userdirs.Roots{State: stateDir}, nil }, stdin: bytes.NewReader(nil), stdout: &bytes.Buffer{},
 		stderr:     bytes.NewBuffer(nil),
 		stdinIsTTY: func() bool { return false },
 	}
@@ -79,7 +82,7 @@ func TestProxyEndpointTransitionRequiresConfirmationAndKeepsRollbackUntilFinalis
 	}, deps); err == nil {
 		t.Fatal("prepare without stopped-and-drained confirmation succeeded")
 	}
-	for _, absent := range []string{codexprov.DefaultCredentialControlPath(home) + ".lock", codexprov.DefaultCredentialControlPath(home) + ".maintenance.json"} {
+	for _, absent := range []string{codexprov.DefaultCredentialControlPath(stateDir) + ".lock", codexprov.DefaultCredentialControlPath(stateDir) + ".maintenance.json"} {
 		if _, err := os.Lstat(absent); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("unconfirmed prepare created %s: %v", absent, err)
 		}
@@ -206,7 +209,6 @@ func createCLIRefusedLegacyEndpoint(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
-	t.Setenv("XDG_CONFIG_HOME", "")
 	state := filepath.Join(home, ".config", "cq", "state")
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)
@@ -214,7 +216,7 @@ func createCLIRefusedLegacyEndpoint(t *testing.T) (string, string) {
 	if err := os.Chmod(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := codexprov.DefaultCredentialControlPath(home)
+	path := codexprov.DefaultCredentialControlPath(state)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +229,7 @@ func createCLIRefusedLegacyEndpoint(t *testing.T) (string, string) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return home, path
+	return state, path
 }
 
 func readDirectoryInventory(t *testing.T, path string) []string {

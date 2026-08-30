@@ -19,7 +19,7 @@ func testCoordinator(t *testing.T) (*CredentialCoordinator, *durableFakeFS) {
 	t.Helper()
 	fs := newDurableFakeFS()
 	store := testManagedStore(t, fs)
-	coordinator, err := NewCredentialCoordinator(store)
+	coordinator, err := NewCredentialCoordinator(store, testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,13 +28,15 @@ func testCoordinator(t *testing.T) (*CredentialCoordinator, *durableFakeFS) {
 	return coordinator, fs
 }
 
+func testCQStateDir() string { return "/cq/state" }
+
 func TestNewCredentialCoordinatorDoesNotCreateCredentialOwnerAuthority(t *testing.T) {
 	filesystem := fsutil.NewMemFS()
 	store, err := NewManagedStore(filesystem)
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewCredentialCoordinator(store)
+	coordinator, err := NewCredentialCoordinator(store, testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +48,53 @@ func TestNewCredentialCoordinatorDoesNotCreateCredentialOwnerAuthority(t *testin
 	}
 }
 
+func TestNewCredentialCoordinatorRequiresStrictStateDirectory(t *testing.T) {
+	tests := map[string]string{
+		"empty":    "",
+		"relative": "cq/state",
+		"unclean":  "/cq/state/../state",
+	}
+	for name, stateDir := range tests {
+		t.Run(name, func(t *testing.T) {
+			filesystem := fsutil.NewMemFS()
+			store, err := NewManagedStore(filesystem)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = NewCredentialCoordinator(store, stateDir)
+			if err == nil {
+				t.Fatalf("NewCredentialCoordinator accepted %q", stateDir)
+			}
+			if _, statErr := filesystem.Stat(filepath.Join(store.Home, ".codex", "auth.json")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("invalid state root mutated provider auth: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestNewCredentialCoordinatorKeepsCQStateSeparateFromProviderHome(t *testing.T) {
+	filesystem := fsutil.NewMemFS()
+	store, err := NewManagedStore(filesystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := "/cq/state"
+	coordinator, err := NewCredentialCoordinator(store, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coordinator.StateDir != stateDir || coordinator.Journal.StateDir != stateDir {
+		t.Fatalf("state roots = coordinator %q, journal %q", coordinator.StateDir, coordinator.Journal.StateDir)
+	}
+	if _, err := filesystem.Stat(stateDir); err != nil {
+		t.Fatalf("state directory: %v", err)
+	}
+	legacyState := filepath.Join(store.Home, ".config", "cq", "state")
+	if _, err := filesystem.Stat(legacyState); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy provider-derived state exists: %v", err)
+	}
+}
+
 func TestNewCredentialCoordinatorWithAuthorityRejectsCandidate(t *testing.T) {
 	filesystem := fsutil.NewMemFS()
 	store, err := NewManagedStore(filesystem)
@@ -54,7 +103,7 @@ func TestNewCredentialCoordinatorWithAuthorityRejectsCandidate(t *testing.T) {
 	}
 	mutationBackend := newMemoryCredentialAuthorityBackend()
 	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
-	_, err = NewCredentialCoordinatorWithAuthority(store, CredentialAuthorityCapabilities{
+	_, err = NewCredentialCoordinatorWithAuthority(store, testCQStateDir(), CredentialAuthorityCapabilities{
 		Role: CredentialAuthorityCandidate, LifecycleBound: true, RootKey: make([]byte, 32),
 		RefreshMutationBackend: mutationBackend, CredentialOwnerBackend: ownerBackend,
 	})
@@ -78,7 +127,7 @@ func TestNewCredentialCoordinatorWithAuthorityDerivesSeparatePurposeKeys(t *test
 	}
 	mutationBackend := newMemoryCredentialAuthorityBackend()
 	ownerBackend := newMemoryCredentialAuthorityBackendSharing(mutationBackend)
-	coordinator, err := NewCredentialCoordinatorWithAuthority(store, CredentialAuthorityCapabilities{
+	coordinator, err := NewCredentialCoordinatorWithAuthority(store, testCQStateDir(), CredentialAuthorityCapabilities{
 		Role: CredentialAuthorityPrimary, LifecycleBound: true, RootKey: bytes.Repeat([]byte{0x61}, 32),
 		RefreshMutationBackend: mutationBackend, CredentialOwnerBackend: ownerBackend,
 	})
@@ -290,13 +339,13 @@ func TestCredentialCoordinatorListRejectsUnsafeCoreCredentialPaths(t *testing.T)
 			},
 		},
 		{
-			name: "managed directory permissive",
+			name: "managed directory writable by another principal",
 			setup: func(t *testing.T, home string) {
 				accountsDir := filepath.Join(home, ".codex", "accounts")
 				if err := os.MkdirAll(accountsDir, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Chmod(accountsDir, 0o755); err != nil {
+				if err := os.Chmod(accountsDir, 0o777); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -341,7 +390,7 @@ func TestCredentialCoordinatorListRejectsUnsafeCoreCredentialPaths(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			coordinator, err := NewCredentialCoordinator(store)
+			coordinator, err := NewCredentialCoordinator(store, filepath.Join(t.TempDir(), "state"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -373,7 +422,7 @@ func TestCredentialCoordinatorListAcceptsStandardCodexCoreDirectoryPermissions(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewCredentialCoordinator(store)
+	coordinator, err := NewCredentialCoordinator(store, filepath.Join(t.TempDir(), "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +451,7 @@ func TestCredentialCoordinatorRejectsCredentialSuffixDirectoryButLegacyIgnoresIt
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewCredentialCoordinator(store)
+	coordinator, err := NewCredentialCoordinator(store, filepath.Join(t.TempDir(), "state"))
 	if err != nil {
 		t.Fatal(err)
 	}

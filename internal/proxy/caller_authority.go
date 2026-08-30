@@ -317,8 +317,16 @@ type NormalCallerAdmissionStore struct {
 	closed    bool
 }
 
-func DefaultNormalCallerAdmissionPath() string {
-	return filepath.Join(configDir(), "normal-caller-admissions-v1")
+func NormalCallerAdmissionPath(stateDir string) string {
+	return filepath.Join(stateDir, "normal-caller-admissions-v1")
+}
+
+func DefaultNormalCallerAdmissionPath() (string, error) {
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return "", err
+	}
+	return NormalCallerAdmissionPath(paths.StateDir), nil
 }
 
 func OpenNormalCallerAdmissionStore(fsys fsutil.FileSystem, path string) (*NormalCallerAdmissionStore, error) {

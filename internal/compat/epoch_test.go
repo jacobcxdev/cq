@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -96,6 +97,9 @@ func TestEnsureEpochRejectsCorruptState(t *testing.T) {
 }
 
 func TestDefaultEpochPathUsesAbsoluteXDGConfigHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG_CONFIG_HOME is a Unix configuration root")
+	}
 	fs := fsutil.NewMemFS()
 	got, err := DefaultEpochPath(fs, func(key string) string {
 		if key == "XDG_CONFIG_HOME" {
@@ -138,6 +142,18 @@ type recordingEpochDirectory struct {
 func (directory *recordingEpochDirectory) CreateExclusive(name string, mode os.FileMode) (fsutil.DurableFile, error) {
 	directory.fs.createPaths = append(directory.fs.createPaths, filepath.Join(directory.path, name))
 	return directory.SecureDirectory.CreateExclusive(name, mode)
+}
+
+func (directory *recordingEpochDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *recordingEpochDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *recordingEpochDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (f failingFS) WriteFile(string, []byte, os.FileMode) error { return f.writeErr }

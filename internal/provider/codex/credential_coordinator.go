@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 type RevisionSet map[CandidateID]Revision
@@ -39,6 +41,7 @@ type CredentialRefreshBroker interface {
 
 type CredentialCoordinator struct {
 	Store            *ManagedStore
+	StateDir         string
 	Activator        *FileSystemActivator
 	Registry         AccountCatalogue
 	Journal          RemovalJournal
@@ -68,16 +71,22 @@ type externalPlanKey struct {
 	Revision Revision
 }
 
-func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, error) {
+func NewCredentialCoordinator(store *ManagedStore, stateDir string) (*CredentialCoordinator, error) {
 	if store == nil || store.FS == nil {
 		return nil, errors.New("managed store unavailable")
+	}
+	if stateDir == "" || !filepath.IsAbs(stateDir) || filepath.Clean(stateDir) != stateDir {
+		return nil, fmt.Errorf("%w: invalid CQ state directory", fsutil.ErrUnsafeSecurePath)
+	}
+	if err := fsutil.EnsureSecureDirectory(store.FS, stateDir); err != nil {
+		return nil, err
 	}
 	activator, err := NewFileSystemActivator(store.FS)
 	if err != nil {
 		return nil, err
 	}
 	coordinator := &CredentialCoordinator{
-		Store: store, Activator: activator,
+		Store: store, StateDir: stateDir, Activator: activator,
 		Registry:      Registry{FS: store.FS, Home: store.Home},
 		Now:           time.Now,
 		knownExternal: make(map[string]bool),
@@ -93,7 +102,7 @@ func NewCredentialCoordinator(store *ManagedStore) (*CredentialCoordinator, erro
 		}
 		return store.FS.SyncDir(filepath.Dir(path))
 	}
-	coordinator.Journal = RemovalJournal{FS: store.FS, Home: store.Home, Store: store}
+	coordinator.Journal = RemovalJournal{FS: store.FS, StateDir: stateDir, Store: store}
 	return coordinator, nil
 }
 
@@ -117,11 +126,11 @@ type CredentialAuthorityCapabilities struct {
 	CredentialOwnerHook    func(string) error
 }
 
-func NewCredentialCoordinatorWithAuthority(store *ManagedStore, capabilities CredentialAuthorityCapabilities) (*CredentialCoordinator, error) {
+func NewCredentialCoordinatorWithAuthority(store *ManagedStore, stateDir string, capabilities CredentialAuthorityCapabilities) (*CredentialCoordinator, error) {
 	if capabilities.Role != CredentialAuthorityPrimary || !capabilities.LifecycleBound || len(capabilities.RootKey) != 32 || capabilities.RefreshMutationBackend == nil || capabilities.CredentialOwnerBackend == nil {
 		return nil, errors.New("lifecycle-bound primary credential authority unavailable")
 	}
-	coordinator, err := NewCredentialCoordinator(store)
+	coordinator, err := NewCredentialCoordinator(store, stateDir)
 	if err != nil {
 		return nil, err
 	}

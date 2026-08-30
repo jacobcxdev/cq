@@ -54,7 +54,7 @@ func TestRunCodexLoginWithoutActivatePreservesSystemAndActiveProjection(t *testi
 	tokens := auth.CodexTokenResponse{IDToken: appCodexJWT(claims.Email, claims.AccountID, claims.UserID), AccessToken: "new-access", RefreshToken: "new-refresh"}
 
 	var output bytes.Buffer
-	err := runCodexLogin(context.Background(), nil, false, fs, fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
+	err := runCodexLogin(context.Background(), nil, false, fs, "/cq/state", fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
 	if err != nil {
 		t.Fatalf("runCodexLogin: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRunCodexLoginActivateUsesExactSavedCandidate(t *testing.T) {
 	tokens := auth.CodexTokenResponse{IDToken: appCodexJWT(claims.Email, claims.AccountID, claims.UserID), AccessToken: "exact", RefreshToken: "new-refresh"}
 
 	var output bytes.Buffer
-	err := runCodexLogin(context.Background(), nil, true, fs, fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
+	err := runCodexLogin(context.Background(), nil, true, fs, "/cq/state", fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
 	if err != nil {
 		t.Fatalf("runCodexLogin: %v", err)
 	}

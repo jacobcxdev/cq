@@ -77,7 +77,7 @@ func TestSaveLoginProjectionFailureRecoversAfterRestart(t *testing.T) {
 	managedBefore := append([]byte(nil), fs.files[managedPath]...)
 	installManagedDirectoryEntry(fs, managedPath)
 
-	restarted, err := NewCredentialCoordinator(testManagedStore(t, fs))
+	restarted, err := NewCredentialCoordinator(testManagedStore(t, fs), testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestExistingSaveLoginProjectionFailureRecoversRotatedRecord(t *testing.T) {
 	}
 	managedBefore := append([]byte(nil), fs.files[ref.path]...)
 
-	restarted, err := NewCredentialCoordinator(testManagedStore(t, fs))
+	restarted, err := NewCredentialCoordinator(testManagedStore(t, fs), testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestAdoptProjectionFailureRecoversAfterRestart(t *testing.T) {
 	managedBefore := append([]byte(nil), fs.files[managedPath]...)
 	installManagedDirectoryEntry(fs, managedPath)
 
-	restarted, err := NewCredentialCoordinator(testManagedStore(t, fs))
+	restarted, err := NewCredentialCoordinator(testManagedStore(t, fs), testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestProjectionRecoveryCrashMatrix(t *testing.T) {
 				fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": nil}
 			}
 
-			restarted, err := NewCredentialCoordinator(testManagedStore(t, fs))
+			restarted, err := NewCredentialCoordinator(testManagedStore(t, fs), testCQStateDir())
 			if err != nil {
 				t.Fatal(err)
 			}

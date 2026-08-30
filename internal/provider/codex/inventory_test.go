@@ -5,11 +5,76 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
+
+func TestAuthoritativeInventoryRejectsHighFileIDChange(t *testing.T) {
+	mem := fsutil.NewMemFS()
+	if err := mem.MkdirAll("/codex", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.WriteFile("/codex/auth.json", []byte(`{"tokens":{"access_token":"token"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fsys := &changingFileIDFS{MemFS: mem}
+	if _, _, err := readAuthoritativeCredentialFile(fsys, "/codex/auth.json"); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+		t.Fatalf("changed high file ID error = %v, want unsafe", err)
+	}
+}
+
+func TestAuthoritativeInventoryAcceptsPrincipalInspectionWithoutUID(t *testing.T) {
+	mem := fsutil.NewMemFS()
+	if err := mem.MkdirAll("/codex", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.WriteFile("/codex/auth.json", []byte(`{"tokens":{"access_token":"token"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	principal := fsutil.SecurePrincipal{Kind: fsutil.SecurePrincipalSID, SIDLength: 4, SID: [68]byte{1, 2, 3, 4}}
+	fsys := &principalOnlyInventoryFS{MemFS: mem, principal: principal}
+	data, found, err := readAuthoritativeCredentialFile(fsys, "/codex/auth.json")
+	if err != nil || !found || len(data) == 0 {
+		t.Fatalf("principal-only credential read = (%q, %v, %v)", data, found, err)
+	}
+}
+
+type principalOnlyInventoryFS struct {
+	*fsutil.MemFS
+	principal fsutil.SecurePrincipal
+}
+
+func (*principalOnlyInventoryFS) EffectiveUID() uint64                    { return 0 }
+func (*principalOnlyInventoryFS) FileOwnerUID(os.FileInfo) (uint64, bool) { return 0, false }
+
+func (fsys *principalOnlyInventoryFS) EffectivePrincipal() (fsutil.SecurePrincipal, bool) {
+	return fsys.principal, true
+}
+
+func (fsys *principalOnlyInventoryFS) FileOwnerPrincipal(os.FileInfo) (fsutil.SecurePrincipal, bool) {
+	return fsys.principal, true
+}
+
+type changingFileIDFS struct {
+	*fsutil.MemFS
+	regularCalls int
+}
+
+func (fsys *changingFileIDFS) FileIdentity(info os.FileInfo) (fsutil.SecureFileIdentity, bool) {
+	identity, ok := fsys.MemFS.FileIdentity(info)
+	if ok && info.Mode().IsRegular() {
+		fsys.regularCalls++
+		if fsys.regularCalls > 2 {
+			identity.FileID[15] = 1
+		}
+	}
+	return identity, ok
+}
 
 type fakeExternalCredentialSource struct {
 	name         string
@@ -479,7 +544,7 @@ func TestInventoryExternalSourceOrderDoesNotChangeIdentity(t *testing.T) {
 
 func TestCredentialCoordinatorResolvesExternalCandidateWithoutListingSecrets(t *testing.T) {
 	fs := newDurableFakeFS()
-	coordinator, err := NewCredentialCoordinator(testManagedStore(t, fs))
+	coordinator, err := NewCredentialCoordinator(testManagedStore(t, fs), testCQStateDir())
 	if err != nil {
 		t.Fatal(err)
 	}

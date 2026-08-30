@@ -3,34 +3,21 @@ package modelregistry
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // --- OverlayPath tests ---
 
-func TestOverlayPath_XDGConfigHome(t *testing.T) {
-	env := func(key string) string {
-		if key == "XDG_CONFIG_HOME" {
-			return "/custom/config"
-		}
-		return ""
-	}
-	got := OverlayPath(env, "/home/user")
-	want := "/custom/config/cq/models.json"
-	if got != want {
-		t.Errorf("OverlayPath() = %q, want %q", got, want)
-	}
-}
-
-func TestOverlayPath_FallbackHome(t *testing.T) {
-	env := func(key string) string { return "" }
-	got := OverlayPath(env, "/home/user")
-	want := "/home/user/.config/cq/models.json"
-	if got != want {
-		t.Errorf("OverlayPath() = %q, want %q", got, want)
+func TestOverlayPathUsesResolvedConfigRoot(t *testing.T) {
+	roots := userdirs.Roots{Config: "/cq/config"}
+	want := filepath.Join("/cq/config", "models.json")
+	if got := OverlayPath(roots); got != want {
+		t.Fatalf("OverlayPath() = %q, want %q", got, want)
 	}
 }
 
@@ -169,7 +156,7 @@ func TestSaveOverlays_PermissionsRealFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o700 {
 		t.Errorf("dir perm = %04o, want 0700", perm)
 	}
 
@@ -178,7 +165,7 @@ func TestSaveOverlays_PermissionsRealFS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat file: %v", err)
 	}
-	if perm := finfo.Mode().Perm(); perm != 0o600 {
+	if perm := finfo.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("file perm = %04o, want 0600", perm)
 	}
 

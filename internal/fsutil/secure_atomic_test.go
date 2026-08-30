@@ -6,11 +6,153 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSameSecureObjectUsesCompleteIdentity(t *testing.T) {
+	base := SecureFileIdentity{Device: 7, Inode: 11, Links: 1, FileID: [16]byte{15: 9}}
+	changes := []SecureFileIdentity{
+		{Device: 8, Inode: 11, Links: 1, FileID: [16]byte{15: 9}},
+		{Device: 7, Inode: 12, Links: 1, FileID: [16]byte{15: 9}},
+		{Device: 7, Inode: 11, Links: 2, FileID: [16]byte{15: 9}},
+		{Device: 7, Inode: 11, Links: 1, FileID: [16]byte{15: 10}},
+	}
+	if !SameSecureObject(base, base) {
+		t.Fatal("identical identity did not match")
+	}
+	for _, changed := range changes {
+		if SameSecureObject(base, changed) {
+			t.Fatalf("identity %#v matched %#v", base, changed)
+		}
+	}
+}
+
+func TestSecurePrincipalUsesCompleteSID(t *testing.T) {
+	first := SecurePrincipal{Kind: SecurePrincipalSID, SIDLength: 12, SID: [68]byte{0: 1, 11: 9}}
+	second := first
+	second.SID[11] = 10
+	if first == second {
+		t.Fatal("distinct canonical SIDs compared equal")
+	}
+}
+
+func TestValidateSecureOwnerUsesPrincipalInspector(t *testing.T) {
+	fsys := &principalMemFS{
+		MemFS:     NewMemFS(),
+		effective: SecurePrincipal{Kind: SecurePrincipalSID, SIDLength: 3, SID: [68]byte{1, 2, 3}},
+		owner:     SecurePrincipal{Kind: SecurePrincipalSID, SIDLength: 3, SID: [68]byte{1, 2, 3}},
+	}
+	if err := fsys.WriteFile("/private", []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := fsys.Stat("/private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSecureOwner(fsys, info); err != nil {
+		t.Fatalf("matching principal rejected: %v", err)
+	}
+	fsys.owner.SID[2] = 4
+	if err := ValidateSecureOwner(fsys, info); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("different principal error = %v, want unsafe", err)
+	}
+}
+
+func TestExternalCredentialPoliciesPreserveUnixModes(t *testing.T) {
+	fsys := NewMemFS()
+	if err := fsys.MkdirAll("/codex", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExternalCredentialDirectory(fsys, "/codex"); err != nil {
+		t.Fatalf("0755 credential directory rejected: %v", err)
+	}
+	if err := fsys.WriteFile("/codex/auth.json", []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := fsys.Stat("/codex/auth.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExternalCredentialFile(fsys, info); err != nil {
+		t.Fatalf("0600 credential rejected: %v", err)
+	}
+	if err := fsys.Chmod("/codex/auth.json", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err = fsys.Stat("/codex/auth.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExternalCredentialFile(fsys, info); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("0644 credential error = %v, want unsafe", err)
+	}
+	if err := ValidateRetainedExternalImportFile(fsys, info); err != nil {
+		t.Fatalf("0644 retained import rejected: %v", err)
+	}
+}
+
+func TestExternalCredentialPolicyOwnsNativeModeDecision(t *testing.T) {
+	fsys := &externalPolicyMemFS{principalMemFS: principalMemFS{MemFS: NewMemFS()}}
+	if err := fsys.MkdirAll("/codex", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExternalCredentialDirectory(fsys, "/codex"); err != nil {
+		t.Fatalf("native directory mode rejected before policy: %v", err)
+	}
+	if err := fsys.WriteFile("/codex/auth.json", []byte("secret"), 0); err != nil {
+		t.Fatal(err)
+	}
+	info, err := fsys.Stat("/codex/auth.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExternalCredentialFile(fsys, info); err != nil {
+		t.Fatalf("native credential mode rejected before policy: %v", err)
+	}
+	if fsys.directoryCalls != 1 || fsys.credentialCalls != 1 {
+		t.Fatalf("external policy calls = directory %d credential %d, want 1/1", fsys.directoryCalls, fsys.credentialCalls)
+	}
+}
+
+type principalMemFS struct {
+	*MemFS
+	effective SecurePrincipal
+	owner     SecurePrincipal
+}
+
+func (fsys *principalMemFS) EffectiveUID() uint64 { return 0 }
+func (fsys *principalMemFS) FileOwnerUID(os.FileInfo) (uint64, bool) {
+	return 0, false
+}
+func (fsys *principalMemFS) EffectivePrincipal() (SecurePrincipal, bool) {
+	return fsys.effective, true
+}
+func (fsys *principalMemFS) FileOwnerPrincipal(os.FileInfo) (SecurePrincipal, bool) {
+	return fsys.owner, true
+}
+
+type externalPolicyMemFS struct {
+	principalMemFS
+	directoryCalls  int
+	credentialCalls int
+}
+
+func (fsys *externalPolicyMemFS) ValidateExternalCredentialDirectoryInfo(os.FileInfo) error {
+	fsys.directoryCalls++
+	return nil
+}
+func (fsys *externalPolicyMemFS) ValidateExternalCredential(os.FileInfo) error {
+	fsys.credentialCalls++
+	return nil
+}
+func (*externalPolicyMemFS) ValidateExternalCache(os.FileInfo) error { return nil }
+func (*externalPolicyMemFS) ValidateRetainedExternalImportFileInfo(os.FileInfo) error {
+	return nil
+}
 
 func TestSecureAtomicWriteUsesUniqueExclusiveTemporaryFiles(t *testing.T) {
 	t.Parallel()
@@ -562,8 +704,12 @@ func TestSecureAtomicWriteRejectsTemporaryReplacementBeforeRename(t *testing.T) 
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("temporary entries remain: %#v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("replacement temporary entries = %#v, want one preserved object", entries)
+	}
+	got, err := fsys.ReadFile(filepath.Join("/state", entries[0].Name()))
+	if err != nil || string(got) != "attacker" {
+		t.Fatalf("preserved replacement = %q, %v; want attacker", got, err)
 	}
 }
 
@@ -974,7 +1120,7 @@ func (fsys *directoryCreationRecordingFS) OpenDurableDirectory(path string) (Dur
 	if err != nil {
 		return nil, err
 	}
-	return &recordingDurableDirectory{DurableDirectory: directory, fsys: fsys, path: filepath.Clean(path)}, nil
+	return &recordingDurableDirectory{DurableDirectory: directory, fsys: fsys, path: cleanMemPath(path)}, nil
 }
 
 type recordingDurableDirectory struct {
@@ -988,7 +1134,7 @@ func (directory *recordingDurableDirectory) OpenDirectory(name string) (DurableD
 	if err != nil {
 		return nil, err
 	}
-	return &recordingDurableDirectory{DurableDirectory: child, fsys: directory.fsys, path: filepath.Join(directory.path, name)}, nil
+	return &recordingDurableDirectory{DurableDirectory: child, fsys: directory.fsys, path: cleanMemPath(filepath.Join(directory.path, name))}, nil
 }
 
 func (directory *recordingDurableDirectory) Sync() error {
@@ -996,12 +1142,12 @@ func (directory *recordingDurableDirectory) Sync() error {
 		return err
 	}
 	directory.fsys.synced = append(directory.fsys.synced, directory.path)
-	if directory.path == filepath.Clean(directory.fsys.failSyncOnce) {
+	if directory.path == cleanMemPath(directory.fsys.failSyncOnce) {
 		directory.fsys.failSyncOnce = ""
 		return errors.New("injected retained directory sync failure")
 	}
-	target := filepath.Clean(directory.fsys.replaceOnParentSync)
-	if directory.fsys.replaceOnParentSync != "" && directory.path == filepath.Dir(target) {
+	target := cleanMemPath(directory.fsys.replaceOnParentSync)
+	if directory.fsys.replaceOnParentSync != "" && directory.path == cleanMemPath(filepath.Dir(target)) {
 		directory.fsys.mu.Lock()
 		original := directory.fsys.dirs[target]
 		delete(directory.fsys.dirs, target)
@@ -1017,6 +1163,9 @@ func (directory *recordingDurableDirectory) Sync() error {
 
 func requireUnixSecureFS(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix secure filesystem contract")
+	}
 	if _, ok := any(OSFileSystem{}).(SecurePathInspector); !ok {
 		t.Skip("secure path inspection is unavailable on this platform")
 	}
@@ -1151,6 +1300,18 @@ type replaceInstalledOnSyncDirectory struct {
 	name string
 }
 
+func (directory *replaceInstalledOnSyncDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *replaceInstalledOnSyncDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *replaceInstalledOnSyncDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (directory *replaceInstalledOnSyncDirectory) Sync() error {
 	if err := directory.SecureDirectory.Sync(); err != nil {
 		return err
@@ -1178,6 +1339,18 @@ type replaceTemporaryOnCloseFile struct {
 	directory SecureDirectory
 	name      string
 	mode      os.FileMode
+}
+
+func (directory *replaceTemporaryOnCloseDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *replaceTemporaryOnCloseDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *replaceTemporaryOnCloseDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (file *replaceTemporaryOnCloseFile) Stat() (os.FileInfo, error) {
@@ -1227,6 +1400,18 @@ func (directory *replaceAfterOpenDirectory) OpenNoFollow(name string) (SecureRea
 	return file, nil
 }
 
+func (directory *replaceAfterOpenDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *replaceAfterOpenDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *replaceAfterOpenDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 type replacingLockDirectoryFS struct{ OSFileSystem }
 
 func (fsys *replacingLockDirectoryFS) OpenSecureDirectory(path string) (SecureDirectory, error) {
@@ -1268,7 +1453,7 @@ func (fsys *replacingDirectoryFS) OpenSecureDirectory(path string) (SecureDirect
 	if err != nil {
 		return nil, err
 	}
-	return &replacingSecureDirectory{fsys: fsys, path: path, info: info}, nil
+	return &replacingSecureDirectory{fsys: fsys, path: cleanMemPath(path), info: info}, nil
 }
 
 type replacingSecureDirectory struct {
@@ -1324,6 +1509,45 @@ func (dir *replacingSecureDirectory) RenameNoReplace(oldName, newName string) er
 	return nil
 }
 
+func (dir *replacingSecureDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	opened, err := dir.fsys.MemFS.OpenSecureDirectory(dir.path)
+	if err != nil {
+		return err
+	}
+	defer opened.Close()
+	if err := opened.(IdentityBoundRenamer).RenameChecked(oldName, newName, expected); err != nil {
+		return err
+	}
+	if dir.fsys.replaceAfterRename {
+		dir.replacePath()
+	}
+	return nil
+}
+
+func (dir *replacingSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	opened, err := dir.fsys.MemFS.OpenSecureDirectory(dir.path)
+	if err != nil {
+		return err
+	}
+	defer opened.Close()
+	if err := opened.(IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected); err != nil {
+		return err
+	}
+	if dir.fsys.replaceAfterRename {
+		dir.replacePath()
+	}
+	return nil
+}
+
+func (dir *replacingSecureDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	opened, err := dir.fsys.MemFS.OpenSecureDirectory(dir.path)
+	if err != nil {
+		return err
+	}
+	defer opened.Close()
+	return opened.(IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (dir *replacingSecureDirectory) Remove(name string) error {
 	return dir.fsys.MemFS.Remove(filepath.Join(dir.path, name))
 }
@@ -1342,7 +1566,7 @@ func (dir *replacingSecureDirectory) replacePath() {
 	original := dir.fsys.dirs[dir.path]
 	delete(dir.fsys.dirs, dir.path)
 	dir.fsys.dirs[heldPath] = original
-	prefix := dir.path + string(filepath.Separator)
+	prefix := dir.path + "/"
 	for path, file := range dir.fsys.files {
 		if !strings.HasPrefix(path, prefix) {
 			continue
@@ -1421,6 +1645,24 @@ func (directory *faultSecureDirectory) Rename(oldName, newName string) error {
 		return fmt.Errorf("injected rename failure")
 	}
 	return directory.SecureDirectory.Rename(oldName, newName)
+}
+
+func (directory *faultSecureDirectory) RenameChecked(oldName, newName string, expected SecureFileIdentity) error {
+	if directory.fsys.failStep == "rename" {
+		return fmt.Errorf("injected rename failure")
+	}
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *faultSecureDirectory) RenameNoReplaceChecked(oldName, newName string, expected SecureFileIdentity) error {
+	if directory.fsys.failStep == "rename" {
+		return fmt.Errorf("injected rename failure")
+	}
+	return directory.SecureDirectory.(IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *faultSecureDirectory) RemoveChecked(name string, expected SecureFileIdentity) error {
+	return directory.SecureDirectory.(IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *faultSecureDirectory) Sync() error {

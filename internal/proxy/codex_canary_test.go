@@ -335,6 +335,18 @@ type replacingCanaryManagedDirectory struct {
 	fsys   *replacingCanaryManagedDirectoryFS
 }
 
+func (directory *replacingCanaryManagedDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *replacingCanaryManagedDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *replacingCanaryManagedDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 func (directory *replacingCanaryManagedDirectory) ReadDir() ([]os.DirEntry, error) {
 	entries, err := directory.reader.ReadDir()
 	if err == nil {
@@ -845,6 +857,18 @@ type countingCanaryKeyOpenDirectory struct {
 	fsutil.SecureDirectory
 	fsys *countingCanaryKeyOpenFS
 	path string
+}
+
+func (directory *countingCanaryKeyOpenDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *countingCanaryKeyOpenDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *countingCanaryKeyOpenDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *countingCanaryKeyOpenDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {

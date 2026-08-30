@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // OverlayFile is the on-disk representation of the user overlay file.
@@ -16,15 +17,8 @@ type OverlayFile struct {
 	Models  []Entry `json:"models"`
 }
 
-// OverlayPath returns the path to the user overlay file.
-// env is used to look up environment variables; homeDir is the fallback home directory.
-// Resolves to $XDG_CONFIG_HOME/cq/models.json, else $homeDir/.config/cq/models.json.
-func OverlayPath(env func(string) string, homeDir string) string {
-	if xdg := env("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "cq", "models.json")
-	}
-	return filepath.Join(homeDir, ".config", "cq", "models.json")
-}
+// OverlayPath returns the CQ model overlay path from resolved roots.
+func OverlayPath(roots userdirs.Roots) string { return filepath.Join(roots.Config, "models.json") }
 
 // LoadOverlays reads the overlay file at path.
 // A missing file returns an empty OverlayFile (version 1) and nil error.

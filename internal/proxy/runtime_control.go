@@ -19,8 +19,16 @@ import (
 	"sync"
 )
 
-func DefaultRuntimeLifecyclePath() string {
-	return filepath.Join(configDir(), ".cq-instance-cq.lifecycle.lock")
+func RuntimeLifecyclePath(runtimeDir string) string {
+	return filepath.Join(runtimeDir, ".cq-instance-cq.lifecycle.lock")
+}
+
+func DefaultRuntimeLifecyclePath() (string, error) {
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return "", err
+	}
+	return RuntimeLifecyclePath(paths.RuntimeDir), nil
 }
 
 const (

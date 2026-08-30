@@ -71,6 +71,13 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	}
 }
 
+func TestProxyAgentLogPathUsesResolvedLogsRoot(t *testing.T) {
+	logs := filepath.Join(string(filepath.Separator), "cq", "logs")
+	if got, want := proxyAgentLogPath(logs), filepath.Join(logs, "proxy.log"); got != want {
+		t.Fatalf("proxy log path = %q, want %q", got, want)
+	}
+}
+
 func TestInstallProxyAgentRejectsHomebrewExecutable(t *testing.T) {
 	oldExecutable := currentExecutable
 	oldRunner := runProxyLaunchctl
@@ -160,6 +167,35 @@ func TestRestartProxyAgentFallsBackToHomebrewLabel(t *testing.T) {
 	want := []string{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), homebrewProxyAgentLabel)}
 	if strings.Join(calls[1], "|") != strings.Join(want, "|") {
 		t.Fatalf("fallback launchctl args = %v, want %v", calls[1], want)
+	}
+}
+
+func TestRestartProxyAgentTargetsHomebrewLabelWhenManagedByHomebrew(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	defer func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+	}()
+	currentExecutable = func() (string, error) {
+		return "/opt/homebrew/Cellar/cq/0.26.1/bin/cq", nil
+	}
+
+	var calls [][]string
+	runProxyLaunchctl = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+
+	if err := restartProxyAgent(); err != nil {
+		t.Fatalf("restartProxyAgent: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("launchctl calls = %d, want 1", len(calls))
+	}
+	want := []string{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), homebrewProxyAgentLabel)}
+	if strings.Join(calls[0], "|") != strings.Join(want, "|") {
+		t.Fatalf("launchctl args = %v, want %v", calls[0], want)
 	}
 }
 

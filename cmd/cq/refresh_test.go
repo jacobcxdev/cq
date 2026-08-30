@@ -18,6 +18,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // testDoer is an httputil.Doer stub for refresh tests.
@@ -31,6 +32,32 @@ func profileJSON(email string) *http.Response {
 		StatusCode: http.StatusOK,
 		Header:     http.Header{},
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestRunRefreshResolvesCQRootsBeforeCredentialDiscovery(t *testing.T) {
+	originalResolve := resolveRefreshRootsFn
+	originalDiscover := discoverClaudeAccountsFn
+	t.Cleanup(func() {
+		resolveRefreshRootsFn = originalResolve
+		discoverClaudeAccountsFn = originalDiscover
+	})
+	wantErr := errors.New("roots unavailable")
+	resolveRefreshRootsFn = func() (userdirs.Roots, error) {
+		return userdirs.Roots{}, wantErr
+	}
+	discovered := false
+	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth {
+		discovered = true
+		return nil
+	}
+
+	err := runRefresh()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runRefresh() error = %v, want wrapping %v", err, wantErr)
+	}
+	if discovered {
+		t.Fatal("credential discovery ran before CQ root resolution")
 	}
 }
 

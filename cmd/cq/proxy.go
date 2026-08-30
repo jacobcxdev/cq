@@ -12,13 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
-	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -26,6 +24,7 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory, codexSecrets codexprov.ExactSecretResolver) ([]proxy.NormalCallerCredentialV1, error) {
@@ -467,6 +466,7 @@ type proxyCommandOptions struct {
 type proxyRegistryDependencies struct {
 	FS                  fsutil.FileSystem
 	HomeDir             string
+	Roots               userdirs.Roots
 	HTTPClient          httputil.Doer
 	CodexClientVersion  string
 	ClaudeToken         func() (string, error)
@@ -482,6 +482,7 @@ func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies)
 	return newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
 		FS:                 deps.FS,
 		HomeDir:            deps.HomeDir,
+		Roots:              deps.Roots,
 		ClaudeUpstream:     cfg.ClaudeUpstream,
 		CodexUpstream:      cfg.CodexUpstream,
 		HTTPClient:         deps.HTTPClient,
@@ -600,6 +601,10 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 }
 
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return fmt.Errorf("resolve CQ directories: %w", err)
+	}
 	var supervisorRole *proxy.RuntimeRoleManifestV1
 	var workerRole *proxy.RuntimeRoleManifestV1
 	var workerFiles proxy.RuntimeRoleFiles
@@ -662,7 +667,6 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}
 	var adoptedListener net.Listener
-	var err error
 	if supervisorRole == nil && workerRole == nil {
 		adoptedListener, err = adoptProxyListenerFn()
 	}
@@ -680,7 +684,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return err
 	}
 	if supervisorRole != nil {
-		store, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.DefaultNormalCallerAdmissionPath())
+		store, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.NormalCallerAdmissionPath(roots.State))
 		if err != nil {
 			return err
 		}
@@ -733,7 +737,13 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	refreshClient := newHTTPClientFn(30*time.Second, version)
 	servingAttestor := proxy.NewServingAttestor()
 	httpRequirements, _ := proxy.DefaultCodexRoutingRequirements(version, codexClientBuild)
-	activeCanary, err := openProxyCodexCanary(fsys, proxy.DefaultCodexCanaryPath(), httpRequirements)
+	activeCanary, err := openProxyCodexCanary(
+		fsys,
+		proxy.CodexCanaryPath(roots.State),
+		roots.Config,
+		roots.State,
+		httpRequirements,
+	)
 	if err != nil {
 		return fmt.Errorf("Codex canary startup: %w", err)
 	}
@@ -775,7 +785,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexContinuity, err := openProxyCodexContinuity(proxyCodexContinuityDependencies{
 		FS:        fsys,
-		StateDir:  cfg.ResolvedCodexContinuityStateDir(),
+		StateDir:  cfg.ResolvedCodexContinuityStateDir(roots.State),
 		Routing:   codexRouting,
 		Retention: time.Duration(cfg.CodexLeaseRetentionDays) * 24 * time.Hour,
 		Now:       time.Now,
@@ -806,7 +816,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	discover := proxy.ClaudeDiscoverer(discoverClaudeAccountsFn)
 	activeEmail := proxy.ActiveEmailFunc(activeClaudeEmailFn)
 	claudeProvider := claudeprov.New(refreshClient)
-	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, cache.DefaultDir())
+	quotaCache := proxy.NewQuotaCache(claudeProvider.FetchAccountUsage, roots.Cache)
 	baseSelector := proxy.NewAccountSelector(discover, activeEmail, quotaCache)
 	affinitySelector := proxy.NewSessionAffinitySelector(baseSelector, discover, quotaCache)
 	selector := proxy.NewPinnedClaudeSelector(affinitySelector, discover, cfg.PinnedClaudeAccount, quotaCache)
@@ -859,7 +869,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("normal caller index: %w", err)
 	}
-	codexQuotaCache := proxy.NewCodexQuotaCache(cache.DefaultDir())
+	codexQuotaCache := proxy.NewCodexQuotaCache(roots.Cache)
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
 	codexObserver, codexWebSocketObserver, err := newProxyCodexV2Observers(proxyCodexV2ObserverDependencies{
 		Routing:    codexRouting,
@@ -916,6 +926,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		pipeline, err = newProxyRegistryPipeline(cfg, proxyRegistryDependencies{
 			FS:                  fsys,
 			HomeDir:             homeDir,
+			Roots:               roots,
 			HTTPClient:          refreshClient,
 			CodexClientVersion:  codexClientBuild,
 			ClaudeToken:         firstClaudeAccessToken,
@@ -1322,16 +1333,11 @@ func loadProxyStatusPort(opts proxyCommandOptions) (int, error) {
 	if opts.Port != 0 {
 		return opts.Port, nil
 	}
-	configHome := os.Getenv("XDG_CONFIG_HOME")
-	if configHome == "" || !filepath.IsAbs(configHome) {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			configHome = filepath.Join(os.TempDir(), "cq-config")
-		} else {
-			configHome = filepath.Join(home, ".config")
-		}
+	paths, err := proxy.ResolveDefaultPaths()
+	if err != nil {
+		return 0, err
 	}
-	data, err := os.ReadFile(filepath.Join(configHome, "cq", "proxy.json"))
+	data, err := os.ReadFile(paths.ConfigFile)
 	if os.IsNotExist(err) {
 		return proxy.DefaultPort, nil
 	}
@@ -1393,8 +1399,7 @@ func validateProxyStatusConfig(cfg *proxy.Config) error {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", cfg.CodexLeaseRetentionDays)
 	}
 	if cfg.CodexContinuityStateDir != "" {
-		clean := filepath.Clean(cfg.CodexContinuityStateDir)
-		if !filepath.IsAbs(cfg.CodexContinuityStateDir) || clean != cfg.CodexContinuityStateDir || clean == string(filepath.Separator) {
+		if !fsutil.IsCleanAbsoluteNonRootPath(cfg.CodexContinuityStateDir) {
 			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", cfg.CodexContinuityStateDir)
 		}
 	}

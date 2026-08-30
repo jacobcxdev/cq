@@ -208,6 +208,45 @@ func TestAuthorityFSSelectorCASCapabilityHasOneGatePerDescription(t *testing.T) 
 	}
 }
 
+func TestAuthorityFSSelectorCASRejectsHighDirectoryFileIDChange(t *testing.T) {
+	filesystem, directory := newAuthorityFSTestDirectory(t)
+	lock, err := AcquireSelectorCASLock(filesystem, directory, "mutation.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.state.directoryIdentity.FileID[15] = 9
+	if err := lock.validateSelectorCAS(directory); !errors.Is(err, ErrAuthorityCASCapability) {
+		t.Fatalf("changed high directory file ID error = %v, want CAS capability", err)
+	}
+}
+
+func TestAuthorityFSSelectorCASAcceptsOwnedLockEntryOnOSFileSystem(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	filesystem := fsutil.OSFileSystem{}
+	directory, err := filesystem.OpenSecureDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	lock, err := AcquireSelectorCASLock(filesystem, directory, "mutation.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := lock.validateSelectorCAS(directory); err != nil {
+		current, _ := authorityDirectoryIdentity(filesystem, directory)
+		t.Fatalf("owned lock entry invalidated directory identity: recorded=%#v current=%#v error=%v", lock.state.directoryIdentity, current, err)
+	}
+	publisher := NewAuthorityObjectPublisher(filesystem, bytes.NewReader(bytes.Repeat([]byte{0x57}, 64)), lock)
+	if _, err := publisher.PublishImmutable(context.Background(), directory, "anchor", []byte("one"), 0o600); err != nil {
+		t.Fatalf("publish with retained directory identity: %v", err)
+	}
+}
+
 func TestAuthorityFSReplaceSelectorLinearisesStaleWriters(t *testing.T) {
 	filesystem, baseDirectory := newAuthorityFSTestDirectory(t)
 	guard := newObservedSelectorCASGuard()
@@ -325,12 +364,40 @@ type blockingRenameDirectory struct {
 	allow   <-chan struct{}
 }
 
+func (directory *blockingRenameDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	directory.reached <- struct{}{}
+	<-directory.allow
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *blockingRenameDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	directory.reached <- struct{}{}
+	<-directory.allow
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *blockingRenameDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
+}
+
 type replaceLockAfterTemporaryReopenDirectory struct {
 	fsutil.SecureDirectory
 	lockName    string
 	once        sync.Once
 	replaced    bool
 	replacement fsutil.ExclusiveLock
+}
+
+func (directory *replaceLockAfterTemporaryReopenDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *replaceLockAfterTemporaryReopenDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
+func (directory *replaceLockAfterTemporaryReopenDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *replaceLockAfterTemporaryReopenDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
@@ -452,9 +519,24 @@ func (directory *recordingAuthorityDirectory) RenameNoReplace(oldName, newName s
 	return directory.SecureDirectory.RenameNoReplace(oldName, newName)
 }
 
+func (directory *recordingAuthorityDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	*directory.events = append(*directory.events, "rename")
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameChecked(oldName, newName, expected)
+}
+
+func (directory *recordingAuthorityDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	*directory.events = append(*directory.events, "rename_no_replace")
+	return directory.SecureDirectory.(fsutil.IdentityBoundRenamer).RenameNoReplaceChecked(oldName, newName, expected)
+}
+
 func (directory *recordingAuthorityDirectory) Remove(name string) error {
 	*directory.events = append(*directory.events, "remove")
 	return directory.SecureDirectory.Remove(name)
+}
+
+func (directory *recordingAuthorityDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	*directory.events = append(*directory.events, "remove")
+	return directory.SecureDirectory.(fsutil.IdentityBoundRemover).RemoveChecked(name, expected)
 }
 
 func (directory *recordingAuthorityDirectory) Sync() error {

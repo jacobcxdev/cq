@@ -1526,7 +1526,7 @@ func codexLeaseDirectoryIdentity(inspector fsutil.SecurePathInspector, directory
 	if !ok || !sameCodexLeaseObject(pathID, heldID) {
 		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
-	return heldID, nil
+	return stableDirectoryObjectIdentity(heldID), nil
 }
 
 func codexLeaseV1Epochs(records []CodexJournalRecord) ([]uint64, []uint64) {
@@ -1651,7 +1651,7 @@ func cloneCodexLeaseSlice[T any](source []T) []T {
 }
 
 func sameCodexLeaseObject(left, right fsutil.SecureFileIdentity) bool {
-	return left.Device == right.Device && left.Inode == right.Inode
+	return fsutil.SameSecureObject(left, right)
 }
 
 func equalCodexEpochs(left, right []uint64) bool {

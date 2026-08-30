@@ -232,9 +232,7 @@ func validateCodexReadinessMarkerDirectoryAuthority(
 	if !heldInfo.IsDir() || !pathInfo.IsDir() || heldInfo.Mode().Perm() != 0o700 || pathInfo.Mode().Perm() != 0o700 {
 		return fmt.Errorf("readiness marker directory: %w", fsutil.ErrUnsafeSecurePath)
 	}
-	heldOwner, heldOwnerOK := inspector.FileOwnerUID(heldInfo)
-	pathOwner, pathOwnerOK := inspector.FileOwnerUID(pathInfo)
-	if !heldOwnerOK || !pathOwnerOK || heldOwner != inspector.EffectiveUID() || pathOwner != inspector.EffectiveUID() {
+	if fsutil.ValidateSecureOwner(inspector, heldInfo) != nil || fsutil.ValidateSecureOwner(inspector, pathInfo) != nil {
 		return fmt.Errorf("readiness marker directory owner: %w", fsutil.ErrUnsafeSecurePath)
 	}
 	heldIdentity, heldIdentityOK := inspector.FileIdentity(heldInfo)
@@ -266,9 +264,8 @@ func invalidateCodexReadinessMarkerInDirectory(
 	if statErr != nil {
 		validationErr = fmt.Errorf("stat prior readiness marker: %w", statErr)
 	} else {
-		owner, ownerOK := inspector.FileOwnerUID(info)
 		identity, identityOK := inspector.FileIdentity(info)
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ownerOK || owner != inspector.EffectiveUID() ||
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || fsutil.ValidateSecureOwner(inspector, info) != nil ||
 			!identityOK || identity.Links != 1 {
 			validationErr = fmt.Errorf("prior readiness marker: %w", fsutil.ErrUnsafeSecurePath)
 		}
