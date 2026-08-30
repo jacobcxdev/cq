@@ -450,7 +450,14 @@ func stopLinuxInstalledHTTPValidationCandidate() error {
 	}
 	_ = unix.Kill(-process.pid, unix.SIGTERM)
 	wait := make(chan error, 1)
-	go func() { wait <- process.command.Wait() }()
+	go func() {
+		defer func() {
+			if recover() != nil {
+				wait <- errors.New("installed validation candidate wait panic")
+			}
+		}()
+		wait <- process.command.Wait()
+	}()
 	select {
 	case err := <-wait:
 		if err == nil || process.command.ProcessState != nil {

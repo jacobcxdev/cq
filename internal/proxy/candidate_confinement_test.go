@@ -33,6 +33,10 @@ func TestCandidateConfinementRejectsCredentialAndProviderAuthority(t *testing.T)
 		if err != nil {
 			t.Fatalf("safe candidate rejected: %v", err)
 		}
+	} else if runtime.GOOS == "linux" {
+		if err != nil && err.Error() != "candidate platform confinement unavailable" {
+			t.Fatalf("Linux candidate error = %v", err)
+		}
 	} else if err == nil || err.Error() != "candidate platform confinement unavailable" {
 		t.Fatalf("unsupported platform error = %v", err)
 	}

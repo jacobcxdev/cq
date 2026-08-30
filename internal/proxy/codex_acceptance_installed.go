@@ -639,14 +639,15 @@ func runCodexInstalledClientAcceptance(ctx context.Context, dependencies codexAc
 		"no_proxy=127.0.0.1,localhost",
 	)
 	command := codexAcceptanceCommand{
-		executable:     dependencies.executable,
-		args:           codexAcceptanceExecArguments(proxyBaseURL, work, outputPath),
-		env:            environment,
-		dir:            work,
-		endpoint:       proxyBaseURL + legacyCodexResponsesPath,
-		outputPath:     outputPath,
-		egressProxyURL: egressURL,
-		loopbackOnly:   true,
+		executable:       dependencies.executable,
+		args:             codexAcceptanceExecArguments(proxyBaseURL, work, outputPath),
+		env:              environment,
+		dir:              work,
+		endpoint:         proxyBaseURL + legacyCodexResponsesPath,
+		outputPath:       outputPath,
+		egressProxyURL:   egressURL,
+		sandboxWriteRoot: root,
+		loopbackOnly:     true,
 	}
 	execCtx, cancelExec := context.WithTimeout(ctx, codexAcceptanceExecTimeout)
 	_, err = dependencies.runner.Run(execCtx, command)

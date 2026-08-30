@@ -107,6 +107,7 @@ var commandDispatcherCoverageOnly = []commandDispatcherCoverage{
 	{commandDispatcherKey{"help.go", "validateProxyLexicalGrammar", "args[1]"}, []string{"codex", "codex-stop", "disable", "enable", "status"}},
 	{commandDispatcherKey{"proxy_candidate_runtime.go", "isCandidateRuntimeCommand", "args[0]"}, []string{"proxy"}},
 	{commandDispatcherKey{"proxy_candidate_runtime.go", "isCandidateRuntimeCommand", "args[1]"}, []string{"candidate"}},
+	{commandDispatcherKey{"linux_acceptance_helper_linux.go", "isLinuxAcceptanceHelperCommand", "args[0]"}, []string{"proxy"}},
 	{commandDispatcherKey{"proxy_commands.go", "classifyCandidateReceiptAuthority", "argv[1]"}, []string{"candidate"}},
 	{commandDispatcherKey{"proxy_commands.go", "classifyCandidateReceiptAuthority", "argv[2]"}, []string{"receipt"}},
 	{commandDispatcherKey{"proxy_commands.go", "classifyProxyReadAuthority", "argv[2]"}, []string{"status"}},

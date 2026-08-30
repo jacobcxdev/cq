@@ -228,6 +228,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if isLinuxAcceptanceHelperCommand(os.Args[1:]) {
+		if err := runLinuxAcceptanceHelper(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "cq: Linux acceptance helper failed")
+			os.Exit(1)
+		}
+		return
+	}
 	if isCandidateRuntimeCommand(os.Args[1:]) {
 		if err := runCandidateRuntimeChild(context.Background(), os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "cq: candidate runtime failed")
