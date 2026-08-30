@@ -164,19 +164,49 @@ ends running tasks before deleting their definitions.
 
 Linux uses the current systemd user manager:
 
-- `cq-proxy.service` runs `cq proxy start` with `Restart=always`.
-- `cq-refresh.service` is a oneshot `cq refresh` unit.
+- `cq-proxy.service` runs `<absolute-cq> proxy start` with `Restart=always`.
+- `cq-refresh.service` is a oneshot `<absolute-cq> refresh` unit.
 - `cq-refresh.timer` starts the refresh service at session start and every 30
   minutes.
 
-Units live in `~/.config/systemd/user`, contain the stable absolute executable
-path, and use owner-only CQ state and log roots. Installation performs
+Units live in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`, contain no shell
+indirection, and use owner-only CQ state and log roots. Installation performs
 `daemon-reload`, enables and starts proxy and timer, starts one refresh, and
-verifies unit plus process identity.
+verifies unit plus process identity. Unit filenames and `ExecStart` forms are
+fixed integration contracts; runtime code must not infer package ownership from
+another path or process name.
 
 Preflight requires a responsive `systemctl --user`. Unsupported init systems or
 an unavailable user manager fail before binary or unit mutation. Lingering is
 not enabled automatically because it changes host-level login policy.
+
+### Linux parallel-work boundary
+
+Packaging and distribution owns:
+
+- the shared `cq service` transaction and ownership metadata;
+- systemd user unit and timer rendering, atomic installation, reload, enable,
+  start, restart, stop, removal, and rollback;
+- installer and package hooks, artifacts, and documentation;
+- service-manager inspection needed to prove exact unit definitions and active
+  executable identity.
+
+Linux runtime compatibility owns:
+
+- supervisor and worker lifecycle behaviour invoked by `cq proxy start`;
+- Linux proxy, listener, and process inspection collectors;
+- installed process and service attestation consumed by status validation;
+- installed HTTP, SSE, and WebSocket validation;
+- Linux acceptance confinement and native runtime proof.
+
+The packaging adapter exposes one narrow user-service-manager boundary with
+`Preflight`, `Install`, `Start`, `Restart`, `Stop`, `Remove`, and `Inspect`
+operations over the fixed three-unit service set. Runtime code supplies CQ
+entrypoints and inspection facts; it does not create or mutate systemd units.
+Packaging code consumes runtime status and validation; it does not reimplement
+Linux supervisor, attestation, confinement, or transport internals. Each branch
+publishes a commit SHA before integration, and cross-boundary changes are rebased
+onto the owning branch instead of duplicated.
 
 ## Homebrew packaging
 
