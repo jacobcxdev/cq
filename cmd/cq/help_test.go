@@ -47,6 +47,23 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 	}
 }
 
+func TestServiceHelpDescribesCompleteCurrentUserLifecycle(t *testing.T) {
+	for _, path := range [][]string{{"service"}, {"service", "install"}, {"service", "uninstall"}} {
+		help, ok := manualHelp(path)
+		if !ok {
+			t.Fatalf("manualHelp(%v) missing entry", path)
+		}
+		for _, want := range []string{"proxy", "refresh"} {
+			if !strings.Contains(help, want) {
+				t.Fatalf("manualHelp(%v) missing %q:\n%s", path, want, help)
+			}
+		}
+		if len(path) > 1 && !strings.Contains(help, "current user") {
+			t.Fatalf("manualHelp(%v) omits current-user scope:\n%s", path, help)
+		}
+	}
+}
+
 func TestCodexHelpShowsImmediateCommands(t *testing.T) {
 	out := &bytes.Buffer{}
 	handled, exitCode, err := runPureGlobalInspection([]string{"codex", "--help"}, out, io.Discard)

@@ -6,20 +6,79 @@
 
 ## Install
 
-Homebrew is the supported macOS installation and service-management path:
+Complete installers place an official release binary, install and start the
+current-user proxy, and schedule periodic credential refresh. No manual
+post-install command is required.
+
+### macOS — Homebrew Cask
 
 ```bash
-brew install jacobcxdev/tap/cq
-brew services start cq            # Optional local proxy service
+brew install --cask jacobcxdev/tap/cq
 ```
 
-Or install a development build with Go:
+Existing formula installations must migrate once so the legacy Homebrew service
+cannot conflict with Cask-owned services:
+
+```bash
+brew services stop cq
+brew uninstall --formula cq
+brew install --cask jacobcxdev/tap/cq
+```
+
+### Windows — WinGet
+
+```powershell
+winget install jacobcxdev.cq
+```
+
+WinGet installs CQ, its uninstaller, PATH and Add/Remove Programs metadata, and
+both scheduled tasks for the current Windows user without administrator access.
+
+### macOS, Windows, and Linux — Go installer runner
+
+```bash
+go run github.com/jacobcxdev/cq/cmd/cq-install@latest
+```
+
+The runner resolves its tagged release, downloads and verifies the matching
+official CQ asset, then installs the same current-user services as each native
+package. Linux requires a functional systemd user manager. Running services
+after logout can also require systemd user lingering configured by the host.
+
+Run the same install command to upgrade or repair an installation. Native
+package-manager upgrades are also supported:
+
+```bash
+brew upgrade --cask cq
+winget upgrade jacobcxdev.cq
+```
+
+Uninstall through the method that owns the installation:
+
+```bash
+brew uninstall --cask cq
+winget uninstall jacobcxdev.cq
+go run github.com/jacobcxdev/cq/cmd/cq-install@latest uninstall
+```
+
+Uninstall removes package-owned executables and services. User configuration,
+credentials, cache, history, and logs remain.
+
+## Development and portable binaries
+
+Plain `go install` builds CQ from source for development:
 
 ```bash
 go install github.com/jacobcxdev/cq/cmd/cq@latest
 ```
 
-Release builds include the private OAuth material needed to refresh Antigravity access in memory. A `go install` build can use an existing, still-valid Antigravity access token but cannot refresh it after expiry.
+This binary lacks official release provenance and release-time Gemini refresh
+material. It does not install or manage services. Direct release archives
+contain official binaries, but extraction also does not install or manage
+services. Use a complete installer when proxy and refresh lifecycle are wanted.
+
+`headroom-ai` remains a separate, optional integration. CQ installers do not
+install Python or optional integrations.
 
 ## Quick start
 
@@ -54,7 +113,7 @@ cq operation --help
 | Quota | Parallel Claude, Codex, and Gemini checks; provider selection; cache bypass; stale-account backfill; TTY and JSON output. |
 | Analysis | Remaining quota, reset times, pace, smoothed burn rate, projected burndown, correction-deadline gauge, multi-account aggregate, provider availability. |
 | Accounts | Claude and Codex OAuth login, listing, activation, switching, removal, and token refresh; read-only Gemini account inspection. |
-| Background work | One-shot OAuth refresh and macOS background refresh LaunchAgent. |
+| Background work | One-shot OAuth refresh and per-user periodic refresh on macOS, Windows, and Linux. |
 | Proxy | Loopback Claude/Codex routing, Anthropic Messages compatibility, native Codex Responses HTTP/WebSocket routing, model discovery, local authentication, health/status inspection. |
 | Routing controls | Claude/Codex pins, Codex default, account allowlist, quota/fairness selection, durable continuity, quota-window priming, capability pools, session bindings, rescue mode. |
 | Codex assurance | Installed HTTP/WebSocket validation, routing canary, candidate runtime lifecycle, client-bearer barrier, release receipts, durable operation recovery, legacy endpoint transition. |
@@ -157,7 +216,7 @@ cq agent install
 cq agent uninstall
 ```
 
-`cq refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. `cq agent install` installs a per-user macOS LaunchAgent that runs refresh work periodically. Expired Claude accounts can still require interactive login.
+`cq refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. Complete installers schedule this work using the platform user service manager. `cq agent install` remains a focused macOS maintenance command. Expired Claude accounts can still require interactive login.
 
 Ordinary quota and account commands do not change background service registration. Complete installers use `cq service install`; focused `cq agent` commands remain available for maintenance.
 
@@ -169,16 +228,20 @@ After an explicit account switch, already-running clients or MCP servers may nee
 
 ### Service lifecycle and status
 
-Homebrew installs must use Homebrew service management:
+Complete installers own service installation and removal. Use `cq service` to
+inspect or restart both package-owned components together:
 
 ```bash
-brew services start cq
-brew services restart cq
-brew services stop cq
-cq proxy status --strict --json
+cq service status --json
+cq service restart
 ```
 
-Manual/non-Homebrew installations can use:
+`cq service install` and `cq service uninstall` expose the same transaction for
+development and repair work. Package hooks call them automatically; users do
+not need them after a complete install.
+
+Focused proxy commands remain available for foreground and compatibility work,
+but do not form a complete installation:
 
 ```bash
 cq proxy start
