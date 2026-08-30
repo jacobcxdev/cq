@@ -14,15 +14,28 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
-var linuxProxyRuntimeInspector = func(context.Context, string) componentStatus {
-	return componentStatus{
+var inspectLinuxProxyRuntimeFn = proxy.InspectLinuxProxyRuntime
+
+var linuxProxyRuntimeInspector = func(ctx context.Context, executable string) componentStatus {
+	status := componentStatus{
 		ID:      systemdProxyUnit,
 		Manager: "systemd-user",
-		Error:   "Linux proxy runtime inspection is unavailable",
 	}
+	identity, err := inspectLinuxProxyRuntimeFn(ctx, executable, proxy.DefaultPort)
+	if err != nil || !identity.Valid() {
+		status.Error = "Linux proxy runtime inspection is unavailable"
+		return status
+	}
+	status.Running = true
+	status.LiveExecutable = identity.Process.Executable.Path
+	status.PID = identity.Process.PID
+	status.Listener = identity.Listener.Address
+	status.Healthy = true
+	return status
 }
 
 func init() {

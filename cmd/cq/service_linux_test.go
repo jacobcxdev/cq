@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -59,9 +60,30 @@ func TestLinuxServiceLifecycleBindsSystemdContract(t *testing.T) {
 	}
 }
 
-func TestLinuxProxyRuntimeHookFailsClosedUntilRuntimeBinds(t *testing.T) {
+func TestLinuxProxyRuntimeHookBindsExactKernelIdentity(t *testing.T) {
+	previous := inspectLinuxProxyRuntimeFn
+	t.Cleanup(func() { inspectLinuxProxyRuntimeFn = previous })
+	inspectLinuxProxyRuntimeFn = func(_ context.Context, executable string, port int) (proxy.LinuxProxyRuntimeIdentity, error) {
+		if executable != "/home/test/bin/cq" || port != proxy.DefaultPort {
+			t.Fatalf("inspection inputs = %q %d", executable, port)
+		}
+		process := proxy.LinuxProcessIdentity{
+			PID: 731, ParentPID: 1, StartTime: 100, UID: 501,
+			Arguments:  []string{executable, "proxy", "start"},
+			CgroupPath: "/user.slice/user-501.slice/user@501.service/app.slice/cq-proxy.service",
+			Executable: proxy.LinuxExecutableIdentity{
+				Path: executable, Device: 1, Inode: 2, Links: 1, Owner: 501,
+				Size: 4, Mode: 0o100755, SHA256: [32]byte{1},
+			},
+		}
+		return proxy.LinuxProxyRuntimeIdentity{
+			Process:  process,
+			Listener: proxy.LinuxListenerIdentity{Address: "127.0.0.1:19280", Inode: 7, Process: process},
+		}, nil
+	}
+
 	status := linuxProxyRuntimeInspector(context.Background(), "/home/test/bin/cq")
-	if status.Healthy || status.Error == "" {
+	if !status.Healthy || status.PID != 731 || status.LiveExecutable != "/home/test/bin/cq" || status.Listener != "127.0.0.1:19280" || status.Error != "" {
 		t.Fatalf("runtime status = %#v", status)
 	}
 }

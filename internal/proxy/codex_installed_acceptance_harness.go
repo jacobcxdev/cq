@@ -21,9 +21,10 @@ var errCodexInstalledListenerAcceptance = errors.New("Codex installed-listener a
 type codexInstalledListenerServiceKind string
 
 const (
-	codexInstalledListenerServiceLaunchd   codexInstalledListenerServiceKind = "launchd"
-	codexInstalledListenerServiceHomebrew  codexInstalledListenerServiceKind = "homebrew"
-	codexInstalledListenerServiceEphemeral codexInstalledListenerServiceKind = "ephemeral"
+	codexInstalledListenerServiceLaunchd     codexInstalledListenerServiceKind = "launchd"
+	codexInstalledListenerServiceHomebrew    codexInstalledListenerServiceKind = "homebrew"
+	codexInstalledListenerServiceSystemdUser codexInstalledListenerServiceKind = "systemd-user"
+	codexInstalledListenerServiceEphemeral   codexInstalledListenerServiceKind = "ephemeral"
 )
 
 // codexInstalledListenerProcessBinding is process-local proof metadata. Only
@@ -561,7 +562,7 @@ func validCodexInstalledListenerProcessBinding(binding codexInstalledListenerPro
 		return false
 	}
 	switch binding.ServiceKind {
-	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew, codexInstalledListenerServiceSystemdUser:
 		return true
 	default:
 		return false

@@ -81,6 +81,17 @@ func CaptureLinuxProcess(pid int) (LinuxProcessIdentity, error) {
 	return captureLinuxProcessWithOperations(pid, defaultLinuxProcOperations())
 }
 
+func CaptureLinuxExecutable(path string) (LinuxExecutableIdentity, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return LinuxExecutableIdentity{}, errLinuxProcIdentity
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved {
+		return LinuxExecutableIdentity{}, errLinuxProcIdentity
+	}
+	return captureLinuxExecutableFile(resolved, resolved, unix.O_NOFOLLOW)
+}
+
 func RevalidateLinuxProcess(expected LinuxProcessIdentity) error {
 	if !expected.Valid() {
 		return errLinuxProcIdentity
@@ -194,7 +205,11 @@ func captureLinuxProcExecutable(procPath string) (LinuxExecutableIdentity, error
 	if err != nil || !filepath.IsAbs(resolved) || filepath.Clean(resolved) != resolved || len(resolved) > 4_096 || strings.HasSuffix(resolved, " (deleted)") {
 		return LinuxExecutableIdentity{}, errLinuxProcIdentity
 	}
-	fd, err := unix.Open(procPath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	return captureLinuxExecutableFile(procPath, resolved, 0)
+}
+
+func captureLinuxExecutableFile(openPath, resolved string, flags int) (LinuxExecutableIdentity, error) {
+	fd, err := unix.Open(openPath, unix.O_RDONLY|unix.O_CLOEXEC|flags, 0)
 	if err != nil {
 		return LinuxExecutableIdentity{}, err
 	}

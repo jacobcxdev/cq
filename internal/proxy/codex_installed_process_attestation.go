@@ -74,7 +74,7 @@ func (proof codexInstalledProcessPlatformProof) valid() bool {
 		return false
 	}
 	switch proof.serviceKind {
-	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew, codexInstalledListenerServiceSystemdUser:
 		return true
 	default:
 		return false
