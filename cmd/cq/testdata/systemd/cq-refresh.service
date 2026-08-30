@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh CQ credentials
+
+[Service]
+Type=oneshot
+ExecStart=/home/test/bin/cq refresh

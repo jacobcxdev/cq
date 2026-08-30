@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package main
 
@@ -15,4 +15,3 @@ func uninstallProxyAgent() error {
 func restartProxyAgent() error {
 	return fmt.Errorf("proxy LaunchAgent is only supported on macOS")
 }
-

@@ -1,0 +1,13 @@
+[Unit]
+Description=CQ local proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/test/bin/cq proxy start
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

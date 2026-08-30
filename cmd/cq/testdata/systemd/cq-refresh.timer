@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh CQ credentials every 30 minutes
+
+[Timer]
+OnStartupSec=0
+OnUnitActiveSec=30min
+Persistent=true
+Unit=cq-refresh.service
+
+[Install]
+WantedBy=timers.target
