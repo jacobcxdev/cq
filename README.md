@@ -159,7 +159,7 @@ cq agent uninstall
 
 `cq refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. `cq agent install` installs a per-user macOS LaunchAgent that runs refresh work periodically. Expired Claude accounts can still require interactive login.
 
-On macOS, a successful ordinary quota/account command also installs the refresh agent on first use if it is absent. Run `cq agent uninstall` to disable it.
+Ordinary quota and account commands do not change background service registration. Complete installers use `cq service install`; focused `cq agent` commands remain available for maintenance.
 
 After an explicit account switch, already-running clients or MCP servers may need reconnection to reload credential state.
 
@@ -547,6 +547,11 @@ cq proxy status
 cq proxy uninstall
 cq proxy validate-http
 cq refresh
+cq service
+cq service install
+cq service restart
+cq service status
+cq service uninstall
 ```
 <!-- public-command-index:end -->
 

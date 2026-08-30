@@ -29,6 +29,7 @@ Commands:
   gemini      Show Gemini account
   refresh     Refresh stored OAuth tokens
   agent       Manage the background refresh agent
+  service     Manage complete background service lifecycle
   proxy       Run and configure the local API proxy
   models      Manage the local model registry
   operation   Inspect or recover a durable proxy operation
@@ -105,6 +106,32 @@ routing are less likely to start from expired credentials.
 	"agent uninstall": `Usage: cq agent uninstall
 
 Uninstall the background quota refresh LaunchAgent.
+`,
+	"service": `Usage: cq service <command>
+
+Manage proxy and refresh services as one installation.
+
+Commands:
+  service install      Install and start both services
+  service restart      Restart both services
+  service status       Show installed service health
+  service uninstall    Stop and remove both services
+`,
+	"service install": `Usage: cq service install
+
+Install and start proxy and refresh services for the current user.
+`,
+	"service restart": `Usage: cq service restart
+
+Restart proxy and refresh services for the current user.
+`,
+	"service status": `Usage: cq service status [--json]
+
+Show registered definitions, live identity, and health for both services.
+`,
+	"service uninstall": `Usage: cq service uninstall
+
+Stop and remove proxy and refresh services for the current user.
 `,
 	"operation": `Usage: cq operation <command>
 
@@ -631,6 +658,9 @@ func validateInterceptedLexicalGrammar(args []string) error {
 		if len(args) > 1 && args[1] != "install" && args[1] != "uninstall" {
 			return fmt.Errorf("unknown agent command: %s", args[1])
 		}
+	case "service":
+		_, err := parseServiceCommand(args[1:])
+		return err
 	case "proxy":
 		return validateProxyLexicalGrammar(args[1:])
 	case "models":
@@ -852,6 +882,8 @@ func interceptedZeroArgumentUsage(args []string) ([]string, string, bool) {
 	switch {
 	case len(args) == 1 && args[0] == "agent":
 		return []string{"agent"}, "missing subcommand", true
+	case len(args) == 1 && args[0] == "service":
+		return []string{"service"}, "missing service subcommand", true
 	case len(args) == 1 && args[0] == "proxy":
 		return []string{"proxy"}, "missing subcommand", true
 	case len(args) == 1 && args[0] == "models":
@@ -899,7 +931,7 @@ func manualUsageInspectionError(args []string) error {
 			return fmt.Errorf("unknown models overlay command: %s", overlayArgs[0])
 		}
 	}
-	if len(args) >= 2 && (args[0] == "agent" || args[0] == "models" || args[0] == "proxy") && args[1] == "help" {
+	if len(args) >= 2 && (args[0] == "agent" || args[0] == "service" || args[0] == "models" || args[0] == "proxy") && args[1] == "help" {
 		path := append([]string{args[0]}, args[2:]...)
 		if _, ok := manualHelp(path); !ok {
 			return fmt.Errorf("no help for command path: %s", strings.Join(path, " "))
@@ -910,6 +942,10 @@ func manualUsageInspectionError(args []string) error {
 		case "agent":
 			if args[1] != "install" && args[1] != "uninstall" {
 				return fmt.Errorf("unknown agent command: %s", args[1])
+			}
+		case "service":
+			if args[1] != "install" && args[1] != "restart" && args[1] != "status" && args[1] != "uninstall" {
+				return fmt.Errorf("unknown service command: %s", args[1])
 			}
 		case "models":
 			if args[1] != "list" && args[1] != "refresh" && args[1] != "overlay" {
@@ -945,6 +981,8 @@ func manualHelpInspectionPath(args []string) ([]string, bool) {
 		return []string{"refresh"}, true
 	case "agent":
 		return interceptedGroupHelpPath("agent", args[1:], map[string]bool{"install": true, "uninstall": true})
+	case "service":
+		return interceptedGroupHelpPath("service", args[1:], map[string]bool{"install": true, "restart": true, "status": true, "uninstall": true})
 	case "models":
 		return modelsHelpInspectionPath(args[1:])
 	case "proxy":
@@ -1171,7 +1209,7 @@ func isInterceptedCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "refresh", "agent", "proxy", "models", "operation":
+	case "refresh", "agent", "service", "proxy", "models", "operation":
 		return true
 	case "codex":
 		return len(args) > 1 && (args[1] == "validate" || args[1] == "canary")

@@ -31,6 +31,7 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 		"gemini",
 		"refresh",
 		"agent",
+		"service",
 		"proxy",
 		"models",
 		"operation",
