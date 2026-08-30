@@ -1,46 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"text/template"
 
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const agentLabel = "dev.jacobcx.cq.refresh"
-
-var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>{{ .Label }}</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>{{ .Binary }}</string>
-		<string>refresh</string>
-	</array>
-	<key>StartInterval</key>
-	<integer>{{ .Interval }}</integer>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>ProcessType</key>
-	<string>Background</string>
-	<key>StandardErrorPath</key>
-	<string>{{ .LogPath }}</string>
-</dict>
-</plist>
-`))
-
-type plistData struct {
-	Label    string
-	Binary   string
-	Interval int
-	LogPath  string
-}
 
 func agentPlistPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -77,48 +47,23 @@ func installAgent(interval int) error {
 	if err != nil {
 		return fmt.Errorf("resolve executable: %w", err)
 	}
-
-	plistPath, err := agentPlistPath()
+	exe, err = filepath.Abs(exe)
 	if err != nil {
+		return fmt.Errorf("resolve absolute executable: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	exe = filepath.Clean(exe)
+	platform := newDarwinCommandServicePlatform(home, roots, exe)
+	if err := platform.installRefresh(context.Background(), exe, interval); err != nil {
 		return err
-	}
-	logPath := agentLogPath(roots.Logs)
-
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
-		return fmt.Errorf("create LaunchAgents dir: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return fmt.Errorf("create log dir: %w", err)
-	}
-
-	// Unload existing agent if present.
-	_ = exec.Command("launchctl", "unload", plistPath).Run()
-
-	f, err := os.Create(plistPath)
-	if err != nil {
-		return fmt.Errorf("create plist: %w", err)
-	}
-	data := plistData{
-		Label:    agentLabel,
-		Binary:   exe,
-		Interval: interval,
-		LogPath:  logPath,
-	}
-	if err := plistTemplate.Execute(f, data); err != nil {
-		f.Close()
-		return fmt.Errorf("write plist: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close plist: %w", err)
-	}
-
-	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
-		return fmt.Errorf("launchctl load: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: installed LaunchAgent (every %ds)\n", interval)
-	fmt.Fprintf(os.Stderr, "cq: plist: %s\n", plistPath)
-	fmt.Fprintf(os.Stderr, "cq: log:   %s\n", logPath)
+	fmt.Fprintf(os.Stderr, "cq: plist: %s\n", platform.plistPath(agentLabel))
+	fmt.Fprintf(os.Stderr, "cq: log:   %s\n", agentLogPath(roots.Logs))
 	return nil
 }
 
@@ -148,13 +93,17 @@ func uninstallAgent() error {
 		fmt.Fprintf(os.Stderr, "cq: no LaunchAgent installed\n")
 		return nil
 	}
-
-	if err := exec.Command("launchctl", "unload", plistPath).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: launchctl unload: %v\n", err)
+	roots, err := userdirs.Default()
+	if err != nil {
+		return err
 	}
-
-	if err := os.Remove(plistPath); err != nil {
-		return fmt.Errorf("remove plist: %w", err)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	platform := newDarwinCommandServicePlatform(home, roots, "")
+	if err := platform.RemoveRefresh(context.Background()); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "cq: uninstalled LaunchAgent\n")
