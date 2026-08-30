@@ -57,6 +57,12 @@ type VersionRunner interface {
 	Version(context.Context, string) (string, error)
 }
 
+// BinaryOwnershipClassifier decides whether an unowned destination can be
+// adopted by the Go installer.
+type BinaryOwnershipClassifier interface {
+	Classify(installstate.Owner, string) (BinaryOwnership, error)
+}
+
 type installationState interface {
 	Load() (installstate.Record, error)
 	Save(installstate.Record) error
@@ -80,6 +86,7 @@ type Installer struct {
 	FS           installerFileSystem
 	Downloader   Downloader
 	Runner       VersionRunner
+	Classifier   BinaryOwnershipClassifier
 	Lifecycle    Lifecycle
 	Metadata     PlatformMetadata
 	State        installationState
@@ -99,10 +106,21 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 	}
 	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 
-	previous, previousRecord, err := installer.currentInstallation()
+	previous, previousRecord, adopted, err := installer.currentInstallation(true)
 	if err != nil {
 		return err
 	}
+	destinationCreated, err := installer.ensureExecutableDirectory()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if resultErr != nil && destinationCreated {
+			if cleanupErr := installer.FS.Remove(filepath.Dir(installer.Installation.Executable)); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove new CQ executable directory: %w", cleanupErr))
+			}
+		}
+	}()
 	temporaryRoot, err := installer.Temporary.Create()
 	if err != nil {
 		return fmt.Errorf("create installer temporary root: %w", err)
@@ -123,7 +141,7 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 	}
 	candidate := installer.Installation
 	candidate.BinaryDigest = stagedDigest
-	if previous != nil && previous.Version == candidate.Version && previous.BinaryDigest == candidate.BinaryDigest {
+	if previous != nil && !adopted && previous.Version == candidate.Version && previous.BinaryDigest == candidate.BinaryDigest {
 		if err := installer.Lifecycle.Status(ctx); err != nil {
 			return fmt.Errorf("validate installed CQ services: %w", err)
 		}
@@ -137,11 +155,12 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 		return err
 	}
 	mutated := false
+	candidateServicesInstalled := false
 	fail := func(cause error) error {
 		if !mutated {
 			return errors.Join(cause, installer.cleanupPrepared(previous != nil))
 		}
-		rollbackErr := installer.rollback(ctx, previous, previousRecord, candidate)
+		rollbackErr := installer.rollback(ctx, previous, previousRecord, candidate, adopted, candidateServicesInstalled)
 		if rollbackErr != nil {
 			evidence := installer.Installation.Executable
 			if previous != nil {
@@ -152,7 +171,7 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 		return cause
 	}
 
-	if previous != nil {
+	if previous != nil && !adopted {
 		mutated = true
 		if err := installer.Lifecycle.Stop(ctx); err != nil {
 			return fail(fmt.Errorf("stop existing CQ services: %w", err))
@@ -173,6 +192,7 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 	if err := installer.Lifecycle.Install(ctx, candidate.Owner); err != nil {
 		return fail(fmt.Errorf("install CQ services: %w", err))
 	}
+	candidateServicesInstalled = true
 	if err := installer.Lifecycle.Status(ctx); err != nil {
 		return fail(fmt.Errorf("validate installed CQ services: %w", err))
 	}
@@ -205,7 +225,7 @@ func (installer *Installer) Uninstall(ctx context.Context) (resultErr error) {
 	}
 	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 
-	current, record, err := installer.currentInstallation()
+	current, record, _, err := installer.currentInstallation(false)
 	if err != nil {
 		return err
 	}
@@ -248,25 +268,46 @@ func (installer *Installer) Uninstall(ctx context.Context) (resultErr error) {
 	return nil
 }
 
-func (installer *Installer) currentInstallation() (*Installation, installstate.Record, error) {
+func (installer *Installer) currentInstallation(allowAdoption bool) (*Installation, installstate.Record, bool, error) {
 	record, err := installer.State.Load()
 	if errors.Is(err, installstate.ErrNotInstalled) {
 		if _, statErr := installer.FS.Stat(installer.Installation.Executable); statErr == nil {
-			return nil, installstate.Record{}, fmt.Errorf("%w: destination exists without CQ ownership", ErrForeignBinary)
+			if !allowAdoption || installer.Installation.Owner != installstate.OwnerGo || installer.Classifier == nil {
+				return nil, installstate.Record{}, false, fmt.Errorf("%w: destination exists without CQ ownership", ErrForeignBinary)
+			}
+			classification, classifyErr := installer.Classifier.Classify(installer.Installation.Owner, installer.Installation.Executable)
+			if classifyErr != nil {
+				return nil, installstate.Record{}, false, classifyErr
+			}
+			if classification != BinaryAdoptable {
+				return nil, installstate.Record{}, false, fmt.Errorf("%w: destination exists without CQ ownership", ErrForeignBinary)
+			}
+			_, _, digest, readErr := installer.readBinary(installer.Installation.Executable)
+			if readErr != nil {
+				return nil, installstate.Record{}, false, readErr
+			}
+			adopted := Installation{
+				Owner:        installstate.OwnerGo,
+				Version:      "adopted",
+				Executable:   installer.Installation.Executable,
+				BinaryDigest: digest,
+				Services:     append([]string(nil), installer.Installation.Services...),
+			}
+			return &adopted, adopted.record(), true, nil
 		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, installstate.Record{}, fmt.Errorf("inspect CQ destination: %w", statErr)
+			return nil, installstate.Record{}, false, fmt.Errorf("inspect CQ destination: %w", statErr)
 		}
-		return nil, installstate.Record{}, nil
+		return nil, installstate.Record{}, false, nil
 	}
 	if err != nil {
-		return nil, installstate.Record{}, err
+		return nil, installstate.Record{}, false, err
 	}
 	if err := installer.State.CheckClaim(installer.Installation.Owner, installer.Installation.Executable); err != nil {
-		return nil, installstate.Record{}, err
+		return nil, installstate.Record{}, false, err
 	}
 	_, _, digest, err := installer.readBinary(record.Executable)
 	if err != nil || digest != record.BinaryDigest {
-		return nil, installstate.Record{}, fmt.Errorf("%w: owned executable digest differs", ErrForeignBinary)
+		return nil, installstate.Record{}, false, fmt.Errorf("%w: owned executable digest differs", ErrForeignBinary)
 	}
 	return &Installation{
 		Owner:        record.Owner,
@@ -274,7 +315,7 @@ func (installer *Installer) currentInstallation() (*Installation, installstate.R
 		Executable:   record.Executable,
 		BinaryDigest: record.BinaryDigest,
 		Services:     append([]string(nil), record.Services...),
-	}, record, nil
+	}, record, false, nil
 }
 
 func (installer *Installer) validateStaged(ctx context.Context, temporaryRoot string, staged StagedBinary) ([]byte, string, error) {
@@ -332,9 +373,11 @@ func (installer *Installer) prepareReplacement(previous *Installation, stagedBod
 	return nil
 }
 
-func (installer *Installer) rollback(ctx context.Context, previous *Installation, previousRecord installstate.Record, candidate Installation) error {
+func (installer *Installer) rollback(ctx context.Context, previous *Installation, previousRecord installstate.Record, candidate Installation, adopted, candidateServicesInstalled bool) error {
 	var result error
-	result = errors.Join(result, installer.Lifecycle.Uninstall(ctx, candidate.Owner))
+	if !adopted || candidateServicesInstalled {
+		result = errors.Join(result, installer.Lifecycle.Uninstall(ctx, candidate.Owner))
+	}
 	result = errors.Join(result, installer.Metadata.Remove(ctx, candidate))
 	result = errors.Join(result, installer.removeIfPresent(installer.Installation.Executable))
 	result = errors.Join(result, installer.removeIfPresent(installer.candidatePath()))
@@ -360,6 +403,20 @@ func (installer *Installer) rollback(ctx context.Context, previous *Installation
 		return errors.Join(result, err)
 	}
 	result = errors.Join(result, installer.syncExecutableDirectory())
+	if adopted {
+		result = errors.Join(result, installer.State.Remove())
+		_, _, restoredDigest, restoreErr := installer.readBinary(previous.Executable)
+		if restoreErr != nil || restoredDigest != previous.BinaryDigest {
+			result = errors.Join(result, fmt.Errorf("restored adopted CQ executable could not be verified: %w", restoreErr))
+		}
+		if result != nil {
+			return result
+		}
+		if err := installer.removeIfPresent(installer.rollbackPath()); err != nil {
+			return err
+		}
+		return installer.syncExecutableDirectory()
+	}
 	result = errors.Join(result, installer.Lifecycle.Install(ctx, previous.Owner))
 	result = errors.Join(result, installer.Lifecycle.Status(ctx))
 	result = errors.Join(result, installer.Metadata.Install(ctx, *previous))
@@ -458,6 +515,24 @@ func (installer *Installer) syncExecutableDirectory() error {
 		return fmt.Errorf("sync CQ executable directory: %w", err)
 	}
 	return nil
+}
+
+func (installer *Installer) ensureExecutableDirectory() (bool, error) {
+	directory := filepath.Dir(installer.Installation.Executable)
+	info, err := installer.FS.Stat(directory)
+	if err == nil {
+		if !info.IsDir() {
+			return false, fmt.Errorf("CQ executable parent is not a directory")
+		}
+		return false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect CQ executable directory: %w", err)
+	}
+	if err := installer.FS.MkdirAll(directory, 0o700); err != nil {
+		return false, fmt.Errorf("create CQ executable directory: %w", err)
+	}
+	return true, nil
 }
 
 func (installer *Installer) candidatePath() string {

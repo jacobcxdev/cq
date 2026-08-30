@@ -31,6 +31,33 @@ func TestInstallerFreshInstallCommitsBinaryServicesMetadataAndState(t *testing.T
 	}
 }
 
+func TestInstallerCreatesMissingExecutableDirectory(t *testing.T) {
+	harness := newInstallerHarness(t)
+	directory := filepath.Join(filepath.Dir(filepath.Dir(harness.installer.Installation.Executable)), "new-bin")
+	harness.installer.Installation.Executable = filepath.Join(directory, installerExecutableName())
+
+	if err := harness.installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := harness.fsys.Stat(directory); err != nil || !info.IsDir() {
+		t.Fatalf("destination directory = %v, %v", info, err)
+	}
+}
+
+func TestInstallerRemovesNewExecutableDirectoryAfterFailure(t *testing.T) {
+	harness := newInstallerHarness(t)
+	directory := filepath.Join(filepath.Dir(filepath.Dir(harness.installer.Installation.Executable)), "new-bin")
+	harness.installer.Installation.Executable = filepath.Join(directory, installerExecutableName())
+	harness.downloader.err = errors.New("download failed")
+
+	if err := harness.installer.Install(context.Background()); err == nil {
+		t.Fatal("Install() succeeded")
+	}
+	if _, err := harness.fsys.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed destination directory remains: %v", err)
+	}
+}
+
 func TestInstallerIdempotentReinstallDoesNotReplaceMatchingBinary(t *testing.T) {
 	harness := newInstallerHarness(t)
 	if err := harness.installer.Install(context.Background()); err != nil {
@@ -92,6 +119,48 @@ func TestInstallerRejectsForeignBinaryBeforeDownload(t *testing.T) {
 	}
 	if harness.downloader.calls != 0 || harness.lifecycle.totalCalls() != 0 {
 		t.Fatal("foreign binary reached download or service mutation")
+	}
+}
+
+func TestInstallerAdoptsUnownedGoBinary(t *testing.T) {
+	harness := newInstallerHarness(t)
+	oldBody := []byte("plain-go-binary")
+	if err := harness.fsys.WriteFile(harness.installer.Installation.Executable, oldBody, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness.installer.Classifier = fakeBinaryClassifier{classification: BinaryAdoptable}
+
+	if err := harness.installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	harness.assertInstalled(t, harness.downloader.body, "0.27.0", installstate.OwnerGo)
+	if harness.lifecycle.stopCalls != 0 || harness.lifecycle.installCalls != 1 || harness.lifecycle.statusCalls != 1 {
+		t.Fatalf("adoption lifecycle = %#v", harness.lifecycle)
+	}
+}
+
+func TestInstallerAdoptionFailureRestoresUnownedBinary(t *testing.T) {
+	harness := newInstallerHarness(t)
+	oldBody := []byte("plain-go-binary")
+	if err := harness.fsys.WriteFile(harness.installer.Installation.Executable, oldBody, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	harness.installer.Classifier = fakeBinaryClassifier{classification: BinaryAdoptable}
+	harness.lifecycle.statusErrors = []error{errors.New("candidate unhealthy")}
+
+	err := harness.installer.Install(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "candidate unhealthy") {
+		t.Fatalf("Install() error = %v", err)
+	}
+	body, readErr := harness.fsys.ReadFile(harness.installer.Installation.Executable)
+	if readErr != nil || !reflect.DeepEqual(body, oldBody) {
+		t.Fatalf("restored adopted body = %q, %v", body, readErr)
+	}
+	if _, stateErr := harness.store.Load(); !errors.Is(stateErr, installstate.ErrNotInstalled) {
+		t.Fatalf("adoption rollback state = %v", stateErr)
+	}
+	if harness.lifecycle.stopCalls != 0 || harness.lifecycle.installCalls != 1 || harness.lifecycle.uninstallCalls != 1 {
+		t.Fatalf("adoption rollback lifecycle = %#v", harness.lifecycle)
 	}
 }
 
@@ -393,6 +462,15 @@ type fakeInstallerRunner struct {
 	version string
 	err     error
 	calls   []string
+}
+
+type fakeBinaryClassifier struct {
+	classification BinaryOwnership
+	err            error
+}
+
+func (classifier fakeBinaryClassifier) Classify(installstate.Owner, string) (BinaryOwnership, error) {
+	return classifier.classification, classifier.err
 }
 
 func (runner *fakeInstallerRunner) Version(_ context.Context, executable string) (string, error) {
