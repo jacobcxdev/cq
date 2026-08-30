@@ -261,10 +261,5 @@ func (OSFileSystem) SyncFile(name string) error {
 	return f.Sync()
 }
 func (OSFileSystem) SyncDir(name string) error {
-	f, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
+	return syncDirectory(name)
 }
