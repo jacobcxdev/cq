@@ -173,9 +173,12 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 	lifecycle := commandLifecycle{
 		Executable: "/go/bin/cq",
 		Owner:      installstate.OwnerGo,
-		Run: func(_ context.Context, executable string, args ...string) error {
+		Run: func(_ context.Context, executable string, args ...string) ([]byte, error) {
 			calls = append(calls, append([]string{executable}, args...))
-			return nil
+			if len(args) == 3 && args[0] == "service" && args[1] == "status" {
+				return []byte(`{"schema_version":1,"owner":"go","proxy":{"registered":true,"running":true,"configured_executable":"/go/bin/cq","live_executable":"/go/bin/cq","healthy":true},"refresh":{"registered":true,"configured_executable":"/go/bin/cq","healthy":true}}`), nil
+			}
+			return nil, nil
 		},
 	}
 	ctx := context.Background()
@@ -192,10 +195,10 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"/go/bin/cq", "service", "uninstall", "--owner=go"},
-		{"/go/bin/cq", "service", "install", "--owner=go"},
+		{"/go/bin/cq", "service", "uninstall", "--owner=go", "--installer-lock-held"},
+		{"/go/bin/cq", "service", "install", "--owner=go", "--installer-lock-held"},
 		{"/go/bin/cq", "service", "status", "--json"},
-		{"/go/bin/cq", "service", "uninstall", "--owner=go"},
+		{"/go/bin/cq", "service", "uninstall", "--owner=go", "--installer-lock-held"},
 	}
 	if len(calls) != len(want) {
 		t.Fatalf("calls = %#v", calls)
@@ -204,6 +207,21 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 		if strings.Join(calls[index], "\x00") != strings.Join(want[index], "\x00") {
 			t.Fatalf("call %d = %#v, want %#v", index, calls[index], want[index])
 		}
+	}
+}
+
+func TestCommandLifecycleStatusRejectsUnhealthyServices(t *testing.T) {
+	lifecycle := commandLifecycle{
+		Executable: "/go/bin/cq",
+		Owner:      installstate.OwnerGo,
+		Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(`{"schema_version":1,"proxy":{"registered":false,"healthy":false},"refresh":{"registered":false,"healthy":false}}`), nil
+		},
+	}
+
+	err := lifecycle.Status(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
+		t.Fatalf("Status() error = %v", err)
 	}
 }
 

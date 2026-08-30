@@ -3,35 +3,43 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
 type serviceCommand struct {
-	Action   string
-	Owner    installstate.Owner
-	OwnerSet bool
-	JSON     bool
-	HelpPath []string
+	Action            string
+	Owner             installstate.Owner
+	OwnerSet          bool
+	JSON              bool
+	ServiceExecutable string
+	InstallerLockHeld bool
+	HelpPath          []string
 }
 
-var serviceLifecycleFactory = func() (*serviceLifecycle, error) {
+var serviceLifecycleFactory = func(string) (*serviceLifecycle, error) {
 	return nil, fmt.Errorf("service platform adapter is unavailable")
 }
 
 func runService(args []string) error {
-	lifecycle, err := serviceLifecycleFactory()
+	command, err := parseServiceCommand(args)
+	if err != nil {
+		return err
+	}
+	lifecycle, err := serviceLifecycleFactory(command.ServiceExecutable)
 	if err != nil {
 		return err
 	}
 	return runServiceWithLifecycle(args, lifecycle, os.Stdout)
 }
 
-func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output io.Writer) error {
+func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output io.Writer) (returnErr error) {
 	command, err := parseServiceCommand(args)
 	if err != nil {
 		return err
@@ -44,6 +52,16 @@ func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output 
 	}
 	if output == nil {
 		output = io.Discard
+	}
+	if command.Action != "status" && !command.InstallerLockHeld {
+		if lifecycle == nil || lifecycle.MutationLocker == nil {
+			return fmt.Errorf("service mutation lock is unavailable")
+		}
+		lock, err := lifecycle.MutationLocker.Acquire()
+		if err != nil {
+			return err
+		}
+		defer func() { returnErr = errors.Join(returnErr, lock.Close()) }()
 	}
 
 	ctx := context.Background()
@@ -117,6 +135,16 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 			if err := setServiceOwner(&command, strings.TrimPrefix(argument, "--owner=")); err != nil {
 				return serviceCommand{}, err
 			}
+		case strings.HasPrefix(argument, "--service-executable="):
+			if command.ServiceExecutable != "" {
+				return serviceCommand{}, fmt.Errorf("service %s: duplicate service executable", command.Action)
+			}
+			command.ServiceExecutable = strings.TrimPrefix(argument, "--service-executable=")
+		case argument == "--installer-lock-held":
+			if command.InstallerLockHeld {
+				return serviceCommand{}, fmt.Errorf("service %s: duplicate installer lock marker", command.Action)
+			}
+			command.InstallerLockHeld = true
 		default:
 			return serviceCommand{}, fmt.Errorf("service %s: unexpected argument %q", command.Action, argument)
 		}
@@ -127,7 +155,48 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 	if command.OwnerSet && command.Action != "install" && command.Action != "uninstall" {
 		return serviceCommand{}, fmt.Errorf("service %s: --owner is only valid with install or uninstall", command.Action)
 	}
+	if command.ServiceExecutable != "" {
+		if command.Owner != installstate.OwnerHomebrew || (command.Action != "install" && command.Action != "uninstall") {
+			return serviceCommand{}, fmt.Errorf("service %s: service executable is only valid for Homebrew lifecycle hooks", command.Action)
+		}
+		if !filepath.IsAbs(command.ServiceExecutable) || filepath.Clean(command.ServiceExecutable) != command.ServiceExecutable {
+			return serviceCommand{}, fmt.Errorf("service %s: service executable must be a clean absolute path", command.Action)
+		}
+	}
+	if command.InstallerLockHeld && (!command.OwnerSet || command.Owner == installstate.OwnerManual || (command.Action != "install" && command.Action != "uninstall")) {
+		return serviceCommand{}, fmt.Errorf("service %s: installer lock marker requires a package lifecycle action", command.Action)
+	}
 	return command, nil
+}
+
+func resolveServiceExecutable(stable string) (string, error) {
+	current, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve current executable: %w", err)
+	}
+	current, err = filepath.Abs(current)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute executable: %w", err)
+	}
+	current = filepath.Clean(current)
+	if stable == "" {
+		return current, nil
+	}
+	if !filepath.IsAbs(stable) || filepath.Clean(stable) != stable {
+		return "", fmt.Errorf("service executable must be a clean absolute path")
+	}
+	currentInfo, err := os.Stat(current)
+	if err != nil {
+		return "", fmt.Errorf("inspect current executable: %w", err)
+	}
+	stableInfo, err := os.Stat(stable)
+	if err != nil {
+		return "", fmt.Errorf("inspect stable executable: %w", err)
+	}
+	if !os.SameFile(currentInfo, stableInfo) {
+		return "", fmt.Errorf("%w: stable executable differs from current process", installstate.ErrOwnershipConflict)
+	}
+	return stable, nil
 }
 
 func setServiceOwner(command *serviceCommand, value string) error {

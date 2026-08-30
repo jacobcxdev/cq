@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
@@ -43,6 +44,45 @@ func TestRunServiceInstallAcceptsHiddenPackageOwner(t *testing.T) {
 	}
 	if record.Owner != installstate.OwnerHomebrew {
 		t.Fatalf("owner = %q, want homebrew", record.Owner)
+	}
+}
+
+func TestServiceCommandAcceptsHomebrewStableExecutableOnly(t *testing.T) {
+	stable := filepath.Join(string(filepath.Separator), "opt", "homebrew", "bin", "cq")
+	command, err := parseServiceCommand([]string{"install", "--owner=homebrew", "--service-executable=" + stable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.ServiceExecutable != stable {
+		t.Fatalf("service executable = %q", command.ServiceExecutable)
+	}
+	if _, err := parseServiceCommand([]string{"install", "--owner=go", "--service-executable=" + stable}); err == nil {
+		t.Fatal("Go owner accepted service executable override")
+	}
+}
+
+func TestResolveServiceExecutablePreservesVerifiedStablePath(t *testing.T) {
+	current, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable := filepath.Join(t.TempDir(), filepath.Base(current))
+	if err := os.Symlink(current, stable); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveServiceExecutable(stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != stable {
+		t.Fatalf("resolved executable = %q, want %q", got, stable)
+	}
+	foreign := filepath.Join(t.TempDir(), "cq")
+	if err := os.WriteFile(foreign, []byte("foreign"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveServiceExecutable(foreign); !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("foreign executable error = %v", err)
 	}
 }
 
@@ -122,6 +162,27 @@ func TestRunServiceRestartAndUninstall(t *testing.T) {
 	}
 	if _, err := store.Load(); !errors.Is(err, installstate.ErrNotInstalled) {
 		t.Fatalf("state after uninstall error = %v", err)
+	}
+}
+
+func TestRunServiceMutationsShareInstallerLock(t *testing.T) {
+	lifecycle, platform, _ := newServiceHarness(t)
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	err = runServiceWithLifecycle([]string{"install", "--owner=go"}, lifecycle, io.Discard)
+	if !errors.Is(err, installer.ErrInstallationInProgress) {
+		t.Fatalf("contended install error = %v", err)
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("contended install mutated platform: %v", platform.calls)
+	}
+
+	if err := runServiceWithLifecycle([]string{"install", "--owner=go", "--installer-lock-held"}, lifecycle, io.Discard); err != nil {
+		t.Fatalf("installer child install error = %v", err)
 	}
 }
 

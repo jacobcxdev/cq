@@ -86,6 +86,53 @@ func TestWindowsTaskDefinitionRejectsWrongSchema(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskDefinitionRejectsDifferentSecurityDescriptor(t *testing.T) {
+	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := parseWindowsTaskDefinition(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.RegistrationInfo.SecurityDescriptor = "D:(A;;FA;;;WD)"
+	if err := validateWindowsTaskDefinition(definition, windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800); !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("security descriptor validation error = %v", err)
+	}
+}
+
+func TestWindowsTaskSecurityDescriptorAcceptsSchedulerCanonicalForms(t *testing.T) {
+	taskDescriptor := "D:(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")(A;;FR;;;" + testWindowsSID + ")"
+	folderDescriptor := "D:PAI(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")"
+	if !validWindowsTaskSecurityDescriptor(taskDescriptor, testWindowsSID, false) {
+		t.Fatal("scheduler-normalised task descriptor was rejected")
+	}
+	if !validWindowsTaskSecurityDescriptor(folderDescriptor, testWindowsSID, true) {
+		t.Fatal("scheduler-normalised folder descriptor was rejected")
+	}
+}
+
+func TestWindowsTaskSecurityDescriptorRejectsBroaderOrWeakerAccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		descriptor string
+		folder     bool
+	}{
+		{name: "foreign trustee", descriptor: "D:P(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")(A;;FR;;;WD)"},
+		{name: "deny", descriptor: "D:P(D;;FR;;;WD)(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")"},
+		{name: "missing system full", descriptor: "D:P(A;;FR;;;SY)(A;;FA;;;" + testWindowsSID + ")"},
+		{name: "missing user full", descriptor: "D:P(A;;FA;;;SY)(A;;FR;;;" + testWindowsSID + ")"},
+		{name: "unprotected folder", descriptor: "D:(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")", folder: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if validWindowsTaskSecurityDescriptor(test.descriptor, testWindowsSID, test.folder) {
+				t.Fatalf("accepted %q", test.descriptor)
+			}
+		})
+	}
+}
+
 func TestWindowsTaskDefinitionSupportsCustomRefreshInterval(t *testing.T) {
 	data, err := renderWindowsTaskDefinition(windowsRefreshTask, testWindowsSID, `C:\cq\cq.exe`, 75)
 	if err != nil {
@@ -97,6 +144,32 @@ func TestWindowsTaskDefinitionSupportsCustomRefreshInterval(t *testing.T) {
 	}
 	if definition.Triggers.LogonTrigger.Repetition == nil || definition.Triggers.LogonTrigger.Repetition.Interval != "PT1M15S" {
 		t.Fatalf("repetition = %#v", definition.Triggers.LogonTrigger.Repetition)
+	}
+}
+
+func TestWindowsTaskDefinitionTemporaryFileUsesUTF16(t *testing.T) {
+	definition, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, cleanup, err := writeTemporaryWindowsTaskXML(t.TempDir(), definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	fileData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fileData) < 2 || fileData[0] != 0xff || fileData[1] != 0xfe {
+		t.Fatalf("temporary XML prefix = %x", fileData[:min(len(fileData), 4)])
+	}
+	parsed, err := parseWindowsTaskDefinition(fileData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Actions.Exec.Command != `C:\cq\cq.exe` {
+		t.Fatalf("round-trip command = %q", parsed.Actions.Exec.Command)
 	}
 }
 
@@ -126,6 +199,9 @@ func TestWindowsTaskDefinitionServiceReconcilesTasksInOrder(t *testing.T) {
 	}
 	if len(runner.tasks) != 2 || !runner.running[windowsProxyTaskPath] || !runner.running[windowsRefreshTaskPath] {
 		t.Fatalf("tasks/running = %#v/%#v", runner.tasks, runner.running)
+	}
+	if !runner.folderExists {
+		t.Fatal("protected task folder was not created")
 	}
 	for _, path := range runner.xmlPaths {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -186,6 +262,9 @@ func TestWindowsTaskDefinitionServiceRestartAndRemovalAreIdempotent(t *testing.T
 	if len(runner.tasks) != 0 {
 		t.Fatalf("tasks remain = %#v", runner.tasks)
 	}
+	if runner.folderExists {
+		t.Fatal("empty task folder remains")
+	}
 	if !hasWindowsTaskCall(runner.calls, []string{"/End", "/TN", windowsRefreshTaskPath}) || !hasWindowsTaskCall(runner.calls, []string{"/Delete", "/TN", windowsProxyTaskPath, "/F"}) {
 		t.Fatalf("removal calls = %#v", runner.calls)
 	}
@@ -214,12 +293,63 @@ func TestWindowsTaskDefinitionServiceInspectCombinesSchedulerAndRuntime(t *testi
 	}
 }
 
+func TestWindowsTaskDefinitionServiceKeepsSchedulerPIDAuthoritative(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.enginePIDs[windowsProxyTaskPath] = []uint32{777}
+
+	status, err := platform.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Proxy.PID != 777 || status.Proxy.Healthy || !strings.Contains(status.Proxy.Error, "PID") {
+		t.Fatalf("proxy status = %#v", status.Proxy)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRejectsForeignFolderSecurity(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	runner.folderExists = true
+	runner.folderSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;WD)"
+
+	err := platform.Preflight(context.Background(), platform.executable)
+	if !errors.Is(err, installstate.ErrOwnershipConflict) || !strings.Contains(err.Error(), "folder") {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRollbackRemovesCreatedFolder(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	restore, err := platform.PrepareRollback(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.folderExists {
+		t.Fatal("task folder was not created")
+	}
+	if err := restore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runner.folderExists || len(runner.tasks) != 0 {
+		t.Fatalf("rollback left folder/tasks = %t/%#v", runner.folderExists, runner.tasks)
+	}
+}
+
 func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *fakeWindowsTaskRunner) {
 	t.Helper()
 	runner := &fakeWindowsTaskRunner{
 		tasks:      map[string][]byte{},
 		running:    map[string]bool{},
 		lastResult: map[string]uint32{},
+		enginePIDs: map[string][]uint32{},
 		failOnce:   map[string]error{},
 	}
 	platform := &windowsTaskServicePlatform{
@@ -229,6 +359,9 @@ func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *f
 		refreshInterval: 1800,
 		run:             runner.Run,
 		queryState:      runner.State,
+		queryFolder:     runner.FolderState,
+		createFolder:    runner.CreateFolder,
+		removeFolder:    runner.RemoveFolderIfEmpty,
 		inspectProxy: func(_ context.Context, executable string) componentStatus {
 			return componentStatus{ID: windowsProxyTaskPath, Manager: "task-scheduler", Running: true, LiveExecutable: executable, PID: 902, Listener: "127.0.0.1:19280", Healthy: true}
 		},
@@ -237,12 +370,15 @@ func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *f
 }
 
 type fakeWindowsTaskRunner struct {
-	calls      [][]string
-	xmlPaths   []string
-	tasks      map[string][]byte
-	running    map[string]bool
-	lastResult map[string]uint32
-	failOnce   map[string]error
+	calls        [][]string
+	xmlPaths     []string
+	tasks        map[string][]byte
+	running      map[string]bool
+	lastResult   map[string]uint32
+	enginePIDs   map[string][]uint32
+	failOnce     map[string]error
+	folderExists bool
+	folderSDDL   string
 }
 
 func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -266,6 +402,10 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 		if err != nil {
 			return nil, err
 		}
+		definition, err = normaliseWindowsTaskXML(definition)
+		if err != nil {
+			return nil, err
+		}
 		runner.xmlPaths = append(runner.xmlPaths, xmlPath)
 		runner.tasks[path] = definition
 		return nil, nil
@@ -275,6 +415,9 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 			return nil, windowsTaskCommandError{Code: windowsTaskAlreadyRunning, Output: "already running"}
 		}
 		runner.running[path] = true
+		if path == windowsProxyTaskPath && len(runner.enginePIDs[path]) == 0 {
+			runner.enginePIDs[path] = []uint32{902}
+		}
 		return nil, nil
 	case "/end":
 		path := args[2]
@@ -290,6 +433,7 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 		}
 		delete(runner.tasks, path)
 		delete(runner.running, path)
+		delete(runner.enginePIDs, path)
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("unexpected schtasks command %q", args[0])
@@ -300,7 +444,31 @@ func (runner *fakeWindowsTaskRunner) State(_ context.Context, path string) (wind
 	if runner.tasks[path] == nil {
 		return windowsTaskRuntimeState{}, windowsTaskCommandError{Code: windowsTaskNotFound, Output: "cannot find the file"}
 	}
-	return windowsTaskRuntimeState{Running: runner.running[path], LastResult: runner.lastResult[path], HasLastResult: true}, nil
+	return windowsTaskRuntimeState{
+		Running:            runner.running[path],
+		LastResult:         runner.lastResult[path],
+		HasLastResult:      true,
+		EnginePIDs:         append([]uint32(nil), runner.enginePIDs[path]...),
+		SecurityDescriptor: "D:(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")(A;;FR;;;" + testWindowsSID + ")",
+	}, nil
+}
+
+func (runner *fakeWindowsTaskRunner) FolderState(context.Context) (windowsTaskFolderState, error) {
+	return windowsTaskFolderState{Exists: runner.folderExists, SecurityDescriptor: runner.folderSDDL}, nil
+}
+
+func (runner *fakeWindowsTaskRunner) CreateFolder(_ context.Context, _ string) error {
+	runner.folderExists = true
+	runner.folderSDDL = "D:PAI(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")"
+	return nil
+}
+
+func (runner *fakeWindowsTaskRunner) RemoveFolderIfEmpty(context.Context) error {
+	if len(runner.tasks) == 0 {
+		runner.folderExists = false
+		runner.folderSDDL = ""
+	}
+	return nil
 }
 
 func hasWindowsTaskCall(calls [][]string, want []string) bool {

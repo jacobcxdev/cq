@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -35,7 +36,7 @@ func TestServiceInstallPersistsOnlyHealthyComponents(t *testing.T) {
 	if record.Owner != installstate.OwnerGo || record.Version != "0.27.0" || record.Executable != lifecycle.Executable || !reflect.DeepEqual(record.Services, wantServices) {
 		t.Fatalf("install record = %#v, want owner/version/path/services", record)
 	}
-	wantCalls := []string{"preflight", "inspect", "install-proxy", "install-refresh", "inspect"}
+	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "install-refresh", "inspect"}
 	if !reflect.DeepEqual(platform.calls, wantCalls) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, wantCalls)
 	}
@@ -57,7 +58,7 @@ func TestServiceInstallIsIdempotent(t *testing.T) {
 	if _, err := store.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	wantCalls := []string{"preflight", "inspect", "install-proxy", "install-refresh", "inspect"}
+	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "install-refresh", "inspect"}
 	if !reflect.DeepEqual(platform.calls, wantCalls) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, wantCalls)
 	}
@@ -77,7 +78,7 @@ func TestServiceInstallRollsBackNewProxyWhenRefreshFails(t *testing.T) {
 	if _, err := store.Load(); !errors.Is(err, installstate.ErrNotInstalled) {
 		t.Fatalf("Load() error = %v, want not installed", err)
 	}
-	wantCalls := []string{"preflight", "inspect", "install-proxy", "install-refresh", "remove-refresh", "remove-proxy"}
+	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "install-refresh", "restore"}
 	if !reflect.DeepEqual(platform.calls, wantCalls) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, wantCalls)
 	}
@@ -87,6 +88,7 @@ func TestServiceInstallPreservesPreexistingProxyOnRefreshFailure(t *testing.T) {
 	lifecycle, platform, _ := newServiceHarness(t)
 	platform.proxyRegistered = true
 	platform.proxyRunning = true
+	platform.proxyDefinition = "original"
 	platform.installRefreshErr = errors.New("refresh registration failed")
 
 	err := lifecycle.Install(context.Background(), installstate.OwnerGo)
@@ -95,6 +97,9 @@ func TestServiceInstallPreservesPreexistingProxyOnRefreshFailure(t *testing.T) {
 	}
 	if !platform.proxyRegistered || !platform.proxyRunning {
 		t.Fatalf("pre-existing proxy removed: registered/running = %t/%t", platform.proxyRegistered, platform.proxyRunning)
+	}
+	if platform.proxyDefinition != "original" {
+		t.Fatalf("pre-existing proxy definition = %q", platform.proxyDefinition)
 	}
 	for _, call := range platform.calls {
 		if call == "remove-proxy" {
@@ -174,7 +179,7 @@ func TestServiceUninstallRemovesRefreshBeforeProxyAndState(t *testing.T) {
 	if err := lifecycle.Uninstall(context.Background(), installstate.OwnerGo); err != nil {
 		t.Fatalf("Uninstall() error = %v", err)
 	}
-	want := []string{"remove-refresh", "remove-proxy", "inspect"}
+	want := []string{"preflight", "inspect", "remove-refresh", "remove-proxy", "inspect"}
 	if !reflect.DeepEqual(platform.calls, want) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
 	}
@@ -199,7 +204,7 @@ func TestServiceUninstallKeepsStateWhenRemovalFails(t *testing.T) {
 	if _, err := store.Load(); err != nil {
 		t.Fatalf("state removed after failed uninstall: %v", err)
 	}
-	want := []string{"remove-refresh", "remove-proxy"}
+	want := []string{"preflight", "inspect", "remove-refresh", "remove-proxy"}
 	if !reflect.DeepEqual(platform.calls, want) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
 	}
@@ -218,6 +223,82 @@ func TestServiceUninstallRejectsDifferentOwner(t *testing.T) {
 	}
 	if len(platform.calls) != 0 {
 		t.Fatalf("platform calls during owner conflict = %v", platform.calls)
+	}
+}
+
+func TestServiceUninstallWithoutStateOnlySucceedsWhenServicesAreAbsent(t *testing.T) {
+	lifecycle, platform, _ := newServiceHarness(t)
+
+	if err := lifecycle.Uninstall(context.Background(), installstate.OwnerGo); err != nil {
+		t.Fatalf("absent uninstall error = %v", err)
+	}
+	if !reflect.DeepEqual(platform.calls, []string{"inspect"}) {
+		t.Fatalf("absent uninstall calls = %v", platform.calls)
+	}
+
+	platform.calls = nil
+	platform.proxyRegistered = true
+	platform.proxyRunning = true
+	err := lifecycle.Uninstall(context.Background(), installstate.OwnerGo)
+	if !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("unowned uninstall error = %v", err)
+	}
+	if !reflect.DeepEqual(platform.calls, []string{"inspect"}) {
+		t.Fatalf("unowned uninstall mutated services: %v", platform.calls)
+	}
+}
+
+func TestServiceUninstallRequiresRecordedExecutableDigestAndServiceIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*serviceLifecycle, installstate.Store)
+	}{
+		{
+			name: "executable",
+			mutate: func(lifecycle *serviceLifecycle, _ installstate.Store) {
+				lifecycle.Executable = filepath.Join(filepath.Dir(lifecycle.Executable), "other-"+serviceExecutableName())
+			},
+		},
+		{
+			name: "digest",
+			mutate: func(lifecycle *serviceLifecycle, _ installstate.Store) {
+				lifecycle.DigestExecutable = func(string) (string, error) { return strings.Repeat("1", 64), nil }
+			},
+		},
+		{
+			name: "service IDs",
+			mutate: func(_ *serviceLifecycle, store installstate.Store) {
+				record, err := store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				record.Services = []string{"foreign.proxy", "foreign.refresh"}
+				if err := store.Save(record); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lifecycle, platform, store := newServiceHarness(t)
+			if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err != nil {
+				t.Fatal(err)
+			}
+			platform.calls = nil
+			test.mutate(lifecycle, store)
+
+			err := lifecycle.Uninstall(context.Background(), installstate.OwnerGo)
+			if !errors.Is(err, installstate.ErrOwnershipConflict) {
+				t.Fatalf("Uninstall() error = %v", err)
+			}
+			for _, call := range platform.calls {
+				if strings.HasPrefix(call, "remove-") {
+					t.Fatalf("uninstall mutated services: %v", platform.calls)
+				}
+			}
+		})
 	}
 }
 
@@ -255,6 +336,7 @@ func newServiceHarness(t *testing.T) (*serviceLifecycle, *fakeServicePlatform, i
 		StatusInterval:   time.Millisecond,
 		Wait:             func(context.Context, time.Duration) error { return nil },
 		DigestExecutable: func(string) (string, error) { return strings.Repeat("0", 64), nil },
+		MutationLocker:   installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: stateRoot},
 	}
 	return lifecycle, platform, store
 }
@@ -277,6 +359,8 @@ type fakeServicePlatform struct {
 	refreshHealthy    bool
 	refreshRuns       int
 	inspectCalls      int
+	proxyDefinition   string
+	refreshDefinition string
 
 	installProxyErr   error
 	installRefreshErr error
@@ -285,6 +369,24 @@ type fakeServicePlatform struct {
 	removeProxyErr    error
 	removeRefreshErr  error
 	inspectErr        error
+}
+
+func (platform *fakeServicePlatform) PrepareRollback(context.Context) (serviceRestore, error) {
+	platform.calls = append(platform.calls, "snapshot")
+	proxyRegistered := platform.proxyRegistered
+	proxyRunning := platform.proxyRunning
+	refreshRegistered := platform.refreshRegistered
+	proxyDefinition := platform.proxyDefinition
+	refreshDefinition := platform.refreshDefinition
+	return func(context.Context) error {
+		platform.calls = append(platform.calls, "restore")
+		platform.proxyRegistered = proxyRegistered
+		platform.proxyRunning = proxyRunning
+		platform.refreshRegistered = refreshRegistered
+		platform.proxyDefinition = proxyDefinition
+		platform.refreshDefinition = refreshDefinition
+		return nil
+	}, nil
 }
 
 func (platform *fakeServicePlatform) Preflight(_ context.Context, executable string) error {
@@ -302,6 +404,7 @@ func (platform *fakeServicePlatform) InstallProxy(context.Context, string) error
 	}
 	platform.proxyRegistered = true
 	platform.proxyRunning = true
+	platform.proxyDefinition = "candidate"
 	return nil
 }
 
@@ -311,6 +414,7 @@ func (platform *fakeServicePlatform) InstallRefresh(context.Context, string) err
 		return platform.installRefreshErr
 	}
 	platform.refreshRegistered = true
+	platform.refreshDefinition = "candidate"
 	platform.refreshRuns++
 	return nil
 }

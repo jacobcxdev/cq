@@ -75,6 +75,25 @@ func TestInstallerIdempotentReinstallDoesNotReplaceMatchingBinary(t *testing.T) 
 	}
 }
 
+func TestInstallerIdempotentReinstallRepairsUnhealthyServices(t *testing.T) {
+	harness := newInstallerHarness(t)
+	if err := harness.installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	renameCalls := harness.fsys.renameCalls
+	harness.lifecycle.statusErrors = []error{errors.New("services unhealthy"), nil}
+
+	if err := harness.installer.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if harness.fsys.renameCalls != renameCalls || harness.lifecycle.stopCalls != 0 {
+		t.Fatalf("repair replaced binary or stopped services: renames=%d lifecycle=%#v", harness.fsys.renameCalls, harness.lifecycle)
+	}
+	if harness.lifecycle.installCalls != 2 || harness.lifecycle.statusCalls != 3 || harness.metadata.inspectCalls != 2 {
+		t.Fatalf("repair validation calls = %#v / %#v", harness.lifecycle, harness.metadata)
+	}
+}
+
 func TestInstallerUpgradeReplacesOwnedBinary(t *testing.T) {
 	harness := newInstallerHarness(t)
 	harness.seedInstalled(t, []byte("old-binary"), "0.26.2", installstate.OwnerGo)
@@ -188,7 +207,7 @@ func TestInstallerServiceFailureRollsBackBinaryServicesMetadataAndState(t *testi
 		t.Fatalf("Install() error = %v", err)
 	}
 	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
-	if harness.lifecycle.uninstallCalls != 1 || harness.lifecycle.installCalls != 2 || harness.lifecycle.statusCalls != 1 {
+	if harness.lifecycle.uninstallCalls != 0 || harness.lifecycle.installCalls != 2 || harness.lifecycle.statusCalls != 1 {
 		t.Fatalf("rollback lifecycle = %#v", harness.lifecycle)
 	}
 	if harness.metadata.installCalls != 1 || harness.metadata.inspectCalls != 1 {

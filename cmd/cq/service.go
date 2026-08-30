@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
@@ -39,6 +40,7 @@ type serviceStatus struct {
 
 type servicePlatform interface {
 	Preflight(context.Context, string) error
+	PrepareRollback(context.Context) (serviceRestore, error)
 	InstallProxy(context.Context, string) error
 	InstallRefresh(context.Context, string) error
 	RestartProxy(context.Context) error
@@ -47,6 +49,8 @@ type servicePlatform interface {
 	RemoveRefresh(context.Context) error
 	Inspect(context.Context) (serviceStatus, error)
 }
+
+type serviceRestore func(context.Context) error
 
 type serviceStateStore interface {
 	Load() (installstate.Record, error)
@@ -64,6 +68,7 @@ type serviceLifecycle struct {
 	StatusInterval   time.Duration
 	Wait             func(context.Context, time.Duration) error
 	DigestExecutable func(string) (string, error)
+	MutationLocker   installer.InstallerLocker
 }
 
 func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installstate.Owner) (returnErr error) {
@@ -76,19 +81,23 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
 		return fmt.Errorf("service preflight: %w", err)
 	}
-	before, err := lifecycle.Platform.Inspect(ctx)
+	_, err := lifecycle.Platform.Inspect(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect services before install: %w", err)
 	}
+	restore, err := lifecycle.Platform.PrepareRollback(ctx)
+	if err != nil {
+		return fmt.Errorf("snapshot services before install: %w", err)
+	}
 	if err := lifecycle.Platform.InstallProxy(ctx, lifecycle.Executable); err != nil {
-		return fmt.Errorf("install proxy service: %w", err)
+		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("install proxy service: %w", err))
 	}
 	if err := lifecycle.Platform.InstallRefresh(ctx, lifecycle.Executable); err != nil {
-		return lifecycle.rollbackNew(ctx, before, fmt.Errorf("install refresh service: %w", err))
+		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("install refresh service: %w", err))
 	}
 	status, err := lifecycle.waitHealthy(ctx)
 	if err != nil {
-		return lifecycle.rollbackNew(ctx, before, err)
+		return lifecycle.rollbackNew(ctx, restore, err)
 	}
 	digestExecutable := lifecycle.DigestExecutable
 	if digestExecutable == nil {
@@ -96,7 +105,7 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	}
 	binaryDigest, err := digestExecutable(lifecycle.Executable)
 	if err != nil {
-		return lifecycle.rollbackNew(ctx, before, fmt.Errorf("digest service executable: %w", err))
+		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("digest service executable: %w", err))
 	}
 	record := installstate.Record{
 		SchemaVersion: installstate.CurrentSchemaVersion,
@@ -107,7 +116,7 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 		Services:      []string{status.Proxy.ID, status.Refresh.ID},
 	}
 	if err := lifecycle.Store.Save(record); err != nil {
-		return lifecycle.rollbackNew(ctx, before, fmt.Errorf("save service ownership: %w", err))
+		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("save service ownership: %w", err))
 	}
 	return nil
 }
@@ -152,16 +161,47 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 		return err
 	}
 	record, err := lifecycle.Store.Load()
-	if err == nil && record.Owner != owner {
+	if errors.Is(err, installstate.ErrNotInstalled) {
+		status, inspectErr := lifecycle.Platform.Inspect(ctx)
+		if inspectErr != nil {
+			return fmt.Errorf("inspect unowned services: %w", inspectErr)
+		}
+		if !status.Proxy.Registered && !status.Refresh.Registered {
+			return nil
+		}
+		return fmt.Errorf("%w: CQ services exist without installation state", installstate.ErrOwnershipConflict)
+	}
+	if err != nil {
+		return fmt.Errorf("load service ownership: %w", err)
+	}
+	if record.Owner != owner || record.Executable != lifecycle.Executable {
 		return fmt.Errorf(
-			"%w: existing owner %q; requested owner %q",
+			"%w: existing owner %q executable %q; requested owner %q executable %q",
 			installstate.ErrOwnershipConflict,
 			record.Owner,
+			record.Executable,
 			owner,
+			lifecycle.Executable,
 		)
 	}
-	if err != nil && !errors.Is(err, installstate.ErrNotInstalled) {
-		return fmt.Errorf("load service ownership: %w", err)
+	digestExecutable := lifecycle.DigestExecutable
+	if digestExecutable == nil {
+		digestExecutable = installstate.DigestFile
+	}
+	digest, err := digestExecutable(lifecycle.Executable)
+	if err != nil || digest != record.BinaryDigest {
+		return fmt.Errorf("%w: installed executable digest differs", installstate.ErrOwnershipConflict)
+	}
+	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
+		return fmt.Errorf("service ownership preflight: %w", err)
+	}
+	status, err := lifecycle.Platform.Inspect(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect services before uninstall: %w", err)
+	}
+	wantServices := []string{status.Proxy.ID, status.Refresh.ID}
+	if !sameServiceIDs(record.Services, wantServices) {
+		return fmt.Errorf("%w: recorded service identifiers differ", installstate.ErrOwnershipConflict)
 	}
 
 	removeErr := errors.Join(
@@ -171,7 +211,7 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 	if removeErr != nil {
 		return removeErr
 	}
-	status, err := lifecycle.Platform.Inspect(ctx)
+	status, err = lifecycle.Platform.Inspect(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect services after uninstall: %w", err)
 	}
@@ -182,6 +222,18 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 		return fmt.Errorf("remove service ownership: %w", err)
 	}
 	return nil
+}
+
+func sameServiceIDs(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (lifecycle *serviceLifecycle) waitHealthy(ctx context.Context) (serviceStatus, error) {
@@ -225,15 +277,11 @@ func (lifecycle *serviceLifecycle) waitHealthy(ctx context.Context) (serviceStat
 	)
 }
 
-func (lifecycle *serviceLifecycle) rollbackNew(ctx context.Context, before serviceStatus, cause error) error {
-	var rollbackErr error
-	if !before.Refresh.Registered {
-		rollbackErr = errors.Join(rollbackErr, wrapServiceError("roll back refresh service", lifecycle.Platform.RemoveRefresh(ctx)))
+func (lifecycle *serviceLifecycle) rollbackNew(ctx context.Context, restore serviceRestore, cause error) error {
+	if restore == nil {
+		return errors.Join(cause, fmt.Errorf("service rollback is unavailable"))
 	}
-	if !before.Proxy.Registered {
-		rollbackErr = errors.Join(rollbackErr, wrapServiceError("roll back proxy service", lifecycle.Platform.RemoveProxy(ctx)))
-	}
-	return errors.Join(cause, rollbackErr)
+	return errors.Join(cause, wrapServiceError("restore previous services", restore(ctx)))
 }
 
 func (lifecycle *serviceLifecycle) validate(owner installstate.Owner) error {

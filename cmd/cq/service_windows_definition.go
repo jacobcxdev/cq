@@ -12,11 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
 const (
+	windowsTaskFolderName     = "cq"
+	windowsTaskFolderPath     = `\cq`
 	windowsProxyTaskPath      = `\cq\Proxy`
 	windowsRefreshTaskPath    = `\cq\Refresh`
 	windowsTaskXMLNS          = "http://schemas.microsoft.com/windows/2004/02/mit/task"
@@ -44,9 +48,10 @@ type windowsTaskDefinition struct {
 }
 
 type windowsTaskRegistrationInfo struct {
-	Author      string `xml:"Author"`
-	Description string `xml:"Description"`
-	URI         string `xml:"URI"`
+	Author             string `xml:"Author"`
+	Description        string `xml:"Description"`
+	URI                string `xml:"URI"`
+	SecurityDescriptor string `xml:"SecurityDescriptor"`
 }
 
 type windowsTaskTriggers struct {
@@ -107,9 +112,16 @@ type windowsTaskExec struct {
 }
 
 type windowsTaskRuntimeState struct {
-	Running       bool
-	LastResult    uint32
-	HasLastResult bool
+	Running            bool
+	LastResult         uint32
+	HasLastResult      bool
+	EnginePIDs         []uint32
+	SecurityDescriptor string
+}
+
+type windowsTaskFolderState struct {
+	Exists             bool
+	SecurityDescriptor string
 }
 
 type windowsTaskCommandError struct {
@@ -131,6 +143,9 @@ type windowsTaskServicePlatform struct {
 	refreshInterval int
 	run             func(context.Context, ...string) ([]byte, error)
 	queryState      func(context.Context, string) (windowsTaskRuntimeState, error)
+	queryFolder     func(context.Context) (windowsTaskFolderState, error)
+	createFolder    func(context.Context, string) error
+	removeFolder    func(context.Context) error
 	inspectProxy    func(context.Context, string) componentStatus
 }
 
@@ -141,10 +156,17 @@ func (platform *windowsTaskServicePlatform) Preflight(ctx context.Context, execu
 	if err := validateAbsoluteWindowsExecutable(executable); err != nil {
 		return err
 	}
-	if platform.run == nil || platform.queryState == nil {
+	if platform.run == nil || platform.queryState == nil || platform.queryFolder == nil || platform.createFolder == nil || platform.removeFolder == nil {
 		return fmt.Errorf("Windows Task Scheduler is unavailable")
 	}
 	platform.executable = executable
+	folder, err := platform.queryFolder(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect Windows task folder security: %w", err)
+	}
+	if folder.Exists && !validWindowsTaskSecurityDescriptor(folder.SecurityDescriptor, platform.sid, true) {
+		return fmt.Errorf("%w: Windows task folder security descriptor differs", installstate.ErrOwnershipConflict)
+	}
 	for _, kind := range []windowsTaskKind{windowsProxyTask, windowsRefreshTask} {
 		definition, exists, err := platform.queryDefinition(ctx, kind)
 		if err != nil {
@@ -154,9 +176,59 @@ func (platform *windowsTaskServicePlatform) Preflight(ctx context.Context, execu
 			if err := validateWindowsTaskDefinition(definition, kind, platform.sid, executable, platform.interval()); err != nil {
 				return err
 			}
+			taskPath, _, _, _ := windowsTaskValues(kind)
+			state, err := platform.queryState(ctx, taskPath)
+			if err != nil {
+				return fmt.Errorf("inspect Windows task security: %w", err)
+			}
+			if !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, platform.sid, false) {
+				return fmt.Errorf("%w: Windows task security descriptor differs", installstate.ErrOwnershipConflict)
+			}
 		}
 	}
 	return nil
+}
+
+type windowsTaskSnapshot struct {
+	taskPath   string
+	definition []byte
+	exists     bool
+	running    bool
+}
+
+func (platform *windowsTaskServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+	folder, err := platform.queryFolder(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot Windows task folder: %w", err)
+	}
+	snapshots := make([]windowsTaskSnapshot, 0, 2)
+	for _, kind := range []windowsTaskKind{windowsProxyTask, windowsRefreshTask} {
+		definition, exists, err := platform.queryDefinitionBytes(ctx, kind)
+		if err != nil {
+			return nil, err
+		}
+		taskPath, _, _, _ := windowsTaskValues(kind)
+		running := false
+		if exists {
+			state, err := platform.queryState(ctx, taskPath)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot Windows task state: %w", err)
+			}
+			running = state.Running
+		}
+		snapshots = append(snapshots, windowsTaskSnapshot{taskPath: taskPath, definition: append([]byte(nil), definition...), exists: exists, running: running})
+	}
+	return func(restoreCtx context.Context) error {
+		var result error
+		for index := len(snapshots) - 1; index >= 0; index-- {
+			snapshot := snapshots[index]
+			result = errors.Join(result, platform.restore(restoreCtx, snapshot.taskPath, snapshot.definition, snapshot.exists, snapshot.running))
+		}
+		if !folder.Exists {
+			result = errors.Join(result, platform.removeFolder(restoreCtx))
+		}
+		return result
+	}, nil
 }
 
 func (platform *windowsTaskServicePlatform) InstallProxy(ctx context.Context, executable string) error {
@@ -208,22 +280,57 @@ func (platform *windowsTaskServicePlatform) reconcile(ctx context.Context, kind 
 			return fmt.Errorf("inspect existing Windows task state: %w", err)
 		}
 	}
-	definition, err := renderWindowsTaskDefinition(kind, platform.sid, executable, platform.interval())
+	folderCreated, err := platform.ensureTaskFolder(ctx)
 	if err != nil {
 		return err
 	}
+	definition, err := renderWindowsTaskDefinition(kind, platform.sid, executable, platform.interval())
+	if err != nil {
+		return errors.Join(err, platform.removeCreatedTaskFolder(ctx, folderCreated))
+	}
 	if err := platform.createTask(ctx, taskPath, definition); err != nil {
-		return errors.Join(fmt.Errorf("create Windows task %s: %w", taskPath, err), platform.restore(ctx, taskPath, oldDefinition, oldExists, oldState.Running))
+		return errors.Join(fmt.Errorf("create Windows task %s: %w", taskPath, err), platform.restore(ctx, taskPath, oldDefinition, oldExists, oldState.Running), platform.removeCreatedTaskFolder(ctx, folderCreated))
 	}
 	if err := platform.runTask(ctx, taskPath); err != nil {
-		return errors.Join(err, platform.restore(ctx, taskPath, oldDefinition, oldExists, oldState.Running))
+		return errors.Join(err, platform.restore(ctx, taskPath, oldDefinition, oldExists, oldState.Running), platform.removeCreatedTaskFolder(ctx, folderCreated))
 	}
 	return nil
 }
 
+func (platform *windowsTaskServicePlatform) ensureTaskFolder(ctx context.Context) (bool, error) {
+	state, err := platform.queryFolder(ctx)
+	if err != nil {
+		return false, fmt.Errorf("inspect Windows task folder: %w", err)
+	}
+	if state.Exists {
+		if !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, platform.sid, true) {
+			return false, fmt.Errorf("%w: Windows task folder security descriptor differs", installstate.ErrOwnershipConflict)
+		}
+		return false, nil
+	}
+	if err := platform.createFolder(ctx, windowsTaskSecurityDescriptor(platform.sid)); err != nil {
+		return false, fmt.Errorf("create Windows task folder: %w", err)
+	}
+	state, err = platform.queryFolder(ctx)
+	if err != nil {
+		return true, fmt.Errorf("inspect created Windows task folder: %w", err)
+	}
+	if !state.Exists || !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, platform.sid, true) {
+		return true, fmt.Errorf("%w: created Windows task folder security descriptor differs", installstate.ErrOwnershipConflict)
+	}
+	return true, nil
+}
+
+func (platform *windowsTaskServicePlatform) removeCreatedTaskFolder(ctx context.Context, created bool) error {
+	if !created {
+		return nil
+	}
+	return platform.removeFolder(ctx)
+}
+
 func (platform *windowsTaskServicePlatform) restore(ctx context.Context, taskPath string, definition []byte, exists, running bool) error {
 	var result error
-	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) {
+	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
 		result = errors.Join(result, fmt.Errorf("end failed candidate task: %w", err))
 	}
 	if !exists {
@@ -270,6 +377,7 @@ func (platform *windowsTaskServicePlatform) remove(ctx context.Context, taskPath
 	if _, err := platform.run(ctx, "/Delete", "/TN", taskPath, "/F"); err != nil && !isWindowsTaskNotFound(err) {
 		result = errors.Join(result, fmt.Errorf("delete Windows task %s: %w", taskPath, err))
 	}
+	result = errors.Join(result, platform.removeFolder(ctx))
 	return result
 }
 
@@ -293,6 +401,9 @@ func (platform *windowsTaskServicePlatform) inspect(ctx context.Context, kind wi
 		return status, fmt.Errorf("inspect Windows task state %s: %w", taskPath, err)
 	}
 	status.Running = runtimeState.Running
+	if !validWindowsTaskSecurityDescriptor(runtimeState.SecurityDescriptor, platform.sid, false) {
+		return status, fmt.Errorf("%w: Windows task security descriptor differs", installstate.ErrOwnershipConflict)
+	}
 	if kind == windowsRefreshTask {
 		if runtimeState.HasLastResult && runtimeState.LastResult == 0 {
 			status.Healthy = true
@@ -305,9 +416,17 @@ func (platform *windowsTaskServicePlatform) inspect(ctx context.Context, kind wi
 	if status.Running && platform.inspectProxy != nil {
 		runtimeStatus := platform.inspectProxy(ctx, status.ConfiguredExecutable)
 		status.LiveExecutable = runtimeStatus.LiveExecutable
-		status.PID = runtimeStatus.PID
 		status.Listener = runtimeStatus.Listener
 		status.Error = runtimeStatus.Error
+		if len(runtimeState.EnginePIDs) != 1 || runtimeState.EnginePIDs[0] == 0 {
+			status.Error = "Task Scheduler returned ambiguous proxy instance PIDs"
+			return status, nil
+		}
+		status.PID = int(runtimeState.EnginePIDs[0])
+		if runtimeStatus.PID != status.PID {
+			status.Error = fmt.Sprintf("listener PID %d differs from Task Scheduler EnginePID %d", runtimeStatus.PID, status.PID)
+			return status, nil
+		}
 		status.Healthy = runtimeStatus.Healthy && sameServiceExecutable(status.LiveExecutable, status.ConfiguredExecutable)
 	}
 	return status, nil
@@ -354,6 +473,10 @@ func writeTemporaryWindowsTaskXML(root string, definition []byte) (string, func(
 	if len(definition) == 0 || len(definition) > maxWindowsTaskXMLBytes || root == "" {
 		return "", func() {}, fmt.Errorf("invalid temporary Windows task XML")
 	}
+	fileData, err := encodeWindowsTaskXMLFile(definition)
+	if err != nil {
+		return "", func() {}, err
+	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", func() {}, fmt.Errorf("create temporary task directory: %w", err)
 	}
@@ -368,7 +491,7 @@ func writeTemporaryWindowsTaskXML(root string, definition []byte) (string, func(
 		cleanup()
 		return "", func() {}, fmt.Errorf("seal temporary task XML: %w", err)
 	}
-	if _, err := file.Write(definition); err != nil {
+	if _, err := file.Write(fileData); err != nil {
 		_ = file.Close()
 		cleanup()
 		return "", func() {}, fmt.Errorf("write temporary task XML: %w", err)
@@ -420,9 +543,10 @@ func renderWindowsTaskDefinition(kind windowsTaskKind, sid, executable string, r
 		Version: "1.4",
 		XMLNS:   windowsTaskXMLNS,
 		RegistrationInfo: windowsTaskRegistrationInfo{
-			Author:      "CQ",
-			Description: description,
-			URI:         taskPath,
+			Author:             "CQ",
+			Description:        description,
+			URI:                taskPath,
+			SecurityDescriptor: windowsTaskSecurityDescriptor(sid),
 		},
 		Triggers: windowsTaskTriggers{LogonTrigger: windowsTaskLogonTrigger{
 			Enabled: true,
@@ -458,7 +582,7 @@ func renderWindowsTaskDefinition(kind windowsTaskKind, sid, executable string, r
 	}
 	if kind == windowsProxyTask {
 		definition.Settings.ExecutionTimeLimit = "PT0S"
-		definition.Settings.RestartOnFailure = &windowsTaskRestartPolicy{Interval: "PT5S", Count: 999}
+		definition.Settings.RestartOnFailure = &windowsTaskRestartPolicy{Interval: "PT1M", Count: 999}
 	} else {
 		definition.Triggers.LogonTrigger.Repetition = &windowsTaskRepetition{
 			Interval:          formatWindowsDuration(refreshInterval),
@@ -477,6 +601,10 @@ func renderWindowsTaskDefinition(kind windowsTaskKind, sid, executable string, r
 func parseWindowsTaskDefinition(data []byte) (windowsTaskDefinition, error) {
 	if len(data) == 0 || len(data) > maxWindowsTaskXMLBytes {
 		return windowsTaskDefinition{}, fmt.Errorf("Windows task XML has invalid size")
+	}
+	data, err := normaliseWindowsTaskXML(data)
+	if err != nil {
+		return windowsTaskDefinition{}, err
 	}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var definition windowsTaskDefinition
@@ -498,6 +626,47 @@ func parseWindowsTaskDefinition(data []byte) (windowsTaskDefinition, error) {
 	return definition, nil
 }
 
+func encodeWindowsTaskXMLFile(data []byte) ([]byte, error) {
+	normalised, err := normaliseWindowsTaskXML(data)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.Replace(string(normalised), `encoding="UTF-8"`, `encoding="UTF-16"`, 1)
+	units := utf16.Encode([]rune(text))
+	encoded := make([]byte, 2, 2+len(units)*2)
+	encoded[0], encoded[1] = 0xff, 0xfe
+	for _, unit := range units {
+		encoded = append(encoded, byte(unit), byte(unit>>8))
+	}
+	return encoded, nil
+}
+
+func normaliseWindowsTaskXML(data []byte) ([]byte, error) {
+	if len(data) >= 2 && ((data[0] == 0xff && data[1] == 0xfe) || (data[0] == 0xfe && data[1] == 0xff)) {
+		littleEndian := data[0] == 0xff
+		data = data[2:]
+		if len(data)%2 != 0 {
+			return nil, fmt.Errorf("Windows task XML has invalid UTF-16 length")
+		}
+		units := make([]uint16, len(data)/2)
+		for index := range units {
+			if littleEndian {
+				units[index] = uint16(data[index*2]) | uint16(data[index*2+1])<<8
+			} else {
+				units[index] = uint16(data[index*2])<<8 | uint16(data[index*2+1])
+			}
+		}
+		text := string(utf16.Decode(units))
+		text = strings.Replace(text, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
+		return []byte(text), nil
+	}
+	data = bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("Windows task XML is not valid UTF-8 or UTF-16")
+	}
+	return append([]byte(nil), data...), nil
+}
+
 func validateWindowsTaskDefinition(definition windowsTaskDefinition, kind windowsTaskKind, sid, executable string, refreshInterval int) error {
 	if refreshInterval <= 0 {
 		refreshInterval = 1800
@@ -515,6 +684,9 @@ func validateWindowsTaskDefinition(definition windowsTaskDefinition, kind window
 	if definition.RegistrationInfo.URI != taskPath {
 		return conflict("URI differs")
 	}
+	if !validWindowsTaskSecurityDescriptor(definition.RegistrationInfo.SecurityDescriptor, sid, false) {
+		return conflict("security descriptor differs")
+	}
 	trigger := definition.Triggers.LogonTrigger
 	principal := definition.Principals.Principal
 	if !trigger.Enabled || trigger.UserID != sid || principal.ID != "CQUser" || principal.UserID != sid || principal.LogonType != "InteractiveToken" || principal.RunLevel != "LeastPrivilege" {
@@ -528,13 +700,77 @@ func validateWindowsTaskDefinition(definition windowsTaskDefinition, kind window
 		return conflict("action differs")
 	}
 	if kind == windowsProxyTask {
-		if trigger.Repetition != nil || definition.Settings.ExecutionTimeLimit != "PT0S" || definition.Settings.RestartOnFailure == nil || definition.Settings.RestartOnFailure.Interval != "PT5S" || definition.Settings.RestartOnFailure.Count != 999 {
+		if trigger.Repetition != nil || definition.Settings.ExecutionTimeLimit != "PT0S" || definition.Settings.RestartOnFailure == nil || definition.Settings.RestartOnFailure.Interval != "PT1M" || definition.Settings.RestartOnFailure.Count != 999 {
 			return conflict("proxy lifetime policy differs")
 		}
 	} else if trigger.Repetition == nil || trigger.Repetition.Interval != formatWindowsDuration(refreshInterval) || definition.Settings.ExecutionTimeLimit != "PT5M" {
 		return conflict("refresh repetition differs")
 	}
 	return nil
+}
+
+func windowsTaskSecurityDescriptor(sid string) string {
+	return "D:P(A;;FA;;;SY)(A;;FA;;;" + sid + ")"
+}
+
+func validWindowsTaskSecurityDescriptor(value, sid string, requireProtected bool) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	sid = strings.ToUpper(sid)
+	if !strings.HasPrefix(value, "D:") {
+		return false
+	}
+	body := strings.TrimPrefix(value, "D:")
+	aceStart := strings.IndexByte(body, '(')
+	if aceStart < 0 {
+		return false
+	}
+	flags := body[:aceStart]
+	if requireProtected && !strings.Contains(flags, "P") {
+		return false
+	}
+	for flags != "" {
+		switch {
+		case strings.HasPrefix(flags, "AI"), strings.HasPrefix(flags, "AR"):
+			flags = flags[2:]
+		case strings.HasPrefix(flags, "P"):
+			flags = flags[1:]
+		default:
+			return false
+		}
+	}
+	foundSystemFull := false
+	foundUserFull := false
+	for body = body[aceStart:]; body != ""; {
+		if body[0] != '(' {
+			return false
+		}
+		aceEnd := strings.IndexByte(body, ')')
+		if aceEnd < 0 {
+			return false
+		}
+		fields := strings.Split(body[1:aceEnd], ";")
+		if len(fields) != 6 || fields[0] != "A" || fields[1] != "" || fields[3] != "" || fields[4] != "" {
+			return false
+		}
+		if fields[2] != "FA" && fields[2] != "FR" {
+			return false
+		}
+		switch fields[5] {
+		case "SY":
+			if fields[2] != "FA" {
+				return false
+			}
+			foundSystemFull = true
+		case sid:
+			if fields[2] == "FA" {
+				foundUserFull = true
+			}
+		default:
+			return false
+		}
+		body = body[aceEnd+1:]
+	}
+	return foundSystemFull && foundUserFull
 }
 
 func windowsTaskValues(kind windowsTaskKind) (taskPath, arguments, description string, err error) {

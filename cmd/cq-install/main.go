@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,7 @@ import (
 const (
 	cqModulePath          = "github.com/jacobcxdev/cq"
 	maxVersionOutputBytes = 4 << 10
+	maxServiceOutputBytes = 64 << 10
 )
 
 var (
@@ -248,46 +250,84 @@ func (noPlatformMetadata) Inspect(context.Context, installer.Installation) error
 type commandLifecycle struct {
 	Executable string
 	Owner      installstate.Owner
-	Run        func(context.Context, string, ...string) error
+	Run        func(context.Context, string, ...string) ([]byte, error)
 }
 
 func (lifecycle commandLifecycle) Stop(ctx context.Context) error {
-	return lifecycle.run(ctx, "service", "uninstall", "--owner="+string(lifecycle.Owner))
+	_, err := lifecycle.run(ctx, "service", "uninstall", "--owner="+string(lifecycle.Owner), "--installer-lock-held")
+	return err
 }
 
 func (lifecycle commandLifecycle) Install(ctx context.Context, owner installstate.Owner) error {
 	if owner != lifecycle.Owner {
 		return fmt.Errorf("service owner changed during installation")
 	}
-	return lifecycle.run(ctx, "service", "install", "--owner="+string(owner))
+	_, err := lifecycle.run(ctx, "service", "install", "--owner="+string(owner), "--installer-lock-held")
+	return err
 }
 
 func (lifecycle commandLifecycle) Status(ctx context.Context) error {
-	return lifecycle.run(ctx, "service", "status", "--json")
+	data, err := lifecycle.run(ctx, "service", "status", "--json")
+	if err != nil {
+		return err
+	}
+	var status struct {
+		SchemaVersion int                `json:"schema_version"`
+		Owner         installstate.Owner `json:"owner"`
+		Proxy         struct {
+			Registered           bool   `json:"registered"`
+			Running              bool   `json:"running"`
+			ConfiguredExecutable string `json:"configured_executable"`
+			LiveExecutable       string `json:"live_executable"`
+			Healthy              bool   `json:"healthy"`
+		} `json:"proxy"`
+		Refresh struct {
+			Registered           bool   `json:"registered"`
+			ConfiguredExecutable string `json:"configured_executable"`
+			Healthy              bool   `json:"healthy"`
+		} `json:"refresh"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return fmt.Errorf("decode CQ service status: %w", err)
+	}
+	if status.SchemaVersion != 1 ||
+		status.Owner != lifecycle.Owner ||
+		!status.Proxy.Registered || !status.Proxy.Running || !status.Proxy.Healthy ||
+		status.Proxy.ConfiguredExecutable != lifecycle.Executable || status.Proxy.LiveExecutable != lifecycle.Executable ||
+		!status.Refresh.Registered || !status.Refresh.Healthy || status.Refresh.ConfiguredExecutable != lifecycle.Executable {
+		return fmt.Errorf("CQ services are unhealthy")
+	}
+	return nil
 }
 
 func (lifecycle commandLifecycle) Uninstall(ctx context.Context, owner installstate.Owner) error {
 	if owner != lifecycle.Owner {
 		return fmt.Errorf("service owner changed during installation")
 	}
-	return lifecycle.run(ctx, "service", "uninstall", "--owner="+string(owner))
+	_, err := lifecycle.run(ctx, "service", "uninstall", "--owner="+string(owner), "--installer-lock-held")
+	return err
 }
 
-func (lifecycle commandLifecycle) run(ctx context.Context, args ...string) error {
+func (lifecycle commandLifecycle) run(ctx context.Context, args ...string) ([]byte, error) {
 	if lifecycle.Executable == "" || lifecycle.Run == nil {
-		return fmt.Errorf("service command is unavailable")
+		return nil, fmt.Errorf("service command is unavailable")
 	}
 	return lifecycle.Run(ctx, lifecycle.Executable, args...)
 }
 
-func runCQService(ctx context.Context, executable string, args ...string) error {
+func runCQService(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	var output boundedBuffer
+	output.Limit = maxServiceOutputBytes
 	command := exec.CommandContext(ctx, executable, args...)
-	command.Stdout = io.Discard
+	command.Stdout = &output
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("CQ service command failed: %w", err)
+		return nil, fmt.Errorf("CQ service command failed: %w", err)
 	}
-	return nil
+	if output.Exceeded {
+		return nil, fmt.Errorf("CQ service output exceeds size limit")
+	}
+	return output.Buffer.Bytes(), nil
 }
 
 type commandVersionRunner struct {

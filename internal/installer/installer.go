@@ -143,7 +143,12 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 	candidate.BinaryDigest = stagedDigest
 	if previous != nil && !adopted && previous.Version == candidate.Version && previous.BinaryDigest == candidate.BinaryDigest {
 		if err := installer.Lifecycle.Status(ctx); err != nil {
-			return fmt.Errorf("validate installed CQ services: %w", err)
+			if installErr := installer.Lifecycle.Install(ctx, candidate.Owner); installErr != nil {
+				return errors.Join(fmt.Errorf("validate installed CQ services: %w", err), fmt.Errorf("repair installed CQ services: %w", installErr))
+			}
+			if statusErr := installer.Lifecycle.Status(ctx); statusErr != nil {
+				return fmt.Errorf("validate repaired CQ services: %w", statusErr)
+			}
 		}
 		if err := installer.Metadata.Inspect(ctx, *previous); err != nil {
 			return fmt.Errorf("validate installed CQ metadata: %w", err)
@@ -375,7 +380,7 @@ func (installer *Installer) prepareReplacement(previous *Installation, stagedBod
 
 func (installer *Installer) rollback(ctx context.Context, previous *Installation, previousRecord installstate.Record, candidate Installation, adopted, candidateServicesInstalled bool) error {
 	var result error
-	if !adopted || candidateServicesInstalled {
+	if candidateServicesInstalled {
 		result = errors.Join(result, installer.Lifecycle.Uninstall(ctx, candidate.Owner))
 	}
 	result = errors.Join(result, installer.Metadata.Remove(ctx, candidate))

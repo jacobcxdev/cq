@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -49,7 +50,7 @@ func init() {
 	serviceLifecycleFactory = defaultDarwinServiceLifecycle
 }
 
-func defaultDarwinServiceLifecycle() (*serviceLifecycle, error) {
+func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
 	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
@@ -58,7 +59,7 @@ func defaultDarwinServiceLifecycle() (*serviceLifecycle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory: %w", err)
 	}
-	executable, err := resolveExecutable()
+	executable, err := resolveServiceExecutable(stableExecutable)
 	if err != nil {
 		return nil, fmt.Errorf("resolve executable: %w", err)
 	}
@@ -94,6 +95,7 @@ func defaultDarwinServiceLifecycle() (*serviceLifecycle, error) {
 		Version:        version,
 		StatusAttempts: 20,
 		StatusInterval: time.Second,
+		MutationLocker: installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: roots.State},
 	}, nil
 }
 
@@ -147,6 +149,45 @@ func (platform *darwinServicePlatform) Preflight(ctx context.Context, executable
 		}
 	}
 	return nil
+}
+
+type darwinServiceSnapshot struct {
+	label  string
+	path   string
+	data   []byte
+	exists bool
+	loaded bool
+}
+
+func (platform *darwinServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+	snapshots := make([]darwinServiceSnapshot, 0, 2)
+	for _, label := range []string{proxyAgentLabel, agentLabel} {
+		path := platform.plistPath(label)
+		data, err := os.ReadFile(path)
+		exists := err == nil
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("snapshot %s definition: %w", label, err)
+		}
+		if len(data) > maxDarwinPlistBytes {
+			return nil, fmt.Errorf("snapshot %s definition exceeds size limit", label)
+		}
+		loaded, _, err := platform.printJob(ctx, label)
+		if err != nil {
+			return nil, err
+		}
+		if loaded && !exists {
+			return nil, fmt.Errorf("%w: %s is loaded without managed definition", installstate.ErrOwnershipConflict, label)
+		}
+		snapshots = append(snapshots, darwinServiceSnapshot{label: label, path: path, data: append([]byte(nil), data...), exists: exists, loaded: loaded})
+	}
+	return func(restoreCtx context.Context) error {
+		var result error
+		for index := len(snapshots) - 1; index >= 0; index-- {
+			snapshot := snapshots[index]
+			result = errors.Join(result, platform.restore(restoreCtx, snapshot.label, snapshot.path, snapshot.data, snapshot.exists, snapshot.loaded))
+		}
+		return result
+	}, nil
 }
 
 func (platform *darwinServicePlatform) InstallProxy(ctx context.Context, executable string) error {

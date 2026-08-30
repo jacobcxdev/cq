@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -135,26 +136,99 @@ func (platform *systemdServicePlatform) Preflight(ctx context.Context, executabl
 		return fmt.Errorf("user systemd manager is unavailable: %w", err)
 	}
 	platform.executable = executable
+	expected, err := renderSystemdServiceDefinitions(executable)
+	if err != nil {
+		return err
+	}
 	for _, name := range []string{systemdProxyUnit, systemdRefreshService, systemdRefreshTimer} {
-		data, err := readBoundedSystemdUnit(platform.unitPath(name))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+		properties, err := platform.show(ctx, name)
 		if err != nil {
+			return fmt.Errorf("inspect loaded %s: %w", name, err)
+		}
+		data, err := readBoundedSystemdUnit(platform.unitPath(name))
+		localExists := err == nil
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("inspect %s: %w", name, err)
 		}
-		if name == systemdRefreshTimer {
-			continue
+		if localExists && !bytes.Equal(data, expected[name]) {
+			return fmt.Errorf("%w: %s definition differs", installstate.ErrOwnershipConflict, name)
 		}
-		configured, err := parseSystemdExecStartExecutable(data)
-		if err != nil {
-			return fmt.Errorf("%w: %s has invalid ExecStart: %v", installstate.ErrOwnershipConflict, name, err)
-		}
-		if configured != executable {
-			return fmt.Errorf("%w: %s uses executable %q", installstate.ErrOwnershipConflict, name, configured)
+		switch properties["LoadState"] {
+		case "not-found":
+		case "loaded":
+			fragment := filepath.Clean(properties["FragmentPath"])
+			if !localExists || properties["FragmentPath"] == "" || fragment != platform.unitPath(name) {
+				return fmt.Errorf("%w: %s is loaded from %q", installstate.ErrOwnershipConflict, name, properties["FragmentPath"])
+			}
+		default:
+			return fmt.Errorf("%w: %s has load state %q", installstate.ErrOwnershipConflict, name, properties["LoadState"])
 		}
 	}
 	return nil
+}
+
+type systemdUnitSnapshot struct {
+	name       string
+	definition []byte
+	exists     bool
+	enabled    bool
+	active     bool
+}
+
+func (platform *systemdServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+	snapshots := make([]systemdUnitSnapshot, 0, 3)
+	for _, name := range []string{systemdProxyUnit, systemdRefreshService, systemdRefreshTimer} {
+		definition, exists, err := platform.definition(name)
+		if err != nil {
+			return nil, err
+		}
+		properties, err := platform.show(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if properties["LoadState"] == "loaded" && !exists {
+			return nil, fmt.Errorf("%w: %s is loaded without managed definition", installstate.ErrOwnershipConflict, name)
+		}
+		snapshots = append(snapshots, systemdUnitSnapshot{
+			name:       name,
+			definition: append([]byte(nil), definition...),
+			exists:     exists,
+			enabled:    strings.HasPrefix(properties["UnitFileState"], "enabled"),
+			active:     properties["ActiveState"] == "active",
+		})
+	}
+	return func(restoreCtx context.Context) error {
+		var result error
+		result = errors.Join(result, platform.RemoveRefresh(restoreCtx), platform.RemoveProxy(restoreCtx))
+		for _, snapshot := range snapshots {
+			if !snapshot.exists {
+				continue
+			}
+			if err := atomicWriteSystemdUnit(platform.unitPath(snapshot.name), snapshot.definition); err != nil {
+				result = errors.Join(result, fmt.Errorf("restore %s definition: %w", snapshot.name, err))
+			}
+		}
+		if _, err := platform.run(restoreCtx, "--user", "daemon-reload"); err != nil {
+			result = errors.Join(result, fmt.Errorf("reload restored user systemd units: %w", err))
+			return result
+		}
+		for _, snapshot := range snapshots {
+			if !snapshot.exists {
+				continue
+			}
+			if snapshot.enabled {
+				if _, err := platform.run(restoreCtx, "--user", "enable", snapshot.name); err != nil {
+					result = errors.Join(result, fmt.Errorf("restore enabled state for %s: %w", snapshot.name, err))
+				}
+			}
+			if snapshot.active {
+				if _, err := platform.run(restoreCtx, "--user", "start", snapshot.name); err != nil {
+					result = errors.Join(result, fmt.Errorf("restore running state for %s: %w", snapshot.name, err))
+				}
+			}
+		}
+		return errors.Join(result, syncSystemdDirectory(platform.unitDirectory))
+	}, nil
 }
 
 func (platform *systemdServicePlatform) InstallProxy(_ context.Context, executable string) error {

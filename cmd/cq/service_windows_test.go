@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -44,6 +46,124 @@ func TestWindowsServiceLifecycleBindsTaskContract(t *testing.T) {
 	}
 	if platform.sid != testWindowsSID || platform.executable != executable || platform.temporaryRoot != filepath.Join(roots.State, "task-xml") {
 		t.Fatalf("platform = %#v", platform)
+	}
+}
+
+func TestWindowsTaskFolderSecurityLifecycleNative(t *testing.T) {
+	if os.Getenv("CQ_NATIVE_WINDOWS_SCHEDULER_TEST") != "1" {
+		t.Skip("set CQ_NATIVE_WINDOWS_SCHEDULER_TEST=1 on an isolated Windows host")
+	}
+	ctx := context.Background()
+	before, err := queryWindowsTaskFolderState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Exists {
+		t.Fatal("refusing to replace existing CQ task folder")
+	}
+	sid, err := currentWindowsServiceSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createWindowsTaskFolder(ctx, windowsTaskSecurityDescriptor(sid)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := removeWindowsTaskFolderIfEmpty(context.Background()); err != nil {
+			t.Errorf("cleanup task folder: %v", err)
+		}
+	})
+	created, err := queryWindowsTaskFolderState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created.Exists || !validWindowsTaskSecurityDescriptor(created.SecurityDescriptor, sid, true) {
+		t.Fatalf("created folder state = %#v", created)
+	}
+	if err := removeWindowsTaskFolderIfEmpty(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := queryWindowsTaskFolderState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Exists {
+		t.Fatalf("task folder remains = %#v", after)
+	}
+}
+
+func TestWindowsTaskRuntimeStateNative(t *testing.T) {
+	if os.Getenv("CQ_NATIVE_WINDOWS_SCHEDULER_TEST") != "1" {
+		t.Skip("set CQ_NATIVE_WINDOWS_SCHEDULER_TEST=1 on an isolated Windows host")
+	}
+	ctx := context.Background()
+	before, err := queryWindowsTaskFolderState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Exists {
+		t.Fatal("refusing to replace existing CQ task folder")
+	}
+	sid, err := currentWindowsServiceSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createWindowsTaskFolder(ctx, windowsTaskSecurityDescriptor(sid)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = runWindowsSchtasks(context.Background(), "/End", "/TN", windowsProxyTaskPath)
+		_, _ = runWindowsSchtasks(context.Background(), "/Delete", "/TN", windowsProxyTaskPath, "/F")
+		if err := removeWindowsTaskFolderIfEmpty(context.Background()); err != nil {
+			t.Errorf("cleanup task folder: %v", err)
+		}
+	})
+	data, err := renderWindowsTaskDefinition(windowsProxyTask, sid, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := parseWindowsTaskDefinition(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.Actions.Exec.Arguments = "-NoProfile -NonInteractive -Command Start-Sleep -Seconds 60"
+	definition.Actions.Exec.WorkingDirectory = `C:\Windows\System32\WindowsPowerShell\v1.0`
+	data, err = xml.MarshalIndent(definition, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append([]byte(xml.Header), append(data, '\n')...)
+	path, cleanup, err := writeTemporaryWindowsTaskXML(t.TempDir(), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := runWindowsSchtasks(ctx, "/Create", "/TN", windowsProxyTaskPath, "/XML", path, "/F"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runWindowsSchtasks(ctx, "/Run", "/TN", windowsProxyTaskPath); err != nil {
+		t.Fatal(err)
+	}
+	var state windowsTaskRuntimeState
+	for attempt := 0; attempt < 20; attempt++ {
+		state, err = queryWindowsTaskState(ctx, windowsProxyTaskPath)
+		if err == nil && state.Running && len(state.EnginePIDs) == 1 && state.EnginePIDs[0] != 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || len(state.EnginePIDs) != 1 || state.EnginePIDs[0] == 0 || !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, sid, false) {
+		t.Fatalf("runtime state = %#v", state)
+	}
+	executable, err := queryWindowsProcessExecutable(state.EnginePIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalWindowsPath(executable, definition.Actions.Exec.Command) {
+		t.Fatalf("EnginePID executable = %q, want %q", executable, definition.Actions.Exec.Command)
 	}
 }
 

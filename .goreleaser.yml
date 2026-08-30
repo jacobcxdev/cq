@@ -89,10 +89,10 @@ homebrew_casks:
     hooks:
       pre:
         uninstall: |
-          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "uninstall", "--owner=homebrew"]
+          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
       post:
         install: |
-          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "install", "--owner=homebrew"]
+          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
     uninstall:
       launchctl:
         - dev.jacobcx.cq.proxy

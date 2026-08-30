@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -28,8 +29,8 @@ func init() {
 	serviceLifecycleFactory = defaultLinuxServiceLifecycle
 }
 
-func defaultLinuxServiceLifecycle() (*serviceLifecycle, error) {
-	platform, roots, executable, err := defaultLinuxSystemdPlatform()
+func defaultLinuxServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
+	platform, roots, executable, err := defaultLinuxSystemdPlatform(stableExecutable)
 	if err != nil {
 		return nil, err
 	}
@@ -56,10 +57,11 @@ func newLinuxServiceLifecycle(
 		Version:        version,
 		StatusAttempts: 20,
 		StatusInterval: time.Second,
+		MutationLocker: installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: roots.State},
 	}
 }
 
-func defaultLinuxSystemdPlatform() (*systemdServicePlatform, userdirs.Roots, string, error) {
+func defaultLinuxSystemdPlatform(stableExecutable ...string) (*systemdServicePlatform, userdirs.Roots, string, error) {
 	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, userdirs.Roots{}, "", err
@@ -68,7 +70,11 @@ func defaultLinuxSystemdPlatform() (*systemdServicePlatform, userdirs.Roots, str
 	if err != nil {
 		return nil, userdirs.Roots{}, "", err
 	}
-	executable, err := resolveLinuxExecutable()
+	requested := ""
+	if len(stableExecutable) > 0 {
+		requested = stableExecutable[0]
+	}
+	executable, err := resolveServiceExecutable(requested)
 	if err != nil {
 		return nil, userdirs.Roots{}, "", err
 	}
@@ -98,14 +104,7 @@ func linuxSystemdUserDirectory() (string, error) {
 }
 
 func resolveLinuxExecutable() (string, error) {
-	if executable, err := exec.LookPath("cq"); err == nil {
-		return executable, nil
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve current executable: %w", err)
-	}
-	return executable, nil
+	return resolveServiceExecutable("")
 }
 
 func runLinuxSystemctl(ctx context.Context, args ...string) ([]byte, error) {

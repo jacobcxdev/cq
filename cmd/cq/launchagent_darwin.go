@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -25,13 +24,7 @@ func agentLogPath(logsDir string) string {
 }
 
 func resolveExecutable() (string, error) {
-	// Prefer PATH lookup — returns stable symlink path (e.g. /opt/homebrew/bin/cq)
-	// which survives Homebrew upgrades.
-	if exe, err := exec.LookPath("cq"); err == nil {
-		return exe, nil
-	}
-	// Fall back to the current binary path for local/dev builds.
-	return os.Executable()
+	return resolveServiceExecutable("")
 }
 
 func installAgent(interval int) error {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -43,12 +43,12 @@ func init() {
 	serviceLifecycleFactory = defaultWindowsServiceLifecycle
 }
 
-func defaultWindowsServiceLifecycle() (*serviceLifecycle, error) {
+func defaultWindowsServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
 	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
 	}
-	executable, err := resolveWindowsExecutable()
+	executable, err := resolveServiceExecutable(stableExecutable)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +81,9 @@ func newWindowsServiceLifecycle(
 		refreshInterval: 1800,
 		run:             run,
 		queryState:      queryState,
+		queryFolder:     queryWindowsTaskFolderState,
+		createFolder:    createWindowsTaskFolder,
+		removeFolder:    removeWindowsTaskFolderIfEmpty,
 		inspectProxy:    inspectProxy,
 	}
 	return &serviceLifecycle{
@@ -90,6 +93,7 @@ func newWindowsServiceLifecycle(
 		Version:        version,
 		StatusAttempts: 30,
 		StatusInterval: time.Second,
+		MutationLocker: installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: roots.State},
 	}
 }
 
@@ -110,21 +114,7 @@ func currentWindowsServiceSID() (string, error) {
 }
 
 func resolveWindowsExecutable() (string, error) {
-	if executable, err := exec.LookPath("cq.exe"); err == nil {
-		absolute, err := filepath.Abs(executable)
-		if err == nil {
-			return filepath.Clean(absolute), nil
-		}
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve current executable: %w", err)
-	}
-	executable, err = filepath.Abs(executable)
-	if err != nil {
-		return "", fmt.Errorf("resolve absolute executable: %w", err)
-	}
-	return filepath.Clean(executable), nil
+	return resolveServiceExecutable("")
 }
 
 func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
@@ -153,9 +143,12 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	if err != nil {
 		return windowsTaskRuntimeState{}, err
 	}
+	comTaskFolder := strings.TrimSuffix(taskFolder, `\`)
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $task=Get-ScheduledTask -TaskPath '%s' -TaskName '%s'; $info=$task | Get-ScheduledTaskInfo; [pscustomobject]@{State=[string]$task.State;LastResult=[uint32]$info.LastTaskResult} | ConvertTo-Json -Compress`,
+		`$ErrorActionPreference='Stop'; $task=Get-ScheduledTask -TaskPath '%s' -TaskName '%s'; $info=$task | Get-ScheduledTaskInfo; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; [pscustomobject]@{State=[string]$task.State;LastResult=[uint32]$info.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress`,
 		taskFolder,
+		taskName,
+		comTaskFolder,
 		taskName,
 	)
 	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
@@ -170,8 +163,10 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 		return windowsTaskRuntimeState{}, fmt.Errorf("Windows task runtime output exceeds size limit")
 	}
 	var state struct {
-		State      string `json:"State"`
-		LastResult uint32 `json:"LastResult"`
+		State              string   `json:"State"`
+		LastResult         uint32   `json:"LastResult"`
+		EnginePIDs         []uint32 `json:"EnginePIDs"`
+		SecurityDescriptor string   `json:"SecurityDescriptor"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
@@ -179,10 +174,59 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 		return windowsTaskRuntimeState{}, fmt.Errorf("decode Windows task runtime: %w", err)
 	}
 	return windowsTaskRuntimeState{
-		Running:       strings.EqualFold(state.State, "Running"),
-		LastResult:    state.LastResult,
-		HasLastResult: true,
+		Running:            strings.EqualFold(state.State, "Running"),
+		LastResult:         state.LastResult,
+		HasLastResult:      true,
+		EnginePIDs:         append([]uint32(nil), state.EnginePIDs...),
+		SecurityDescriptor: state.SecurityDescriptor,
 	}, nil
+}
+
+func queryWindowsTaskFolderState(ctx context.Context) (windowsTaskFolderState, error) {
+	script := `$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $folder=$service.GetFolder('\cq'); [pscustomobject]@{Exists=$true;SecurityDescriptor=[string]$folder.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { if ($_.Exception.HResult -eq -2147024894) { [pscustomobject]@{Exists=$false;SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`
+	output, err := runWindowsTaskPowerShell(ctx, script)
+	if err != nil {
+		return windowsTaskFolderState{}, fmt.Errorf("query Windows task folder: %w", err)
+	}
+	var state windowsTaskFolderState
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return windowsTaskFolderState{}, fmt.Errorf("decode Windows task folder: %w", err)
+	}
+	return state, nil
+}
+
+func createWindowsTaskFolder(ctx context.Context, securityDescriptor string) error {
+	script := fmt.Sprintf(
+		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $root=$service.GetFolder('\'); try { $null=$service.GetFolder('\cq') } catch { if ($_.Exception.HResult -ne -2147024894) { throw }; $null=$root.CreateFolder('cq','%s') }`,
+		securityDescriptor,
+	)
+	_, err := runWindowsTaskPowerShell(ctx, script)
+	if err != nil {
+		return fmt.Errorf("create Windows task folder: %w", err)
+	}
+	return nil
+}
+
+func removeWindowsTaskFolderIfEmpty(ctx context.Context) error {
+	script := `$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $root=$service.GetFolder('\'); $folder=$null; try { $folder=$service.GetFolder('\cq') } catch { if ($_.Exception.HResult -ne -2147024894) { throw } }; if ($null -ne $folder -and $folder.GetTasks(0).Count -eq 0 -and $folder.GetFolders(0).Count -eq 0) { $root.DeleteFolder('cq',0) }; exit 0`
+	_, err := runWindowsTaskPowerShell(ctx, script)
+	if err != nil {
+		return fmt.Errorf("remove empty Windows task folder: %w", err)
+	}
+	return nil
+}
+
+func runWindowsTaskPowerShell(ctx context.Context, script string) ([]byte, error) {
+	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	if len(output) > 64<<10 {
+		return nil, fmt.Errorf("Windows Task Scheduler output exceeds size limit")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("PowerShell failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
 }
 
 func splitWindowsTaskPath(taskPath string) (string, string, error) {
@@ -299,7 +343,7 @@ func checkWindowsProxyHTTPHealth(ctx context.Context, address string) error {
 func ensureAgent() {}
 
 func installAgent(interval int) error {
-	lifecycle, err := defaultWindowsServiceLifecycle()
+	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}
@@ -313,7 +357,7 @@ func installAgent(interval int) error {
 }
 
 func uninstallAgent() error {
-	lifecycle, err := defaultWindowsServiceLifecycle()
+	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}
@@ -321,7 +365,7 @@ func uninstallAgent() error {
 }
 
 func installProxyAgent() error {
-	lifecycle, err := defaultWindowsServiceLifecycle()
+	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}
@@ -333,7 +377,7 @@ func installProxyAgent() error {
 }
 
 func uninstallProxyAgent() error {
-	lifecycle, err := defaultWindowsServiceLifecycle()
+	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}
@@ -341,7 +385,7 @@ func uninstallProxyAgent() error {
 }
 
 func restartProxyAgent() error {
-	lifecycle, err := defaultWindowsServiceLifecycle()
+	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}

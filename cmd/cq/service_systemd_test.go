@@ -69,6 +69,9 @@ func TestSystemdServiceInstallUsesUserManagerInOrder(t *testing.T) {
 
 	wantCalls := [][]string{
 		{"--user", "show-environment"},
+		{"--user", "show", systemdProxyUnit, "--no-pager", "--property=" + strings.Join(systemdShowProperties, ",")},
+		{"--user", "show", systemdRefreshService, "--no-pager", "--property=" + strings.Join(systemdShowProperties, ",")},
+		{"--user", "show", systemdRefreshTimer, "--no-pager", "--property=" + strings.Join(systemdShowProperties, ",")},
 		{"--user", "daemon-reload"},
 		{"--user", "enable", "--now", systemdProxyUnit, systemdRefreshTimer},
 		{"--user", "start", systemdRefreshService},
@@ -117,6 +120,30 @@ func TestSystemdServicePreflightRejectsDifferentExecutable(t *testing.T) {
 	}
 
 	err = platform.Preflight(context.Background(), platform.executable)
+	if !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("Preflight() error = %v, want ownership conflict", err)
+	}
+}
+
+func TestSystemdServicePreflightRejectsForeignLoadedFragment(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	runner.show[systemdProxyUnit] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "MainPID": "0", "FragmentPath": "/usr/lib/systemd/user/cq-proxy.service", "Result": "success",
+	})
+
+	err := platform.Preflight(context.Background(), platform.executable)
+	if !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("Preflight() error = %v, want ownership conflict", err)
+	}
+}
+
+func TestSystemdServicePreflightRejectsModifiedRefreshTimer(t *testing.T) {
+	platform, _ := newSystemdServiceHarness(t)
+	if err := atomicWriteSystemdUnit(platform.unitPath(systemdRefreshTimer), []byte("[Timer]\nOnUnitActiveSec=1s\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := platform.Preflight(context.Background(), platform.executable)
 	if !errors.Is(err, installstate.ErrOwnershipConflict) {
 		t.Fatalf("Preflight() error = %v, want ownership conflict", err)
 	}
