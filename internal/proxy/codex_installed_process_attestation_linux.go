@@ -7,15 +7,31 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 const codexInstalledLinuxProxyUnit = "cq-proxy.service"
+
+type codexInstalledLinuxServiceProof struct {
+	unit       string
+	path       string
+	executable string
+	sha256     [sha256.Size]byte
+}
+
+func (proof codexInstalledLinuxServiceProof) valid() bool {
+	return proof.unit == codexInstalledLinuxProxyUnit && filepath.IsAbs(proof.path) &&
+		filepath.Clean(proof.path) == proof.path && filepath.Base(proof.path) == proof.unit &&
+		filepath.IsAbs(proof.executable) && filepath.Clean(proof.executable) == proof.executable &&
+		proof.sha256 != ([sha256.Size]byte{})
+}
 
 type codexInstalledLinuxProcessVerifierDependencies struct {
 	pid               func() int
 	uid               func() int
 	executablePath    func() (string, error)
 	captureExecutable func(string) (codexInstalledExecutableProof, error)
+	captureService    func(int, codexInstalledExecutableProof) (codexInstalledLinuxServiceProof, error)
 	loadPort          func() (int, error)
 	captureProcess    func(int) (LinuxProcessIdentity, error)
 	captureListener   func(int, int) (LinuxListenerIdentity, error)
@@ -42,6 +58,9 @@ func newCodexInstalledLinuxProcessVerifier(dependencies codexInstalledLinuxProce
 	if dependencies.captureExecutable == nil {
 		dependencies.captureExecutable = captureCodexInstalledExecutable
 	}
+	if dependencies.captureService == nil {
+		dependencies.captureService = captureCodexInstalledLinuxService
+	}
 	if dependencies.loadPort == nil {
 		dependencies.loadPort = func() (int, error) {
 			config, err := LoadExistingConfig()
@@ -66,12 +85,12 @@ func (verifier *codexInstalledLinuxProcessVerifier) Capture(ctx context.Context)
 	}
 	dependencies := verifier.dependencies
 	if dependencies.pid == nil || dependencies.uid == nil || dependencies.executablePath == nil || dependencies.captureExecutable == nil ||
-		dependencies.loadPort == nil || dependencies.captureProcess == nil || dependencies.captureListener == nil {
+		dependencies.captureService == nil || dependencies.loadPort == nil || dependencies.captureProcess == nil || dependencies.captureListener == nil {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
 
-	pid, uid := dependencies.pid(), dependencies.uid()
-	if pid <= 1 || uid < 0 {
+	currentPID, uid := dependencies.pid(), dependencies.uid()
+	if currentPID <= 1 || uid < 0 {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
 	executablePath, err := dependencies.executablePath()
@@ -82,26 +101,36 @@ func (verifier *codexInstalledLinuxProcessVerifier) Capture(ctx context.Context)
 	if err != nil || !executable.valid() {
 		return codexInstalledProcessPlatformProof{}, codexInstalledAttestationError(ctx)
 	}
-	port, err := dependencies.loadPort()
-	if err != nil || port < 1 || port > 65_535 {
+	service, err := dependencies.captureService(uid, executable)
+	if err != nil || !service.valid() || service.executable != executable.path {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
-	process, err := dependencies.captureProcess(pid)
-	if err != nil || !codexInstalledLinuxProcessMatches(process, pid, uid, executable, dependencies.captureExecutable) {
+	current, err := dependencies.captureProcess(currentPID)
+	if err != nil {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
-	listener, err := dependencies.captureListener(pid, port)
-	if err != nil || !listener.Valid() || !listener.Process.Equal(process) {
+	listenerOwner, port, err := codexInstalledLinuxListenerOwner(current, uid, executable, dependencies)
+	if err != nil {
+		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
+	}
+	listener, err := dependencies.captureListener(listenerOwner.PID, port)
+	if err != nil || !listener.Valid() || !listener.Process.Equal(listenerOwner) {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
 	if err := ctx.Err(); err != nil {
 		return codexInstalledProcessPlatformProof{}, err
 	}
-	processAfter, err := dependencies.captureProcess(pid)
-	if err != nil || !processAfter.Equal(process) {
+	currentAfter, err := dependencies.captureProcess(currentPID)
+	if err != nil || !currentAfter.Equal(current) {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
-	listenerAfter, err := dependencies.captureListener(pid, port)
+	if listenerOwner.PID != currentPID {
+		listenerOwnerAfter, captureErr := dependencies.captureProcess(listenerOwner.PID)
+		if captureErr != nil || !listenerOwnerAfter.Equal(listenerOwner) {
+			return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
+		}
+	}
+	listenerAfter, err := dependencies.captureListener(listenerOwner.PID, port)
 	if err != nil || !equalCodexInstalledLinuxListener(listenerAfter, listener) {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
@@ -109,17 +138,16 @@ func (verifier *codexInstalledLinuxProcessVerifier) Capture(ctx context.Context)
 	if err != nil || currentExecutable != executable {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
-	serviceExecutable, err := dependencies.captureExecutable(process.Arguments[0])
-	if err != nil || serviceExecutable != executable {
+	serviceAfter, err := dependencies.captureService(uid, executable)
+	if err != nil || serviceAfter != service {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
 	}
-	serviceIdentity := codexInstalledLinuxServiceIdentity(uid, process.Arguments, executable)
 	proof := codexInstalledProcessPlatformProof{
-		pid:                   pid,
+		pid:                   listenerOwner.PID,
 		serviceKind:           codexInstalledListenerServiceSystemdUser,
 		persistent:            true,
 		executable:            executable,
-		serviceIdentitySHA256: serviceIdentity,
+		serviceIdentitySHA256: codexInstalledLinuxServiceIdentity(uid, service, executable),
 	}
 	if !proof.valid() {
 		return codexInstalledProcessPlatformProof{}, errCodexInstalledProcessAttestation
@@ -127,22 +155,80 @@ func (verifier *codexInstalledLinuxProcessVerifier) Capture(ctx context.Context)
 	return proof, nil
 }
 
-func codexInstalledLinuxProcessMatches(
+func codexInstalledLinuxListenerOwner(
+	current LinuxProcessIdentity,
+	uid int,
+	executable codexInstalledExecutableProof,
+	dependencies codexInstalledLinuxProcessVerifierDependencies,
+) (LinuxProcessIdentity, int, error) {
+	if !codexInstalledLinuxProcessIdentityMatches(current, uid, executable, dependencies.captureExecutable) {
+		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
+	}
+	if codexInstalledLinuxSystemdSupervisorMatches(current, uid, executable, dependencies.captureExecutable) {
+		port, err := dependencies.loadPort()
+		if err != nil || !validCodexInstalledLinuxPort(port) {
+			return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
+		}
+		return current, port, nil
+	}
+	if port, ok := codexInstalledLinuxCandidatePort(current.Arguments, executable.path); ok {
+		return current, port, nil
+	}
+	if len(current.Arguments) != 23 || current.ParentPID <= 1 {
+		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
+	}
+	manifest, err := ParseRuntimeRoleArguments(current.Arguments[3:])
+	if err != nil || manifest.Role != RuntimeRoleWorker || manifest.ManifestDigest != executable.sha256 {
+		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
+	}
+	supervisor, err := dependencies.captureProcess(current.ParentPID)
+	if err != nil || !codexInstalledLinuxSystemdSupervisorMatches(supervisor, uid, executable, dependencies.captureExecutable) ||
+		supervisor.CgroupPath != current.CgroupPath {
+		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
+	}
+	port, err := dependencies.loadPort()
+	if err != nil || !validCodexInstalledLinuxPort(port) {
+		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
+	}
+	return supervisor, port, nil
+}
+
+func codexInstalledLinuxProcessIdentityMatches(
 	process LinuxProcessIdentity,
-	pid int,
 	uid int,
 	executable codexInstalledExecutableProof,
 	captureExecutable func(string) (codexInstalledExecutableProof, error),
 ) bool {
-	if !process.Valid() || process.PID != pid || process.UID != uint64(uid) || len(process.Arguments) != 3 ||
-		!filepath.IsAbs(process.Arguments[0]) || filepath.Clean(process.Arguments[0]) != process.Arguments[0] ||
-		process.Arguments[1] != "proxy" || process.Arguments[2] != "start" ||
-		!linuxProxyRuntimeCgroupMatches(process.CgroupPath, uint64(uid)) ||
+	if !process.Valid() || process.UID != uint64(uid) || len(process.Arguments) < 3 ||
+		process.Arguments[0] != executable.path || process.Arguments[1] != "proxy" || process.Arguments[2] != "start" ||
 		!codexInstalledLinuxExecutableMatches(process.Executable, executable) || captureExecutable == nil {
 		return false
 	}
-	serviceExecutable, err := captureExecutable(process.Arguments[0])
-	return err == nil && serviceExecutable == executable
+	current, err := captureExecutable(process.Arguments[0])
+	return err == nil && current == executable
+}
+
+func codexInstalledLinuxSystemdSupervisorMatches(
+	process LinuxProcessIdentity,
+	uid int,
+	executable codexInstalledExecutableProof,
+	captureExecutable func(string) (codexInstalledExecutableProof, error),
+) bool {
+	return len(process.Arguments) == 3 && linuxProxyRuntimeCgroupMatches(process.CgroupPath, uint64(uid)) &&
+		codexInstalledLinuxProcessIdentityMatches(process, uid, executable, captureExecutable)
+}
+
+func codexInstalledLinuxCandidatePort(arguments []string, executable string) (int, bool) {
+	if len(arguments) != 7 || arguments[0] != executable || arguments[1] != "proxy" || arguments[2] != "start" ||
+		arguments[3] != "--port" || arguments[5] != "--linux-validation-candidate-fd" || arguments[6] != "3" {
+		return 0, false
+	}
+	port, err := strconv.Atoi(arguments[4])
+	return port, err == nil && strconv.Itoa(port) == arguments[4] && validCodexInstalledLinuxPort(port) && port != DefaultPort
+}
+
+func validCodexInstalledLinuxPort(port int) bool {
+	return port >= 1 && port <= 65_535
 }
 
 func codexInstalledLinuxExecutableMatches(actual LinuxExecutableIdentity, expected codexInstalledExecutableProof) bool {
@@ -155,15 +241,15 @@ func equalCodexInstalledLinuxListener(left, right LinuxListenerIdentity) bool {
 	return left.Valid() && right.Valid() && left.Address == right.Address && left.Inode == right.Inode && left.Process.Equal(right.Process)
 }
 
-func codexInstalledLinuxServiceIdentity(uid int, arguments []string, executable codexInstalledExecutableProof) [sha256.Size]byte {
+func codexInstalledLinuxServiceIdentity(uid int, service codexInstalledLinuxServiceProof, executable codexInstalledExecutableProof) [sha256.Size]byte {
 	destination := sha256.New()
-	writeCodexInstalledProcessBindingField(destination, []byte("cq-codex-installed-linux-systemd-service-v1"))
+	writeCodexInstalledProcessBindingField(destination, []byte("cq-codex-installed-linux-systemd-service-v2"))
 	writeCodexInstalledProcessBindingField(destination, []byte(codexInstalledListenerServiceSystemdUser))
-	writeCodexInstalledProcessBindingField(destination, []byte(codexInstalledLinuxProxyUnit))
+	writeCodexInstalledProcessBindingField(destination, []byte(service.unit))
+	writeCodexInstalledProcessBindingField(destination, []byte(service.path))
 	writeCodexInstalledProcessBindingInt(destination, uid)
-	for _, argument := range arguments {
-		writeCodexInstalledProcessBindingField(destination, []byte(argument))
-	}
+	writeCodexInstalledProcessBindingField(destination, []byte(service.executable))
+	writeCodexInstalledProcessBindingField(destination, service.sha256[:])
 	writeCodexInstalledProcessBindingField(destination, []byte(executable.path))
 	writeCodexInstalledProcessBindingField(destination, executable.sha256[:])
 	var digest [sha256.Size]byte
