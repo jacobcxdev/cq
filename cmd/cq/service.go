@@ -1,17 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
-const serviceStatusSchemaVersion = 1
+const (
+	serviceStatusSchemaVersion   = 1
+	serviceSnapshotSchemaVersion = 1
+	maxServiceSnapshotBytes      = 3 << 20
+)
 
 var ErrServiceUnhealthy = errors.New("CQ services are unhealthy")
 
@@ -41,6 +49,8 @@ type serviceStatus struct {
 type servicePlatform interface {
 	Preflight(context.Context, string) error
 	PrepareRollback(context.Context) (serviceRestore, error)
+	Snapshot(context.Context) (servicePlatformSnapshot, error)
+	Restore(context.Context, servicePlatformSnapshot) error
 	InstallProxy(context.Context, string) error
 	InstallRefresh(context.Context, string) error
 	RestartProxy(context.Context) error
@@ -51,6 +61,29 @@ type servicePlatform interface {
 }
 
 type serviceRestore func(context.Context) error
+
+type servicePlatformSnapshot struct {
+	Manager                  string                     `json:"manager"`
+	FolderExists             bool                       `json:"folder_exists,omitempty"`
+	FolderSecurityDescriptor string                     `json:"folder_security_descriptor,omitempty"`
+	Components               []serviceComponentSnapshot `json:"components"`
+}
+
+type serviceComponentSnapshot struct {
+	ID            string `json:"id"`
+	Definition    []byte `json:"definition,omitempty"`
+	Exists        bool   `json:"exists"`
+	Enabled       bool   `json:"enabled,omitempty"`
+	UnitFileState string `json:"unit_file_state,omitempty"`
+	Running       bool   `json:"running,omitempty"`
+}
+
+type persistedServiceSnapshot struct {
+	SchemaVersion int                     `json:"schema_version"`
+	Owner         installstate.Owner      `json:"owner"`
+	Executable    string                  `json:"executable"`
+	Platform      servicePlatformSnapshot `json:"platform"`
+}
 
 type serviceStateStore interface {
 	Load() (installstate.Record, error)
@@ -133,6 +166,77 @@ func (lifecycle *serviceLifecycle) Restart(ctx context.Context) error {
 	}
 	if _, err := lifecycle.waitHealthy(ctx); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (lifecycle *serviceLifecycle) Snapshot(ctx context.Context, owner installstate.Owner, path string) error {
+	if err := lifecycle.validate(owner); err != nil {
+		return err
+	}
+	if err := validateServiceSnapshotPath(path); err != nil {
+		return err
+	}
+	if err := lifecycle.Store.CheckClaim(owner, lifecycle.Executable); err != nil {
+		return err
+	}
+	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
+		return fmt.Errorf("service snapshot preflight: %w", err)
+	}
+	platformSnapshot, err := lifecycle.Platform.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("snapshot services: %w", err)
+	}
+	data, err := json.Marshal(persistedServiceSnapshot{
+		SchemaVersion: serviceSnapshotSchemaVersion,
+		Owner:         owner,
+		Executable:    lifecycle.Executable,
+		Platform:      platformSnapshot,
+	})
+	if err != nil {
+		return fmt.Errorf("encode service snapshot: %w", err)
+	}
+	if len(data) > maxServiceSnapshotBytes {
+		return fmt.Errorf("service snapshot exceeds size limit")
+	}
+	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, data); err != nil {
+		return fmt.Errorf("write service snapshot: %w", err)
+	}
+	return nil
+}
+
+func (lifecycle *serviceLifecycle) Restore(ctx context.Context, owner installstate.Owner, path string) error {
+	if err := lifecycle.validate(owner); err != nil {
+		return err
+	}
+	if err := validateServiceSnapshotPath(path); err != nil {
+		return err
+	}
+	data, err := fsutil.ReadSecureFile(fsutil.OSFileSystem{}, path, maxServiceSnapshotBytes)
+	if err != nil {
+		return fmt.Errorf("read service snapshot: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var snapshot persistedServiceSnapshot
+	if err := decoder.Decode(&snapshot); err != nil {
+		return fmt.Errorf("decode service snapshot: %w", err)
+	}
+	if err := requireServiceSnapshotEOF(decoder); err != nil {
+		return err
+	}
+	if snapshot.SchemaVersion != serviceSnapshotSchemaVersion || snapshot.Owner != owner || snapshot.Executable != lifecycle.Executable {
+		return fmt.Errorf("service snapshot identity differs")
+	}
+	if err := lifecycle.Platform.Restore(ctx, snapshot.Platform); err != nil {
+		return fmt.Errorf("restore services: %w", err)
+	}
+	restored, err := lifecycle.Platform.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("verify restored services: %w", err)
+	}
+	if !sameServicePlatformSnapshot(restored, snapshot.Platform) {
+		return fmt.Errorf("restored services differ from snapshot")
 	}
 	return nil
 }
@@ -230,6 +334,42 @@ func sameServiceIDs(left, right []string) bool {
 	}
 	for index := range left {
 		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateServiceSnapshotPath(path string) error {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("service snapshot path must be a clean absolute path")
+	}
+	return nil
+}
+
+func requireServiceSnapshotEOF(decoder *json.Decoder) error {
+	var extra any
+	err := decoder.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("decode service snapshot trailer: %w", err)
+	}
+	return fmt.Errorf("service snapshot contains trailing data")
+}
+
+func sameServicePlatformSnapshot(left, right servicePlatformSnapshot) bool {
+	if left.Manager != right.Manager || left.FolderExists != right.FolderExists || left.FolderSecurityDescriptor != right.FolderSecurityDescriptor || len(left.Components) != len(right.Components) {
+		return false
+	}
+	for index := range left.Components {
+		leftComponent := left.Components[index]
+		rightComponent := right.Components[index]
+		if leftComponent.ID != rightComponent.ID || leftComponent.Exists != rightComponent.Exists || leftComponent.Enabled != rightComponent.Enabled || leftComponent.UnitFileState != rightComponent.UnitFileState || leftComponent.Running != rightComponent.Running {
+			return false
+		}
+		if leftComponent.Exists && !bytes.Equal(leftComponent.Definition, rightComponent.Definition) {
 			return false
 		}
 	}

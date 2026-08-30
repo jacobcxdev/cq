@@ -94,6 +94,42 @@ func TestSystemdServiceInstallUsesUserManagerInOrder(t *testing.T) {
 	assertNoSystemdTemporaryFiles(t, platform.unitDirectory)
 }
 
+func TestSystemdServiceRestorePreservesRuntimeEnablement(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+	definitions, err := renderSystemdServiceDefinitions(platform.executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, definition := range definitions {
+		if err := atomicWriteSystemdUnit(platform.unitPath(name), definition); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner.show[systemdProxyUnit] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "active", "SubState": "running", "MainPID": "731", "UnitFileState": "enabled-runtime", "Result": "success",
+	})
+	runner.show[systemdRefreshService] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "MainPID": "0", "UnitFileState": "static", "Result": "success",
+	})
+	runner.show[systemdRefreshTimer] = systemdShow(map[string]string{
+		"LoadState": "loaded", "ActiveState": "inactive", "SubState": "dead", "MainPID": "0", "UnitFileState": "disabled", "Result": "success",
+	})
+	snapshot, err := platform.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	if err := platform.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !hasSystemdCall(runner.calls, []string{"--user", "enable", "--runtime", systemdProxyUnit}) {
+		t.Fatalf("restore calls = %#v, want runtime enable", runner.calls)
+	}
+	if hasSystemdCall(runner.calls, []string{"--user", "enable", systemdProxyUnit}) {
+		t.Fatalf("restore calls = %#v, persistent enable changed prior state", runner.calls)
+	}
+}
+
 func TestSystemdServicePreflightRejectsUnavailableManagerBeforeWrites(t *testing.T) {
 	platform, runner := newSystemdServiceHarness(t)
 	runner.fail["--user\x00show-environment"] = errors.New("Failed to connect to bus")
@@ -372,6 +408,15 @@ func systemdShow(values map[string]string) []byte {
 		fmt.Fprintf(&output, "%s=%s\n", key, values[key])
 	}
 	return []byte(output.String())
+}
+
+func hasSystemdCall(calls [][]string, want []string) bool {
+	for _, call := range calls {
+		if reflect.DeepEqual(call, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func assertNoSystemdTemporaryFiles(t *testing.T, directory string) {

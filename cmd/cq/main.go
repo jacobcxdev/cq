@@ -324,18 +324,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cq: %v\n", err)
 		os.Exit(1)
 	}
-	if shouldEnsureAgentAfter(ctx.Command()) {
-		ensureAgent()
-	}
-}
-
-func shouldEnsureAgentAfter(command string) bool {
-	switch command {
-	case "codex resets list", "codex resets list <account-reference>", "codex resets recommend", "codex resets use <account-reference>":
-		return false
-	default:
-		return true
-	}
 }
 
 func ensureCompatibilityEpoch() error {

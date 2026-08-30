@@ -92,6 +92,47 @@ func TestWindowsTaskFolderSecurityLifecycleNative(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskAbsenceUsesStructuredCodesNative(t *testing.T) {
+	if os.Getenv("CQ_NATIVE_WINDOWS_SCHEDULER_TEST") != "1" {
+		t.Skip("set CQ_NATIVE_WINDOWS_SCHEDULER_TEST=1 on an isolated Windows host")
+	}
+	const missingTask = `\cq\CQ-ReadOnly-Absence-Probe`
+	_, err := runWindowsSchtasks(context.Background(), "/Query", "/TN", missingTask, "/XML", "/HResult")
+	if !isWindowsTaskNotFound(err) {
+		t.Fatalf("query missing task error = %v", err)
+	}
+	_, err = queryWindowsTaskState(context.Background(), missingTask)
+	if !isWindowsTaskNotFound(err) {
+		t.Fatalf("inspect missing task error = %v", err)
+	}
+}
+
+func TestNormaliseWindowsHRESULT(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int64
+		want    uint32
+		wantErr bool
+	}{
+		{name: "success", value: 0, want: 0},
+		{name: "signed file not found", value: -2147024894, want: 0x80070002},
+		{name: "unsigned maximum", value: 1<<32 - 1, want: 0xffffffff},
+		{name: "below signed minimum", value: -1<<31 - 1, wantErr: true},
+		{name: "above unsigned maximum", value: 1 << 32, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normaliseWindowsHRESULT(test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("normaliseWindowsHRESULT(%d) error = %v", test.value, err)
+			}
+			if got != test.want {
+				t.Fatalf("normaliseWindowsHRESULT(%d) = %#x, want %#x", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestWindowsTaskRuntimeStateNative(t *testing.T) {
 	if os.Getenv("CQ_NATIVE_WINDOWS_SCHEDULER_TEST") != "1" {
 		t.Skip("set CQ_NATIVE_WINDOWS_SCHEDULER_TEST=1 on an isolated Windows host")

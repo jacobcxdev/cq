@@ -19,6 +19,7 @@ type serviceCommand struct {
 	OwnerSet          bool
 	JSON              bool
 	ServiceExecutable string
+	SnapshotFile      string
 	InstallerLockHeld bool
 	HelpPath          []string
 }
@@ -40,6 +41,10 @@ func runService(args []string) error {
 }
 
 func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output io.Writer) (returnErr error) {
+	return runServiceWithLifecycleInput(args, lifecycle, output, os.Stdin)
+}
+
+func runServiceWithLifecycleInput(args []string, lifecycle *serviceLifecycle, output io.Writer, inheritedLock *os.File) (returnErr error) {
 	command, err := parseServiceCommand(args)
 	if err != nil {
 		return err
@@ -53,10 +58,21 @@ func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output 
 	if output == nil {
 		output = io.Discard
 	}
-	if command.Action != "status" && !command.InstallerLockHeld {
-		if lifecycle == nil || lifecycle.MutationLocker == nil {
-			return fmt.Errorf("service mutation lock is unavailable")
+	if command.Action != "status" && (lifecycle == nil || lifecycle.MutationLocker == nil) {
+		return fmt.Errorf("service mutation lock is unavailable")
+	}
+	if command.Action != "status" && command.InstallerLockHeld {
+		validator, ok := lifecycle.MutationLocker.(interface {
+			ValidateInherited(*os.File) error
+		})
+		if !ok {
+			return fmt.Errorf("inherited installer lock validation is unavailable")
 		}
+		if err := validator.ValidateInherited(inheritedLock); err != nil {
+			return fmt.Errorf("validate inherited installer lock: %w", err)
+		}
+	}
+	if command.Action != "status" && !command.InstallerLockHeld {
 		lock, err := lifecycle.MutationLocker.Acquire()
 		if err != nil {
 			return err
@@ -70,6 +86,8 @@ func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output 
 		return lifecycle.Install(ctx, command.Owner)
 	case "restart":
 		return lifecycle.Restart(ctx)
+	case "snapshot":
+		return lifecycle.Snapshot(ctx, command.Owner, command.SnapshotFile)
 	case "status":
 		status, err := lifecycle.Status(ctx)
 		if err != nil {
@@ -83,6 +101,8 @@ func runServiceWithLifecycle(args []string, lifecycle *serviceLifecycle, output 
 		return writeServiceStatus(output, status)
 	case "uninstall":
 		return lifecycle.Uninstall(ctx, command.Owner)
+	case "restore":
+		return lifecycle.Restore(ctx, command.Owner, command.SnapshotFile)
 	default:
 		return fmt.Errorf("unknown service action %q", command.Action)
 	}
@@ -105,7 +125,7 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 
 	command := serviceCommand{Action: args[0], Owner: installstate.OwnerManual}
 	switch command.Action {
-	case "install", "restart", "status", "uninstall":
+	case "install", "restart", "snapshot", "status", "uninstall", "restore":
 	default:
 		return serviceCommand{}, fmt.Errorf("unknown service command: %s", command.Action)
 	}
@@ -140,6 +160,11 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 				return serviceCommand{}, fmt.Errorf("service %s: duplicate service executable", command.Action)
 			}
 			command.ServiceExecutable = strings.TrimPrefix(argument, "--service-executable=")
+		case strings.HasPrefix(argument, "--snapshot-file="):
+			if command.SnapshotFile != "" {
+				return serviceCommand{}, fmt.Errorf("service %s: duplicate service snapshot file", command.Action)
+			}
+			command.SnapshotFile = strings.TrimPrefix(argument, "--snapshot-file=")
 		case argument == "--installer-lock-held":
 			if command.InstallerLockHeld {
 				return serviceCommand{}, fmt.Errorf("service %s: duplicate installer lock marker", command.Action)
@@ -152,8 +177,9 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 	if command.JSON && command.Action != "status" {
 		return serviceCommand{}, fmt.Errorf("service %s: --json is only valid with status", command.Action)
 	}
-	if command.OwnerSet && command.Action != "install" && command.Action != "uninstall" {
-		return serviceCommand{}, fmt.Errorf("service %s: --owner is only valid with install or uninstall", command.Action)
+	packageAction := command.Action == "install" || command.Action == "uninstall" || command.Action == "snapshot" || command.Action == "restore"
+	if command.OwnerSet && !packageAction {
+		return serviceCommand{}, fmt.Errorf("service %s: --owner is only valid with a package lifecycle action", command.Action)
 	}
 	if command.ServiceExecutable != "" {
 		if command.Owner != installstate.OwnerHomebrew || (command.Action != "install" && command.Action != "uninstall") {
@@ -163,8 +189,18 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 			return serviceCommand{}, fmt.Errorf("service %s: service executable must be a clean absolute path", command.Action)
 		}
 	}
-	if command.InstallerLockHeld && (!command.OwnerSet || command.Owner == installstate.OwnerManual || (command.Action != "install" && command.Action != "uninstall")) {
+	if command.SnapshotFile != "" {
+		if (command.Action != "snapshot" && command.Action != "restore") || !filepath.IsAbs(command.SnapshotFile) || filepath.Clean(command.SnapshotFile) != command.SnapshotFile {
+			return serviceCommand{}, fmt.Errorf("service %s: service snapshot file must be a clean absolute path", command.Action)
+		}
+	} else if command.Action == "snapshot" || command.Action == "restore" {
+		return serviceCommand{}, fmt.Errorf("service %s: service snapshot file is required", command.Action)
+	}
+	if command.InstallerLockHeld && (!command.OwnerSet || command.Owner == installstate.OwnerManual || !packageAction) {
 		return serviceCommand{}, fmt.Errorf("service %s: installer lock marker requires a package lifecycle action", command.Action)
+	}
+	if (command.Action == "snapshot" || command.Action == "restore") && !command.InstallerLockHeld {
+		return serviceCommand{}, fmt.Errorf("service %s: installer lock marker is required", command.Action)
 	}
 	return command, nil
 }

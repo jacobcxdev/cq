@@ -151,43 +151,54 @@ func (platform *darwinServicePlatform) Preflight(ctx context.Context, executable
 	return nil
 }
 
-type darwinServiceSnapshot struct {
-	label  string
-	path   string
-	data   []byte
-	exists bool
-	loaded bool
+func (platform *darwinServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+	snapshot, err := platform.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func(restoreCtx context.Context) error {
+		return platform.Restore(restoreCtx, snapshot)
+	}, nil
 }
 
-func (platform *darwinServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
-	snapshots := make([]darwinServiceSnapshot, 0, 2)
+func (platform *darwinServicePlatform) Snapshot(ctx context.Context) (servicePlatformSnapshot, error) {
+	snapshot := servicePlatformSnapshot{Manager: "launchd", Components: make([]serviceComponentSnapshot, 0, 2)}
 	for _, label := range []string{proxyAgentLabel, agentLabel} {
 		path := platform.plistPath(label)
 		data, err := os.ReadFile(path)
 		exists := err == nil
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("snapshot %s definition: %w", label, err)
+			return servicePlatformSnapshot{}, fmt.Errorf("snapshot %s definition: %w", label, err)
 		}
 		if len(data) > maxDarwinPlistBytes {
-			return nil, fmt.Errorf("snapshot %s definition exceeds size limit", label)
+			return servicePlatformSnapshot{}, fmt.Errorf("snapshot %s definition exceeds size limit", label)
 		}
 		loaded, _, err := platform.printJob(ctx, label)
 		if err != nil {
-			return nil, err
+			return servicePlatformSnapshot{}, err
 		}
 		if loaded && !exists {
-			return nil, fmt.Errorf("%w: %s is loaded without managed definition", installstate.ErrOwnershipConflict, label)
+			return servicePlatformSnapshot{}, fmt.Errorf("%w: %s is loaded without managed definition", installstate.ErrOwnershipConflict, label)
 		}
-		snapshots = append(snapshots, darwinServiceSnapshot{label: label, path: path, data: append([]byte(nil), data...), exists: exists, loaded: loaded})
+		snapshot.Components = append(snapshot.Components, serviceComponentSnapshot{ID: label, Definition: append([]byte(nil), data...), Exists: exists, Running: loaded})
 	}
-	return func(restoreCtx context.Context) error {
-		var result error
-		for index := len(snapshots) - 1; index >= 0; index-- {
-			snapshot := snapshots[index]
-			result = errors.Join(result, platform.restore(restoreCtx, snapshot.label, snapshot.path, snapshot.data, snapshot.exists, snapshot.loaded))
+	return snapshot, nil
+}
+
+func (platform *darwinServicePlatform) Restore(ctx context.Context, snapshot servicePlatformSnapshot) error {
+	labels := []string{proxyAgentLabel, agentLabel}
+	if snapshot.Manager != "launchd" || snapshot.FolderExists || snapshot.FolderSecurityDescriptor != "" || len(snapshot.Components) != len(labels) {
+		return fmt.Errorf("invalid launchd service snapshot")
+	}
+	var result error
+	for index := len(labels) - 1; index >= 0; index-- {
+		component := snapshot.Components[index]
+		if component.ID != labels[index] || component.Enabled || component.UnitFileState != "" || (!component.Exists && (component.Running || len(component.Definition) != 0)) || len(component.Definition) > maxDarwinPlistBytes {
+			return fmt.Errorf("invalid launchd service snapshot component %q", component.ID)
 		}
-		return result
-	}, nil
+		result = errors.Join(result, platform.restore(ctx, component.ID, platform.plistPath(component.ID), component.Definition, component.Exists, component.Running))
+	}
+	return result
 }
 
 func (platform *darwinServicePlatform) InstallProxy(ctx context.Context, executable string) error {

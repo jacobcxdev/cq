@@ -167,68 +167,102 @@ func (platform *systemdServicePlatform) Preflight(ctx context.Context, executabl
 	return nil
 }
 
-type systemdUnitSnapshot struct {
-	name       string
-	definition []byte
-	exists     bool
-	enabled    bool
-	active     bool
+func (platform *systemdServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+	snapshot, err := platform.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func(restoreCtx context.Context) error {
+		return platform.Restore(restoreCtx, snapshot)
+	}, nil
 }
 
-func (platform *systemdServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
-	snapshots := make([]systemdUnitSnapshot, 0, 3)
+func (platform *systemdServicePlatform) Snapshot(ctx context.Context) (servicePlatformSnapshot, error) {
+	snapshot := servicePlatformSnapshot{Manager: "systemd-user", Components: make([]serviceComponentSnapshot, 0, 3)}
 	for _, name := range []string{systemdProxyUnit, systemdRefreshService, systemdRefreshTimer} {
 		definition, exists, err := platform.definition(name)
 		if err != nil {
-			return nil, err
+			return servicePlatformSnapshot{}, err
 		}
 		properties, err := platform.show(ctx, name)
 		if err != nil {
-			return nil, err
+			return servicePlatformSnapshot{}, err
 		}
 		if properties["LoadState"] == "loaded" && !exists {
-			return nil, fmt.Errorf("%w: %s is loaded without managed definition", installstate.ErrOwnershipConflict, name)
+			return servicePlatformSnapshot{}, fmt.Errorf("%w: %s is loaded without managed definition", installstate.ErrOwnershipConflict, name)
 		}
-		snapshots = append(snapshots, systemdUnitSnapshot{
-			name:       name,
-			definition: append([]byte(nil), definition...),
-			exists:     exists,
-			enabled:    strings.HasPrefix(properties["UnitFileState"], "enabled"),
-			active:     properties["ActiveState"] == "active",
+		unitFileState := ""
+		if exists {
+			unitFileState = properties["UnitFileState"]
+			if !supportedSystemdUnitFileState(unitFileState) {
+				return servicePlatformSnapshot{}, fmt.Errorf("%w: %s has unsupported unit file state %q", installstate.ErrOwnershipConflict, name, unitFileState)
+			}
+		}
+		snapshot.Components = append(snapshot.Components, serviceComponentSnapshot{
+			ID:            name,
+			Definition:    append([]byte(nil), definition...),
+			Exists:        exists,
+			UnitFileState: unitFileState,
+			Running:       properties["ActiveState"] == "active",
 		})
 	}
-	return func(restoreCtx context.Context) error {
-		var result error
-		result = errors.Join(result, platform.RemoveRefresh(restoreCtx), platform.RemoveProxy(restoreCtx))
-		for _, snapshot := range snapshots {
-			if !snapshot.exists {
-				continue
+	return snapshot, nil
+}
+
+func (platform *systemdServicePlatform) Restore(ctx context.Context, snapshot servicePlatformSnapshot) error {
+	names := []string{systemdProxyUnit, systemdRefreshService, systemdRefreshTimer}
+	if snapshot.Manager != "systemd-user" || snapshot.FolderExists || snapshot.FolderSecurityDescriptor != "" || len(snapshot.Components) != len(names) {
+		return fmt.Errorf("invalid systemd service snapshot")
+	}
+	for index, component := range snapshot.Components {
+		invalidAbsent := !component.Exists && (component.Enabled || component.UnitFileState != "" || component.Running || len(component.Definition) != 0)
+		if component.ID != names[index] || component.Enabled || invalidAbsent || (component.Exists && !supportedSystemdUnitFileState(component.UnitFileState)) || len(component.Definition) > maxSystemdUnitBytes {
+			return fmt.Errorf("invalid systemd service snapshot component %q", component.ID)
+		}
+	}
+	var result error
+	result = errors.Join(result, platform.RemoveRefresh(ctx), platform.RemoveProxy(ctx))
+	for _, component := range snapshot.Components {
+		if !component.Exists {
+			continue
+		}
+		if err := atomicWriteSystemdUnit(platform.unitPath(component.ID), component.Definition); err != nil {
+			result = errors.Join(result, fmt.Errorf("restore %s definition: %w", component.ID, err))
+		}
+	}
+	if _, err := platform.run(ctx, "--user", "daemon-reload"); err != nil {
+		return errors.Join(result, fmt.Errorf("reload restored user systemd units: %w", err))
+	}
+	for _, component := range snapshot.Components {
+		if !component.Exists {
+			continue
+		}
+		switch component.UnitFileState {
+		case "enabled":
+			if _, err := platform.run(ctx, "--user", "enable", component.ID); err != nil {
+				result = errors.Join(result, fmt.Errorf("restore enabled state for %s: %w", component.ID, err))
 			}
-			if err := atomicWriteSystemdUnit(platform.unitPath(snapshot.name), snapshot.definition); err != nil {
-				result = errors.Join(result, fmt.Errorf("restore %s definition: %w", snapshot.name, err))
+		case "enabled-runtime":
+			if _, err := platform.run(ctx, "--user", "enable", "--runtime", component.ID); err != nil {
+				result = errors.Join(result, fmt.Errorf("restore runtime-enabled state for %s: %w", component.ID, err))
 			}
 		}
-		if _, err := platform.run(restoreCtx, "--user", "daemon-reload"); err != nil {
-			result = errors.Join(result, fmt.Errorf("reload restored user systemd units: %w", err))
-			return result
-		}
-		for _, snapshot := range snapshots {
-			if !snapshot.exists {
-				continue
-			}
-			if snapshot.enabled {
-				if _, err := platform.run(restoreCtx, "--user", "enable", snapshot.name); err != nil {
-					result = errors.Join(result, fmt.Errorf("restore enabled state for %s: %w", snapshot.name, err))
-				}
-			}
-			if snapshot.active {
-				if _, err := platform.run(restoreCtx, "--user", "start", snapshot.name); err != nil {
-					result = errors.Join(result, fmt.Errorf("restore running state for %s: %w", snapshot.name, err))
-				}
+		if component.Running {
+			if _, err := platform.run(ctx, "--user", "start", component.ID); err != nil {
+				result = errors.Join(result, fmt.Errorf("restore running state for %s: %w", component.ID, err))
 			}
 		}
-		return errors.Join(result, syncSystemdDirectory(platform.unitDirectory))
-	}, nil
+	}
+	return errors.Join(result, syncSystemdDirectory(platform.unitDirectory))
+}
+
+func supportedSystemdUnitFileState(state string) bool {
+	switch state {
+	case "enabled", "enabled-runtime", "disabled", "static":
+		return true
+	default:
+		return false
+	}
 }
 
 func (platform *systemdServicePlatform) InstallProxy(_ context.Context, executable string) error {

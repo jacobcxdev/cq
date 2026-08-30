@@ -118,24 +118,66 @@ func resolveWindowsExecutable() (string, error) {
 }
 
 func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) >= 3 && strings.EqualFold(args[1], "/TN") {
+		switch strings.ToLower(args[0]) {
+		case "/run", "/end", "/delete":
+			return runWindowsTaskMutation(ctx, strings.ToLower(args[0]), args[2])
+		}
+	}
 	output, err := exec.CommandContext(ctx, "schtasks.exe", args...).CombinedOutput()
 	if err == nil {
 		return output, nil
 	}
 	message := strings.TrimSpace(string(output))
-	lowerMessage := strings.ToLower(message)
 	code := uint32(1)
-	if strings.Contains(lowerMessage, "cannot find") || strings.Contains(lowerMessage, "not exist") {
-		code = windowsTaskNotFound
-	} else if strings.Contains(lowerMessage, "already running") {
-		code = windowsTaskAlreadyRunning
-	} else {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			code = uint32(exitError.ExitCode())
-		}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		code = uint32(exitError.ExitCode())
 	}
 	return output, windowsTaskCommandError{Code: code, Output: message}
+}
+
+func runWindowsTaskMutation(ctx context.Context, action, taskPath string) ([]byte, error) {
+	taskFolder, taskName, err := splitWindowsTaskPath(taskPath)
+	if err != nil {
+		return nil, err
+	}
+	comTaskFolder := strings.TrimSuffix(taskFolder, `\`)
+	var operation string
+	switch action {
+	case "/run":
+		operation = fmt.Sprintf(`$task=$service.GetFolder('%s').GetTask('%s'); $null=$task.Run($null)`, comTaskFolder, taskName)
+	case "/end":
+		operation = fmt.Sprintf(`$task=$service.GetFolder('%s').GetTask('%s'); $instances=$task.GetInstances(0); for($index=1;$index -le $instances.Count;$index++){ $instances.Item($index).Stop() }`, comTaskFolder, taskName)
+	case "/delete":
+		operation = fmt.Sprintf(`$service.GetFolder('%s').DeleteTask('%s',0)`, comTaskFolder, taskName)
+	default:
+		return nil, fmt.Errorf("unsupported Windows task mutation %q", action)
+	}
+	script := fmt.Sprintf(
+		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $code=[int64]0; try { %s } catch { $code=[int64]$_.Exception.HResult }; [pscustomobject]@{Code=$code} | ConvertTo-Json -Compress`,
+		operation,
+	)
+	output, err := runWindowsTaskPowerShell(ctx, script)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Code int64 `json:"Code"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode Windows task mutation: %w", err)
+	}
+	code, err := normaliseWindowsHRESULT(result.Code)
+	if err != nil {
+		return nil, fmt.Errorf("decode Windows task mutation: %w", err)
+	}
+	if code != 0 {
+		return nil, windowsTaskCommandError{Code: code}
+	}
+	return nil, nil
 }
 
 func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRuntimeState, error) {
@@ -145,26 +187,23 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	}
 	comTaskFolder := strings.TrimSuffix(taskFolder, `\`)
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $task=Get-ScheduledTask -TaskPath '%s' -TaskName '%s'; $info=$task | Get-ScheduledTaskInfo; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; [pscustomobject]@{State=[string]$task.State;LastResult=[uint32]$info.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress`,
-		taskFolder,
-		taskName,
+		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=([int]$registered.State -eq 4);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
 		comTaskFolder,
 		taskName,
 	)
 	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
-		if strings.Contains(strings.ToLower(message), "no scheduledtask objects") || strings.Contains(strings.ToLower(message), "cannot find") {
-			return windowsTaskRuntimeState{}, windowsTaskCommandError{Code: windowsTaskNotFound, Output: message}
-		}
 		return windowsTaskRuntimeState{}, fmt.Errorf("query Windows task runtime: %w: %s", err, message)
 	}
 	if len(output) > 64<<10 {
 		return windowsTaskRuntimeState{}, fmt.Errorf("Windows task runtime output exceeds size limit")
 	}
 	var state struct {
-		State              string   `json:"State"`
-		LastResult         uint32   `json:"LastResult"`
+		Exists             bool     `json:"Exists"`
+		Code               int64    `json:"Code"`
+		Running            bool     `json:"Running"`
+		LastResult         int64    `json:"LastResult"`
 		EnginePIDs         []uint32 `json:"EnginePIDs"`
 		SecurityDescriptor string   `json:"SecurityDescriptor"`
 	}
@@ -173,13 +212,31 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	if err := decoder.Decode(&state); err != nil {
 		return windowsTaskRuntimeState{}, fmt.Errorf("decode Windows task runtime: %w", err)
 	}
+	code, err := normaliseWindowsHRESULT(state.Code)
+	if err != nil {
+		return windowsTaskRuntimeState{}, fmt.Errorf("decode Windows task runtime code: %w", err)
+	}
+	if !state.Exists {
+		return windowsTaskRuntimeState{}, windowsTaskCommandError{Code: code}
+	}
+	lastResult, err := normaliseWindowsHRESULT(state.LastResult)
+	if err != nil {
+		return windowsTaskRuntimeState{}, fmt.Errorf("decode Windows task last result: %w", err)
+	}
 	return windowsTaskRuntimeState{
-		Running:            strings.EqualFold(state.State, "Running"),
-		LastResult:         state.LastResult,
+		Running:            state.Running,
+		LastResult:         lastResult,
 		HasLastResult:      true,
 		EnginePIDs:         append([]uint32(nil), state.EnginePIDs...),
 		SecurityDescriptor: state.SecurityDescriptor,
 	}, nil
+}
+
+func normaliseWindowsHRESULT(value int64) (uint32, error) {
+	if value < -1<<31 || value > 1<<32-1 {
+		return 0, fmt.Errorf("Windows HRESULT %d is outside 32-bit range", value)
+	}
+	return uint32(value), nil
 }
 
 func queryWindowsTaskFolderState(ctx context.Context) (windowsTaskFolderState, error) {

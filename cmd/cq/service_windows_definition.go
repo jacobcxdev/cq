@@ -189,46 +189,86 @@ func (platform *windowsTaskServicePlatform) Preflight(ctx context.Context, execu
 	return nil
 }
 
-type windowsTaskSnapshot struct {
-	taskPath   string
-	definition []byte
-	exists     bool
-	running    bool
+func (platform *windowsTaskServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+	snapshot, err := platform.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func(restoreCtx context.Context) error {
+		return platform.Restore(restoreCtx, snapshot)
+	}, nil
 }
 
-func (platform *windowsTaskServicePlatform) PrepareRollback(ctx context.Context) (serviceRestore, error) {
+func (platform *windowsTaskServicePlatform) Snapshot(ctx context.Context) (servicePlatformSnapshot, error) {
 	folder, err := platform.queryFolder(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot Windows task folder: %w", err)
+		return servicePlatformSnapshot{}, fmt.Errorf("snapshot Windows task folder: %w", err)
 	}
-	snapshots := make([]windowsTaskSnapshot, 0, 2)
+	snapshot := servicePlatformSnapshot{Manager: "task-scheduler", FolderExists: folder.Exists, Components: make([]serviceComponentSnapshot, 0, 2)}
+	if folder.Exists {
+		if !validWindowsTaskSecurityDescriptor(folder.SecurityDescriptor, platform.sid, true) {
+			return servicePlatformSnapshot{}, fmt.Errorf("%w: Windows task folder security descriptor differs", installstate.ErrOwnershipConflict)
+		}
+		snapshot.FolderSecurityDescriptor = folder.SecurityDescriptor
+	}
 	for _, kind := range []windowsTaskKind{windowsProxyTask, windowsRefreshTask} {
 		definition, exists, err := platform.queryDefinitionBytes(ctx, kind)
 		if err != nil {
-			return nil, err
+			return servicePlatformSnapshot{}, err
 		}
 		taskPath, _, _, _ := windowsTaskValues(kind)
 		running := false
 		if exists {
 			state, err := platform.queryState(ctx, taskPath)
 			if err != nil {
-				return nil, fmt.Errorf("snapshot Windows task state: %w", err)
+				return servicePlatformSnapshot{}, fmt.Errorf("snapshot Windows task state: %w", err)
 			}
 			running = state.Running
 		}
-		snapshots = append(snapshots, windowsTaskSnapshot{taskPath: taskPath, definition: append([]byte(nil), definition...), exists: exists, running: running})
+		snapshot.Components = append(snapshot.Components, serviceComponentSnapshot{ID: taskPath, Definition: append([]byte(nil), definition...), Exists: exists, Running: running})
 	}
-	return func(restoreCtx context.Context) error {
-		var result error
-		for index := len(snapshots) - 1; index >= 0; index-- {
-			snapshot := snapshots[index]
-			result = errors.Join(result, platform.restore(restoreCtx, snapshot.taskPath, snapshot.definition, snapshot.exists, snapshot.running))
+	return snapshot, nil
+}
+
+func (platform *windowsTaskServicePlatform) Restore(ctx context.Context, snapshot servicePlatformSnapshot) error {
+	taskPaths := []string{windowsProxyTaskPath, windowsRefreshTaskPath}
+	validFolder := snapshot.FolderExists && validWindowsTaskSecurityDescriptor(snapshot.FolderSecurityDescriptor, platform.sid, true)
+	validAbsentFolder := !snapshot.FolderExists && snapshot.FolderSecurityDescriptor == ""
+	if snapshot.Manager != "task-scheduler" || (!validFolder && !validAbsentFolder) || len(snapshot.Components) != len(taskPaths) {
+		return fmt.Errorf("invalid Windows task service snapshot")
+	}
+	for index, component := range snapshot.Components {
+		if component.ID != taskPaths[index] || component.Enabled || component.UnitFileState != "" || (!component.Exists && (component.Running || len(component.Definition) != 0)) || len(component.Definition) > maxWindowsTaskXMLBytes {
+			return fmt.Errorf("invalid Windows task service snapshot component %q", component.ID)
+		}
+	}
+	var result error
+	if snapshot.FolderExists {
+		folder, err := platform.queryFolder(ctx)
+		if err != nil {
+			return fmt.Errorf("inspect Windows task folder before restore: %w", err)
 		}
 		if !folder.Exists {
-			result = errors.Join(result, platform.removeFolder(restoreCtx))
+			if err := platform.createFolder(ctx, snapshot.FolderSecurityDescriptor); err != nil {
+				return fmt.Errorf("restore Windows task folder: %w", err)
+			}
+			folder, err = platform.queryFolder(ctx)
+			if err != nil {
+				return fmt.Errorf("inspect restored Windows task folder: %w", err)
+			}
 		}
-		return result
-	}, nil
+		if !folder.Exists || folder.SecurityDescriptor != snapshot.FolderSecurityDescriptor {
+			return fmt.Errorf("restored Windows task folder security descriptor differs")
+		}
+	}
+	for index := len(snapshot.Components) - 1; index >= 0; index-- {
+		component := snapshot.Components[index]
+		result = errors.Join(result, platform.restore(ctx, component.ID, component.Definition, component.Exists, component.Running))
+	}
+	if !snapshot.FolderExists {
+		result = errors.Join(result, platform.removeFolder(ctx))
+	}
+	return result
 }
 
 func (platform *windowsTaskServicePlatform) InstallProxy(ctx context.Context, executable string) error {
@@ -449,7 +489,7 @@ func (platform *windowsTaskServicePlatform) queryDefinitionBytes(ctx context.Con
 	if err != nil {
 		return nil, false, err
 	}
-	data, err := platform.run(ctx, "/Query", "/TN", taskPath, "/XML")
+	data, err := platform.run(ctx, "/Query", "/TN", taskPath, "/XML", "/HResult")
 	if err == nil {
 		if len(data) > maxWindowsTaskXMLBytes {
 			return nil, false, fmt.Errorf("Windows task XML exceeds size limit")

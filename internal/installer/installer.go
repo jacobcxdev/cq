@@ -36,6 +36,8 @@ type Installation struct {
 type Lifecycle interface {
 	Stop(context.Context) error
 	Install(context.Context, installstate.Owner) error
+	Snapshot(context.Context, installstate.Owner, string) error
+	Restore(context.Context, installstate.Owner, string) error
 	Status(context.Context) error
 	Uninstall(context.Context, installstate.Owner) error
 }
@@ -105,6 +107,7 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+	ctx = ContextWithInstallLock(ctx, lock)
 
 	previous, previousRecord, adopted, err := installer.currentInstallation(true)
 	if err != nil {
@@ -159,13 +162,15 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 	if err := installer.prepareReplacement(previous, stagedBody, stagedDigest); err != nil {
 		return err
 	}
+	serviceSnapshotPath := filepath.Join(temporaryRoot, "services.json")
+	serviceSnapshotPrepared := false
 	mutated := false
 	candidateServicesInstalled := false
 	fail := func(cause error) error {
 		if !mutated {
 			return errors.Join(cause, installer.cleanupPrepared(previous != nil))
 		}
-		rollbackErr := installer.rollback(ctx, previous, previousRecord, candidate, adopted, candidateServicesInstalled)
+		rollbackErr := installer.rollback(ctx, previous, previousRecord, candidate, adopted, candidateServicesInstalled, serviceSnapshotPath, serviceSnapshotPrepared)
 		if rollbackErr != nil {
 			evidence := installer.Installation.Executable
 			if previous != nil {
@@ -177,6 +182,10 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 	}
 
 	if previous != nil && !adopted {
+		if err := installer.Lifecycle.Snapshot(ctx, previous.Owner, serviceSnapshotPath); err != nil {
+			return fail(fmt.Errorf("snapshot existing CQ services: %w", err))
+		}
+		serviceSnapshotPrepared = true
 		mutated = true
 		if err := installer.Lifecycle.Stop(ctx); err != nil {
 			return fail(fmt.Errorf("stop existing CQ services: %w", err))
@@ -229,6 +238,7 @@ func (installer *Installer) Uninstall(ctx context.Context) (resultErr error) {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+	ctx = ContextWithInstallLock(ctx, lock)
 
 	current, record, _, err := installer.currentInstallation(false)
 	if err != nil {
@@ -241,34 +251,48 @@ func (installer *Installer) Uninstall(ctx context.Context) (resultErr error) {
 	if err != nil || digest != current.BinaryDigest {
 		return fmt.Errorf("%w: installed executable digest differs", ErrForeignBinary)
 	}
-	if err := installer.Lifecycle.Uninstall(ctx, current.Owner); err != nil {
-		return fmt.Errorf("uninstall CQ services: %w", err)
+	temporaryRoot, err := installer.Temporary.Create()
+	if err != nil {
+		return fmt.Errorf("create installer temporary root: %w", err)
 	}
-	restore := func(cause error) error {
+	defer func() {
+		if cleanupErr := installer.Temporary.Remove(temporaryRoot); cleanupErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove installer temporary root %s: %w", temporaryRoot, cleanupErr))
+		}
+	}()
+	serviceSnapshotPath := filepath.Join(temporaryRoot, "services.json")
+	if err := installer.Lifecycle.Snapshot(ctx, current.Owner, serviceSnapshotPath); err != nil {
+		return fmt.Errorf("snapshot installed CQ services: %w", err)
+	}
+	restore := func(cause error, restoreMetadata bool) error {
 		var rollbackErr error
 		if _, statErr := installer.FS.Stat(current.Executable); errors.Is(statErr, os.ErrNotExist) {
 			rollbackErr = errors.Join(rollbackErr, installer.writeExclusive(current.Executable, body, mode))
 		}
-		rollbackErr = errors.Join(rollbackErr, installer.Metadata.Install(ctx, *current))
-		rollbackErr = errors.Join(rollbackErr, installer.Lifecycle.Install(ctx, current.Owner))
-		rollbackErr = errors.Join(rollbackErr, installer.Lifecycle.Status(ctx))
+		if restoreMetadata {
+			rollbackErr = errors.Join(rollbackErr, installer.Metadata.Install(ctx, *current))
+		}
+		rollbackErr = errors.Join(rollbackErr, installer.Lifecycle.Restore(ctx, current.Owner, serviceSnapshotPath))
 		rollbackErr = errors.Join(rollbackErr, installer.State.Save(record))
 		if rollbackErr != nil {
 			return errors.Join(cause, fmt.Errorf("%w: %v", ErrRollbackUnverified, rollbackErr))
 		}
 		return cause
 	}
+	if err := installer.Lifecycle.Uninstall(ctx, current.Owner); err != nil {
+		return restore(fmt.Errorf("uninstall CQ services: %w", err), false)
+	}
 	if err := installer.Metadata.Remove(ctx, *current); err != nil {
-		return restore(fmt.Errorf("remove CQ platform metadata: %w", err))
+		return restore(fmt.Errorf("remove CQ platform metadata: %w", err), true)
 	}
 	if err := installer.FS.Remove(current.Executable); err != nil {
-		return restore(fmt.Errorf("remove CQ executable: %w", err))
+		return restore(fmt.Errorf("remove CQ executable: %w", err), true)
 	}
 	if err := installer.syncExecutableDirectory(); err != nil {
-		return restore(err)
+		return restore(err, true)
 	}
 	if err := installer.State.Remove(); err != nil {
-		return restore(fmt.Errorf("remove CQ installation ownership: %w", err))
+		return restore(fmt.Errorf("remove CQ installation ownership: %w", err), true)
 	}
 	return nil
 }
@@ -378,7 +402,7 @@ func (installer *Installer) prepareReplacement(previous *Installation, stagedBod
 	return nil
 }
 
-func (installer *Installer) rollback(ctx context.Context, previous *Installation, previousRecord installstate.Record, candidate Installation, adopted, candidateServicesInstalled bool) error {
+func (installer *Installer) rollback(ctx context.Context, previous *Installation, previousRecord installstate.Record, candidate Installation, adopted, candidateServicesInstalled bool, serviceSnapshotPath string, serviceSnapshotPrepared bool) error {
 	var result error
 	if candidateServicesInstalled {
 		result = errors.Join(result, installer.Lifecycle.Uninstall(ctx, candidate.Owner))
@@ -422,8 +446,11 @@ func (installer *Installer) rollback(ctx context.Context, previous *Installation
 		}
 		return installer.syncExecutableDirectory()
 	}
-	result = errors.Join(result, installer.Lifecycle.Install(ctx, previous.Owner))
-	result = errors.Join(result, installer.Lifecycle.Status(ctx))
+	if !serviceSnapshotPrepared {
+		result = errors.Join(result, fmt.Errorf("previous service snapshot is unavailable"))
+	} else {
+		result = errors.Join(result, installer.Lifecycle.Restore(ctx, previous.Owner, serviceSnapshotPath))
+	}
 	result = errors.Join(result, installer.Metadata.Install(ctx, *previous))
 	result = errors.Join(result, installer.Metadata.Inspect(ctx, *previous))
 	result = errors.Join(result, installer.State.Save(previousRecord))

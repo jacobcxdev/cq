@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +171,30 @@ func TestServiceRestartRunsRefreshThenProxy(t *testing.T) {
 	}
 }
 
+func TestServiceSnapshotRestoresExactDefinitionsAndStoppedState(t *testing.T) {
+	lifecycle, platform, store := newServiceHarness(t)
+	if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err != nil {
+		t.Fatal(err)
+	}
+	platform.proxyDefinition = "custom-proxy-definition"
+	platform.refreshDefinition = "custom-refresh-definition"
+	platform.proxyRunning = false
+	snapshotPath := filepath.Join(store.Roots.State, "services-snapshot.json")
+
+	if err := lifecycle.Snapshot(context.Background(), installstate.OwnerGo, snapshotPath); err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	platform.proxyDefinition = "candidate-proxy-definition"
+	platform.refreshDefinition = "candidate-refresh-definition"
+	platform.proxyRunning = true
+	if err := lifecycle.Restore(context.Background(), installstate.OwnerGo, snapshotPath); err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+	if platform.proxyDefinition != "custom-proxy-definition" || platform.refreshDefinition != "custom-refresh-definition" || platform.proxyRunning {
+		t.Fatalf("restored service state = proxy %q refresh %q running %t", platform.proxyDefinition, platform.refreshDefinition, platform.proxyRunning)
+	}
+}
+
 func TestServiceUninstallRemovesRefreshBeforeProxyAndState(t *testing.T) {
 	lifecycle, platform, store := newServiceHarness(t)
 	if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err != nil {
@@ -323,7 +349,7 @@ func TestServiceStatusJSONSchemaIsStable(t *testing.T) {
 
 func newServiceHarness(t *testing.T) (*serviceLifecycle, *fakeServicePlatform, installstate.Store) {
 	t.Helper()
-	stateRoot := filepath.Join(t.TempDir(), "state")
+	stateRoot := testServiceStateRoot(t)
 	store := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: stateRoot}}
 	executable := filepath.Join(t.TempDir(), "bin", serviceExecutableName())
 	platform := &fakeServicePlatform{executable: executable, proxyHealthy: true, refreshHealthy: true}
@@ -339,6 +365,33 @@ func newServiceHarness(t *testing.T) (*serviceLifecycle, *fakeServicePlatform, i
 		MutationLocker:   installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: stateRoot},
 	}
 	return lifecycle, platform, store
+}
+
+func testServiceStateRoot(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return filepath.Join(t.TempDir(), "state")
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, roots.State); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(roots.State, "service-state-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove Windows service state test root: %v", err)
+		}
+	})
+	return root
 }
 
 func serviceExecutableName() string {
@@ -372,21 +425,34 @@ type fakeServicePlatform struct {
 }
 
 func (platform *fakeServicePlatform) PrepareRollback(context.Context) (serviceRestore, error) {
-	platform.calls = append(platform.calls, "snapshot")
-	proxyRegistered := platform.proxyRegistered
-	proxyRunning := platform.proxyRunning
-	refreshRegistered := platform.refreshRegistered
-	proxyDefinition := platform.proxyDefinition
-	refreshDefinition := platform.refreshDefinition
-	return func(context.Context) error {
-		platform.calls = append(platform.calls, "restore")
-		platform.proxyRegistered = proxyRegistered
-		platform.proxyRunning = proxyRunning
-		platform.refreshRegistered = refreshRegistered
-		platform.proxyDefinition = proxyDefinition
-		platform.refreshDefinition = refreshDefinition
-		return nil
+	snapshot, err := platform.Snapshot(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) error {
+		return platform.Restore(ctx, snapshot)
 	}, nil
+}
+
+func (platform *fakeServicePlatform) Snapshot(context.Context) (servicePlatformSnapshot, error) {
+	platform.calls = append(platform.calls, "snapshot")
+	return servicePlatformSnapshot{Manager: "fake", Components: []serviceComponentSnapshot{
+		{ID: "proxy", Definition: []byte(platform.proxyDefinition), Exists: platform.proxyRegistered, Running: platform.proxyRunning},
+		{ID: "refresh", Definition: []byte(platform.refreshDefinition), Exists: platform.refreshRegistered},
+	}}, nil
+}
+
+func (platform *fakeServicePlatform) Restore(_ context.Context, snapshot servicePlatformSnapshot) error {
+	platform.calls = append(platform.calls, "restore")
+	if snapshot.Manager != "fake" || len(snapshot.Components) != 2 || snapshot.Components[0].ID != "proxy" || snapshot.Components[1].ID != "refresh" {
+		return errors.New("invalid fake snapshot")
+	}
+	platform.proxyRegistered = snapshot.Components[0].Exists
+	platform.proxyRunning = snapshot.Components[0].Running
+	platform.refreshRegistered = snapshot.Components[1].Exists
+	platform.proxyDefinition = string(snapshot.Components[0].Definition)
+	platform.refreshDefinition = string(snapshot.Components[1].Definition)
+	return nil
 }
 
 func (platform *fakeServicePlatform) Preflight(_ context.Context, executable string) error {

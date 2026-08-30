@@ -207,7 +207,7 @@ func TestInstallerServiceFailureRollsBackBinaryServicesMetadataAndState(t *testi
 		t.Fatalf("Install() error = %v", err)
 	}
 	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
-	if harness.lifecycle.uninstallCalls != 0 || harness.lifecycle.installCalls != 2 || harness.lifecycle.statusCalls != 1 {
+	if harness.lifecycle.uninstallCalls != 0 || harness.lifecycle.installCalls != 1 || harness.lifecycle.snapshotCalls != 1 || harness.lifecycle.restoreCalls != 1 || harness.lifecycle.statusCalls != 0 {
 		t.Fatalf("rollback lifecycle = %#v", harness.lifecycle)
 	}
 	if harness.metadata.installCalls != 1 || harness.metadata.inspectCalls != 1 {
@@ -229,8 +229,27 @@ func TestInstallerStatusFailureRollsBack(t *testing.T) {
 		t.Fatalf("Install() error = %v", err)
 	}
 	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
-	if harness.lifecycle.uninstallCalls != 1 || harness.lifecycle.installCalls != 2 || harness.lifecycle.statusCalls != 2 {
+	if harness.lifecycle.uninstallCalls != 1 || harness.lifecycle.installCalls != 1 || harness.lifecycle.snapshotCalls != 1 || harness.lifecycle.restoreCalls != 1 || harness.lifecycle.statusCalls != 1 {
 		t.Fatalf("status rollback lifecycle = %#v", harness.lifecycle)
+	}
+}
+
+func TestInstallerPostServiceFailureRestoresExactServiceSnapshot(t *testing.T) {
+	harness := newInstallerHarness(t)
+	oldBody := []byte("old")
+	harness.seedInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
+	harness.lifecycle.modelServiceState = true
+	harness.lifecycle.definition = "custom-owned-definition"
+	harness.lifecycle.running = false
+	harness.metadata.installErrors = []error{errors.New("metadata failed after service install")}
+
+	err := harness.installer.Install(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "metadata failed after service install") {
+		t.Fatalf("Install() error = %v", err)
+	}
+	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
+	if harness.lifecycle.definition != "custom-owned-definition" || harness.lifecycle.running {
+		t.Fatalf("restored service state = definition %q running %t", harness.lifecycle.definition, harness.lifecycle.running)
 	}
 }
 
@@ -246,7 +265,7 @@ func TestInstallerReplacementFailureRollsBackStoppedServices(t *testing.T) {
 		t.Fatalf("Install() error = %v", err)
 	}
 	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
-	if harness.lifecycle.stopCalls != 1 || harness.lifecycle.installCalls != 1 || harness.lifecycle.statusCalls != 1 {
+	if harness.lifecycle.stopCalls != 1 || harness.lifecycle.installCalls != 0 || harness.lifecycle.snapshotCalls != 1 || harness.lifecycle.restoreCalls != 1 || harness.lifecycle.statusCalls != 0 {
 		t.Fatalf("replacement rollback lifecycle = %#v", harness.lifecycle)
 	}
 }
@@ -255,7 +274,8 @@ func TestInstallerRollbackValidationFailurePreservesRecoveryFile(t *testing.T) {
 	harness := newInstallerHarness(t)
 	oldBody := []byte("old")
 	harness.seedInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
-	harness.lifecycle.statusErrors = []error{errors.New("candidate unhealthy"), errors.New("rollback unhealthy")}
+	harness.lifecycle.statusErrors = []error{errors.New("candidate unhealthy")}
+	harness.lifecycle.restoreErrors = []error{errors.New("rollback unhealthy")}
 
 	err := harness.installer.Install(context.Background())
 	if !errors.Is(err, ErrRollbackUnverified) || !strings.Contains(err.Error(), harness.installer.rollbackPath()) {
@@ -308,6 +328,52 @@ func TestInstallerUninstallRejectsChangedOwnedBinary(t *testing.T) {
 	}
 	if harness.lifecycle.totalCalls() != 0 || harness.metadata.totalCalls() != 0 {
 		t.Fatal("changed binary triggered uninstall mutation")
+	}
+}
+
+func TestInstallerUninstallLifecycleFailureRestoresExactSnapshot(t *testing.T) {
+	harness := newInstallerHarness(t)
+	oldBody := []byte("owned")
+	harness.seedInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
+	harness.lifecycle.modelServiceState = true
+	harness.lifecycle.definition = "custom-owned-definition"
+	harness.lifecycle.running = false
+	harness.lifecycle.mutateOnUninstallError = true
+	harness.lifecycle.uninstallErrors = []error{errors.New("remove refresh service")}
+
+	err := harness.installer.Uninstall(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "uninstall CQ services") {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
+	if harness.lifecycle.definition != "custom-owned-definition" || harness.lifecycle.running {
+		t.Fatalf("restored service state = definition %q running %t", harness.lifecycle.definition, harness.lifecycle.running)
+	}
+	if harness.lifecycle.snapshotCalls != 1 || harness.lifecycle.restoreCalls != 1 {
+		t.Fatalf("uninstall rollback lifecycle = %#v", harness.lifecycle)
+	}
+}
+
+func TestInstallerUninstallStateRemovalFailureRestoresExactSnapshot(t *testing.T) {
+	harness := newInstallerHarness(t)
+	oldBody := []byte("owned")
+	harness.seedInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
+	harness.lifecycle.modelServiceState = true
+	harness.lifecycle.definition = "custom-owned-definition"
+	harness.lifecycle.running = false
+	harness.fsys.failRemoveTarget = harness.store.Path()
+	harness.fsys.failRemoveCount = 1
+
+	err := harness.installer.Uninstall(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "remove CQ installation ownership") {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	harness.assertInstalled(t, oldBody, "0.26.2", installstate.OwnerGo)
+	if harness.lifecycle.definition != "custom-owned-definition" || harness.lifecycle.running {
+		t.Fatalf("restored service state = definition %q running %t", harness.lifecycle.definition, harness.lifecycle.running)
+	}
+	if harness.lifecycle.snapshotCalls != 1 || harness.lifecycle.restoreCalls != 1 {
+		t.Fatalf("uninstall rollback lifecycle = %#v", harness.lifecycle)
 	}
 }
 
@@ -444,6 +510,8 @@ type failingInstallerFS struct {
 	*fsutil.MemFS
 	failRenameDestination string
 	failRenameCount       int
+	failRemoveTarget      string
+	failRemoveCount       int
 	renameCalls           int
 }
 
@@ -454,6 +522,14 @@ func (fsys *failingInstallerFS) Rename(oldPath, newPath string) error {
 		return errors.New("injected replacement failure")
 	}
 	return fsys.MemFS.Rename(oldPath, newPath)
+}
+
+func (fsys *failingInstallerFS) Remove(path string) error {
+	if path == fsys.failRemoveTarget && fsys.failRemoveCount > 0 {
+		fsys.failRemoveCount--
+		return errors.New("injected removal failure")
+	}
+	return fsys.MemFS.Remove(path)
 }
 
 type fakeInstallerDownloader struct {
@@ -498,23 +574,64 @@ func (runner *fakeInstallerRunner) Version(_ context.Context, executable string)
 }
 
 type fakeInstallerLifecycle struct {
-	stopCalls       int
-	installCalls    int
-	statusCalls     int
-	uninstallCalls  int
-	installErrors   []error
-	statusErrors    []error
-	uninstallErrors []error
+	stopCalls              int
+	installCalls           int
+	snapshotCalls          int
+	restoreCalls           int
+	statusCalls            int
+	uninstallCalls         int
+	installErrors          []error
+	statusErrors           []error
+	uninstallErrors        []error
+	restoreErrors          []error
+	mutateOnUninstallError bool
+	modelServiceState      bool
+	definition             string
+	running                bool
+	savedDefinition        string
+	savedRunning           bool
 }
 
 func (lifecycle *fakeInstallerLifecycle) Stop(context.Context) error {
 	lifecycle.stopCalls++
+	if lifecycle.modelServiceState {
+		lifecycle.definition = ""
+		lifecycle.running = false
+	}
 	return nil
 }
 
 func (lifecycle *fakeInstallerLifecycle) Install(_ context.Context, _ installstate.Owner) error {
 	lifecycle.installCalls++
-	return popInstallerError(&lifecycle.installErrors)
+	err := popInstallerError(&lifecycle.installErrors)
+	if err == nil && lifecycle.modelServiceState {
+		if lifecycle.installCalls == 1 {
+			lifecycle.definition = "candidate-definition"
+		} else {
+			lifecycle.definition = "rendered-default-definition"
+		}
+		lifecycle.running = true
+	}
+	return err
+}
+
+func (lifecycle *fakeInstallerLifecycle) Snapshot(_ context.Context, _ installstate.Owner, _ string) error {
+	lifecycle.snapshotCalls++
+	lifecycle.savedDefinition = lifecycle.definition
+	lifecycle.savedRunning = lifecycle.running
+	return nil
+}
+
+func (lifecycle *fakeInstallerLifecycle) Restore(_ context.Context, _ installstate.Owner, _ string) error {
+	lifecycle.restoreCalls++
+	if err := popInstallerError(&lifecycle.restoreErrors); err != nil {
+		return err
+	}
+	if lifecycle.modelServiceState {
+		lifecycle.definition = lifecycle.savedDefinition
+		lifecycle.running = lifecycle.savedRunning
+	}
+	return nil
 }
 
 func (lifecycle *fakeInstallerLifecycle) Status(context.Context) error {
@@ -524,11 +641,16 @@ func (lifecycle *fakeInstallerLifecycle) Status(context.Context) error {
 
 func (lifecycle *fakeInstallerLifecycle) Uninstall(_ context.Context, _ installstate.Owner) error {
 	lifecycle.uninstallCalls++
-	return popInstallerError(&lifecycle.uninstallErrors)
+	err := popInstallerError(&lifecycle.uninstallErrors)
+	if lifecycle.modelServiceState && (err == nil || lifecycle.mutateOnUninstallError) {
+		lifecycle.definition = ""
+		lifecycle.running = false
+	}
+	return err
 }
 
 func (lifecycle *fakeInstallerLifecycle) totalCalls() int {
-	return lifecycle.stopCalls + lifecycle.installCalls + lifecycle.statusCalls + lifecycle.uninstallCalls
+	return lifecycle.stopCalls + lifecycle.installCalls + lifecycle.snapshotCalls + lifecycle.restoreCalls + lifecycle.statusCalls + lifecycle.uninstallCalls
 }
 
 type fakeInstallerMetadata struct {

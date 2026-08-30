@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -250,11 +251,11 @@ func (noPlatformMetadata) Inspect(context.Context, installer.Installation) error
 type commandLifecycle struct {
 	Executable string
 	Owner      installstate.Owner
-	Run        func(context.Context, string, ...string) ([]byte, error)
+	Run        func(context.Context, string, *os.File, ...string) ([]byte, error)
 }
 
 func (lifecycle commandLifecycle) Stop(ctx context.Context) error {
-	_, err := lifecycle.run(ctx, "service", "uninstall", "--owner="+string(lifecycle.Owner), "--installer-lock-held")
+	_, err := lifecycle.runMutation(ctx, "service", "uninstall", "--owner="+string(lifecycle.Owner))
 	return err
 }
 
@@ -262,12 +263,28 @@ func (lifecycle commandLifecycle) Install(ctx context.Context, owner installstat
 	if owner != lifecycle.Owner {
 		return fmt.Errorf("service owner changed during installation")
 	}
-	_, err := lifecycle.run(ctx, "service", "install", "--owner="+string(owner), "--installer-lock-held")
+	_, err := lifecycle.runMutation(ctx, "service", "install", "--owner="+string(owner))
+	return err
+}
+
+func (lifecycle commandLifecycle) Snapshot(ctx context.Context, owner installstate.Owner, path string) error {
+	if owner != lifecycle.Owner {
+		return fmt.Errorf("service owner changed during installation")
+	}
+	_, err := lifecycle.runMutation(ctx, "service", "snapshot", "--owner="+string(owner), "--snapshot-file="+path)
+	return err
+}
+
+func (lifecycle commandLifecycle) Restore(ctx context.Context, owner installstate.Owner, path string) error {
+	if owner != lifecycle.Owner {
+		return fmt.Errorf("service owner changed during installation")
+	}
+	_, err := lifecycle.runMutation(ctx, "service", "restore", "--owner="+string(owner), "--snapshot-file="+path)
 	return err
 }
 
 func (lifecycle commandLifecycle) Status(ctx context.Context) error {
-	data, err := lifecycle.run(ctx, "service", "status", "--json")
+	data, err := lifecycle.run(ctx, nil, "service", "status", "--json")
 	if err != nil {
 		return err
 	}
@@ -304,21 +321,31 @@ func (lifecycle commandLifecycle) Uninstall(ctx context.Context, owner installst
 	if owner != lifecycle.Owner {
 		return fmt.Errorf("service owner changed during installation")
 	}
-	_, err := lifecycle.run(ctx, "service", "uninstall", "--owner="+string(owner), "--installer-lock-held")
+	_, err := lifecycle.runMutation(ctx, "service", "uninstall", "--owner="+string(owner))
 	return err
 }
 
-func (lifecycle commandLifecycle) run(ctx context.Context, args ...string) ([]byte, error) {
+func (lifecycle commandLifecycle) runMutation(ctx context.Context, args ...string) (output []byte, resultErr error) {
+	lockFile, err := installer.InheritedInstallLockFile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("inherit CQ installer lock: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, lockFile.Close()) }()
+	return lifecycle.run(ctx, lockFile, append(args, "--installer-lock-held")...)
+}
+
+func (lifecycle commandLifecycle) run(ctx context.Context, stdin *os.File, args ...string) ([]byte, error) {
 	if lifecycle.Executable == "" || lifecycle.Run == nil {
 		return nil, fmt.Errorf("service command is unavailable")
 	}
-	return lifecycle.Run(ctx, lifecycle.Executable, args...)
+	return lifecycle.Run(ctx, lifecycle.Executable, stdin, args...)
 }
 
-func runCQService(ctx context.Context, executable string, args ...string) ([]byte, error) {
+func runCQService(ctx context.Context, executable string, stdin *os.File, args ...string) ([]byte, error) {
 	var output boundedBuffer
 	output.Limit = maxServiceOutputBytes
 	command := exec.CommandContext(ctx, executable, args...)
+	command.Stdin = stdin
 	command.Stdout = &output
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {

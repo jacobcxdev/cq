@@ -98,8 +98,28 @@ func (fsys OSFileSystem) OpenDurableDirectory(name string) (DurableDirectory, er
 	return &windowsSecureDirectory{file: file, childrenPrivate: boundary.PostAnchorPrivate}, nil
 }
 
-func (fsys OSFileSystem) openSecureDirectoryAncestor(name string) (DurableDirectory, error) {
-	return fsys.OpenDurableDirectory(name)
+func (fsys OSFileSystem) openSecureDirectoryAncestor(target, ancestor string) (DurableDirectory, error) {
+	selection, err := fsys.resolveSecureBoundary(target, secureBoundaryCQPrivate)
+	if err != nil {
+		return nil, err
+	}
+	boundary, err := fsys.windowsPathBoundary(selection, secureBoundaryCQPrivate)
+	if err != nil {
+		return nil, err
+	}
+	if !windowsPathWithin(boundary.AnchorPath, ancestor) || !windowsPathWithin(ancestor, target) {
+		return nil, fmt.Errorf("%w: Windows secure directory ancestor boundary", ErrUnsafeSecurePath)
+	}
+	file, err := openWindowsAbsolutePath(
+		ancestor,
+		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.FILE_TRAVERSE|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_DIRECTORY_FILE,
+		boundary,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &windowsSecureDirectory{file: file, childrenPrivate: boundary.PostAnchorPrivate}, nil
 }
 
 func (fsys OSFileSystem) OpenSecureDirectory(name string) (SecureDirectory, error) {

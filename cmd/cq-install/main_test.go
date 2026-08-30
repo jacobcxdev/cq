@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"testing"
 
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
@@ -173,7 +176,13 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 	lifecycle := commandLifecycle{
 		Executable: "/go/bin/cq",
 		Owner:      installstate.OwnerGo,
-		Run: func(_ context.Context, executable string, args ...string) ([]byte, error) {
+		Run: func(_ context.Context, executable string, stdin *os.File, args ...string) ([]byte, error) {
+			if args[1] == "status" && stdin != nil {
+				t.Fatal("status inherited installer lock")
+			}
+			if args[1] != "status" && stdin == nil {
+				t.Fatal("mutation omitted inherited installer lock")
+			}
 			calls = append(calls, append([]string{executable}, args...))
 			if len(args) == 3 && args[0] == "service" && args[1] == "status" {
 				return []byte(`{"schema_version":1,"owner":"go","proxy":{"registered":true,"running":true,"configured_executable":"/go/bin/cq","live_executable":"/go/bin/cq","healthy":true},"refresh":{"registered":true,"configured_executable":"/go/bin/cq","healthy":true}}`), nil
@@ -181,14 +190,21 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 			return nil, nil
 		},
 	}
-	ctx := context.Background()
+	ctx := installer.ContextWithInstallLock(context.Background(), commandTestInstallLock{})
+	snapshotPath := filepath.Join(t.TempDir(), "services.json")
 	if err := lifecycle.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := lifecycle.Install(ctx, installstate.OwnerGo); err != nil {
 		t.Fatal(err)
 	}
+	if err := lifecycle.Snapshot(ctx, installstate.OwnerGo, snapshotPath); err != nil {
+		t.Fatal(err)
+	}
 	if err := lifecycle.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Restore(ctx, installstate.OwnerGo, snapshotPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := lifecycle.Uninstall(ctx, installstate.OwnerGo); err != nil {
@@ -197,7 +213,9 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 	want := [][]string{
 		{"/go/bin/cq", "service", "uninstall", "--owner=go", "--installer-lock-held"},
 		{"/go/bin/cq", "service", "install", "--owner=go", "--installer-lock-held"},
+		{"/go/bin/cq", "service", "snapshot", "--owner=go", "--snapshot-file=" + snapshotPath, "--installer-lock-held"},
 		{"/go/bin/cq", "service", "status", "--json"},
+		{"/go/bin/cq", "service", "restore", "--owner=go", "--snapshot-file=" + snapshotPath, "--installer-lock-held"},
 		{"/go/bin/cq", "service", "uninstall", "--owner=go", "--installer-lock-held"},
 	}
 	if len(calls) != len(want) {
@@ -210,11 +228,29 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 	}
 }
 
+func TestCommandLifecycleRejectsMissingInstallLockCapability(t *testing.T) {
+	calls := 0
+	lifecycle := commandLifecycle{
+		Executable: "/go/bin/cq",
+		Owner:      installstate.OwnerGo,
+		Run: func(context.Context, string, *os.File, ...string) ([]byte, error) {
+			calls++
+			return nil, nil
+		},
+	}
+	if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err == nil {
+		t.Fatal("Install() accepted a context without the held installer lock")
+	}
+	if calls != 0 {
+		t.Fatalf("service command calls = %d, want 0", calls)
+	}
+}
+
 func TestCommandLifecycleStatusRejectsUnhealthyServices(t *testing.T) {
 	lifecycle := commandLifecycle{
 		Executable: "/go/bin/cq",
 		Owner:      installstate.OwnerGo,
-		Run: func(context.Context, string, ...string) ([]byte, error) {
+		Run: func(context.Context, string, *os.File, ...string) ([]byte, error) {
 			return []byte(`{"schema_version":1,"proxy":{"registered":false,"healthy":false},"refresh":{"registered":false,"healthy":false}}`), nil
 		},
 	}
@@ -236,6 +272,14 @@ func TestCommandVersionRunnerNormalisesReleaseVersion(t *testing.T) {
 	if got != "0.27.0" {
 		t.Fatalf("Version() = %q", got)
 	}
+}
+
+type commandTestInstallLock struct{}
+
+func (commandTestInstallLock) Close() error { return nil }
+
+func (commandTestInstallLock) InheritedFile() (*os.File, error) {
+	return os.Open(os.DevNull)
 }
 
 func testCommandDependencies(action installerAction) commandDependencies {

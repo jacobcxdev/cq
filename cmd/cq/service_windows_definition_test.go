@@ -185,12 +185,12 @@ func TestWindowsTaskDefinitionServiceReconcilesTasksInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"/Query", "/TN", windowsProxyTaskPath, "/XML"},
-		{"/Query", "/TN", windowsRefreshTaskPath, "/XML"},
-		{"/Query", "/TN", windowsProxyTaskPath, "/XML"},
+		{"/Query", "/TN", windowsProxyTaskPath, "/XML", "/HResult"},
+		{"/Query", "/TN", windowsRefreshTaskPath, "/XML", "/HResult"},
+		{"/Query", "/TN", windowsProxyTaskPath, "/XML", "/HResult"},
 		{"/Create", "/TN", windowsProxyTaskPath, "/XML", runner.xmlPaths[0], "/F"},
 		{"/Run", "/TN", windowsProxyTaskPath},
-		{"/Query", "/TN", windowsRefreshTaskPath, "/XML"},
+		{"/Query", "/TN", windowsRefreshTaskPath, "/XML", "/HResult"},
 		{"/Create", "/TN", windowsRefreshTaskPath, "/XML", runner.xmlPaths[1], "/F"},
 		{"/Run", "/TN", windowsRefreshTaskPath},
 	}
@@ -343,6 +343,33 @@ func TestWindowsTaskDefinitionServiceRollbackRemovesCreatedFolder(t *testing.T) 
 	}
 }
 
+func TestWindowsTaskDefinitionServiceRestoreRecreatesExactFolderFirst(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	priorFolderSDDL := "D:PAR(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")"
+	runner.folderSDDL = priorFolderSDDL
+	snapshot, err := platform.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.tasks = map[string][]byte{}
+	runner.running = map[string]bool{}
+	runner.folderExists = false
+	runner.folderSDDL = ""
+
+	if err := platform.Restore(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.folderExists || runner.folderSDDL != priorFolderSDDL {
+		t.Fatalf("restored folder = %t, %q", runner.folderExists, runner.folderSDDL)
+	}
+}
+
 func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *fakeWindowsTaskRunner) {
 	t.Helper()
 	runner := &fakeWindowsTaskRunner{
@@ -397,6 +424,9 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 		}
 		return append([]byte(nil), definition...), nil
 	case "/create":
+		if !runner.folderExists {
+			return nil, errors.New("Task Scheduler folder does not exist")
+		}
 		path, xmlPath := args[2], args[4]
 		definition, err := os.ReadFile(xmlPath)
 		if err != nil {
@@ -457,9 +487,9 @@ func (runner *fakeWindowsTaskRunner) FolderState(context.Context) (windowsTaskFo
 	return windowsTaskFolderState{Exists: runner.folderExists, SecurityDescriptor: runner.folderSDDL}, nil
 }
 
-func (runner *fakeWindowsTaskRunner) CreateFolder(_ context.Context, _ string) error {
+func (runner *fakeWindowsTaskRunner) CreateFolder(_ context.Context, securityDescriptor string) error {
 	runner.folderExists = true
-	runner.folderSDDL = "D:PAI(A;;FA;;;SY)(A;;FA;;;" + testWindowsSID + ")"
+	runner.folderSDDL = securityDescriptor
 	return nil
 }
 

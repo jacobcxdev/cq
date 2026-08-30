@@ -13,8 +13,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func TestRunServiceInstallDefaultsToManualOwner(t *testing.T) {
@@ -181,9 +183,98 @@ func TestRunServiceMutationsShareInstallerLock(t *testing.T) {
 		t.Fatalf("contended install mutated platform: %v", platform.calls)
 	}
 
-	if err := runServiceWithLifecycle([]string{"install", "--owner=go", "--installer-lock-held"}, lifecycle, io.Discard); err != nil {
+	if err := runServiceWithLifecycle([]string{"install", "--owner=go", "--installer-lock-held"}, lifecycle, io.Discard); err == nil {
+		t.Fatal("public installer lock marker bypassed mutation lock")
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("unverified installer lock marker mutated platform: %v", platform.calls)
+	}
+}
+
+func TestRunServiceAcceptsInheritedInstallerLock(t *testing.T) {
+	lifecycle, platform, store := newServiceHarness(t)
+	locker := installer.FileInstallLocker{
+		FS:        fsutil.OSFileSystem{},
+		StateRoot: testServiceInstallerLockStateRoot(t),
+	}
+	lifecycle.MutationLocker = locker
+	lock, err := locker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	inherited, err := installer.InheritedInstallLockFile(installer.ContextWithInstallLock(context.Background(), lock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inherited.Close()
+
+	if err := runServiceWithLifecycleInput(
+		[]string{"install", "--owner=go", "--installer-lock-held"},
+		lifecycle,
+		io.Discard,
+		inherited,
+	); err != nil {
 		t.Fatalf("installer child install error = %v", err)
 	}
+	record, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Owner != installstate.OwnerGo {
+		t.Fatalf("owner = %q, want go", record.Owner)
+	}
+	snapshotPath := filepath.Join(store.Roots.State, "services-command-snapshot.json")
+	platform.proxyDefinition = "custom-proxy"
+	platform.proxyRunning = false
+	if err := runServiceWithLifecycleInput(
+		[]string{"snapshot", "--owner=go", "--snapshot-file=" + snapshotPath, "--installer-lock-held"},
+		lifecycle,
+		io.Discard,
+		inherited,
+	); err != nil {
+		t.Fatalf("installer child snapshot error = %v", err)
+	}
+	platform.proxyDefinition = "candidate-proxy"
+	platform.proxyRunning = true
+	if err := runServiceWithLifecycleInput(
+		[]string{"restore", "--owner=go", "--snapshot-file=" + snapshotPath, "--installer-lock-held"},
+		lifecycle,
+		io.Discard,
+		inherited,
+	); err != nil {
+		t.Fatalf("installer child restore error = %v", err)
+	}
+	if platform.proxyDefinition != "custom-proxy" || platform.proxyRunning {
+		t.Fatalf("restored service state = %q running %t", platform.proxyDefinition, platform.proxyRunning)
+	}
+}
+
+func testServiceInstallerLockStateRoot(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return filepath.Join(t.TempDir(), "state")
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, roots.State); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(roots.State, "service-lock-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove Windows service lock test root: %v", err)
+		}
+	})
+	return root
 }
 
 func TestServiceHelpIsPureAndHidesOwnerFlag(t *testing.T) {

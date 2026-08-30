@@ -1,8 +1,10 @@
 package installer
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -28,11 +30,37 @@ type FileInstallLocker struct {
 	StateRoot string
 }
 
+type fileInstallLock struct {
+	fsutil.ExclusiveLock
+}
+
+func (lock *fileInstallLock) InheritedFile() (*os.File, error) {
+	return fsutil.DuplicateExclusiveLockFile(lock.ExclusiveLock)
+}
+
+type installLockContextKey struct{}
+
+// ContextWithInstallLock binds one held lock to installer lifecycle calls.
+func ContextWithInstallLock(ctx context.Context, lock InstallLock) context.Context {
+	return context.WithValue(ctx, installLockContextKey{}, lock)
+}
+
+// InheritedInstallLockFile duplicates the held lock bound to ctx.
+func InheritedInstallLockFile(ctx context.Context) (*os.File, error) {
+	lock, ok := ctx.Value(installLockContextKey{}).(interface {
+		InheritedFile() (*os.File, error)
+	})
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	return lock.InheritedFile()
+}
+
 func (locker FileInstallLocker) Acquire() (InstallLock, error) {
 	if locker.FS == nil || locker.StateRoot == "" || !filepath.IsAbs(locker.StateRoot) || filepath.Clean(locker.StateRoot) != locker.StateRoot {
 		return nil, fmt.Errorf("invalid installer lock state root")
 	}
-	if err := locker.FS.MkdirAll(locker.StateRoot, 0o700); err != nil {
+	if err := fsutil.EnsureSecureDirectory(locker.FS, locker.StateRoot); err != nil {
 		return nil, fmt.Errorf("create installer state root: %w", err)
 	}
 	opener, ok := locker.FS.(fsutil.ExclusiveLocker)
@@ -46,5 +74,13 @@ func (locker FileInstallLocker) Acquire() (InstallLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acquire CQ installer lock: %w", err)
 	}
-	return lock, nil
+	return &fileInstallLock{ExclusiveLock: lock}, nil
+}
+
+// ValidateInherited proves file is the descriptor for this active lock.
+func (locker FileInstallLocker) ValidateInherited(file *os.File) error {
+	if locker.FS == nil || locker.StateRoot == "" || !filepath.IsAbs(locker.StateRoot) || filepath.Clean(locker.StateRoot) != locker.StateRoot {
+		return fmt.Errorf("invalid installer lock state root")
+	}
+	return fsutil.ValidateInheritedExclusiveLockFile(locker.FS, filepath.Join(locker.StateRoot, installLockFilename), file)
 }

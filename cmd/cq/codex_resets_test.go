@@ -386,22 +386,6 @@ func TestDispatchCodexResetsPreservesGlobalJSON(t *testing.T) {
 	}
 }
 
-func TestCodexResetsCommandsSkipAutomaticAgent(t *testing.T) {
-	for _, command := range []string{
-		"codex resets list",
-		"codex resets list <account-reference>",
-		"codex resets recommend",
-		"codex resets use <account-reference>",
-	} {
-		if shouldEnsureAgentAfter(command) {
-			t.Fatalf("shouldEnsureAgentAfter(%q) = true", command)
-		}
-	}
-	if !shouldEnsureAgentAfter("codex accounts") {
-		t.Fatal("ordinary account command unexpectedly skipped agent")
-	}
-}
-
 func TestCodexResetsRecommendIsAdvisoryAcrossLayers(t *testing.T) {
 	fixture := newCodexResetCLIFixture(panicReader{})
 	root := newCodexResetCLITempDir(t)
