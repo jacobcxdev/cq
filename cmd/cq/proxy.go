@@ -120,6 +120,12 @@ var runProxyAdoptedRuntimeFn = func(context.Context, net.Listener, func(context.
 var runProxyOwnedRuntimeFn = func(context.Context, int, func(context.Context, net.Listener, http.Handler) error) (bool, error) {
 	return false, nil
 }
+var activateProxyValidationCandidateFn = func(fd, port int) error {
+	if fd != 0 || port != 0 {
+		return errors.New("proxy validation candidate is unavailable")
+	}
+	return nil
+}
 
 var adoptProxyListenerFn = func() (net.Listener, error) { return nil, nil }
 
@@ -457,10 +463,11 @@ func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefault
 }
 
 type proxyCommandOptions struct {
-	Port                 int
-	MigrateLegacyManaged bool
-	JSON                 bool
-	RuntimeRole          *proxy.RuntimeRoleManifestV1
+	Port                       int
+	MigrateLegacyManaged       bool
+	JSON                       bool
+	RuntimeRole                *proxy.RuntimeRoleManifestV1
+	LinuxValidationCandidateFD int
 }
 
 type proxyRegistryDependencies struct {
@@ -584,6 +591,16 @@ func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOpt
 				return opts, fmt.Errorf("%s: unknown argument %s", command, args[i])
 			}
 			opts.MigrateLegacyManaged = true
+		case "--linux-validation-candidate-fd":
+			if command != "proxy start" || i+1 >= len(args) || opts.LinuxValidationCandidateFD != 0 {
+				return opts, fmt.Errorf("%s: invalid Linux validation candidate controller", command)
+			}
+			fd, err := strconv.Atoi(args[i+1])
+			if err != nil || fd != 3 {
+				return opts, fmt.Errorf("%s: invalid Linux validation candidate controller", command)
+			}
+			opts.LinuxValidationCandidateFD = fd
+			i++
 		case "--json":
 			if command != "proxy status" {
 				return opts, fmt.Errorf("%s: unknown argument", command)
@@ -601,6 +618,14 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 }
 
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
+	if opts.LinuxValidationCandidateFD != 0 {
+		if opts.Port == 0 || opts.Port == proxy.DefaultPort {
+			return errors.New("Linux validation candidate requires an isolated port")
+		}
+		if err := activateProxyValidationCandidateFn(opts.LinuxValidationCandidateFD, opts.Port); err != nil {
+			return err
+		}
+	}
 	roots, err := userdirs.Default()
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
@@ -716,7 +741,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if intent != nil {
 		return runInstalledHTTPValidationStartupFn(context.Background(), cfg, version, intent)
 	}
-	if workerRole == nil {
+	if workerRole == nil && opts.LinuxValidationCandidateFD == 0 {
 		handled, err := runProxyOwnedRuntimeFn(context.Background(), cfg.Port, serveRuntimeSupervisor)
 		if handled {
 			return err

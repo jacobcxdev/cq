@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package main
 
@@ -15,3 +15,5 @@ func validateInstalledHTTPValidationCandidate(int) (installedHTTPValidationCandi
 func restartInstalledHTTPValidationCandidate(string) error {
 	return errors.New("installed HTTP validation is only supported on macOS")
 }
+
+func cleanupInstalledHTTPValidationCandidate() {}
