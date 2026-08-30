@@ -70,6 +70,9 @@ jobs:
       - run: .\cq.exe --version
       - run: .\cq-install.exe --help
       - run: go vet ./...
-      - run: go test -race -count=1 ./internal/installer -run '^TestWindows'
+      - run: go test -race -count=1 ./internal/fsutil
+      - run: go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'
       - run: go test -race -count=1 ./cmd/cq-install
-      - run: go test -race -count=1 ./...
+      - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
+        env:
+          CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"

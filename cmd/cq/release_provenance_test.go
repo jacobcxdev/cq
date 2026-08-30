@@ -202,6 +202,10 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 		"go build -o cq.exe ./cmd/cq",
 		"go build -o cq-install.exe ./cmd/cq-install",
 		"go test -race -count=1 ./...",
+		"go test -race -count=1 ./internal/fsutil",
+		"go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'",
+		"go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'",
+		`CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"`,
 		"GOOS=windows GOARCH=amd64 go build ./...",
 		"GOOS=windows GOARCH=arm64 go build ./...",
 		"GOOS=linux GOARCH=amd64 go build ./...",
@@ -215,6 +219,9 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 	}
 	if strings.Contains(text, "self-hosted") || strings.Contains(text, "bespoke") {
 		t.Fatal("CI requires a persistent custom runner")
+	}
+	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
+		t.Fatalf("full race suite runs on %d platforms, want Linux only", count)
 	}
 }
 
