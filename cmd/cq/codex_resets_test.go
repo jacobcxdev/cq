@@ -685,12 +685,7 @@ func equalCodexResetEpochs(left, right map[string]map[quota.WindowName]int64) bo
 
 func newCodexResetCLITempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/private/tmp", "cq-reset-cli-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return t.TempDir()
 }
 
 func assertPublicCodexResetJSON(t *testing.T, body []byte) {

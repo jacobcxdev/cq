@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -191,7 +192,11 @@ func TestDispatchUnknownCommandReturnsError(t *testing.T) {
 
 func TestDispatchCodexAccountsJSON(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	shortConfigDir, err := os.MkdirTemp("/private/tmp", "cq-accounts-")
+	tempRoot := os.TempDir()
+	if runtime.GOOS == "darwin" {
+		tempRoot = "/private/tmp"
+	}
+	shortConfigDir, err := os.MkdirTemp(tempRoot, "cq-accounts-")
 	if err != nil {
 		t.Fatal(err)
 	}
