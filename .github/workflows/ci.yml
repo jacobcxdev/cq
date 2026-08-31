@@ -53,6 +53,17 @@ jobs:
           fi
           cat "$test_log"
           grep -F -- "--- PASS: ${test_name} " "$test_log"
+      - run: go test -race -count=1 -skip '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$' ./...
+
+  linux-confinement:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
       - name: Permit Linux acceptance namespaces
         run: |
           setting=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
@@ -63,7 +74,6 @@ jobs:
           fi
       - name: Gate Linux acceptance confinement
         run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
-      - run: go test -race -count=1 ./...
       - name: Restore Linux namespace restriction
         if: always()
         run: |
