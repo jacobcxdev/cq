@@ -89,7 +89,7 @@ jobs:
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
-            grep -E 'EPERM|EACCES|ENOSYS|landlock_|mount\(|sendto\(|recvfrom\(' "$trace" | tail -300 >&2 || true
+            grep -E 'clone|execve|mount|landlock|sendto|sendmsg|recvfrom|recvmsg|F_GETFD|kill|SIGCHLD|SIGKILL|exit' "$trace" | tail -500 >&2 || true
             exit "$status"
           fi
       - run: go test -race -count=1 ./...
