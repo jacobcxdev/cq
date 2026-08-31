@@ -79,7 +79,19 @@ jobs:
             mount --make-rprivate /
           '
       - name: Gate Linux acceptance confinement
-        run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq strace
+          trace="$RUNNER_TEMP/cq-linux-acceptance.strace"
+          set +e
+          strace -f -qq -s 256 -o "$trace" \
+            go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            grep -E 'EPERM|EACCES|ENOSYS|landlock_|mount\(|sendto\(|recvfrom\(' "$trace" | tail -300 >&2 || true
+            exit "$status"
+          fi
       - run: go test -race -count=1 ./...
       - name: Restore Linux namespace restriction
         if: always()
