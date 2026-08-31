@@ -14,7 +14,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Install current Codex client
         run: |
@@ -34,7 +34,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - run: go build ./...
       - run: GOOS=windows GOARCH=amd64 go build ./...
@@ -61,37 +61,8 @@ jobs:
             echo "CQ_APPARMOR_USERNS_ORIGINAL=$value" >> "$GITHUB_ENV"
             echo 0 | sudo tee "$setting" >/dev/null
           fi
-      - name: Probe Linux acceptance namespaces
-        run: |
-          uname -a
-          cat /etc/os-release
-          for setting in \
-            /proc/sys/kernel/apparmor_restrict_unprivileged_userns \
-            /proc/sys/kernel/unprivileged_userns_clone \
-            /proc/sys/user/max_user_namespaces; do
-            if [ -f "$setting" ]; then
-              printf '%s=' "$setting"
-              cat "$setting"
-            fi
-          done
-          unshare --user --map-root-user --net --mount sh -euxc '
-            id
-            mount --make-rprivate /
-          '
       - name: Gate Linux acceptance confinement
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq strace
-          trace="$RUNNER_TEMP/cq-linux-acceptance.strace"
-          set +e
-          strace -f -qq -s 256 -o "$trace" \
-            go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            grep -E 'clone|execve|mount|landlock|sendto|sendmsg|recvfrom|recvmsg|F_GETFD|kill|SIGCHLD|SIGKILL|exit' "$trace" | tail -500 >&2 || true
-            exit "$status"
-          fi
+        run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
       - run: go test -race -count=1 ./...
       - name: Restore Linux namespace restriction
         if: always()
@@ -107,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - run: go build -o cq.exe ./cmd/cq
       - run: go build -o cq-install.exe ./cmd/cq-install

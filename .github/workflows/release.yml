@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Install current Codex client
         run: |
@@ -39,7 +39,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Require live Codex routing validation
         env:
