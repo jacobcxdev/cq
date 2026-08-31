@@ -74,6 +74,7 @@ jobs:
           fi
       - name: Gate Linux acceptance confinement
         run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
+      - run: go test -race -count=1 ./...
       - name: Restore Linux namespace restriction
         if: always()
         run: |
