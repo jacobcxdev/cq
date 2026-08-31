@@ -15,3 +15,11 @@ func (*unixSecureDirectory) OpenExclusiveLock(string, os.FileMode) (ExclusiveLoc
 func (*unixSecureDirectory) ProbeExclusiveLockHeld(string, os.FileMode) (os.FileInfo, error) {
 	return nil, ErrSecureCapabilityUnavailable
 }
+
+func inspectInheritedExclusiveLockFile(*os.File) (os.FileInfo, error) {
+	return nil, ErrSecureCapabilityUnavailable
+}
+
+func validateInheritedExclusiveLockHeld(*os.File) error {
+	return ErrSecureCapabilityUnavailable
+}

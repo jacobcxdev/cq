@@ -13,9 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,39 +71,16 @@ func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceC
 			executable = executionProof.path
 		}
 	}
+	execution := codexAcceptanceExecution{command: command, executable: executable, args: args, proof: executionProof}
+	var output []byte
+	var err error
 	if command.loopbackOnly {
-		if runtime.GOOS != "darwin" {
-			return nil, errors.New("Codex acceptance network confinement unavailable")
-		}
-		if _, err := os.Stat("/usr/bin/sandbox-exec"); err != nil {
-			return nil, errors.New("Codex acceptance network confinement unavailable")
-		}
-		profile, err := codexAcceptanceSandboxProfile(command)
-		if err != nil {
-			return nil, errors.New("Codex acceptance sandbox authority unavailable")
-		}
-		args = append([]string{"-p", profile, executable}, args...)
-		executable = "/usr/bin/sandbox-exec"
-	}
-
-	cmd := exec.CommandContext(ctx, executable, args...)
-	cmd.Env = append([]string(nil), command.env...)
-	cmd.Dir = command.dir
-	cmd.Stdin = strings.NewReader("")
-	cmd.Stderr = io.Discard
-	cmd.WaitDelay = 2 * time.Second
-	var output codexAcceptanceLimitedBuffer
-	output.limit = codexAcceptanceOutputLimit
-	if command.captureOutput {
-		cmd.Stdout = &output
+		output, err = defaultCodexAcceptanceConfinement().Execute(ctx, execution)
 	} else {
-		cmd.Stdout = io.Discard
+		output, err = runCodexAcceptanceExecution(ctx, execution)
 	}
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, errors.New("Codex acceptance command timed out")
-		}
-		return nil, errors.New("Codex acceptance command failed")
+	if err != nil {
+		return nil, err
 	}
 	if retainedExecutable != nil {
 		current, err := captureCodexInstalledExecutable(command.expectedExecutable.path)
@@ -119,7 +94,7 @@ func (osCodexAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceC
 			}
 		}
 	}
-	return output.Bytes(), nil
+	return output, nil
 }
 
 func materialiseCodexAcceptanceExecutable(
@@ -664,14 +639,15 @@ func runCodexInstalledClientAcceptance(ctx context.Context, dependencies codexAc
 		"no_proxy=127.0.0.1,localhost",
 	)
 	command := codexAcceptanceCommand{
-		executable:     dependencies.executable,
-		args:           codexAcceptanceExecArguments(proxyBaseURL, work, outputPath),
-		env:            environment,
-		dir:            work,
-		endpoint:       proxyBaseURL + legacyCodexResponsesPath,
-		outputPath:     outputPath,
-		egressProxyURL: egressURL,
-		loopbackOnly:   true,
+		executable:       dependencies.executable,
+		args:             codexAcceptanceExecArguments(proxyBaseURL, work, outputPath),
+		env:              environment,
+		dir:              work,
+		endpoint:         proxyBaseURL + legacyCodexResponsesPath,
+		outputPath:       outputPath,
+		egressProxyURL:   egressURL,
+		sandboxWriteRoot: root,
+		loopbackOnly:     true,
 	}
 	execCtx, cancelExec := context.WithTimeout(ctx, codexAcceptanceExecTimeout)
 	_, err = dependencies.runner.Run(execCtx, command)

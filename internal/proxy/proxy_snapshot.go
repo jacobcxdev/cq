@@ -230,11 +230,11 @@ func validFactCode(code string) bool {
 }
 
 func validDesiredProxyState(value DesiredProxyState) bool {
-	return value.Manager == "" || value.Manager == "launchagent" || value.Manager == "homebrew" || value.Manager == "manual"
+	return value.Manager == "" || value.Manager == "launchagent" || value.Manager == "homebrew" || value.Manager == "systemd-user" || value.Manager == "manual"
 }
 
 func validServiceState(value ServiceState) bool {
-	if value.Manager != "launchagent" && value.Manager != "homebrew" && value.Manager != "manual" {
+	if value.Manager != "launchagent" && value.Manager != "homebrew" && value.Manager != "systemd-user" && value.Manager != "manual" {
 		return false
 	}
 	switch value.State {

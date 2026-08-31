@@ -131,7 +131,7 @@ func (requirement codexInstalledArtifactRequirement) valid() bool {
 		return false
 	}
 	switch requirement.serviceKind {
-	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew, codexInstalledListenerServiceSystemdUser:
 		return true
 	default:
 		return false
@@ -653,7 +653,7 @@ func validateCodexReadinessMarkerArtifactBinding(marker CodexReadinessMarker) er
 		return fmt.Errorf("readiness marker installed artifact digest invalid")
 	}
 	switch codexInstalledListenerServiceKind(marker.ServiceKind) {
-	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew, codexInstalledListenerServiceSystemdUser:
 		return nil
 	default:
 		return fmt.Errorf("readiness marker service kind invalid")

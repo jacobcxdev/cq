@@ -29,6 +29,46 @@ func (lock *windowsExclusiveLock) Stat() (os.FileInfo, error) {
 	return inspectWindowsHandle(windows.Handle(lock.file.Fd()), lock.file.Name())
 }
 
+func (lock *windowsExclusiveLock) duplicateFile() (*os.File, error) {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.closed {
+		return nil, os.ErrClosed
+	}
+	current := windows.CurrentProcess()
+	var duplicate windows.Handle
+	if err := windows.DuplicateHandle(
+		current,
+		windows.Handle(lock.file.Fd()),
+		current,
+		&duplicate,
+		0,
+		false,
+		windows.DUPLICATE_SAME_ACCESS,
+	); err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(duplicate), lock.file.Name())
+	if file == nil {
+		_ = windows.CloseHandle(duplicate)
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	return file, nil
+}
+
+func inspectInheritedExclusiveLockFile(file *os.File) (os.FileInfo, error) {
+	return inspectWindowsHandle(windows.Handle(file.Fd()), file.Name())
+}
+
+func validateInheritedExclusiveLockHeld(file *os.File) error {
+	// Lock handles deny new writers. Flush therefore proves this descriptor
+	// retained the write capability exported by the lock owner.
+	if err := file.Sync(); err != nil {
+		return errors.Join(ErrExclusiveLockNotHeld, err)
+	}
+	return nil
+}
+
 func (lock *windowsExclusiveLock) Close() error {
 	lock.mu.Lock()
 	defer lock.mu.Unlock()
@@ -74,7 +114,7 @@ func (directory *windowsSecureDirectory) openExclusiveLock(name string, _ os.Fil
 		windows.Handle(directory.file.Fd()),
 		name,
 		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.READ_CONTROL|windows.DELETE|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		windows.FILE_SHARE_READ,
 		disposition,
 		windows.FILE_NON_DIRECTORY_FILE,
 		descriptor,
@@ -129,7 +169,7 @@ func (directory *windowsSecureDirectory) ProbeExclusiveLockHeld(name string, _ o
 	result, err := openWindowsRelative(
 		windows.Handle(directory.file.Fd()),
 		name,
-		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_GENERIC_READ|windows.READ_CONTROL|windows.SYNCHRONIZE,
 		windowsShareAll,
 		windows.FILE_OPEN,
 		windows.FILE_NON_DIRECTORY_FILE,

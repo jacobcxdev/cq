@@ -99,14 +99,15 @@ var commandDispatcherCoverageOnly = []commandDispatcherCoverage{
 	{commandDispatcherKey{"help.go", "interceptedZeroArgumentUsage", "args[1]"}, []string{"overlay", "prime"}},
 	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[1]"}, []string{"canary", "endpoint", "resets", "validate"}},
 	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[2]"}, []string{"list", "recommend", "use"}},
-	{commandDispatcherKey{"help.go", "manualUsageInspectionError", "args[0]"}, []string{"agent", "models", "proxy"}},
-	{commandDispatcherKey{"help.go", "manualUsageInspectionError", "args[1]"}, []string{"install", "list", "overlay", "prime", "refresh", "uninstall"}},
+	{commandDispatcherKey{"help.go", "manualUsageInspectionError", "args[0]"}, []string{"agent", "models", "proxy", "service"}},
+	{commandDispatcherKey{"help.go", "manualUsageInspectionError", "args[1]"}, []string{"install", "list", "overlay", "prime", "refresh", "restart", "status", "uninstall"}},
 	{commandDispatcherKey{"help.go", "proxyHelpInspectionPath", "args[1]"}, []string{"artifact", "client-bearer-barrier", "codex", "inspect-legacy", "receipt", "transition-legacy"}},
 	{commandDispatcherKey{"help.go", "proxyHelpInspectionPath", "args[2]"}, []string{"refresh", "show", "switch"}},
 	{commandDispatcherKey{"help.go", "validateInterceptedLexicalGrammar", "args[1]"}, []string{"canary", "install", "uninstall", "validate"}},
 	{commandDispatcherKey{"help.go", "validateProxyLexicalGrammar", "args[1]"}, []string{"codex", "codex-stop", "disable", "enable", "status"}},
 	{commandDispatcherKey{"proxy_candidate_runtime.go", "isCandidateRuntimeCommand", "args[0]"}, []string{"proxy"}},
 	{commandDispatcherKey{"proxy_candidate_runtime.go", "isCandidateRuntimeCommand", "args[1]"}, []string{"candidate"}},
+	{commandDispatcherKey{"linux_acceptance_helper_linux.go", "isLinuxAcceptanceHelperCommand", "args[0]"}, []string{"proxy"}},
 	{commandDispatcherKey{"proxy_commands.go", "classifyCandidateReceiptAuthority", "argv[1]"}, []string{"candidate"}},
 	{commandDispatcherKey{"proxy_commands.go", "classifyCandidateReceiptAuthority", "argv[2]"}, []string{"receipt"}},
 	{commandDispatcherKey{"proxy_commands.go", "classifyProxyReadAuthority", "argv[2]"}, []string{"status"}},
@@ -132,6 +133,45 @@ func TestREADMEListsEveryPublicCommandPath(t *testing.T) {
 	for _, invocation := range []string{"cq --json", "cq --refresh", "cq --version"} {
 		if !strings.Contains(readme, invocation) {
 			t.Errorf("README missing global invocation %q", invocation)
+		}
+	}
+}
+
+func TestREADMEDocumentsCompleteInstallationParity(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := string(body)
+	normalised := strings.Join(strings.Fields(readme), " ")
+	for _, required := range []string{
+		"brew install --cask jacobcxdev/tap/cq",
+		"winget install jacobcxdev.cq",
+		"go run github.com/jacobcxdev/cq/cmd/cq-install@latest",
+		"No manual post-install command is required",
+		"brew services stop cq",
+		"brew uninstall --formula cq",
+		"brew uninstall --cask cq",
+		"winget uninstall jacobcxdev.cq",
+		"go run github.com/jacobcxdev/cq/cmd/cq-install@latest uninstall",
+		"configuration, credentials, cache, history, and logs remain",
+		"functional systemd user manager",
+		"current Windows user without administrator access",
+		"## Development and portable binaries",
+		"go install github.com/jacobcxdev/cq/cmd/cq@latest",
+		"does not install or manage services",
+		"headroom-ai",
+	} {
+		if !strings.Contains(normalised, required) {
+			t.Errorf("README missing installation contract %q", required)
+		}
+	}
+	for _, obsolete := range []string{
+		"brew install jacobcxdev/tap/cq\n",
+		"brew services start cq            # Optional local proxy service",
+	} {
+		if strings.Contains(readme, obsolete) {
+			t.Errorf("README retains obsolete installation instruction %q", obsolete)
 		}
 	}
 }

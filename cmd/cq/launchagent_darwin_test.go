@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,17 +8,17 @@ import (
 )
 
 func TestPlistTemplate(t *testing.T) {
-	var buf bytes.Buffer
-	data := plistData{
-		Label:    "dev.jacobcx.cq.refresh",
-		Binary:   "/opt/homebrew/bin/cq",
-		Interval: 1800,
-		LogPath:  "/Users/test/Library/Logs/cq/refresh.log",
+	data, err := renderDarwinLaunchAgent(darwinLaunchAgentDefinition{
+		Label:             "dev.jacobcx.cq.refresh",
+		ProgramArguments:  []string{"/opt/homebrew/bin/cq", "refresh"},
+		StartInterval:     1800,
+		RunAtLoad:         true,
+		StandardErrorPath: "/Users/test/Library/Logs/cq/refresh.log",
+	})
+	if err != nil {
+		t.Fatalf("render plist: %v", err)
 	}
-	if err := plistTemplate.Execute(&buf, data); err != nil {
-		t.Fatalf("template execute: %v", err)
-	}
-	out := buf.String()
+	out := string(data)
 
 	for _, want := range []string{
 		"<string>dev.jacobcx.cq.refresh</string>",

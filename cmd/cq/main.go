@@ -228,6 +228,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if isLinuxAcceptanceHelperCommand(os.Args[1:]) {
+		if err := runLinuxAcceptanceHelper(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "cq: Linux acceptance helper failed")
+			os.Exit(1)
+		}
+		return
+	}
 	if isCandidateRuntimeCommand(os.Args[1:]) {
 		if err := runCandidateRuntimeChild(context.Background(), os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "cq: candidate runtime failed")
@@ -275,6 +282,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "service":
+			if err := runService(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "proxy":
 			if err := runProxy(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "cq: %v\n", err)
@@ -310,18 +323,6 @@ func main() {
 	if err := dispatch(ctx, &cli); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: %v\n", err)
 		os.Exit(1)
-	}
-	if shouldEnsureAgentAfter(ctx.Command()) {
-		ensureAgent()
-	}
-}
-
-func shouldEnsureAgentAfter(command string) bool {
-	switch command {
-	case "codex resets list", "codex resets list <account-reference>", "codex resets recommend", "codex resets use <account-reference>":
-		return false
-	default:
-		return true
 	}
 }
 

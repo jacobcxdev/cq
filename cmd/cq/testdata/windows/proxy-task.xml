@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>CQ</Author>
+    <Description>Runs CQ local proxy</Description>
+    <URI>\cq\Proxy</URI>
+    <SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-111111111-222222222-333333333-1001)</SecurityDescriptor>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>S-1-5-21-111111111-222222222-333333333-1001</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="CQUser">
+      <UserId>S-1-5-21-111111111-222222222-333333333-1001</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <WakeToRun>false</WakeToRun>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="CQUser">
+    <Exec>
+      <Command>C:\Users\Test &amp; Co\cq.exe</Command>
+      <Arguments>proxy start</Arguments>
+      <WorkingDirectory>C:\Users\Test &amp; Co</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

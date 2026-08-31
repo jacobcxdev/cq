@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+PackageIdentifier: jacobcxdev.cq
+PackageVersion: {{.Version}}
+InstallerLocale: en-US
+InstallerType: exe
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: install --owner=winget --silent
+  SilentWithProgress: install --owner=winget --silent
+UpgradeBehavior: install
+Commands:
+  - cq
+Installers:
+  - Architecture: x64
+    InstallerUrl: {{.X64URL}}
+    InstallerSha256: {{.X64SHA256}}
+    AppsAndFeaturesEntries:
+      - DisplayName: CQ
+        Publisher: jacobcxdev
+        DisplayVersion: {{.Version}}
+  - Architecture: arm64
+    InstallerUrl: {{.ARM64URL}}
+    InstallerSha256: {{.ARM64SHA256}}
+    AppsAndFeaturesEntries:
+      - DisplayName: CQ
+        Publisher: jacobcxdev
+        DisplayVersion: {{.Version}}
+ManifestType: installer
+ManifestVersion: 1.10.0

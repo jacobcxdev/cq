@@ -92,6 +92,19 @@ type ExclusiveLock interface {
 	Close() error
 }
 
+type exclusiveLockFileDuplicator interface {
+	duplicateFile() (*os.File, error)
+}
+
+// DuplicateExclusiveLockFile duplicates the descriptor backing a held lock.
+func DuplicateExclusiveLockFile(lock ExclusiveLock) (*os.File, error) {
+	duplicator, ok := lock.(exclusiveLockFileDuplicator)
+	if !ok {
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	return duplicator.duplicateFile()
+}
+
 // ExclusiveFileCreator supplies handle-level exclusive creation without
 // widening FileSystem for callers that never write durable private state.
 type ExclusiveFileCreator interface {
@@ -248,10 +261,5 @@ func (OSFileSystem) SyncFile(name string) error {
 	return f.Sync()
 }
 func (OSFileSystem) SyncDir(name string) error {
-	f, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
+	return syncDirectory(name)
 }

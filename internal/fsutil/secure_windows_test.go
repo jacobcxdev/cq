@@ -25,6 +25,26 @@ type fixedWindowsBoundaryResolver struct {
 	anchorIdentity SecureFileIdentity
 }
 
+type cqRootWindowsBoundaryResolver struct {
+	anchorPath     string
+	anchorIdentity SecureFileIdentity
+}
+
+func (resolver *cqRootWindowsBoundaryResolver) ResolveSecureBoundary(path string, purpose secureBoundaryPurpose) (secureBoundarySelection, error) {
+	clean, err := validateWindowsAbsolutePath(path)
+	if err != nil || !windowsPathWithin(resolver.anchorPath, clean) {
+		return secureBoundarySelection{}, fmt.Errorf("%w: Windows CQ test boundary", ErrUnsafeSecurePath)
+	}
+	if purpose == secureBoundaryCQPrivate && !windowsPathWithin(filepath.Join(resolver.anchorPath, "cq"), clean) {
+		return secureBoundarySelection{}, fmt.Errorf("%w: Windows CQ test boundary", ErrUnsafeSecurePath)
+	}
+	return secureBoundarySelection{AnchorPath: resolver.anchorPath, PostAnchorPrivate: purpose == secureBoundaryCQPrivate}, nil
+}
+
+func (resolver *cqRootWindowsBoundaryResolver) SecureBoundaryIdentity() (SecureFileIdentity, bool) {
+	return resolver.anchorIdentity, resolver.anchorIdentity != (SecureFileIdentity{})
+}
+
 func (resolver *fixedWindowsBoundaryResolver) ResolveSecureBoundary(path string, purpose secureBoundaryPurpose) (secureBoundarySelection, error) {
 	clean, err := validateWindowsAbsolutePath(path)
 	if err != nil || !windowsPathWithin(resolver.anchorPath, clean) {
@@ -88,6 +108,21 @@ func TestWindowsSecureAtomicWriteStaysInRetainedDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(canonical, "value")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement namespace received value: %v", err)
+	}
+}
+
+func TestWindowsSecureDirectoryBootstrapsFromBoundaryAnchor(t *testing.T) {
+	anchor := t.TempDir()
+	initial := newWindowsTestFileSystem(t, anchor)
+	identity := initial.secureBoundaryResolver.(*fixedWindowsBoundaryResolver).anchorIdentity
+	fsys := OSFileSystem{secureBoundaryResolver: &cqRootWindowsBoundaryResolver{anchorPath: anchor, anchorIdentity: identity}}
+	target := filepath.Join(anchor, "cq", "state")
+
+	if err := EnsureSecureDirectory(fsys, target); err != nil {
+		t.Fatalf("EnsureSecureDirectory() error = %v", err)
+	}
+	if err := ValidateSecureDirectory(fsys, target); err != nil {
+		t.Fatalf("ValidateSecureDirectory() error = %v", err)
 	}
 }
 

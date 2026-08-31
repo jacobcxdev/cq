@@ -408,9 +408,9 @@ func EnsureSecureDirectory(fsys FileSystem, path string) error {
 	}
 	var parent DurableDirectory
 	if boundaryOpener, ok := fsys.(interface {
-		openSecureDirectoryAncestor(string) (DurableDirectory, error)
+		openSecureDirectoryAncestor(string, string) (DurableDirectory, error)
 	}); ok {
-		parent, err = boundaryOpener.openSecureDirectoryAncestor(existing)
+		parent, err = boundaryOpener.openSecureDirectoryAncestor(clean, existing)
 		if err != nil {
 			return fmt.Errorf("open secure directory boundary ancestor: %w", err)
 		}

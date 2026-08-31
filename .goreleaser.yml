@@ -1,7 +1,8 @@
 version: 2
 
 builds:
-  - main: ./cmd/cq
+  - id: cq
+    main: ./cmd/cq
     binary: cq
     env:
       - CGO_ENABLED=0
@@ -18,12 +19,47 @@ builds:
       - amd64
       - arm64
 
+  - id: cq-install
+    main: ./cmd/cq-install
+    binary: cq-install
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
 archives:
-  - format: tar.gz
+  - id: cq
+    ids: [cq]
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
+
+  - id: cq-install
+    ids: [cq-install]
+    formats: [binary]
+    name_template: "cq-install_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids: [cq]
+      sign:
+        certificate: '{{ .Env.MACOS_SIGN_P12 }}'
+        password: '{{ .Env.MACOS_SIGN_PASSWORD }}'
+      notarize:
+        issuer_id: '{{ .Env.MACOS_NOTARY_ISSUER_ID }}'
+        key_id: '{{ .Env.MACOS_NOTARY_KEY_ID }}'
+        key: '{{ .Env.MACOS_NOTARY_KEY }}'
+        wait: true
+        timeout: 20m
 
 checksum:
   name_template: "checksums.txt"
@@ -37,26 +73,31 @@ changelog:
     exclude:
       - "^Merge "
 
-brews:
+homebrew_casks:
   - repository:
       owner: jacobcxdev
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     name: cq
+    ids: [cq]
+    directory: Casks
     homepage: "https://github.com/jacobcxdev/cq"
     description: "CLI tool to check AI provider quota usage"
     license: "MIT"
-    dependencies:
-      - name: python@3
-    install: |
-      bin.install "cq"
-    post_install: |
-      system Formula["python@3"].opt_bin/"python3", "-m", "pip", "install", "--break-system-packages", "--quiet", "headroom-ai[all]"
-    service: |
-      run [opt_bin/"cq", "proxy", "start"]
-      keep_alive true
-      log_path File.expand_path("~/Library/Logs/cq/proxy.log")
-      error_log_path File.expand_path("~/Library/Logs/cq/proxy.log")
-      working_dir Dir.home
-    test: |
-      system "#{bin}/cq", "--help"
+    skip_upload: true
+    binaries:
+      - cq
+    hooks:
+      pre:
+        uninstall: |
+          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
+      post:
+        install: |
+          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
+    uninstall:
+      launchctl:
+        - dev.jacobcx.cq.proxy
+        - dev.jacobcx.cq.refresh
+      delete:
+        - ~/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist
+        - ~/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist

@@ -22,6 +22,7 @@ var (
 	loadProxyStartConfigFn                         = proxy.LoadConfig
 	validateInstalledHTTPValidationCandidateFn     = validateInstalledHTTPValidationCandidate
 	restartInstalledHTTPValidationCandidateFn      = restartInstalledHTTPValidationCandidate
+	cleanupInstalledHTTPValidationCandidateFn      = cleanupInstalledHTTPValidationCandidate
 	consumeInstalledHTTPValidationStartupRequestFn = func(build string) (*installedHTTPValidationConsumedRequest, error) {
 		store, err := defaultInstalledHTTPValidationRequestStoreFn()
 		if err != nil {
@@ -65,6 +66,7 @@ func runDefaultProxyValidateHTTP(args []string, build string) error {
 	if binding.label != candidateProxyAgentLabel || binding.port != opts.Port {
 		return errors.New("proxy validate-http: candidate service port mismatch")
 	}
+	defer cleanupInstalledHTTPValidationCandidateFn()
 	resolveService := store.resolveService
 	store.resolveService = func(label string) (installedHTTPValidationServiceBinding, error) {
 		current, err := resolveService(binding.label)

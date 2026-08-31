@@ -27,6 +27,40 @@ func (lock *unixExclusiveLock) Stat() (os.FileInfo, error) {
 	return lock.file.Stat()
 }
 
+func (lock *unixExclusiveLock) duplicateFile() (*os.File, error) {
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.closed {
+		return nil, os.ErrClosed
+	}
+	fd, err := unix.Dup(int(lock.file.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	unix.CloseOnExec(fd)
+	file := os.NewFile(uintptr(fd), lock.file.Name())
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, ErrSecureCapabilityUnavailable
+	}
+	return file, nil
+}
+
+func inspectInheritedExclusiveLockFile(file *os.File) (os.FileInfo, error) {
+	return file.Stat()
+}
+
+func validateInheritedExclusiveLockHeld(file *os.File) error {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return ErrExclusiveLockNotHeld
+	}
+	if err != nil {
+		return fmt.Errorf("probe inherited exclusive filesystem lock: %w", err)
+	}
+	return nil
+}
+
 func (OSFileSystem) OpenExclusiveLock(name string, perm os.FileMode) (ExclusiveLock, error) {
 	dir, base := filepath.Dir(name), filepath.Base(name)
 	if err := validateSecureEntryName(base); err != nil {

@@ -31,6 +31,7 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 		"gemini",
 		"refresh",
 		"agent",
+		"service",
 		"proxy",
 		"models",
 		"operation",
@@ -42,6 +43,23 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 	for _, unwanted := range []string{"claude login", "codex login", "gemini accounts", "agent install", "proxy start", "models list", "operation status"} {
 		if strings.Contains(help, unwanted) {
 			t.Fatalf("root help contains nested command %q:\n%s", unwanted, help)
+		}
+	}
+}
+
+func TestServiceHelpDescribesCompleteCurrentUserLifecycle(t *testing.T) {
+	for _, path := range [][]string{{"service"}, {"service", "install"}, {"service", "uninstall"}} {
+		help, ok := manualHelp(path)
+		if !ok {
+			t.Fatalf("manualHelp(%v) missing entry", path)
+		}
+		for _, want := range []string{"proxy", "refresh"} {
+			if !strings.Contains(help, want) {
+				t.Fatalf("manualHelp(%v) missing %q:\n%s", path, want, help)
+			}
+		}
+		if len(path) > 1 && !strings.Contains(help, "current user") {
+			t.Fatalf("manualHelp(%v) omits current-user scope:\n%s", path, help)
 		}
 	}
 }

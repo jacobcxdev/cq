@@ -31,6 +31,7 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
 		t.Skip("installed Codex supervisor acceptance requires explicit opt-in")
 	}
+	prepareCodexAcceptanceTestConfinement(t)
 	clientPath, err := resolveCodexAcceptanceClientExecutable()
 	if err != nil {
 		t.Fatalf("resolve installed Codex client: %v", err)
@@ -996,7 +997,13 @@ func sanitiseCodexAcceptanceDiagnostic(value string) string {
 }
 
 func (runner codexTaskAffinityAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
-	if runtime.GOOS != "darwin" || command.executable == "" || !command.expectedExecutable.valid() || !command.loopbackOnly {
+	if command.executable == "" || !command.expectedExecutable.valid() || !command.loopbackOnly {
+		return nil, errors.New("Codex task-affinity runner unavailable")
+	}
+	if runtime.GOOS == "linux" {
+		return (osCodexAcceptanceRunner{}).Run(ctx, command)
+	}
+	if runtime.GOOS != "darwin" {
 		return nil, errors.New("Codex task-affinity runner unavailable")
 	}
 	before, err := captureCodexInstalledExecutable(command.executable)

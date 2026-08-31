@@ -74,7 +74,7 @@ func (proof codexInstalledProcessPlatformProof) valid() bool {
 		return false
 	}
 	switch proof.serviceKind {
-	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew:
+	case codexInstalledListenerServiceLaunchd, codexInstalledListenerServiceHomebrew, codexInstalledListenerServiceSystemdUser:
 		return true
 	default:
 		return false
@@ -726,11 +726,7 @@ func resolveCodexInstalledClientExecutable() (string, error) {
 			return path, nil
 		}
 	}
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return "", errCodexInstalledProcessAttestation
-	}
-	return path, nil
+	return resolveCodexInstalledClientExecutableFromPath()
 }
 
 func codexInstalledAttestationError(ctx context.Context) error {
