@@ -61,6 +61,23 @@ jobs:
             echo "CQ_APPARMOR_USERNS_ORIGINAL=$value" >> "$GITHUB_ENV"
             echo 0 | sudo tee "$setting" >/dev/null
           fi
+      - name: Probe Linux acceptance namespaces
+        run: |
+          uname -a
+          cat /etc/os-release
+          for setting in \
+            /proc/sys/kernel/apparmor_restrict_unprivileged_userns \
+            /proc/sys/kernel/unprivileged_userns_clone \
+            /proc/sys/user/max_user_namespaces; do
+            if [ -f "$setting" ]; then
+              printf '%s=' "$setting"
+              cat "$setting"
+            fi
+          done
+          unshare --user --map-root-user --net --mount sh -euxc '
+            id
+            mount --make-rprivate /
+          '
       - name: Gate Linux acceptance confinement
         run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
       - run: go test -race -count=1 ./...
