@@ -1,7 +1,0 @@
-abi <abi/4.0>,
-
-include <tunables/global>
-
-profile cq-proxy-tests flags=(unconfined) {
-  userns,
-}

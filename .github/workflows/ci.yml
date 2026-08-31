@@ -53,12 +53,23 @@ jobs:
           fi
           cat "$test_log"
           grep -F -- "--- PASS: ${test_name} " "$test_log"
-      - name: Permit proxy test user namespaces
-        run: sudo apparmor_parser --replace .github/apparmor/cq-proxy-tests
-      - run: aa-exec -p cq-proxy-tests -- go test -race -count=1 ./...
-      - name: Remove proxy test confinement profile
+      - name: Permit Linux acceptance namespaces
+        run: |
+          setting=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -f "$setting" ]; then
+            value="$(cat "$setting")"
+            echo "CQ_APPARMOR_USERNS_ORIGINAL=$value" >> "$GITHUB_ENV"
+            echo 0 | sudo tee "$setting" >/dev/null
+          fi
+      - name: Gate Linux acceptance confinement
+        run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
+      - run: go test -race -count=1 ./...
+      - name: Restore Linux namespace restriction
         if: always()
-        run: sudo apparmor_parser --remove .github/apparmor/cq-proxy-tests
+        run: |
+          if [ -n "${CQ_APPARMOR_USERNS_ORIGINAL:-}" ]; then
+            echo "$CQ_APPARMOR_USERNS_ORIGINAL" | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns >/dev/null
+          fi
 
   windows:
     runs-on: windows-latest
