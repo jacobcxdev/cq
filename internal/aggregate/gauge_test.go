@@ -326,6 +326,41 @@ func TestComputeGaugeInfoOnPace(t *testing.T) {
 	}
 }
 
+func TestComputeGaugeInfoIncludesDepletedAccountsInPace(t *testing.T) {
+	now := int64(1_000)
+	period := int64(604_800)
+	resetIn := int64(504_000)
+	accounts := []acctInfo{
+		{multiplier: 20, result: quota.Result{AccountID: "acctA", Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 86, ResetAtUnix: now + resetIn},
+		}}},
+		{multiplier: 20, result: quota.Result{AccountID: "acctB", Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 93, ResetAtUnix: now + resetIn},
+		}}},
+		{multiplier: 20, result: quota.Result{AccountID: "acctC", Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now + resetIn},
+		}}},
+	}
+
+	allAccounts := computeGaugeInfo(accounts, quota.Window7Day, period, now, "", nil)
+	if allAccounts.Pos != 0 {
+		t.Errorf("all-account Pos = %d, want 0 (severe overburn)", allAccounts.Pos)
+	}
+	// Depleted capacity contributes demand but cannot accept new load. The two
+	// active accounts therefore split the aggregate demand across 40x, leaving
+	// the first coverage gap after about 154,949 seconds. Counting the depleted
+	// account in active allocation would delay the gap to about 232,423 seconds.
+	const wantGapStart = 154_949.0
+	if math.Abs(allAccounts.GapStart-wantGapStart) > 1 {
+		t.Errorf("all-account GapStart = %.0f, want %.0f", allAccounts.GapStart, wantGapStart)
+	}
+
+	healthyPool := computeGaugeInfo(accounts[:2], quota.Window7Day, period, now, "", nil)
+	if healthyPool.Pos != 5 {
+		t.Errorf("healthy-pool Pos = %d, want 5 (moderate underburn)", healthyPool.Pos)
+	}
+}
+
 func TestComputeGaugeInfoUnderburn(t *testing.T) {
 	now := int64(1_000)
 	period := int64(18_000)
