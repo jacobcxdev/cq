@@ -12,10 +12,9 @@ import (
 // TestGaugePhaseInvariantAcrossOffsets is the headline regression test for
 // the phase-stability fix. It sweeps (burnFactor × phaseOffset × multiplier
 // pairs × window) scenarios and asserts that the rate-ratio gauge produces
-// a phase-invariant GaugePos: the set of positions observed as time moves
-// through a full second period must be either a singleton equal to the bucket
-// posFromRho(burnFactor) maps to, or a mix of that bucket with position 0
-// tagged as an imminent_block override (a legitimate severity escalation).
+// a phase-invariant GaugePos while usage remains observable. Once an account
+// saturates at 100% used, exact burn is no longer observable; those samples
+// must still remain in an overburn bucket.
 //
 // This test MUST fail on main prior to Steps 5-8. The main failure mode is
 // that sustain.go's legacy gap-fraction severity bucketing produces wildly
@@ -87,12 +86,17 @@ func TestGaugePhaseInvariantAcrossOffsets(t *testing.T) {
 
 // sweepPositions walks a synthetic timeline through the second period,
 // computing the gauge position at each step and returning the observed
-// positions (skipping transient reset-boundary moments where the cumulative
-// rate on a fresh account would be zero and therefore uninformative).
+// positions. It skips transient reset-boundary moments and records when a
+// sample saturates because exact cumulative rate is then unobservable.
 //
 // The burnRates argument is nil: the cumulative-rate-source fix derives rho
 // from used/elapsed directly, so no EWMA preseeding is needed — the sweep
 // now exercises the real production path end-to-end.
+type phaseObservation struct {
+	pos       int
+	saturated bool
+}
+
 func sweepPositions(
 	t *testing.T,
 	winName quota.WindowName,
@@ -101,7 +105,7 @@ func sweepPositions(
 	mults []int,
 	burnFactor float64,
 	offsetS int64,
-) []int {
+) []phaseObservation {
 	t.Helper()
 	period := float64(periodS)
 
@@ -111,7 +115,7 @@ func sweepPositions(
 	const nowBase = int64(10_000_000)
 	resetBases := []int64{nowBase, nowBase - offsetS}
 
-	positions := make([]int, 0, periodS/stepS+1)
+	observations := make([]phaseObservation, 0, periodS/stepS+1)
 	for elapsed := stepS; elapsed < periodS; elapsed += stepS {
 		now := nowBase + periodS + elapsed // second period
 
@@ -132,12 +136,14 @@ func sweepPositions(
 		}
 
 		accounts := make([]acctInfo, 0, len(mults))
+		saturated := false
 		for i, m := range mults {
 			rb := resetBases[i]
 			elapsedInWindow := (now - rb) % periodS
 			resetAt := now + (periodS - elapsedInWindow)
 			used := burnFactor * 100.0 * float64(elapsedInWindow) / period
-			if used > 100 {
+			if used >= 100 {
+				saturated = true
 				used = 100
 			}
 			remaining := int(100.0 - used)
@@ -158,27 +164,37 @@ func sweepPositions(
 		}
 
 		gi := computeGaugeInfo(accounts, winName, periodS, now, "", nil)
-		positions = append(positions, gi.Pos)
+		observations = append(observations, phaseObservation{pos: gi.Pos, saturated: saturated})
 	}
-	return positions
+	return observations
 }
 
-// assertPhaseInvariant checks that the set of observed gauge positions across
-// a phase sweep is phase-stable: either a singleton matching the expected
-// bucket, or (for overburn scenarios where one account reaches near-zero at
-// some phase) a mix of the expected natural bucket and the natural severe
-// overburn bucket (pos 0). The imminent-block override is an orthogonal
-// warning flag (GaugeOverride) and must NOT rewrite GaugePos to a different
-// value — so any position 0 seen here must be a natural rho result, not an
-// override side effect. Any other pattern — different non-zero non-expected
-// positions, flipping between overburn and underburn, etc. — indicates
-// phase dependence in the rate-ratio severity and fails the test.
-func assertPhaseInvariant(t *testing.T, observed []int, expected int, burnFactor float64) {
+// assertPhaseInvariant requires exact phase stability while cumulative usage
+// remains observable. Saturated samples lose exact burn timing but must remain
+// red. The imminent-block override is orthogonal and must not rewrite GaugePos.
+func assertPhaseInvariant(t *testing.T, observed []phaseObservation, expected int, burnFactor float64) {
 	t.Helper()
 
 	set := map[int]int{}
-	for _, p := range observed {
-		set[p]++
+	saturated := false
+	for _, observation := range observed {
+		if observation.saturated {
+			saturated = true
+			if burnFactor <= 1.05 || observation.pos < 0 || observation.pos > 2 {
+				t.Errorf(
+					"saturated burnFactor=%.3f position=%d, want overburn position 0..2",
+					burnFactor, observation.pos,
+				)
+			}
+			continue
+		}
+		set[observation.pos]++
+	}
+	if len(set) == 0 {
+		if saturated {
+			return
+		}
+		t.Fatal("phase sweep produced no observations")
 	}
 	uniq := make([]int, 0, len(set))
 	for p := range set {
@@ -186,21 +202,10 @@ func assertPhaseInvariant(t *testing.T, observed []int, expected int, burnFactor
 	}
 	sort.Ints(uniq)
 
-	// Singleton: perfect phase invariance.
+	// Unsaturated observations must be exactly phase-invariant.
 	if len(uniq) == 1 && uniq[0] == expected {
 		return
 	}
-
-	// Overburn scenarios may additionally hit position 0 (severe overburn)
-	// at phases where one account's remaining becomes near-zero and rho
-	// crosses into the severe bucket naturally. We accept {expected} or
-	// {expected, 0} as long as expected is an overburn bucket. This is
-	// purely a natural rho result — GaugeOverride does not change GaugePos.
-	if burnFactor > 1.05 && len(uniq) == 2 && uniq[0] == 0 && uniq[1] == expected {
-		return
-	}
-	// The reverse ordering (expected < 0 is impossible, but the sort puts
-	// 0 first only if present).
 
 	// Anything else is a phase-stability failure.
 	t.Errorf(

@@ -296,16 +296,17 @@ func computeGaugeInfo(
 // buildSustainersAndRatios constructs sustainAccount records for the given
 // accounts and window, while simultaneously computing:
 //
-//   - totalSupply: Σ(m_i × 100 / period) for currently-active accounts
-//     (remaining > 0 and not gated). Exhausted and gated accounts contribute
-//     zero supply while unavailable.
-//   - totalDemand: Σ(m_i × rate_i) using the per-account cumulative rate
-//     (used/elapsed), a phase-invariant "am I on track within this window?"
-//     signal that does not depend on persistent EWMA data.
+//   - totalSupply: Σ(m_i × 100 / period) for non-gated accounts. Exhausted
+//     accounts remain part of pace because their depleted capacity is evidence;
+//     gated accounts contribute zero supply while unavailable.
+//   - totalDemand: Σ(m_i × rate_i) for non-gated accounts using the
+//     per-account cumulative rate (used/elapsed), a phase-invariant "am I on
+//     track within this window?" signal that does not depend on persistent
+//     EWMA data.
 //   - sumActiveMulti: Σ(m_i) for active accounts with remaining quota and no
 //     gate. Drives the uniform allocatedRate in the interval simulator.
-//   - haveData: true if at least one active account has a positive cumulative
-//     rate. Cold-start (every active account fresh, used=0) still returns
+//   - haveData: true if at least one non-gated account has a positive cumulative
+//     rate. Cold-start (every eligible account fresh, used=0) still returns
 //     false so the gauge falls back to Pos=-1.
 //   - hasWindowData: true if at least one account had this window at all.
 //
@@ -410,19 +411,18 @@ func buildSustainersAndRatios(
 			}
 		}
 
-		// Active = usable and contributing to the simulator's drain model.
-		// Exhausted accounts (remaining == 0) contribute neither demand nor
-		// supply to rho — they sit in a dead zone until reset. Gated
-		// accounts are dormant for the same reason. Both are still appended
-		// to sustainers[] so the all-empty-or-gated shortcut can detect them.
-		active := remaining > 0 && !gated
-		if active {
+		// Depleted accounts remain in the pace ratio: using all capacity early
+		// is burn evidence, not absence of data. They stay out of the active
+		// allocation weight because they cannot accept more load before reset.
+		if !gated {
 			totalSupply += mult * 100.0 / period
 			totalDemand += mult * rate
-			sumActiveMulti += mult
 			if rate > 0 {
 				haveData = true
 			}
+		}
+		if remaining > 0 && !gated {
+			sumActiveMulti += mult
 		}
 
 		sustainers = append(sustainers, sustainAccount{
