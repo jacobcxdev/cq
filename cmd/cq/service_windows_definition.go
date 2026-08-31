@@ -795,13 +795,13 @@ func validWindowsTaskSecurityDescriptor(value, sid string, requireProtected bool
 		if fields[2] != "FA" && fields[2] != "FR" {
 			return false
 		}
-		switch fields[5] {
-		case "SY":
+		switch {
+		case fields[5] == "SY":
 			if fields[2] != "FA" {
 				return false
 			}
 			foundSystemFull = true
-		case sid:
+		case fields[5] == sid || fields[5] == "LA" && windowsSIDHasRID(sid, 500):
 			if fields[2] == "FA" {
 				foundUserFull = true
 			}
@@ -811,6 +811,18 @@ func validWindowsTaskSecurityDescriptor(value, sid string, requireProtected bool
 		body = body[aceEnd+1:]
 	}
 	return foundSystemFull && foundUserFull
+}
+
+func windowsSIDHasRID(sid string, rid uint64) bool {
+	if validateWindowsSID(sid) != nil {
+		return false
+	}
+	separator := strings.LastIndexByte(sid, '-')
+	if separator < 0 || separator == len(sid)-1 {
+		return false
+	}
+	value, err := strconv.ParseUint(sid[separator+1:], 10, 32)
+	return err == nil && value == rid
 }
 
 func windowsTaskValues(kind windowsTaskKind) (taskPath, arguments, description string, err error) {

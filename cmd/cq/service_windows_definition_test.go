@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -109,6 +110,21 @@ func TestWindowsTaskSecurityDescriptorAcceptsSchedulerCanonicalForms(t *testing.
 	}
 	if !validWindowsTaskSecurityDescriptor(folderDescriptor, testWindowsSID, true) {
 		t.Fatal("scheduler-normalised folder descriptor was rejected")
+	}
+}
+
+func TestWindowsTaskSecurityDescriptorAcceptsAdministratorAlias(t *testing.T) {
+	administratorSID := "S-1-5-21-111111111-222222222-333333333-500"
+	taskDescriptor := "D:(A;;FA;;;SY)(A;;FA;;;LA)(A;;FR;;;LA)"
+	folderDescriptor := "D:PAI(A;;FA;;;SY)(A;;FA;;;LA)"
+	if !validWindowsTaskSecurityDescriptor(taskDescriptor, administratorSID, false) {
+		t.Fatal("scheduler Administrator task descriptor was rejected")
+	}
+	if !validWindowsTaskSecurityDescriptor(folderDescriptor, administratorSID, true) {
+		t.Fatal("scheduler Administrator folder descriptor was rejected")
+	}
+	if validWindowsTaskSecurityDescriptor(taskDescriptor, testWindowsSID, false) {
+		t.Fatal("Administrator alias accepted for non-Administrator SID")
 	}
 }
 
@@ -520,7 +536,13 @@ func assertWindowsTaskGolden(t *testing.T, kind windowsTaskKind, executable, nam
 	if err != nil {
 		t.Fatal(err)
 	}
+	data = normaliseWindowsTaskXMLNewlines(data)
+	want = normaliseWindowsTaskXMLNewlines(want)
 	if string(data) != string(want) {
 		t.Fatalf("definition differs\ngot:\n%s\nwant:\n%s", data, want)
 	}
+}
+
+func normaliseWindowsTaskXMLNewlines(value []byte) []byte {
+	return bytes.ReplaceAll(value, []byte("\r\n"), []byte("\n"))
 }
