@@ -304,9 +304,9 @@ go run github.com/jacobcxdev/cq/cmd/cq-install@latest uninstall
   CQ configuration.
 - Official release binaries retain release-time Gemini OAuth material and other
   provenance link data. Source-built CQ binaries do not substitute for them.
-- Darwin release binaries used by the Homebrew Cask are signed with the existing
-  Developer ID Application identity and notarised by Apple before archiving.
-  Installation never clears Gatekeeper quarantine as a signing substitute.
+- Darwin release binaries used by the Homebrew Cask are checksum-pinned official
+  release artifacts. Homebrew publication does not depend on App Store Connect,
+  and Linux or Windows publication cannot be blocked by Apple credentials.
 
 ## Transaction and recovery
 

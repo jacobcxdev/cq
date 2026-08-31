@@ -58,7 +58,7 @@ Homebrew Cask DSL, WinGet community manifests, GitHub Actions.
 | Installer destinations | `internal/installer/destination.go`, `internal/installer/destination_test.go`, `internal/installer/platform_unix.go`, `internal/installer/platform_windows.go`, `internal/installer/platform_windows_test.go` | Go path selection, Windows PATH/ARP/uninstaller ownership, package metadata |
 | Go/WinGet entrypoint | `cmd/cq-install/main.go`, `cmd/cq-install/main_test.go` | Tagged-version runner and durable Windows installer CLI |
 | WinGet generation | `packaging/winget/*.yaml.tmpl`, `internal/tools/wingetmanifest/main.go`, `internal/tools/wingetmanifest/main_test.go` | Render versioned x64/arm64 community manifests from release metadata |
-| Release packaging | `.goreleaser.yml`, `.github/workflows/release.yml`, `cmd/cq/release_provenance_test.go` | Build both commands, notarise macOS binaries, publish Cask, verify assets |
+| Release packaging | `.goreleaser.yml`, `.github/workflows/release.yml`, `cmd/cq/release_provenance_test.go` | Build both commands, publish Cask, verify assets |
 | CI and acceptance | `.github/workflows/ci.yml`, `.github/scripts/validate-windows-install.ps1`, `.github/scripts/validate-linux-install.sh` | Hosted builds plus disposable native install proof |
 | User guidance | `README.md`, `cmd/cq/readme_test.go` | Complete methods first, portable/development limitations explicit |
 
@@ -773,7 +773,7 @@ Homebrew Cask DSL, WinGet community manifests, GitHub Actions.
   - pinned release URLs, hashes, and silent lifecycle switches
   ```
 
-## Task 13: Replace formula publication with signed Homebrew Cask
+## Task 13: Replace formula publication with Homebrew Cask
 
 **Files:**
 
@@ -782,10 +782,9 @@ Homebrew Cask DSL, WinGet community manifests, GitHub Actions.
 - Modify: `cmd/cq/release_provenance_test.go`
 
 - [ ] Add failing provenance tests requiring two builds (`cq`, `cq-install`),
-  macOS notarisation for `cq`, Windows-only release archive for `cq-install`,
-  `homebrew_casks` instead of `brews`, no Python dependency, no `headroom-ai`,
-  lifecycle hooks, both launchd cleanup labels, and release verification of
-  signed Darwin binaries.
+  Windows-only release archive for `cq-install`, `homebrew_casks` instead of
+  `brews`, no Python dependency, no `headroom-ai`, lifecycle hooks, both launchd
+  cleanup labels, and release verification of Darwin binaries.
 
 - [ ] Run `go test -race -count=1 ./cmd/cq -run
   '^TestReleaseProvenance'`; expect fail.
@@ -795,39 +794,15 @@ Homebrew Cask DSL, WinGet community manifests, GitHub Actions.
   `cq-install_0.27.0_windows_amd64.exe` or arm64 executable, not an archive.
   Keep `cq` six-platform archive build and release-time Gemini provenance.
 
-- [ ] Add GoReleaser OSS cross-platform macOS executable signing and
-  notarisation for build `cq`:
-
-  ```yaml
-  notarize:
-    macos:
-      - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
-        ids: [cq]
-        sign:
-          certificate: '{{ .Env.MACOS_SIGN_P12 }}'
-          password: '{{ .Env.MACOS_SIGN_PASSWORD }}'
-        notarize:
-          issuer_id: '{{ .Env.MACOS_NOTARY_ISSUER_ID }}'
-          key_id: '{{ .Env.MACOS_NOTARY_KEY_ID }}'
-          key: '{{ .Env.MACOS_NOTARY_KEY }}'
-          wait: true
-          timeout: 20m
-  ```
-
 - [ ] Replace `brews` with Cask configuration using `binaries: [cq]`, post
   install hook invoking stable Homebrew symlink `cq service install
   --owner=homebrew`, pre uninstall hook invoking `cq service uninstall
   --owner=homebrew`, and uninstall backstops for
   `dev.jacobcx.cq.proxy` and `dev.jacobcx.cq.refresh`.
 
-- [ ] Add release workflow secret preflight for five Apple values. Use existing
-  Developer ID Application certificate and App Store Connect key; export them
-  to GitHub encrypted secrets without printing bytes. Do not add private key
-  files to repository or workflow artifacts.
-
 - [ ] Upgrade `goreleaser-action` to v7 and retain OSS distribution. Run
-  `goreleaser check`, then `goreleaser release --snapshot --clean --skip=sign`.
-  Expect config and unsigned snapshot pass.
+  `goreleaser check`, then `goreleaser release --snapshot --clean`. Expect
+  config and snapshot pass without App Store Connect credentials.
 
 - [ ] Run provenance tests; expect pass.
 
@@ -837,7 +812,7 @@ Homebrew Cask DSL, WinGet community manifests, GitHub Actions.
   build: added signed package artifacts
 
   - published complete Homebrew Cask lifecycle hooks
-  - built Windows installer and notarised macOS executables
+  - built Windows installer and verified macOS artifacts
   ```
 
 ## Task 14: Document complete methods and migration
@@ -1025,13 +1000,12 @@ manifest PR.
 - [ ] Wait for every required GitHub check and review. Do not merge on partial
   green. Squash-merge after full green and confirm merged commit on `main`.
 
-- [ ] Verify Apple signing secrets exist without exposing values. Tag merged
-  commit `v0.27.0` and push tag. Wait for release workflow completion.
+- [ ] Tag merged commit `v0.27.0` and push tag. Wait for release workflow
+  completion without adding an App Store Connect dependency.
 
 - [ ] Verify published assets: six CQ archives, two Windows installer executables,
-  checksums, both Darwin binaries validly signed and notarised, Cask commit in
-  `jacobcxdev/homebrew-tap`, no formula update, release provenance, and correct
-  linked version strings.
+  checksums, both Darwin binaries, Cask commit in `jacobcxdev/homebrew-tap`, no
+  formula update, release provenance, and correct linked version strings.
 
 - [ ] Generate WinGet `0.27.0` manifests from published installer URLs and
   hashes. Run `winget validate`, fork/update `microsoft/winget-pkgs`, open
@@ -1063,6 +1037,6 @@ manifest PR.
   installer, platform, and package tasks.
 - [ ] Confirm Linux boundary remains one-way: packaging mutates units; runtime
   supplies behaviour and inspection.
-- [ ] Confirm release path uses official binaries, checksum verification,
-  notarisation, no quarantine bypass, no bespoke runner, and no optional
-  headroom install.
+- [ ] Confirm release path uses official binaries, checksum verification, no
+  App Store Connect dependency, no bespoke runner, and no optional headroom
+  install.
