@@ -278,9 +278,32 @@ func verifyLinuxNamespaceDescriptors(explicit map[int]bool) error {
 		if errno == unix.EBADF {
 			continue
 		}
-		if errno != 0 || flags&unix.FD_CLOEXEC == 0 {
+		if errno != 0 || closeLinuxNamespaceDescriptorOnExec(fd, flags) != nil {
 			return errors.New("unexpected inherited Linux descriptor")
 		}
+	}
+	return nil
+}
+
+func closeLinuxNamespaceDescriptorOnExec(fd int, flags uintptr) error {
+	if flags&unix.FD_CLOEXEC == 0 {
+		_, _, errno := unix.Syscall(unix.SYS_FCNTL, uintptr(fd), unix.F_SETFD, flags|unix.FD_CLOEXEC)
+		if errno == unix.EBADF {
+			return nil
+		}
+		if errno != 0 {
+			return errno
+		}
+	}
+	verified, _, errno := unix.Syscall(unix.SYS_FCNTL, uintptr(fd), unix.F_GETFD, 0)
+	if errno == unix.EBADF {
+		return nil
+	}
+	if errno != 0 {
+		return errno
+	}
+	if verified&unix.FD_CLOEXEC == 0 {
+		return errors.New("Linux descriptor remained inheritable")
 	}
 	return nil
 }
