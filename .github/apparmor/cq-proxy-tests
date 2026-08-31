@@ -2,6 +2,6 @@ abi <abi/4.0>,
 
 include <tunables/global>
 
-profile cq-proxy-tests /tmp/cq-go-build/**/proxy.test flags=(unconfined) {
+profile cq-proxy-tests flags=(unconfined) {
   userns,
 }

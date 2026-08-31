@@ -54,17 +54,11 @@ jobs:
           cat "$test_log"
           grep -F -- "--- PASS: ${test_name} " "$test_log"
       - name: Permit proxy test user namespaces
-        run: |
-          install -d -m 0700 /tmp/cq-go-build
-          sudo apparmor_parser --replace .github/apparmor/cq-proxy-tests
-      - run: go test -race -count=1 ./...
-        env:
-          GOTMPDIR: /tmp/cq-go-build
+        run: sudo apparmor_parser --replace .github/apparmor/cq-proxy-tests
+      - run: aa-exec -p cq-proxy-tests -- go test -race -count=1 ./...
       - name: Remove proxy test confinement profile
         if: always()
-        run: |
-          sudo apparmor_parser --remove .github/apparmor/cq-proxy-tests
-          find /tmp/cq-go-build -depth -delete
+        run: sudo apparmor_parser --remove .github/apparmor/cq-proxy-tests
 
   windows:
     runs-on: windows-latest
