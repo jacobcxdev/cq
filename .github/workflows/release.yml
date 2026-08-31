@@ -71,21 +71,6 @@ jobs:
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
         run: test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
 
-      - name: Verify Apple signing credentials
-        env:
-          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
-          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
-          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-        run: |
-          for name in MACOS_SIGN_P12 MACOS_SIGN_PASSWORD MACOS_NOTARY_ISSUER_ID MACOS_NOTARY_KEY_ID MACOS_NOTARY_KEY; do
-            if [ -z "${!name:-}" ]; then
-              echo "${name} is required" >&2
-              exit 1
-            fi
-          done
-
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
@@ -94,11 +79,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
-          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
-          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
-          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
 
       - name: Publish formatted Homebrew Cask
         env:
@@ -164,5 +144,6 @@ jobs:
             archive="cq_${version}_darwin_${arch}.tar.gz"
             gh release download "${RELEASE_TAG}" --pattern "${archive}" --dir "${verification_dir}"
             tar -xzf "${verification_dir}/${archive}" -C "${verification_dir}"
-            codesign --verify --strict --verbose=2 "${verification_dir}/cq"
+            go version -m "${verification_dir}/cq" |
+              grep -F "github.com/jacobcxdev/cq/cmd/cq"
           done

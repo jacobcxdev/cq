@@ -100,7 +100,7 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	}
 }
 
-func TestReleaseNotarisesAndVerifiesDarwinBinaries(t *testing.T) {
+func TestReleaseDoesNotDependOnAppStoreConnect(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -109,37 +109,28 @@ func TestReleaseNotarisesAndVerifiesDarwinBinaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	releaserText := string(releaser)
-	for _, required := range []string{
-		"notarize:",
-		"macos:",
-		`enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'`,
-		"certificate: '{{ .Env.MACOS_SIGN_P12 }}'",
-		"password: '{{ .Env.MACOS_SIGN_PASSWORD }}'",
-		"issuer_id: '{{ .Env.MACOS_NOTARY_ISSUER_ID }}'",
-		"key_id: '{{ .Env.MACOS_NOTARY_KEY_ID }}'",
-		"key: '{{ .Env.MACOS_NOTARY_KEY }}'",
-		"wait: true",
-		"timeout: 20m",
-	} {
-		if !strings.Contains(releaserText, required) {
-			t.Fatalf("GoReleaser notarisation missing %q", required)
-		}
-	}
 	workflowText := string(workflow)
-	for _, secret := range []string{
+	combined := string(releaser) + workflowText
+	for _, forbidden := range []string{
+		"notarize:",
 		"MACOS_SIGN_P12",
 		"MACOS_SIGN_PASSWORD",
 		"MACOS_NOTARY_ISSUER_ID",
 		"MACOS_NOTARY_KEY_ID",
 		"MACOS_NOTARY_KEY",
 	} {
-		if strings.Count(workflowText, secret) < 2 || !strings.Contains(workflowText, "secrets."+secret) {
-			t.Fatalf("release workflow does not preflight and pass %s", secret)
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("release depends on Apple release credential %q", forbidden)
 		}
 	}
-	if !strings.Contains(workflowText, "codesign --verify --strict") {
-		t.Fatal("release workflow does not verify signed Darwin binaries")
+	for _, required := range []string{
+		`archive="cq_${version}_darwin_${arch}.tar.gz"`,
+		`go version -m "${verification_dir}/cq"`,
+		"github.com/jacobcxdev/cq/cmd/cq",
+	} {
+		if !strings.Contains(workflowText, required) {
+			t.Fatalf("release does not verify Darwin artifact %q", required)
+		}
 	}
 }
 
