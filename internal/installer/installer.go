@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -609,14 +610,51 @@ type OSTemporaryDirectories struct {
 	Root string
 }
 
-func (temporary OSTemporaryDirectories) Create() (string, error) {
+func (temporary OSTemporaryDirectories) Create() (directory string, resultErr error) {
 	if temporary.Root == "" || !filepath.IsAbs(temporary.Root) || filepath.Clean(temporary.Root) != temporary.Root {
 		return "", fmt.Errorf("invalid installer temporary root")
 	}
-	if err := os.MkdirAll(temporary.Root, 0o700); err != nil {
+	fsys := fsutil.OSFileSystem{}
+	if err := fsutil.EnsureSecureDirectory(fsys, temporary.Root); err != nil {
 		return "", err
 	}
-	return os.MkdirTemp(temporary.Root, "cq-install-")
+	parent, err := fsys.OpenDurableDirectory(temporary.Root)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if closeErr := parent.Close(); closeErr != nil {
+			if directory != "" {
+				cleanupErr := os.Remove(directory)
+				directory = ""
+				resultErr = errors.Join(resultErr, closeErr, cleanupErr)
+				return
+			}
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
+	for range 128 {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		name := "cq-install-" + hex.EncodeToString(random[:])
+		if err := parent.Mkdir(name, 0o700); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		directory = filepath.Join(temporary.Root, name)
+		if err := parent.Sync(); err != nil {
+			return "", errors.Join(err, os.Remove(directory))
+		}
+		if err := fsutil.ValidateSecureDirectory(fsys, directory); err != nil {
+			return "", errors.Join(err, os.Remove(directory))
+		}
+		return directory, nil
+	}
+	return "", fmt.Errorf("create unique installer temporary root")
 }
 
 func (temporary OSTemporaryDirectories) Remove(directory string) error {
