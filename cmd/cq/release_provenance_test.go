@@ -580,6 +580,10 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	linuxText := string(linux)
 	for _, required := range []string{
 		"trap cleanup EXIT INT TERM",
+		`echo "missing required command: $command" >&2`,
+		`systemd_executable=/usr/lib/systemd/systemd`,
+		`echo "systemd user manager unavailable: $systemd_executable" >&2`,
+		`"$systemd_executable" --user --unit=basic.target`,
 		"cq-proxy.service",
 		"cq-refresh.service",
 		"cq-refresh.timer",
@@ -592,5 +596,8 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		if !strings.Contains(linuxText, required) {
 			t.Errorf("Linux installation script missing cleanup/proof %q", required)
 		}
+	}
+	if strings.Contains(linuxText, "for command in go jq systemctl systemd readlink") {
+		t.Error("Linux installation script requires systemd daemon on PATH")
 	}
 }
