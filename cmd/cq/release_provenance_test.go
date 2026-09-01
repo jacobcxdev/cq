@@ -450,12 +450,19 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	windowsMSIText := string(windowsMSI)
+	directInstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service install --owner=winget`)
+	directUninstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service uninstall --owner=winget`)
+	msiInstallIndex := strings.Index(windowsMSIText, `Invoke-MSI -Action install -Path $PreviousMSI`)
+	if directInstallIndex < 0 || directUninstallIndex < directInstallIndex || msiInstallIndex < directUninstallIndex {
+		t.Error("Windows MSI validation does not expose and clean direct service lifecycle before installer execution")
+	}
 	for _, script := range []struct {
 		text string
 		seal string
 	}{
 		{text: windowsText, seal: "Set-PrivateTree -Root $temporaryLocal"},
-		{text: string(windowsMSI), seal: "Set-PrivateTree -Root $localCQ"},
+		{text: windowsMSIText, seal: "Set-PrivateTree -Root $localCQ"},
 	} {
 		sealIndex := strings.Index(script.text, script.seal)
 		fixtureIndex := strings.Index(script.text, "fixtures --config")

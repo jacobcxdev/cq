@@ -31,6 +31,7 @@ $roamingCQ = Join-Path $roaming "cq"
 $localCQ = Join-Path $local "cq"
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("cq-msi-validation-" + [Guid]::NewGuid().ToString("N"))
 $probeExecutable = Join-Path $temporaryRoot "native-transport-probe.exe"
+$serviceProbe = Join-Path $temporaryRoot "cq-service-probe.exe"
 $addressFile = Join-Path $temporaryRoot "upstream-address.txt"
 $upstreamProcess = $null
 $ownsState = $false
@@ -181,6 +182,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "failed to build native transport probe"
     }
+    & go build -ldflags "-X main.version=$PreviousVersion" -o $serviceProbe ./cmd/cq
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to build direct service lifecycle probe"
+    }
     $upstreamProcess = Start-Process -FilePath $probeExecutable -ArgumentList @("serve", "--address-file", $addressFile) -PassThru -NoNewWindow
     Wait-File -Path $addressFile
     $upstream = (Get-Content -LiteralPath $addressFile -Raw).Trim()
@@ -195,6 +200,26 @@ try {
     }
     foreach ($root in @($codexRoot, $roamingCQ, $localCQ)) {
         Set-PrivateTree -Root $root
+    }
+
+    & $serviceProbe service install --owner=winget
+    if ($LASTEXITCODE -ne 0) {
+        throw "direct CQ service install failed"
+    }
+    $directStatus = (& $serviceProbe service status --json | ConvertFrom-Json)
+    if ($LASTEXITCODE -ne 0 -or $directStatus.owner -ne "winget" -or -not $directStatus.proxy.running -or -not $directStatus.proxy.healthy -or -not $directStatus.refresh.healthy) {
+        throw "direct CQ service lifecycle is unhealthy"
+    }
+    if ($directStatus.proxy.configured_executable -ne $serviceProbe -or $directStatus.proxy.live_executable -ne $serviceProbe -or $directStatus.proxy.listener -ne "127.0.0.1:$Port") {
+        throw "direct CQ service process identity differs"
+    }
+    & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
+    if ($LASTEXITCODE -ne 0) {
+        throw "direct CQ service transport probe failed"
+    }
+    & $serviceProbe service uninstall --owner=winget
+    if ($LASTEXITCODE -ne 0) {
+        throw "direct CQ service uninstall failed"
     }
 
     Invoke-MSI -Action install -Path $PreviousMSI -Log (Join-Path $temporaryRoot "install-previous.log")
