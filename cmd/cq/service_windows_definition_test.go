@@ -356,6 +356,37 @@ func TestWindowsTaskDefinitionServiceRestartAndRemovalAreIdempotent(t *testing.T
 	}
 }
 
+func TestWindowsTaskDefinitionServiceWaitsForTaskInstanceExitBeforeDelete(t *testing.T) {
+	platform, _ := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+
+	polls := 0
+	platform.queryState = func(context.Context, string) (windowsTaskRuntimeState, error) {
+		polls++
+		state := windowsTaskRuntimeState{HasLastResult: true}
+		if polls == 1 {
+			state.EnginePIDs = []uint32{902}
+		}
+		return state, nil
+	}
+	originalRun := platform.run
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if strings.EqualFold(args[0], "/Delete") && polls < 2 {
+			return nil, errors.New("task deleted before its process exited")
+		}
+		return originalRun(ctx, args...)
+	}
+
+	if err := platform.RemoveProxy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if polls != 2 {
+		t.Fatalf("task stop polls = %d, want 2", polls)
+	}
+}
+
 func TestWindowsTaskDefinitionServiceInspectCombinesSchedulerAndRuntime(t *testing.T) {
 	platform, runner := newWindowsTaskServiceHarness(t)
 	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
@@ -558,6 +589,7 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 			return nil, windowsTaskCommandError{Code: windowsTaskNotFound, Output: "cannot find the file"}
 		}
 		runner.running[path] = false
+		delete(runner.enginePIDs, path)
 		return nil, nil
 	case "/delete":
 		path := args[2]
