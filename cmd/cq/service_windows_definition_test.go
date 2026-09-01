@@ -246,6 +246,40 @@ func TestWindowsTaskDefinitionServiceRestoresPreviousTaskOnRunFailure(t *testing
 	}
 }
 
+func TestWindowsTaskDefinitionServiceRestartProxyReplacesInstance(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	baseRun := platform.run
+	nextPID := uint32(901)
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		output, err := baseRun(ctx, args...)
+		if err == nil && reflect.DeepEqual(args, []string{"/Run", "/TN", windowsProxyTaskPath}) {
+			nextPID++
+			runner.enginePIDs[windowsProxyTaskPath] = []uint32{nextPID}
+		}
+		return output, err
+	}
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	before := runner.enginePIDs[windowsProxyTaskPath][0]
+	runner.calls = nil
+
+	if err := platform.RestartProxy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after := runner.enginePIDs[windowsProxyTaskPath][0]
+	if before == after {
+		t.Fatalf("proxy PID remained %d", after)
+	}
+	want := [][]string{
+		{"/End", "/TN", windowsProxyTaskPath},
+		{"/Run", "/TN", windowsProxyTaskPath},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("restart calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
 func TestWindowsTaskDefinitionServiceRestartAndRemovalAreIdempotent(t *testing.T) {
 	platform, runner := newWindowsTaskServiceHarness(t)
 	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {

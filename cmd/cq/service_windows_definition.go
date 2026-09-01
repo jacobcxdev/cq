@@ -280,11 +280,11 @@ func (platform *windowsTaskServicePlatform) InstallRefresh(ctx context.Context, 
 }
 
 func (platform *windowsTaskServicePlatform) RestartProxy(ctx context.Context) error {
-	return platform.runTask(ctx, windowsProxyTaskPath)
+	return platform.restartTask(ctx, windowsProxyTaskPath)
 }
 
 func (platform *windowsTaskServicePlatform) RestartRefresh(ctx context.Context) error {
-	return platform.runTask(ctx, windowsRefreshTaskPath)
+	return platform.restartTask(ctx, windowsRefreshTaskPath)
 }
 
 func (platform *windowsTaskServicePlatform) RemoveProxy(ctx context.Context) error {
@@ -407,6 +407,13 @@ func (platform *windowsTaskServicePlatform) runTask(ctx context.Context, taskPat
 		return fmt.Errorf("run Windows task %s: %w", taskPath, err)
 	}
 	return nil
+}
+
+func (platform *windowsTaskServicePlatform) restartTask(ctx context.Context, taskPath string) error {
+	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
+		return fmt.Errorf("end Windows task %s before restart: %w", taskPath, err)
+	}
+	return platform.runTask(ctx, taskPath)
 }
 
 func (platform *windowsTaskServicePlatform) remove(ctx context.Context, taskPath string) error {

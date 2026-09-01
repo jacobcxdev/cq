@@ -153,21 +153,47 @@ func TestServiceInstallRejectsOwnershipConflictBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestServiceRestartRunsRefreshThenProxy(t *testing.T) {
+func TestServiceRestartWaitsForProxyBeforeRefresh(t *testing.T) {
 	lifecycle, platform, _ := newServiceHarness(t)
 	platform.proxyRegistered = true
 	platform.proxyRunning = true
+	platform.proxyHealthy = false
 	platform.refreshRegistered = true
+	lifecycle.StatusAttempts = 3
+	lifecycle.Wait = func(context.Context, time.Duration) error {
+		platform.proxyHealthy = true
+		return nil
+	}
 
 	if err := lifecycle.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart() error = %v", err)
 	}
-	want := []string{"restart-refresh", "restart-proxy", "inspect"}
+	want := []string{"restart-proxy", "inspect", "inspect", "restart-refresh", "inspect"}
 	if !reflect.DeepEqual(platform.calls, want) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
 	}
 	if platform.refreshRuns != 1 {
 		t.Fatalf("refresh runs = %d, want 1", platform.refreshRuns)
+	}
+}
+
+func TestServiceRestartDoesNotRunRefreshWhenProxyIsUnhealthy(t *testing.T) {
+	lifecycle, platform, _ := newServiceHarness(t)
+	platform.proxyRegistered = true
+	platform.proxyRunning = true
+	platform.proxyHealthy = false
+	platform.refreshRegistered = true
+
+	err := lifecycle.Restart(context.Background())
+	if !errors.Is(err, ErrServiceUnhealthy) {
+		t.Fatalf("Restart() error = %v, want ErrServiceUnhealthy", err)
+	}
+	want := []string{"restart-proxy", "inspect"}
+	if !reflect.DeepEqual(platform.calls, want) {
+		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
+	}
+	if platform.refreshRuns != 0 {
+		t.Fatalf("refresh runs = %d, want 0", platform.refreshRuns)
 	}
 }
 
