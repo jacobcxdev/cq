@@ -100,6 +100,16 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	}
 }
 
+func TestReleaseArchivesContainOnlyCQExecutable(t *testing.T) {
+	releaser, err := os.ReadFile("../../.goreleaser.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(releaser), "    files:\n      - none*\n") {
+		t.Fatal("GoReleaser archives include default metadata files")
+	}
+}
+
 func TestReleaseDoesNotDependOnAppStoreConnect(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
 	if err != nil {
