@@ -79,11 +79,12 @@ homebrew_casks:
           system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
       post:
         install: |
+          if OS.mac?
+            attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false
+            if attributes.stdout.lines(chomp: true).include?("com.apple.quarantine")
+              system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]
+            end
+            remaining_attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false
+            raise "cq remains quarantined after installation" if remaining_attributes.stdout.lines(chomp: true).include?("com.apple.quarantine")
+          end
           system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
-    uninstall:
-      launchctl:
-        - dev.jacobcx.cq.proxy
-        - dev.jacobcx.cq.refresh
-      delete:
-        - ~/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist
-        - ~/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist

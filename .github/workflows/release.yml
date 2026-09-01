@@ -71,6 +71,24 @@ jobs:
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
         run: test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
 
+      - name: Build package validation snapshot
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
+
+      - name: Validate Homebrew Cask quarantine handling
+        run: |
+          case "$(uname -m)" in
+            arm64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_arm64.tar.gz' -print -quit)" ;;
+            x86_64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_amd64.tar.gz' -print -quit)" ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          test -n "$archive"
+          .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"

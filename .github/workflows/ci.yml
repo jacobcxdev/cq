@@ -11,6 +11,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -26,6 +28,26 @@ jobs:
         env:
           CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"
         run: CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" go test -race -count=1 ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledRescuePassesThroughCurrentClient)$'
+
+      - name: Bind reviewed Codex corpus provenance
+        run: echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go 0.0.0 ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: validation
+
+      - name: Validate Homebrew Cask quarantine handling
+        run: |
+          case "$(uname -m)" in
+            arm64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_arm64.tar.gz' -print -quit)" ;;
+            x86_64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_amd64.tar.gz' -print -quit)" ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          test -n "$archive"
+          .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
 
   test:
     runs-on: ubuntu-latest
