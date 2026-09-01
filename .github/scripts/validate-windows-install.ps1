@@ -55,7 +55,7 @@ function Invoke-WinGet {
     if ($LASTEXITCODE -ne 0) {
         $exitCode = $LASTEXITCODE
         $diagnosticRoot = Join-Path $local "Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir"
-        $diagnostic = Get-ChildItem -LiteralPath $diagnosticRoot -Filter "WinGet-jacobcxdev.cq*.log" -File -ErrorAction SilentlyContinue |
+        $diagnostic = Get-ChildItem -LiteralPath $diagnosticRoot -Filter "WinGet*.log" -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($diagnostic) {
@@ -442,7 +442,7 @@ try {
         if ($productCode -notmatch '^\{[0-9A-Fa-f-]{36}\}$') {
             throw "CQ MSI product code is invalid"
         }
-        Invoke-WinGet -Arguments @("uninstall", "--product-code", $productCode, "--scope", "user", "--silent", "--accept-source-agreements", "--disable-interactivity")
+        Invoke-WinGet -Arguments @("uninstall", "--product-code", $productCode, "--silent", "--accept-source-agreements", "--disable-interactivity")
         Wait-Removed -Path $installedCQ
         foreach ($name in @("Proxy", "Refresh")) {
             if (Get-ScheduledTask -TaskPath $taskPath -TaskName $name -ErrorAction SilentlyContinue) {

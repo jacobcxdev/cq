@@ -491,6 +491,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`Remove-ValidationPath -Path $localCQ`,
 		`$SkipWinGet`,
 		`DiagOutputDir`,
+		`-Filter "WinGet*.log"`,
 		`"install", "--manifest", $PreviousManifestPath`,
 		`"upgrade", "--manifest", $ManifestPath`,
 		`$productCode = [string]$installedEntry.PSChildName`,
