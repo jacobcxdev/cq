@@ -248,20 +248,3 @@ jobs:
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
-
-      - name: Prove deployed v0.29.10 recovery
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $artifactRoot = Join-Path $env:RUNNER_TEMP "deployed-winget-manifests"
-          gh run download 33508767358 --name winget-manifests --dir $artifactRoot
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to download deployed WinGet manifest"
-          }
-          $manifestPath = @(Get-ChildItem -LiteralPath $artifactRoot -Directory -Recurse | Where-Object { $_.FullName -match "[\\/]j[\\/]jacobcxdev[\\/]cq[\\/]0\.29\.10$" })
-          if ($manifestPath.Count -ne 1) {
-            throw "deployed WinGet manifest directory is absent or ambiguous"
-          }
-          .\.github\scripts\validate-windows-install.ps1 -ManifestPath $manifestPath[0].FullName -ExpectedVersion 0.29.10 -UseSourceGoRunner

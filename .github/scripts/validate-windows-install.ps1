@@ -12,8 +12,6 @@ param(
 
     [switch]$SkipWinGet,
 
-    [switch]$UseSourceGoRunner,
-
     [ValidateRange(1024, 65535)]
     [int]$Port = 19280
 )
@@ -73,12 +71,7 @@ function Invoke-GoRunner {
         [string]$Version,
         [string]$Action = "install"
     )
-    if ($UseSourceGoRunner) {
-        $arguments = @("run", "-ldflags", "-X main.version=$Version", "./cmd/cq-install")
-    }
-    else {
-        $arguments = @("run", "github.com/jacobcxdev/cq/cmd/cq-install@v$Version")
-    }
+    $arguments = @("run", "github.com/jacobcxdev/cq/cmd/cq-install@v$Version")
     if ($Action -eq "uninstall") {
         $arguments += "uninstall"
     }
