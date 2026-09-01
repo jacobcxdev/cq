@@ -314,8 +314,10 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		`$validationArguments.PreviousVersion = $previousVersion`,
 		"needs: [release, windows-packages, windows-acceptance]",
 		"needs: [windows-deployed, linux-install]",
+		`gh release view "$RELEASE_TAG" --json tagName,isDraft,assets`,
 		`gh release edit "$RELEASE_TAG" --draft=false`,
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
+		`brew style --fix "$cask"`,
 		`.\.github\scripts\validate-windows-install.ps1`,
 		"secrets.WINGET_PKGS_TOKEN",
 		"microsoft/winget-pkgs",
@@ -338,6 +340,15 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	lifecycleIndex := strings.Index(text, ".github/scripts/validate-homebrew-install.sh")
 	if styleIndex < 0 || lifecycleIndex < 0 || styleIndex > lifecycleIndex {
 		t.Error("release workflow does not validate formatted Homebrew Cask bytes")
+	}
+	publishStart := strings.Index(text, "\n  publish:\n")
+	publishEnd := strings.Index(text[publishStart+1:], "\n      - name: Audit published Homebrew Cask\n")
+	if publishStart < 0 || publishEnd < 0 {
+		t.Fatal("release workflow publish job is missing")
+	}
+	publishBlock := text[publishStart : publishStart+1+publishEnd]
+	if strings.Contains(publishBlock, `releases/tags/${RELEASE_TAG}`) {
+		t.Error("release workflow queries the public-only tag endpoint before publishing its draft")
 	}
 }
 
