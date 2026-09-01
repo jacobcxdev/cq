@@ -286,6 +286,7 @@ function Remove-CQTask {
     $ErrorActionPreference = "Continue"
     & schtasks.exe /End /TN $TaskName 2>$null | Out-Null
     & schtasks.exe /Delete /TN $TaskName /F 2>$null | Out-Null
+    $global:LASTEXITCODE = 0
 }
 
 function Remove-CQTaskFolder {
