@@ -153,10 +153,12 @@ function Assert-Installed {
     if ($normalisedUserPath -notcontains $normalisedInstallRoot) {
         throw "CQ MSI PATH entry is absent"
     }
-    & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
-    if ($LASTEXITCODE -ne 0) {
+    $probeOutput = & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
+    $probeExitCode = $LASTEXITCODE
+    if ($probeExitCode -ne 0) {
         throw "installed HTTP/SSE/WebSocket probe failed"
     }
+    $probeOutput | Write-Host
     return $status
 }
 
