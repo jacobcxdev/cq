@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -27,6 +28,8 @@ const (
 	maxWindowsTaskXMLBytes    = 256 << 10
 	windowsTaskNotFound       = uint32(0x80070002)
 	windowsTaskAlreadyRunning = uint32(0x8004131f)
+	windowsTaskStopAttempts   = 100
+	windowsTaskStopInterval   = 100 * time.Millisecond
 )
 
 type windowsTaskKind uint8
@@ -370,8 +373,8 @@ func (platform *windowsTaskServicePlatform) removeCreatedTaskFolder(ctx context.
 
 func (platform *windowsTaskServicePlatform) restore(ctx context.Context, taskPath string, definition []byte, exists, running bool) error {
 	var result error
-	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
-		result = errors.Join(result, fmt.Errorf("end failed candidate task: %w", err))
+	if err := platform.endAndWait(ctx, taskPath); err != nil {
+		return fmt.Errorf("stop failed candidate task: %w", err)
 	}
 	if !exists {
 		if _, err := platform.run(ctx, "/Delete", "/TN", taskPath, "/F"); err != nil && !isWindowsTaskNotFound(err) {
@@ -410,22 +413,54 @@ func (platform *windowsTaskServicePlatform) runTask(ctx context.Context, taskPat
 }
 
 func (platform *windowsTaskServicePlatform) restartTask(ctx context.Context, taskPath string) error {
-	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
-		return fmt.Errorf("end Windows task %s before restart: %w", taskPath, err)
+	if err := platform.endAndWait(ctx, taskPath); err != nil {
+		return fmt.Errorf("stop Windows task %s before restart: %w", taskPath, err)
 	}
 	return platform.runTask(ctx, taskPath)
 }
 
 func (platform *windowsTaskServicePlatform) remove(ctx context.Context, taskPath string) error {
 	var result error
-	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
-		result = errors.Join(result, fmt.Errorf("end Windows task %s: %w", taskPath, err))
+	if err := platform.endAndWait(ctx, taskPath); err != nil {
+		return errors.Join(result, err, platform.removeFolder(ctx))
 	}
 	if _, err := platform.run(ctx, "/Delete", "/TN", taskPath, "/F"); err != nil && !isWindowsTaskNotFound(err) {
 		result = errors.Join(result, fmt.Errorf("delete Windows task %s: %w", taskPath, err))
 	}
 	result = errors.Join(result, platform.removeFolder(ctx))
 	return result
+}
+
+func (platform *windowsTaskServicePlatform) endAndWait(ctx context.Context, taskPath string) error {
+	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
+		return fmt.Errorf("end Windows task %s: %w", taskPath, err)
+	}
+	return platform.waitTaskStopped(ctx, taskPath)
+}
+
+func (platform *windowsTaskServicePlatform) waitTaskStopped(ctx context.Context, taskPath string) error {
+	return platform.waitTaskStoppedWithPolicy(ctx, taskPath, windowsTaskStopAttempts, windowsTaskStopInterval)
+}
+
+func (platform *windowsTaskServicePlatform) waitTaskStoppedWithPolicy(ctx context.Context, taskPath string, attempts int, interval time.Duration) error {
+	for attempt := 0; attempt < attempts; attempt++ {
+		state, err := platform.queryState(ctx, taskPath)
+		if isWindowsTaskNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect Windows task %s while stopping: %w", taskPath, err)
+		}
+		if !state.Running && len(state.EnginePIDs) == 0 {
+			return nil
+		}
+		if attempt+1 < attempts {
+			if err := waitForServicePoll(ctx, interval); err != nil {
+				return err
+			}
+		}
+	}
+	return fmt.Errorf("Windows task %s remained running after stop", taskPath)
 }
 
 func (platform *windowsTaskServicePlatform) inspect(ctx context.Context, kind windowsTaskKind) (componentStatus, error) {

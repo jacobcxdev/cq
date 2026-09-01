@@ -347,6 +347,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git fetch --force --tags origin
           previous_tag=
           while IFS= read -r candidate; do
             if [[ "$candidate" != "$GITHUB_REF_NAME" ]]; then
@@ -443,7 +444,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-latest, windows-11-arm]
+        include:
+          - runner: windows-latest
+            architecture: amd64
+            winget: true
+          - runner: windows-11-arm
+            architecture: arm64
+            winget: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -455,11 +462,23 @@ jobs:
           go-version-file: go.mod
 
       - uses: actions/download-artifact@v5
+        if: matrix.winget
         with:
           name: winget-manifests
           path: ${{ runner.temp }}/winget-manifests
 
+      - uses: actions/download-artifact@v5
+        if: ${{ !matrix.winget }}
+        with:
+          name: windows-msi-validation
+          path: ${{ runner.temp }}/windows-msi-validation
+
+      - name: Refresh release tag inventory
+        shell: pwsh
+        run: git fetch --force --tags origin
+
       - name: Validate deployed WinGet and Go runner lifecycle
+        if: matrix.winget
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -524,6 +543,32 @@ jobs:
             $validationArguments.PreviousVersion = $previousVersion
           }
           .\.github\scripts\validate-windows-install.ps1 @validationArguments
+
+      - name: Validate deployed ARM64 MSI and Go runner lifecycle
+        if: ${{ !matrix.winget }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $previousTag = @(git tag --sort=-v:refname | Where-Object { $_ -ne $env:RELEASE_TAG } | Select-Object -First 1)
+          if ($previousTag.Count -ne 1) {
+            throw "previous stable tag is absent or ambiguous"
+          }
+          $previousGoVersion = $previousTag[0].TrimStart("v")
+          $validationRoot = Join-Path $env:RUNNER_TEMP "windows-msi-validation"
+          $publicRoot = Join-Path $env:RUNNER_TEMP "public-windows-msi"
+          New-Item -ItemType Directory -Path $publicRoot -Force | Out-Null
+          gh release download $env:RELEASE_TAG --pattern "cq_${version}_windows_${{ matrix.architecture }}.msi" --dir $publicRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to download public ARM64 MSI"
+          }
+          $previousMSI = Join-Path $validationRoot "cq_0.0.1_windows_${{ matrix.architecture }}.msi"
+          $currentMSI = Join-Path $publicRoot "cq_${version}_windows_${{ matrix.architecture }}.msi"
+          .\.github\scripts\validate-windows-install.ps1 -SkipWinGet -ExpectedVersion $version -PreviousGoVersion $previousGoVersion
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
 
   winget-publish:
     needs: [windows-deployed, linux-install]

@@ -286,7 +286,7 @@ func (installer *Installer) Uninstall(ctx context.Context) (resultErr error) {
 	if err := installer.Metadata.Remove(ctx, *current); err != nil {
 		return restore(fmt.Errorf("remove CQ platform metadata: %w", err), true)
 	}
-	if err := installer.FS.Remove(current.Executable); err != nil {
+	if err := removeExecutable(ctx, installer.FS, current.Executable); err != nil {
 		return restore(fmt.Errorf("remove CQ executable: %w", err), true)
 	}
 	if err := installer.syncExecutableDirectory(); err != nil {
@@ -409,8 +409,13 @@ func (installer *Installer) rollback(ctx context.Context, previous *Installation
 		result = errors.Join(result, installer.Lifecycle.Uninstall(ctx, candidate.Owner))
 	}
 	result = errors.Join(result, installer.Metadata.Remove(ctx, candidate))
-	result = errors.Join(result, installer.removeIfPresent(installer.Installation.Executable))
+	result = errors.Join(result, installer.removeExecutableIfPresent(ctx, installer.Installation.Executable))
 	result = errors.Join(result, installer.removeIfPresent(installer.candidatePath()))
+	if _, err := installer.FS.Stat(installer.Installation.Executable); err == nil {
+		return errors.Join(result, fmt.Errorf("candidate CQ executable remains"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(result, fmt.Errorf("verify candidate CQ executable removal: %w", err))
+	}
 	if previous == nil {
 		result = errors.Join(result, installer.State.Remove())
 		result = errors.Join(result, installer.syncExecutableDirectory())
@@ -501,7 +506,12 @@ func (installer *Installer) readBinary(path string) ([]byte, os.FileMode, string
 }
 
 func (installer *Installer) writeExclusive(path string, body []byte, mode os.FileMode) (resultErr error) {
-	file, err := installer.FS.CreateExclusive(path, mode.Perm())
+	directory, err := fsutil.OpenOwnerControlledDirectory(installer.FS, filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
+	file, err := directory.CreateExclusive(filepath.Base(path), mode.Perm())
 	if err != nil {
 		return err
 	}
@@ -538,6 +548,13 @@ func (installer *Installer) ensureAbsent(path string) error {
 
 func (installer *Installer) removeIfPresent(path string) error {
 	if err := installer.FS.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (installer *Installer) removeExecutableIfPresent(ctx context.Context, path string) error {
+	if err := removeExecutable(ctx, installer.FS, path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

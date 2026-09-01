@@ -308,7 +308,15 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		"runs-on: ubuntu-24.04-arm",
 		`.github/scripts/validate-linux-install.sh`,
 		"name: windows-msi-validation",
-		"runner: [windows-latest, windows-11-arm]",
+		"runner: windows-latest",
+		"runner: windows-11-arm",
+		"architecture: arm64",
+		"winget: false",
+		`if: matrix.winget`,
+		`if: ${{ !matrix.winget }}`,
+		`git fetch --force --tags origin`,
+		`-SkipWinGet`,
+		`gh release download $env:RELEASE_TAG`,
 		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
 		`$validationArguments.PreviousGoVersion = $previousGoVersion`,
 		`if ($statusCode -ne 404)`,
@@ -346,6 +354,9 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	}
 	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 2 {
 		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 2", count)
+	}
+	if count := strings.Count(text, "git fetch --force --tags origin"); count != 2 {
+		t.Errorf("release workflow refreshes tag inventory %d times, want Linux and Windows deployment jobs", count)
 	}
 	releaseStart := strings.Index(text, "\n  release:\n")
 	windowsStart := strings.Index(text, "\n  windows-packages:\n")
@@ -462,14 +473,34 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		"if ($ownsWinGetPackage)",
 		"Remove-Item -LiteralPath $temporaryRoot -Recurse -Force",
 		"native-transport-probe.go",
-		`$temporaryCodex = Join-Path $temporaryHome ".codex"`,
+		`$local = [Environment]::GetFolderPath("LocalApplicationData")`,
+		`$roaming = [Environment]::GetFolderPath("ApplicationData")`,
+		`$homePath = [Environment]::GetFolderPath("UserProfile")`,
+		`$codexRoot = Join-Path $homePath ".codex"`,
+		`$installedCQ = Join-Path $local "Programs\cq\cq.exe"`,
+		`"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
+		`"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
+		`"HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
+		`"HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
+		`$displayName = $_.PSObject.Properties["DisplayName"]`,
+		`$publisher = $_.PSObject.Properties["Publisher"]`,
+		`$pathSeparators = [char[]]@("\", "/")`,
+		`TrimEnd($pathSeparators)`,
+		`Remove-ValidationPath -Path $codexRoot`,
+		`Remove-ValidationPath -Path $roamingCQ`,
+		`Remove-ValidationPath -Path $localCQ`,
+		`$SkipWinGet`,
+		`DiagOutputDir`,
+		`-Filter "WinGet*.log"`,
 		`"install", "--manifest", $PreviousManifestPath`,
 		`"upgrade", "--manifest", $ManifestPath`,
-		`"uninstall", "--id", "jacobcxdev.cq"`,
+		`$productCode = [string]$installedEntry.PSChildName`,
+		`"uninstall", "--product-code", $productCode`,
 		`github.com/jacobcxdev/cq/cmd/cq-install@v$Version`,
 		"PreviousGoVersion",
 		"GetSecurityDescriptor(4)",
 		"EnginePID",
+		`$runLevelProperty = $principal.PSObject.Properties["RunLevel"]`,
 		"LocalManifestFiles",
 		`@(Get-CQARPEntries).Count`,
 	} {
@@ -483,6 +514,18 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	if strings.Contains(windowsText, "& $Path install --owner=winget") {
 		t.Fatal("Windows native validation bypasses WinGet")
+	}
+	if strings.Contains(windowsText, "$principal.RunLevel") {
+		t.Fatal("Windows deployment validation requires optional RunLevel XML property")
+	}
+	for _, redirected := range []string{
+		`$shellKey.SetValue("AppData"`,
+		`$shellKey.SetValue("Local AppData"`,
+		`$environmentKey.SetValue("USERPROFILE"`,
+	} {
+		if strings.Contains(windowsText, redirected) {
+			t.Errorf("Windows deployment validation redirects native user profile with %q", redirected)
+		}
 	}
 	windowsMSI, err := os.ReadFile("../../.github/scripts/validate-windows-msi.ps1")
 	if err != nil {
@@ -511,7 +554,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		text string
 		seal string
 	}{
-		{text: windowsText, seal: "Set-PrivateTree -Root $temporaryLocal"},
+		{text: windowsText, seal: "Set-PrivateTree -Root $localCQ"},
 		{text: windowsMSIText, seal: "Set-PrivateTree -Root $localCQ"},
 	} {
 		sealIndex := strings.Index(script.text, script.seal)

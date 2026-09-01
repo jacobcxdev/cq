@@ -44,6 +44,28 @@ func TestInstallerCreatesMissingExecutableDirectory(t *testing.T) {
 	}
 }
 
+func TestInstallerWritesIntoOwnerControlledExecutableDirectory(t *testing.T) {
+	fsys := &pathRestrictedInstallerFS{MemFS: fsutil.NewMemFS()}
+	directory := filepath.Join("go", "bin")
+	if err := fsys.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installation := Installation{Executable: filepath.Join(directory, installerExecutableName())}
+	installer := Installer{FS: fsys, Installation: installation}
+	body := []byte("cq")
+
+	if err := installer.writeExclusive(installer.candidatePath(), body, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fsys.ReadFile(installer.candidatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("candidate body = %q", got)
+	}
+}
+
 func TestInstallerRemovesNewExecutableDirectoryAfterFailure(t *testing.T) {
 	harness := newInstallerHarness(t)
 	directory := filepath.Join(filepath.Dir(filepath.Dir(harness.installer.Installation.Executable)), "new-bin")
@@ -512,7 +534,16 @@ type failingInstallerFS struct {
 	failRenameCount       int
 	failRemoveTarget      string
 	failRemoveCount       int
+	failRemoveError       error
 	renameCalls           int
+}
+
+type pathRestrictedInstallerFS struct {
+	*fsutil.MemFS
+}
+
+func (*pathRestrictedInstallerFS) CreateExclusive(string, os.FileMode) (fsutil.DurableFile, error) {
+	return nil, fsutil.ErrUnsafeSecurePath
 }
 
 func (fsys *failingInstallerFS) Rename(oldPath, newPath string) error {
@@ -527,6 +558,9 @@ func (fsys *failingInstallerFS) Rename(oldPath, newPath string) error {
 func (fsys *failingInstallerFS) Remove(path string) error {
 	if path == fsys.failRemoveTarget && fsys.failRemoveCount > 0 {
 		fsys.failRemoveCount--
+		if fsys.failRemoveError != nil {
+			return fsys.failRemoveError
+		}
 		return errors.New("injected removal failure")
 	}
 	return fsys.MemFS.Remove(path)

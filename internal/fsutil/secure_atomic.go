@@ -666,6 +666,19 @@ func OpenOwnerControlledDirectory(fsys FileSystem, path string) (SecureDirectory
 	if !ok {
 		return nil, ErrSecureCapabilityUnavailable
 	}
+	if opener, ok := fsys.(interface {
+		openOwnerControlledDirectory(string) (SecureDirectory, error)
+	}); ok {
+		directory, err := opener.openOwnerControlledDirectory(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := ValidateOwnerControlledDirectoryHandle(inspector, directory, path); err != nil {
+			_ = directory.Close()
+			return nil, err
+		}
+		return directory, nil
+	}
 	opener, ok := fsys.(DurableDirectoryOpener)
 	if !ok {
 		return nil, ErrSecureCapabilityUnavailable
