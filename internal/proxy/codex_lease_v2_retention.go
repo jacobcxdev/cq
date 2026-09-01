@@ -216,19 +216,6 @@ func (store *CodexLeaseStore) validateCodexLeaseV2CandidateLocked(candidate code
 	if err := validateCodexLeaseRepresentedModes(representedCodexLeaseAuthoritativeEpochs(candidate.Records), store.modes); err != nil {
 		return err
 	}
-	data, err := store.marshalV2Envelope(candidate)
-	if err != nil {
-		return err
-	}
-	var signed codexLeaseJournalEnvelopeV2
-	if err := decodeCodexLeaseV2StrictJSON(data, &signed); err != nil {
-		return err
-	}
-	if err := store.validateV2Envelope(signed); err != nil {
-		return err
-	}
-	if err := store.validateCodexLeaseV2State(signed); err != nil {
-		return err
-	}
-	return nil
+	_, _, err := store.prepareV2Envelope(candidate)
+	return err
 }
