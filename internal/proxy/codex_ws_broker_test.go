@@ -1423,6 +1423,57 @@ func TestCodexTerminatingWSBrokerRoutesTurnWithoutPrewarmAdoption(t *testing.T) 
 	}
 }
 
+func TestCodexTerminatingWSBrokerFailsOpenWhenPrewarmResponseStalls(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{{
+			AccountKey:  "account-a",
+			CandidateID: "candidate-a",
+			Kind:        CodexAttemptSlotDirect,
+		}},
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: prewarm},
+		{err: io.EOF},
+	}}
+	upstream := newCodexWSBrokerBlockingConn()
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{
+		"account-a": {upstream},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans:                planner,
+		Upstream:             dialer,
+		UpstreamURL:          "wss://example.invalid/responses",
+		DownstreamGeneration: 41,
+		PrewarmTimeout:       20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- broker.Serve(context.Background(), downstream) }()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		_ = upstream.Close()
+		<-serveDone
+		t.Fatal("stalled upstream prewarm blocked broker")
+	}
+	const wantFrame = `{"type":"error","status":504,"error":{"type":"api_error"}}`
+	if writes := downstream.writtenPayloads(); len(writes) != 1 || string(writes[0]) != wantFrame {
+		t.Fatalf("fail-open writes = %q, want %q", writes, wantFrame)
+	}
+	if planner.cancelCalls != 1 {
+		t.Fatalf("prewarm cancellations = %d, want 1", planner.cancelCalls)
+	}
+}
+
 func TestServerCodexWebSocketEnforceUsesTerminatingBroker(t *testing.T) {
 	t.Parallel()
 	broker := &codexWebSocketRoutingHandlerStub{}
