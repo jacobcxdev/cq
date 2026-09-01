@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -309,13 +310,23 @@ func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, respons
 		}
 	}
 	switch response.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return CodexPinnedAuthFailure, nil
-	case http.StatusTooManyRequests:
-		if response.Uncompressed || !codexAttemptResponseHasIdentityEncoding(response.Header) {
+	case http.StatusForbidden:
+		body, complete, err := inspectAttemptResponseForClassification(response)
+		if err != nil {
+			return CodexPinnedAccepted, err
+		}
+		if !complete {
 			return CodexPinnedAccepted, nil
 		}
-		body, complete, err := inspectAttemptResponse(response)
+		wrapped, err := parseCodexHTTPError(body, response.StatusCode)
+		if err != nil || !wrapped.AuthFailure || wrapped.ErrorType != "authentication_error" {
+			return CodexPinnedAccepted, nil
+		}
+		return CodexPinnedAuthFailure, nil
+	case http.StatusTooManyRequests:
+		body, complete, err := inspectAttemptResponseForClassification(response)
 		if err != nil {
 			return CodexPinnedAccepted, err
 		}
@@ -326,6 +337,7 @@ func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, respons
 		if err != nil || !wrapped.HardUsageLimit {
 			return CodexPinnedAccepted, nil
 		}
+		detachInspectedAttemptResponse(response)
 		r.observeHardLimit(choice, response, capacity)
 		return CodexPinnedHardLimit, nil
 	default:
@@ -377,6 +389,11 @@ func executeCodexAttempt(executor ExplicitAccountExecutor, ctx context.Context, 
 }
 
 func codexAttemptResponseHasIdentityEncoding(header http.Header) bool {
+	encoding, supported := codexAttemptResponseEncoding(header)
+	return supported && encoding == "identity"
+}
+
+func codexAttemptResponseEncoding(header http.Header) (string, bool) {
 	found := false
 	var values []string
 	for name, headerValues := range header {
@@ -387,9 +404,18 @@ func codexAttemptResponseHasIdentityEncoding(header http.Header) bool {
 		values = append(values, headerValues...)
 	}
 	if !found {
-		return true
+		return "identity", true
 	}
-	return len(values) == 1 && strings.EqualFold(strings.TrimSpace(values[0]), "identity")
+	if len(values) != 1 {
+		return "", false
+	}
+	encoding := strings.ToLower(strings.TrimSpace(values[0]))
+	switch encoding {
+	case "identity", "gzip", "zstd":
+		return encoding, true
+	default:
+		return "", false
+	}
 }
 
 func (r *CodexRequestRouter) newRateLimitProducer(choice RouteChoice, liveEventsAuthoritative bool) *codexRateLimitProducer {
@@ -454,9 +480,71 @@ func inspectAttemptResponse(response *http.Response) ([]byte, bool, error) {
 		}
 		return nil, false, nil
 	}
-	_ = original.Close()
-	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.Body = &codexReplayBody{
+		Reader: bytes.NewReader(body),
+		Closer: original,
+	}
 	return body, true, nil
+}
+
+func inspectAttemptResponseForClassification(response *http.Response) ([]byte, bool, error) {
+	body, complete, err := inspectAttemptResponse(response)
+	if err != nil || !complete {
+		return body, complete, err
+	}
+	decoded, complete := decodeCodexErrorResponseBody(body, response.Header, response.Uncompressed)
+	return decoded, complete, nil
+}
+
+func decodeCodexErrorResponseBody(body []byte, header http.Header, uncompressed bool) ([]byte, bool) {
+	if len(body) > codexAttemptResponseLimit {
+		return nil, false
+	}
+	if uncompressed {
+		return body, true
+	}
+	encoding, supported := codexAttemptResponseEncoding(header)
+	if !supported {
+		return nil, false
+	}
+	switch encoding {
+	case "identity":
+		return body, true
+	case "gzip":
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, false
+		}
+		decoded, readErr := io.ReadAll(io.LimitReader(reader, codexAttemptResponseLimit+1))
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil || len(decoded) > codexAttemptResponseLimit {
+			return nil, false
+		}
+		return decoded, true
+	case "zstd":
+		decoded, err := DecodeCodexRequest(body, encoding, CodexZstdLimits{
+			MaxEncodedBytes: codexAttemptResponseLimit,
+			MaxDecodedBytes: codexAttemptResponseLimit,
+		})
+		if err != nil {
+			return nil, false
+		}
+		return decoded.Decoded(), true
+	default:
+		return nil, false
+	}
+}
+
+func detachInspectedAttemptResponse(response *http.Response) {
+	if response == nil {
+		return
+	}
+	replay, ok := response.Body.(*codexReplayBody)
+	if !ok {
+		return
+	}
+	_ = replay.Closer.Close()
+	response.Body = io.NopCloser(replay.Reader)
 }
 
 type codexReplayBody struct {

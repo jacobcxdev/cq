@@ -115,7 +115,7 @@ func TestCodexInstalledSupervisorSupportsRemoteCompaction(t *testing.T) {
 	}
 	webSocketExecutor := NewCodexWebSocketAttemptExecutor(core.inventory, core.inventory)
 	webSocketExecutor.Dialer.Proxy = nil
-	server.CodexWebSocketBroker, err = NewCodexTerminatingWebSocketHandler(webSocketPlanner, webSocketExecutor, "http://"+webSocketUpstream.Addr().String())
+	server.CodexWebSocketBroker, err = NewCodexTerminatingWebSocketHandler(webSocketPlanner, webSocketExecutor, core.inventory, core.capacity, "http://"+webSocketUpstream.Addr().String())
 	if err != nil {
 		t.Fatalf("construct WebSocket acceptance handler: %v", err)
 	}
@@ -573,10 +573,11 @@ func TestCodexInstalledNormalContinuesAfterLiveToolCall(t *testing.T) {
 		}
 	}()
 	prompt := "Use the shell to read `message.txt`, then reply with only its contents and no other text."
-	if err := runCodexTaskAffinityAcceptancePromptForTransport(ctx, codexReadOnlyTaskAffinityAcceptanceRunner{}, clientProof, listener.URL, isolation, false, true, true, prompt, output); err != nil {
+	if err := runCodexTaskAffinityAcceptancePromptForTransport(ctx, codexReadOnlyTaskAffinityAcceptanceRunner{stdin: prompt}, clientProof, listener.URL, isolation, false, true, true, prompt, output); err != nil {
 		actual, _ := os.ReadFile(filepath.Join(isolation.root, strings.ToLower(output)+".txt"))
 		actual = actual[:min(len(actual), 256)]
-		t.Fatalf("live Codex tool continuation: %v; bounded output %q", err, strings.TrimSpace(string(actual)))
+		webSockets, responses, compactions := traffic.snapshot()
+		t.Fatalf("live Codex tool continuation: %v; bounded output %q; traffic websocket=%d responses=%d compactions=%d", err, strings.TrimSpace(string(actual)), webSockets, responses, compactions)
 	}
 	if err := <-rotationDone; err != nil {
 		t.Fatalf("rotate live Codex credential revision: %v", err)
@@ -869,9 +870,9 @@ func TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover(t *testing.T) {
 	if os.Getenv("CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE") != "1" {
 		t.Skip("installed Codex task-affinity acceptance requires explicit opt-in")
 	}
-	clientPath, err := resolveCodexInstalledClientExecutable()
+	clientPath, err := resolveCodexAcceptanceClientExecutable()
 	if err != nil {
-		t.Skip("installed Codex client unavailable")
+		t.Fatalf("resolve installed Codex client: %v", err)
 	}
 	clientProof, err := captureCodexInstalledExecutable(clientPath)
 	if err != nil {
@@ -1040,9 +1041,11 @@ func (runner codexTaskAffinityAcceptanceRunner) Run(ctx context.Context, command
 	return append([]byte(nil), stderr.data...), nil
 }
 
-type codexReadOnlyTaskAffinityAcceptanceRunner struct{}
+type codexReadOnlyTaskAffinityAcceptanceRunner struct {
+	stdin string
+}
 
-func (codexReadOnlyTaskAffinityAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
+func (runner codexReadOnlyTaskAffinityAcceptanceRunner) Run(ctx context.Context, command codexAcceptanceCommand) ([]byte, error) {
 	if command.executable == "" || !command.expectedExecutable.valid() || !command.loopbackOnly {
 		return nil, errors.New("Codex read-only task-affinity runner unavailable")
 	}
@@ -1056,7 +1059,7 @@ func (codexReadOnlyTaskAffinityAcceptanceRunner) Run(ctx context.Context, comman
 	child := exec.CommandContext(ctx, command.executable, command.args...)
 	child.Env = append([]string(nil), command.env...)
 	child.Dir = command.dir
-	child.Stdin = strings.NewReader("")
+	child.Stdin = strings.NewReader(runner.stdin)
 	stdout := &codexAcceptanceDiagnosticBuffer{}
 	child.Stdout = stdout
 	stderr := &codexAcceptanceDiagnosticBuffer{}
@@ -1066,7 +1069,7 @@ func (codexReadOnlyTaskAffinityAcceptanceRunner) Run(ctx context.Context, comman
 		if ctx.Err() != nil {
 			return nil, errors.New("Codex task-affinity command timed out")
 		}
-		diagnostic := sanitiseCodexAcceptanceDiagnostic(string(stderr.data))
+		diagnostic := sanitiseCodexAcceptanceDiagnostic(string(codexAcceptanceCombinedOutput(stdout.data, stderr.data)))
 		if diagnostic == "" {
 			return nil, fmt.Errorf("Codex task-affinity command failed: %w", err)
 		}
@@ -1198,7 +1201,11 @@ func runCodexTaskAffinityAcceptancePromptForTransport(
 		args = slices.Insert(args, len(args)-1, "-c", "features.apps=false")
 	}
 	args = slices.DeleteFunc(args, func(value string) bool { return value == "--ephemeral" })
-	args[len(args)-1] = prompt
+	if allowTools {
+		args[len(args)-1] = "-"
+	} else {
+		args[len(args)-1] = prompt
+	}
 	if resume {
 		args = slices.Insert(args, 1, "resume", "--last")
 		args = removeCodexTaskAffinityUnsupportedResumeArguments(args)

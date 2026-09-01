@@ -136,9 +136,9 @@ func markCachedResults(results []quota.Result, age int64) []quota.Result {
 // enrichCachedWithDiscovered takes cached results and merges in locally discovered
 // accounts. For each discovered account:
 //   - if a cached usable row already matches, keep it as-is
-//   - if no cached row exists, emit an auth_expired row so the account remains visible
+//   - if no cached row exists, emit an unverified row so the account remains visible
 //
-// This ensures expired accounts are visible on cached runs until explicitly removed.
+// Discovery alone does not prove that an account's credentials expired.
 func (r *Runner) enrichCachedWithDiscovered(ctx context.Context, id provider.ID, cached []quota.Result) []quota.Result {
 	svc := r.Services[id]
 	disc, ok := svc.Usage.(provider.Discoverer)
@@ -175,8 +175,9 @@ func (r *Runner) enrichCachedWithDiscovered(ctx context.Context, id provider.ID,
 		if acct.Email != "" && byEmail[acct.Email] {
 			continue
 		}
-		// No usable cached row — emit a visible auth_expired row.
-		row := quota.ErrorResult("auth_expired", "auth expired", 0)
+		// No usable cached row and no provider contact — keep the account visible
+		// without claiming that its credentials expired.
+		row := quota.ErrorResult("usage_unverified", "usage not available in cache", 0)
 		row.AccountID = acct.AccountID
 		row.Email = acct.Email
 		row.Active = acct.Active

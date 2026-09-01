@@ -258,7 +258,7 @@ func TestRunnerUsesCache(t *testing.T) {
 	}
 }
 
-func TestRunnerUsesCacheAndAddsExpiredDiscoveredAccount(t *testing.T) {
+func TestRunnerUsesCacheAndMarksUncachedDiscoveredAccountUsageUnverified(t *testing.T) {
 	cached := []quota.Result{{
 		Status:    quota.StatusOK,
 		AccountID: "acct-1",
@@ -269,7 +269,7 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredAccount(t *testing.T) {
 		id: provider.Codex,
 		discovered: []provider.Account{
 			{AccountID: "acct-1", Email: "cached@example.com"},
-			{AccountID: "acct-2", Email: "expired@example.com"},
+			{AccountID: "acct-2", Email: "uncached@example.com"},
 		},
 	}
 	cr := &captureRenderer{}
@@ -298,18 +298,21 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredAccount(t *testing.T) {
 	if results[1].Status != quota.StatusError {
 		t.Fatalf("results[1].Status = %q, want error", results[1].Status)
 	}
-	if results[1].Error == nil || results[1].Error.Code != "auth_expired" {
-		t.Fatalf("results[1].Error = %+v, want auth_expired", results[1].Error)
+	if results[1].Error == nil || results[1].Error.Code != "usage_unverified" {
+		t.Fatalf("results[1].Error = %+v, want usage_unverified", results[1].Error)
 	}
-	if results[1].Email != "expired@example.com" {
-		t.Fatalf("results[1].Email = %q, want expired@example.com", results[1].Email)
+	if results[1].Error.Message != "usage not available in cache" {
+		t.Fatalf("results[1].Error.Message = %q, want cache explanation", results[1].Error.Message)
+	}
+	if results[1].Email != "uncached@example.com" {
+		t.Fatalf("results[1].Email = %q, want uncached@example.com", results[1].Email)
 	}
 	if results[1].AccountID != "acct-2" {
 		t.Fatalf("results[1].AccountID = %q, want acct-2", results[1].AccountID)
 	}
 }
 
-func TestRunnerUsesCacheAndAddsExpiredDiscoveredClaudeAccount(t *testing.T) {
+func TestRunnerUsesCacheAndMarksUncachedDiscoveredClaudeAccountUsageUnverified(t *testing.T) {
 	cached := []quota.Result{{
 		Status:    quota.StatusOK,
 		AccountID: "claude-acct-1",
@@ -320,7 +323,7 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredClaudeAccount(t *testing.T) {
 		id: provider.Claude,
 		discovered: []provider.Account{
 			{AccountID: "claude-acct-1", Email: "cached@example.com"},
-			{AccountID: "claude-acct-2", Email: "expired@example.com"},
+			{AccountID: "claude-acct-2", Email: "uncached@example.com"},
 		},
 	}
 	cr := &captureRenderer{}
@@ -349,18 +352,21 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredClaudeAccount(t *testing.T) {
 	if results[0].Status != quota.StatusOK {
 		t.Fatalf("results[0].Status = %q, want ok", results[0].Status)
 	}
-	if results[1].Error == nil || results[1].Error.Code != "auth_expired" {
-		t.Fatalf("results[1].Error = %+v, want auth_expired", results[1].Error)
+	if results[1].Error == nil || results[1].Error.Code != "usage_unverified" {
+		t.Fatalf("results[1].Error = %+v, want usage_unverified", results[1].Error)
 	}
-	if results[1].Email != "expired@example.com" {
-		t.Fatalf("results[1].Email = %q, want expired@example.com", results[1].Email)
+	if results[1].Error.Message != "usage not available in cache" {
+		t.Fatalf("results[1].Error.Message = %q, want cache explanation", results[1].Error.Message)
+	}
+	if results[1].Email != "uncached@example.com" {
+		t.Fatalf("results[1].Email = %q, want uncached@example.com", results[1].Email)
 	}
 	if results[1].AccountID != "claude-acct-2" {
 		t.Fatalf("results[1].AccountID = %q, want claude-acct-2", results[1].AccountID)
 	}
 }
 
-func TestRunnerUsesCacheAndAddsExpiredDiscoveredGeminiAccount(t *testing.T) {
+func TestRunnerUsesCacheAndMarksUncachedDiscoveredGeminiAccountUsageUnverified(t *testing.T) {
 	p := &mockProvider{
 		id:         provider.Gemini,
 		discovered: []provider.Account{{Email: "gemini@example.com"}},
@@ -391,8 +397,11 @@ func TestRunnerUsesCacheAndAddsExpiredDiscoveredGeminiAccount(t *testing.T) {
 	if results[0].Status != quota.StatusError {
 		t.Fatalf("results[0].Status = %q, want error", results[0].Status)
 	}
-	if results[0].Error == nil || results[0].Error.Code != "auth_expired" {
-		t.Fatalf("results[0].Error = %+v, want auth_expired", results[0].Error)
+	if results[0].Error == nil || results[0].Error.Code != "usage_unverified" {
+		t.Fatalf("results[0].Error = %+v, want usage_unverified", results[0].Error)
+	}
+	if results[0].Error.Message != "usage not available in cache" {
+		t.Fatalf("results[0].Error.Message = %q, want cache explanation", results[0].Error.Message)
 	}
 	if results[0].Email != "gemini@example.com" {
 		t.Fatalf("results[0].Email = %q, want gemini@example.com", results[0].Email)

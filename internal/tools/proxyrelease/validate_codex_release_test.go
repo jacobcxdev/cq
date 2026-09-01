@@ -46,6 +46,22 @@ func TestValidateCodexReleasePrefersExplicitSystemAuth(t *testing.T) {
 	}
 }
 
+func TestValidateCodexReleaseHonoursExplicitAcceptanceExecutable(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+	decoy := filepath.Join(t.TempDir(), "decoy-codex-home")
+	writeValidateCodexReleaseAuth(t, filepath.Join(decoy, "auth.json"), 0o600)
+
+	_, events, err := runValidateCodexReleaseShell(t, repositoryRoot, home, decoy, "")
+	if err != nil {
+		t.Fatalf("validate-codex-release: %v", err)
+	}
+	if !strings.Contains(events, "acceptance-executable=/usr/bin/true\n") {
+		t.Fatalf("acceptance executable was not propagated exactly:\n%s", events)
+	}
+}
+
 func TestValidateCodexReleaseRejectsMissingLiveGate(t *testing.T) {
 	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
 	home := t.TempDir()
@@ -57,6 +73,39 @@ func TestValidateCodexReleaseRejectsMissingLiveGate(t *testing.T) {
 	_, _, err := runValidateCodexReleaseShellOmittingTest(t, repositoryRoot, home, decoy, "", omitted)
 	if err == nil || !strings.Contains(err.Error(), omitted+" did not execute") {
 		t.Fatalf("validate-codex-release = %v, want missing gate failure", err)
+	}
+}
+
+func TestValidateCodexReleaseRejectsMissingHardLimitFailoverGate(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+	decoy := filepath.Join(t.TempDir(), "decoy-codex-home")
+	writeValidateCodexReleaseAuth(t, filepath.Join(decoy, "auth.json"), 0o600)
+	const omitted = "TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover"
+
+	_, _, err := runValidateCodexReleaseShellOmittingTest(t, repositoryRoot, home, decoy, "", omitted)
+	if err == nil || !strings.Contains(err.Error(), omitted+" did not execute") {
+		t.Fatalf("validate-codex-release = %v, want missing hard-limit failover gate failure", err)
+	}
+}
+
+func TestCodexValidationWorkflowsRunHardLimitFailoverGate(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	const testName = "TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover"
+	const optIn = `CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"`
+	for _, relativePath := range []string{".github/workflows/ci.yml", ".github/workflows/release.yml"} {
+		t.Run(relativePath, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repositoryRoot, relativePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents := string(data)
+			if strings.Count(contents, testName) != 2 || strings.Count(contents, optIn) != 1 ||
+				!strings.Contains(contents, `grep -F -- "--- PASS: ${test_name} " "$test_log"`) {
+				t.Fatalf("%s must opt in, select, and require PASS evidence for %s", relativePath, testName)
+			}
+		})
 	}
 }
 
@@ -160,6 +209,15 @@ case "$1" in
     ;;
   build) printf 'build\n' >>"$CQ_TEST_EVENTS" ;;
   test)
+	printf 'acceptance-executable=%s\n' "$CQ_CODEX_ACCEPTANCE_EXECUTABLE" >>"$CQ_TEST_EVENTS"
+	case "$*" in
+	  *TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover*) ;;
+	  *) printf 'hard-limit failover missing from test pattern\n' >&2; exit 96 ;;
+	esac
+	[ "${CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE:-}" = 1 ] || {
+	  printf 'hard-limit failover opt-in missing\n' >&2
+	  exit 96
+	}
     printf 'test\n' >>"$CQ_TEST_EVENTS"
     printf '%s\n' "$CQ_CODEX_LIVE_AUTH_FILE" >"$CQ_TEST_AUTH_CAPTURE"
 	for release_test in \
@@ -167,6 +225,7 @@ case "$1" in
 		TestCodexInstalledNormalContinuesAfterLiveToolCall \
 		TestCodexInstalledRescuePassesThroughLiveUpstream \
 		TestCodexInstalledLiveRescueTaskResumesInNormal \
+		TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover \
 		TestCodexExactExecutableNormalPassesThroughLiveUpstream \
 		TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream
 	do

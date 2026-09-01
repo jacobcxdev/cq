@@ -75,13 +75,14 @@ type proxyCodexWebSocketDependencies struct {
 	DefaultAccountKey codexprov.AccountKey
 	PinnedAccountKey  codexprov.AccountKey
 	Executor          proxy.ExplicitWebSocketExecutor
+	Refresher         codexprov.CredentialReferenceRefresher
 	SessionPolicy     *proxy.SessionPolicyResolver
 	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	TurnReceipts      *proxy.CodexTurnReceiptStore
 	Upstream          string
 	Now               func() time.Time
 
-	newHandler func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, string) (proxy.CodexWebSocketRoutingHandler, error)
+	newHandler func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, codexprov.CredentialReferenceRefresher, *proxy.CodexCapacityLedger, string) (proxy.CodexWebSocketRoutingHandler, error)
 }
 
 func proxyCodexEnforcementAuthority(status, peer proxy.CodexModeStatus) proxy.CodexLeaseAuthorityPolicy {
@@ -189,7 +190,7 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 	if deps.Status.ModeEpoch == 0 || deps.Status.AuthoritativeEpoch != deps.Status.ModeEpoch {
 		return nil, errors.New("Codex WebSocket authority epoch unavailable")
 	}
-	if deps.Inventory == nil || deps.Capacity == nil || deps.Routes == nil || deps.Runtime == nil || deps.Executor == nil || deps.Now == nil {
+	if deps.Inventory == nil || deps.Capacity == nil || deps.Routes == nil || deps.Runtime == nil || deps.Executor == nil || deps.Refresher == nil || deps.Now == nil {
 		return nil, errors.New("Codex WebSocket dependencies unavailable")
 	}
 	planner := &proxy.CodexHTTPRequestPlanFactory{
@@ -210,7 +211,7 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 	if newHandler == nil {
 		newHandler = proxy.NewCodexTerminatingWebSocketHandler
 	}
-	handler, err := newHandler(planner, deps.Executor, deps.Upstream)
+	handler, err := newHandler(planner, deps.Executor, deps.Refresher, deps.Capacity, deps.Upstream)
 	if err != nil {
 		return nil, fmt.Errorf("construct Codex WebSocket handler: %w", err)
 	}

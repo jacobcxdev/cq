@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/gorilla/websocket"
 )
@@ -28,6 +29,8 @@ const (
 	codexWSInvalidFrameProtocol         codexWSInvalidFrameOrigin = "protocol"
 	codexWSInvalidFramePrewarmAuthority codexWSInvalidFrameOrigin = "prewarm_authority"
 	codexWSInvalidFrameBrokerAuthority  codexWSInvalidFrameOrigin = "broker_authority"
+	codexWSInvalidFrameUpstreamPrewarm  codexWSInvalidFrameOrigin = "upstream_prewarm"
+	codexWSInvalidFrameUpstreamResponse codexWSInvalidFrameOrigin = "upstream_response"
 )
 
 type codexWSFrameType string
@@ -64,13 +67,27 @@ const (
 	codexWSInvalidFrameRequestKindMemory  codexWSInvalidFrameDetail = "request_kind_memory"
 	codexWSInvalidFrameRequestKindUnknown codexWSInvalidFrameDetail = "request_kind_unknown"
 	codexWSInvalidFrameLeaseKey           codexWSInvalidFrameDetail = "lease_key"
+	codexWSInvalidFrameNonText            codexWSInvalidFrameDetail = "non_text"
+	codexWSInvalidFrameMalformedEvent     codexWSInvalidFrameDetail = "malformed_event"
+	codexWSInvalidFrameUnknownEvent       codexWSInvalidFrameDetail = "unknown_event"
+	codexWSInvalidFrameCompletionOrder    codexWSInvalidFrameDetail = "completion_before_admission"
+	codexWSInvalidFrameErrorOrder         codexWSInvalidFrameDetail = "error_before_admission"
+	codexWSInvalidFrameDeltaOrder         codexWSInvalidFrameDetail = "delta_before_admission"
 )
+
+type codexWSEventType string
+
+const codexWSEventTypeUnknown codexWSEventType = "unknown"
 
 type codexWSInvalidFrameError struct {
 	Origin codexWSInvalidFrameOrigin
 	Type   codexWSFrameType
 	Size   codexWSFrameSize
 	Detail codexWSInvalidFrameDetail
+	Event  codexWSEventType
+	Status string
+	Code   codexWSEventType
+	Kind   codexWSEventType
 	cause  error
 }
 
@@ -86,17 +103,105 @@ func (err *codexWSInvalidFrameError) Unwrap() error {
 }
 
 func newCodexWSInvalidFrameError(origin codexWSInvalidFrameOrigin, messageType int, payload []byte, cause error) error {
-	detail := codexWSInvalidFrameDetail("")
+	return newCodexWSInvalidFrameErrorWithDetail(origin, messageType, payload, "", cause)
+}
+
+func newCodexWSInvalidFrameErrorWithDetail(origin codexWSInvalidFrameOrigin, messageType int, payload []byte, detail codexWSInvalidFrameDetail, cause error) error {
 	var authorityErr *codexWSAuthorityError
-	if errors.As(cause, &authorityErr) {
+	if detail == "" && errors.As(cause, &authorityErr) {
 		detail = authorityErr.Detail
 	}
+	status, errorType, code := classifyCodexWSErrorMetadata(messageType, payload)
 	return &codexWSInvalidFrameError{
 		Origin: origin,
 		Type:   classifyCodexWSFrameType(messageType),
 		Size:   classifyCodexWSFrameSize(len(payload)),
 		Detail: detail,
+		Event:  classifyCodexWSEventType(messageType, payload),
+		Status: status,
+		Code:   code,
+		Kind:   errorType,
 		cause:  errors.Join(ErrCodexWSInvalidFrame, cause),
+	}
+}
+
+func classifyCodexWSErrorMetadata(messageType int, payload []byte) (string, codexWSEventType, codexWSEventType) {
+	if messageType != websocket.TextMessage {
+		return "", "", ""
+	}
+	wrapped, err := ParseCodexWrappedError(payload)
+	if err != nil || !wrapped.Found {
+		return "", "", ""
+	}
+	status := ""
+	if wrapped.Status >= 100 && wrapped.Status <= 599 {
+		status = strconv.Itoa(wrapped.Status)
+	}
+	errorType := codexWSEventType("")
+	if knownCodexWSErrorType(wrapped.ErrorType) {
+		errorType = codexWSEventType(wrapped.ErrorType)
+	}
+	return status, errorType, ""
+}
+
+func classifyCodexWSEventType(messageType int, payload []byte) codexWSEventType {
+	if messageType != websocket.TextMessage {
+		return codexWSEventTypeUnknown
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(payload, &envelope) != nil || !knownCodexWSEventType(envelope.Type) {
+		return codexWSEventTypeUnknown
+	}
+	return codexWSEventType(envelope.Type)
+}
+
+func knownCodexWSEventType(value string) bool {
+	switch value {
+	case "error",
+		"codex.rate_limits",
+		"codex.response.metadata",
+		"keepalive",
+		"response.completed",
+		"response.content_part.added",
+		"response.content_part.done",
+		"response.created",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.failed",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.in_progress",
+		"response.incomplete",
+		"response.metadata",
+		"response.output_item.added",
+		"response.output_item.done",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"responsesapi.websocket_timing":
+		return true
+	default:
+		return false
+	}
+}
+
+func knownCodexWSErrorType(value string) bool {
+	switch value {
+	case "api_error",
+		"authentication_error",
+		"insufficient_quota",
+		"invalid_request_error",
+		"rate_limit_exceeded",
+		"server_error",
+		"usage_limit_reached":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -160,7 +265,7 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 		encoded:     append([]byte(nil), payload...),
 		request:     request,
 		key:         key,
-		portable:    request.PreviousResponseID == "" && !request.HasEncryptedState && !request.HasTurnState,
+		portable:    request.PreviousResponseID == "" && !request.HasPreviousResponseID && !request.HasEncryptedState && !request.HasTurnState,
 		prewarm:     prewarm,
 		diagnostics: diagnostics,
 	}, nil

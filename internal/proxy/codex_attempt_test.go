@@ -14,9 +14,33 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/klauspost/compress/zstd"
 )
 
 const codexLiveUsageLimitBody = `{"error":{"eligible_promo":null,"message":"The usage limit has been reached","plan_type":"pro","resets_at":1786832019,"resets_in_seconds":539708,"type":"usage_limit_reached"}}`
+
+func gzipCodexAttemptBody(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	writer := gzip.NewWriter(&encoded)
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
+func zstdCodexAttemptBody(t *testing.T, body []byte) []byte {
+	t.Helper()
+	writer, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	return writer.EncodeAll(body, nil)
+}
 
 type queuedRequestScope struct {
 	plans        []CodexRequestPlan
@@ -439,7 +463,48 @@ func TestCodexRequestRouterFailsOverOnlyForExactHardQuota(t *testing.T) {
 	}
 }
 
-func TestCodexRequestRouterReturnsEncodedHard429Unchanged(t *testing.T) {
+func TestCodexRequestRouterFailsOverForbiddenOnlyForAuthenticationError(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantCalls  []codex.CandidateID
+	}{
+		{
+			name:       "authentication error",
+			body:       `{"error":{"type":"authentication_error"}}`,
+			wantStatus: http.StatusOK,
+			wantCalls:  []codex.CandidateID{"first", "second"},
+		},
+		{
+			name:       "policy denial",
+			body:       `{"error":{"type":"safety_policy_violation"}}`,
+			wantStatus: http.StatusForbidden,
+			wantCalls:  []codex.CandidateID{"first"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := requestPlan("one", "first", "second")
+			executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"first":  {{status: http.StatusForbidden, body: test.body}},
+				"second": {{status: http.StatusOK}},
+			}}
+			router := &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}, Executor: executor}
+
+			response, _, _, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != test.wantStatus || !slices.Equal(executor.calls, test.wantCalls) {
+				t.Fatalf("status=%d calls=%v", response.StatusCode, executor.calls)
+			}
+		})
+	}
+}
+
+func TestCodexRequestRouterReturnsMalformedEncoded429Unchanged(t *testing.T) {
 	bodyText := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
 	body := &trackingReadCloser{Reader: strings.NewReader(bodyText)}
 	header := make(http.Header)
@@ -494,7 +559,7 @@ func TestCodexRequestRouterReturnsEncodedHard429Unchanged(t *testing.T) {
 	}
 }
 
-func TestCodexRequestRouterReturnsUncompressedHard429Unchanged(t *testing.T) {
+func TestCodexRequestRouterFailsOverUncompressedHard429(t *testing.T) {
 	bodyText := `{"error":{"type":"usage_limit_reached"}}`
 	body := &trackingReadCloser{Reader: strings.NewReader(bodyText)}
 	want := &http.Response{
@@ -519,28 +584,22 @@ func TestCodexRequestRouterReturnsUncompressedHard429Unchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response != want || choice.AccountKey != "one" || attempt.Candidate.CandidateID != "first" {
-		t.Fatalf("response=%p want=%p choice=%q attempt=%q", response, want, choice.AccountKey, attempt.Candidate.CandidateID)
+	defer response.Body.Close()
+	if response == want || response.StatusCode != http.StatusOK || choice.AccountKey != "two" || attempt.Candidate.CandidateID != "second" {
+		t.Fatalf("response=%p rejected=%p status=%d choice=%q attempt=%q", response, want, response.StatusCode, choice.AccountKey, attempt.Candidate.CandidateID)
 	}
-	if scope.calls != 1 || !slices.Equal(executor.calls, []codex.CandidateID{"first"}) {
+	if scope.calls != 2 || !slices.Equal(executor.calls, []codex.CandidateID{"first", "second"}) {
 		t.Fatalf("scope calls=%d attempts=%v", scope.calls, executor.calls)
 	}
-	if view := ledger.Capacity("one", CapacityBucketForModel("gpt-5.4")); view.State == CapacityZero {
-		t.Fatalf("uncompressed response zeroed capacity: %+v", view)
-	}
-	data, readErr := io.ReadAll(response.Body)
-	if readErr != nil || string(data) != bodyText || !response.Uncompressed {
-		t.Fatalf("uncompressed=%v body=%q error=%v", response.Uncompressed, data, readErr)
-	}
-	if closeErr := response.Body.Close(); closeErr != nil {
-		t.Fatal(closeErr)
+	if view := ledger.Capacity("one", CapacityBucketForModel("gpt-5.4")); view.State != CapacityZero {
+		t.Fatalf("uncompressed response capacity: %+v", view)
 	}
 	if body.closeCalls != 1 {
 		t.Fatalf("body close calls = %d, want 1", body.closeCalls)
 	}
 }
 
-func TestCodexRequestRouterReturnsDefaultTransportDecodedGzip429Unchanged(t *testing.T) {
+func TestCodexRequestRouterFailsOverDefaultTransportDecodedGzip429(t *testing.T) {
 	bodyText := `{"error":{"type":"usage_limit_reached"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Encoding", "gzip")
@@ -559,7 +618,6 @@ func TestCodexRequestRouterReturnsDefaultTransportDecodedGzip429Unchanged(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer want.Body.Close()
 	if !want.Uncompressed || want.Header.Get("Content-Encoding") != "" {
 		t.Fatalf("default transport response uncompressed=%v encoding=%q", want.Uncompressed, want.Header.Get("Content-Encoding"))
 	}
@@ -578,18 +636,125 @@ func TestCodexRequestRouterReturnsDefaultTransportDecodedGzip429Unchanged(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response != want || choice.AccountKey != "one" || attempt.Candidate.CandidateID != "first" {
-		t.Fatalf("response=%p want=%p choice=%q attempt=%q", response, want, choice.AccountKey, attempt.Candidate.CandidateID)
+	defer response.Body.Close()
+	if response == want || response.StatusCode != http.StatusOK || choice.AccountKey != "two" || attempt.Candidate.CandidateID != "second" {
+		t.Fatalf("response=%p rejected=%p status=%d choice=%q attempt=%q", response, want, response.StatusCode, choice.AccountKey, attempt.Candidate.CandidateID)
 	}
-	if scope.calls != 1 || !slices.Equal(executor.calls, []codex.CandidateID{"first"}) {
+	if scope.calls != 2 || !slices.Equal(executor.calls, []codex.CandidateID{"first", "second"}) {
 		t.Fatalf("scope calls=%d attempts=%v", scope.calls, executor.calls)
 	}
-	if view := ledger.Capacity("one", CapacityBucketForModel("gpt-5.4")); view.State == CapacityZero {
-		t.Fatalf("default transport decoded response zeroed capacity: %+v", view)
+	if view := ledger.Capacity("one", CapacityBucketForModel("gpt-5.4")); view.State != CapacityZero {
+		t.Fatalf("default transport decoded response capacity: %+v", view)
 	}
-	data, readErr := io.ReadAll(response.Body)
-	if readErr != nil || string(data) != bodyText || !response.Uncompressed {
-		t.Fatalf("uncompressed=%v body=%q error=%v", response.Uncompressed, data, readErr)
+}
+
+func TestCodexRequestRouterFailsOverCompressedHard429(t *testing.T) {
+	bodyText := []byte(`{"error":{"type":"usage_limit_reached"}}`)
+	tests := []struct {
+		name     string
+		encoding string
+		encode   func(*testing.T, []byte) []byte
+	}{
+		{name: "gzip", encoding: "gzip", encode: gzipCodexAttemptBody},
+		{name: "zstd", encoding: "zstd", encode: zstdCodexAttemptBody},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded := test.encode(t, bodyText)
+			rejectedBody := &trackingReadCloser{Reader: bytes.NewReader(encoded)}
+			header := http.Header{"Content-Encoding": {test.encoding}, "X-Upstream": {"one", "two"}}
+			rejected := &http.Response{
+				Status:        "429 encoded upstream response",
+				StatusCode:    http.StatusTooManyRequests,
+				Header:        header,
+				Body:          rejectedBody,
+				ContentLength: int64(len(encoded)),
+			}
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{
+				requestPlan("one", "first"),
+				requestPlan("two", "second"),
+			}}
+			executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"first":  {{resp: rejected}},
+				"second": {{status: http.StatusOK}},
+			}}
+			ledger := NewCodexCapacityLedger(time.Now, time.Hour)
+			router := &CodexRequestRouter{Scope: scope, Executor: executor, Capacity: ledger}
+
+			response, choice, attempt, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response == rejected || response.StatusCode != http.StatusOK || choice.AccountKey != "two" || attempt.Candidate.CandidateID != "second" {
+				t.Fatalf("response=%p rejected=%p status=%d choice=%q attempt=%q", response, rejected, response.StatusCode, choice.AccountKey, attempt.Candidate.CandidateID)
+			}
+			if scope.calls != 2 || !slices.Equal(executor.calls, []codex.CandidateID{"first", "second"}) {
+				t.Fatalf("scope calls=%d attempts=%v", scope.calls, executor.calls)
+			}
+			if view := ledger.Capacity("one", CapacityBucketForModel("gpt-5.4")); view.State != CapacityZero {
+				t.Fatalf("compressed response capacity: %+v", view)
+			}
+			if rejectedBody.closeCalls != 1 || rejected.Status != "429 encoded upstream response" || rejected.ContentLength != int64(len(encoded)) || rejected.Header.Get("Content-Encoding") != test.encoding || !slices.Equal(rejected.Header.Values("X-Upstream"), []string{"one", "two"}) {
+				t.Fatalf("rejected closes=%d status=%q length=%d headers=%v", rejectedBody.closeCalls, rejected.Status, rejected.ContentLength, rejected.Header)
+			}
+		})
+	}
+}
+
+func TestCodexRequestRouterReturnsCompressedUnknown429Unchanged(t *testing.T) {
+	oversized := bytes.Repeat([]byte("x"), codexAttemptResponseLimit+1)
+	tests := []struct {
+		name     string
+		encoding string
+		body     []byte
+		encode   func(*testing.T, []byte) []byte
+	}{
+		{name: "gzip soft limit", encoding: "gzip", body: []byte(`{"error":{"type":"rate_limit_exceeded"}}`), encode: gzipCodexAttemptBody},
+		{name: "zstd soft limit", encoding: "zstd", body: []byte(`{"error":{"type":"rate_limit_exceeded"}}`), encode: zstdCodexAttemptBody},
+		{name: "gzip decoded oversize", encoding: "gzip", body: oversized, encode: gzipCodexAttemptBody},
+		{name: "zstd decoded oversize", encoding: "zstd", body: oversized, encode: zstdCodexAttemptBody},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded := test.encode(t, test.body)
+			body := &trackingReadCloser{Reader: bytes.NewReader(encoded)}
+			header := http.Header{"Content-Encoding": {test.encoding}, "X-Upstream": {"one", "two"}}
+			want := &http.Response{
+				Status:        "429 encoded upstream response",
+				StatusCode:    http.StatusTooManyRequests,
+				Header:        header,
+				Body:          body,
+				ContentLength: int64(len(encoded)),
+			}
+			scope := &queuedRequestScope{plans: []CodexRequestPlan{
+				requestPlan("one", "first"),
+				requestPlan("two", "second"),
+			}}
+			executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+				"first":  {{resp: want}},
+				"second": {{status: http.StatusOK, body: "unexpected failover"}},
+			}}
+			router := &CodexRequestRouter{Scope: scope, Executor: executor}
+
+			response, _, _, err := router.Do(context.Background(), CodexRouteRequirements{}, makeCodexRequest(`{"model":"gpt-5.4"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response != want || body.closeCalls != 0 || scope.calls != 1 || !slices.Equal(executor.calls, []codex.CandidateID{"first"}) {
+				t.Fatalf("response=%p want=%p closes=%d scope=%d calls=%v", response, want, body.closeCalls, scope.calls, executor.calls)
+			}
+			got, readErr := io.ReadAll(response.Body)
+			if readErr != nil || !bytes.Equal(got, encoded) || response.Status != want.Status || response.ContentLength != int64(len(encoded)) || response.Header.Get("Content-Encoding") != test.encoding || !slices.Equal(response.Header.Values("X-Upstream"), []string{"one", "two"}) {
+				t.Fatalf("body equal=%v read=%v status=%q length=%d headers=%v", bytes.Equal(got, encoded), readErr, response.Status, response.ContentLength, response.Header)
+			}
+			if err := response.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if body.closeCalls != 1 {
+				t.Fatalf("body close calls=%d, want 1", body.closeCalls)
+			}
+		})
 	}
 }
 
@@ -954,7 +1119,7 @@ func TestCodexRequestRouterReturnsRetainedResponseWhenRealExecutorFailsBeforeDis
 	}
 }
 
-func TestCodexRequestRouterDoPinnedReturnsFinalUnauthorizedResponse(t *testing.T) {
+func TestCodexRequestRouterDoPinnedReturnsPolicyForbiddenResponse(t *testing.T) {
 	body := &trackingReadCloser{Reader: strings.NewReader("rejected")}
 	want := &http.Response{
 		Status:     "403 exact upstream status",
@@ -970,7 +1135,7 @@ func TestCodexRequestRouterDoPinnedReturnsFinalUnauthorizedResponse(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response != want || attempt.Candidate.CandidateID != "only" || failure != CodexPinnedAuthFailure || body.closed {
+	if response != want || attempt.Candidate.CandidateID != "only" || failure != CodexPinnedAccepted || body.closed {
 		t.Fatalf("response=%p attempt=%q failure=%v closed=%v", response, attempt.Candidate.CandidateID, failure, body.closed)
 	}
 	response.Body.Close()

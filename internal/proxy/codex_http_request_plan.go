@@ -155,7 +155,7 @@ func (factory *CodexHTTPRequestPlanFactory) ProbeRetained(ctx context.Context, i
 	}
 	switch snapshot.Classification {
 	case CodexRestoredLaneHistorical:
-		if snapshot.HistoricalAuthoritative {
+		if snapshot.HistoricalAuthoritative && !snapshot.RestartableFailedHead {
 			return nil, true, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexStaleTurn)
 		}
 	case CodexRestoredLaneCurrent:
@@ -453,6 +453,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if !codexHTTPRequestExpectedBoundMatchesSnapshot(input.ExpectedBound, snapshot) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexLeaseAuthorityMismatch)
 	}
+	snapshot = codexHTTPRequestDetachPortableUnavailableRoute(snapshot, protocol, input.ExpectedBound)
 
 	now := time.Now()
 	if factory.Now != nil {
@@ -485,6 +486,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		}
 		authenticatedCallerAccount, _ = codexAuthenticatedCallerMapping(inventory, caller, callerIdentity)
 	}
+	resetInventory := inventory
 	noteCodexObservation(ctx, codexObservationFields{
 		CallerMappingObserved:  true,
 		CallerDomain:           string(callerDomain),
@@ -527,18 +529,27 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if boundAccountKey == "" {
 		boundAccountKey = factory.PinnedAccountKey
 	}
+	accountUnavailablePortable := boundAccountKey != "" && codexHTTPRequestAccountUnavailablePortable(protocol) &&
+		continuityAccountKey == "" && !authenticatedBoundContinuation
+	dispatchUnavailable := append([]codex.AccountKey(nil), snapshot.QuotaExhaustedAccountKeys...)
+	if !snapshot.RestartableFailedHead && codexHTTPRequestAccountUnavailablePortable(protocol) {
+		dispatchUnavailable = mergeCodexHTTPRequestAccountKeys(dispatchUnavailable, snapshot.UnavailableAccountKeys)
+	}
 	dispatchInput := CodexFrozenDispatchInput{
-		Inventory:              inventory,
-		Capacity:               factory.Capacity,
-		Requirements:           requirements,
-		Provisional:            cloneCodexHTTPRequestPlanProvisional(snapshot.Provisional),
-		AccountValues:          policyDecision.AccountValues,
-		AffinityAccountKey:     affinityAccountKey,
-		AffinityEffectiveModel: snapshot.AffinityEffectiveModel,
-		DefaultAccountKey:      factory.DefaultAccountKey,
-		BoundAccountKey:        boundAccountKey,
-		AcceptedRevision:       input.AcceptedRevision,
-		Now:                    now,
+		Inventory:                   inventory,
+		Capacity:                    factory.Capacity,
+		Requirements:                requirements,
+		Provisional:                 cloneCodexHTTPRequestPlanProvisional(snapshot.Provisional),
+		AccountValues:               policyDecision.AccountValues,
+		AffinityAccountKey:          affinityAccountKey,
+		AffinityEffectiveModel:      snapshot.AffinityEffectiveModel,
+		DefaultAccountKey:           factory.DefaultAccountKey,
+		BoundAccountKey:             boundAccountKey,
+		UnavailableAccountKeys:      dispatchUnavailable,
+		ProbeUnavailableAccountKeys: append([]codex.AccountKey(nil), snapshot.QuotaExhaustedAccountKeys...),
+		ProbeUnavailableWhenAll:     true,
+		AcceptedRevision:            input.AcceptedRevision,
+		Now:                         now,
 	}
 	dispatch, err := factory.buildDispatch(ctx, dispatchInput)
 	if err != nil {
@@ -555,19 +566,27 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			if !callerOK {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
 			}
-			allowed := policyDecision.Allowed
-			if boundAccountKey != "" {
+			fullCreateChoice, routeErr := ResolveCapabilityRoute(capabilityPolicy, capabilityEvidence, CallerRequestAuthorityV1{
+				SchemaVersion: 1, AllowedAccounts: policyDecision.Allowed, PreferredAccount: choice.AccountKey, AccountWorkspaces: codexCapabilityAccountWorkspaces(resetInventory, policyDecision.Allowed), EvaluatedAt: now,
+				FinalScope: codexCapabilityFinalScope(factory.TransportKind, input.Encoded, protocol, choice, caller),
+			})
+			if routeErr != nil {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, routeErr)
+			}
+			resetInventory = filterCodexHTTPRequestInventory(resetInventory, fullCreateChoice.AllowedAccounts)
+			allowed := fullCreateChoice.AllowedAccounts
+			if boundAccountKey != "" && !accountUnavailablePortable {
 				allowed = []codex.AccountKey{boundAccountKey}
 			}
 			finalChoice, routeErr := ResolveCapabilityRoute(capabilityPolicy, capabilityEvidence, CallerRequestAuthorityV1{
-				SchemaVersion: 1, AllowedAccounts: allowed, PreferredAccount: choice.AccountKey, AccountWorkspaces: codexCapabilityAccountWorkspaces(inventory, allowed), EvaluatedAt: now,
+				SchemaVersion: 1, AllowedAccounts: allowed, PreferredAccount: choice.AccountKey, AccountWorkspaces: codexCapabilityAccountWorkspaces(resetInventory, allowed), EvaluatedAt: now,
 				FinalScope: codexCapabilityFinalScope(factory.TransportKind, input.Encoded, protocol, choice, caller),
 			})
 			if routeErr != nil {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, routeErr)
 			}
 			policyDecision.Allowed = append([]codex.AccountKey(nil), finalChoice.AllowedAccounts...)
-			inventory = filterCodexHTTPRequestInventory(inventory, finalChoice.AllowedAccounts)
+			inventory = filterCodexHTTPRequestInventory(resetInventory, finalChoice.AllowedAccounts)
 			dispatchInput.Inventory = inventory
 			dispatch, err = factory.buildDispatch(ctx, dispatchInput)
 			if err != nil {
@@ -586,6 +605,36 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
 			}
 		}
+	}
+	quotaExhaustionProbe := containsCodexHTTPRequestAccountKey(snapshot.QuotaExhaustedAccountKeys, choice.AccountKey)
+	if policyDecision.Status == PolicyDecisionSelected {
+		available := excludeCodexHTTPRequestAccountKeys(policyDecision.Allowed, dispatchUnavailable)
+		if len(available) != 0 {
+			policyDecision.Allowed = available
+		} else if quotaExhaustionProbe {
+			policyDecision.Allowed = []codex.AccountKey{choice.AccountKey}
+		}
+	}
+	if len(resetInventory.Accounts) > 1 {
+		resetPlan := dispatch
+		if boundAccountKey != "" {
+			resetInput := dispatchInput
+			resetInput.Inventory = resetInventory
+			resetInput.AffinityAccountKey = ""
+			resetInput.AffinityEffectiveModel = ""
+			resetInput.BoundAccountKey = ""
+			resetPlan, err = factory.buildDispatch(ctx, resetInput)
+			if err != nil {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+			}
+		}
+		dispatch = dispatch.withAccountUnavailableResetCandidates(resetPlan, choice)
+		if accountUnavailablePortable {
+			dispatch = dispatch.withAccountUnavailableFallbacks(resetPlan, choice)
+		}
+	}
+	if accountUnavailablePortable {
+		dispatch.accountUnavailablePortable = true
 	}
 	if input.ExpectedBound != nil && (choice.AccountKey != input.ExpectedBound.AccountKey || choice.EffectiveModel != snapshot.BoundChoice.EffectiveModel) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)
@@ -615,7 +664,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		}
 		permitDigest = permit.Digest
 	}
-	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, expectedBound, continuityAccountKey != "" || authenticatedBoundContinuation, authenticatedCallerContinuity, permitDigest)
+	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, expectedBound, continuityAccountKey != "" || authenticatedBoundContinuation, authenticatedCallerContinuity, permitDigest, quotaExhaustionProbe)
 	leasePlan.ingressContinuity = ingressContinuity
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
@@ -653,6 +702,26 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	result.receipt = factory.registerCodexTurnReceipt(protocol, policyDecision, boundAccountKey, dispatchAccounts[0], shadowAdvice)
 	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
+}
+
+func codexHTTPRequestAccountUnavailablePortable(protocol CodexProtocolRequest) bool {
+	return protocol.PreviousResponseID == "" && !protocol.HasPreviousResponseID &&
+		!protocol.HasTurnState && !protocol.HasEncryptedState
+}
+
+func codexHTTPRequestDetachPortableUnavailableRoute(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, expected *CodexLeaseBoundExpectation) CodexLeaseRouteSnapshot {
+	if expected != nil || snapshot.RestartableFailedHead || !codexHTTPRequestAccountUnavailablePortable(protocol) {
+		return snapshot
+	}
+	if containsCodexHTTPRequestAccountKey(snapshot.UnavailableAccountKeys, snapshot.BoundAccountKey) {
+		snapshot.BoundAccountKey = ""
+		snapshot.BoundRequiresAccount = false
+	}
+	if containsCodexHTTPRequestAccountKey(snapshot.UnavailableAccountKeys, snapshot.AffinityAccountKey) {
+		snapshot.AffinityAccountKey = ""
+		snapshot.AffinityRequiresAccount = false
+	}
+	return snapshot
 }
 
 func (factory *CodexHTTPRequestPlanFactory) registerCodexTurnReceipt(protocol CodexProtocolRequest, policy SessionPolicyDecision, boundAccountKey codex.AccountKey, account CodexFrozenDispatchAccount, shadow codexNoAffinityShadowResult) *codexTurnReceiptHandle {
@@ -761,6 +830,48 @@ func filterCodexHTTPRequestInventory(inventory codex.Inventory, allowed []codex.
 		}
 	}
 	return filtered
+}
+
+func excludeCodexHTTPRequestAccountKeys(accounts, excluded []codex.AccountKey) []codex.AccountKey {
+	if len(excluded) == 0 {
+		return append([]codex.AccountKey(nil), accounts...)
+	}
+	set := make(map[codex.AccountKey]struct{}, len(excluded))
+	for _, account := range excluded {
+		set[account] = struct{}{}
+	}
+	filtered := make([]codex.AccountKey, 0, len(accounts))
+	for _, account := range accounts {
+		if _, unavailable := set[account]; !unavailable {
+			filtered = append(filtered, account)
+		}
+	}
+	return filtered
+}
+
+func mergeCodexHTTPRequestAccountKeys(left, right []codex.AccountKey) []codex.AccountKey {
+	merged := append([]codex.AccountKey(nil), left...)
+	seen := make(map[codex.AccountKey]struct{}, len(left)+len(right))
+	for _, account := range left {
+		seen[account] = struct{}{}
+	}
+	for _, account := range right {
+		if _, duplicate := seen[account]; duplicate {
+			continue
+		}
+		seen[account] = struct{}{}
+		merged = append(merged, account)
+	}
+	return merged
+}
+
+func containsCodexHTTPRequestAccountKey(accounts []codex.AccountKey, target codex.AccountKey) bool {
+	for _, account := range accounts {
+		if account == target {
+			return true
+		}
+	}
+	return false
 }
 
 // planWebSocketPrewarm selects one memory-only account order. Prewarm carries
@@ -973,7 +1084,7 @@ const codexGPT56PromptCacheFairnessFloor = 30 * time.Minute
 
 func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, now time.Time) (codex.AccountKey, codex.AccountKey, error) {
 	affinityPresent := snapshot.AffinityPresent || snapshot.AffinityAccountKey != ""
-	requiresContinuity := snapshot.AffinityRequiresAccount || protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState
+	requiresContinuity := snapshot.BoundRequiresAccount || snapshot.AffinityRequiresAccount || protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState
 	if requiresContinuity {
 		account := snapshot.BoundAccountKey
 		if account == "" {
@@ -1126,7 +1237,7 @@ func cloneCodexHTTPRequestPlanProvisional(source map[codex.AccountKey]int) map[c
 	return clone
 }
 
-func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity, authenticatedCallerContinuity bool, dispatchPermitDigest string) CodexLeaseRequestPlan {
+func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy, protocol CodexProtocolRequest, choice RouteChoice, dispatch CodexFrozenDispatchPlan, expected *CodexLeaseBoundExpectation, requiresAccountContinuity, authenticatedCallerContinuity bool, dispatchPermitDigest string, quotaExhaustionProbe bool) CodexLeaseRequestPlan {
 	httpSlots := CodexHTTPAttemptSlots(dispatch)
 	slots := make([]CodexLeaseAttemptSlotPlan, len(httpSlots))
 	for index, slot := range httpSlots {
@@ -1157,6 +1268,7 @@ func codexHTTPRequestLeasePlan(key LeaseKey, accounts []codex.AccountKey, author
 		RequiresAccountContinuity:     requiresAccountContinuity,
 		authenticatedCallerContinuity: authenticatedCallerContinuity,
 		DispatchPermitDigest:          dispatchPermitDigest,
+		QuotaExhaustionProbe:          quotaExhaustionProbe,
 		Evidence:                      codexLeaseRequestEvidenceFromProtocol(protocol),
 	}
 }

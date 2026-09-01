@@ -33,6 +33,19 @@ func TestCodexWSPendingFrameUsesStrongFrameAuthorityWithoutHandshake(t *testing.
 	}
 }
 
+func TestCodexWSPendingFrameExplicitEmptyPreviousResponseIDIsNotPortable(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+	if pending.portable || !pending.request.HasPreviousResponseID || pending.request.PreviousResponseID != "" {
+		t.Fatalf("explicit empty previous_response_id portability = %v request = %+v", pending.portable, pending.request)
+	}
+}
+
 func TestCodexWSPendingFrameAcceptsSupportedCompactionPhases(t *testing.T) {
 	for _, phase := range []string{"standalone_turn", "pre_turn", "mid_turn"} {
 		t.Run(phase, func(t *testing.T) {
@@ -139,6 +152,108 @@ func TestCodexWSPendingFrameClassifiesFailureWithoutPayload(t *testing.T) {
 			failure := classifyCodexWebSocketFailure(err)
 			if failure.Origin != test.wantOrigin || failure.FrameType != test.wantType || failure.FrameSize != test.wantSize || failure.FrameDetail != test.wantDetail {
 				t.Fatalf("broker failure = %+v, want origin/type/size/detail %s/%s/%s/%s", failure, test.wantOrigin, test.wantType, test.wantSize, test.wantDetail)
+			}
+		})
+	}
+}
+
+func TestCodexWSInvalidFrameClassifiesAllowlistedEventMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		messageType int
+		payload     []byte
+		wantEvent   codexWSEventType
+		wantStatus  string
+		wantType    codexWSEventType
+		wantCode    codexWSEventType
+		private     []string
+	}{
+		{
+			name:        "known application error",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"bad_anchor","message":"private upstream detail"}}`),
+			wantEvent:   "error",
+			wantStatus:  "400",
+			wantType:    "invalid_request_error",
+			private:     []string{"bad_anchor", "private"},
+		},
+		{
+			name:        "known usage limit error",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`),
+			wantEvent:   "error",
+			wantStatus:  "429",
+			wantType:    "usage_limit_reached",
+		},
+		{
+			name:        "valid identifier private metadata",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"error","status":400,"error":{"type":"client_secret_ABC123","code":"sk_live_ABC123","message":"private upstream detail"}}`),
+			wantEvent:   "error",
+			wantStatus:  "400",
+			private:     []string{"client_secret_ABC123", "sk_live_ABC123", "private"},
+		},
+		{
+			name:        "invalid identifier private metadata",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"error","status":400,"error":{"type":"private type","code":"private/code","message":"private upstream detail"}}`),
+			wantEvent:   "error",
+			wantStatus:  "400",
+			private:     []string{"private"},
+		},
+		{
+			name:        "known response event",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"response.completed","response":{}}`),
+			wantEvent:   "response.completed",
+		},
+		{
+			name:        "valid identifier private event",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"sk_live_ABC123"}`),
+			wantEvent:   codexWSEventTypeUnknown,
+			private:     []string{"sk_live_ABC123"},
+		},
+		{
+			name:        "unknown response delta",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"response.client_secret.delta"}`),
+			wantEvent:   codexWSEventTypeUnknown,
+			private:     []string{"client_secret"},
+		},
+		{
+			name:        "malformed text",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":`),
+			wantEvent:   codexWSEventTypeUnknown,
+		},
+		{
+			name:        "binary",
+			messageType: websocket.BinaryMessage,
+			payload:     []byte("private-binary-frame"),
+			wantEvent:   codexWSEventTypeUnknown,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := newCodexWSInvalidFrameErrorWithDetail(codexWSInvalidFrameUpstreamResponse, test.messageType, test.payload, codexWSInvalidFrameErrorOrder, errors.New("private cause"))
+			var frameErr *codexWSInvalidFrameError
+			if !errors.As(err, &frameErr) {
+				t.Fatalf("error = %T, want frame error", err)
+			}
+			if frameErr.Event != test.wantEvent || frameErr.Status != test.wantStatus || frameErr.Kind != test.wantType || frameErr.Code != test.wantCode {
+				t.Fatalf("metadata = event %q status %q type %q code %q, want %q/%q/%q/%q", frameErr.Event, frameErr.Status, frameErr.Kind, frameErr.Code, test.wantEvent, test.wantStatus, test.wantType, test.wantCode)
+			}
+			failure := classifyCodexWebSocketFailure(err)
+			if failure.EventType != test.wantEvent || failure.ErrorStatus != test.wantStatus || failure.ErrorType != test.wantType || failure.ErrorCode != test.wantCode {
+				t.Fatalf("failure metadata = %+v", failure)
+			}
+			for _, rendered := range []string{frameErr.Error(), failure.ErrorStatus, string(failure.EventType), string(failure.ErrorType), string(failure.ErrorCode)} {
+				for _, private := range test.private {
+					if strings.Contains(rendered, private) {
+						t.Fatalf("diagnostic exposed private payload %q: %q", private, rendered)
+					}
+				}
 			}
 		})
 	}

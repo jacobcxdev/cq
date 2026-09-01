@@ -23,6 +23,8 @@ import (
 
 const codexInstalledHTTPValidationTempPrefix = "cq-codex-v2-"
 
+const codexInstalledHTTPValidationHardLimitBody = `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
+
 const (
 	codexInstalledHTTPValidationAccountA codex.AccountKey = "validation-account-a"
 	codexInstalledHTTPValidationAccountB codex.AccountKey = "validation-account-b"
@@ -605,7 +607,7 @@ func (upstream *codexInstalledHTTPValidationUpstream) serveHTTP(writer http.Resp
 		upstream.recordRoute(protocol.Metadata.Metadata, accountID, http.StatusTooManyRequests)
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(writer, `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`)
+		_, _ = io.WriteString(writer, codexInstalledHTTPValidationHardLimitBody)
 		return
 	}
 	upstream.recordRoute(protocol.Metadata.Metadata, accountID, http.StatusOK)
@@ -836,7 +838,8 @@ func (exercise *codexInstalledHTTPValidationExercise) Run(ctx context.Context) (
 				(trafficCase.scenario == codexInstalledHTTPValidationScenarioAdmittedHardLimit && requestIndex > 0) {
 				wantStatus = http.StatusTooManyRequests
 			}
-			if err := exercise.send(ctx, trafficCase.metadata, trafficCase.compact, wantStatus); err != nil {
+			continuation := trafficCase.scenario == codexInstalledHTTPValidationScenarioAdmittedHardLimit && requestIndex > 0
+			if err := exercise.send(ctx, trafficCase.metadata, trafficCase.compact, continuation, wantStatus); err != nil {
 				return err
 			}
 		}
@@ -883,8 +886,8 @@ func codexInstalledHTTPValidationTrafficCases() []codexInstalledHTTPValidationTr
 	return cases
 }
 
-func (exercise *codexInstalledHTTPValidationExercise) send(ctx context.Context, metadata CodexTurnMetadata, compact bool, wantStatus int) error {
-	body, err := json.Marshal(map[string]any{
+func (exercise *codexInstalledHTTPValidationExercise) send(ctx context.Context, metadata CodexTurnMetadata, compact, continuation bool, wantStatus int) error {
+	payload := map[string]any{
 		"model": "gpt-5.6-sol",
 		"input": []map[string]any{{
 			"role":    "user",
@@ -894,7 +897,12 @@ func (exercise *codexInstalledHTTPValidationExercise) send(ctx context.Context, 
 		"client_metadata": map[string]any{
 			codexTurnMetadataKey: metadata,
 		},
-	})
+	}
+	if continuation {
+		payload["previous_response_id"] = "validation-response"
+		payload["encrypted_content"] = "validation-state"
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return errors.New("encode Codex installed HTTP validation request")
 	}
@@ -926,7 +934,8 @@ func (exercise *codexInstalledHTTPValidationExercise) send(ctx context.Context, 
 	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, codexProtocolMaxBytes+1))
 	closeErr := response.Body.Close()
 	defer clearBytes(responseBody)
-	if readErr != nil || closeErr != nil || len(responseBody) == 0 || len(responseBody) > codexProtocolMaxBytes || response.StatusCode != wantStatus {
+	if readErr != nil || closeErr != nil || len(responseBody) == 0 || len(responseBody) > codexProtocolMaxBytes || response.StatusCode != wantStatus ||
+		(wantStatus == http.StatusTooManyRequests && !bytes.Equal(responseBody, []byte(codexInstalledHTTPValidationHardLimitBody))) {
 		return errors.New("Codex installed HTTP validation response mismatch")
 	}
 	return nil

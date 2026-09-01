@@ -18,7 +18,7 @@ func TestBuildCodexFrozenDispatchPlanMaterialisesPolicyChoices(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	affinity := frozenDispatchTestLogicalAccount("account-affinity",
 		frozenDispatchCandidate("account-affinity", "candidate-managed", "revision-managed", codex.SourceManaged, true, now.Add(time.Hour)),
-		frozenDispatchCandidate("account-affinity", "candidate-accepted", "revision-accepted", codex.SourceSystem, false, now.Add(-time.Hour)),
+		frozenDispatchCandidate("account-affinity", "candidate-accepted", "revision-accepted", codex.SourceSystem, false, now.Add(2*time.Hour)),
 	)
 	defaultAccount := frozenDispatchTestLogicalAccount("account-default",
 		frozenDispatchCandidate("account-default", "candidate-external", "revision-external", codex.SourceExternal, false, time.Time{}),
@@ -97,6 +97,114 @@ func TestBuildCodexFrozenDispatchPlanUsesProvisionalCounts(t *testing.T) {
 	}
 }
 
+func TestBuildCodexFrozenDispatchPlanExcludesDurablyUnavailableAccounts(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	plan, err := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{
+		Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+		}},
+		UnavailableAccountKeys: []codex.AccountKey{"account-b"},
+		Requirements:           CodexRouteRequirements{RequestedModel: "gpt-5"},
+		DefaultAccountKey:      "account-a",
+		Now:                    now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := plan.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-a" {
+		t.Fatalf("dispatch accounts = %#v, want only account-a", accounts)
+	}
+}
+
+func TestBuildCodexFrozenDispatchPlanProbesOneUnavailableAccountOnlyWhenAllAreUnavailable(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	for _, test := range []struct {
+		name        string
+		unavailable []codex.AccountKey
+		defaultKey  codex.AccountKey
+		want        codex.AccountKey
+	}{
+		{name: "unavailable account skipped while alternate remains", unavailable: []codex.AccountKey{"account-a"}, want: "account-b"},
+		{name: "one unavailable account probed after all exhaust", unavailable: []codex.AccountKey{"account-a", "account-b"}, want: "account-a"},
+		{name: "configured default is deterministic exhausted probe", unavailable: []codex.AccountKey{"account-a", "account-b"}, defaultKey: "account-b", want: "account-b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, err := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{
+				Inventory:                   inventory,
+				UnavailableAccountKeys:      test.unavailable,
+				ProbeUnavailableAccountKeys: test.unavailable,
+				ProbeUnavailableWhenAll:     true,
+				Requirements:                CodexRouteRequirements{RequestedModel: "gpt-5"},
+				DefaultAccountKey:           test.defaultKey,
+				Now:                         now,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			accounts := plan.Accounts()
+			if len(accounts) != 1 || accounts[0].Choice().AccountKey != test.want {
+				t.Fatalf("dispatch accounts = %#v, want only %s", accounts, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildCodexFrozenDispatchPlanProbesRecoveredUnavailableAccountBeforeExhaustedDefault(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	observe := func(account codex.AccountKey, remaining int, source CapacitySource) {
+		t.Helper()
+		fact := capacity.NewObservationStream().Stamp(CapacityFact{
+			AccountKey: account, Bucket: CapacityBucketBase, RemainingPct: remaining,
+			Source: source, ObservedAt: now, Confidence: CapacityConfidenceAuthoritative,
+		})
+		if !capacity.Observe(fact) {
+			t.Fatalf("observe %v capacity for %s", source, account)
+		}
+	}
+	observe("account-a", 0, CapacitySourceHardLimit)
+	observe("account-b", 0, CapacitySourceHardLimit)
+
+	input := CodexFrozenDispatchInput{
+		Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+		}},
+		Capacity:                    capacity,
+		UnavailableAccountKeys:      []codex.AccountKey{"account-a", "account-b"},
+		ProbeUnavailableAccountKeys: []codex.AccountKey{"account-a", "account-b"},
+		ProbeUnavailableWhenAll:     true,
+		Requirements:                CodexRouteRequirements{RequestedModel: "gpt-5"},
+		DefaultAccountKey:           "account-a",
+		Now:                         now,
+	}
+	plan, err := BuildCodexFrozenDispatchPlan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := plan.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-a" {
+		t.Fatalf("initial dispatch accounts = %#v, want deterministic default account-a", accounts)
+	}
+
+	observe("account-a", 0, CapacitySourceHardLimit)
+	observe("account-b", 75, CapacitySourceLiveRateLimits)
+	plan, err = BuildCodexFrozenDispatchPlan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts = plan.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("dispatch accounts = %#v, want recovered account-b before exhausted default", accounts)
+	}
+}
+
 func TestBuildCodexFrozenDispatchPlanFreezesAccountValues(t *testing.T) {
 	t.Parallel()
 
@@ -153,7 +261,7 @@ func TestBuildCodexFrozenDispatchPlanUsesInjectedTimeForCandidateOrder(t *testin
 	plan, err := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{
 		Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
 			frozenDispatchTestLogicalAccount("account-route",
-				frozenDispatchCandidate("account-route", "candidate-a-expired", "revision-expired", codex.SourceManaged, false, now.Add(-time.Hour)),
+				frozenDispatchCandidate("account-route", "candidate-a-future", "revision-future", codex.SourceManaged, false, now.Add(time.Hour)),
 				frozenDispatchCandidate("account-route", "candidate-z-unknown", "revision-unknown", codex.SourceManaged, false, time.Time{}),
 			),
 		}},
@@ -165,8 +273,8 @@ func TestBuildCodexFrozenDispatchPlanUsesInjectedTimeForCandidateOrder(t *testin
 		t.Fatal(err)
 	}
 	attempts := plan.Accounts()[0].Attempts()
-	if len(attempts) != 2 || attempts[0].Candidate.CandidateID != "candidate-z-unknown" || attempts[1].Candidate.CandidateID != "candidate-a-expired" {
-		t.Fatalf("attempt order = %+v, want unknown-expiry candidate before expired candidate", attempts)
+	if len(attempts) != 2 || attempts[0].Candidate.CandidateID != "candidate-a-future" || attempts[1].Candidate.CandidateID != "candidate-z-unknown" {
+		t.Fatalf("attempt order = %+v, want future-expiry candidate before unknown-expiry candidate", attempts)
 	}
 }
 
@@ -576,6 +684,36 @@ func TestFreezeCodexDispatchAccountRejectsNoDispatchableCandidate(t *testing.T) 
 	}
 }
 
+func TestFreezeCodexDispatchAccountKeepsExpiredManagedCandidateRefreshOnly(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	candidate := frozenDispatchCandidate("account-route", "candidate-managed", "revision-stale", codex.SourceManaged, true, now.Add(-time.Minute))
+	candidate.RefreshEligible = true
+	account, err := freezeCodexDispatchAccount(
+		frozenDispatchTestLogicalAccount("account-route", candidate),
+		RouteChoice{
+			AccountKey:      "account-route",
+			RequestedModel:  "gpt-5",
+			EffectiveModel:  "gpt-5",
+			RequiredBuckets: []CapacityBucket{CapacityBucketBase},
+		},
+		"",
+		now,
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts := account.Attempts(); len(attempts) != 0 {
+		t.Fatalf("direct attempts = %#v, want none", attempts)
+	}
+	refresh, ok := account.RefreshAttempt()
+	if !ok || refresh.Candidate.CandidateID != "candidate-managed" || refresh.Revision != "revision-stale" {
+		t.Fatalf("refresh attempt = %#v, %t", refresh, ok)
+	}
+}
+
 func TestCodexFrozenDispatchPlanReturnsDetachedMemoryOnlyViews(t *testing.T) {
 	t.Parallel()
 
@@ -665,6 +803,7 @@ func frozenDispatchCandidate(accountKey codex.AccountKey, candidateID codex.Cand
 		Source:          source,
 		AccessExpiresAt: expires,
 		CQAuthored:      cqAuthored,
+		RefreshEligible: cqAuthored,
 		Routable:        true,
 	}
 }

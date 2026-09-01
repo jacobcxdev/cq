@@ -37,10 +37,10 @@ repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 codexbar_root=${CQ_CODEXBAR_LIVE_ROOT:-$HOME/Library/Application Support/CodexBar}
 [ "${codexbar_root#/}" != "$codexbar_root" ] || fail "CodexBar root must be absolute"
 desktop_codex=/Applications/ChatGPT.app/Contents/Resources/codex
-if [ -x "$desktop_codex" ]; then
-	codex_executable=$desktop_codex
-elif [ -n "${CQ_CODEX_ACCEPTANCE_EXECUTABLE:-}" ]; then
+if [ -n "${CQ_CODEX_ACCEPTANCE_EXECUTABLE:-}" ]; then
 	codex_executable=$CQ_CODEX_ACCEPTANCE_EXECUTABLE
+elif [ -x "$desktop_codex" ]; then
+	codex_executable=$desktop_codex
 else
 	codex_executable=$(command -v codex) || fail "Codex executable is required"
 fi
@@ -136,14 +136,16 @@ TestCodexInstalledNormalPassesThroughLiveUpstream
 TestCodexInstalledNormalContinuesAfterLiveToolCall
 TestCodexInstalledRescuePassesThroughLiveUpstream
 TestCodexInstalledLiveRescueTaskResumesInNormal
+TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover
 TestCodexExactExecutableNormalPassesThroughLiveUpstream
 TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream
 '
-release_test_pattern='^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal|TestCodexExactExecutableNormalPassesThroughLiveUpstream|TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream)$'
+release_test_pattern='^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal|TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover|TestCodexExactExecutableNormalPassesThroughLiveUpstream|TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream)$'
 release_test_log=$validation_root/live-routing-tests.log
 if ! env \
 	CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
 	CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE=1 \
+	CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE=1 \
 	CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
 	CQ_CODEXBAR_LIVE_ROOT="$codexbar_root" \
 	CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \

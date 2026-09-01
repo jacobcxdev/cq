@@ -268,7 +268,7 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 
 	webSocketExecutor := NewCodexWebSocketAttemptExecutor(inventory, inventory)
 	webSocketExecutor.Dialer.Proxy = nil
-	webSocketBroker, err := NewCodexTerminatingWebSocketHandler(planner, webSocketExecutor, DefaultCodexUpstream)
+	webSocketBroker, err := NewCodexTerminatingWebSocketHandler(planner, webSocketExecutor, core.inventory, core.capacity, DefaultCodexUpstream)
 	if err != nil {
 		t.Fatalf("construct live Codex normal WebSocket handler: %v", err)
 	}

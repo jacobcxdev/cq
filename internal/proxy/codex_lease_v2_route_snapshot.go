@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -12,19 +13,23 @@ import (
 // lease-owned routing state. The accepted credential revision is deliberately
 // absent: callers own that inventory revision and must combine it explicitly.
 type CodexLeaseRouteSnapshot struct {
-	Classification          CodexRestoredLaneClassification
-	BoundAccountKey         codex.AccountKey
-	BoundIdentity           CodexJournalRecordIdentity
-	BoundRecordGeneration   uint64
-	BoundChoice             RouteChoice
-	HistoricalAuthoritative bool
-	AffinityPresent         bool
-	AffinityAccountKey      codex.AccountKey
-	AffinityCacheAdmittedAt time.Time
-	AffinityEffectiveModel  string
-	AffinityRequiresAccount bool
-	Provisional             map[codex.AccountKey]int
-	JournalGeneration       uint64
+	Classification            CodexRestoredLaneClassification
+	BoundAccountKey           codex.AccountKey
+	BoundIdentity             CodexJournalRecordIdentity
+	BoundRecordGeneration     uint64
+	BoundChoice               RouteChoice
+	BoundRequiresAccount      bool
+	HistoricalAuthoritative   bool
+	RestartableFailedHead     bool
+	AffinityPresent           bool
+	AffinityAccountKey        codex.AccountKey
+	AffinityCacheAdmittedAt   time.Time
+	AffinityEffectiveModel    string
+	AffinityRequiresAccount   bool
+	UnavailableAccountKeys    []codex.AccountKey
+	QuotaExhaustedAccountKeys []codex.AccountKey
+	Provisional               map[codex.AccountKey]int
+	JournalGeneration         uint64
 }
 
 // LoadRouteSnapshot returns the requested lane's bound and affinity accounts
@@ -68,6 +73,35 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 			Provisional:       provisional,
 			JournalGeneration: restored.Fence.Journal,
 		}
+		_, snapshot.RestartableFailedHead = codexRestoredLaneRestartableFailedHead(restored)
+		unavailable := make(map[codex.AccountKey]struct{})
+		quotaUnavailable := make(map[codex.AccountKey]struct{})
+		if restored.RequestedIdentity == codexLaneRequestScopeIdentity(restored.Lane) {
+			for _, accountHash := range restored.Lane.RequestUnavailableAccountHashes {
+				account, resolved := coordinator.store.resolveCodexLeaseAccount(accountHash, accounts)
+				if !resolved {
+					continue
+				}
+				unavailable[account] = struct{}{}
+				snapshot.UnavailableAccountKeys = append(snapshot.UnavailableAccountKeys, account)
+			}
+		}
+		for _, accountHash := range restored.Lane.QuotaExhaustedAccountHashes {
+			account, resolved := coordinator.store.resolveCodexLeaseAccount(accountHash, accounts)
+			if !resolved {
+				continue
+			}
+			if _, found := unavailable[account]; !found {
+				unavailable[account] = struct{}{}
+				snapshot.UnavailableAccountKeys = append(snapshot.UnavailableAccountKeys, account)
+			}
+			quotaUnavailable[account] = struct{}{}
+			snapshot.QuotaExhaustedAccountKeys = append(snapshot.QuotaExhaustedAccountKeys, account)
+		}
+		sort.Slice(snapshot.QuotaExhaustedAccountKeys, func(i, j int) bool {
+			return snapshot.QuotaExhaustedAccountKeys[i] < snapshot.QuotaExhaustedAccountKeys[j]
+		})
+		sort.Slice(snapshot.UnavailableAccountKeys, func(i, j int) bool { return snapshot.UnavailableAccountKeys[i] < snapshot.UnavailableAccountKeys[j] })
 		if restored.Affinity != nil {
 			snapshot.AffinityPresent = true
 			snapshot.AffinityCacheAdmittedAt = restored.Affinity.CacheAdmittedAt
@@ -85,6 +119,10 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 			}
 			if restored.Affinity.Resolved {
 				snapshot.AffinityAccountKey = restored.Affinity.AccountKey
+				if _, blocked := quotaUnavailable[snapshot.AffinityAccountKey]; blocked {
+					snapshot.AffinityAccountKey = ""
+					snapshot.AffinityRequiresAccount = false
+				}
 			}
 		}
 		if restored.Classification == CodexRestoredLaneCurrent {
@@ -92,13 +130,24 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 				if record.Identity != restored.Fence.Current || (!record.Record.EverAdmitted && !record.Record.NonMigratable) {
 					continue
 				}
-				if record.AccountKey == "" {
+				boundAccount := record.AccountKey
+				if codexLeaseCurrentAttemptState(record.Record) == CodexAttemptAccountUnavailable {
+					if _, blocked := quotaUnavailable[boundAccount]; blocked {
+						continue
+					}
+				}
+				attempt, found := codexLeaseAttemptByGeneration(record.Record.Attempts, record.Record.CurrentAttemptGeneration)
+				if found && !record.Record.NonMigratable && (attempt.State == CodexAttemptPrepared || attempt.State == CodexAttemptDispatched) && attempt.Slot > 0 && int(attempt.Slot) <= len(record.Record.AttemptEnvelope.Slots) && !constantTimeCodexLeaseDigestEqual(record.Record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash, record.Record.AccountHash) {
+					boundAccount, _ = coordinator.store.resolveCodexLeaseAccount(record.Record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash, accounts)
+				}
+				if boundAccount == "" {
 					return CodexLeaseRouteSnapshot{}, fmt.Errorf("%w: persisted bound account is unavailable", ErrCodexLeaseAuthorityMismatch)
 				}
-				snapshot.BoundAccountKey = record.AccountKey
+				snapshot.BoundAccountKey = boundAccount
 				snapshot.BoundIdentity = record.Identity
 				snapshot.BoundRecordGeneration = record.Record.RecordGeneration
 				snapshot.BoundChoice = cloneRouteChoice(record.Choice)
+				snapshot.BoundRequiresAccount = record.Record.NonMigratable
 				break
 			}
 		}

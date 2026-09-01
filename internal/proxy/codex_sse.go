@@ -348,7 +348,16 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		} else {
 			observation.Error = wrapped
 		}
-	case envelope.Type == "response.failed" || envelope.Type == "response.incomplete":
+	case envelope.Type == "response.failed":
+		observation.Kind = CodexSSEError
+		wrapped, err := parseCodexResponseFailure(envelope.Response)
+		if err != nil {
+			observation.Kind = CodexSSEMalformed
+			observation.ParseError = err
+		} else {
+			observation.Error = wrapped
+		}
+	case envelope.Type == "response.incomplete":
 		observation.Kind = CodexSSEError
 	case envelope.Type == "codex.rate_limits":
 		observation.Kind = CodexSSERateLimits
@@ -356,6 +365,44 @@ func classifyCodexSSEData(data []byte) CodexSSEObservation {
 		observation.Kind = CodexSSEUnknown
 	}
 	return observation
+}
+
+func parseCodexResponseFailure(raw json.RawMessage) (CodexWrappedError, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return CodexWrappedError{}, nil
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &response); err != nil || response == nil {
+		return CodexWrappedError{}, errors.New("response.failed requires response object")
+	}
+	errorPayload, found := codexJSONRawField(response, "error")
+	if !found || bytes.Equal(bytes.TrimSpace(errorPayload), []byte("null")) {
+		return CodexWrappedError{}, nil
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(errorPayload, &nested); err != nil || nested == nil {
+		return CodexWrappedError{}, errors.New("response.failed error must be an object")
+	}
+	errorType, errorTypePresent, errorTypeValid, err := parseCodexErrorString(nested["type"])
+	if err != nil {
+		return CodexWrappedError{}, errors.New("response.failed error type must be a string")
+	}
+	code, codePresent, codeValid, err := parseCodexErrorString(nested["code"])
+	if err != nil {
+		return CodexWrappedError{}, errors.New("response.failed error code must be a string")
+	}
+	message, _, _, err := parseCodexErrorString(nested["message"])
+	if err != nil {
+		return CodexWrappedError{}, errors.New("response.failed error message must be a string")
+	}
+	return CodexWrappedError{
+		Found:     errorTypePresent && errorTypeValid || codePresent && codeValid,
+		ErrorType: errorType,
+		Code:      code,
+		Message:   message,
+		HardUsageLimit: errorTypePresent && errorTypeValid && errorType == "usage_limit_reached" ||
+			codePresent && codeValid && code == "insufficient_quota",
+	}, nil
 }
 
 func ParseCodexSSE(body []byte, maxEvent int) ([]CodexSSEObservation, error) {

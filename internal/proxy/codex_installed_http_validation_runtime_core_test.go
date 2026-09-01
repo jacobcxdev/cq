@@ -258,6 +258,41 @@ func TestCodexInstalledHTTPValidationExerciseHonoursCancellationWithoutTraffic(t
 	}
 }
 
+func TestCodexInstalledHTTPValidationExerciseRequiresCanonicalHardLimitBody(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "canonical", body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`},
+		{name: "wrong typed error", body: `{"type":"error","status":429,"error":{"type":"rate_limit_exceeded"}}`, wantErr: true},
+		{name: "canonical with trailing data", body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}\n`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusTooManyRequests)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			t.Cleanup(server.Close)
+			exercise := &codexInstalledHTTPValidationExercise{
+				address:    strings.TrimPrefix(server.URL, "http://"),
+				localToken: testCodexInstalledLocalToken,
+				client:     server.Client(),
+			}
+			err := exercise.send(context.Background(), CodexTurnMetadata{
+				SessionID:   "validation-session",
+				ThreadID:    "validation-thread",
+				TurnID:      "validation-turn",
+				RequestKind: CodexRequestTurn,
+			}, false, false, http.StatusTooManyRequests)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("send() error = %v, want error %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func snapshotCodexInstalledValidationTestTree(t *testing.T, root string) string {
 	t.Helper()
 	var entries []string

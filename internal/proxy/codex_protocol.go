@@ -205,12 +205,13 @@ func parseCodexError(payload []byte, transportStatus int, allowTransportStatus b
 		found = hasError
 	}
 	return CodexWrappedError{
-		Found:          found,
-		Status:         status,
-		ErrorType:      errorType,
-		Code:           code,
-		Message:        message,
-		AuthFailure:    validStatus && (status == http.StatusUnauthorized || status == http.StatusForbidden),
+		Found:     found,
+		Status:    status,
+		ErrorType: errorType,
+		Code:      code,
+		Message:   message,
+		AuthFailure: validStatus && (status == http.StatusUnauthorized ||
+			(status == http.StatusForbidden && errorTypeValid && errorType == "authentication_error")),
 		HardUsageLimit: validStatus && status == http.StatusTooManyRequests && errorTypeValid && errorType == "usage_limit_reached",
 	}, nil
 }
@@ -1007,7 +1008,9 @@ func isCodexLifecycleAuthorityField(path []string, name string) bool {
 	case len(path) == 0:
 		return codexJSONNameEqual(name, "type") || codexJSONNameEqual(name, "response") || codexJSONNameEqual(name, "end_turn") || codexJSONNameEqual(name, "headers")
 	case len(path) == 1 && codexJSONNameEqual(path[0], "response"):
-		return codexJSONNameEqual(name, "id") || codexJSONNameEqual(name, "end_turn")
+		return codexJSONNameEqual(name, "id") || codexJSONNameEqual(name, "end_turn") || codexJSONNameEqual(name, "error")
+	case len(path) == 2 && codexJSONNameEqual(path[0], "response") && codexJSONNameEqual(path[1], "error"):
+		return codexJSONNameEqual(name, "type") || codexJSONNameEqual(name, "code") || codexJSONNameEqual(name, "message")
 	case len(path) == 1 && codexJSONNameEqual(path[0], "headers"):
 		return codexJSONNameEqual(name, "x-codex-turn-state")
 	default:

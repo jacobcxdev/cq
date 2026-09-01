@@ -161,7 +161,8 @@ func TestCodexPrimerRequestHTTPClassification(t *testing.T) {
 		wantCode  PrimerRequestResultCode
 	}{
 		{name: "typed 401", status: http.StatusUnauthorized, body: `{"error":"unauthorised"}`, wantState: PrimerRequestRejected, wantCode: PrimerRequestCodeAuthRejected},
-		{name: "typed 403", status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantState: PrimerRequestRejected, wantCode: PrimerRequestCodeAuthRejected},
+		{name: "authentication 403", status: http.StatusForbidden, body: `{"error":{"type":"authentication_error"}}`, wantState: PrimerRequestRejected, wantCode: PrimerRequestCodeAuthRejected},
+		{name: "policy 403", status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantState: PrimerRequestAmbiguous, wantCode: PrimerRequestCodeHTTPAmbiguous},
 		{name: "typed hard limit", status: http.StatusTooManyRequests, body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`, wantState: PrimerRequestRejected, wantCode: PrimerRequestCodeHardLimit},
 		{name: "400", status: http.StatusBadRequest, body: `{}`, wantState: PrimerRequestRejected, wantCode: PrimerRequestCodeHTTPPreAdmission},
 		{name: "404", status: http.StatusNotFound, body: `{}`, wantState: PrimerRequestRejected, wantCode: PrimerRequestCodeHTTPPreAdmission},

@@ -347,7 +347,7 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 		called := false
 		handler, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
 			Status: status,
-			newHandler: func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, string) (proxy.CodexWebSocketRoutingHandler, error) {
+			newHandler: func(proxy.CodexNativeHTTPRequestPlanner, proxy.ExplicitWebSocketExecutor, codexprov.CredentialReferenceRefresher, *proxy.CodexCapacityLedger, string) (proxy.CodexWebSocketRoutingHandler, error) {
 				called = true
 				return &proxyCodexWebSocketTestHandler{}, nil
 			},
@@ -369,6 +369,8 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 	wantHandler := &proxyCodexWebSocketTestHandler{}
 	var planner *proxy.CodexHTTPRequestPlanFactory
 	var gotExecutor proxy.ExplicitWebSocketExecutor
+	var gotRefresher codexprov.CredentialReferenceRefresher
+	var gotCapacity *proxy.CodexCapacityLedger
 	var upstream string
 	handler, err := newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
 		Status: proxy.CodexModeStatus{
@@ -378,10 +380,12 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 			AuthoritativeEpoch: 12,
 		},
 		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
-		DefaultAccountKey: "default-account", PinnedAccountKey: "pinned-account", Executor: executor, SessionPolicy: sessionPolicy, DispatchPermits: dispatchPermits, TurnReceipts: receipts, Upstream: "https://codex.example/backend-api", Now: time.Now,
-		newHandler: func(gotPlanner proxy.CodexNativeHTTPRequestPlanner, executor proxy.ExplicitWebSocketExecutor, gotUpstream string) (proxy.CodexWebSocketRoutingHandler, error) {
+		DefaultAccountKey: "default-account", PinnedAccountKey: "pinned-account", Executor: executor, Refresher: dependency, SessionPolicy: sessionPolicy, DispatchPermits: dispatchPermits, TurnReceipts: receipts, Upstream: "https://codex.example/backend-api", Now: time.Now,
+		newHandler: func(gotPlanner proxy.CodexNativeHTTPRequestPlanner, executor proxy.ExplicitWebSocketExecutor, refresher codexprov.CredentialReferenceRefresher, handlerCapacity *proxy.CodexCapacityLedger, gotUpstream string) (proxy.CodexWebSocketRoutingHandler, error) {
 			planner, _ = gotPlanner.(*proxy.CodexHTTPRequestPlanFactory)
 			gotExecutor = executor
+			gotRefresher = refresher
+			gotCapacity = handlerCapacity
 			upstream = gotUpstream
 			return wantHandler, nil
 		},
@@ -392,8 +396,8 @@ func TestNewProxyCodexWebSocketInstallsOnlyForEnforcement(t *testing.T) {
 	if planner == nil || planner.Inventory != dependency || planner.Capacity != capacity || planner.Routes != dependency || planner.Runtime != dependency || planner.DefaultAccountKey != "default-account" || planner.PinnedAccountKey != "pinned-account" || planner.SessionPolicy != sessionPolicy || planner.DispatchPermits != dispatchPermits || planner.TurnReceipts != receipts || planner.Authority.ModeEpoch != 12 || !planner.Authority.Authoritative {
 		t.Fatalf("WebSocket planner dependencies = %#v", planner)
 	}
-	if planner.Headroom != nil || gotExecutor != executor || upstream != "https://codex.example/backend-api" {
-		t.Fatalf("WebSocket execution dependencies = headroom %T executor %T upstream %q", planner.Headroom, gotExecutor, upstream)
+	if planner.Headroom != nil || gotExecutor != executor || gotRefresher != dependency || gotCapacity != capacity || upstream != "https://codex.example/backend-api" {
+		t.Fatalf("WebSocket execution dependencies = headroom %T executor %T refresher %T capacity %p upstream %q", planner.Headroom, gotExecutor, gotRefresher, gotCapacity, upstream)
 	}
 
 	for _, status := range []proxy.CodexModeStatus{
@@ -443,8 +447,8 @@ func TestProxyCodexEnforcedTransportsShareContinuityAuthority(t *testing.T) {
 	_, err = newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
 		Status: webSocketStatus, PeerStatus: httpStatus,
 		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
-		Executor: proxyCodexWebSocketTestExecutor{}, Upstream: "https://codex.example", Now: time.Now,
-		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, _ proxy.ExplicitWebSocketExecutor, _ string) (proxy.CodexWebSocketRoutingHandler, error) {
+		Executor: proxyCodexWebSocketTestExecutor{}, Refresher: dependency, Upstream: "https://codex.example", Now: time.Now,
+		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, _ proxy.ExplicitWebSocketExecutor, _ codexprov.CredentialReferenceRefresher, _ *proxy.CodexCapacityLedger, _ string) (proxy.CodexWebSocketRoutingHandler, error) {
 			webSocketPlanner, _ = planner.(*proxy.CodexHTTPRequestPlanFactory)
 			return &proxyCodexWebSocketTestHandler{}, nil
 		},

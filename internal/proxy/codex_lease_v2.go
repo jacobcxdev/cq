@@ -59,25 +59,27 @@ type CodexLeaseCutover struct {
 }
 
 type CodexJournalLane struct {
-	SessionHash                    string    `json:"session_hash"`
-	ThreadHash                     string    `json:"thread_hash"`
-	NamespaceHash                  string    `json:"namespace_hash"`
-	Generation                     uint64    `json:"generation"`
-	CurrentTurnHash                string    `json:"current_turn_hash,omitempty"`
-	CurrentModeEpoch               uint64    `json:"current_mode_epoch,omitempty"`
-	CurrentAuthoritative           bool      `json:"current_authoritative,omitempty"`
-	LastTurnHash                   string    `json:"last_turn_hash,omitempty"`
-	LastModeEpoch                  uint64    `json:"last_mode_epoch,omitempty"`
-	LastAuthoritative              bool      `json:"last_authoritative,omitempty"`
-	LastAdmittedAccountHash        string    `json:"last_admitted_account_hash,omitempty"`
-	LastAdmittedTurnHash           string    `json:"last_admitted_turn_hash,omitempty"`
-	LastAdmittedModeEpoch          uint64    `json:"last_admitted_mode_epoch,omitempty"`
-	LastAdmittedAuthoritative      bool      `json:"last_admitted_authoritative,omitempty"`
-	LastAdmissionJournalGeneration uint64    `json:"last_admission_journal_generation,omitempty"`
-	LastAdmittedAt                 time.Time `json:"last_admitted_at,omitempty"`
-	LastCacheAdmittedAt            time.Time `json:"last_cache_admitted_at,omitzero"`
-	LastCacheEffectiveModel        string    `json:"last_cache_effective_model,omitempty"`
-	LastObservedAt                 time.Time `json:"last_observed_at"`
+	SessionHash                     string    `json:"session_hash"`
+	ThreadHash                      string    `json:"thread_hash"`
+	NamespaceHash                   string    `json:"namespace_hash"`
+	Generation                      uint64    `json:"generation"`
+	CurrentTurnHash                 string    `json:"current_turn_hash,omitempty"`
+	CurrentModeEpoch                uint64    `json:"current_mode_epoch,omitempty"`
+	CurrentAuthoritative            bool      `json:"current_authoritative,omitempty"`
+	LastTurnHash                    string    `json:"last_turn_hash,omitempty"`
+	LastModeEpoch                   uint64    `json:"last_mode_epoch,omitempty"`
+	LastAuthoritative               bool      `json:"last_authoritative,omitempty"`
+	LastAdmittedAccountHash         string    `json:"last_admitted_account_hash,omitempty"`
+	LastAdmittedTurnHash            string    `json:"last_admitted_turn_hash,omitempty"`
+	LastAdmittedModeEpoch           uint64    `json:"last_admitted_mode_epoch,omitempty"`
+	LastAdmittedAuthoritative       bool      `json:"last_admitted_authoritative,omitempty"`
+	LastAdmissionJournalGeneration  uint64    `json:"last_admission_journal_generation,omitempty"`
+	LastAdmittedAt                  time.Time `json:"last_admitted_at,omitempty"`
+	LastCacheAdmittedAt             time.Time `json:"last_cache_admitted_at,omitzero"`
+	LastCacheEffectiveModel         string    `json:"last_cache_effective_model,omitempty"`
+	RequestUnavailableAccountHashes []string  `json:"request_unavailable_account_hashes,omitempty"`
+	QuotaExhaustedAccountHashes     []string  `json:"quota_exhausted_account_hashes,omitempty"`
+	LastObservedAt                  time.Time `json:"last_observed_at"`
 }
 
 type CodexAttemptSlotKind string
@@ -119,6 +121,7 @@ type CodexCurrentRequest struct {
 	CompactionPhase          CodexCompactionPhase  `json:"compaction_phase,omitempty"`
 	RequestedModelHash       string                `json:"requested_model_hash,omitempty"`
 	DispatchPermitDigest     string                `json:"dispatch_permit_digest,omitempty"`
+	QuotaExhaustionProbe     bool                  `json:"quota_exhaustion_probe,omitempty"`
 	EffectiveModel           string                `json:"effective_model,omitempty"`
 	RequiredBuckets          []CapacityBucket      `json:"required_buckets,omitempty"`
 	AttemptEnvelope          CodexAttemptEnvelope  `json:"attempt_envelope"`
@@ -476,6 +479,8 @@ func clearCodexLeaseV2Envelope(envelope *codexLeaseJournalEnvelopeV2) {
 	clear(envelope.Cutover.AuthoritativeModeEpochs)
 	clear(envelope.Cutover.ShadowModeEpochs)
 	for index := range envelope.Lanes {
+		clear(envelope.Lanes[index].RequestUnavailableAccountHashes)
+		clear(envelope.Lanes[index].QuotaExhaustedAccountHashes)
 		envelope.Lanes[index] = CodexJournalLane{}
 	}
 	for index := range envelope.Records {
@@ -1089,8 +1094,13 @@ func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJour
 	}
 	if !cacheFieldsAllowed {
 		for _, lane := range envelope.Lanes {
-			if !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" {
+			if !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" || len(lane.RequestUnavailableAccountHashes) != 0 || len(lane.QuotaExhaustedAccountHashes) != 0 {
 				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 cache affinity", ErrCodexLeaseTrustLost)
+			}
+		}
+		for _, record := range envelope.Records {
+			if record.QuotaExhaustionProbe {
+				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 quota probe", ErrCodexLeaseTrustLost)
 			}
 		}
 	}
@@ -1112,6 +1122,16 @@ func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLea
 		}
 		if lane.Generation == 0 || lane.Generation > envelope.Generation || lane.LastObservedAt.IsZero() || !codexLeaseUTCTime(lane.LastObservedAt) {
 			return errors.New("invalid lane generation or timestamp")
+		}
+		for hashIndex, accountHash := range lane.RequestUnavailableAccountHashes {
+			if !validCodexLeaseDigest(accountHash) || (hashIndex != 0 && lane.RequestUnavailableAccountHashes[hashIndex-1] >= accountHash) {
+				return errors.New("invalid or non-canonical request-unavailable accounts")
+			}
+		}
+		for hashIndex, accountHash := range lane.QuotaExhaustedAccountHashes {
+			if !validCodexLeaseDigest(accountHash) || (hashIndex != 0 && lane.QuotaExhaustedAccountHashes[hashIndex-1] >= accountHash) {
+				return errors.New("invalid or non-canonical quota-exhausted accounts")
+			}
 		}
 		if index > 0 && !codexJournalLaneLess(envelope.Lanes[index-1], lane) {
 			return errors.New("duplicate or non-canonical lane identity")
@@ -1270,7 +1290,7 @@ func (store *CodexLeaseStore) validateV2RouteAndAttempts(record CodexJournalReco
 
 	envelope := record.AttemptEnvelope
 	if len(envelope.Slots) == 0 {
-		if envelope.PolicyVersion != 0 || envelope.PlanDigest != "" || envelope.AttemptLimit != 0 || len(record.Attempts) != 0 || record.CurrentAttemptGeneration != 0 {
+		if envelope.PolicyVersion != 0 || envelope.PlanDigest != "" || envelope.AttemptLimit != 0 || record.QuotaExhaustionProbe || len(record.Attempts) != 0 || record.CurrentAttemptGeneration != 0 {
 			return errors.New("attempt metadata exists without a frozen envelope")
 		}
 		if record.State != LeaseReserving && record.State != LeaseFailedUnadmitted {
@@ -1288,8 +1308,8 @@ func (store *CodexLeaseStore) validateV2RouteAndAttempts(record CodexJournalReco
 		if slot.Index != uint32(index+1) || !validCodexLeaseDigest(slot.AccountHash) || !validCodexLeaseDigest(slot.CandidateHash) || (slot.Kind != CodexAttemptSlotDirect && slot.Kind != CodexAttemptSlotEligibleManagedRefresh) {
 			return errors.New("invalid attempt slot")
 		}
-		if record.EverAdmitted && record.Generation > record.AdmissionRequestGeneration && !constantTimeCodexLeaseDigestEqual(slot.AccountHash, record.AccountHash) {
-			return errors.New("later admitted request contains a foreign account slot")
+		if record.QuotaExhaustionProbe && !constantTimeCodexLeaseDigestEqual(slot.AccountHash, envelope.Slots[0].AccountHash) {
+			return errors.New("quota exhaustion probe spans multiple accounts")
 		}
 	}
 	if !validCodexLeaseDigest(envelope.PlanDigest) || !constantTimeCodexLeaseDigestEqual(envelope.PlanDigest, codexLeaseAttemptPlanDigest(store.key, envelope.Slots)) {
@@ -1310,12 +1330,23 @@ func (store *CodexLeaseStore) validateV2RouteAndAttempts(record CodexJournalReco
 			return errors.New("attempt slot used more than once")
 		}
 		usedSlots[attempt.Slot] = struct{}{}
-		if index < len(record.Attempts)-1 && attempt.State != CodexAttemptProviderFailed {
+		if index < len(record.Attempts)-1 && attempt.State != CodexAttemptProviderFailed && attempt.State != CodexAttemptAccountUnavailable {
 			return errors.New("historical attempt is not a failed pre-admission route")
+		}
+		if index > 0 && !constantTimeCodexLeaseDigestEqual(envelope.Slots[attempt.Slot-1].AccountHash, envelope.Slots[record.Attempts[index-1].Slot-1].AccountHash) && record.Attempts[index-1].State != CodexAttemptAccountUnavailable && ((record.EverAdmitted && record.Generation > record.AdmissionRequestGeneration) || record.Attempts[index-1].State != CodexAttemptProviderFailed) {
+			return errors.New("attempt changed account without account unavailability")
 		}
 	}
 	current := record.Attempts[len(record.Attempts)-1]
-	if record.CurrentAttemptGeneration != current.Generation || envelope.Slots[current.Slot-1].AccountHash != record.AccountHash {
+	pendingHardRebind := len(record.Attempts) > 1 && !record.NonMigratable &&
+		record.Attempts[len(record.Attempts)-2].State == CodexAttemptAccountUnavailable &&
+		(current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched || current.State == CodexAttemptAccountUnavailable)
+	pendingFullCreateRebind := record.EverAdmitted && !record.NonMigratable &&
+		(current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched || current.State == CodexAttemptAbandonedBeforeDispatch || current.State == CodexAttemptAccountUnavailable) &&
+		!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash)
+	pendingIndeterminateFullCreateRebind := record.EverAdmitted && record.NonMigratable && current.State == CodexAttemptIndeterminate &&
+		!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash)
+	if record.CurrentAttemptGeneration != current.Generation || (!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash) && !pendingHardRebind && !pendingFullCreateRebind && !pendingIndeterminateFullCreateRebind) {
 		return errors.New("current attempt does not match latest persisted route")
 	}
 	if current.State == CodexAttemptIndeterminate && !record.NonMigratable {
@@ -1333,11 +1364,11 @@ func (store *CodexLeaseStore) validateV2RouteAndAttempts(record CodexJournalReco
 			return errors.New("bound active lease has invalid current attempt")
 		}
 	case LeaseContinuationPending, LeaseBoundQuiescent:
-		if current.State != CodexAttemptProviderCompleted && current.State != CodexAttemptProviderFailed {
+		if current.State != CodexAttemptProviderCompleted && current.State != CodexAttemptProviderFailed && current.State != CodexAttemptAccountUnavailable {
 			return errors.New("quiescent lease has non-terminal current attempt")
 		}
 	case LeaseOrphaned:
-		if current.State != CodexAttemptIndeterminate && current.State != CodexAttemptProviderCompleted && current.State != CodexAttemptProviderFailed && current.State != CodexAttemptAbandonedBeforeDispatch {
+		if current.State != CodexAttemptIndeterminate && current.State != CodexAttemptProviderCompleted && current.State != CodexAttemptProviderFailed && current.State != CodexAttemptAbandonedBeforeDispatch && current.State != CodexAttemptAccountUnavailable {
 			return errors.New("orphaned lease has replayable current attempt")
 		}
 		if record.Authoritative && current.State != CodexAttemptIndeterminate && !record.EverAdmitted {
@@ -1427,11 +1458,30 @@ func validCodexLeaseState(state LeaseState) bool {
 
 func validCodexLeaseAttemptState(state CodexAttemptState) bool {
 	switch state {
-	case CodexAttemptPrepared, CodexAttemptDispatched, CodexAttemptStreaming, CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptIndeterminate, CodexAttemptAbandonedBeforeDispatch:
+	case CodexAttemptPrepared, CodexAttemptDispatched, CodexAttemptStreaming, CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptIndeterminate, CodexAttemptAbandonedBeforeDispatch, CodexAttemptAccountUnavailable:
 		return true
 	default:
 		return false
 	}
+}
+
+func codexLeaseRestartableFailedHead(record CodexJournalRecordV2) bool {
+	state := codexLeaseCurrentAttemptState(record)
+	return record.Generation > 0 && record.State == LeaseFailedUnadmitted && !record.EverAdmitted &&
+		record.RoutingRefs == 0 && record.AttemptRefs == 0 && record.ResponseObserverRefs == 0 && record.SocketLineageExtinct &&
+		record.CurrentAttemptGeneration > 0 && (state == CodexAttemptProviderFailed || state == CodexAttemptAccountUnavailable)
+}
+
+func codexRestoredLaneRestartableFailedHead(restored CodexRestoredLane) (CodexRestoredRecord, bool) {
+	if restored.Classification != CodexRestoredLaneHistorical || !restored.Fence.Current.IsZero() || restored.Fence.Last != restored.RequestedIdentity {
+		return CodexRestoredRecord{}, false
+	}
+	for _, record := range restored.ResolvedRecords {
+		if record.Identity == restored.RequestedIdentity && codexLeaseRestartableFailedHead(record.Record) {
+			return record, true
+		}
+	}
+	return CodexRestoredRecord{}, false
 }
 
 func validCodexLeaseRequest(kind CodexRequestKind, phase CodexCompactionPhase) bool {
@@ -1590,6 +1640,16 @@ func canonicaliseCodexLeaseV2(envelope *codexLeaseJournalEnvelopeV2) {
 		}
 		return left.NamespaceHash < right.NamespaceHash
 	})
+	for index := range envelope.Lanes {
+		if envelope.Lanes[index].RequestUnavailableAccountHashes == nil {
+			envelope.Lanes[index].RequestUnavailableAccountHashes = []string{}
+		}
+		sort.Strings(envelope.Lanes[index].RequestUnavailableAccountHashes)
+		if envelope.Lanes[index].QuotaExhaustedAccountHashes == nil {
+			envelope.Lanes[index].QuotaExhaustedAccountHashes = []string{}
+		}
+		sort.Strings(envelope.Lanes[index].QuotaExhaustedAccountHashes)
+	}
 	sort.Slice(envelope.Records, func(i, j int) bool {
 		left, right := envelope.Records[i], envelope.Records[j]
 		if left.SessionHash != right.SessionHash {
@@ -1631,6 +1691,10 @@ func cloneCodexLeaseV2Envelope(envelope codexLeaseJournalEnvelopeV2) codexLeaseJ
 	clone.Cutover.AuthoritativeModeEpochs = cloneCodexLeaseSlice(envelope.Cutover.AuthoritativeModeEpochs)
 	clone.Cutover.ShadowModeEpochs = cloneCodexLeaseSlice(envelope.Cutover.ShadowModeEpochs)
 	clone.Lanes = cloneCodexLeaseSlice(envelope.Lanes)
+	for index := range envelope.Lanes {
+		clone.Lanes[index].RequestUnavailableAccountHashes = cloneCodexLeaseSlice(envelope.Lanes[index].RequestUnavailableAccountHashes)
+		clone.Lanes[index].QuotaExhaustedAccountHashes = cloneCodexLeaseSlice(envelope.Lanes[index].QuotaExhaustedAccountHashes)
+	}
 	clone.Records = make([]CodexJournalRecordV2, len(envelope.Records))
 	for index, record := range envelope.Records {
 		clone.Records[index] = record

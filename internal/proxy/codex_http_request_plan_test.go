@@ -28,7 +28,7 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 		),
 		frozenDispatchTestLogicalAccount("account-a",
 			frozenDispatchCandidate("account-a", "candidate-managed", "revision-managed", codex.SourceManaged, true, now.Add(time.Hour)),
-			frozenDispatchCandidate("account-a", "candidate-accepted", "revision-accepted", codex.SourceSystem, false, now.Add(-time.Hour)),
+			frozenDispatchCandidate("account-a", "candidate-accepted", "revision-accepted", codex.SourceSystem, false, now.Add(2*time.Hour)),
 		),
 	}}
 	events := make([]string, 0, 7)
@@ -548,6 +548,7 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 		affinityModel    string
 		cacheAdmittedAt  time.Time
 		bound            bool
+		boundRequires    bool
 		requiresAccount  bool
 		encryptedRequest bool
 		unresolved       bool
@@ -572,6 +573,7 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 		{name: "encrypted predecessor survives hard zero", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, hardZero: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
 		{name: "encrypted request remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), encryptedRequest: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
 		{name: "exact turn remains bound after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1},
+		{name: "indeterminate turn remains pinned for full create", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, boundRequires: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
 		{name: "warm unresolved account permits fairness", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), unresolved: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
 		{name: "unknown-policy unresolved account permits fairness", model: "gpt-5.7-codex", affinityModel: "gpt-5.7-codex", cacheAdmittedAt: now.Add(-time.Hour), unresolved: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
 		{name: "private-policy unresolved account permits fairness", model: "gpt-5.6-private", affinityModel: "gpt-5.6-private", cacheAdmittedAt: now.Add(-time.Hour), unresolved: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
@@ -600,6 +602,7 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 			if test.bound {
 				snapshot.Classification = CodexRestoredLaneCurrent
 				snapshot.BoundAccountKey = "account-a"
+				snapshot.BoundRequiresAccount = test.boundRequires
 			}
 			capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
 			if test.hardZero {
@@ -647,6 +650,13 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 			}
 			if runtime.plan.RequiresAccountContinuity != test.wantContinuity {
 				t.Fatalf("durable account continuity = %v, want %v", runtime.plan.RequiresAccountContinuity, test.wantContinuity)
+			}
+			if test.wantContinuity {
+				for _, slot := range runtime.plan.Slots {
+					if slot.AccountKey != "account-a" {
+						t.Fatalf("durable continuity slots = %#v, want only account-a", runtime.plan.Slots)
+					}
+				}
 			}
 		})
 	}
@@ -939,6 +949,282 @@ func TestCodexHTTPRequestPlanFactoryPreservesAuthenticatedContinuationAcrossSess
 		if strings.Contains(string(encoded), private) {
 			t.Fatalf("caller trace exposed private value %q: %s", private, encoded)
 		}
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryFreezesPortableFallbacksAfterPoolAndCapabilityFiltering(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	key := []byte("01234567890123456789012345678901")
+	predicate := CapabilityPredicateCoreV1{
+		SchemaVersion: 1, Capability: "model.invoke", ProductSurface: string(NormalCallerLocal),
+		AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5",
+	}
+
+	for _, test := range []struct {
+		name   string
+		policy RoutingPolicyV2
+	}{
+		{
+			name: "pool exclusion",
+			policy: RoutingPolicyV2{
+				SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 7,
+				Pools:           []AccountPoolV2{{ID: testPoolIDA, Name: "pool", Members: []codex.AccountKey{"account-a", "account-b"}}},
+				SessionBindings: []SessionBindingV2{{SessionDigest: keyedSessionDigest(key, []byte("session")), PoolID: testPoolIDA}},
+			},
+		},
+		{
+			name: "capability exclusion",
+			policy: RoutingPolicyV2{
+				SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 7,
+				Pools:                []AccountPoolV2{{ID: testPoolIDA, Name: "pool", Members: []codex.AccountKey{"account-a", "account-b", "account-c"}}},
+				SessionBindings:      []SessionBindingV2{{SessionDigest: keyedSessionDigest(key, []byte("session")), PoolID: testPoolIDA}},
+				CapabilityPool:       testPoolIDA,
+				CapabilityPredicates: []CapabilityPredicateCoreV1{predicate},
+				CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{
+					capabilityEvidenceForTest("account-a", "private-account-account-a", predicate, "a", nil, CapabilityEvidenceEligible, 7, now),
+					capabilityEvidenceForTest("account-b", "private-account-account-b", predicate, "b", nil, CapabilityEvidenceEligible, 7, now),
+					capabilityEvidenceForTest("account-c", "private-account-account-c", predicate, "c", nil, CapabilityEvidenceIneligible, 7, now),
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+				frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+				frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+				frozenDispatchTestLogicalAccount("account-c", frozenDispatchCandidate("account-c", "candidate-c", "revision-c", codex.SourceSystem, false, now.Add(time.Hour))),
+			}}
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}}
+			permits := &sessionPolicyPermitRecorder{}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+					JournalGeneration: 1, BoundAccountKey: "account-a",
+				}},
+				Runtime:           runtime,
+				DefaultAccountKey: "account-a",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+				SessionPolicy:     NewSessionPolicyResolver(key, test.policy),
+				DispatchPermits:   permits,
+			}
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{
+				Domain: NormalCallerLocal, SubjectID: "local", ConsumptionDigest: strings.Repeat("a", 64),
+			})
+
+			prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+				Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			ordinary := prepared.Dispatch.Accounts()
+			fallbacks := prepared.Dispatch.AccountUnavailableFallbacks()
+			if len(ordinary) != 1 || ordinary[0].Choice().AccountKey != "account-a" {
+				t.Fatalf("ordinary dispatch = %#v, want only bound account-a", ordinary)
+			}
+			if len(fallbacks) != 1 || fallbacks[0].Choice().AccountKey != "account-b" {
+				t.Fatalf("fallbacks = %#v, want only account-b", fallbacks)
+			}
+			if got, want := prepared.Dispatch.probe.routeCount, uint32(len(ordinary)+len(fallbacks)); got != want {
+				t.Fatalf("installed probe route count = %d, want %d", got, want)
+			}
+			if reset := prepared.Dispatch.AccountUnavailableResetCandidates(); !slices.Equal(reset, []codex.AccountKey{"account-b"}) {
+				t.Fatalf("reset candidates = %v, want only account-b", reset)
+			}
+			wantSlots := []CodexLeaseAttemptSlotPlan{
+				{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+				{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+			}
+			if !reflect.DeepEqual(runtime.plan.Slots, wantSlots) {
+				t.Fatalf("lease slots = %#v, want %#v", runtime.plan.Slots, wantSlots)
+			}
+			if len(permits.requests) != 1 || !slices.Equal(permits.requests[0].AllowedAccounts, []codex.AccountKey{"account-a", "account-b"}) {
+				t.Fatalf("permit requests = %#v", permits.requests)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestAccountUnavailablePortableRejectsProviderContinuationState(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		protocol CodexProtocolRequest
+		want     bool
+	}{
+		{name: "portable", want: true},
+		{name: "explicit empty previous response", protocol: CodexProtocolRequest{HasPreviousResponseID: true}},
+		{name: "previous response", protocol: CodexProtocolRequest{PreviousResponseID: "response", HasPreviousResponseID: true}},
+		{name: "turn state", protocol: CodexProtocolRequest{HasTurnState: true}},
+		{name: "encrypted state", protocol: CodexProtocolRequest{HasEncryptedState: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := codexHTTPRequestAccountUnavailablePortable(test.protocol); got != test.want {
+				t.Fatalf("portable = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryFreezesDetachedFullCreateResetCandidates(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, test := range []struct {
+		name           string
+		accounts       []codex.AccountKey
+		unavailable    []codex.AccountKey
+		quotaExhausted []codex.AccountKey
+		want           []codex.AccountKey
+	}{
+		{name: "eligible alternate", accounts: []codex.AccountKey{"account-a", "account-b"}, want: []codex.AccountKey{"account-b"}},
+		{name: "only selected account", accounts: []codex.AccountKey{"account-a"}},
+		{name: "request unavailable remains retryable", accounts: []codex.AccountKey{"account-a", "account-b"}, unavailable: []codex.AccountKey{"account-b"}, want: []codex.AccountKey{"account-b"}},
+		{name: "alternate quota exhausted", accounts: []codex.AccountKey{"account-a", "account-b"}, quotaExhausted: []codex.AccountKey{"account-b"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := codex.Inventory{Accounts: make([]codex.LogicalAccount, 0, len(test.accounts))}
+			for _, account := range test.accounts {
+				inventory.Accounts = append(inventory.Accounts, frozenDispatchTestLogicalAccount(
+					account,
+					frozenDispatchCandidate(account, codex.CandidateID("candidate-"+string(account)), codex.Revision("revision-"+string(account)), codex.SourceSystem, false, now.Add(time.Hour)),
+				))
+			}
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+					JournalGeneration: 1, BoundAccountKey: "account-a", UnavailableAccountKeys: test.unavailable, QuotaExhaustedAccountKeys: test.quotaExhausted,
+				}},
+				Runtime:           runtime,
+				DefaultAccountKey: "account-a",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+			}
+			body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")), "}") + `,"previous_response_id":"response-a"}`)
+
+			prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{Encoded: body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			if got := prepared.Dispatch.AccountUnavailableFallbacks(); len(got) != 0 {
+				t.Fatalf("nonportable fallbacks = %#v, want none", got)
+			}
+			got := prepared.Dispatch.AccountUnavailableResetCandidates()
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("reset candidates = %v, want %v", got, test.want)
+			}
+			if len(got) != 0 {
+				got[0] = "mutated"
+				if reread := prepared.Dispatch.AccountUnavailableResetCandidates(); !slices.Equal(reread, test.want) {
+					t.Fatalf("reset candidates aliased caller memory: %v", reread)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryProbesOneQuotaExhaustedAccountOnlyAfterPoolExhaustion(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	for _, test := range []struct {
+		name           string
+		quotaExhausted []codex.AccountKey
+		wantProbe      bool
+	}{
+		{name: "unexhausted alternate", quotaExhausted: []codex.AccountKey{"account-a"}},
+		{name: "all exhausted", quotaExhausted: []codex.AccountKey{"account-a", "account-b"}, wantProbe: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+					JournalGeneration: 1, QuotaExhaustedAccountKeys: test.quotaExhausted,
+				}},
+				Runtime:           runtime,
+				DefaultAccountKey: "account-b",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+			}
+
+			prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+				Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			accounts := prepared.Dispatch.Accounts()
+			if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+				t.Fatalf("dispatch accounts = %#v, want only account-b", accounts)
+			}
+			if runtime.plan.QuotaExhaustionProbe != test.wantProbe {
+				t.Fatalf("quota exhaustion probe = %t, want %t", runtime.plan.QuotaExhaustionProbe, test.wantProbe)
+			}
+			if slots := runtime.plan.Slots; len(slots) != 1 || slots[0].AccountKey != "account-b" {
+				t.Fatalf("lease slots = %#v, want only account-b", slots)
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryScopesAuthUnavailableToAdmittedPortableReset(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	for _, test := range []struct {
+		name            string
+		restartableHead bool
+		want            codex.AccountKey
+	}{
+		{name: "admitted reset excludes unavailable account", want: "account-b"},
+		{name: "rejected retry may retry recovered account", restartableHead: true, want: "account-a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: test.want}}
+			snapshot := CodexLeaseRouteSnapshot{
+				JournalGeneration:     1,
+				RestartableFailedHead: test.restartableHead,
+				UnavailableAccountKeys: []codex.AccountKey{
+					"account-a",
+				},
+			}
+			if !test.restartableHead {
+				snapshot.Classification = CodexRestoredLaneCurrent
+				snapshot.BoundAccountKey = "account-a"
+				snapshot.AffinityPresent = true
+				snapshot.AffinityAccountKey = "account-a"
+			}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory:         &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Routes:            &codexHTTPRequestPlanTestSnapshotter{snapshot: snapshot},
+				Runtime:           runtime,
+				DefaultAccountKey: "account-a",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+			}
+
+			prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+				Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			accounts := prepared.Dispatch.Accounts()
+			if len(accounts) == 0 || accounts[0].Choice().AccountKey != test.want {
+				t.Fatalf("dispatch accounts = %#v, want %s first", accounts, test.want)
+			}
+			if runtime.plan.QuotaExhaustionProbe {
+				t.Fatal("auth-unavailable reset was marked as quota probe")
+			}
+		})
 	}
 }
 
@@ -1859,6 +2145,11 @@ func TestCodexHTTPRequestPlanFactoryProbeRetainedClaimsOnlyExactAuthoritativeBin
 	if expected, claimed, err := factory.ProbeRetained(context.Background(), input); expected != nil || !claimed || !errors.Is(err, ErrCodexStaleTurn) {
 		t.Fatalf("historical probe = %#v, claimed=%t, err=%v", expected, claimed, err)
 	}
+	routes.snapshot.RestartableFailedHead = true
+	if expected, claimed, err := factory.ProbeRetained(context.Background(), input); expected != nil || claimed || err != nil {
+		t.Fatalf("restartable historical probe = %#v, claimed=%t, err=%v", expected, claimed, err)
+	}
+	routes.snapshot.RestartableFailedHead = false
 	routes.snapshot.HistoricalAuthoritative = false
 	if expected, claimed, err := factory.ProbeRetained(context.Background(), input); expected != nil || claimed || err != nil {
 		t.Fatalf("historical shadow probe = %#v, claimed=%t, err=%v", expected, claimed, err)
