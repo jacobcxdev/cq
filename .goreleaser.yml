@@ -13,8 +13,6 @@ builds:
       - -X github.com/jacobcxdev/cq/internal/proxy.codexStage11CorpusBuildProvenanceSHA256={{ .Env.CODEX_STAGE11_PROVENANCE_SHA256 }}
     goos:
       - darwin
-      - linux
-      - windows
     goarch:
       - amd64
       - arm64
@@ -26,10 +24,6 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - none*
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-
 checksum:
   name_template: "checksums.txt"
 

@@ -82,26 +82,35 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	for _, required := range []string{
 		"id: cq\n",
 		"-X main.version={{ .Version }}",
+		"goos:\n      - darwin",
+		"goarch:\n      - amd64\n      - arm64",
 	} {
 		if !strings.Contains(releaserText, required) {
 			t.Fatalf("GoReleaser missing %q", required)
 		}
 	}
-	if strings.Count(releaserText, "- windows") != 1 || strings.Contains(releaserText, "id: cq-install") || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
+	for _, forbidden := range []string{"- linux", "- windows", "format_overrides:"} {
+		if strings.Contains(releaserText, forbidden) {
+			t.Fatalf("GoReleaser still targets non-macOS platform %q", forbidden)
+		}
+	}
+	if strings.Contains(releaserText, "id: cq-install") || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
 		t.Fatal("release artifact targets or optional dependency separation differ")
 	}
 	workflowText := string(workflow)
 	for _, required := range []string{
 		"goreleaser/goreleaser-action@v7",
-		"runs-on: windows-latest",
-		"wix --version 5.0.2",
-		`.\.github\scripts\build-windows-msi.ps1`,
-		`@("amd64", "arm64")`,
-		`cq_${version}_windows_${architecture}.msi`,
-		"gh release upload",
+		"runs-on: macos-15",
+		`archive="cq_${version}_darwin_${arch}.tar.gz"`,
+		"needs: release",
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("release workflow missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"runs-on: ubuntu", "runs-on: windows", "windows-packages:", "windows-acceptance:", "linux-install:", "windows-deployed:", "winget-publish:"} {
+		if strings.Contains(workflowText, forbidden) {
+			t.Fatalf("release workflow still uses non-macOS surface %q", forbidden)
 		}
 	}
 }
@@ -272,7 +281,7 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
+func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -297,45 +306,15 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	for _, required := range []string{
 		"args: release --clean",
 		`.github/scripts/validate-homebrew-install.sh`,
-		`winget validate --manifest $manifestPath --disable-interactivity`,
-		`$metadataText -notmatch "GOOS=windows"`,
-		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
-		`$manifestArgs = @(`,
-		`& go run ./internal/tools/wingetmanifest @manifestArgs`,
-		`[IO.File]::WriteAllText($checksums, $checksumText, [Text.UTF8Encoding]::new($false))`,
-		`if ($checksumBytes.Length -eq 0 -or $checksumBytes[-1] -ne 10 -or $checksumBytes -contains [byte]13)`,
-		`.\.github\scripts\validate-windows-msi.ps1`,
-		"runs-on: ubuntu-24.04-arm",
-		`.github/scripts/validate-linux-install.sh`,
-		"name: windows-msi-validation",
-		"runner: windows-latest",
-		"runner: windows-11-arm",
-		"architecture: arm64",
-		"winget: false",
-		`if: matrix.winget`,
-		`if: ${{ !matrix.winget }}`,
-		`git fetch --force --tags origin`,
-		`-SkipWinGet`,
-		`gh release download $env:RELEASE_TAG`,
-		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
-		`$validationArguments.PreviousGoVersion = $previousGoVersion`,
-		`if ($statusCode -ne 404)`,
-		`$publishedVersions | Sort-Object -Descending | Select-Object -First 1`,
-		`$validationArguments.PreviousVersion = $previousVersion`,
-		"needs: [release, windows-packages, windows-acceptance]",
-		"needs: [windows-deployed, linux-install]",
+		"needs: release",
 		`gh release view "$RELEASE_TAG" --json tagName,isDraft,assets`,
 		`gh release edit "$RELEASE_TAG" --draft=false`,
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
 		`brew style --fix "$cask"`,
-		`.\.github\scripts\validate-windows-install.ps1`,
-		"secrets.WINGET_PKGS_TOKEN",
-		"microsoft/winget-pkgs",
-		`if gh api "$upstream_path" >/dev/null 2>&1`,
-		`git -C "$checkout" diff --cached --quiet`,
+		`for arch in amd64 arm64; do`,
 	} {
 		if !strings.Contains(text, required) {
-			t.Errorf("release workflow missing native publication gate %q", required)
+			t.Errorf("release workflow missing macOS publication gate %q", required)
 		}
 	}
 	if count := strings.Count(text, "args: release --clean"); count != 1 {
@@ -352,15 +331,12 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 			t.Errorf("release workflow uses pipefail-unsafe previous-tag selection %q", unsafe)
 		}
 	}
-	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 2 {
-		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 2", count)
-	}
-	if count := strings.Count(text, "git fetch --force --tags origin"); count != 2 {
-		t.Errorf("release workflow refreshes tag inventory %d times, want Linux and Windows deployment jobs", count)
+	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 1 {
+		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 1", count)
 	}
 	releaseStart := strings.Index(text, "\n  release:\n")
-	windowsStart := strings.Index(text, "\n  windows-packages:\n")
-	if releaseStart < 0 || windowsStart <= releaseStart || !strings.Contains(text[releaseStart:windowsStart], "fetch-depth: 0") {
+	publishStart := strings.Index(text, "\n  publish:\n")
+	if releaseStart < 0 || publishStart <= releaseStart || !strings.Contains(text[releaseStart:publishStart], "fetch-depth: 0") {
 		t.Error("release job does not fetch prior tags for upgrade validation")
 	}
 	styleIndex := strings.Index(text, "brew style --fix dist/homebrew/Casks/cq.rb")
@@ -368,7 +344,6 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	if styleIndex < 0 || lifecycleIndex < 0 || styleIndex > lifecycleIndex {
 		t.Error("release workflow does not validate formatted Homebrew Cask bytes")
 	}
-	publishStart := strings.Index(text, "\n  publish:\n")
 	publishEnd := strings.Index(text[publishStart+1:], "\n      - name: Audit published Homebrew Cask\n")
 	if publishStart < 0 || publishEnd < 0 {
 		t.Fatal("release workflow publish job is missing")
@@ -379,33 +354,27 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	}
 }
 
-func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
+func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(workflow)
 	for _, required := range []string{
-		"runs-on: windows-latest",
-		"go build -o cq.exe ./cmd/cq",
-		"go build -o cq-install.exe ./cmd/cq-install",
-		`.\.github\scripts\build-windows-msi.ps1`,
-		"wix --version 5.0.2",
-		`.\.github\scripts\validate-windows-msi.ps1`,
+		"runs-on: macos-15",
+		"go build ./...",
+		"go vet ./...",
 		"go test -race -count=1 ./...",
-		"go test -race -count=1 ./internal/fsutil",
-		"go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'",
-		"go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'",
-		`CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"`,
-		"GOOS=windows GOARCH=amd64 go build ./...",
-		"GOOS=windows GOARCH=arm64 go build ./...",
-		"GOOS=linux GOARCH=amd64 go build ./...",
-		"GOOS=linux GOARCH=arm64 go build ./...",
 		"./internal/installer",
 		"./cmd/cq-install",
 	} {
 		if !strings.Contains(text, required) {
-			t.Errorf("CI missing native installer gate %q", required)
+			t.Errorf("CI missing macOS gate %q", required)
+		}
+	}
+	for _, forbidden := range []string{"runs-on: ubuntu", "runs-on: windows", "GOOS=windows", "GOOS=linux", "linux-confinement:", "\n  windows:\n"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("CI still uses non-macOS surface %q", forbidden)
 		}
 	}
 	if strings.Contains(text, "self-hosted") || strings.Contains(text, "bespoke") {
@@ -418,36 +387,7 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 		t.Error("CI does not use pipe-safe previous-tag selection")
 	}
 	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
-		t.Fatalf("full race suite runs on %d platforms, want Linux only", count)
-	}
-}
-
-func TestCIProfilesUbuntuConfinementWithoutWeakeningAppArmor(t *testing.T) {
-	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(workflow)
-	for _, required := range []string{
-		"profile cq-ci-userns flags=(unconfined)",
-		"userns,",
-		"sudo apparmor_parser --replace",
-		"aa-exec --profile=cq-ci-userns -- go test -race -count=1 ./...",
-		"sudo apparmor_parser --remove",
-		"trap cleanup EXIT",
-		"AppArmor profile cleanup failed",
-	} {
-		if !strings.Contains(text, required) {
-			t.Errorf("CI missing Ubuntu confinement contract %q", required)
-		}
-	}
-	for _, forbidden := range []string{
-		"apparmor_restrict_unprivileged_userns",
-		"t.Skip",
-	} {
-		if strings.Contains(text, forbidden) {
-			t.Errorf("CI weakens Ubuntu confinement with %q", forbidden)
-		}
+		t.Fatalf("full race suite runs %d times, want one macOS run", count)
 	}
 }
 
