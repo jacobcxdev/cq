@@ -4,6 +4,7 @@ package codex
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -128,14 +129,25 @@ type credentialEndpoint struct {
 }
 
 func openCredentialEndpoint(path string, allowRecovery bool, hook credentialEndpointPhaseHook) (*credentialEndpoint, *rpc.Client, error) {
-	return openCredentialEndpointWithRecoveryObservation(path, allowRecovery, hook, nil, false)
+	return openCredentialEndpointWithContext(context.Background(), path, allowRecovery, hook)
+}
+
+func openCredentialEndpointWithContext(ctx context.Context, path string, allowRecovery bool, hook credentialEndpointPhaseHook) (*credentialEndpoint, *rpc.Client, error) {
+	return openCredentialEndpointWithRecoveryObservation(ctx, path, allowRecovery, hook, nil, false)
 }
 
 func openCredentialEndpointWithRecoveryRecorder(path string, allowRecovery bool, hook credentialEndpointPhaseHook, recorder CredentialEndpointRecoveryRecorder) (*credentialEndpoint, *rpc.Client, error) {
-	return openCredentialEndpointWithRecoveryObservation(path, allowRecovery, hook, recorder, true)
+	return openCredentialEndpointWithRecoveryRecorderContext(context.Background(), path, allowRecovery, hook, recorder)
 }
 
-func openCredentialEndpointWithRecoveryObservation(path string, allowRecovery bool, hook credentialEndpointPhaseHook, recorder CredentialEndpointRecoveryRecorder, recoveryRecordRequired bool) (*credentialEndpoint, *rpc.Client, error) {
+func openCredentialEndpointWithRecoveryRecorderContext(ctx context.Context, path string, allowRecovery bool, hook credentialEndpointPhaseHook, recorder CredentialEndpointRecoveryRecorder) (*credentialEndpoint, *rpc.Client, error) {
+	return openCredentialEndpointWithRecoveryObservation(ctx, path, allowRecovery, hook, recorder, true)
+}
+
+func openCredentialEndpointWithRecoveryObservation(ctx context.Context, path string, allowRecovery bool, hook credentialEndpointPhaseHook, recorder CredentialEndpointRecoveryRecorder, recoveryRecordRequired bool) (*credentialEndpoint, *rpc.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	directory, finalName, err := validateCredentialEndpointPath(path)
 	if err != nil {
 		return nil, nil, err
@@ -175,7 +187,7 @@ func openCredentialEndpointWithRecoveryObservation(path string, allowRecovery bo
 		return nil, nil, err
 	}
 	endpoint.invokePhase(credentialEndpointPhaseNamespacePinned)
-	client, err := endpoint.openLocked(allowRecovery)
+	client, err := endpoint.openLocked(ctx, allowRecovery)
 	if err != nil {
 		endpoint.release()
 		return nil, nil, err
@@ -967,7 +979,7 @@ func (e *credentialEndpoint) cleanInterruptedPublication(sidecar credentialEndpo
 	return e.syncDirectory()
 }
 
-func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error) {
+func (e *credentialEndpoint) openLocked(ctx context.Context, allowRecovery bool) (*rpc.Client, error) {
 	if err := e.rejectMaintenanceJournal(); err != nil {
 		return nil, err
 	}
@@ -1003,7 +1015,7 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 			if pendingErr := e.rejectMaintenanceJournal(); pendingErr != nil {
 				return nil, pendingErr
 			}
-			return e.waitForLiveOwner(credentialEndpointDialTimeout)
+			return e.waitForLiveOwner(ctx, credentialEndpointDialTimeout)
 		} else if err != nil {
 			return nil, err
 		}
@@ -1037,7 +1049,7 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 		if errors.Is(crashErr, ErrCredentialEndpointIdentityChanged) {
 			heldErr := fsutil.ValidateExclusiveLockHeldInDirectory(e.fs, e.secureDirectory, filepath.Base(credentialEndpointLockPath(e.path)), sidecar.lockFileIdentity())
 			if heldErr == nil {
-				client, waitErr := e.waitForLiveOwner(credentialEndpointDialTimeout)
+				client, waitErr := e.waitForLiveOwner(ctx, credentialEndpointDialTimeout)
 				if client != nil || !errors.Is(waitErr, fsutil.ErrExclusiveLockNotHeld) {
 					return client, waitErr
 				}
@@ -1072,7 +1084,7 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 		heldErr := fsutil.ValidateExclusiveLockHeldInDirectory(e.fs, e.secureDirectory, filepath.Base(credentialEndpointLockPath(e.path)), expectedLock)
 		switch {
 		case heldErr == nil:
-			client, waitErr := e.waitForLiveOwner(credentialEndpointDialTimeout)
+			client, waitErr := e.waitForLiveOwner(ctx, credentialEndpointDialTimeout)
 			if client != nil || !errors.Is(waitErr, fsutil.ErrExclusiveLockNotHeld) {
 				return client, waitErr
 			}
@@ -1093,7 +1105,7 @@ func (e *credentialEndpoint) openLocked(allowRecovery bool) (*rpc.Client, error)
 				if pendingErr := e.rejectMaintenanceJournal(); pendingErr != nil {
 					return nil, pendingErr
 				}
-				return e.waitForLiveOwner(credentialEndpointDialTimeout)
+				return e.waitForLiveOwner(ctx, credentialEndpointDialTimeout)
 			}
 			return nil, err
 		}
@@ -1229,10 +1241,29 @@ func (e *credentialEndpoint) validateCrashState(sidecar credentialEndpointSideca
 	return validateCredentialEndpointCrashState(sidecar, finalIdentity, finalExists, temporaryIdentity, temporaryExists)
 }
 
-func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Client, error) {
+func (e *credentialEndpoint) waitForLiveOwner(ctx context.Context, timeout time.Duration) (*rpc.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	deadline := time.Now().Add(timeout)
+	contextDeadline, hasContextDeadline := ctx.Deadline()
+	if hasContextDeadline {
+		deadline = contextDeadline
+	}
+	deadlineError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if hasContextDeadline {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
 	var lastErr error
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, err, lastErr)
+		}
 		if err := e.rejectMaintenanceJournal(); err != nil {
 			return nil, err
 		}
@@ -1264,7 +1295,7 @@ func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Clien
 			} else if sidecar.State == credentialEndpointPublished && finalExists && finalIdentity == sidecar.credentialEndpointIdentity {
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, lastErr)
+					return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, deadlineError(), lastErr)
 				}
 				client, protocol, generation, probeErr := probeCredentialOwnerAttempt(e.path, min(remaining, 25*time.Millisecond), net.DialTimeout)
 				lastErr = probeErr
@@ -1307,9 +1338,16 @@ func (e *credentialEndpoint) waitForLiveOwner(timeout time.Duration) (*rpc.Clien
 			}
 		}
 		if time.Now().After(deadline) {
-			return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, lastErr)
+			return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, deadlineError(), lastErr)
 		}
-		time.Sleep(min(2*time.Millisecond, time.Until(deadline)))
+		wait := min(2*time.Millisecond, time.Until(deadline))
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, ctx.Err(), lastErr)
+		case <-timer.C:
+		}
 	}
 }
 

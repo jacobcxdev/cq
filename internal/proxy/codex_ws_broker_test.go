@@ -495,11 +495,9 @@ func testCodexTerminatingWSBrokerRotatesLaterPortableRequest(t *testing.T, unava
 		{messageType: websocket.TextMessage, payload: second},
 		{err: io.EOF},
 	}}
-	firstUpstreamA := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+	upstreamA := &codexWSBrokerConnStub{readGateAfter: 2, readGateReleaseAtWrite: 2, readGate: make(chan struct{}), reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a"}}`)},
-	}}
-	secondUpstreamA := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: unavailable},
 	}}
 	upstreamB := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
@@ -507,7 +505,7 @@ func testCodexTerminatingWSBrokerRotatesLaterPortableRequest(t *testing.T, unava
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)},
 	}}
 	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{
-		"account-a": {firstUpstreamA, secondUpstreamA},
+		"account-a": {upstreamA},
 		"account-b": {upstreamB},
 	}}
 	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
@@ -519,14 +517,11 @@ func testCodexTerminatingWSBrokerRotatesLaterPortableRequest(t *testing.T, unava
 	if err := broker.Serve(context.Background(), downstream); err != nil {
 		t.Fatal(err)
 	}
-	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-a", "account-b"}) {
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
 		t.Fatalf("dial accounts = %#v", got)
 	}
-	if got := firstUpstreamA.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{first}) {
-		t.Fatalf("first A writes = %#v", got)
-	}
-	if got := secondUpstreamA.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{second}) {
-		t.Fatalf("second A writes = %#v", got)
+	if got := upstreamA.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{first, second}) {
+		t.Fatalf("A writes = %#v", got)
 	}
 	if got := upstreamB.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{second}) {
 		t.Fatalf("B writes = %#v", got)
