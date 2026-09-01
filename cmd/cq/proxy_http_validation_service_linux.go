@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,13 +40,17 @@ type linuxInstalledHTTPValidationCandidateOperations struct {
 	resolveService  func(string) (installedHTTPValidationServiceBinding, error)
 	controller      func() (int, int, bool)
 	captureProcess  func(int) (proxy.LinuxProcessIdentity, error)
+	captureWorker   func(context.Context, proxy.LinuxProcessIdentity) (proxy.LinuxProcessIdentity, error)
 	captureListener func(int, int) (proxy.LinuxListenerIdentity, error)
+	ready           func(int) error
 }
 
 type linuxInstalledHTTPValidationCandidateProcess struct {
-	command *exec.Cmd
-	pid     int
-	port    int
+	command    *exec.Cmd
+	pid        int
+	port       int
+	waitOnce   sync.Once
+	waitResult chan error
 }
 
 var linuxInstalledHTTPValidationCandidateState struct {
@@ -226,8 +231,15 @@ func validateInstalledHTTPValidationCandidateWithLinuxOperations(
 	if operations.captureListener == nil {
 		operations.captureListener = proxy.CaptureLinuxListener
 	}
+	if operations.captureWorker == nil {
+		operations.captureWorker = proxy.CaptureLinuxRuntimeWorker
+	}
+	if operations.ready == nil {
+		operations.ready = probeLinuxInstalledHTTPValidationCandidate
+	}
 	if port < 1 || port > 65_535 || port == proxy.DefaultPort || operations.resolveService == nil ||
-		operations.controller == nil || operations.captureProcess == nil || operations.captureListener == nil {
+		operations.controller == nil || operations.captureProcess == nil || operations.captureWorker == nil ||
+		operations.captureListener == nil || operations.ready == nil {
 		return installedHTTPValidationCandidateAuthority{}, errors.New("incomplete installed validation candidate authority")
 	}
 	binding, err := operations.resolveService(candidateProxyAgentLabel)
@@ -242,9 +254,16 @@ func validateInstalledHTTPValidationCandidateWithLinuxOperations(
 	if err != nil || !validLinuxInstalledHTTPValidationCandidateProcess(process, pid, port, binding) {
 		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate process is unavailable")
 	}
+	worker, err := operations.captureWorker(context.Background(), process)
+	if err != nil || !validLinuxInstalledHTTPValidationCandidateWorker(worker, process, binding) {
+		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate worker is unavailable")
+	}
 	listener, err := operations.captureListener(pid, port)
 	if err != nil || !listener.Valid() || listener.Address != net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) || !listener.Process.Equal(process) {
 		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate listener is unavailable")
+	}
+	if err := operations.ready(port); err != nil {
+		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate worker is not ready")
 	}
 	processAfter, err := operations.captureProcess(pid)
 	if err != nil || !processAfter.Equal(process) {
@@ -254,11 +273,18 @@ func validateInstalledHTTPValidationCandidateWithLinuxOperations(
 	if err != nil || !listenerAfter.Valid() || listenerAfter.Address != listener.Address || listenerAfter.Inode != listener.Inode || !listenerAfter.Process.Equal(listener.Process) {
 		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate listener changed")
 	}
+	workerAfter, err := operations.captureWorker(context.Background(), processAfter)
+	if err != nil || !workerAfter.Equal(worker) {
+		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate worker changed")
+	}
 	pidAfter, portAfter, ok := operations.controller()
 	if !ok || pidAfter != pid || portAfter != port {
 		return installedHTTPValidationCandidateAuthority{}, errors.New("installed validation candidate controller changed")
 	}
-	return installedHTTPValidationCandidateAuthority{binding: binding, pid: pid}, nil
+	return installedHTTPValidationCandidateAuthority{
+		binding: binding, pid: pid, processStart: process.StartTime, listenerInode: listener.Inode,
+		worker: worker.PID, workerStart: worker.StartTime,
+	}, nil
 }
 
 func validLinuxInstalledHTTPValidationCandidateProcess(
@@ -272,6 +298,48 @@ func validLinuxInstalledHTTPValidationCandidateProcess(
 		process.Arguments[3] == "--port" && process.Arguments[4] == strconv.Itoa(port) &&
 		process.Arguments[5] == "--linux-validation-candidate-fd" && process.Arguments[6] == "3" &&
 		hex.EncodeToString(process.Executable.SHA256[:]) == binding.executableSHA256
+}
+
+func validLinuxInstalledHTTPValidationCandidateWorker(
+	worker proxy.LinuxProcessIdentity,
+	supervisor proxy.LinuxProcessIdentity,
+	binding installedHTTPValidationServiceBinding,
+) bool {
+	if !worker.Valid() || worker.ParentPID != supervisor.PID || worker.UID != supervisor.UID ||
+		worker.CgroupPath != supervisor.CgroupPath || worker.Executable != supervisor.Executable || len(worker.Arguments) != 23 ||
+		worker.Arguments[0] != worker.Executable.Path || worker.Arguments[1] != "proxy" || worker.Arguments[2] != "start" ||
+		hex.EncodeToString(worker.Executable.SHA256[:]) != binding.executableSHA256 {
+		return false
+	}
+	manifest, err := proxy.ParseRuntimeRoleArguments(worker.Arguments[3:])
+	return err == nil && manifest.Role == proxy.RuntimeRoleWorker && manifest.ProxyInstanceID == linuxValidationCandidateProxyInstanceID &&
+		manifest.ManifestDigest == worker.Executable.SHA256
+}
+
+func probeLinuxInstalledHTTPValidationCandidate(port int) error {
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+"/health", nil)
+	if err != nil {
+		return err
+	}
+	transport := &http.Transport{DisableCompression: true, DialContext: func(dialCtx context.Context, network, requested string) (net.Conn, error) {
+		if network != "tcp" || requested != address {
+			return nil, errors.New("unexpected validation candidate address")
+		}
+		return (&net.Dialer{}).DialContext(dialCtx, "tcp4", address)
+	}}
+	defer transport.CloseIdleConnections()
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return errors.New("validation candidate health is unavailable")
+	}
+	return nil
 }
 
 func activateLinuxValidationCandidate(fd, port int) error {
@@ -369,7 +437,7 @@ func startLinuxInstalledHTTPValidationCandidate(port int) (returnErr error) {
 	command.ExtraFiles = []*os.File{reader}
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	configureLinuxInstalledHTTPValidationCandidateCommand(command)
 	if err := command.Start(); err != nil {
 		_ = writer.Close()
 		return err
@@ -395,16 +463,21 @@ func startLinuxInstalledHTTPValidationCandidate(port int) (returnErr error) {
 	defer cancel()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
+	var validationErr error
 	for {
-		if _, err := validateInstalledHTTPValidationCandidateWithLinuxOperations(port, linuxInstalledHTTPValidationCandidateOperations{}); err == nil {
+		if _, validationErr = validateInstalledHTTPValidationCandidateWithLinuxOperations(port, linuxInstalledHTTPValidationCandidateOperations{}); validationErr == nil {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return errors.New("installed validation candidate did not become ready")
+			return errors.Join(errors.New("installed validation candidate did not become ready"), validationErr)
 		case <-ticker.C:
 		}
 	}
+}
+
+func configureLinuxInstalledHTTPValidationCandidateCommand(command *exec.Cmd) {
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
 
 func restartInstalledHTTPValidationCandidate(label string) error {
@@ -415,29 +488,148 @@ func restartInstalledHTTPValidationCandidate(label string) error {
 	if !ok {
 		return errors.New("installed validation candidate controller is unavailable")
 	}
-	if err := stopLinuxInstalledHTTPValidationCandidate(); err != nil {
+	before, err := validateInstalledHTTPValidationCandidateWithLinuxOperations(port, linuxInstalledHTTPValidationCandidateOperations{})
+	if err != nil || before.worker <= 1 || before.workerStart == 0 {
+		return errors.Join(err, errors.New("installed validation candidate worker is unavailable"))
+	}
+	workerDescriptor, err := openLinuxProcessDescriptor(before.worker)
+	if err != nil {
 		return err
 	}
-	if err := startLinuxInstalledHTTPValidationCandidate(port); err != nil {
+	defer unix.Close(workerDescriptor)
+	supervisor, err := proxy.CaptureLinuxProcess(before.pid)
+	if err != nil {
+		return errors.Join(err, errors.New("installed validation candidate supervisor changed"))
+	}
+	worker, err := proxy.CaptureLinuxRuntimeWorker(context.Background(), supervisor)
+	if err != nil || worker.PID != before.worker || worker.StartTime != before.workerStart {
+		return errors.Join(err, errors.New("installed validation candidate worker changed"))
+	}
+	if err := signalLinuxProcessDescriptor(workerDescriptor, unix.SIGKILL); err != nil {
 		return err
+	}
+	replacementCtx, cancelReplacement := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelReplacement()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		after, validationErr := validateInstalledHTTPValidationCandidateWithLinuxOperations(port, linuxInstalledHTTPValidationCandidateOperations{})
+		if validationErr == nil && after.pid == before.pid && (after.worker != before.worker || after.workerStart != before.workerStart) {
+			break
+		}
+		select {
+		case <-replacementCtx.Done():
+			return errors.New("installed validation candidate worker was not replaced")
+		case <-ticker.C:
+		}
 	}
 	linuxInstalledHTTPValidationCandidateState.Lock()
 	process := linuxInstalledHTTPValidationCandidateState.process
-	linuxInstalledHTTPValidationCandidateState.process = nil
-	linuxInstalledHTTPValidationCandidateState.starting = false
 	linuxInstalledHTTPValidationCandidateState.Unlock()
 	if process == nil || process.command == nil || process.command.Process == nil {
 		return errors.New("installed validation candidate controller is unavailable")
 	}
-	if err := process.command.Process.Release(); err != nil {
-		_ = unix.Kill(-process.pid, unix.SIGKILL)
+	if err := process.command.Process.Signal(unix.SIGUSR1); err != nil {
 		return err
+	}
+	err = awaitLinuxInstalledHTTPValidationCandidate(
+		waitLinuxInstalledHTTPValidationCandidate(process),
+		15*time.Minute,
+		5*time.Second,
+		func() error { return unix.Kill(-process.pid, unix.SIGKILL) },
+		errors.New("installed validation candidate timed out"),
+		errors.New("installed validation candidate cleanup timed out"),
+	)
+	clearLinuxInstalledHTTPValidationCandidateProcess(process)
+	return err
+}
+
+func openLinuxProcessDescriptor(pid int) (int, error) {
+	if pid <= 1 {
+		return -1, errors.New("invalid installed validation candidate pid")
+	}
+	descriptor, _, errno := unix.Syscall(unix.SYS_PIDFD_OPEN, uintptr(pid), 0, 0)
+	if errno != 0 {
+		return -1, errno
+	}
+	return int(descriptor), nil
+}
+
+func signalLinuxProcessDescriptor(descriptor int, signal unix.Signal) error {
+	if descriptor < 0 || signal <= 0 {
+		return errors.New("invalid installed validation candidate process descriptor")
+	}
+	_, _, errno := unix.Syscall6(unix.SYS_PIDFD_SEND_SIGNAL, uintptr(descriptor), uintptr(signal), 0, 0, 0, 0)
+	if errno != 0 {
+		return errno
 	}
 	return nil
 }
 
-func cleanupInstalledHTTPValidationCandidate() {
-	_ = stopLinuxInstalledHTTPValidationCandidate()
+func clearLinuxInstalledHTTPValidationCandidateProcess(process *linuxInstalledHTTPValidationCandidateProcess) {
+	linuxInstalledHTTPValidationCandidateState.Lock()
+	if linuxInstalledHTTPValidationCandidateState.process == process {
+		linuxInstalledHTTPValidationCandidateState.process = nil
+	}
+	linuxInstalledHTTPValidationCandidateState.Unlock()
+}
+
+func cleanupInstalledHTTPValidationCandidate() error {
+	return stopLinuxInstalledHTTPValidationCandidate()
+}
+
+func waitLinuxInstalledHTTPValidationCandidate(process *linuxInstalledHTTPValidationCandidateProcess) <-chan error {
+	if process == nil {
+		result := make(chan error, 1)
+		result <- errors.New("installed validation candidate controller is unavailable")
+		return result
+	}
+	process.waitOnce.Do(func() {
+		process.waitResult = make(chan error, 1)
+		go func() {
+			defer func() {
+				if recover() != nil {
+					process.waitResult <- errors.New("installed validation candidate wait panic")
+				}
+			}()
+			process.waitResult <- process.command.Wait()
+		}()
+	})
+	return process.waitResult
+}
+
+func awaitLinuxInstalledHTTPValidationCandidate(
+	wait <-chan error,
+	timeout time.Duration,
+	killTimeout time.Duration,
+	kill func() error,
+	timedOut error,
+	cleanupTimedOut error,
+) error {
+	return awaitLinuxInstalledHTTPValidationCandidateWithTimer(wait, timeout, killTimeout, time.After, kill, timedOut, cleanupTimedOut)
+}
+
+func awaitLinuxInstalledHTTPValidationCandidateWithTimer(
+	wait <-chan error,
+	timeout time.Duration,
+	killTimeout time.Duration,
+	timer func(time.Duration) <-chan time.Time,
+	kill func() error,
+	timedOut error,
+	cleanupTimedOut error,
+) error {
+	select {
+	case err := <-wait:
+		return err
+	case <-timer(timeout):
+	}
+	killErr := kill()
+	select {
+	case <-wait:
+		return errors.Join(timedOut, killErr)
+	case <-timer(killTimeout):
+		return errors.Join(cleanupTimedOut, killErr)
+	}
 }
 
 func stopLinuxInstalledHTTPValidationCandidate() error {
@@ -449,30 +641,18 @@ func stopLinuxInstalledHTTPValidationCandidate() error {
 		return nil
 	}
 	_ = unix.Kill(-process.pid, unix.SIGTERM)
-	wait := make(chan error, 1)
-	go func() {
-		defer func() {
-			if recover() != nil {
-				wait <- errors.New("installed validation candidate wait panic")
-			}
-		}()
-		wait <- process.command.Wait()
-	}()
-	select {
-	case err := <-wait:
-		if err == nil || process.command.ProcessState != nil {
-			return nil
-		}
-		return err
-	case <-time.After(5 * time.Second):
-		_ = unix.Kill(-process.pid, unix.SIGKILL)
-		select {
-		case <-wait:
-			return nil
-		case <-time.After(5 * time.Second):
-			return errors.New("installed validation candidate cleanup timed out")
-		}
+	err := awaitLinuxInstalledHTTPValidationCandidate(
+		waitLinuxInstalledHTTPValidationCandidate(process),
+		5*time.Second,
+		5*time.Second,
+		func() error { return unix.Kill(-process.pid, unix.SIGKILL) },
+		nil,
+		errors.New("installed validation candidate cleanup timed out"),
+	)
+	if err == nil || process.command.ProcessState != nil {
+		return nil
 	}
+	return err
 }
 
 func readLinuxInstalledHTTPValidationUnit(path string) ([]byte, string, error) {

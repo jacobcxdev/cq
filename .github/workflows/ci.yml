@@ -86,23 +86,39 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Permit Linux acceptance namespaces
+      - name: Run full suite under Ubuntu userns profile
+        shell: bash
         run: |
-          setting=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
-          if [ -f "$setting" ]; then
-            value="$(cat "$setting")"
-            echo "CQ_APPARMOR_USERNS_ORIGINAL=$value" >> "$GITHUB_ENV"
-            echo 0 | sudo tee "$setting" >/dev/null
-          fi
-      - name: Gate Linux acceptance confinement
-        run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
-      - run: go test -race -count=1 ./...
-      - name: Restore Linux namespace restriction
-        if: always()
-        run: |
-          if [ -n "${CQ_APPARMOR_USERNS_ORIGINAL:-}" ]; then
-            echo "$CQ_APPARMOR_USERNS_ORIGINAL" | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns >/dev/null
-          fi
+          set -euo pipefail
+          profile_name=cq-ci-userns
+          profile_path="$RUNNER_TEMP/${profile_name}.apparmor"
+          profile_loaded=0
+          cleanup() {
+            result=$?
+            trap - EXIT
+            if [ "$profile_loaded" -eq 1 ] && ! sudo apparmor_parser --remove "$profile_path"; then
+              result=1
+            fi
+            if sudo grep -Fq -- "${profile_name} (unconfined)" /sys/kernel/security/apparmor/profiles; then
+              echo "AppArmor profile cleanup failed" >&2
+              result=1
+            fi
+            find "$profile_path" -delete
+            exit "$result"
+          }
+          trap cleanup EXIT
+          command -v apparmor_parser
+          command -v aa-exec
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            '' \
+            'profile cq-ci-userns flags=(unconfined) {' \
+            '  userns,' \
+            '}' >"$profile_path"
+          sudo apparmor_parser --replace "$profile_path"
+          profile_loaded=1
+          aa-exec --profile=cq-ci-userns -- go test -race -count=1 ./...
 
   windows:
     runs-on: windows-latest

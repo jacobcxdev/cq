@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +33,9 @@ func TestCodexInstalledHTTPClientExerciseUsesIsolatedExactClient(t *testing.T) {
 	localToken := "Qx9m0c9Yx6L-1wH2fBzE3pV8uN5kT7rS4aD6jG0lM2o"
 	runner := testCodexAcceptanceRunner(func(_ context.Context, got codexAcceptanceCommand) ([]byte, error) {
 		command = got
+		if err := requestCodexAcceptanceUserSettings(got, localToken); err != nil {
+			return nil, err
+		}
 		auth, err := os.ReadFile(filepath.Join(commandEnv(got.env, "CODEX_HOME"), "auth.json"))
 		if err != nil {
 			return nil, err
@@ -85,6 +90,9 @@ func TestCodexInstalledWebSocketClientExerciseUsesWebSocketProvider(t *testing.T
 		joined := strings.Join(command.args, "\n")
 		if !strings.Contains(joined, `supports_websockets = true`) || strings.Contains(joined, `supports_websockets = false`) {
 			return nil, errors.New("installed client did not use WebSocket provider")
+		}
+		if err := requestCodexAcceptanceUserSettings(command, localToken); err != nil {
+			return nil, err
 		}
 		return nil, os.WriteFile(command.outputPath, []byte("PONG\n"), 0o600)
 	})
@@ -282,6 +290,9 @@ func TestCodexInstalledHTTPClientExerciseRejectsNonExactPong(t *testing.T) {
 		t.Fatalf("capture exact client: %v", err)
 	}
 	runner := testCodexAcceptanceRunner(func(_ context.Context, command codexAcceptanceCommand) ([]byte, error) {
+		if err := requestCodexAcceptanceUserSettings(command, "Qx9m0c9Yx6L-1wH2fBzE3pV8uN5kT7rS4aD6jG0lM2o"); err != nil {
+			return nil, err
+		}
 		return nil, os.WriteFile(command.outputPath, []byte("PONG plus explanation\n"), 0o600)
 	})
 	outcome := &codexInstalledHTTPClientOutcome{}
@@ -295,6 +306,77 @@ func TestCodexInstalledHTTPClientExerciseRejectsNonExactPong(t *testing.T) {
 	if outcome.exactPong.Load() {
 		t.Fatal("non-exact PONG recorded as exact")
 	}
+}
+
+func TestCodexInstalledHTTPClientExerciseRejectsUnexpectedBootstrapRoute(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(executable, []byte("exact client"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := captureCodexInstalledExecutable(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localToken := "Qx9m0c9Yx6L-1wH2fBzE3pV8uN5kT7rS4aD6jG0lM2o"
+	runner := testCodexAcceptanceRunner(func(_ context.Context, command codexAcceptanceCommand) ([]byte, error) {
+		baseURL, err := codexAcceptanceChatGPTBaseURL(command.args)
+		if err != nil {
+			return nil, err
+		}
+		response, err := (&http.Client{Transport: &http.Transport{}}).Get(baseURL + "/unexpected")
+		if err != nil {
+			return nil, err
+		}
+		_ = response.Body.Close()
+		if err := requestCodexAcceptanceUserSettings(command, localToken); err != nil {
+			return nil, err
+		}
+		return nil, os.WriteFile(command.outputPath, []byte("PONG\n"), 0o600)
+	})
+	outcome := &codexInstalledHTTPClientOutcome{}
+	exercise, err := newCodexInstalledHTTPClientExercise("127.0.0.1:43123", proof, localToken, runner, outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exercise.Run(context.Background()); err == nil {
+		t.Fatal("unexpected bootstrap route accepted")
+	}
+	if outcome.exactPong.Load() || outcome.egressAttempts.Load() != 1 {
+		t.Fatalf("client outcome pong/egress = %v/%d, want false/1", outcome.exactPong.Load(), outcome.egressAttempts.Load())
+	}
+}
+
+func requestCodexAcceptanceUserSettings(command codexAcceptanceCommand, localToken string) error {
+	baseURL, err := codexAcceptanceChatGPTBaseURL(command.args)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest(http.MethodGet, baseURL+"/api/codex/settings/user", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+localToken)
+	request.Header.Set("ChatGPT-Account-ID", "acceptance-bootstrap")
+	request.Header.Set("Cache-Control", "no-cache, no-store")
+	response, err := (&http.Client{Transport: &http.Transport{}}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return errors.New("local Codex user settings request rejected")
+	}
+	return nil
+}
+
+func codexAcceptanceChatGPTBaseURL(args []string) (string, error) {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] != "-c" || !strings.HasPrefix(args[index+1], "chatgpt_base_url=") {
+			continue
+		}
+		return strconv.Unquote(strings.TrimPrefix(args[index+1], "chatgpt_base_url="))
+	}
+	return "", errors.New("local Codex user settings endpoint missing")
 }
 
 func TestCodexInstalledHTTPCompositeExerciseRunsTrafficOnly(t *testing.T) {

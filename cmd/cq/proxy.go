@@ -120,6 +120,12 @@ var runProxyAdoptedRuntimeFn = func(context.Context, net.Listener, func(context.
 var runProxyOwnedRuntimeFn = func(context.Context, int, func(context.Context, net.Listener, http.Handler) error) (bool, error) {
 	return false, nil
 }
+var runProxyValidationCandidateFn = func(context.Context, proxyCommandOptions, string) (bool, error) {
+	return false, nil
+}
+var runProxyValidationCandidateWorkerFn = func(context.Context, proxy.RuntimeRoleManifestV1, proxy.RuntimeRoleFiles) (bool, error) {
+	return false, nil
+}
 var activateProxyValidationCandidateFn = func(fd, port int) error {
 	if fd != 0 || port != 0 {
 		return errors.New("proxy validation candidate is unavailable")
@@ -619,16 +625,11 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 
 func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if opts.LinuxValidationCandidateFD != 0 {
-		if opts.Port == 0 || opts.Port == proxy.DefaultPort {
-			return errors.New("Linux validation candidate requires an isolated port")
-		}
-		if err := activateProxyValidationCandidateFn(opts.LinuxValidationCandidateFD, opts.Port); err != nil {
+		handled, err := runProxyValidationCandidateFn(context.Background(), opts, version)
+		if handled {
 			return err
 		}
-	}
-	roots, err := userdirs.Default()
-	if err != nil {
-		return fmt.Errorf("resolve CQ directories: %w", err)
+		return errors.New("proxy validation candidate is unavailable")
 	}
 	var supervisorRole *proxy.RuntimeRoleManifestV1
 	var workerRole *proxy.RuntimeRoleManifestV1
@@ -690,6 +691,17 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			}
 			defer func() { returnErr = errors.Join(returnErr, supervisorFiles.Close()) }()
 		}
+	}
+	if workerRole != nil {
+		handled, err := runProxyValidationCandidateWorkerFn(context.Background(), *workerRole, workerFiles)
+		if handled {
+			workerFiles = proxy.RuntimeRoleFiles{}
+			return err
+		}
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
 	var adoptedListener net.Listener
 	if supervisorRole == nil && workerRole == nil {
@@ -782,10 +794,29 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}()
 	}
 	legacyFinaliseVerifier := newProxyLegacyMaintenanceFinaliseVerifier(version, codexClientBuild, cfg.Port, servingAttestor)
-	credentialControl, err := codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(
-		context.Background(), fsys, refreshClient, legacyFinaliseVerifier,
-		codexprov.CredentialEndpointRecoveryRecorderFunc(codexCanaryEndpointRecoveryRecorder(activeCanary)),
-	)
+	openCredentialControl := func(ctx context.Context) (*codexprov.CredentialControl, error) {
+		return codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(
+			ctx, fsys, refreshClient, legacyFinaliseVerifier,
+			codexprov.CredentialEndpointRecoveryRecorderFunc(codexCanaryEndpointRecoveryRecorder(activeCanary)),
+		)
+	}
+	var credentialControl *codexprov.CredentialControl
+	if workerRole == nil {
+		credentialControl, err = openCredentialControl(context.Background())
+	} else {
+		credentialAuthorityCtx, cancelCredentialAuthority := context.WithTimeout(context.Background(), 10*time.Second)
+		credentialControl, err = acquireProxyWorkerCredentialAuthority(credentialAuthorityCtx, proxyCredentialAuthorityOperations{
+			open: openCredentialControl,
+			owner: func(control *codexprov.CredentialControl) bool {
+				return control.Owner()
+			},
+			close: func(control *codexprov.CredentialControl) error {
+				return control.Close()
+			},
+			wait: waitProxyCredentialAuthority,
+		})
+		cancelCredentialAuthority()
+	}
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
@@ -1201,22 +1232,26 @@ func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler 
 		return proxy.ErrRuntimeSupervisorUnavailable
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	done := make(chan struct{})
-	defer close(done)
+	serveResult := make(chan error, 1)
 	go func() {
-		select {
-		case <-ctx.Done():
-			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = server.Shutdown(shutdown)
-		case <-done:
-		}
+		serveResult <- server.Serve(listener)
 	}()
-	err := server.Serve(listener)
-	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
-		return nil
+	select {
+	case err := <-serveResult:
+		return err
+	case <-ctx.Done():
 	}
-	return err
+	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownErr := server.Shutdown(shutdown)
+	cancel()
+	if shutdownErr != nil {
+		shutdownErr = errors.Join(shutdownErr, server.Close())
+	}
+	serveErr := <-serveResult
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(shutdownErr, serveErr)
 }
 
 func newProxyCodexRoutingCapacityRefresher(

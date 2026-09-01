@@ -19,6 +19,8 @@ import (
 )
 
 var inspectLinuxProxyRuntimeFn = proxy.InspectLinuxProxyRuntime
+var captureLinuxRuntimeWorkerFn = proxy.CaptureLinuxRuntimeWorker
+var probeLinuxProxyRuntimeHealthFn = probeLinuxProxyHealth
 var linuxProxyRuntimePortFn = func() (int, error) {
 	config, err := proxy.LoadExistingConfig()
 	if err != nil || config == nil || config.Port < 1 || config.Port > 65_535 {
@@ -39,6 +41,25 @@ var linuxProxyRuntimeInspector = func(ctx context.Context, executable string) co
 	}
 	identity, err := inspectLinuxProxyRuntimeFn(ctx, executable, port)
 	if err != nil || !identity.Valid() {
+		status.Error = "Linux proxy runtime inspection is unavailable"
+		return status
+	}
+	worker, err := captureLinuxRuntimeWorkerFn(ctx, identity.Process)
+	if err != nil {
+		status.Error = "Linux proxy runtime inspection is unavailable"
+		return status
+	}
+	if !probeLinuxProxyRuntimeHealthFn(ctx, identity.Listener.Address) {
+		status.Error = "Linux proxy runtime health is unavailable"
+		return status
+	}
+	confirmed, err := inspectLinuxProxyRuntimeFn(ctx, executable, port)
+	if err != nil || !confirmed.Valid() || !confirmed.Equal(identity) {
+		status.Error = "Linux proxy runtime inspection is unavailable"
+		return status
+	}
+	confirmedWorker, err := captureLinuxRuntimeWorkerFn(ctx, confirmed.Process)
+	if err != nil || !confirmedWorker.Equal(worker) {
 		status.Error = "Linux proxy runtime inspection is unavailable"
 		return status
 	}

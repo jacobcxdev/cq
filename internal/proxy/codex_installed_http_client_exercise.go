@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const codexInstalledHTTPClientTempPrefix = "cq-codex-installed-client-"
@@ -92,7 +94,8 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 		return errCodexInstalledListenerAcceptance
 	}
 	defer func() {
-		returnErr = errors.Join(returnErr, removeCodexInstalledHTTPClientTempRoot(root))
+		cleanupErr := removeCodexInstalledHTTPClientTempRoot(root)
+		returnErr = errors.Join(returnErr, cleanupErr)
 	}()
 	if err := os.Chmod(root, 0o700); err != nil {
 		return errCodexInstalledListenerAcceptance
@@ -113,7 +116,17 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 		return errCodexInstalledListenerAcceptance
 	}
 
-	egressListener, egressServer, egressErrors, err := startCodexAcceptanceHTTP(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	var userSettingsRequests atomic.Uint64
+	egressListener, egressServer, egressErrors, err := startCodexAcceptanceHTTP(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.EscapedPath() == "/api/codex/settings/user" && request.URL.RawQuery == "" &&
+			request.Header.Get("Authorization") == "Bearer "+exercise.localToken &&
+			request.Header.Get("ChatGPT-Account-ID") == "acceptance-bootstrap" &&
+			request.Header.Get("Cache-Control") == "no-cache, no-store" {
+			userSettingsRequests.Add(1)
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"commit_attribution_enabled":false}`))
+			return
+		}
 		exercise.outcome.egressAttempts.Add(1)
 		http.Error(writer, "installed validation egress denied", http.StatusBadGateway)
 	}))
@@ -142,10 +155,12 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
 	)
+	args := codexAcceptanceExecArgumentsForTransport(baseURL, work, outputPath, exercise.webSocket)
+	args = append(args[:len(args)-1], append([]string{"-c", "chatgpt_base_url=" + strconv.Quote(egressURL)}, args[len(args)-1:]...)...)
 	command := codexAcceptanceCommand{
 		executable:         exercise.executable.path,
 		expectedExecutable: exercise.executable,
-		args:               codexAcceptanceExecArgumentsForTransport(baseURL, work, outputPath, exercise.webSocket),
+		args:               args,
 		env:                environment,
 		dir:                work,
 		endpoint:           baseURL + legacyCodexResponsesPath,
@@ -169,7 +184,7 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 	}
 	exactPong := bytes.Equal(output, []byte("PONG")) || bytes.Equal(output, []byte("PONG\n"))
 	clearBytes(output)
-	if !exactPong || exercise.outcome.egressAttempts.Load() != 0 {
+	if !exactPong || userSettingsRequests.Load() != 1 || exercise.outcome.egressAttempts.Load() != 0 {
 		return errCodexInstalledListenerAcceptance
 	}
 	exercise.outcome.exactPong.Store(true)

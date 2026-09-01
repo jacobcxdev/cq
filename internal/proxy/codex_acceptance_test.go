@@ -348,6 +348,9 @@ func assertCodexAcceptanceCommandIsolation(t *testing.T, command codexAcceptance
 		t.Fatal("installed client command is not loopback-confined")
 	}
 	args := strings.Join(command.args, "\n")
+	if strings.Contains(args, "--strict-config") {
+		t.Fatal("acceptance command requires option unavailable in pinned Codex build")
+	}
 	for _, required := range []string{
 		"exec",
 		"--ephemeral",
@@ -360,6 +363,7 @@ func assertCodexAcceptanceCommandIsolation(t *testing.T, command codexAcceptance
 		"supports_websockets = false",
 		"analytics.enabled=false",
 		"features.enable_request_compression=true",
+		"features.apps=false",
 		"features.plugins=false",
 		"features.respect_system_proxy=true",
 		"check_for_update_on_startup=false",

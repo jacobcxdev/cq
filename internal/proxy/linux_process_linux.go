@@ -50,6 +50,15 @@ type LinuxProcessIdentity struct {
 	Executable LinuxExecutableIdentity
 }
 
+type linuxProcessMatchFacts struct {
+	PID        int
+	ParentPID  int
+	StartTime  uint64
+	UID        uint64
+	Arguments  []string
+	CgroupPath string
+}
+
 func (identity LinuxProcessIdentity) Valid() bool {
 	return identity.PID > 1 && identity.ParentPID >= 0 && identity.StartTime != 0 &&
 		len(identity.Arguments) != 0 && identity.CgroupPath != "" && identity.Executable.Valid()
@@ -79,6 +88,57 @@ func defaultLinuxProcOperations() linuxProcOperations {
 
 func CaptureLinuxProcess(pid int) (LinuxProcessIdentity, error) {
 	return captureLinuxProcessWithOperations(pid, defaultLinuxProcOperations())
+}
+
+func captureLinuxProcessMatchFacts(pid int, operations linuxProcOperations) (linuxProcessMatchFacts, error) {
+	if pid <= 1 || operations.readFile == nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	root := filepath.Join("/proc", strconv.Itoa(pid))
+	statBefore, err := operations.readFile(filepath.Join(root, "stat"), linuxProcFileMaxBytes)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	parentPID, startTime, err := parseLinuxProcStat(statBefore, pid)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	status, err := operations.readFile(filepath.Join(root, "status"), linuxProcFileMaxBytes)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	uid, err := parseLinuxProcStatusUID(status)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	cmdline, err := operations.readFile(filepath.Join(root, "cmdline"), linuxProcFileMaxBytes)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	arguments, err := parseLinuxProcCmdline(cmdline)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	cgroup, err := operations.readFile(filepath.Join(root, "cgroup"), linuxProcFileMaxBytes)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	cgroupPath, err := parseLinuxProcCgroup(cgroup)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	statAfter, err := operations.readFile(filepath.Join(root, "stat"), linuxProcFileMaxBytes)
+	if err != nil {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	parentAfter, startAfter, err := parseLinuxProcStat(statAfter, pid)
+	if err != nil || parentAfter != parentPID || startAfter != startTime {
+		return linuxProcessMatchFacts{}, errLinuxProcIdentity
+	}
+	return linuxProcessMatchFacts{
+		PID: pid, ParentPID: parentPID, StartTime: startTime, UID: uid,
+		Arguments: arguments, CgroupPath: cgroupPath,
+	}, nil
 }
 
 func CaptureLinuxExecutable(path string) (LinuxExecutableIdentity, error) {

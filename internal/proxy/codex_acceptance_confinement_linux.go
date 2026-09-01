@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/url"
@@ -24,6 +25,8 @@ type linuxCodexAcceptanceConfinement struct{}
 var openLinuxAcceptanceHelper = func() (*os.File, error) {
 	return os.Open("/proc/self/exe")
 }
+
+var startLinuxAcceptanceCommand = func(command *exec.Cmd) error { return command.Start() }
 
 func defaultCodexAcceptanceConfinement() codexAcceptanceConfinement {
 	return linuxCodexAcceptanceConfinement{}
@@ -88,8 +91,8 @@ func (linuxCodexAcceptanceConfinement) Execute(ctx context.Context, execution co
 		Pdeathsig:                  syscall.SIGKILL,
 		Setpgid:                    true,
 	}
-	if err := command.Start(); err != nil {
-		return nil, errors.New("Codex acceptance namespace confinement unavailable")
+	if err := startLinuxAcceptanceCommand(command); err != nil {
+		return nil, fmt.Errorf("Codex acceptance namespace confinement unavailable: %w", err)
 	}
 	_ = child.Close()
 	_ = helper.Close()

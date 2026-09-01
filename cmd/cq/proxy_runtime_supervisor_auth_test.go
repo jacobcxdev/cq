@@ -148,6 +148,51 @@ func TestRuntimeSupervisorStartupSkipsCredentialDiscovery(t *testing.T) {
 	}
 }
 
+func TestServeRuntimeSupervisorWaitsForActiveRequestDrain(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- serveRuntimeSupervisor(ctx, listener, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			close(started)
+			<-release
+			writer.WriteHeader(http.StatusNoContent)
+		}))
+	}()
+	clientResult := make(chan error, 1)
+	go func() {
+		response, requestErr := http.Get("http://" + listener.Addr().String())
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		clientResult <- requestErr
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-result:
+		t.Fatalf("serve returned before active request drained: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-clientResult; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after active request drained")
+	}
+}
+
 func TestOwnedRuntimeSupervisorStartupSkipsCredentialDiscovery(t *testing.T) {
 	oldAdopt := adoptProxyListenerFn
 	oldRun := runProxyOwnedRuntimeFn

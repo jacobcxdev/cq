@@ -5,6 +5,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -98,6 +100,22 @@ func TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock(t *testing.T)
 		if err := codexAcceptanceServeError(serverErrors); err != nil {
 			t.Fatalf("relay server error: %v", err)
 		}
+	}
+}
+
+func TestLinuxAcceptanceConfinementPreservesNamespaceStartError(t *testing.T) {
+	oldStart := startLinuxAcceptanceCommand
+	startLinuxAcceptanceCommand = func(*exec.Cmd) error { return syscall.EPERM }
+	t.Cleanup(func() { startLinuxAcceptanceCommand = oldStart })
+	root := t.TempDir()
+	_, err := (linuxCodexAcceptanceConfinement{}).Execute(context.Background(), codexAcceptanceExecution{
+		executable: "/bin/true",
+		command: codexAcceptanceCommand{
+			dir: root, sandboxWriteRoot: root, loopbackOnly: true,
+		},
+	})
+	if !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("namespace start error = %v", err)
 	}
 }
 

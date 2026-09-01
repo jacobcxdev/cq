@@ -298,6 +298,35 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 	}
 }
 
+func TestCIProfilesUbuntuConfinementWithoutWeakeningAppArmor(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"profile cq-ci-userns flags=(unconfined)",
+		"userns,",
+		"sudo apparmor_parser --replace",
+		"aa-exec --profile=cq-ci-userns -- go test -race -count=1 ./...",
+		"sudo apparmor_parser --remove",
+		"trap cleanup EXIT",
+		"AppArmor profile cleanup failed",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("CI missing Ubuntu confinement contract %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"apparmor_restrict_unprivileged_userns",
+		"t.Skip",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("CI weakens Ubuntu confinement with %q", forbidden)
+		}
+	}
+}
+
 func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	windows, err := os.ReadFile("../../.github/scripts/validate-windows-install.ps1")
 	if err != nil {

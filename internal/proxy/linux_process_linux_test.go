@@ -76,6 +76,28 @@ func TestLinuxProcRejectsProcessStartTimeChange(t *testing.T) {
 	}
 }
 
+func TestLinuxProcessMatchFactsRejectStartTimeChangeBeforeExecutableCapture(t *testing.T) {
+	statCalls := 0
+	operations := linuxProcOperations{readFile: func(path string, _ int64) ([]byte, error) {
+		switch {
+		case strings.HasSuffix(path, "/stat"):
+			statCalls++
+			return linuxTestStat(42, 1, 100+statCalls-1), nil
+		case strings.HasSuffix(path, "/status"):
+			return []byte("Uid:\t501\t501\t501\t501\n"), nil
+		case strings.HasSuffix(path, "/cmdline"):
+			return []byte("/usr/bin/cq\x00proxy\x00start\x00"), nil
+		case strings.HasSuffix(path, "/cgroup"):
+			return []byte("0::/user.slice/cq-proxy.service\n"), nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}}
+	if _, err := captureLinuxProcessMatchFacts(42, operations); err == nil {
+		t.Fatal("reused PID metadata unexpectedly passed prefilter")
+	}
+}
+
 func linuxTestStat(pid, parent, start int) []byte {
 	fields := []string{"S", fmt.Sprint(parent)}
 	for len(fields) < 19 {
