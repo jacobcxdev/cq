@@ -302,6 +302,8 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
 		`$manifestArgs = @(`,
 		`& go run ./internal/tools/wingetmanifest @manifestArgs`,
+		`[IO.File]::WriteAllText($checksums, $checksumText, [Text.UTF8Encoding]::new($false))`,
+		`if ($checksumBytes.Length -eq 0 -or $checksumBytes[-1] -ne 10 -or $checksumBytes -contains [byte]13)`,
 		`.\.github\scripts\validate-windows-msi.ps1`,
 		"runs-on: ubuntu-24.04-arm",
 		`.github/scripts/validate-linux-install.sh`,
@@ -330,6 +332,9 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	}
 	if count := strings.Count(text, "args: release --clean"); count != 1 {
 		t.Errorf("release workflow builds artifacts %d times, want one exact draft build", count)
+	}
+	if strings.Contains(text, "[IO.File]::WriteAllLines($checksums") {
+		t.Error("release workflow rewrites checksums with platform-native CRLF endings")
 	}
 	releaseStart := strings.Index(text, "\n  release:\n")
 	windowsStart := strings.Index(text, "\n  windows-packages:\n")

@@ -234,7 +234,12 @@ jobs:
             $digest = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
             $baseChecksums += "$digest  $([IO.Path]::GetFileName($msi))"
           }
-          [IO.File]::WriteAllLines($checksums, [string[]]($baseChecksums | Sort-Object), [Text.UTF8Encoding]::new($false))
+          $checksumText = (($baseChecksums | Sort-Object) -join "`n") + "`n"
+          [IO.File]::WriteAllText($checksums, $checksumText, [Text.UTF8Encoding]::new($false))
+          $checksumBytes = [IO.File]::ReadAllBytes($checksums)
+          if ($checksumBytes.Length -eq 0 -or $checksumBytes[-1] -ne 10 -or $checksumBytes -contains [byte]13) {
+            throw "checksums.txt must use LF-only line endings"
+          }
 
           $x64MSI = Join-Path $releaseRoot "cq_${version}_windows_amd64.msi"
           $arm64MSI = Join-Path $releaseRoot "cq_${version}_windows_arm64.msi"
