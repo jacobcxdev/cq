@@ -391,6 +391,30 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 	}
 }
 
+func TestGitHubWorkflowsRunOnlyWhenDispatched(t *testing.T) {
+	for _, path := range []string{
+		"../../.github/workflows/ci.yml",
+		"../../.github/workflows/release.yml",
+	} {
+		workflow, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		header, _, ok := strings.Cut(string(workflow), "\njobs:\n")
+		if !ok {
+			t.Fatalf("%s has no jobs section", path)
+		}
+		if !strings.Contains(header, "\n  workflow_dispatch:\n") {
+			t.Errorf("%s is not manually dispatched", path)
+		}
+		for _, automatic := range []string{"\n  push:\n", "\n  pull_request:\n", "\n  schedule:\n"} {
+			if strings.Contains(header, automatic) {
+				t.Errorf("%s retains automatic trigger %q", path, strings.TrimSpace(automatic))
+			}
+		}
+	}
+}
+
 func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	windows, err := os.ReadFile("../../.github/scripts/validate-windows-install.ps1")
 	if err != nil {
