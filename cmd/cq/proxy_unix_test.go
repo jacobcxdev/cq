@@ -57,3 +57,43 @@ func TestUnixRuntimeDescriptorPathIsAbsolute(t *testing.T) {
 		t.Fatalf("unexpected descriptor path %q", path)
 	}
 }
+
+func TestResolveUnixRuntimeExecutableCanonicalisesSymlink(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "cq")
+	if err := os.WriteFile(target, []byte("cq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "linked-cq")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveUnixRuntimeExecutable(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != canonicalTarget {
+		t.Fatalf("resolved executable = %q; want %q", resolved, canonicalTarget)
+	}
+}
+
+func TestResolveUnixRuntimeExecutableRejectsCycle(t *testing.T) {
+	directory := t.TempDir()
+	first := filepath.Join(directory, "first")
+	second := filepath.Join(directory, "second")
+	if err := os.Symlink(second, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(first, second); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := resolveUnixRuntimeExecutable(first); err == nil {
+		t.Fatal("symlink cycle unexpectedly resolved")
+	}
+}

@@ -48,7 +48,7 @@ func runUnixProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serv
 	if err != nil {
 		return fmt.Errorf("digest supervisor runtime lifecycle: %w", err)
 	}
-	executable, err := os.Executable()
+	executable, err := currentUnixRuntimeExecutable()
 	if err != nil {
 		return fmt.Errorf("resolve runtime executable: %w", err)
 	}
@@ -159,7 +159,7 @@ func newUnixRuntimeLauncher(executable string, manifest proxy.RuntimeRoleManifes
 }
 
 func newUnixProxyRuntimeWorkerLauncher(manifest proxy.RuntimeRoleManifestV1, supervisorHolder proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
-	executable, err := os.Executable()
+	executable, err := currentUnixRuntimeExecutable()
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +171,25 @@ func newUnixProxyRuntimeWorkerLauncher(manifest proxy.RuntimeRoleManifestV1, sup
 		return nil, fmt.Errorf("resolve runtime lifecycle descriptor: non-absolute path")
 	}
 	return newUnixRuntimeLauncher(executable, manifest, supervisorHolder, lifecyclePath), nil
+}
+
+func currentUnixRuntimeExecutable() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return resolveUnixRuntimeExecutable(executable)
+}
+
+func resolveUnixRuntimeExecutable(executable string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(resolved) {
+		return "", fmt.Errorf("non-absolute path")
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func runtimeDescriptorPath(fd int) string {
