@@ -419,7 +419,8 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 
 	protocol, err := inspection.Protocol()
 	if factory.TransportKind == "http" {
-		replaceCodexRequestShapeObservation(ctx, classifyCodexRequestShape(protocol, err))
+		replaceCodexRequestObservation(ctx, protocol, err)
+		emitCodexRequestIngressObservation(ctx)
 	}
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
@@ -454,6 +455,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexLeaseAuthorityMismatch)
 	}
 	snapshot = codexHTTPRequestDetachPortableUnavailableRoute(snapshot, protocol, input.ExpectedBound)
+	snapshot = codexHTTPRequestDetachInvalidatedPortableRoute(snapshot, protocol, input.ExpectedBound)
 
 	now := time.Now()
 	if factory.Now != nil {
@@ -713,14 +715,29 @@ func codexHTTPRequestDetachPortableUnavailableRoute(snapshot CodexLeaseRouteSnap
 	if expected != nil || snapshot.RestartableFailedHead || !codexHTTPRequestAccountUnavailablePortable(protocol) {
 		return snapshot
 	}
-	if containsCodexHTTPRequestAccountKey(snapshot.UnavailableAccountKeys, snapshot.BoundAccountKey) {
+	unavailable := mergeCodexHTTPRequestAccountKeys(snapshot.UnavailableAccountKeys, snapshot.QuotaExhaustedAccountKeys)
+	if containsCodexHTTPRequestAccountKey(unavailable, snapshot.BoundAccountKey) {
 		snapshot.BoundAccountKey = ""
+		snapshot.BoundIdentity = CodexJournalRecordIdentity{}
+		snapshot.BoundRecordGeneration = 0
+		snapshot.BoundChoice = RouteChoice{}
 		snapshot.BoundRequiresAccount = false
 	}
-	if containsCodexHTTPRequestAccountKey(snapshot.UnavailableAccountKeys, snapshot.AffinityAccountKey) {
+	if containsCodexHTTPRequestAccountKey(unavailable, snapshot.AffinityAccountKey) {
 		snapshot.AffinityAccountKey = ""
 		snapshot.AffinityRequiresAccount = false
 	}
+	return snapshot
+}
+
+func codexHTTPRequestDetachInvalidatedPortableRoute(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, expected *CodexLeaseBoundExpectation) CodexLeaseRouteSnapshot {
+	if expected != nil || !snapshot.AffinityInvalidated || snapshot.BoundRequiresAccount || !codexHTTPRequestAccountUnavailablePortable(protocol) {
+		return snapshot
+	}
+	snapshot.BoundAccountKey = ""
+	snapshot.BoundIdentity = CodexJournalRecordIdentity{}
+	snapshot.BoundRecordGeneration = 0
+	snapshot.BoundChoice = RouteChoice{}
 	return snapshot
 }
 

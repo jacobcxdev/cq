@@ -31,6 +31,11 @@ func TestCodexWSPendingFrameUsesStrongFrameAuthorityWithoutHandshake(t *testing.
 	if string(pending.encoded) != string(payload) {
 		t.Fatalf("owned frame changed: %q", pending.encoded)
 	}
+	var event RouteEvent
+	event.applyRouteDiagnostics(pending.diagnostics)
+	if event.SessionKey != hashPrefix("codex-session", "session") || event.SessionSource != "metadata:session_id" {
+		t.Fatalf("frame task correlation = %q/%q", event.SessionKey, event.SessionSource)
+	}
 }
 
 func TestCodexWSPendingFrameExplicitEmptyPreviousResponseIDIsNotPortable(t *testing.T) {

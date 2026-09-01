@@ -63,6 +63,51 @@ func TestCodexLeaseAffinityInvalidationPreservesActiveRequestAndSurvivesRestart(
 		t.Fatalf("active request drain after invalidation: %v", err)
 	}
 
+	current, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, next.Accounts, next.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.BoundAccountKey != "account-a" || current.BoundRequiresAccount || !current.AffinityInvalidated {
+		t.Fatalf("portable current binding after invalidation = account %q required %v invalidated %v", current.BoundAccountKey, current.BoundRequiresAccount, current.AffinityInvalidated)
+	}
+	current = codexHTTPRequestDetachInvalidatedPortableRoute(current, CodexProtocolRequest{}, nil)
+	if current.BoundAccountKey != "" {
+		t.Fatalf("portable current route after invalidation = account %q", current.BoundAccountKey)
+	}
+	migrated := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect,
+	}})
+	migrated.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	migratedHandle, err := runtimeLease.BeginRequest(migrated)
+	if err != nil {
+		t.Fatalf("portable current request after invalidation: %v", err)
+	}
+	if migratedHandle.AccountKey() != "account-b" {
+		t.Fatalf("portable current account after invalidation = %q, want account-b", migratedHandle.AccountKey())
+	}
+	migratedHandle, err = migratedHandle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migratedHandle, err = migratedHandle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migratedHandle, err = migratedHandle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migratedHandle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := coordinator.LoadRouteSnapshot(context.Background(), next.Key, next.Accounts, next.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted.AffinityAccountKey != "account-b" || admitted.BoundAccountKey != "" || admitted.AffinityInvalidated {
+		t.Fatalf("admitted affinity = account %q bound %q invalidated %v", admitted.AffinityAccountKey, admitted.BoundAccountKey, admitted.AffinityInvalidated)
+	}
+
 	if err := coordinator.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +116,8 @@ func TestCodexLeaseAffinityInvalidationPreservesActiveRequestAndSurvivesRestart(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored.AffinityAccountKey != "" || restored.AffinityRequiresAccount {
-		t.Fatalf("restored affinity = account %q required %v", restored.AffinityAccountKey, restored.AffinityRequiresAccount)
+	if restored.AffinityAccountKey != "account-b" || restored.BoundAccountKey != "" || restored.AffinityRequiresAccount || restored.AffinityInvalidated {
+		t.Fatalf("restored affinity = account %q bound %q required %v invalidated %v", restored.AffinityAccountKey, restored.BoundAccountKey, restored.AffinityRequiresAccount, restored.AffinityInvalidated)
 	}
 }
 
@@ -117,7 +162,7 @@ func TestCodexLeaseAffinityInvalidationPreservesRequiredContinuity(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.AffinityAccountKey != "account-a" || !snapshot.AffinityRequiresAccount {
-		t.Fatalf("required affinity after invalidation = account %q required %v", snapshot.AffinityAccountKey, snapshot.AffinityRequiresAccount)
+	if snapshot.AffinityAccountKey != "account-a" || !snapshot.AffinityRequiresAccount || snapshot.AffinityInvalidated {
+		t.Fatalf("required affinity after invalidation = account %q required %v invalidated %v", snapshot.AffinityAccountKey, snapshot.AffinityRequiresAccount, snapshot.AffinityInvalidated)
 	}
 }

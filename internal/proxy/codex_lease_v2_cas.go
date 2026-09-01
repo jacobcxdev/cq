@@ -386,6 +386,7 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 	}
 	appendGenerations := make(map[CodexJournalRecordIdentity]uint64)
 	firstAdmissions := make(map[CodexJournalRecordIdentity]CodexJournalRecordV2)
+	affinityRefreshes := make(map[CodexJournalRecordIdentity]struct{})
 	cacheAdmissions := make(map[CodexJournalRecordIdentity]CodexJournalRecordV2)
 	accountUnavailableHash := ""
 	quotaExhaustedHash := ""
@@ -404,7 +405,8 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		} else if input.PredecessorTurnHash != "" {
 			predecessorChanged = true
 		}
-		result, appended, firstAdmission, err := store.buildCodexLeaseRecordAfterImage(old, exists, input, identity == beginRequest, fences[identity], now)
+		beginRequestAffinityReset := identity == beginRequest && codexLeaseAffinityInvalidationBeginRequest(old, input, storedLane, next.AffinityInvalidationGeneration)
+		result, appended, firstAdmission, err := store.buildCodexLeaseRecordAfterImage(old, exists, input, identity == beginRequest, beginRequestAffinityReset, fences[identity], now)
 		if err != nil {
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
 		}
@@ -413,6 +415,9 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		}
 		if firstAdmission {
 			firstAdmissions[identity] = result
+			if exists && codexLeaseAccountUnavailableAdmission(old, input) && storedLane.LastAdmissionJournalGeneration != 0 && codexLaneAffinityJournalGeneration(storedLane) <= next.AffinityInvalidationGeneration {
+				affinityRefreshes[identity] = struct{}{}
+			}
 		}
 		if codexLeaseCacheAdmission(old, result, exists) {
 			cacheAdmissions[identity] = result
@@ -537,6 +542,11 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		desiredLane.LastAdmittedAuthoritative = admitted.Authoritative
 		desiredLane.LastAdmissionJournalGeneration = admitted.AdmissionJournalGeneration
 		desiredLane.LastAdmittedAt = admitted.AdmittedAt
+		if _, refreshed := affinityRefreshes[identity]; refreshed {
+			desiredLane.AffinityRefreshJournalGeneration = next.Generation + 1
+		} else if admitted.AdmissionJournalGeneration == next.Generation+1 {
+			desiredLane.AffinityRefreshJournalGeneration = 0
+		}
 	}
 	for identity, admitted := range cacheAdmissions {
 		if !codexLeaseAffinityEligible(admitted) {
@@ -683,7 +693,7 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 	return nil
 }
 
-func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
+func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
 	result := cloneCodexJournalRecordV2(input)
 	bindingReassignment := exists && codexLeaseAccountUnavailableAdmission(old, input)
 	bindingReset := exists && beginRequest && codexLeaseAccountUnavailableBeginRequest(old, input)
@@ -747,7 +757,7 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 	result.LastObservedAt = now
 	var appended uint64
 	if beginRequest {
-		request, err := store.buildCodexBeginRequestAfterImage(old, result, fence, now)
+		request, err := store.buildCodexBeginRequestAfterImage(old, result, affinityInvalidationReset, fence, now)
 		if err != nil {
 			return CodexJournalRecordV2{}, 0, false, err
 		}
@@ -890,6 +900,17 @@ func codexLeaseAccountUnavailableBeginRequest(old, desired CodexJournalRecordV2)
 	return desired.State == LeaseProvisional
 }
 
+func codexLeaseAffinityInvalidationBeginRequest(old, desired CodexJournalRecordV2, lane CodexJournalLane, invalidationGeneration uint64) bool {
+	if invalidationGeneration == 0 || lane.LastAdmissionJournalGeneration == 0 || lane.LastAdmissionJournalGeneration > invalidationGeneration ||
+		!old.EverAdmitted || old.NonMigratable || old.HasEncryptedState || old.HasTurnState || desired.NonMigratable ||
+		len(desired.AttemptEnvelope.Slots) == 0 || len(desired.Attempts) != 1 {
+		return false
+	}
+	attempt := desired.Attempts[0]
+	return attempt.Slot > 0 && int(attempt.Slot) <= len(desired.AttemptEnvelope.Slots) &&
+		!constantTimeCodexLeaseDigestEqual(old.AccountHash, desired.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash)
+}
+
 func codexLeaseAccountUnavailableCanBeginRequest(old CodexJournalRecordV2) bool {
 	currentState := codexLeaseCurrentAttemptState(old)
 	accountUnavailable := currentState == CodexAttemptAccountUnavailable
@@ -1006,9 +1027,9 @@ func codexLeaseCurrentRequestCacheRefreshEligible(old, result CodexJournalRecord
 	return old.EverAdmitted && result.EverAdmitted && result.RequestKind == CodexRequestCompaction && result.CompactionPhase == CodexCompactionMidTurn && constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash)
 }
 
-func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired CodexJournalRecordV2, fence CodexLeaseRecordFence, now time.Time) (CodexCurrentRequest, error) {
+func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired CodexJournalRecordV2, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexCurrentRequest, error) {
 	request := cloneCodexCurrentRequest(desired.CodexCurrentRequest)
-	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired)
+	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired) || affinityInvalidationReset
 	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if request.Generation != 0 || request.CurrentAttemptGeneration != 0 || len(request.Attempts) != 1 {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest requires a store-owned generation and one prepared attempt", ErrCodexLeaseInvalidMutation)
@@ -1459,7 +1480,7 @@ func (store *CodexLeaseStore) validateCodexLeaseAdmissionEvidence(envelope codex
 
 	for _, lane := range envelope.Lanes {
 		laneDigest := codexJournalLaneDigest(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash)
-		present := lane.LastAdmittedAccountHash != "" || lane.LastAdmittedTurnHash != "" || lane.LastAdmittedModeEpoch != 0 || lane.LastAdmittedAuthoritative || lane.LastAdmissionJournalGeneration != 0 || !lane.LastAdmittedAt.IsZero() || !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != ""
+		present := lane.LastAdmittedAccountHash != "" || lane.LastAdmittedTurnHash != "" || lane.LastAdmittedModeEpoch != 0 || lane.LastAdmittedAuthoritative || lane.LastAdmissionJournalGeneration != 0 || lane.AffinityRefreshJournalGeneration != 0 || !lane.LastAdmittedAt.IsZero() || !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != ""
 		if !present {
 			if len(eligibleByLane[laneDigest]) != 0 {
 				return errors.New("eligible admitted record has no lane affinity")
@@ -1468,6 +1489,9 @@ func (store *CodexLeaseStore) validateCodexLeaseAdmissionEvidence(envelope codex
 		}
 		if !validCodexLeaseDigest(lane.LastAdmittedAccountHash) || !validCodexLeaseDigest(lane.LastAdmittedTurnHash) || lane.LastAdmittedModeEpoch == 0 || !lane.LastAdmittedAuthoritative || lane.LastAdmissionJournalGeneration <= envelope.Cutover.CompletionGeneration || lane.LastAdmissionJournalGeneration > envelope.Generation || !codexLeaseUTCTime(lane.LastAdmittedAt) || lane.LastAdmittedAt.Before(envelope.Cutover.CompletedAt) || lane.LastAdmittedAt.After(lane.LastObservedAt) {
 			return errors.New("invalid lane admission affinity")
+		}
+		if lane.AffinityRefreshJournalGeneration != 0 && (lane.AffinityRefreshJournalGeneration <= lane.LastAdmissionJournalGeneration || lane.AffinityRefreshJournalGeneration > envelope.Generation) {
+			return errors.New("invalid lane affinity refresh")
 		}
 		if lane.LastCacheAdmittedAt.IsZero() {
 			if lane.LastCacheEffectiveModel != "" {
@@ -1658,7 +1682,11 @@ func codexLeaseCurrentAttemptState(record CodexJournalRecordV2) CodexAttemptStat
 }
 
 func codexLaneAffinityIsZero(lane CodexJournalLane) bool {
-	return lane.LastAdmittedAccountHash == "" && lane.LastAdmittedTurnHash == "" && lane.LastAdmittedModeEpoch == 0 && !lane.LastAdmittedAuthoritative && lane.LastAdmissionJournalGeneration == 0 && lane.LastAdmittedAt.IsZero() && lane.LastCacheAdmittedAt.IsZero() && lane.LastCacheEffectiveModel == ""
+	return lane.LastAdmittedAccountHash == "" && lane.LastAdmittedTurnHash == "" && lane.LastAdmittedModeEpoch == 0 && !lane.LastAdmittedAuthoritative && lane.LastAdmissionJournalGeneration == 0 && lane.AffinityRefreshJournalGeneration == 0 && lane.LastAdmittedAt.IsZero() && lane.LastCacheAdmittedAt.IsZero() && lane.LastCacheEffectiveModel == ""
+}
+
+func codexLaneAffinityJournalGeneration(lane CodexJournalLane) uint64 {
+	return max(lane.LastAdmissionJournalGeneration, lane.AffinityRefreshJournalGeneration)
 }
 
 func copyCodexLaneAffinity(destination *CodexJournalLane, source CodexJournalLane) {
@@ -1667,6 +1695,7 @@ func copyCodexLaneAffinity(destination *CodexJournalLane, source CodexJournalLan
 	destination.LastAdmittedModeEpoch = source.LastAdmittedModeEpoch
 	destination.LastAdmittedAuthoritative = source.LastAdmittedAuthoritative
 	destination.LastAdmissionJournalGeneration = source.LastAdmissionJournalGeneration
+	destination.AffinityRefreshJournalGeneration = source.AffinityRefreshJournalGeneration
 	destination.LastAdmittedAt = source.LastAdmittedAt
 	destination.LastCacheAdmittedAt = source.LastCacheAdmittedAt
 	destination.LastCacheEffectiveModel = source.LastCacheEffectiveModel

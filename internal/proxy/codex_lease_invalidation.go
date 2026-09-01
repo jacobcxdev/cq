@@ -53,7 +53,7 @@ func (store *CodexLeaseStore) invalidateTaskAffinities() (CodexLeaseInvalidation
 
 	invalidated := 0
 	for _, lane := range store.v2.Lanes {
-		if codexLaneAffinityIsZero(lane) || lane.LastAdmissionJournalGeneration <= store.v2.AffinityInvalidationGeneration || codexLeaseLaneAffinityRequiresAccount(*store.v2, lane) {
+		if codexLaneAffinityIsZero(lane) || codexLaneAffinityJournalGeneration(lane) <= store.v2.AffinityInvalidationGeneration || codexLeaseLaneAffinityRequiresAccount(*store.v2, lane) {
 			continue
 		}
 		invalidated++

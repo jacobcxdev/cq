@@ -28,6 +28,7 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"start := time.Now()",
 		"var model string",
 		"ctx, routeDiag := withRouteDiagnostics(r.Context())",
+		"ctx = s.withCodexRequestIngressObservation(ctx, r.Method, r.URL.Path, \"codex_native_ingress\")",
 		"r = r.WithContext(ctx)",
 		"if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil",
 		"if s.CodexNativeHTTP != nil",
@@ -36,7 +37,7 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"model = legacy.Handle(w, r)",
 	})
 
-	diagnostics := requireCodexNativeIf(t, handler.Body.List[4])
+	diagnostics := requireCodexNativeIf(t, handler.Body.List[5])
 	assertCodexNativeStatementShape(t, fileSet, diagnostics.Body.List, []string{
 		"w = wrapped",
 		"defer func literal",
@@ -56,7 +57,7 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"s.emitDiagnostics(event)",
 	})
 
-	authoritative := requireCodexNativeIf(t, handler.Body.List[5])
+	authoritative := requireCodexNativeIf(t, handler.Body.List[6])
 	assertCodexNativeStatementShape(t, fileSet, authoritative.Body.List, []string{
 		"if handled, routedModel := s.CodexNativeHTTP.TryServe(w, r, false); handled",
 	})
@@ -66,29 +67,30 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"return",
 	})
 
-	fallback := requireCodexNativeIf(t, handler.Body.List[7])
+	fallback := requireCodexNativeIf(t, handler.Body.List[8])
 	assertCodexNativeStatementShape(t, fileSet, fallback.Body.List, []string{
 		"legacy = newLegacyCodexNativeHTTPHandler(s)",
 	})
 
 	wantCalls := map[string]int{
-		"func literal":                    1,
-		"event.applyRouteDiagnostics":     1,
-		"event.applySessionCorrelation":   1,
-		"legacy.Handle":                   1,
-		"newLegacyCodexNativeHTTPHandler": 1,
-		"r.Context":                       1,
-		"r.WithContext":                   1,
-		"rec.diagnosticsError":            1,
-		"rec.statusCode":                  1,
-		"s.CodexNativeHTTP.TryServe":      1,
-		"s.emitDiagnostics":               1,
-		"s.wrapDiagnosticsResponseWriter": 1,
-		"start.UTC":                       1,
-		"time.Now":                        1,
-		"time.Since":                      1,
-		"time.Since(start).Milliseconds":  1,
-		"withRouteDiagnostics":            1,
+		"func literal":                         1,
+		"event.applyRouteDiagnostics":          1,
+		"event.applySessionCorrelation":        1,
+		"legacy.Handle":                        1,
+		"newLegacyCodexNativeHTTPHandler":      1,
+		"r.Context":                            1,
+		"r.WithContext":                        1,
+		"rec.diagnosticsError":                 1,
+		"rec.statusCode":                       1,
+		"s.CodexNativeHTTP.TryServe":           1,
+		"s.emitDiagnostics":                    1,
+		"s.withCodexRequestIngressObservation": 1,
+		"s.wrapDiagnosticsResponseWriter":      1,
+		"start.UTC":                            1,
+		"time.Now":                             1,
+		"time.Since":                           1,
+		"time.Since(start).Milliseconds":       1,
+		"withRouteDiagnostics":                 1,
 	}
 	gotCalls := make(map[string]int)
 	ast.Inspect(handler.Body, func(node ast.Node) bool {
