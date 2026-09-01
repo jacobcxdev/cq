@@ -216,6 +216,36 @@ func TestDarwinServiceInspectCombinesDefinitionsAndRuntime(t *testing.T) {
 	}
 }
 
+func TestServiceStatusHealthyForAcceptsSymlinkedExecutable(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "cq")
+	if err := os.WriteFile(target, []byte("cq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "linked-cq")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	status := serviceStatus{
+		Proxy: componentStatus{
+			Registered:           true,
+			Running:              true,
+			Healthy:              true,
+			ConfiguredExecutable: link,
+			LiveExecutable:       target,
+		},
+		Refresh: componentStatus{
+			Registered:           true,
+			Healthy:              true,
+			ConfiguredExecutable: link,
+		},
+	}
+
+	if !status.healthyFor(link) {
+		t.Fatal("healthy Cask symlink and runtime target rejected")
+	}
+}
+
 func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinLaunchctl) {
 	t.Helper()
 	home := filepath.Join(t.TempDir(), "home")

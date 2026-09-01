@@ -448,11 +448,11 @@ func (status serviceStatus) healthyFor(executable string) bool {
 	return status.Proxy.Registered &&
 		status.Proxy.Running &&
 		status.Proxy.Healthy &&
-		status.Proxy.ConfiguredExecutable == executable &&
-		status.Proxy.LiveExecutable == executable &&
+		sameServiceExecutable(status.Proxy.ConfiguredExecutable, executable) &&
+		sameServiceExecutable(status.Proxy.LiveExecutable, executable) &&
 		status.Refresh.Registered &&
 		status.Refresh.Healthy &&
-		status.Refresh.ConfiguredExecutable == executable
+		sameServiceExecutable(status.Refresh.ConfiguredExecutable, executable)
 }
 
 func waitForServicePoll(ctx context.Context, duration time.Duration) error {
