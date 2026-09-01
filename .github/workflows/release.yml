@@ -234,7 +234,12 @@ jobs:
             $digest = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
             $baseChecksums += "$digest  $([IO.Path]::GetFileName($msi))"
           }
-          [IO.File]::WriteAllLines($checksums, [string[]]($baseChecksums | Sort-Object), [Text.UTF8Encoding]::new($false))
+          $checksumText = (($baseChecksums | Sort-Object) -join "`n") + "`n"
+          [IO.File]::WriteAllText($checksums, $checksumText, [Text.UTF8Encoding]::new($false))
+          $checksumBytes = [IO.File]::ReadAllBytes($checksums)
+          if ($checksumBytes.Length -eq 0 -or $checksumBytes[-1] -ne 10 -or $checksumBytes -contains [byte]13) {
+            throw "checksums.txt must use LF-only line endings"
+          }
 
           $x64MSI = Join-Path $releaseRoot "cq_${version}_windows_amd64.msi"
           $arm64MSI = Join-Path $releaseRoot "cq_${version}_windows_arm64.msi"
@@ -364,16 +369,17 @@ jobs:
           set -euo pipefail
           cask="$RUNNER_TEMP/homebrew-cask/cq.rb"
           test -f "$cask"
-          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
-          test "$(jq -r '.tag_name' <<<"$release")" = "$RELEASE_TAG"
+          release="$(gh release view "$RELEASE_TAG" --json tagName,isDraft,assets)"
+          test "$(jq -r '.tagName' <<<"$release")" = "$RELEASE_TAG"
           test "$(jq '.assets | length' <<<"$release")" -ge 9
-          draft="$(jq -r '.draft' <<<"$release")"
+          draft="$(jq -r '.isDraft' <<<"$release")"
           case "$draft" in
             true) gh release edit "$RELEASE_TAG" --draft=false ;;
             false) echo "Release $RELEASE_TAG already public; resuming publication" ;;
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
+          brew style --fix "$cask"
           brew style "$cask"
           endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb"
           encoded="$(base64 <"$cask" | tr -d '\n')"

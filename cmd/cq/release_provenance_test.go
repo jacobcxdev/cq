@@ -302,6 +302,8 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
 		`$manifestArgs = @(`,
 		`& go run ./internal/tools/wingetmanifest @manifestArgs`,
+		`[IO.File]::WriteAllText($checksums, $checksumText, [Text.UTF8Encoding]::new($false))`,
+		`if ($checksumBytes.Length -eq 0 -or $checksumBytes[-1] -ne 10 -or $checksumBytes -contains [byte]13)`,
 		`.\.github\scripts\validate-windows-msi.ps1`,
 		"runs-on: ubuntu-24.04-arm",
 		`.github/scripts/validate-linux-install.sh`,
@@ -314,8 +316,10 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		`$validationArguments.PreviousVersion = $previousVersion`,
 		"needs: [release, windows-packages, windows-acceptance]",
 		"needs: [windows-deployed, linux-install]",
+		`gh release view "$RELEASE_TAG" --json tagName,isDraft,assets`,
 		`gh release edit "$RELEASE_TAG" --draft=false`,
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
+		`brew style --fix "$cask"`,
 		`.\.github\scripts\validate-windows-install.ps1`,
 		"secrets.WINGET_PKGS_TOKEN",
 		"microsoft/winget-pkgs",
@@ -329,6 +333,9 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	if count := strings.Count(text, "args: release --clean"); count != 1 {
 		t.Errorf("release workflow builds artifacts %d times, want one exact draft build", count)
 	}
+	if strings.Contains(text, "[IO.File]::WriteAllLines($checksums") {
+		t.Error("release workflow rewrites checksums with platform-native CRLF endings")
+	}
 	releaseStart := strings.Index(text, "\n  release:\n")
 	windowsStart := strings.Index(text, "\n  windows-packages:\n")
 	if releaseStart < 0 || windowsStart <= releaseStart || !strings.Contains(text[releaseStart:windowsStart], "fetch-depth: 0") {
@@ -338,6 +345,15 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	lifecycleIndex := strings.Index(text, ".github/scripts/validate-homebrew-install.sh")
 	if styleIndex < 0 || lifecycleIndex < 0 || styleIndex > lifecycleIndex {
 		t.Error("release workflow does not validate formatted Homebrew Cask bytes")
+	}
+	publishStart := strings.Index(text, "\n  publish:\n")
+	publishEnd := strings.Index(text[publishStart+1:], "\n      - name: Audit published Homebrew Cask\n")
+	if publishStart < 0 || publishEnd < 0 {
+		t.Fatal("release workflow publish job is missing")
+	}
+	publishBlock := text[publishStart : publishStart+1+publishEnd]
+	if strings.Contains(publishBlock, `releases/tags/${RELEASE_TAG}`) {
+		t.Error("release workflow queries the public-only tag endpoint before publishing its draft")
 	}
 }
 
