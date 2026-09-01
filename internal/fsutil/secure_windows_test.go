@@ -364,6 +364,40 @@ func TestWindowsRetainedReadDirectoryDoesNotExposeMutation(t *testing.T) {
 	}
 }
 
+func TestWindowsOpenNoFollowAcceptsExternalCredentialOutsideCQRoots(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".codex")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "auth.json")
+	if err := os.WriteFile(path, []byte("credential"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := fmt.Sprintf(
+		"O:%sG:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)",
+		user.String(), user.String(), user.String(),
+	)
+	setWindowsTestSecurity(t, root, private)
+	setWindowsTestSecurity(t, path, private)
+
+	file, err := (OSFileSystem{}).OpenNoFollow(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "credential" {
+		t.Fatalf("credential = %q", data)
+	}
+}
+
 func TestWindowsRetainedDirectoriesResetEnumerationAndCloseOnce(t *testing.T) {
 	root := t.TempDir()
 	state := filepath.Join(root, "state")
