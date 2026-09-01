@@ -490,6 +490,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		"PreviousGoVersion",
 		"GetSecurityDescriptor(4)",
 		"EnginePID",
+		`$runLevelProperty = $principal.PSObject.Properties["RunLevel"]`,
 		"LocalManifestFiles",
 		`@(Get-CQARPEntries).Count`,
 	} {
@@ -503,6 +504,9 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	if strings.Contains(windowsText, "& $Path install --owner=winget") {
 		t.Fatal("Windows native validation bypasses WinGet")
+	}
+	if strings.Contains(windowsText, "$principal.RunLevel") {
+		t.Fatal("Windows deployment validation requires optional RunLevel XML property")
 	}
 	for _, redirected := range []string{
 		`$shellKey.SetValue("AppData"`,

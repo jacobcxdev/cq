@@ -198,7 +198,9 @@ function Assert-TaskDefinition {
     [xml]$definition = Export-ScheduledTask -TaskPath $taskPath -TaskName $Name
     $principal = $definition.Task.Principals.Principal
     $action = $definition.Task.Actions.Exec
-    if ($principal.UserId -ne $CurrentSID -or $principal.LogonType -ne "InteractiveToken" -or ($principal.RunLevel -and $principal.RunLevel -ne "LeastPrivilege")) {
+    $runLevelProperty = $principal.PSObject.Properties["RunLevel"]
+    $runLevel = if ($runLevelProperty) { [string]$runLevelProperty.Value } else { "" }
+    if ($principal.UserId -ne $CurrentSID -or $principal.LogonType -ne "InteractiveToken" -or ($runLevel -ne "" -and $runLevel -ne "LeastPrivilege")) {
         throw "$Name principal differs from current-user authority"
     }
     if ($action.Command -ne $Executable -or $action.Arguments -ne $Arguments) {
