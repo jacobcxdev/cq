@@ -158,11 +158,14 @@ func (lifecycle *serviceLifecycle) Restart(ctx context.Context) error {
 	if err := lifecycle.validateWithoutOwner(); err != nil {
 		return err
 	}
-	if err := lifecycle.Platform.RestartRefresh(ctx); err != nil {
-		return fmt.Errorf("restart refresh service: %w", err)
-	}
 	if err := lifecycle.Platform.RestartProxy(ctx); err != nil {
 		return fmt.Errorf("restart proxy service: %w", err)
+	}
+	if err := lifecycle.waitProxyHealthy(ctx); err != nil {
+		return err
+	}
+	if err := lifecycle.Platform.RestartRefresh(ctx); err != nil {
+		return fmt.Errorf("restart refresh service: %w", err)
 	}
 	if _, err := lifecycle.waitHealthy(ctx); err != nil {
 		return err
@@ -417,6 +420,45 @@ func (lifecycle *serviceLifecycle) waitHealthy(ctx context.Context) (serviceStat
 	)
 }
 
+func (lifecycle *serviceLifecycle) waitProxyHealthy(ctx context.Context) error {
+	attempts := lifecycle.StatusAttempts
+	if attempts <= 0 {
+		attempts = 20
+	}
+	interval := lifecycle.StatusInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	wait := lifecycle.Wait
+	if wait == nil {
+		wait = waitForServicePoll
+	}
+
+	var status serviceStatus
+	var inspectErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		status, inspectErr = lifecycle.Platform.Inspect(ctx)
+		if inspectErr == nil && status.proxyHealthyFor(lifecycle.Executable) {
+			return nil
+		}
+		if attempt+1 < attempts {
+			if err := wait(ctx, interval); err != nil {
+				return err
+			}
+		}
+	}
+	if inspectErr != nil {
+		return fmt.Errorf("%w: inspect proxy: %v", ErrServiceUnhealthy, inspectErr)
+	}
+	return fmt.Errorf(
+		"%w: proxy registered=%t running=%t healthy=%t",
+		ErrServiceUnhealthy,
+		status.Proxy.Registered,
+		status.Proxy.Running,
+		status.Proxy.Healthy,
+	)
+}
+
 func (lifecycle *serviceLifecycle) rollbackNew(ctx context.Context, restore serviceRestore, cause error) error {
 	if restore == nil {
 		return errors.Join(cause, fmt.Errorf("service rollback is unavailable"))
@@ -445,14 +487,18 @@ func (lifecycle *serviceLifecycle) validateWithoutOwner() error {
 }
 
 func (status serviceStatus) healthyFor(executable string) bool {
+	return status.proxyHealthyFor(executable) &&
+		status.Refresh.Registered &&
+		status.Refresh.Healthy &&
+		sameServiceExecutable(status.Refresh.ConfiguredExecutable, executable)
+}
+
+func (status serviceStatus) proxyHealthyFor(executable string) bool {
 	return status.Proxy.Registered &&
 		status.Proxy.Running &&
 		status.Proxy.Healthy &&
 		sameServiceExecutable(status.Proxy.ConfiguredExecutable, executable) &&
-		sameServiceExecutable(status.Proxy.LiveExecutable, executable) &&
-		status.Refresh.Registered &&
-		status.Refresh.Healthy &&
-		sameServiceExecutable(status.Refresh.ConfiguredExecutable, executable)
+		sameServiceExecutable(status.Proxy.LiveExecutable, executable)
 }
 
 func waitForServicePoll(ctx context.Context, duration time.Duration) error {
