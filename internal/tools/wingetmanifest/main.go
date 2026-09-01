@@ -206,9 +206,14 @@ func findRepositoryRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return findRepositoryRootFrom(directory)
+}
+
+func findRepositoryRootFrom(directory string) (string, error) {
 	for {
 		module, readErr := os.ReadFile(filepath.Join(directory, "go.mod"))
-		if readErr == nil && strings.HasPrefix(string(module), repositoryModule+"\n") {
+		firstLine, _, _ := strings.Cut(string(module), "\n")
+		if readErr == nil && strings.TrimSpace(firstLine) == repositoryModule {
 			return directory, nil
 		}
 		parent := filepath.Dir(directory)

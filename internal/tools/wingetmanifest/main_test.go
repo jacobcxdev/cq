@@ -144,6 +144,29 @@ func TestGenerateRejectsNonemptyOutput(t *testing.T) {
 	}
 }
 
+func TestFindRepositoryRootAcceptsWindowsLineEndings(t *testing.T) {
+	repositoryRoot := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(repositoryRoot, "go.mod"),
+		[]byte(repositoryModule+"\r\n\r\ngo 1.26.1\r\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(repositoryRoot, "internal", "tools", "wingetmanifest")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findRepositoryRootFrom(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != repositoryRoot {
+		t.Fatalf("findRepositoryRootFrom() = %q, want %q", got, repositoryRoot)
+	}
+}
+
 func testManifestConfig() manifestConfig {
 	return manifestConfig{
 		Version:     "0.27.0",
