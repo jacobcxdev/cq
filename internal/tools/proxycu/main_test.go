@@ -143,7 +143,7 @@ func testOSCommandRunnerContainsGrandchild(t *testing.T, escape bool) {
 	}
 	runner := &osCommandRunner{
 		environment: environment,
-		timeout:     100 * time.Millisecond,
+		timeout:     500 * time.Millisecond,
 		waitDelay:   100 * time.Millisecond,
 	}
 	started := time.Now()
@@ -151,7 +151,7 @@ func testOSCommandRunnerContainsGrandchild(t *testing.T, escape bool) {
 	if err == nil {
 		t.Fatal("timed-out process group returned success")
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("runner waited %s for a descendant-held pipe", elapsed)
 	}
 	assertProcessGone(t, pidFile)

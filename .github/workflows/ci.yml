@@ -133,6 +133,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Provide pinned Go path
+        run: |
+          sudo mkdir -p /opt/homebrew/bin
+          sudo ln -sf "$(command -v go)" /opt/homebrew/bin/go
+
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race -count=1 ./internal/installer ./cmd/cq-install
