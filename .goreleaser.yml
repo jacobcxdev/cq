@@ -38,6 +38,8 @@ archives:
     ids: [cq]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - none*
     format_overrides:
       - goos: windows
         formats: [zip]
