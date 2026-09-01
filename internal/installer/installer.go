@@ -501,7 +501,12 @@ func (installer *Installer) readBinary(path string) ([]byte, os.FileMode, string
 }
 
 func (installer *Installer) writeExclusive(path string, body []byte, mode os.FileMode) (resultErr error) {
-	file, err := installer.FS.CreateExclusive(path, mode.Perm())
+	directory, err := fsutil.OpenOwnerControlledDirectory(installer.FS, filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
+	file, err := directory.CreateExclusive(filepath.Base(path), mode.Perm())
 	if err != nil {
 		return err
 	}

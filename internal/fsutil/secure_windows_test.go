@@ -1288,6 +1288,25 @@ func TestWindowsZeroValueBoundaryIgnoresEnvironmentAndGlobalState(t *testing.T) 
 	}
 }
 
+func TestWindowsOwnerControlledDirectoryOpensOutsideCQRoots(t *testing.T) {
+	directoryPath := filepath.Join(t.TempDir(), "go-bin")
+	if err := os.Mkdir(directoryPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := OpenOwnerControlledDirectory(OSFileSystem{}, directoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	file, err := directory.CreateExclusive("cq.exe.candidate", 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWindowsSecureOpenRejectsBroadIntermediateBelowAnchor(t *testing.T) {
 	anchor := t.TempDir()
 	intermediate := filepath.Join(anchor, "intermediate")
