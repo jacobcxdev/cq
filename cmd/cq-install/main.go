@@ -237,7 +237,7 @@ func buildInstaller(ctx context.Context, owner installstate.Owner, releaseVersio
 }
 
 func installerTemporaryRoot(roots userdirs.Roots) string {
-	return filepath.Join(roots.Cache, "installer")
+	return filepath.Join(roots.State, "installer")
 }
 
 type platformInstallation struct {
