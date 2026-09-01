@@ -109,6 +109,28 @@ func externalInventoryCandidate(t *testing.T, source ExternalCredentialSource) C
 	return inventory.Accounts[0].Candidates[0]
 }
 
+func TestCodexBarSourceKeepsValidAccessAfterIDTokenExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	root := t.TempDir()
+	writeCodexBarFixture(t, root, 0o600, nil)
+	idToken := fakeCodexJWTWithExpiry("user@example.test", "acct-1", "user-1", "plus", now.Add(-time.Hour).Unix())
+	accessToken := fakeCodexJWTWithExpiry("", "", "", "", now.Add(24*time.Hour).Unix())
+	writeCodexBarAuthAndFingerprint(t, root, codexAuthJSON(accessToken, "acct-1", idToken))
+
+	source := NewCodexBarSource(root)
+	candidates, err := source.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || !candidates[0].AccessExpiresAt.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("candidates = %#v, want access-token expiry", candidates)
+	}
+	candidate := externalInventoryCandidate(t, source)
+	if got := CandidateAvailabilityAt(candidate, now); got != CandidateReady {
+		t.Fatalf("availability = %v, want ready after ID-token expiry", got)
+	}
+}
+
 type replacingCodexBarReadFileSystem struct {
 	osCodexBarReadFileSystem
 	target      string

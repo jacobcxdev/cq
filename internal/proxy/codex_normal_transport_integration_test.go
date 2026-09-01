@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -20,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/klauspost/compress/zstd"
@@ -76,6 +82,7 @@ const (
 	normalTransportGateWSIdleCloseAfterPrecheck
 	normalTransportGateWSResponseAnchorSocketBound
 	normalTransportGateWSResponseAnchorSocketClosed
+	normalTransportGateAccessTokenOutlivesIDToken
 )
 
 type normalTransportGateReceipt struct {
@@ -92,6 +99,7 @@ type normalTransportGateBackend struct {
 
 	mu                sync.Mutex
 	receipts          []normalTransportGateReceipt
+	authorizations    []string
 	httpAuthRecovered bool
 	httpAuthActive    bool
 	httpAuthStatus    int
@@ -104,6 +112,18 @@ type normalTransportGateBackend struct {
 	wsAuthChainDone   bool
 	wsHandshakeBody   []byte
 	wsHandshakeCoding string
+}
+
+func (backend *normalTransportGateBackend) recordAuthorization(authorization string) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	backend.authorizations = append(backend.authorizations, authorization)
+}
+
+func (backend *normalTransportGateBackend) authorizationSnapshot() []string {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	return append([]string(nil), backend.authorizations...)
 }
 
 func newNormalTransportGateBackend(scenario normalTransportGateScenario) *normalTransportGateBackend {
@@ -137,6 +157,7 @@ func (backend *normalTransportGateBackend) ServeHTTP(writer http.ResponseWriter,
 	}
 	accountID := request.Header.Get("ChatGPT-Account-ID")
 	authorization := request.Header.Get("Authorization")
+	backend.recordAuthorization(authorization)
 	if accountID == "" || !strings.HasPrefix(authorization, "Bearer validation-token-") {
 		backend.fail(writer, http.StatusUnauthorized, errors.New("provider authority unavailable"))
 		return
@@ -753,11 +774,11 @@ func (planner normalTransportGateCloseAfterPrecheckPlanner) Build(ctx context.Co
 }
 
 type normalTransportGateHarness struct {
-	backend    *normalTransportGateBackend
-	proxy      *httptest.Server
-	continuity *CodexContinuityCoordinator
-	localToken string
-	refresh    *normalTransportGateRefreshInventory
+	backend     *normalTransportGateBackend
+	proxy       *httptest.Server
+	continuity  *CodexContinuityCoordinator
+	callerToken string
+	refresh     *normalTransportGateRefreshInventory
 }
 
 type normalTransportGateMultiCredentialInventory struct {
@@ -1002,6 +1023,97 @@ func (inventory *normalTransportGateRefreshInventory) refreshCount() int {
 	return inventory.refreshes
 }
 
+func normalTransportGateJWT(t *testing.T, header string, claims any) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+}
+
+func normalTransportGateAccessExpiryFixture(t *testing.T) (codex.Inventory, codex.CredentialMaterial, NormalCallerCredentialV1) {
+	t.Helper()
+	now := time.Now().UTC()
+	const accountID = "validation-upstream-a"
+	const userID = "validation-user-a"
+	idToken := normalTransportGateJWT(t, "e30", map[string]any{
+		"email": "validation@example.test",
+		"exp":   now.Add(-time.Hour).Unix(),
+		"https://api.openai.com/auth": map[string]string{
+			"chatgpt_account_id": accountID,
+			"chatgpt_user_id":    userID,
+			"chatgpt_plan_type":  "pro",
+		},
+	})
+	accessExpiresAt := time.Unix(now.Add(24*time.Hour).Unix(), 0)
+	accessToken := normalTransportGateJWT(t, "validation-token-a", map[string]any{
+		"exp": accessExpiresAt.Unix(),
+	})
+	authData, err := json.Marshal(map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": "validation-refresh-token",
+			"id_token":      idToken,
+			"account_id":    accountID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	managedHome := filepath.Join(root, "managed-codex-homes", "validation-record")
+	if err := os.MkdirAll(managedHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(managedHome, "auth.json"), authData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := sha256.Sum256(authData)
+	manifest, err := json.Marshal(map[string]any{
+		"version": 3,
+		"accounts": []any{map[string]any{
+			"id":                 "validation-record",
+			"managedHomePath":    managedHome,
+			"providerAccountID":  accountID,
+			"workspaceAccountID": accountID,
+			"authFingerprint":    hex.EncodeToString(fingerprint[:]),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "managed-codex-accounts.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	inventory := codex.DiscoverInventoryWithSources(context.Background(), fsutil.NewMemFS(), codex.NewCodexBarSource(root))
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
+		t.Fatalf("parsed CodexBar inventory = %#v, want one account and candidate", inventory)
+	}
+	// Installed CodexBar accounts have already been associated with a stable
+	// logical account by the account catalogue. Preserve that independent
+	// routing fact while keeping candidate metadata sourced from the parser.
+	inventory.Accounts[0].Unstable = false
+	account := inventory.Accounts[0]
+	candidate := account.Candidates[0]
+	material := codex.CredentialMaterial{
+		AccessToken:  accessToken,
+		RefreshToken: "validation-refresh-token",
+		IDToken:      idToken,
+		AccountID:    accountID,
+	}
+	caller := NormalCallerCredentialV1{
+		Domain:     NormalCallerCodex,
+		Bearer:     accessToken,
+		SubjectID:  string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision),
+		ValidUntil: accessExpiresAt,
+	}
+	return inventory, material, caller
+}
+
 func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateScenario) *normalTransportGateHarness {
 	t.Helper()
 	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
@@ -1013,6 +1125,15 @@ func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateSce
 			t.Errorf("close normal transport gate core: %v", err)
 		}
 	})
+	var codexCaller *NormalCallerCredentialV1
+	if scenario == normalTransportGateAccessTokenOutlivesIDToken {
+		inventory, material, caller := normalTransportGateAccessExpiryFixture(t)
+		core.inventory.inventory = inventory
+		core.inventory.material = map[codex.AccountKey]codex.CredentialMaterial{
+			inventory.Accounts[0].Key: material,
+		}
+		codexCaller = &caller
+	}
 	if normalTransportGateAllAccountsLimited(scenario) {
 		accounts := core.inventory.inventory.Accounts[:0]
 		for _, account := range core.inventory.inventory.Accounts {
@@ -1042,6 +1163,9 @@ func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateSce
 	}
 	if scenario == normalTransportGateWSDirectAuthRefreshAllFailure {
 		defaultAccountKey = codexInstalledHTTPValidationAccountA
+	}
+	if scenario == normalTransportGateAccessTokenOutlivesIDToken {
+		defaultAccountKey = ""
 	}
 	var credentialInventory codex.CredentialInventory = core.inventory
 	var exactSecrets codex.ExactSecretResolver = core.inventory
@@ -1147,8 +1271,18 @@ func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateSce
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyServer, _ := newCodexRuntimeSupervisorAcceptanceServer(t, handler, localToken)
-	return &normalTransportGateHarness{backend: backend, proxy: proxyServer, continuity: core.continuity, localToken: localToken, refresh: refreshInventory}
+	callerToken := localToken
+	var proxyServer *httptest.Server
+	if codexCaller != nil {
+		proxyServer, _ = newCodexRuntimeSupervisorAcceptanceServerWithCredentials(t, handler, []NormalCallerCredentialV1{
+			{Domain: NormalCallerLocal, Bearer: localToken, SubjectID: "validation-local"},
+			*codexCaller,
+		})
+		callerToken = codexCaller.Bearer
+	} else {
+		proxyServer, _ = newCodexRuntimeSupervisorAcceptanceServer(t, handler, localToken)
+	}
+	return &normalTransportGateHarness{backend: backend, proxy: proxyServer, continuity: core.continuity, callerToken: callerToken, refresh: refreshInventory}
 }
 
 func normalTransportGateAllAccountsLimited(scenario normalTransportGateScenario) bool {
@@ -1173,6 +1307,52 @@ func normalTransportGateNonPortableWebSocketScenario(scenario normalTransportGat
 	return scenario == normalTransportGateWSNonPortableApplicationHardLimit || scenario == normalTransportGateWSNonPortableHandshakeHardLimit ||
 		scenario == normalTransportGateWSNonPortableAllApplicationHardLimit || scenario == normalTransportGateWSNonPortableAllHandshakeHardLimit ||
 		scenario == normalTransportGateWSNonPortableTwoApplicationHardLimit || scenario == normalTransportGateWSNonPortableTwoHandshakeHardLimit
+}
+
+func TestNormalProxyTransportRoutesWhenAccessTokenOutlivesIDToken(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		t.Run(transport, func(t *testing.T) {
+			harness := newNormalTransportGateHarness(t, normalTransportGateAccessTokenOutlivesIDToken)
+			metadata := CodexTurnMetadata{
+				SessionID:   "normal-transport-session-access-expiry-" + transport,
+				ThreadID:    "normal-transport-thread-access-expiry-" + transport,
+				TurnID:      "normal-transport-turn-access-expiry-" + transport,
+				RequestKind: CodexRequestTurn,
+			}
+
+			switch transport {
+			case "http":
+				status, responseBody := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, metadata))
+				if status != http.StatusOK || !bytes.Contains(responseBody, []byte(`"type":"response.completed"`)) {
+					t.Fatalf("normal HTTP response = %d %q, want completed 200", status, responseBody)
+				}
+				receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+				if len(receipts) != 1 || receipts[0].accountID != "validation-upstream-a" || receipts[0].status != http.StatusOK {
+					t.Fatalf("provider HTTP receipts = %#v, want one completed account-a request", receipts)
+				}
+			case "websocket":
+				connection := normalTransportGateWebSocket(t, harness)
+				if err := connection.WriteMessage(websocket.TextMessage, normalTransportGateWSFrame(metadata.TurnID, "")); err != nil {
+					t.Fatal(err)
+				}
+				normalTransportGateReadWSCompletion(t, connection)
+				if err := connection.Close(); err != nil {
+					t.Fatal(err)
+				}
+				handshakes := normalTransportGateReceipts(harness.backend.snapshot(), "websocket_handshake")
+				frames := normalTransportGateReceipts(harness.backend.snapshot(), "websocket_frame")
+				if len(handshakes) != 1 || handshakes[0].accountID != "validation-upstream-a" || handshakes[0].status != http.StatusSwitchingProtocols || len(frames) != 1 {
+					t.Fatalf("provider WebSocket receipts = handshakes %#v frames %#v, want one completed account-a turn", handshakes, frames)
+				}
+			}
+
+			authorizations := harness.backend.authorizationSnapshot()
+			if len(authorizations) != 1 || authorizations[0] != "Bearer "+harness.callerToken {
+				t.Fatalf("provider authorizations = %#v, want exact parsed access bearer", authorizations)
+			}
+			harness.backend.assertNoFailure(t)
+		})
+	}
 }
 
 func TestNormalProxyTransportHTTPRejectedTurnCanRetry(t *testing.T) {
@@ -2577,7 +2757,7 @@ func normalTransportGateHTTPCall(t *testing.T, harness *normalTransportGateHarne
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+harness.localToken)
+	request.Header.Set("Authorization", "Bearer "+harness.callerToken)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
@@ -2597,7 +2777,7 @@ func normalTransportGateWebSocket(t *testing.T, harness *normalTransportGateHarn
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	header := make(http.Header)
-	header.Set("Authorization", "Bearer "+harness.localToken)
+	header.Set("Authorization", "Bearer "+harness.callerToken)
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second, Subprotocols: []string{"responses"}, Proxy: nil}
 	connection, response, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(harness.proxy.URL, "http")+legacyCodexResponsesPath, header)
 	if err != nil {
