@@ -264,7 +264,10 @@ function Assert-Installed {
             throw "CQ MSI registration count is $($entries.Count)"
         }
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        if (($userPath -split ";") -notcontains $root) {
+        $pathSeparators = [char[]]@("\", "/")
+        $normalisedRoot = $root.TrimEnd($pathSeparators)
+        $normalisedUserPath = @($userPath -split ";" | ForEach-Object { $_.Trim().TrimEnd($pathSeparators) })
+        if ($normalisedUserPath -notcontains $normalisedRoot) {
             throw "installer PATH entry is absent"
         }
     }
@@ -445,7 +448,10 @@ try {
             throw "CQ MSI registration remains"
         }
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        if (($userPath -split ";") -contains $installRoot) {
+        $pathSeparators = [char[]]@("\", "/")
+        $normalisedInstallRoot = $installRoot.TrimEnd($pathSeparators)
+        $normalisedUserPath = @($userPath -split ";" | ForEach-Object { $_.Trim().TrimEnd($pathSeparators) })
+        if ($normalisedUserPath -contains $normalisedInstallRoot) {
             throw "installer PATH entry remains"
         }
     }
