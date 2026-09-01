@@ -482,6 +482,8 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
 		`"HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
 		`"HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"`,
+		`$displayName = $_.PSObject.Properties["DisplayName"]`,
+		`$publisher = $_.PSObject.Properties["Publisher"]`,
 		`Remove-ValidationPath -Path $codexRoot`,
 		`Remove-ValidationPath -Path $roamingCQ`,
 		`Remove-ValidationPath -Path $localCQ`,

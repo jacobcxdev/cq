@@ -92,7 +92,10 @@ function Get-CQARPEntries {
     return @($roots | ForEach-Object {
         Get-ItemProperty $_ -ErrorAction SilentlyContinue
     } | Where-Object {
-        $_.DisplayName -eq "CQ" -and $_.Publisher -eq "jacobcxdev"
+        $displayName = $_.PSObject.Properties["DisplayName"]
+        $publisher = $_.PSObject.Properties["Publisher"]
+        $displayName -and $publisher -and
+            $displayName.Value -eq "CQ" -and $publisher.Value -eq "jacobcxdev"
     })
 }
 
