@@ -175,15 +175,11 @@ func parseAccountData(data []byte, path string) (CodexAccount, bool) {
 	if accountID == "" {
 		accountID = claims.AccountID
 	}
-	expiresAt := claims.ExpiresAt * 1000
-	if af.CQExpiresAt > expiresAt {
-		expiresAt = af.CQExpiresAt
-	}
 	return CodexAccount{
 		AccessToken: af.Tokens.AccessToken, RefreshToken: af.Tokens.RefreshToken,
 		IDToken: af.Tokens.IDToken, AccountID: accountID, UserID: claims.UserID,
 		Email: claims.Email, PlanType: claims.PlanType, RecordKey: claims.RecordKey(),
-		FilePath: path, ExpiresAt: expiresAt,
+		FilePath: path, ExpiresAt: accountAccessExpiresAt(af),
 	}, true
 }
 

@@ -6,14 +6,19 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // fakeCodexJWT builds a Codex-style JWT with the given claims.
 func fakeCodexJWT(email, accountID, userID, planType string) string {
+	return fakeCodexJWTWithExpiry(email, accountID, userID, planType, 1774076490)
+}
+
+func fakeCodexJWTWithExpiry(email, accountID, userID, planType string, expiresAt int64) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	payload := map[string]any{
 		"email": email,
-		"exp":   1774076490.0,
+		"exp":   expiresAt,
 		"https://api.openai.com/auth": map[string]any{
 			"chatgpt_account_id": accountID,
 			"chatgpt_user_id":    userID,
@@ -23,6 +28,94 @@ func fakeCodexJWT(email, accountID, userID, planType string) string {
 	body, _ := json.Marshal(payload)
 	encoded := base64.RawURLEncoding.EncodeToString(body)
 	return header + "." + encoded + ".fakesig"
+}
+
+func codexAuthJSONWithCQExpiry(accessToken, accountID, idToken string, expiresAt int64) []byte {
+	var document map[string]any
+	_ = json.Unmarshal(codexAuthJSON(accessToken, accountID, idToken), &document)
+	document["cq_expires_at"] = expiresAt
+	data, _ := json.Marshal(document)
+	return data
+}
+
+func TestAccountParsingUsesAccessTokenExpiry(t *testing.T) {
+	const (
+		idExpiresAt     = int64(1_700_000_000)
+		accessExpiresAt = int64(1_700_086_400)
+	)
+	idToken := fakeCodexJWTWithExpiry("user@example.com", "acct-123", "user-456", "plus", idExpiresAt)
+	accessToken := fakeCodexJWTWithExpiry("", "", "", "", accessExpiresAt)
+	data := codexAuthJSON(accessToken, "acct-123", idToken)
+	fs := newFakeFS()
+	const path = "/fake/home/.codex/auth.json"
+	fs.files[path] = data
+
+	fromData, ok := parseAccountData(data, path)
+	if !ok {
+		t.Fatal("parseAccountData rejected valid auth")
+	}
+	fromFile, ok := parseAccountFile(fs, path)
+	if !ok {
+		t.Fatal("parseAccountFile rejected valid auth")
+	}
+	for name, account := range map[string]CodexAccount{"data": fromData, "file": fromFile} {
+		if account.ExpiresAt != accessExpiresAt*1000 {
+			t.Fatalf("%s ExpiresAt = %d, want access-token expiry %d", name, account.ExpiresAt, accessExpiresAt*1000)
+		}
+		candidate := CredentialCandidate{Source: SourceExternal, Routable: true, AccessExpiresAt: time.UnixMilli(account.ExpiresAt)}
+		if got := CandidateAvailabilityAt(candidate, time.Unix(idExpiresAt+1, 0)); got != CandidateReady {
+			t.Fatalf("%s availability after ID-token expiry = %v, want ready", name, got)
+		}
+	}
+}
+
+func TestAccountParsingUsesCQExpiryForOpaqueAccessToken(t *testing.T) {
+	const cqExpiresAt = int64(1_700_086_400_000)
+	idToken := fakeCodexJWTWithExpiry("user@example.com", "acct-123", "user-456", "plus", 1_700_000_000)
+	data := codexAuthJSONWithCQExpiry("opaque-access-token", "acct-123", idToken, cqExpiresAt)
+
+	account, ok := parseAccountData(data, "/auth.json")
+	if !ok {
+		t.Fatal("parseAccountData rejected valid opaque auth")
+	}
+	if account.ExpiresAt != cqExpiresAt {
+		t.Fatalf("ExpiresAt = %d, want CQ expiry %d", account.ExpiresAt, cqExpiresAt)
+	}
+}
+
+func TestAccountParsingPrefersAccessTokenExpiryOverCQExpiry(t *testing.T) {
+	const (
+		accessExpiresAt = int64(1_700_000_000)
+		cqExpiresAt     = int64(1_700_086_400_000)
+	)
+	idToken := fakeCodexJWTWithExpiry("user@example.com", "acct-123", "user-456", "plus", 1_800_000_000)
+	accessToken := fakeCodexJWTWithExpiry("", "", "", "", accessExpiresAt)
+	data := codexAuthJSONWithCQExpiry(accessToken, "acct-123", idToken, cqExpiresAt)
+
+	account, ok := parseAccountData(data, "/auth.json")
+	if !ok {
+		t.Fatal("parseAccountData rejected valid auth")
+	}
+	if account.ExpiresAt != accessExpiresAt*1000 {
+		t.Fatalf("ExpiresAt = %d, want access-token expiry %d", account.ExpiresAt, accessExpiresAt*1000)
+	}
+	candidate := CredentialCandidate{Source: SourceExternal, Routable: true, AccessExpiresAt: time.UnixMilli(account.ExpiresAt)}
+	if got := CandidateAvailabilityAt(candidate, time.Unix(accessExpiresAt+1, 0)); got != CandidateUnavailable {
+		t.Fatalf("availability after access-token expiry = %v, want unavailable", got)
+	}
+}
+
+func TestAccountParsingLeavesOpaqueAccessExpiryUnknown(t *testing.T) {
+	idToken := fakeCodexJWTWithExpiry("user@example.com", "acct-123", "user-456", "plus", 1_700_000_000)
+	data := codexAuthJSON("opaque-access-token", "acct-123", idToken)
+
+	account, ok := parseAccountData(data, "/auth.json")
+	if !ok {
+		t.Fatal("parseAccountData rejected valid opaque auth")
+	}
+	if account.ExpiresAt != 0 {
+		t.Fatalf("ExpiresAt = %d, want unknown", account.ExpiresAt)
+	}
 }
 
 func codexAuthJSON(accessToken, accountID, idToken string) []byte {
@@ -283,7 +376,8 @@ func TestAccountsSwitchRefusesAmbiguousEmail(t *testing.T) {
 func TestDiscoverAccountsIncludesRefreshMetadata(t *testing.T) {
 	fs := newFakeFS()
 	jwt := fakeCodexJWT("refresh@test.com", "acct-refresh", "user-refresh", "plus")
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-refresh", "acct-refresh", jwt)
+	accessToken := fakeCodexJWTWithExpiry("", "", "", "", 1774076490)
+	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON(accessToken, "acct-refresh", jwt)
 
 	accts := DiscoverAccounts(fs)
 	if len(accts) != 1 {

@@ -724,7 +724,7 @@ func TestCodexRegistryModelsRetriesFreshExternalAfterStaleManaged401WithoutWrite
 	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
 	identity := codexprov.AccountIdentity{AccountID: "account-one", UserID: "user-one", Email: "one@example.test", PlanType: "plus", RecordKey: "user-one::account-one"}
 	idToken := registryCredentialJWT(identity)
-	staleManagedToken := registryAccessJWT(now.Add(2 * time.Hour))
+	staleManagedToken := registryAccessJWT(time.Now().Add(2 * time.Hour))
 	const freshExternalToken = "synthetic-fresh-external-token"
 
 	fsys := fsutil.NewMemFS()

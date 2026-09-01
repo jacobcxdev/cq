@@ -28,7 +28,7 @@ type CodexAccount struct {
 	RecordKey    string // "{user_id}::{account_id}" — codex-auth compat
 	FilePath     string // source file path
 	IsActive     bool   // true if from ~/.codex/auth.json
-	ExpiresAt    int64  // Unix ms derived from JWT exp claim; 0 = unknown
+	ExpiresAt    int64  // Unix ms derived from access-token exp or CQ metadata; 0 = unknown
 }
 
 // codexAuthFile is the on-disk format shared with Codex CLI and codex-auth.
@@ -42,6 +42,17 @@ type codexAuthFile struct {
 	} `json:"tokens"`
 	LastRefresh string `json:"last_refresh,omitempty"`
 	CQExpiresAt int64  `json:"cq_expires_at,omitempty"`
+}
+
+func accountAccessExpiresAt(af codexAuthFile) int64 {
+	expiresAt := auth.DecodeCodexClaims(af.Tokens.AccessToken).ExpiresAt * 1000
+	if expiresAt > 0 {
+		return expiresAt
+	}
+	if af.CQExpiresAt > 0 {
+		return af.CQExpiresAt
+	}
+	return 0
 }
 
 // DiscoverAccounts finds all Codex accounts from:
@@ -82,11 +93,6 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 		accountID = claims.AccountID
 	}
 
-	expiresAtMs := claims.ExpiresAt * 1000
-	if af.CQExpiresAt > expiresAtMs {
-		expiresAtMs = af.CQExpiresAt
-	}
-
 	return CodexAccount{
 		AccessToken:  af.Tokens.AccessToken,
 		RefreshToken: af.Tokens.RefreshToken,
@@ -97,7 +103,7 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 		PlanType:     claims.PlanType,
 		RecordKey:    claims.RecordKey(),
 		FilePath:     path,
-		ExpiresAt:    expiresAtMs,
+		ExpiresAt:    accountAccessExpiresAt(af),
 	}, true
 }
 
