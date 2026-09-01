@@ -264,4 +264,4 @@ jobs:
           if ($manifestPath.Count -ne 1) {
             throw "deployed WinGet manifest directory is absent or ambiguous"
           }
-          .\.github\scripts\validate-windows-install.ps1 -ManifestPath $manifestPath[0].FullName -ExpectedVersion 0.29.10
+          .\.github\scripts\validate-windows-install.ps1 -ManifestPath $manifestPath[0].FullName -ExpectedVersion 0.29.10 -UseSourceGoRunner
