@@ -385,6 +385,8 @@ try {
     $proxyConfig = Join-Path $temporaryRoaming "cq\proxy.json"
     $proxyState = Join-Path $temporaryLocal "cq\state\proxy-resilience"
     $codexAuth = Join-Path $temporaryCodex "auth.json"
+    New-Item -ItemType Directory -Path $proxyState -Force | Out-Null
+    Set-PrivateTree -Root $temporaryLocal
     & $probeExecutable fixtures --config $proxyConfig --auth $codexAuth --state-root $proxyState --upstream $upstream --port $Port
     if ($LASTEXITCODE -ne 0) {
         throw "failed to write synthetic acceptance fixtures"

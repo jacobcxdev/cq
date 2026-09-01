@@ -139,5 +139,6 @@ if xattr -p com.apple.quarantine "$validation_binary" >/dev/null 2>&1; then
   echo "Homebrew Cask left cq quarantined" >&2
   exit 1
 fi
+find "$validation_binary" -depth -delete
 
-echo "Homebrew Cask quarantine validation passed"
+echo "Homebrew Cask quarantine and missing-binary uninstall validation passed"

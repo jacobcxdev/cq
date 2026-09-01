@@ -200,6 +200,7 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		`args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
 		`raise "cq remains quarantined after installation"`,
 		`"service", "install", "--owner=homebrew",`,
+		`if File.executable?("#{HOMEBREW_PREFIX}/bin/cq")`,
 		`"service", "uninstall", "--owner=homebrew",`,
 		`"--service-executable=#{HOMEBREW_PREFIX}/bin/cq",`,
 		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.proxy"]`,
@@ -263,6 +264,7 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 		`abort "production CQ binary path survived validation isolation"`,
 		`abort "missing Homebrew uninstall backstop for #{backstop}"`,
 		`abort "production CQ launchd label survived validation isolation"`,
+		`find "$validation_binary" -depth -delete`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask validation missing fail-closed guard %q", required)
@@ -443,6 +445,23 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	if strings.Contains(windowsText, "& $Path install --owner=winget") {
 		t.Fatal("Windows native validation bypasses WinGet")
+	}
+	windowsMSI, err := os.ReadFile("../../.github/scripts/validate-windows-msi.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range []struct {
+		text string
+		seal string
+	}{
+		{text: windowsText, seal: "Set-PrivateTree -Root $temporaryLocal"},
+		{text: string(windowsMSI), seal: "Set-PrivateTree -Root $localCQ"},
+	} {
+		sealIndex := strings.Index(script.text, script.seal)
+		fixtureIndex := strings.Index(script.text, "fixtures --config")
+		if sealIndex < 0 || fixtureIndex < 0 || sealIndex > fixtureIndex {
+			t.Errorf("Windows installation script does not seal fixture state before initialisation: %q", script.seal)
+		}
 	}
 	homebrewInstall, err := os.ReadFile("../../.github/scripts/validate-homebrew-install.sh")
 	if err != nil {

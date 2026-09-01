@@ -61,11 +61,13 @@ homebrew_casks:
     hooks:
       pre:
         uninstall: |
-          system_command "#{HOMEBREW_PREFIX}/bin/cq",
-                         args: [
-                           "service", "uninstall", "--owner=homebrew",
-                           "--service-executable=#{HOMEBREW_PREFIX}/bin/cq",
-                         ]
+          if File.executable?("#{HOMEBREW_PREFIX}/bin/cq")
+            system_command "#{HOMEBREW_PREFIX}/bin/cq",
+                           args: [
+                             "service", "uninstall", "--owner=homebrew",
+                             "--service-executable=#{HOMEBREW_PREFIX}/bin/cq",
+                           ]
+          end
           system_command "/bin/launchctl",
                          args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.proxy"],
                          must_succeed: false
