@@ -82,6 +82,7 @@ const (
 	normalTransportGateWSIdleCloseAfterPrecheck
 	normalTransportGateWSResponseAnchorSocketBound
 	normalTransportGateWSResponseAnchorSocketClosed
+	normalTransportGateWSPrewarmStall
 	normalTransportGateAccessTokenOutlivesIDToken
 )
 
@@ -340,6 +341,17 @@ func (backend *normalTransportGateBackend) serveWebSocket(writer http.ResponseWr
 		payload:    string(payload),
 		connection: connectionIndex,
 	})
+	if backend.scenario == normalTransportGateWSPrewarmStall && connectionIndex == 1 {
+		var request struct {
+			Generate *bool `json:"generate"`
+		}
+		if err := json.Unmarshal(payload, &request); err != nil || request.Generate == nil || *request.Generate {
+			backend.recordFailure(fmt.Errorf("provider stalled WebSocket request was not prewarm"))
+			return
+		}
+		_, _, _ = connection.ReadMessage()
+		return
+	}
 	if backend.scenario == normalTransportGateWSResponseAnchorSocketBound {
 		backend.serveWebSocketResponseAnchorSocketBound(connection, connectionIndex, payload)
 		return
@@ -1253,6 +1265,13 @@ func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateSce
 	if err != nil {
 		t.Fatal(err)
 	}
+	if scenario == normalTransportGateWSPrewarmStall {
+		handler, ok := webSocketBroker.(*codexTerminatingWebSocketHandler)
+		if !ok {
+			t.Fatal("normal transport gate WebSocket handler unavailable")
+		}
+		handler.prewarmTimeout = 20 * time.Millisecond
+	}
 	localToken, err := newCodexInstalledHTTPValidationToken()
 	if err != nil {
 		t.Fatal(err)
@@ -1593,6 +1612,41 @@ func TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak(t *testing.T) 
 			harness.backend.assertNoFailure(t)
 		})
 	}
+}
+
+func TestNormalProxyTransportWebSocketStalledPrewarmFailsOpen(t *testing.T) {
+	harness := newNormalTransportGateHarness(t, normalTransportGateWSPrewarmStall)
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"normal-transport-session-ws\",\"thread_id\":\"normal-transport-thread-ws\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	connection := normalTransportGateWebSocket(t, harness)
+	if err := connection.WriteMessage(websocket.TextMessage, prewarm); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	messageType, payload, err := connection.ReadMessage()
+	_ = connection.Close()
+	if err != nil || messageType != websocket.TextMessage {
+		t.Fatalf("stalled prewarm fail-open = type %d payload %q err %v", messageType, payload, err)
+	}
+	normalTransportGateRequireSemanticJSON(t, payload, []byte(`{"type":"error","status":504,"error":{"type":"api_error"}}`), "stalled prewarm fail-open")
+
+	retry := normalTransportGateWebSocket(t, harness)
+	turn := normalTransportGateWSFrame("normal-transport-turn-after-stalled-prewarm", "")
+	if err := retry.WriteMessage(websocket.TextMessage, turn); err != nil {
+		t.Fatal(err)
+	}
+	replies := normalTransportGateReadWSCompletion(t, retry)
+	_ = retry.Close()
+	if !bytes.Contains(bytes.Join(replies, nil), []byte("normal-transport-websocket")) {
+		t.Fatalf("turn after stalled prewarm = %q", replies)
+	}
+
+	frames := normalTransportGateReceipts(harness.backend.snapshot(), "websocket_frame")
+	if len(frames) != 2 || frames[0].connection != 1 || frames[0].payload != string(prewarm) || frames[1].connection != 2 || frames[1].payload != string(turn) {
+		t.Fatalf("stalled prewarm transport receipts = %#v, want prewarm then fresh turn", frames)
+	}
+	harness.backend.assertNoFailure(t)
 }
 
 func TestNormalProxyTransportWebSocketHandshakeHardLimitPreservesFinalProviderBody(t *testing.T) {

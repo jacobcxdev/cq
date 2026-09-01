@@ -152,12 +152,13 @@ func safeCodexWebSocketFailureReason(reason codexWebSocketFailureReason) codexWe
 }
 
 type codexTerminatingWebSocketHandler struct {
-	plans       CodexNativeHTTPRequestPlanner
-	upstream    codexWSUpstreamDialer
-	refresher   codex.CredentialReferenceRefresher
-	capacity    *CodexCapacityLedger
-	upstreamURL string
-	generation  atomic.Uint64
+	plans          CodexNativeHTTPRequestPlanner
+	upstream       codexWSUpstreamDialer
+	refresher      codex.CredentialReferenceRefresher
+	capacity       *CodexCapacityLedger
+	upstreamURL    string
+	prewarmTimeout time.Duration
+	generation     atomic.Uint64
 }
 
 // NewCodexTerminatingWebSocketHandler constructs readiness-gated WebSocket
@@ -172,11 +173,12 @@ func NewCodexTerminatingWebSocketHandler(plans CodexNativeHTTPRequestPlanner, ex
 		return nil, errors.New("Codex WebSocket upstream is invalid")
 	}
 	return &codexTerminatingWebSocketHandler{
-		plans:       plans,
-		upstream:    codexExplicitWSUpstreamDialer{executor: executor},
-		refresher:   refresher,
-		capacity:    capacity,
-		upstreamURL: upstreamURL,
+		plans:          plans,
+		upstream:       codexExplicitWSUpstreamDialer{executor: executor},
+		refresher:      refresher,
+		capacity:       capacity,
+		upstreamURL:    upstreamURL,
+		prewarmTimeout: codexWSPrewarmResponseTimeout,
 	}, nil
 }
 
@@ -196,6 +198,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 		UpstreamURL:          handler.upstreamURL,
 		Headers:              header,
 		DownstreamGeneration: generation,
+		PrewarmTimeout:       handler.prewarmTimeout,
 	})
 	if err != nil {
 		return err
@@ -238,6 +241,7 @@ type codexTerminatingWSBrokerConfig struct {
 	Headers              http.Header
 	AcceptedRevision     codex.Revision
 	DownstreamGeneration uint64
+	PrewarmTimeout       time.Duration
 }
 
 type codexTerminatingWSBroker struct {
@@ -246,8 +250,9 @@ type codexTerminatingWSBroker struct {
 }
 
 const (
-	codexWSIdleKeepAliveInterval = 30 * time.Second
-	codexWSControlWriteTimeout   = time.Second
+	codexWSIdleKeepAliveInterval  = 30 * time.Second
+	codexWSControlWriteTimeout    = time.Second
+	codexWSPrewarmResponseTimeout = 10 * time.Second
 )
 
 type codexWSFrameObservationSinkContextKey struct{}
@@ -329,6 +334,9 @@ type codexWSDownstreamReader struct {
 func newCodexTerminatingWSBroker(config codexTerminatingWSBrokerConfig) (*codexTerminatingWSBroker, error) {
 	if config.Plans == nil || config.Upstream == nil || config.UpstreamURL == "" || config.DownstreamGeneration == 0 {
 		return nil, fmt.Errorf("%w: incomplete terminating WebSocket broker", ErrCodexLeaseWriterUnavailable)
+	}
+	if config.PrewarmTimeout <= 0 {
+		config.PrewarmTimeout = codexWSPrewarmResponseTimeout
 	}
 	config.Headers = config.Headers.Clone()
 	return &codexTerminatingWSBroker{config: config}, nil
@@ -979,7 +987,18 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 			}
 			return fmt.Errorf("Codex upstream WebSocket write failed")
 		}
-		rotate, err := broker.readPrewarmResponse(ctx, downstream, planner, account, accountIndex+1 < len(accounts), active)
+		prewarmCtx, cancelPrewarm := context.WithTimeout(ctx, broker.config.PrewarmTimeout)
+		rotate, err := broker.readPrewarmResponse(prewarmCtx, ctx, downstream, planner, account, accountIndex+1 < len(accounts), active)
+		cancelPrewarm()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			noteCodexObservation(ctx, codexObservationFields{Decision: "broker_failed", Reason: "timeout"})
+			fmt.Fprintln(os.Stderr, "cq: Codex route trace transport=websocket event=broker_failed stage=upstream_read reason=timeout request_kind=prewarm handled=true")
+			frame, _ := canonicalCodexWSHandshakeError(&http.Response{StatusCode: http.StatusGatewayTimeout}, CodexWrappedError{}, nil)
+			if writeErr := writeCodexWSMessage(ctx, downstream, websocket.TextMessage, frame); writeErr != nil {
+				return fmt.Errorf("Codex downstream WebSocket write failed")
+			}
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -1033,7 +1052,7 @@ func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, acco
 	return last
 }
 
-func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx context.Context, downstream websocketRelayConn, planner codexWebSocketPrewarmPlanner, account CodexFrozenDispatchAccount, canRotate bool, active *codexWSActiveUpstream) (bool, error) {
+func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx context.Context, downstream websocketRelayConn, planner codexWebSocketPrewarmPlanner, account CodexFrozenDispatchAccount, canRotate bool, active *codexWSActiveUpstream) (bool, error) {
 	relayed := false
 	responseAnchor := ""
 	turnState := ""
@@ -1096,8 +1115,8 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx context.Context,
 				return false, readyErr
 			}
 			active.prewarm = reservation
-			startCodexWSUpstreamReader(ctx, active)
-			broker.startIdleUpstreamKeepalive(ctx, active)
+			startCodexWSUpstreamReader(activeCtx, active)
+			broker.startIdleUpstreamKeepalive(activeCtx, active)
 			return false, nil
 		}
 		if observation.Kind == CodexSSEError {
