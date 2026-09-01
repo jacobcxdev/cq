@@ -451,6 +451,17 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	windowsMSIText := string(windowsMSI)
+	for _, required := range []string{
+		"Stop-ScheduledTask",
+		"Unregister-ScheduledTask",
+	} {
+		if !strings.Contains(windowsMSIText, required) {
+			t.Errorf("Windows MSI validation cleanup missing non-native task operation %q", required)
+		}
+	}
+	if strings.Contains(windowsMSIText, "& schtasks.exe") {
+		t.Error("Windows MSI validation cleanup leaks expected missing-task exit status")
+	}
 	foregroundIndex := strings.Index(windowsMSIText, `Start-Process -FilePath $serviceProbe -ArgumentList @("proxy", "start")`)
 	directInstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service install --owner=winget`)
 	directUninstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service uninstall --owner=winget`)

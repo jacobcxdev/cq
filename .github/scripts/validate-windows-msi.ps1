@@ -164,9 +164,9 @@ function Assert-Installed {
 
 function Remove-CQTasks {
     $ErrorActionPreference = "Continue"
-    foreach ($task in @($proxyTask, $refreshTask)) {
-        & schtasks.exe /End /TN $task 2>$null | Out-Null
-        & schtasks.exe /Delete /TN $task /F 2>$null | Out-Null
+    foreach ($name in @("Proxy", "Refresh")) {
+        Stop-ScheduledTask -TaskPath $taskPath -TaskName $name -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskPath $taskPath -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
     }
     try {
         $scheduler = New-Object -ComObject "Schedule.Service"
