@@ -32,7 +32,10 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
-const codexReleaseExecutableAcceptanceEnvironment = "CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE"
+const (
+	codexReleaseExecutableAcceptanceEnvironment     = "CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE"
+	codexReleaseExecutableRoutingAccountEnvironment = "CQ_CODEX_LIVE_ROUTING_ACCOUNT_ID"
+)
 
 type codexReleaseExecutableIsolation struct {
 	root        string
@@ -283,6 +286,19 @@ func TestSnapshotCodexReleaseExecutableCredentialExcludesSystemCallerIdentity(t 
 		credential.identity.AccountID != "routing-account" || credential.material.AccessToken != routingAccessToken {
 		t.Fatalf("resolved refs = %#v, identity = %#v", source.resolved, credential.identity)
 	}
+	t.Setenv(codexReleaseExecutableRoutingAccountEnvironment, "routing-account")
+	filtered := &fakeCodexReleaseCredentialSource{
+		snapshots:  []codex.CodexBarProtectionSnapshot{proof, proof},
+		candidates: source.candidates,
+		materials:  source.materials,
+	}
+	credential, _, err = snapshotCodexReleaseExecutableCredential(context.Background(), filtered, clientCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.resolved) != 1 || filtered.resolved[0] != distinctRef || credential.identity.AccountID != "routing-account" {
+		t.Fatalf("filtered refs = %#v, identity = %#v", filtered.resolved, credential.identity)
+	}
 	matchingOnly := &fakeCodexReleaseCredentialSource{
 		snapshots:  []codex.CodexBarProtectionSnapshot{proof, proof},
 		candidates: source.candidates[:1],
@@ -303,9 +319,13 @@ func snapshotCodexReleaseExecutableCredential(ctx context.Context, source codexR
 	if err != nil {
 		return result, before, errors.New("list normal CQ Codex auth")
 	}
+	requiredAccountID := os.Getenv(codexReleaseExecutableRoutingAccountEnvironment)
 	minimumExpiry := time.Now().Add(codexLiveAcceptanceMinimumCredentialLifetime)
 	for _, candidate := range candidates {
 		if !candidate.Routable || candidate.Identity.AccountID == "" || candidate.Identity.UserID == "" {
+			continue
+		}
+		if requiredAccountID != "" && candidate.Identity.AccountID != requiredAccountID {
 			continue
 		}
 		if excludedCredential.identity.AccountID != "" && excludedCredential.identity.UserID != "" &&
