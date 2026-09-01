@@ -149,12 +149,11 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		"hooks:",
 		"install: |",
 		"uninstall: |",
+		`attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false`,
+		`system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
+		`raise "cq remains quarantined after installation"`,
 		`args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]`,
 		`args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]`,
-		"dev.jacobcx.cq.proxy",
-		"dev.jacobcx.cq.refresh",
-		"~/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist",
-		"~/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask missing %q", required)
@@ -162,6 +161,12 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(text, "skip_upload: true") {
 		t.Fatal("GoReleaser publishes the unformatted generated Homebrew Cask")
+	}
+	if strings.Contains(text, "\n    uninstall:\n") {
+		t.Fatal("Homebrew Cask duplicates transactional uninstall with privileged fallback")
+	}
+	if strings.Contains(text, "must_succeed: false") {
+		t.Fatal("Homebrew Cask quarantine removal fails open")
 	}
 
 	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
@@ -175,9 +180,36 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		"repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb",
 		"secrets.HOMEBREW_TAP_TOKEN",
 		"brew audit --cask --strict jacobcxdev/tap/cq",
+		`.github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"`,
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("Homebrew Cask publish workflow missing %q", required)
+		}
+	}
+}
+
+func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
+	script, err := os.ReadFile("../../.github/scripts/validate-homebrew-cask.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	for _, required := range []string{
+		`validation_caskroom="$(brew --caskroom)/$validation_token"`,
+		`installed_casks=$(brew list --cask)`,
+		`installed_taps=$(brew tap)`,
+		`validation Cask cleanup failed`,
+		`validation Caskroom cleanup failed`,
+		`validation binary cleanup failed`,
+		`validation tap cleanup failed`,
+		`validation temporary directory cleanup failed`,
+		`lifecycle_commands == %w[install uninstall]`,
+		`abort "CQ lifecycle command survived validation isolation"`,
+		`abort "production CQ binary path survived validation isolation"`,
+		`abort "unexpected Homebrew launchctl uninstall fallback"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Homebrew Cask validation missing fail-closed guard %q", required)
 		}
 	}
 }
