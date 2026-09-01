@@ -148,7 +148,9 @@ function Assert-Installed {
         throw "CQ MSI registration count is $registrationCount"
     }
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (($userPath -split ";") -notcontains $installRoot) {
+    $normalisedInstallRoot = $installRoot -replace '[\\/]+$', ''
+    $normalisedUserPath = @($userPath -split ";" | ForEach-Object { $_ -replace '[\\/]+$', '' })
+    if ($normalisedUserPath -notcontains $normalisedInstallRoot) {
         throw "CQ MSI PATH entry is absent"
     }
     & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
