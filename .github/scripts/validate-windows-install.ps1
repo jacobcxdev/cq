@@ -437,7 +437,12 @@ try {
             throw "installed HTTP/SSE/WebSocket probe failed"
         }
 
-        Invoke-WinGet -Arguments @("uninstall", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-source-agreements", "--disable-interactivity")
+        $installedEntry = @(Get-CQARPEntries)[0]
+        $productCode = [string]$installedEntry.PSChildName
+        if ($productCode -notmatch '^\{[0-9A-Fa-f-]{36}\}$') {
+            throw "CQ MSI product code is invalid"
+        }
+        Invoke-WinGet -Arguments @("uninstall", "--product-code", $productCode, "--scope", "user", "--silent", "--accept-source-agreements", "--disable-interactivity")
         Wait-Removed -Path $installedCQ
         foreach ($name in @("Proxy", "Refresh")) {
             if (Get-ScheduledTask -TaskPath $taskPath -TaskName $name -ErrorAction SilentlyContinue) {
