@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -390,16 +391,446 @@ func TestCodexHTTPRequestSessionAdvancesAccountOnlyForExactHard429(t *testing.T)
 	if got := ledger.Capacity("account-a", CapacityBucketBase); got.State != CapacityZero || got.Source != CapacitySourceHardLimit {
 		t.Fatalf("hard-limit capacity = %#v", got)
 	}
-	wantEvents := []string{"mark", "send:candidate-a", "retry:2", "mark", "send:candidate-b", "admit"}
+	wantEvents := []string{"mark", "send:candidate-a", "quota:2", "mark", "send:candidate-b", "admit"}
 	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
 }
 
-func TestCodexHTTPRequestSessionHardContinuitySurfacesExact429Once(t *testing.T) {
+func TestCodexHTTPRequestSessionExpiresHistoricalLeaseOnExactHard429(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	secondChoice := codexHTTPSessionChoice("account-b")
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice: firstChoice,
+			attempts: []CandidateAttempt{
+				codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1),
+			},
+		}},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice: secondChoice,
+			attempts: []CandidateAttempt{
+				codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1),
+			},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	events := make([]string, 0, 8)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{
+			{response: &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"usage_limit_reached"}}`))}},
+			{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}},
+		},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Choice.AccountKey != "account-b" || dispatcher.calls != 2 {
+		t.Fatalf("result/calls = %#v/%d, want account-b success after two dispatches", result, dispatcher.calls)
+	}
+	wantEvents := []string{"mark", "send:candidate-a", "quota:2", "mark", "send:candidate-b", "admit"}
+	if !slices.Equal(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestCodexHTTPRequestSessionSurfacesHard429OnlyAfterFallbacksExhaust(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	secondChoice := codexHTTPSessionChoice("account-b")
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   firstChoice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)},
+		}},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice:   secondChoice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	firstBody := &codexRejectedTrackingBody{reader: strings.NewReader(`{"error":{"type":"usage_limit_reached"}}`)}
+	lastPayload := []byte(`{"error":{"type":"usage_limit_reached","message":"all exhausted"}}`)
+	lastResponse := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(bytes.NewReader(lastPayload))}
+	events := make([]string, 0, 8)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{
+			{response: &http.Response{StatusCode: http.StatusTooManyRequests, Body: firstBody}},
+			{response: lastResponse},
+		},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response != lastResponse || result.Choice.AccountKey != "account-b" || dispatcher.calls != 2 || firstBody.closes != 1 {
+		t.Fatalf("result/calls/first close = %#v/%d/%d", result, dispatcher.calls, firstBody.closes)
+	}
+	got, readErr := io.ReadAll(result.Response.Body)
+	closeErr := result.Response.Body.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(got, lastPayload) {
+		t.Fatalf("last hard-limit body = %q, read/close %v/%v", got, readErr, closeErr)
+	}
+	wantEvents := []string{"mark", "send:candidate-a", "quota:2", "mark", "send:candidate-b", "quota:0"}
+	if !slices.Equal(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestCodexHTTPRequestSessionNonportableHard429ExpiresAccountWithoutReplay(t *testing.T) {
 	choice := codexHTTPSessionChoice("account-a")
 	plan := CodexFrozenDispatchPlan{
 		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   choice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)},
+		}},
+		accountUnavailableResetCandidates: []codex.AccountKey{"account-b"},
+	}
+	body := []byte(strings.TrimSuffix(string(frozenRequestBody(choice.RequestedModel, CodexRequestTurn, "private delta")), "}") + `,"previous_response_id":"response-a"}`)
+	inspection, err := InspectCodexNativeRequest(context.Background(), body, http.Header{
+		"Content-Type":  {"application/json"},
+		"Accept":        {"text/event-stream"},
+		"Authorization": {"Bearer private"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := inspection.Freeze(context.Background(), choice, nil, HeadroomModeCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hardLimitBody := []byte(`{"error":{"type":"usage_limit_reached","message":"account exhausted"}}`)
+	hardLimitResponse := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(bytes.NewReader(hardLimitBody))}
+	events := make([]string, 0, 4)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: body,
+		outcomes: []codexHTTPSessionOutcome{{response: hardLimitResponse}},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response != hardLimitResponse || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
+		t.Fatalf("result/calls = %#v/%d, want exact account-a response after one dispatch", result, dispatcher.calls)
+	}
+	got, readErr := io.ReadAll(result.Response.Body)
+	closeErr := result.Response.Body.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(got, hardLimitBody) {
+		t.Fatalf("hard-limit body = %q, read/close %v/%v", got, readErr, closeErr)
+	}
+	wantEvents := []string{"mark", "send:candidate-a", "quota:0"}
+	if !slices.Equal(events, wantEvents) {
+		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+}
+
+func TestCodexHTTPRequestSessionCompletesAdmittedAuthCycleAfterSurfacing(t *testing.T) {
+	choice := codexHTTPSessionChoice("account-a")
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   choice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)},
+		}},
+		accountUnavailableResetCandidates: []codex.AccountKey{"account-b"},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+	response := &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody}
+	events := make([]string, 0, 4)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{{response: response}},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Response != response || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
+		t.Fatalf("result/calls = %#v/%d, want exact auth response after one dispatch", result, dispatcher.calls)
+	}
+	if want := []string{"mark", "send:candidate-a", "exhaust:0", "complete-unavailable"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestCodexHTTPRequestSessionDoesNotReplaySoft429ToHardLimitFallback(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	response := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"rate_limit_exceeded"}}`))}
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   firstChoice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)},
+		}},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice:   codexHTTPSessionChoice("account-b"),
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	events := make([]string, 0, 4)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{{response: response}},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response != response || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
+		t.Fatalf("result/calls = %#v/%d", result, dispatcher.calls)
+	}
+	if want := []string{"mark", "send:candidate-a", "finish"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestCodexHTTPRequestSessionExhaustsSameAccountAuthAttemptsBeforePortableFallback(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice: firstChoice,
+			attempts: []CandidateAttempt{
+				codexHTTPSessionAttempt("account-a", "candidate-a-one", "revision-a-one", 1),
+				codexHTTPSessionAttempt("account-a", "candidate-a-two", "revision-a-two", 2),
+			},
+		}},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice:   codexHTTPSessionChoice("account-b"),
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	events := make([]string, 0, 10)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{
+			{response: &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody}},
+			{response: &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"authentication_error"}}`))}},
+			{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}},
+		},
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-a", 3: "account-b"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil || result.Choice.AccountKey != "account-b" || dispatcher.calls != 3 {
+		t.Fatalf("result/calls = %#v/%d", result, dispatcher.calls)
+	}
+	want := []string{
+		"mark", "send:candidate-a-one", "retry:2",
+		"mark", "send:candidate-a-two", "exhaust:3",
+		"mark", "send:candidate-b", "admit",
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestCodexHTTPRequestSessionRefreshesFallbackAfterPrimaryUnavailable(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	directB := codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)
+	refreshB := directB
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice:   firstChoice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)},
+		}},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice:         codexHTTPSessionChoice("account-b"),
+			attempts:       []CandidateAttempt{directB},
+			refreshAttempt: &refreshB,
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	events := make([]string, 0, 10)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{
+			{response: &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"usage_limit_reached"}}`))}},
+			{response: &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody}},
+			{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}},
+		},
+	}
+	refresher := &codexHTTPSessionRefresher{
+		wantRef: directB.Candidate, wantRevision: directB.Revision,
+		ref: directB.Candidate, revision: "revision-b-refreshed",
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b", 3: "account-b"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Refresher: refresher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil || result.Choice.AccountKey != "account-b" || result.Attempt.Revision != "revision-b-refreshed" || dispatcher.calls != 3 || refresher.calls != 1 {
+		t.Fatalf("result/dispatch/refresh = %#v/%d/%d", result, dispatcher.calls, refresher.calls)
+	}
+	want := []string{
+		"mark", "send:candidate-a", "quota:2",
+		"mark", "send:candidate-b", "retry:3",
+		"mark", "send:candidate-b", "admit",
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	result.Response.Body.Close()
+}
+
+func TestCodexHTTPRequestSessionRefreshesRefreshOnlyCandidateBeforeDispatch(t *testing.T) {
+	choice := codexHTTPSessionChoice("account-a")
+	stale := codexHTTPSessionAttempt("account-a", "candidate-a", "revision-stale", 1)
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice: choice, refreshAttempt: &stale,
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+	events := make([]string, 0, 4)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}}},
+	}
+	refresher := &codexHTTPSessionRefresher{
+		wantRef: stale.Candidate, wantRevision: stale.Revision,
+		ref: stale.Candidate, revision: "revision-current",
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", slotAccounts: map[uint32]codex.AccountKey{1: "account-a"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Refresher: refresher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if dispatcher.calls != 1 || refresher.calls != 1 || result.Response == nil || result.Attempt.Revision != "revision-current" {
+		t.Fatalf("dispatch/refresh/result = %d/%d/%#v", dispatcher.calls, refresher.calls, result)
+	}
+	if want := []string{"mark", "send:candidate-a", "admit"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestCodexHTTPRequestSessionRotatesRefreshOnlyFailureWithoutDispatchingStaleCandidate(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	stale := codexHTTPSessionAttempt("account-a", "candidate-a", "revision-stale", 1)
+	plan := CodexFrozenDispatchPlan{
+		status: CodexRoutePlanReady,
+		accounts: []CodexFrozenDispatchAccount{{
+			choice: firstChoice, refreshAttempt: &stale,
+		}},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice:   codexHTTPSessionChoice("account-b"),
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)},
+		}},
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	events := make([]string, 0, 6)
+	dispatcher := &codexHTTPSessionDispatcher{
+		t: t, events: &events, wantBody: encoded,
+		outcomes: []codexHTTPSessionOutcome{{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}}},
+	}
+	refresher := &codexHTTPSessionRefresher{
+		wantRef: stale.Candidate, wantRevision: stale.Revision, err: codex.ErrRefreshUnavailable,
+	}
+	lifecycle := &codexHTTPSessionLifecycle{
+		account: "account-a", admitted: true,
+		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events,
+	}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Refresher: refresher}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if dispatcher.calls != 1 || refresher.calls != 1 || result.Response == nil || result.Choice.AccountKey != "account-b" {
+		t.Fatalf("dispatch/refresh/result = %d/%d/%#v", dispatcher.calls, refresher.calls, result)
+	}
+	if want := []string{"exhaust:2", "mark", "send:candidate-b", "admit"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestCodexHTTPRequestSessionPortableHardLimitWithoutFallbackExpiresBinding(t *testing.T) {
+	choice := codexHTTPSessionChoice("account-a")
+	plan := CodexFrozenDispatchPlan{
+		status:                     CodexRoutePlanReady,
+		accountUnavailablePortable: true,
 		accounts: []CodexFrozenDispatchAccount{{
 			choice: choice,
 			attempts: []CandidateAttempt{
@@ -428,14 +859,14 @@ func TestCodexHTTPRequestSessionHardContinuitySurfacesExact429Once(t *testing.T)
 		t.Fatal(err)
 	}
 	if result.Response != response || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
-		t.Fatalf("hard continuity result/calls = %#v/%d, want original account-a response and one dispatch", result, dispatcher.calls)
+		t.Fatalf("portable hard-limit result/calls = %#v/%d, want original account-a response and one dispatch", result, dispatcher.calls)
 	}
 	got, readErr := io.ReadAll(result.Response.Body)
 	closeErr := result.Response.Body.Close()
 	if readErr != nil || closeErr != nil || !bytes.Equal(got, hardBody) {
-		t.Fatalf("hard continuity body = %q, read/close %v/%v", got, readErr, closeErr)
+		t.Fatalf("portable hard-limit body = %q, read/close %v/%v", got, readErr, closeErr)
 	}
-	if want := []string{"mark", "send:candidate-a", "finish"}; strings.Join(events, ",") != strings.Join(want, ",") {
+	if want := []string{"mark", "send:candidate-a", "quota:0"}; strings.Join(events, ",") != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
@@ -455,7 +886,8 @@ func TestCodexHTTPRequestSessionSurfacesRetainedEarlyDefaultAfterAlternativesExh
 	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, defaultChoice)
 	defaultFailure := `{"error":{"type":"usage_limit_reached"}}`
 	defaultBody := &codexRejectedTrackingBody{reader: strings.NewReader(defaultFailure)}
-	ordinaryBody := &codexRejectedTrackingBody{reader: strings.NewReader("ordinary failure")}
+	ordinaryFailure := `{"error":{"type":"authentication_error"}}`
+	ordinaryBody := &codexRejectedTrackingBody{reader: strings.NewReader(ordinaryFailure)}
 	events := make([]string, 0, 8)
 	dispatcher := &codexHTTPSessionDispatcher{
 		t:      t,
@@ -488,7 +920,7 @@ func TestCodexHTTPRequestSessionSurfacesRetainedEarlyDefaultAfterAlternativesExh
 	if readErr != nil || closeErr != nil || string(body) != defaultFailure {
 		t.Fatalf("retained default body = %q, read/close %v/%v", body, readErr, closeErr)
 	}
-	if defaultBody.closes != 1 || ordinaryBody.readBytes != len("ordinary failure") || ordinaryBody.closes != 1 {
+	if defaultBody.closes != 1 || ordinaryBody.readBytes != len(ordinaryFailure) || ordinaryBody.closes != 1 {
 		t.Fatalf("default/ordinary disposal = %d and %d/%d", defaultBody.closes, ordinaryBody.readBytes, ordinaryBody.closes)
 	}
 	if dispatcher.calls != 2 {
@@ -545,7 +977,7 @@ func TestCodexHTTPRequestSessionDegradedInventoryOverridesRetainedDefault(t *tes
 	if defaultBody.closes != 1 || dispatcher.calls != 2 {
 		t.Fatalf("retained default close/dispatch calls = %d/%d, want 1/2", defaultBody.closes, dispatcher.calls)
 	}
-	wantEvents := []string{"mark", "send:candidate-default", "retry:2", "abandon"}
+	wantEvents := []string{"mark", "send:candidate-default", "quota:2", "abandon"}
 	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
@@ -562,17 +994,22 @@ func TestCodexHTTPAttemptSlotsMatchFrozenDirectAndRefreshOrder(t *testing.T) {
 			{choice: codexHTTPSessionChoice("account-a"), attempts: []CandidateAttempt{first, second}, refreshAttempt: &refresh},
 			{choice: codexHTTPSessionChoice("account-b"), attempts: []CandidateAttempt{last}, isDefault: true},
 		},
+		accountUnavailableFallbacks: []CodexFrozenDispatchAccount{{
+			choice:   codexHTTPSessionChoice("account-c"),
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-c", "candidate-four", "revision-four", 1)},
+		}},
 	}
 
 	slots := CodexHTTPAttemptSlots(plan)
-	if len(slots) != 4 {
-		t.Fatalf("slots = %d, want 4", len(slots))
+	if len(slots) != 5 {
+		t.Fatalf("slots = %d, want 5", len(slots))
 	}
 	want := []CodexHTTPAttemptSlotPlan{
 		{Index: 1, AccountKey: "account-a", CandidateID: "candidate-one", Kind: CodexAttemptSlotDirect},
 		{Index: 2, AccountKey: "account-a", CandidateID: "candidate-two", Kind: CodexAttemptSlotDirect},
 		{Index: 3, AccountKey: "account-a", CandidateID: "candidate-two", Kind: CodexAttemptSlotEligibleManagedRefresh},
 		{Index: 4, AccountKey: "account-b", CandidateID: "candidate-three", Kind: CodexAttemptSlotDirect},
+		{Index: 5, AccountKey: "account-c", CandidateID: "candidate-four", Kind: CodexAttemptSlotDirect},
 	}
 	for index := range want {
 		if slots[index] != want[index] {
@@ -580,7 +1017,7 @@ func TestCodexHTTPAttemptSlotsMatchFrozenDirectAndRefreshOrder(t *testing.T) {
 		}
 	}
 	slots[0].AccountKey = "mutated"
-	if again := CodexHTTPAttemptSlots(plan); len(again) != 4 || again[0].AccountKey != "account-a" {
+	if again := CodexHTTPAttemptSlots(plan); len(again) != 5 || again[0].AccountKey != "account-a" {
 		t.Fatalf("slot mutation escaped: %#v", again)
 	}
 }
@@ -683,15 +1120,18 @@ func TestCodexHTTPRequestSessionStopsWithoutMigration(t *testing.T) {
 		body         []byte
 		dispatchErr  error
 		wantErr      error
+		wantMigrate  bool
+		wantQuota    bool
 	}{
 		{name: "network", dispatchErr: networkErr, wantErr: networkErr},
 		{name: "timeout", dispatchErr: context.DeadlineExceeded, wantErr: context.DeadlineExceeded},
-		{name: "unauthorised", status: http.StatusUnauthorized, body: []byte("credential rejected")},
-		{name: "forbidden", status: http.StatusForbidden, body: []byte("credential forbidden")},
+		{name: "unauthorised", status: http.StatusUnauthorized, body: []byte("credential rejected"), wantMigrate: true},
+		{name: "forbidden policy", status: http.StatusForbidden, body: []byte(`{"error":{"type":"safety_policy_violation"}}`)},
+		{name: "forbidden authentication error", status: http.StatusForbidden, body: []byte(`{"error":{"type":"authentication_error"}}`), wantMigrate: true},
 		{name: "server error", status: http.StatusInternalServerError, body: []byte("provider failed")},
 		{name: "soft limit", status: http.StatusTooManyRequests, body: []byte(`{"error":{"type":"rate_limit_exceeded"}}`)},
 		{name: "encoded hard limit", status: http.StatusTooManyRequests, header: http.Header{"Content-Encoding": {"gzip"}}, body: []byte(`{"error":{"type":"usage_limit_reached"}}`)},
-		{name: "already decoded hard limit", status: http.StatusTooManyRequests, uncompressed: true, body: []byte(`{"error":{"type":"usage_limit_reached"}}`)},
+		{name: "already decoded hard limit", status: http.StatusTooManyRequests, uncompressed: true, body: []byte(`{"error":{"type":"usage_limit_reached"}}`), wantMigrate: true, wantQuota: true},
 		{name: "malformed limit", status: http.StatusTooManyRequests, body: []byte(`{"error":`)},
 		{name: "oversize limit", status: http.StatusTooManyRequests, body: bytes.Repeat([]byte("x"), codexAttemptResponseLimit+17)},
 	}
@@ -738,8 +1178,12 @@ func TestCodexHTTPRequestSessionStopsWithoutMigration(t *testing.T) {
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("error = %v, want %v", err, test.wantErr)
 			}
-			if dispatcher.calls != 1 {
-				t.Fatalf("dispatch calls = %d, want 1", dispatcher.calls)
+			wantDispatch := 1
+			if test.wantMigrate {
+				wantDispatch = 2
+			}
+			if dispatcher.calls != wantDispatch {
+				t.Fatalf("dispatch calls = %d, want %d", dispatcher.calls, wantDispatch)
 			}
 			if test.dispatchErr != nil {
 				if result.Response != nil {
@@ -747,6 +1191,20 @@ func TestCodexHTTPRequestSessionStopsWithoutMigration(t *testing.T) {
 				}
 				wantEvents := []string{"mark", "send:candidate-a", "indeterminate", "drain"}
 				if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
+					t.Fatalf("events = %v, want %v", events, wantEvents)
+				}
+				return
+			}
+			if test.wantMigrate {
+				if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Choice.AccountKey != "account-b" {
+					t.Fatalf("migrated result = %#v", result)
+				}
+				migrationEvent := "exhaust:2"
+				if test.wantQuota {
+					migrationEvent = "quota:2"
+				}
+				wantEvents := []string{"mark", "send:candidate-a", migrationEvent, "mark", "send:candidate-b", "admit"}
+				if !slices.Equal(events, wantEvents) {
 					t.Fatalf("events = %v, want %v", events, wantEvents)
 				}
 				return
@@ -860,47 +1318,62 @@ func TestCodexHTTPRequestSessionDrainsWhenRetryTransitionFails(t *testing.T) {
 	}
 }
 
-func TestCodexHTTPRequestSessionNeverMigratesAfterPriorAdmission(t *testing.T) {
-	firstChoice := codexHTTPSessionChoice("account-a")
-	secondChoice := codexHTTPSessionChoice("account-b")
-	plan := CodexFrozenDispatchPlan{
-		status: CodexRoutePlanReady,
-		accounts: []CodexFrozenDispatchAccount{
-			{choice: firstChoice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)}},
-			{choice: secondChoice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)}},
-		},
-	}
-	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
-	events := make([]string, 0, 4)
-	hardBody := []byte(`{"error":{"type":"usage_limit_reached"}}`)
-	response := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(bytes.NewReader(hardBody))}
-	dispatcher := &codexHTTPSessionDispatcher{
-		t: t, events: &events, wantBody: encoded,
-		outcomes: []codexHTTPSessionOutcome{
-			{response: response},
-			{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}},
-		},
-	}
-	lifecycle := &codexHTTPSessionLifecycle{
-		account: "account-a", admitted: true,
-		slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events,
-	}
-	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestCodexHTTPRequestSessionNonPortableRejectionPreservesBinding(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   []byte
+	}{
+		{name: "unauthorised", status: http.StatusUnauthorized, body: []byte("unauthorised")},
+		{name: "forbidden", status: http.StatusForbidden, body: []byte("forbidden")},
+		{name: "hard limit", status: http.StatusTooManyRequests, body: []byte(`{"error":{"type":"usage_limit_reached"}}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			firstChoice := codexHTTPSessionChoice("account-a")
+			secondChoice := codexHTTPSessionChoice("account-b")
+			plan := CodexFrozenDispatchPlan{
+				status: CodexRoutePlanReady,
+				accounts: []CodexFrozenDispatchAccount{
+					{choice: firstChoice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)}},
+					{choice: secondChoice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)}},
+				},
+			}
+			frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+			events := make([]string, 0, 4)
+			response := &http.Response{StatusCode: test.status, Body: io.NopCloser(bytes.NewReader(test.body))}
+			dispatcher := &codexHTTPSessionDispatcher{
+				t: t, events: &events, wantBody: encoded,
+				outcomes: []codexHTTPSessionOutcome{
+					{response: response},
+					{response: &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}},
+				},
+			}
+			lifecycle := &codexHTTPSessionLifecycle{
+				account: "account-a", admitted: true,
+				slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events,
+			}
+			template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if result.Response != response || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
-		t.Fatalf("result/calls = %#v/%d, want original A response and one dispatch", result, dispatcher.calls)
-	}
-	got, readErr := io.ReadAll(result.Response.Body)
-	closeErr := result.Response.Body.Close()
-	if readErr != nil || closeErr != nil || !bytes.Equal(got, hardBody) {
-		t.Fatalf("body = %q, read/close %v/%v", got, readErr, closeErr)
+			result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			if result.Response != response || result.Choice.AccountKey != "account-a" || dispatcher.calls != 1 {
+				t.Fatalf("result/calls = %#v/%d, want original A response and one dispatch", result, dispatcher.calls)
+			}
+			got, readErr := io.ReadAll(result.Response.Body)
+			closeErr := result.Response.Body.Close()
+			if readErr != nil || closeErr != nil || !bytes.Equal(got, test.body) {
+				t.Fatalf("body = %q, read/close %v/%v", got, readErr, closeErr)
+			}
+			wantEvents := []string{"mark", "send:candidate-a", "finish"}
+			if !slices.Equal(events, wantEvents) {
+				t.Fatalf("events = %v, want %v", events, wantEvents)
+			}
+		})
 	}
 }
 
@@ -1037,7 +1510,7 @@ func TestCodexHTTPRequestSessionReturnsTypedDefaultFailureAfterExhaustion(t *tes
 	if result.Response != nil || rejectedBody.readBytes != len("rejected") || rejectedBody.closes != 1 {
 		t.Fatalf("result/body disposal = %#v and %d/%d", result, rejectedBody.readBytes, rejectedBody.closes)
 	}
-	wantEvents := []string{"mark", "send:candidate-a", "finish"}
+	wantEvents := []string{"mark", "send:candidate-a", "exhaust:0"}
 	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
@@ -1053,7 +1526,7 @@ func TestCodexHTTPRequestSessionRefreshDegradationWinsAndStaleRevisionSkips(t *t
 		wantDispatch int
 	}{
 		{name: "degraded inventory wins", refreshErr: codex.ErrCredentialInventoryDegraded, wantErr: codex.ErrCredentialInventoryDegraded, wantDispatch: 1},
-		{name: "stale revision surfaces rejection", refreshRev: "revision-a", wantDispatch: 1},
+		{name: "stale revision rotates account", refreshRev: "revision-a", wantDispatch: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			firstChoice := codexHTTPSessionChoice("account-a")
@@ -1106,7 +1579,7 @@ func TestCodexHTTPRequestSessionRefreshDegradationWinsAndStaleRevisionSkips(t *t
 				}
 				return
 			}
-			if result.Response == nil || result.Response.StatusCode != http.StatusUnauthorized || result.Choice.AccountKey != "account-a" {
+			if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Choice.AccountKey != "account-b" {
 				t.Fatalf("result = %#v", result)
 			}
 			result.Response.Body.Close()
@@ -1221,6 +1694,44 @@ func (lifecycle *codexHTTPSessionLifecycle) RejectAndPrepareContext(_ context.Co
 	if next.retryErr != nil {
 		return nil, next.retryErr
 	}
+	return next, nil
+}
+
+func (lifecycle *codexHTTPSessionLifecycle) RecordAccountUnavailableContext(_ context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	next := lifecycle.copy()
+	if replacementSlot != 0 {
+		account, ok := next.slotAccounts[replacementSlot]
+		if !ok {
+			return nil, errors.New("unknown slot")
+		}
+		next.account = account
+	}
+	*next.events = append(*next.events, fmt.Sprintf("exhaust:%d", replacementSlot))
+	if next.retryErr != nil {
+		return nil, next.retryErr
+	}
+	return next, nil
+}
+
+func (lifecycle *codexHTTPSessionLifecycle) RecordQuotaExhaustedContext(_ context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	next := lifecycle.copy()
+	if replacementSlot != 0 {
+		account, ok := next.slotAccounts[replacementSlot]
+		if !ok {
+			return nil, errors.New("unknown slot")
+		}
+		next.account = account
+	}
+	*next.events = append(*next.events, fmt.Sprintf("quota:%d", replacementSlot))
+	if next.retryErr != nil {
+		return nil, next.retryErr
+	}
+	return next, nil
+}
+
+func (lifecycle *codexHTTPSessionLifecycle) CompleteAccountUnavailableCycleContext(context.Context) (CodexHTTPRequestLifecycle, error) {
+	next := lifecycle.copy()
+	*next.events = append(*next.events, "complete-unavailable")
 	return next, nil
 }
 

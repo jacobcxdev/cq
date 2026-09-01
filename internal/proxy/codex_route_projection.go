@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"strings"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -30,6 +31,7 @@ func ProjectCodexRoutePolicyCandidates(
 	capacity *CodexCapacityLedger,
 	requirements CodexRouteRequirements,
 	provisional map[codex.AccountKey]int,
+	now time.Time,
 ) ([]CodexRoutePolicyCandidate, error) {
 	for _, count := range provisional {
 		if count < 0 {
@@ -63,7 +65,7 @@ func ProjectCodexRoutePolicyCandidates(
 			},
 			RequiredCapacity:  views,
 			Compatible:        compatible,
-			Routable:          codexRouteProjectionAccountRoutable(account),
+			Routable:          codexRouteProjectionAccountRoutable(account, now),
 			ProvisionalLeases: provisional[account.Key],
 		})
 	}
@@ -84,20 +86,20 @@ func projectCodexRouteModel(plan, requested string) (string, bool) {
 	return rewritten, true
 }
 
-func codexRouteProjectionAccountRoutable(account codex.LogicalAccount) bool {
+func codexRouteProjectionAccountRoutable(account codex.LogicalAccount, now time.Time) bool {
 	if !account.Routable || account.Unstable || account.Identity.AccountID == "" || account.Identity.UserID == "" {
 		return false
 	}
 	for _, candidate := range account.Candidates {
-		if codexRouteProjectionCandidateReady(account.Key, candidate) {
+		if codexRouteProjectionCandidateReady(account.Key, candidate, now) {
 			return true
 		}
 	}
 	return false
 }
 
-func codexRouteProjectionCandidateReady(accountKey codex.AccountKey, candidate codex.CredentialCandidate) bool {
-	return candidate.Routable && !candidate.DispatchBlocked &&
+func codexRouteProjectionCandidateReady(accountKey codex.AccountKey, candidate codex.CredentialCandidate, now time.Time) bool {
+	return codex.CandidateAvailabilityAt(candidate, now) != codex.CandidateUnavailable &&
 		candidate.Ref.AccountKey == accountKey && candidate.Ref.CandidateID != "" &&
 		candidate.Revision != "" && candidate.Source >= codex.SourceSystem && candidate.Source <= codex.SourceExternal
 }

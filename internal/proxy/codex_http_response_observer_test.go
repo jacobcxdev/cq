@@ -571,6 +571,18 @@ func (lifecycle *codexHTTPObserverLifecycle) RejectAndPrepareContext(context.Con
 	return lifecycle.next(), nil
 }
 
+func (lifecycle *codexHTTPObserverLifecycle) RecordAccountUnavailableContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error) {
+	return lifecycle.next(), nil
+}
+
+func (lifecycle *codexHTTPObserverLifecycle) RecordQuotaExhaustedContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error) {
+	return lifecycle.next(), nil
+}
+
+func (lifecycle *codexHTTPObserverLifecycle) CompleteAccountUnavailableCycleContext(context.Context) (CodexHTTPRequestLifecycle, error) {
+	return lifecycle.next(), nil
+}
+
 func (lifecycle *codexHTTPObserverLifecycle) AbandonBeforeDispatchContext(context.Context) (CodexHTTPRequestLifecycle, error) {
 	return lifecycle.next(), nil
 }

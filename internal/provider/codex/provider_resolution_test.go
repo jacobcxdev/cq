@@ -99,7 +99,7 @@ func TestFetchCredentialAuthorityLossReturnsPrivacySafeFetchError(t *testing.T) 
 			authority: &providerCredentialAuthority{
 				inventories: []Inventory{providerInventory(
 					AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"},
-					providerCandidate(CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}, "revision-1", SourceManaged, time.Time{}),
+					providerRefreshEligibleCandidate(CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}, "revision-1", time.Time{}),
 				)},
 				resolveExact: func(_ int, planned PlannedCandidate) (CredentialMaterial, error) {
 					return testCredentialMaterial(planned.Identity, "expired-secret"), nil
@@ -417,14 +417,14 @@ func TestFetchRetainsLastLogicalInventoryAsStaleOnRealCoordinatorFailure(t *test
 		}),
 		fs: fs, inventory: coordinator, secrets: coordinator,
 	}
-	first, err := p.Fetch(context.Background(), time.Now())
+	first, err := p.Fetch(context.Background(), time.Unix(1_700_000_000, 0))
 	if err != nil || len(first) != 1 || !first[0].IsUsable() {
 		t.Fatalf("initial Fetch results/error = %+v/%v, want one usable result", first, err)
 	}
 
 	const sensitive = "private managed directory and token-secret"
 	fs.readDirErr = map[string]error{"/fake/home/.codex/accounts": errors.New(sensitive)}
-	second, err := p.Fetch(context.Background(), time.Now())
+	second, err := p.Fetch(context.Background(), time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("degraded Fetch error = %v, want typed result", err)
 	}
@@ -506,6 +506,13 @@ func providerCandidate(ref CandidateRef, revision Revision, source CredentialSou
 	return CredentialCandidate{Ref: ref, Revision: revision, Source: source, AccessExpiresAt: expires, Routable: true}
 }
 
+func providerRefreshEligibleCandidate(ref CandidateRef, revision Revision, expires time.Time) CredentialCandidate {
+	candidate := providerCandidate(ref, revision, SourceManaged, expires)
+	candidate.CQAuthored = true
+	candidate.RefreshEligible = true
+	return candidate
+}
+
 func providerUsageResponse(status int) *http.Response {
 	body := ""
 	if status == http.StatusOK {
@@ -515,6 +522,190 @@ func providerUsageResponse(status int) *http.Response {
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestFetchKnownExpiredExternalCredentialDoesNotDispatch(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	ref := CandidateRef{AccountKey: "logical-1", CandidateID: "external-1"}
+	authority := &providerCredentialAuthority{
+		inventories: []Inventory{providerInventory(
+			identity,
+			providerCandidate(ref, "revision-1", SourceExternal, now.Add(-time.Minute)),
+		)},
+	}
+	requestCalls := 0
+	p := &Provider{
+		client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+			requestCalls++
+			return providerUsageResponse(http.StatusOK), nil
+		}),
+		fs: newFakeFS(), inventory: authority, secrets: authority,
+	}
+
+	results, err := p.Fetch(context.Background(), now)
+	if err != nil || len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "auth_expired" {
+		t.Fatalf("Fetch results/error = %+v/%v, want one auth_expired result", results, err)
+	}
+	if got := results[0].Error.Message; got != "access expired — credential owner must refresh" {
+		t.Fatalf("error message = %q, want credential-owner refresh guidance", got)
+	}
+	listCalls, weakCalls, plans := authority.snapshot()
+	if listCalls != 1 || weakCalls != 0 || len(plans) != 0 || requestCalls != 0 {
+		t.Fatalf("list/weak/plans/upstream calls = %d/%d/%d/%d, want 1/0/0/0", listCalls, weakCalls, len(plans), requestCalls)
+	}
+}
+
+func TestFetchProviderAuthEvidenceOutranksLaterLocalExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "unauthorised", status: http.StatusUnauthorized},
+		{
+			name:   "forbidden authentication error",
+			status: http.StatusForbidden,
+			body:   `{"error":{"type":"authentication_error"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			readyRef := CandidateRef{AccountKey: "logical-1", CandidateID: "external-ready"}
+			expiredRef := CandidateRef{AccountKey: "logical-1", CandidateID: "external-expired"}
+			authority := &providerCredentialAuthority{
+				inventories: []Inventory{providerInventory(
+					identity,
+					providerCandidate(readyRef, "ready-revision", SourceExternal, now.Add(time.Hour)),
+					providerCandidate(expiredRef, "expired-revision", SourceExternal, now.Add(-time.Minute)),
+				)},
+				resolveExact: func(_ int, planned PlannedCandidate) (CredentialMaterial, error) {
+					return testCredentialMaterial(planned.Identity, "rejected-secret"), nil
+				},
+			}
+			requestCalls := 0
+			p := &Provider{
+				client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+					requestCalls++
+					return &http.Response{
+						StatusCode: test.status,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(test.body)),
+					}, nil
+				}),
+				fs: newFakeFS(), inventory: authority, secrets: authority,
+			}
+
+			results, err := p.Fetch(context.Background(), now)
+			if err != nil || len(results) != 1 || results[0].Error == nil {
+				t.Fatalf("Fetch results/error = %+v/%v, want one provider rejection", results, err)
+			}
+			if got := results[0].Error.Code; got != "auth_expired" {
+				t.Fatalf("error code = %q, want auth_expired", got)
+			}
+			if got := results[0].Error.HTTPStatus; got != test.status {
+				t.Fatalf("HTTP status = %d, want %d", got, test.status)
+			}
+			if got := results[0].Error.Message; got != credentialRejectedMessage {
+				t.Fatalf("error message = %q, want provider rejection evidence", got)
+			}
+			listCalls, weakCalls, plans := authority.snapshot()
+			if listCalls != 1 || weakCalls != 0 || len(plans) != 1 || requestCalls != 1 {
+				t.Fatalf("list/weak/plans/upstream calls = %d/%d/%d/%d, want 1/0/1/1", listCalls, weakCalls, len(plans), requestCalls)
+			}
+		})
+	}
+}
+
+func TestFetchProviderAuthEvidenceOutranksLaterManagedRefreshRequirement(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	readyRef := CandidateRef{AccountKey: "logical-1", CandidateID: "external-ready"}
+	expiredRef := CandidateRef{AccountKey: "logical-1", CandidateID: "managed-expired"}
+	authority := &providerCredentialAuthority{
+		inventories: []Inventory{providerInventory(
+			identity,
+			providerCandidate(readyRef, "ready-revision", SourceExternal, now.Add(time.Hour)),
+			providerRefreshEligibleCandidate(expiredRef, "expired-revision", now.Add(-time.Minute)),
+		)},
+		resolveExact: func(_ int, planned PlannedCandidate) (CredentialMaterial, error) {
+			return testCredentialMaterial(planned.Identity, "rejected-secret"), nil
+		},
+	}
+	requestCalls := 0
+	p := &Provider{
+		client: providerDoerFunc(func(*http.Request) (*http.Response, error) {
+			requestCalls++
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}),
+		fs: newFakeFS(), inventory: authority, secrets: authority,
+	}
+
+	results, err := p.Fetch(context.Background(), now)
+	if err != nil || len(results) != 1 || results[0].Error == nil {
+		t.Fatalf("Fetch results/error = %+v/%v, want one provider rejection", results, err)
+	}
+	if got := results[0].Error.Code; got != "auth_expired" {
+		t.Fatalf("error code = %q, want auth_expired", got)
+	}
+	if got := results[0].Error.HTTPStatus; got != http.StatusUnauthorized {
+		t.Fatalf("HTTP status = %d, want 401", got)
+	}
+	if got := results[0].Error.Message; got != credentialRejectedMessage {
+		t.Fatalf("error message = %q, want provider rejection evidence", got)
+	}
+	listCalls, weakCalls, plans := authority.snapshot()
+	if listCalls != 1 || weakCalls != 0 || len(plans) != 1 || requestCalls != 1 {
+		t.Fatalf("list/weak/plans/upstream calls = %d/%d/%d/%d, want 1/0/1/1", listCalls, weakCalls, len(plans), requestCalls)
+	}
+}
+
+func TestFetchKnownExpiredManagedCredentialRefreshesBeforeDispatch(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	identity := AccountIdentity{AccountID: "account-1", UserID: "user-1", Email: "one@example.test"}
+	ref := CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}
+	candidate := providerCandidate(ref, "revision-1", SourceManaged, now.Add(-time.Minute))
+	candidate.CQAuthored = true
+	candidate.RefreshEligible = true
+	authority := &providerCredentialAuthority{
+		inventories: []Inventory{providerInventory(identity, candidate)},
+	}
+	broker := &providerRefreshBroker{refresh: func(gotRef CandidateRef, gotRevision Revision) (RefreshResult, error) {
+		if gotRef != ref || gotRevision != "revision-1" {
+			t.Fatalf("refresh target = %+v/%q, want %+v/revision-1", gotRef, gotRevision, ref)
+		}
+		return RefreshResult{
+			Ref: ref, Revision: "revision-2",
+			Material: testCredentialMaterial(identity, "refreshed-secret"),
+		}, nil
+	}}
+	requestCalls := 0
+	p := &Provider{
+		client: providerDoerFunc(func(req *http.Request) (*http.Response, error) {
+			requestCalls++
+			if got := req.Header.Get("Authorization"); got != "Bearer refreshed-secret" {
+				t.Fatalf("Authorization = %q, want refreshed credential", got)
+			}
+			return providerUsageResponse(http.StatusOK), nil
+		}),
+		fs: newFakeFS(), inventory: authority, secrets: authority, refreshBroker: broker,
+	}
+
+	results, err := p.Fetch(context.Background(), now)
+	if err != nil || len(results) != 1 || !results[0].IsUsable() {
+		t.Fatalf("Fetch results/error = %+v/%v, want refreshed success", results, err)
+	}
+	listCalls, weakCalls, plans := authority.snapshot()
+	refreshCalls, _, _ := broker.snapshot()
+	if listCalls != 1 || weakCalls != 0 || len(plans) != 0 || refreshCalls != 1 || requestCalls != 1 {
+		t.Fatalf("list/weak/plans/refresh/upstream calls = %d/%d/%d/%d/%d, want 1/0/0/1/1", listCalls, weakCalls, len(plans), refreshCalls, requestCalls)
 	}
 }
 
@@ -590,8 +781,11 @@ func TestFetchStaleCredentialIdentitySwitchFailsBeforeDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "auth_expired" {
-		t.Fatalf("results = %+v, want one auth_expired result", results)
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "fetch_error" {
+		t.Fatalf("results = %+v, want one inventory failure result", results)
+	}
+	if results[0].Error.Message != credentialInventoryDegradedMessage {
+		t.Fatalf("error message = %q, want credential-inventory guidance without unproven expiry", results[0].Error.Message)
 	}
 	listCalls, weakCalls, plans := authority.snapshot()
 	if listCalls != 2 || weakCalls != 0 || len(plans) != 1 || requestCalls != 0 {
@@ -699,8 +893,8 @@ func TestFetchResolvedCredentialIdentityMismatchFailsBeforeDispatch(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "auth_expired" {
-		t.Fatalf("results = %+v, want one auth_expired result", results)
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "fetch_error" || results[0].Error.Message != credentialInventoryDegradedMessage {
+		t.Fatalf("results = %+v, want one credential inventory failure", results)
 	}
 	listCalls, weakCalls, plans := authority.snapshot()
 	if listCalls != 1 || weakCalls != 0 || len(plans) != 1 || requestCalls != 0 {
@@ -735,8 +929,8 @@ func TestFetchResolvedCredentialUserIdentityMismatchFailsBeforeDispatch(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "auth_expired" {
-		t.Fatalf("results = %+v, want one auth_expired result", results)
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "fetch_error" || results[0].Error.Message != credentialInventoryDegradedMessage {
+		t.Fatalf("results = %+v, want one credential inventory failure", results)
 	}
 	if requestCalls != 0 {
 		t.Fatalf("upstream calls = %d, want 0", requestCalls)
@@ -768,8 +962,11 @@ func TestFetchRepeatedStaleCredentialStopsAfterOneReplan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "auth_expired" {
-		t.Fatalf("results = %+v, want one auth_expired result", results)
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "fetch_error" {
+		t.Fatalf("results = %+v, want one credential inventory failure", results)
+	}
+	if results[0].Error.Message != credentialInventoryDegradedMessage {
+		t.Fatalf("error message = %q, want credential-inventory guidance without unproven expiry", results[0].Error.Message)
 	}
 	listCalls, weakCalls, plans := authority.snapshot()
 	if listCalls != 2 || weakCalls != 0 || len(plans) != 2 || requestCalls != 0 {
@@ -981,8 +1178,8 @@ func TestFetchManagedRefreshUsesReplannedRevision(t *testing.T) {
 	ref := CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}
 	authority := &providerCredentialAuthority{
 		inventories: []Inventory{
-			providerInventory(identity, providerCandidate(ref, "revision-1", SourceManaged, time.Time{})),
-			providerInventory(identity, providerCandidate(ref, "revision-2", SourceManaged, time.Time{})),
+			providerInventory(identity, providerRefreshEligibleCandidate(ref, "revision-1", time.Time{})),
+			providerInventory(identity, providerRefreshEligibleCandidate(ref, "revision-2", time.Time{})),
 		},
 		resolveExact: func(call int, planned PlannedCandidate) (CredentialMaterial, error) {
 			if call == 1 {
@@ -1041,7 +1238,7 @@ func TestFetchManagedRefreshStrongIdentityMismatchFailsBeforeDispatch(t *testing
 	ref := CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}
 	authority := &providerCredentialAuthority{
 		inventories: []Inventory{providerInventory(identity,
-			providerCandidate(ref, "revision-1", SourceManaged, time.Time{}),
+			providerRefreshEligibleCandidate(ref, "revision-1", time.Time{}),
 		)},
 		resolveExact: func(int, PlannedCandidate) (CredentialMaterial, error) {
 			return testCredentialMaterial(identity, "expired-secret"), nil
@@ -1085,7 +1282,7 @@ func TestFetchManagedRefreshCancellationStopsImmediately(t *testing.T) {
 	ref := CandidateRef{AccountKey: "logical-1", CandidateID: "managed-1"}
 	authority := &providerCredentialAuthority{
 		inventories: []Inventory{providerInventory(identity,
-			providerCandidate(ref, "revision-1", SourceManaged, time.Time{}),
+			providerRefreshEligibleCandidate(ref, "revision-1", time.Time{}),
 		)},
 		resolveExact: func(int, PlannedCandidate) (CredentialMaterial, error) {
 			return testCredentialMaterial(identity, "expired-secret"), nil

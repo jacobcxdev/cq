@@ -77,10 +77,13 @@ type CodexLeaseGenerationFence struct {
 // DeleteRecords survive unchanged; omission never deletes durable authority.
 // Generation and timestamp fields are store-owned and must be zero in inputs.
 type CodexLaneMutation struct {
-	Lane          *CodexJournalLane
-	BeginRequest  *CodexJournalRecordIdentity
-	UpsertRecords []CodexJournalRecordV2
-	DeleteRecords []CodexJournalRecordIdentity
+	Lane                     *CodexJournalLane
+	BeginRequest             *CodexJournalRecordIdentity
+	AccountUnavailable       *CodexJournalRecordIdentity
+	QuotaExhausted           *CodexJournalRecordIdentity
+	CompleteUnavailableCycle *CodexJournalRecordIdentity
+	UpsertRecords            []CodexJournalRecordV2
+	DeleteRecords            []CodexJournalRecordIdentity
 }
 
 func (record CodexJournalRecordV2) Identity() CodexJournalRecordIdentity {
@@ -216,7 +219,7 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 	if store.v2.Generation == math.MaxUint64 {
 		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: journal generation overflow", ErrCodexLeaseInvalidMutation)
 	}
-	if mutation.Lane == nil && len(mutation.UpsertRecords) == 0 && len(mutation.DeleteRecords) == 0 {
+	if mutation.Lane == nil && mutation.CompleteUnavailableCycle == nil && len(mutation.UpsertRecords) == 0 && len(mutation.DeleteRecords) == 0 {
 		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: empty mutation", ErrCodexLeaseInvalidMutation)
 	}
 	if err := validateCodexLaneMutationOwnedFields(mutation); err != nil {
@@ -260,6 +263,27 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: BeginRequest must name its sole existing record upsert", ErrCodexLeaseInvalidMutation)
 		}
 	}
+	var accountUnavailable CodexJournalRecordIdentity
+	if mutation.AccountUnavailable != nil {
+		accountUnavailable = *mutation.AccountUnavailable
+		if accountUnavailable.IsZero() || accountUnavailable.LaneDigest != targetLane || len(mutation.UpsertRecords) != 1 || mutation.UpsertRecords[0].Identity() != accountUnavailable || len(mutation.DeleteRecords) != 0 || mutation.Lane != nil || mutation.BeginRequest != nil {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: account unavailability must name its sole existing record upsert", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	var quotaExhausted CodexJournalRecordIdentity
+	if mutation.QuotaExhausted != nil {
+		quotaExhausted = *mutation.QuotaExhausted
+		if quotaExhausted.IsZero() || quotaExhausted != accountUnavailable {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: quota exhaustion must name its sole existing record upsert", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	var completeUnavailableCycle CodexJournalRecordIdentity
+	if mutation.CompleteUnavailableCycle != nil {
+		completeUnavailableCycle = *mutation.CompleteUnavailableCycle
+		if completeUnavailableCycle.IsZero() || completeUnavailableCycle.LaneDigest != targetLane || len(mutation.UpsertRecords) != 0 || len(mutation.DeleteRecords) != 0 || mutation.Lane != nil || mutation.BeginRequest != nil || mutation.AccountUnavailable != nil || mutation.QuotaExhausted != nil {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: unavailable cycle completion must name one current record", ErrCodexLeaseInvalidMutation)
+		}
+	}
 	storedLaneIndex, laneExists := laneIndex[targetLane]
 	var storedLane CodexJournalLane
 	if laneExists {
@@ -269,12 +293,21 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 	if err != nil {
 		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
 	}
-	if mutation.BeginRequest != nil && (storedCurrent.IsZero() || beginRequest != storedCurrent) {
-		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: BeginRequest must target the current lane head", ErrCodexLeaseInvalidMutation)
-	}
 	storedLast, err := codexLaneLastIdentity(storedLane, recordIndex, next.Records)
 	if err != nil {
 		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
+	}
+	restartingFailedLast := false
+	if mutation.BeginRequest != nil && storedCurrent.IsZero() && beginRequest == storedLast {
+		if index, found := recordIndex[beginRequest]; found {
+			restartingFailedLast = codexLeaseRestartableFailedHead(next.Records[index])
+		}
+	}
+	if mutation.BeginRequest != nil && beginRequest != storedCurrent && !restartingFailedLast {
+		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: BeginRequest must target the current lane head", ErrCodexLeaseInvalidMutation)
+	}
+	if !completeUnavailableCycle.IsZero() && completeUnavailableCycle != storedCurrent {
+		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: unavailable cycle completion must target the current lane head", ErrCodexLeaseInvalidMutation)
 	}
 	if !laneExists {
 		if expected.Lane != 0 || !expected.Current.IsZero() || !expected.Last.IsZero() {
@@ -295,6 +328,13 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 	requiredFences := make(map[CodexJournalRecordIdentity]struct{})
 	upsertIDs := make(map[CodexJournalRecordIdentity]struct{}, len(mutation.UpsertRecords))
 	deleteIDs := make(map[CodexJournalRecordIdentity]struct{}, len(mutation.DeleteRecords))
+	if !completeUnavailableCycle.IsZero() {
+		requiredFences[completeUnavailableCycle] = struct{}{}
+		record := next.Records[recordIndex[completeUnavailableCycle]]
+		if record.PredecessorTurnHash != "" {
+			requiredFences[CodexJournalRecordIdentity{LaneDigest: targetLane, TurnDigest: record.PredecessorTurnHash, ModeEpoch: record.PredecessorModeEpoch, Authoritative: record.PredecessorAuthoritative}] = struct{}{}
+		}
+	}
 	for _, record := range mutation.UpsertRecords {
 		identity := record.Identity()
 		if identity.IsZero() || identity.LaneDigest != targetLane {
@@ -346,6 +386,12 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: unrelated record fence", ErrCodexLeaseInvalidMutation)
 		}
 	}
+	if !completeUnavailableCycle.IsZero() {
+		record := next.Records[recordIndex[completeUnavailableCycle]]
+		if !record.EverAdmitted || record.State != LeaseBoundQuiescent || codexLeaseCurrentAttemptState(record) != CodexAttemptAccountUnavailable || record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !record.SocketLineageExtinct || len(storedLane.RequestUnavailableAccountHashes) == 0 || !codexLeaseExactCurrentAttemptFence(fences[completeUnavailableCycle], record) {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: unavailable cycle is not terminal and surfaced", ErrCodexLeaseInvalidMutation)
+		}
+	}
 
 	wallNow := store.policy.Now().UTC()
 	now := monotonicCodexLeaseTime(wallNow, storedLane.LastObservedAt)
@@ -358,6 +404,10 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 	appendGenerations := make(map[CodexJournalRecordIdentity]uint64)
 	firstAdmissions := make(map[CodexJournalRecordIdentity]CodexJournalRecordV2)
 	cacheAdmissions := make(map[CodexJournalRecordIdentity]CodexJournalRecordV2)
+	accountUnavailableHash := ""
+	quotaExhaustedHash := ""
+	quotaProbeRecoveryHash := ""
+	requestCompleted := false
 	predecessorChanged := false
 	for _, input := range mutation.UpsertRecords {
 		identity := input.Identity()
@@ -383,6 +433,22 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		}
 		if codexLeaseCacheAdmission(old, result, exists) {
 			cacheAdmissions[identity] = result
+		}
+		if identity == accountUnavailable {
+			accountUnavailableHash, err = codexLeaseAccountUnavailableTransitionHash(old, exists, result)
+			if err != nil {
+				return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
+			}
+			if identity == quotaExhausted {
+				quotaExhaustedHash = accountUnavailableHash
+			}
+		}
+		requestCompleted = requestCompleted || codexLeaseRequestCompleted(old, exists, result)
+		if hash, recovered := codexLeaseQuotaProbeRecoveryHash(old, exists, result); recovered {
+			if quotaProbeRecoveryHash != "" && !constantTimeCodexLeaseDigestEqual(quotaProbeRecoveryHash, hash) {
+				return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: one mutation completed multiple quota probes", ErrCodexLeaseInvalidMutation)
+			}
+			quotaProbeRecoveryHash = hash
 		}
 		if exists {
 			next.Records[index] = result
@@ -412,10 +478,50 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		desiredLane = *mutation.Lane
 		if laneExists {
 			copyCodexLaneAffinity(&desiredLane, storedLane)
+			if sameCodexLaneRequestScope(storedLane, desiredLane) {
+				desiredLane.RequestUnavailableAccountHashes = cloneCodexLeaseSlice(storedLane.RequestUnavailableAccountHashes)
+			}
+			desiredLane.QuotaExhaustedAccountHashes = cloneCodexLeaseSlice(storedLane.QuotaExhaustedAccountHashes)
 		}
 	}
 	if !laneExists && mutation.Lane == nil {
 		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: new lane requires an explicit after-image", ErrCodexLeaseInvalidMutation)
+	}
+	if restartingFailedLast {
+		desiredLane.CurrentTurnHash = beginRequest.TurnDigest
+		desiredLane.CurrentModeEpoch = beginRequest.ModeEpoch
+		desiredLane.CurrentAuthoritative = beginRequest.Authoritative
+		desiredLane.RequestUnavailableAccountHashes = nil
+	}
+	if accountUnavailableHash != "" && !slices.Contains(desiredLane.RequestUnavailableAccountHashes, accountUnavailableHash) {
+		desiredLane.RequestUnavailableAccountHashes = append(desiredLane.RequestUnavailableAccountHashes, accountUnavailableHash)
+		sort.Strings(desiredLane.RequestUnavailableAccountHashes)
+	}
+	if quotaExhaustedHash != "" {
+		if !slices.Contains(desiredLane.QuotaExhaustedAccountHashes, quotaExhaustedHash) {
+			desiredLane.QuotaExhaustedAccountHashes = append(desiredLane.QuotaExhaustedAccountHashes, quotaExhaustedHash)
+			sort.Strings(desiredLane.QuotaExhaustedAccountHashes)
+		}
+	}
+	if requestCompleted {
+		desiredLane.RequestUnavailableAccountHashes = nil
+	}
+	if !completeUnavailableCycle.IsZero() {
+		desiredLane.RequestUnavailableAccountHashes = nil
+	}
+	if quotaProbeRecoveryHash != "" {
+		for index, accountHash := range desiredLane.QuotaExhaustedAccountHashes {
+			if !constantTimeCodexLeaseDigestEqual(accountHash, quotaProbeRecoveryHash) {
+				continue
+			}
+			desiredLane.QuotaExhaustedAccountHashes = append(desiredLane.QuotaExhaustedAccountHashes[:index], desiredLane.QuotaExhaustedAccountHashes[index+1:]...)
+			break
+		}
+	}
+	if !beginRequest.IsZero() {
+		if err := validateCodexLeaseBeginRequestAvailability(desiredLane, next.Records[recordIndex[beginRequest]]); err != nil {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
+		}
 	}
 	for _, record := range mutation.UpsertRecords {
 		identity := record.Identity()
@@ -544,6 +650,13 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 		if desiredCurrent == storedCurrent && desiredLast == storedLast {
 			return nil
 		}
+		if storedCurrent.IsZero() && desiredCurrent == storedLast && desiredLast == storedLast {
+			prior, existed := originalRecords[storedLast]
+			_, updated := upsertIDs[storedLast]
+			if existed && updated && codexLeaseRestartableFailedHead(prior) {
+				return nil
+			}
+		}
 		if desiredCurrent.IsZero() && desiredLast == storedLast && !storedCurrent.IsZero() {
 			current, exists := recordIndex[storedCurrent]
 			if exists && records[current].State == LeaseFailedUnadmitted {
@@ -592,6 +705,9 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 
 func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
 	result := cloneCodexJournalRecordV2(input)
+	bindingReassignment := exists && codexLeaseAccountUnavailableAdmission(old, input)
+	bindingReset := exists && beginRequest && codexLeaseAccountUnavailableBeginRequest(old, input)
+	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if result.SessionHash == "" || result.ThreadHash == "" || result.NamespaceHash == "" || result.TurnHash == "" || result.ModeEpoch == 0 || result.ProtocolSchema != CurrentCodexLeaseSchema {
 		return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: incomplete record identity/protocol", ErrCodexLeaseInvalidMutation)
 	}
@@ -616,7 +732,7 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		if old.PredecessorTurnHash != input.PredecessorTurnHash || old.PredecessorModeEpoch != input.PredecessorModeEpoch || old.PredecessorAuthoritative != input.PredecessorAuthoritative {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: frozen predecessor changed", ErrCodexLeaseInvalidMutation)
 		}
-		if old.NonMigratable && !input.NonMigratable {
+		if old.NonMigratable && !input.NonMigratable && !bindingReset {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: non-migratable authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
 		if old.HasEncryptedState && !input.HasEncryptedState {
@@ -638,7 +754,7 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 			}
 			result.LeaseGeneration = old.LeaseGeneration + 1
 		}
-		if (old.EverAdmitted || old.NonMigratable) && !constantTimeCodexLeaseDigestEqual(old.AccountHash, input.AccountHash) {
+		if (old.EverAdmitted || old.NonMigratable) && !constantTimeCodexLeaseDigestEqual(old.AccountHash, input.AccountHash) && !bindingReassignment && !unadmittedBindingReset {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: admitted account changed", ErrCodexLeaseInvalidMutation)
 		}
 		result.EverAdmitted = old.EverAdmitted
@@ -674,10 +790,14 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 				old.State == LeaseBoundActive && result.State == LeaseBoundActive &&
 				constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash) && appendedFound &&
 				appendedAttempt.Slot > 0 && int(appendedAttempt.Slot) <= len(result.AttemptEnvelope.Slots) &&
-				constantTimeCodexLeaseDigestEqual(result.AttemptEnvelope.Slots[appendedAttempt.Slot-1].AccountHash, old.AccountHash) &&
 				old.RoutingRefs == result.RoutingRefs && old.AttemptRefs == result.AttemptRefs &&
 				old.ResponseObserverRefs == result.ResponseObserverRefs && old.SocketLineageExtinct == result.SocketLineageExtinct
-			if pinnedAccountChanged || (!unadmittedReplacement && !admittedReplacement) || !found || previousCurrent.State != CodexAttemptProviderFailed {
+			sameAccountReplacement := admittedReplacement && found && previousCurrent.State == CodexAttemptProviderFailed &&
+				previousCurrent.Slot > 0 && int(previousCurrent.Slot) <= len(result.AttemptEnvelope.Slots) &&
+				constantTimeCodexLeaseDigestEqual(result.AttemptEnvelope.Slots[appendedAttempt.Slot-1].AccountHash, result.AttemptEnvelope.Slots[previousCurrent.Slot-1].AccountHash)
+			unavailableReplacement := admittedReplacement && !old.NonMigratable && found && previousCurrent.State == CodexAttemptAccountUnavailable
+			unadmittedTerminal := unadmittedReplacement && found && (previousCurrent.State == CodexAttemptProviderFailed || previousCurrent.State == CodexAttemptAccountUnavailable)
+			if pinnedAccountChanged || (!unadmittedTerminal && !sameAccountReplacement && !unavailableReplacement) {
 				return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: terminal request replacement requires BeginRequest", ErrCodexLeaseInvalidMutation)
 			}
 		}
@@ -705,7 +825,7 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 	}
 	accountChanged := old.AccountHash != "" || result.AccountHash != ""
 	accountChanged = accountChanged && !constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash)
-	if exists && accountChanged && !beginRequest {
+	if exists && accountChanged && !beginRequest && !bindingReassignment {
 		appendedAttempt, found := codexLeaseAttemptByGeneration(result.Attempts, appended)
 		if old.EverAdmitted || old.NonMigratable || appended == 0 || !found || result.CurrentAttemptGeneration != appended || appendedAttempt.State != CodexAttemptPrepared || appendedAttempt.Slot == 0 || int(appendedAttempt.Slot) > len(result.AttemptEnvelope.Slots) || !constantTimeCodexLeaseDigestEqual(result.AttemptEnvelope.Slots[appendedAttempt.Slot-1].AccountHash, result.AccountHash) {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: account change is not coupled to a prepared replacement attempt", ErrCodexLeaseInvalidMutation)
@@ -764,7 +884,49 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		result.AdmissionCompactionPhase = result.CompactionPhase
 		result.AdmittedAt = now
 	}
-	return result, appended, firstAdmission, nil
+	return result, appended, firstAdmission || bindingReassignment, nil
+}
+
+func codexLeaseAccountUnavailableAdmission(old, desired CodexJournalRecordV2) bool {
+	validState := (!old.EverAdmitted && old.State == LeaseProvisional) || (old.EverAdmitted && old.State == LeaseBoundActive)
+	if !validState || old.NonMigratable || desired.State != LeaseBoundActive || old.Generation != desired.Generation || old.CurrentAttemptGeneration == 0 || old.CurrentAttemptGeneration != desired.CurrentAttemptGeneration || constantTimeCodexLeaseDigestEqual(old.AccountHash, desired.AccountHash) {
+		return false
+	}
+	current, currentFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+	desiredCurrent, found := codexLeaseAttemptByGeneration(desired.Attempts, desired.CurrentAttemptGeneration)
+	if !currentFound || current.State != CodexAttemptDispatched || !found || desiredCurrent.State != CodexAttemptStreaming || desiredCurrent.Slot != current.Slot || current.Slot == 0 || int(current.Slot) > len(old.AttemptEnvelope.Slots) || constantTimeCodexLeaseDigestEqual(old.AttemptEnvelope.Slots[current.Slot-1].AccountHash, old.AccountHash) {
+		return false
+	}
+	return constantTimeCodexLeaseDigestEqual(old.AttemptEnvelope.Slots[current.Slot-1].AccountHash, desired.AccountHash)
+}
+
+func codexLeaseAccountUnavailableBeginRequest(old, desired CodexJournalRecordV2) bool {
+	if !codexLeaseAccountUnavailableCanBeginRequest(old) || desired.NonMigratable {
+		return false
+	}
+	if old.EverAdmitted {
+		return desired.State == LeaseBoundActive
+	}
+	return desired.State == LeaseProvisional
+}
+
+func codexLeaseAccountUnavailableCanBeginRequest(old CodexJournalRecordV2) bool {
+	currentState := codexLeaseCurrentAttemptState(old)
+	accountUnavailable := currentState == CodexAttemptAccountUnavailable
+	pendingPreparedRebind := old.EverAdmitted && old.State == LeaseOrphaned && currentState == CodexAttemptAbandonedBeforeDispatch && !old.NonMigratable && codexLeaseCurrentAttemptAccountDiffersFromBinding(old)
+	if (!accountUnavailable && !pendingPreparedRebind) || old.RoutingRefs != 0 || old.AttemptRefs != 0 || old.ResponseObserverRefs != 0 || !old.SocketLineageExtinct {
+		return false
+	}
+	if old.EverAdmitted {
+		return old.State == LeaseBoundQuiescent || old.State == LeaseOrphaned
+	}
+	return old.State == LeaseFailedUnadmitted && codexLeaseRestartableFailedHead(old)
+}
+
+func codexLeaseCurrentAttemptAccountDiffersFromBinding(record CodexJournalRecordV2) bool {
+	current, found := codexLeaseAttemptByGeneration(record.Attempts, record.CurrentAttemptGeneration)
+	return found && current.Slot > 0 && int(current.Slot) <= len(record.AttemptEnvelope.Slots) &&
+		!constantTimeCodexLeaseDigestEqual(record.AttemptEnvelope.Slots[current.Slot-1].AccountHash, record.AccountHash)
 }
 
 func codexLeaseCacheAdmission(old, result CodexJournalRecordV2, exists bool) bool {
@@ -776,6 +938,87 @@ func codexLeaseCacheAdmission(old, result CodexJournalRecordV2, exists bool) boo
 	return beforeFound && afterFound && before.State == CodexAttemptDispatched && after.State == CodexAttemptStreaming
 }
 
+func codexLeaseAccountUnavailableTransitionHash(old CodexJournalRecordV2, exists bool, result CodexJournalRecordV2) (string, error) {
+	if !exists || old.Generation == 0 || old.Generation != result.Generation || old.CurrentAttemptGeneration == 0 {
+		return "", fmt.Errorf("%w: account unavailability lacks current request authority", ErrCodexLeaseInvalidMutation)
+	}
+	before, beforeFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+	after, afterFound := codexLeaseAttemptByGeneration(result.Attempts, old.CurrentAttemptGeneration)
+	if !beforeFound || !afterFound || before.State == CodexAttemptAccountUnavailable || after.State != CodexAttemptAccountUnavailable || before.Slot == 0 || int(before.Slot) > len(old.AttemptEnvelope.Slots) {
+		return "", fmt.Errorf("%w: account unavailability is not an exact current-attempt transition", ErrCodexLeaseInvalidMutation)
+	}
+	return old.AttemptEnvelope.Slots[before.Slot-1].AccountHash, nil
+}
+
+func codexLeaseRequestCompleted(old CodexJournalRecordV2, exists bool, result CodexJournalRecordV2) bool {
+	if !exists || old.Generation == 0 || old.Generation != result.Generation || old.CurrentAttemptGeneration == 0 || old.CurrentAttemptGeneration != result.CurrentAttemptGeneration {
+		return false
+	}
+	before, beforeFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+	after, afterFound := codexLeaseAttemptByGeneration(result.Attempts, result.CurrentAttemptGeneration)
+	return beforeFound && afterFound && before.State == CodexAttemptStreaming && after.State == CodexAttemptProviderCompleted
+}
+
+func sameCodexLaneRequestScope(left, right CodexJournalLane) bool {
+	return codexLaneRequestScopeIdentity(left) == codexLaneRequestScopeIdentity(right)
+}
+
+func codexLaneRequestScopeIdentity(lane CodexJournalLane) CodexJournalRecordIdentity {
+	if current := codexLaneTupleIdentity(lane, true); !current.IsZero() {
+		return current
+	}
+	return codexLaneTupleIdentity(lane, false)
+}
+
+func codexLeaseQuotaProbeRecoveryHash(old CodexJournalRecordV2, exists bool, result CodexJournalRecordV2) (string, bool) {
+	if !exists || !old.QuotaExhaustionProbe || old.Generation == 0 || old.Generation != result.Generation || old.CurrentAttemptGeneration == 0 || old.CurrentAttemptGeneration != result.CurrentAttemptGeneration {
+		return "", false
+	}
+	before, beforeFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
+	after, afterFound := codexLeaseAttemptByGeneration(result.Attempts, result.CurrentAttemptGeneration)
+	if !beforeFound || !afterFound || before.State != CodexAttemptStreaming || after.State != CodexAttemptProviderCompleted || before.Slot == 0 || int(before.Slot) > len(old.AttemptEnvelope.Slots) {
+		return "", false
+	}
+	return old.AttemptEnvelope.Slots[before.Slot-1].AccountHash, true
+}
+
+func validateCodexLeaseBeginRequestAvailability(lane CodexJournalLane, result CodexJournalRecordV2) error {
+	current, found := codexLeaseAttemptByGeneration(result.Attempts, result.CurrentAttemptGeneration)
+	if !found || current.Slot == 0 || int(current.Slot) > len(result.AttemptEnvelope.Slots) {
+		return fmt.Errorf("%w: BeginRequest current attempt is unavailable", ErrCodexLeaseInvalidMutation)
+	}
+	containsHash := func(hashes []string, accountHash string) bool {
+		for _, unavailable := range hashes {
+			if constantTimeCodexLeaseDigestEqual(unavailable, accountHash) {
+				return true
+			}
+		}
+		return false
+	}
+	if result.QuotaExhaustionProbe {
+		selectedHash := result.AttemptEnvelope.Slots[current.Slot-1].AccountHash
+		if !containsHash(lane.QuotaExhaustedAccountHashes, selectedHash) {
+			return fmt.Errorf("%w: quota probe does not name one exhausted account", ErrCodexLeaseInvalidMutation)
+		}
+		for _, slot := range result.AttemptEnvelope.Slots {
+			if !constantTimeCodexLeaseDigestEqual(slot.AccountHash, selectedHash) {
+				return fmt.Errorf("%w: quota probe spans multiple accounts", ErrCodexLeaseInvalidMutation)
+			}
+		}
+		return nil
+	}
+	requestUnavailable := []string(nil)
+	if result.Identity() == codexLaneRequestScopeIdentity(lane) {
+		requestUnavailable = lane.RequestUnavailableAccountHashes
+	}
+	for _, slot := range result.AttemptEnvelope.Slots {
+		if containsHash(lane.QuotaExhaustedAccountHashes, slot.AccountHash) || containsHash(requestUnavailable, slot.AccountHash) {
+			return fmt.Errorf("%w: BeginRequest reuses an unavailable account", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	return nil
+}
+
 func codexLeaseCurrentRequestCacheRefreshEligible(old, result CodexJournalRecordV2) bool {
 	if codexLeaseCurrentRequestCacheEligible(result) {
 		return true
@@ -785,6 +1028,8 @@ func codexLeaseCurrentRequestCacheRefreshEligible(old, result CodexJournalRecord
 
 func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired CodexJournalRecordV2, fence CodexLeaseRecordFence, now time.Time) (CodexCurrentRequest, error) {
 	request := cloneCodexCurrentRequest(desired.CodexCurrentRequest)
+	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired)
+	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if request.Generation != 0 || request.CurrentAttemptGeneration != 0 || len(request.Attempts) != 1 {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest requires a store-owned generation and one prepared attempt", ErrCodexLeaseInvalidMutation)
 	}
@@ -802,7 +1047,7 @@ func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired Code
 		if old.RoutingRefs != 0 || old.AttemptRefs != 0 || old.ResponseObserverRefs != 0 || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(old)) {
 			return CodexCurrentRequest{}, fmt.Errorf("%w: prior request is not terminal and drained", ErrCodexLeaseInvalidMutation)
 		}
-		allowed := old.State == LeaseContinuationPending || old.State == LeaseBoundQuiescent || old.State == LeaseOrphaned || (old.State == LeaseProvisional && codexLeaseCurrentAttemptState(old) == CodexAttemptAbandonedBeforeDispatch)
+		allowed := old.State == LeaseContinuationPending || old.State == LeaseBoundQuiescent || old.State == LeaseOrphaned || (old.State == LeaseProvisional && codexLeaseCurrentAttemptState(old) == CodexAttemptAbandonedBeforeDispatch) || codexLeaseRestartableFailedHead(old)
 		if !allowed {
 			return CodexCurrentRequest{}, fmt.Errorf("%w: lease state cannot begin another request", ErrCodexLeaseInvalidMutation)
 		}
@@ -814,10 +1059,10 @@ func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired Code
 	if desired.State != wantState {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest has invalid lease state", ErrCodexLeaseInvalidMutation)
 	}
-	if (old.EverAdmitted || old.NonMigratable) && !constantTimeCodexLeaseDigestEqual(old.AccountHash, desired.AccountHash) {
+	if (old.EverAdmitted || old.NonMigratable) && !constantTimeCodexLeaseDigestEqual(old.AccountHash, desired.AccountHash) && !unadmittedBindingReset {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: bound request changed account", ErrCodexLeaseInvalidMutation)
 	}
-	if old.EverAdmitted || old.NonMigratable {
+	if old.NonMigratable && !bindingReset {
 		for _, slot := range request.AttemptEnvelope.Slots {
 			if !constantTimeCodexLeaseDigestEqual(slot.AccountHash, desired.AccountHash) {
 				return CodexCurrentRequest{}, fmt.Errorf("%w: bound request plan contains another account", ErrCodexLeaseInvalidMutation)
@@ -827,6 +1072,12 @@ func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired Code
 	attempt := request.Attempts[0]
 	if attempt.Generation != 0 || attempt.Revision != 0 || attempt.State != CodexAttemptPrepared || attempt.Slot == 0 || !attempt.CreatedAt.IsZero() || !attempt.LastObservedAt.IsZero() {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest attempt is not a clean prepared append", ErrCodexLeaseInvalidMutation)
+	}
+	if int(attempt.Slot) > len(request.AttemptEnvelope.Slots) {
+		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest attempt slot is outside the frozen envelope", ErrCodexLeaseInvalidMutation)
+	}
+	if (old.EverAdmitted || old.NonMigratable) && !constantTimeCodexLeaseDigestEqual(request.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash, desired.AccountHash) && !bindingReset {
+		return CodexCurrentRequest{}, fmt.Errorf("%w: bound request changed account without account unavailability", ErrCodexLeaseInvalidMutation)
 	}
 	request.Generation = old.Generation + 1
 	attempt.Generation = 1
@@ -985,7 +1236,7 @@ func codexLeaseAttemptByGeneration(attempts []CodexJournalAttempt, generation ui
 
 func codexLeaseAttemptTerminalForRollover(state CodexAttemptState) bool {
 	switch state {
-	case CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptIndeterminate, CodexAttemptAbandonedBeforeDispatch:
+	case CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptIndeterminate, CodexAttemptAbandonedBeforeDispatch, CodexAttemptAccountUnavailable:
 		return true
 	default:
 		return false
@@ -1009,7 +1260,7 @@ func codexLeaseExactCurrentAttemptFence(fence CodexLeaseRecordFence, record Code
 }
 
 func validateCodexLaneMutationOwnedFields(mutation CodexLaneMutation) error {
-	if mutation.Lane != nil && (mutation.Lane.Generation != 0 || !mutation.Lane.LastObservedAt.IsZero() || !codexLaneAffinityIsZero(*mutation.Lane)) {
+	if mutation.Lane != nil && (mutation.Lane.Generation != 0 || !mutation.Lane.LastObservedAt.IsZero() || !codexLaneAffinityIsZero(*mutation.Lane) || len(mutation.Lane.RequestUnavailableAccountHashes) != 0 || len(mutation.Lane.QuotaExhaustedAccountHashes) != 0) {
 		return fmt.Errorf("%w: caller supplied lane generation/timestamp", ErrCodexLeaseInvalidMutation)
 	}
 	for _, record := range mutation.UpsertRecords {
@@ -1045,6 +1296,11 @@ func codexLaneMutationTarget(mutation CodexLaneMutation) (string, error) {
 			return "", fmt.Errorf("%w: incomplete lane identity", ErrCodexLeaseInvalidMutation)
 		}
 		if err := accept(codexJournalLaneDigest(mutation.Lane.SessionHash, mutation.Lane.ThreadHash, mutation.Lane.NamespaceHash)); err != nil {
+			return "", err
+		}
+	}
+	if mutation.CompleteUnavailableCycle != nil {
+		if err := accept(mutation.CompleteUnavailableCycle.LaneDigest); err != nil {
 			return "", err
 		}
 	}
@@ -1409,7 +1665,7 @@ func codexLaneTupleIdentity(lane CodexJournalLane, current bool) CodexJournalRec
 }
 
 func sameCodexLanePointers(left, right CodexJournalLane) bool {
-	return left.SessionHash == right.SessionHash && left.ThreadHash == right.ThreadHash && left.NamespaceHash == right.NamespaceHash && left.CurrentTurnHash == right.CurrentTurnHash && left.CurrentModeEpoch == right.CurrentModeEpoch && left.CurrentAuthoritative == right.CurrentAuthoritative && left.LastTurnHash == right.LastTurnHash && left.LastModeEpoch == right.LastModeEpoch && left.LastAuthoritative == right.LastAuthoritative
+	return left.SessionHash == right.SessionHash && left.ThreadHash == right.ThreadHash && left.NamespaceHash == right.NamespaceHash && left.CurrentTurnHash == right.CurrentTurnHash && left.CurrentModeEpoch == right.CurrentModeEpoch && left.CurrentAuthoritative == right.CurrentAuthoritative && left.LastTurnHash == right.LastTurnHash && left.LastModeEpoch == right.LastModeEpoch && left.LastAuthoritative == right.LastAuthoritative && slices.Equal(left.RequestUnavailableAccountHashes, right.RequestUnavailableAccountHashes) && slices.Equal(left.QuotaExhaustedAccountHashes, right.QuotaExhaustedAccountHashes)
 }
 
 func codexLeaseCurrentAttemptState(record CodexJournalRecordV2) CodexAttemptState {
@@ -1479,6 +1735,7 @@ func sameCodexLeaseSemantics(left, right CodexJournalRecordV2) bool {
 		left.ResponseObserverRefs == right.ResponseObserverRefs &&
 		left.RequestedModelHash == right.RequestedModelHash &&
 		left.DispatchPermitDigest == right.DispatchPermitDigest &&
+		left.QuotaExhaustionProbe == right.QuotaExhaustionProbe &&
 		left.EffectiveModel == right.EffectiveModel &&
 		slices.Equal(left.RequiredBuckets, right.RequiredBuckets) &&
 		left.HasEncryptedState == right.HasEncryptedState &&
@@ -1533,11 +1790,11 @@ func cloneCodexCurrentRequest(request CodexCurrentRequest) CodexCurrentRequest {
 }
 
 func codexCurrentRequestIsZero(request CodexCurrentRequest) bool {
-	return request.Generation == 0 && request.RequestKind == "" && request.CompactionPhase == "" && request.RequestedModelHash == "" && request.DispatchPermitDigest == "" && request.EffectiveModel == "" && len(request.RequiredBuckets) == 0 && codexAttemptEnvelopeIsZero(request.AttemptEnvelope) && request.CurrentAttemptGeneration == 0 && request.RoutingRefs == 0 && request.AttemptRefs == 0 && request.ResponseObserverRefs == 0 && len(request.Attempts) == 0
+	return request.Generation == 0 && request.RequestKind == "" && request.CompactionPhase == "" && request.RequestedModelHash == "" && request.DispatchPermitDigest == "" && !request.QuotaExhaustionProbe && request.EffectiveModel == "" && len(request.RequiredBuckets) == 0 && codexAttemptEnvelopeIsZero(request.AttemptEnvelope) && request.CurrentAttemptGeneration == 0 && request.RoutingRefs == 0 && request.AttemptRefs == 0 && request.ResponseObserverRefs == 0 && len(request.Attempts) == 0
 }
 
 func sameCodexCurrentRequestPlan(left, right CodexCurrentRequest) bool {
-	return left.Generation == right.Generation && left.RequestKind == right.RequestKind && left.CompactionPhase == right.CompactionPhase && sameCodexLeaseOptionalDigest(left.RequestedModelHash, right.RequestedModelHash) && sameCodexLeaseOptionalDigest(left.DispatchPermitDigest, right.DispatchPermitDigest) && left.EffectiveModel == right.EffectiveModel && slices.Equal(left.RequiredBuckets, right.RequiredBuckets) && sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
+	return left.Generation == right.Generation && left.RequestKind == right.RequestKind && left.CompactionPhase == right.CompactionPhase && sameCodexLeaseOptionalDigest(left.RequestedModelHash, right.RequestedModelHash) && sameCodexLeaseOptionalDigest(left.DispatchPermitDigest, right.DispatchPermitDigest) && left.QuotaExhaustionProbe == right.QuotaExhaustionProbe && left.EffectiveModel == right.EffectiveModel && slices.Equal(left.RequiredBuckets, right.RequiredBuckets) && sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
 }
 
 func sameCodexAttemptEnvelope(left, right CodexAttemptEnvelope) bool {

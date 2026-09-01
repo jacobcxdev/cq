@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -19,6 +20,9 @@ const (
 	credentialAuthorityUnavailableMessage = "Codex credential coordinator unavailable"
 	credentialInventoryStaleMessage       = "Codex credential inventory stale"
 	credentialInventoryDegradedMessage    = "Codex credential inventory degraded"
+	credentialOwnerRefreshRequiredMessage = "access expired — credential owner must refresh"
+	cqRefreshRequiredMessage              = "access expired — CQ refresh required"
+	credentialRejectedMessage             = "credential rejected by provider"
 )
 
 type logicalInventoryAccount struct {
@@ -48,7 +52,7 @@ func New(client httputil.Doer) *Provider {
 }
 
 // Fetch discovers all Codex accounts and fetches quota for each in parallel.
-func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, error) {
+func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, error) {
 	broker := p.refreshBroker
 	inventoryReader := p.inventory
 	secrets := p.secrets
@@ -107,7 +111,7 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) ([]quota.Result, erro
 					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
 				}
 			}()
-			results[i] = p.fetchLogicalAccount(ctx, logical, inventoryReader, secrets, broker)
+			results[i] = p.fetchLogicalAccount(ctx, logical, inventoryReader, secrets, broker, now)
 			results[i].Active = logical.Active
 		}(i, logical)
 	}
@@ -161,25 +165,29 @@ func sameLogicalInventoryAccount(logical LogicalAccount, account logicalInventor
 		identity.AccountID == account.accountID && identity.UserID == account.userID
 }
 
-func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, inventory CredentialInventory, secrets ExactSecretResolver, broker CredentialRefreshBroker) quota.Result {
+func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, inventory CredentialInventory, secrets ExactSecretResolver, broker CredentialRefreshBroker, now time.Time) quota.Result {
 	if !logical.Routable {
 		return noTokenResult(logical)
 	}
-	candidates := ResolveCandidate(logical, "", time.Now())
-	dispatchable := candidates[:0]
-	for _, candidate := range candidates {
-		if candidate.Routable {
-			dispatchable = append(dispatchable, candidate)
-		}
-	}
-	candidates = dispatchable
-	if len(candidates) == 0 {
-		return noTokenResult(logical)
-	}
-	var last quota.Result
+	candidates := ResolveCandidate(logical, "", now)
+	last := noTokenResult(logical)
+	hasProviderRejection := false
 	inventoryDegraded := false
 	refreshable := make([]PlannedCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
+		switch CandidateAvailabilityAt(candidate, now) {
+		case CandidateRefreshRequired:
+			refreshable = append(refreshable, PlanCandidate(logical, candidate))
+			if !hasProviderRejection {
+				last = authExpiredResult(logical.Identity, cqRefreshRequiredMessage, 0)
+			}
+			continue
+		case CandidateUnavailable:
+			if !hasProviderRejection && candidate.Routable && !candidate.AccessExpiresAt.IsZero() && !candidate.AccessExpiresAt.After(now) {
+				last = credentialOwnerRefreshRequiredResult(logical.Identity)
+			}
+			continue
+		}
 		planned := PlanCandidate(logical, candidate)
 		credential := candidate.Credential
 		if secrets != nil {
@@ -198,9 +206,7 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 					inventoryDegraded = true
 					continue
 				}
-				last = quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", 0)
-				last.Email = logical.Identity.Email
-				last.AccountID = logical.Identity.AccountID
+				inventoryDegraded = true
 				continue
 			}
 			planned = resolved
@@ -221,8 +227,10 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 		if last.Error == nil || last.Error.Code != "auth_expired" {
 			return last
 		}
-		if planned.Source == SourceManaged {
+		hasProviderRejection = true
+		if candidate.Source == SourceManaged && candidate.CQAuthored && candidate.RefreshEligible {
 			refreshable = append(refreshable, planned)
+			last.Error.Message = cqRefreshRequiredMessage
 		}
 	}
 	if broker == nil {
@@ -264,6 +272,17 @@ func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccou
 		return credentialInventoryDegradedResult(logical.Identity, logical.Active)
 	}
 	return last
+}
+
+func authExpiredResult(identity AccountIdentity, message string, status int) quota.Result {
+	result := quota.ErrorResult("auth_expired", message, status)
+	result.Email = identity.Email
+	result.AccountID = identity.AccountID
+	return result
+}
+
+func credentialOwnerRefreshRequiredResult(identity AccountIdentity) quota.Result {
+	return authExpiredResult(identity, credentialOwnerRefreshRequiredMessage, 0)
 }
 
 func noTokenResult(logical LogicalAccount) quota.Result {
@@ -370,7 +389,7 @@ func (p *Provider) discoverAccountInventory(ctx context.Context) (Inventory, err
 
 // DiscoverAccounts returns the coordinator's Codex account inventory without
 // making network calls. It implements provider.Discoverer so the runner can
-// synthesise auth_expired rows for accounts absent from the cache.
+// report accounts whose usage is absent from the cache.
 func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, error) {
 	inventory, err := p.discoverAccountInventory(ctx)
 	if err != nil {
@@ -432,8 +451,8 @@ func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Re
 		return r
 	}
 
-	if code == 401 || code == 403 {
-		r := quota.ErrorResult("auth_expired", "auth expired — re-authenticate via codex login", code)
+	if codexUsageAuthRejected(code, body) {
+		r := quota.ErrorResult("auth_expired", credentialRejectedMessage, code)
 		r.Email = acct.Email
 		r.AccountID = acct.AccountID
 		return r
@@ -447,6 +466,21 @@ func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Re
 	}
 
 	return parseUsage(body, acct.Email, acct.AccountID)
+}
+
+func codexUsageAuthRejected(status int, body []byte) bool {
+	if status == 401 {
+		return true
+	}
+	if status != 403 {
+		return false
+	}
+	var envelope struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(body, &envelope) == nil && envelope.Error.Type == "authentication_error"
 }
 
 // dedup removes duplicate results by AccountID, preferring usable results

@@ -408,6 +408,74 @@ func TestResolveCandidateSkipsDispatchBlockedButRetainsUnroutableForDiscovery(t 
 	}
 }
 
+func TestCandidateAvailabilityAtClassifiesDirectAndRefreshOnlyCredentials(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		name      string
+		candidate CredentialCandidate
+		want      CandidateAvailability
+	}{
+		{
+			name: "future access is ready",
+			candidate: CredentialCandidate{
+				Routable: true, AccessExpiresAt: now.Add(time.Minute),
+			},
+			want: CandidateReady,
+		},
+		{
+			name:      "unknown expiry is ready",
+			candidate: CredentialCandidate{Routable: true},
+			want:      CandidateReady,
+		},
+		{
+			name: "expired external access is unavailable",
+			candidate: CredentialCandidate{
+				Source: SourceExternal, Routable: true, AccessExpiresAt: now.Add(-time.Minute),
+			},
+			want: CandidateUnavailable,
+		},
+		{
+			name: "expired managed access with CQ authority requires refresh",
+			candidate: CredentialCandidate{
+				Source: SourceManaged, CQAuthored: true, RefreshEligible: true,
+				Routable: true, AccessExpiresAt: now.Add(-time.Minute),
+			},
+			want: CandidateRefreshRequired,
+		},
+		{
+			name: "expired exported managed access is unavailable",
+			candidate: CredentialCandidate{
+				Source: SourceManaged, CQAuthored: true, Routable: true,
+				AccessExpiresAt: now.Add(-time.Minute),
+			},
+			want: CandidateUnavailable,
+		},
+		{
+			name: "dispatch block wins over refresh authority",
+			candidate: CredentialCandidate{
+				Source: SourceManaged, CQAuthored: true, RefreshEligible: true,
+				Routable: true, DispatchBlocked: true, AccessExpiresAt: now.Add(-time.Minute),
+			},
+			want: CandidateUnavailable,
+		},
+		{
+			name: "unroutable wins over refresh authority",
+			candidate: CredentialCandidate{
+				Source: SourceManaged, CQAuthored: true, RefreshEligible: true,
+				AccessExpiresAt: now.Add(-time.Minute),
+			},
+			want: CandidateUnavailable,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := CandidateAvailabilityAt(test.candidate, now); got != test.want {
+				t.Fatalf("availability = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestInventoryFederatesFreshExternalCandidateIntoLogicalAccount(t *testing.T) {
 	fs := newFakeFS()
 	now := time.Now()

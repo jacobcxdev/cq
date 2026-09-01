@@ -97,7 +97,7 @@ func TestCodexWSLifecycleRejectsStaleGenerationWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestCodexWSLifecycleHard429RotatesOnlyBeforeAdmission(t *testing.T) {
+func TestCodexWSLifecycleHard429RotatesOnlyBeforeCurrentAdmission(t *testing.T) {
 	t.Parallel()
 	slots := []CodexLeaseAttemptSlotPlan{
 		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
@@ -127,14 +127,92 @@ func TestCodexWSLifecycleHard429RotatesOnlyBeforeAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DefinitePreAdmissionRejection {
-		t.Fatal("admitted hard 429 became rotation authority")
+	if result.DefinitePreAdmissionRejection || !result.HardUsageLimit {
+		t.Fatalf("admitted hard 429 result = %#v, want terminal account unavailability without replay authority", result)
 	}
-	if admitted.handle.AccountKey() != "account-a" || !admitted.handle.record.EverAdmitted {
-		t.Fatal("admitted hard 429 changed account authority")
+	if !bytes.Equal(before, store.journalBytes) {
+		t.Fatal("observing admitted hard 429 mutated authority before broker disposition")
 	}
-	if bytes.Equal(before, store.journalBytes) {
-		t.Fatal("admitted provider failure was not persisted")
+	if err := admitted.RecordQuotaExhausted(context.Background(), 43, 0); err != nil {
+		t.Fatal(err)
+	}
+	if admitted.handle.AccountKey() != "account-a" || !admitted.handle.record.EverAdmitted ||
+		codexLeaseCurrentAttemptState(admitted.handle.record) != CodexAttemptAccountUnavailable || admitted.handle.record.State != LeaseBoundQuiescent {
+		t.Fatalf("admitted hard 429 terminal = account %q ever %v attempt %v state %s",
+			admitted.handle.AccountKey(), admitted.handle.record.EverAdmitted,
+			codexLeaseCurrentAttemptState(admitted.handle.record), admitted.handle.record.State)
+	}
+}
+
+func TestCodexWSLifecycleLaterRequestHard429IsPreAdmission(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("ws-turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+
+	first, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := newCodexWSLifecycle(second, 41, 43)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := lifecycle.ObserveFrame(context.Background(), 43, codexWSBrokerHard429())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.DefinitePreAdmissionRejection || !result.HardUsageLimit {
+		t.Fatalf("later request result = %#v, want definite pre-admission hard limit", result)
+	}
+	if err := lifecycle.RecordQuotaExhausted(context.Background(), 43, 2); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle.handle.AccountKey() != "account-b" || codexLeaseCurrentAttemptState(lifecycle.handle.record) != CodexAttemptPrepared {
+		t.Fatalf("replacement = account %q attempt %v", lifecycle.handle.AccountKey(), codexLeaseCurrentAttemptState(lifecycle.handle.record))
+	}
+}
+
+func TestCodexWSLifecycleFindsReplacementAccountSlotInFrozenEnvelope(t *testing.T) {
+	t.Parallel()
+	lifecycle, _ := newCodexWSLifecycleTest(t, []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a-1", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-a-2", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	slot, err := lifecycle.replacementSlot("account-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slot != 3 {
+		t.Fatalf("replacement slot = %d, want 3", slot)
 	}
 }
 

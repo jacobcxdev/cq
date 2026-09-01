@@ -250,6 +250,9 @@ type CodexHTTPRequestLifecycle interface {
 	AccountKey() codex.AccountKey
 	MarkDispatchedContext(context.Context) (CodexHTTPRequestLifecycle, error)
 	RejectAndPrepareContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error)
+	RecordAccountUnavailableContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error)
+	RecordQuotaExhaustedContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error)
+	CompleteAccountUnavailableCycleContext(context.Context) (CodexHTTPRequestLifecycle, error)
 	AbandonBeforeDispatchContext(context.Context) (CodexHTTPRequestLifecycle, error)
 	FinishRejected() (CodexHTTPRequestLifecycle, error)
 	IndeterminateContext(context.Context, CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error)
@@ -299,6 +302,21 @@ func (lifecycle *codexLeaseHTTPRequestLifecycle) MarkDispatchedContext(ctx conte
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) RejectAndPrepareContext(ctx context.Context, slot uint32) (CodexHTTPRequestLifecycle, error) {
 	handle, err := lifecycle.handle.RejectAndPrepareContext(ctx, slot)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) RecordAccountUnavailableContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.RecordAccountUnavailableContext(ctx, replacementSlot)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) RecordQuotaExhaustedContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.RecordQuotaExhaustedContext(ctx, replacementSlot)
+	return lifecycle.next(handle, err)
+}
+
+func (lifecycle *codexLeaseHTTPRequestLifecycle) CompleteAccountUnavailableCycleContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	handle, err := lifecycle.handle.CompleteAccountUnavailableCycleContext(ctx)
 	return lifecycle.next(handle, err)
 }
 
@@ -366,7 +384,7 @@ type CodexHTTPAttemptSlotPlan struct {
 // CodexHTTPAttemptSlots projects the exact direct and eligible-refresh order
 // consumed by Do into durable request-envelope slots.
 func CodexHTTPAttemptSlots(plan CodexFrozenDispatchPlan) []CodexHTTPAttemptSlotPlan {
-	accounts := plan.Accounts()
+	accounts, _ := codexHTTPRequestDispatchAccounts(plan)
 	accountSlots := codexHTTPRequestAccountSlotMap(accounts)
 	var slots []CodexHTTPAttemptSlotPlan
 	for accountIndex, account := range accounts {
@@ -408,8 +426,8 @@ func (session *CodexHTTPRequestSession) Do(
 	if session == nil || session.Executor == nil || template == nil || template.URL == nil || frozen == nil || lifecycle == nil {
 		return result, errors.New("Codex HTTP request session unavailable")
 	}
-	accounts := plan.Accounts()
-	if len(accounts) == 0 {
+	accounts, ordinaryAccountCount := codexHTTPRequestDispatchAccounts(plan)
+	if ordinaryAccountCount == 0 {
 		return session.abandonPrepared(ctx, result, plan.TerminalError())
 	}
 	frozenChoice, err := frozen.Choice()
@@ -435,6 +453,52 @@ accountsLoop:
 		directAttempts := len(attempts)
 		refreshPlanned, hasRefresh := account.RefreshAttempt()
 		refreshConsidered := false
+		if len(attempts) == 0 && hasRefresh {
+			refreshConsidered = true
+			result.Choice = choice
+			result.Attempt = refreshPlanned
+			var refreshErr error
+			if session.Refresher == nil {
+				refreshErr = codex.ErrRefreshUnavailable
+			} else {
+				ref, revision, err := session.Refresher.RefreshReference(ctx, refreshPlanned.Candidate, refreshPlanned.Revision)
+				if err != nil {
+					refreshErr = err
+				} else {
+					refreshed, validationErr := candidateAttemptWithRefreshedRevision(refreshPlanned, ref, revision)
+					if validationErr != nil {
+						refreshErr = validationErr
+					} else {
+						refreshed.Ordinal = 1
+						attempts = append(attempts, refreshed)
+					}
+				}
+			}
+			if refreshErr != nil {
+				nextAccountIndex, hasReplacement := codexHTTPRequestNextUnavailableAccount(
+					accountIndex,
+					ordinaryAccountCount,
+					len(accounts),
+					result.Lifecycle.EverAdmitted(),
+				)
+				replacementSlot := uint32(0)
+				if hasReplacement {
+					replacementSlot = codexHTTPRequestFirstAccountSlot(accountSlots[nextAccountIndex])
+				}
+				if !hasReplacement && !codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
+					return session.abandonPrepared(ctx, result, refreshErr)
+				}
+				next, unavailableErr := codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, replacementSlot, false)
+				if unavailableErr != nil {
+					return session.finishIndeterminate(ctx, result, errors.Join(refreshErr, unavailableErr))
+				}
+				result.Lifecycle = next
+				if hasReplacement {
+					continue accountsLoop
+				}
+				return result, refreshErr
+			}
+		}
 		for attemptIndex := 0; attemptIndex < len(attempts); attemptIndex++ {
 			attempt := attempts[attemptIndex]
 			result.Choice = choice
@@ -556,39 +620,52 @@ accountsLoop:
 				result.Lifecycle = next
 				continue
 			}
-			if hardRejected && !result.Lifecycle.EverAdmitted() && accountIndex+1 < len(accounts) {
-				if account.IsDefault() {
-					retainErr := retention.Reject(ctx, response, true)
-					if retainErr != nil {
-						next, finishErr := result.Lifecycle.FinishRejected()
-						if finishErr == nil {
-							result.Lifecycle = next
+			if accountUnavailable := authRejected || hardRejected; accountUnavailable {
+				nextAccountIndex, hasReplacement := codexHTTPRequestNextUnavailableAccount(
+					accountIndex,
+					ordinaryAccountCount,
+					len(accounts),
+					result.Lifecycle.EverAdmitted(),
+				)
+				if hasReplacement {
+					if account.IsDefault() {
+						retainErr := retention.Reject(ctx, response, true)
+						if retainErr != nil {
+							next, finishErr := result.Lifecycle.FinishRejected()
+							if finishErr == nil {
+								result.Lifecycle = next
+							}
+							var rejectedErr *CodexRejectedResponseError
+							if errors.As(retainErr, &rejectedErr) && rejectedErr.Code == CodexRejectedResponseBodyTooLarge {
+								return result, finishErr
+							}
+							result.Response = nil
+							return result, errors.Join(retainErr, finishErr)
 						}
-						var rejectedErr *CodexRejectedResponseError
-						if errors.As(retainErr, &rejectedErr) && rejectedErr.Code == CodexRejectedResponseBodyTooLarge {
-							return result, finishErr
-						}
-						result.Response = nil
-						return result, errors.Join(retainErr, finishErr)
+						retainedChoice = choice
+						retainedAttempt = actual
+						defaultRetained = true
+					} else {
+						discardCodexHTTPRequestResponse(ctx, response)
 					}
-					retainedChoice = choice
-					retainedAttempt = actual
-					defaultRetained = true
-				} else {
-					discardCodexHTTPRequestResponse(ctx, response)
+					result.Response = nil
+					next, retryErr := codexHTTPRequestRecordAccountUnavailable(
+						ctx,
+						result.Lifecycle,
+						codexHTTPRequestFirstAccountSlot(accountSlots[nextAccountIndex]),
+						hardRejected,
+					)
+					if retryErr != nil {
+						return session.finishIndeterminate(ctx, result, retryErr)
+					}
+					result.Lifecycle = next
+					continue accountsLoop
 				}
-				result.Response = nil
-				next, retryErr := result.Lifecycle.RejectAndPrepareContext(ctx, accountSlots[accountIndex+1].direct[0])
-				if retryErr != nil {
-					return session.finishIndeterminate(ctx, result, retryErr)
-				}
-				result.Lifecycle = next
-				continue accountsLoop
 			}
 			if (authRejected || hardRejected) && defaultRetained {
 				discardCodexHTTPRequestResponse(ctx, response)
 				result.Response = nil
-				next, finishErr := result.Lifecycle.FinishRejected()
+				next, finishErr := codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
 				if finishErr != nil {
 					return result, finishErr
 				}
@@ -602,16 +679,22 @@ accountsLoop:
 				result.Attempt = retainedAttempt
 				return result, nil
 			}
-			if (authRejected || hardRejected) && plan.TerminalError() != nil {
+			if (authRejected || hardRejected) && plan.TerminalError() != nil && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
 				discardCodexHTTPRequestResponse(ctx, response)
 				result.Response = nil
-				next, finishErr := result.Lifecycle.FinishRejected()
+				next, finishErr := codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
 				if finishErr == nil {
 					result.Lifecycle = next
 				}
 				return result, errors.Join(plan.TerminalError(), finishErr)
 			}
-			next, finishErr := result.Lifecycle.FinishRejected()
+			var next CodexHTTPRequestLifecycle
+			var finishErr error
+			if (authRejected || hardRejected) && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
+				next, finishErr = codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
+			} else {
+				next, finishErr = result.Lifecycle.FinishRejected()
+			}
 			if finishErr != nil {
 				discardCodexHTTPRequestResponse(ctx, response)
 				result.Response = nil
@@ -624,9 +707,56 @@ accountsLoop:
 	return session.abandonPrepared(ctx, result, fmt.Errorf("%w: frozen plan has no attempts", plan.TerminalError()))
 }
 
+func codexHTTPRequestCanRecordAccountUnavailable(plan CodexFrozenDispatchPlan, lifecycle CodexHTTPRequestLifecycle) bool {
+	return lifecycle != nil && (!lifecycle.EverAdmitted() || plan.accountUnavailablePortable || len(plan.accountUnavailableFallbacks) != 0 || len(plan.accountUnavailableResetCandidates) != 0)
+}
+
+func codexHTTPRequestRecordAccountUnavailable(ctx context.Context, lifecycle CodexHTTPRequestLifecycle, replacementSlot uint32, quotaExhausted bool) (CodexHTTPRequestLifecycle, error) {
+	if quotaExhausted {
+		return lifecycle.RecordQuotaExhaustedContext(ctx, replacementSlot)
+	}
+	next, err := lifecycle.RecordAccountUnavailableContext(ctx, replacementSlot)
+	if err != nil || replacementSlot != 0 || !lifecycle.EverAdmitted() {
+		return next, err
+	}
+	return next.CompleteAccountUnavailableCycleContext(ctx)
+}
+
+func codexHTTPRequestDispatchAccounts(plan CodexFrozenDispatchPlan) ([]CodexFrozenDispatchAccount, int) {
+	ordinary := plan.Accounts()
+	fallbacks := plan.AccountUnavailableFallbacks()
+	accounts := make([]CodexFrozenDispatchAccount, 0, len(ordinary)+len(fallbacks))
+	accounts = append(accounts, ordinary...)
+	accounts = append(accounts, fallbacks...)
+	return accounts, len(ordinary)
+}
+
+func codexHTTPRequestNextUnavailableAccount(current, ordinaryCount, total int, everAdmitted bool) (int, bool) {
+	if current < ordinaryCount {
+		if !everAdmitted && current+1 < ordinaryCount {
+			return current + 1, true
+		}
+		if ordinaryCount < total {
+			return ordinaryCount, true
+		}
+		return 0, false
+	}
+	if current+1 < total {
+		return current + 1, true
+	}
+	return 0, false
+}
+
 type codexHTTPRequestAccountSlots struct {
 	direct  []uint32
 	refresh uint32
+}
+
+func codexHTTPRequestFirstAccountSlot(slots codexHTTPRequestAccountSlots) uint32 {
+	if len(slots.direct) != 0 {
+		return slots.direct[0]
+	}
+	return slots.refresh
 }
 
 func codexHTTPRequestAccountSlotMap(accounts []CodexFrozenDispatchAccount) []codexHTTPRequestAccountSlots {

@@ -297,6 +297,9 @@ func (store *CodexLeaseStore) resolveCodexLeaseAccount(accountHash string, accou
 }
 
 func codexLeaseRecordRequiresResolvedAccount(record CodexJournalRecordV2) bool {
+	if codexLeaseCurrentAttemptState(record) == CodexAttemptAccountUnavailable {
+		return false
+	}
 	switch record.State {
 	case LeaseProvisional:
 		return record.EverAdmitted || record.NonMigratable || codexLeaseCurrentAttemptState(record) != CodexAttemptAbandonedBeforeDispatch
@@ -333,6 +336,8 @@ func codexLeaseFenceContainsRecord(fences []CodexLeaseRecordFence, identity Code
 
 func cloneCodexRestoredLane(restored CodexRestoredLane) CodexRestoredLane {
 	clone := restored
+	clone.Lane.RequestUnavailableAccountHashes = cloneCodexLeaseSlice(restored.Lane.RequestUnavailableAccountHashes)
+	clone.Lane.QuotaExhaustedAccountHashes = cloneCodexLeaseSlice(restored.Lane.QuotaExhaustedAccountHashes)
 	clone.RequestedRecord = cloneCodexJournalRecordV2(restored.RequestedRecord)
 	if restored.Affinity != nil {
 		affinity := *restored.Affinity

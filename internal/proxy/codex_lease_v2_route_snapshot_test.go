@@ -102,6 +102,78 @@ func TestCodexLeaseRouteSnapshotReturnsDetachedGenerationFencedRouteState(t *tes
 	}
 }
 
+func TestCodexLeaseRouteSnapshotSuppressesUnavailableBoundAccount(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "account-a", Kind: CodexAttemptSlotDirect,
+	}})
+	initial, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err = initial.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err = initial.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err = initial.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{HasEncryptedState: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initial.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	incremental := plan
+	incremental.RequiresAccountContinuity = true
+	incremental.Evidence.HasEncryptedState = true
+	handle, err := runtimeLease.BeginRequest(incremental)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.State() != LeaseBoundQuiescent || codexLeaseCurrentAttemptState(handle.record) != CodexAttemptAccountUnavailable || !handle.EverAdmitted() {
+		t.Fatalf("terminal unavailable request = %#v", handle.record)
+	}
+
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BoundAccountKey != "" || !snapshot.BoundIdentity.IsZero() || snapshot.BoundRecordGeneration != 0 || !reflect.DeepEqual(snapshot.BoundChoice, RouteChoice{}) || snapshot.AffinityAccountKey != "" || snapshot.AffinityRequiresAccount {
+		t.Fatalf("unavailable route remained bound: %#v", snapshot)
+	}
+	if !reflect.DeepEqual(snapshot.UnavailableAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("unavailable accounts = %#v, want account-a", snapshot.UnavailableAccountKeys)
+	}
+	if !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("quota-exhausted accounts = %#v, want account-a", snapshot.QuotaExhaustedAccountKeys)
+	}
+	snapshot.UnavailableAccountKeys[0] = "mutated"
+	again, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(again.UnavailableAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("second unavailable accounts = %#v, want detached account-a", again.UnavailableAccountKeys)
+	}
+}
+
 func TestCodexLeaseRouteSnapshotRefreshesAffinityFromLatestAdmittedRequest(t *testing.T) {
 	t.Parallel()
 
@@ -466,7 +538,7 @@ func TestCodexLeaseRouteSnapshotBindsCurrentNonMigratableRequest(t *testing.T) {
 	if !handle.record.NonMigratable || handle.record.EverAdmitted {
 		t.Fatalf("test precondition = non-migratable %v admitted %v, want true/false", handle.record.NonMigratable, handle.record.EverAdmitted)
 	}
-	if snapshot.BoundAccountKey != "account-a" || snapshot.BoundRecordGeneration != handle.record.RecordGeneration || snapshot.BoundChoice.AccountKey != "account-a" {
+	if snapshot.BoundAccountKey != "account-a" || snapshot.BoundRecordGeneration != handle.record.RecordGeneration || snapshot.BoundChoice.AccountKey != "account-a" || !snapshot.BoundRequiresAccount {
 		t.Fatalf("non-migratable binding = account %q generation %d choice %#v", snapshot.BoundAccountKey, snapshot.BoundRecordGeneration, snapshot.BoundChoice)
 	}
 	wrongAccount := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{

@@ -33,11 +33,13 @@ func TestCodexTurnLeaseStateTable(t *testing.T) {
 
 func TestCodexAttemptStateTable(t *testing.T) {
 	t.Parallel()
-	states := []CodexAttemptState{CodexAttemptPrepared, CodexAttemptDispatched, CodexAttemptStreaming, CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptIndeterminate}
+	states := []CodexAttemptState{CodexAttemptPrepared, CodexAttemptDispatched, CodexAttemptStreaming, CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptIndeterminate, CodexAttemptAbandonedBeforeDispatch, CodexAttemptAccountUnavailable}
 	allowed := map[[2]CodexAttemptState]bool{
-		{CodexAttemptPrepared, CodexAttemptDispatched}:  true,
+		{CodexAttemptPrepared, CodexAttemptDispatched}: true, {CodexAttemptPrepared, CodexAttemptAccountUnavailable}: true,
 		{CodexAttemptDispatched, CodexAttemptStreaming}: true, {CodexAttemptDispatched, CodexAttemptProviderFailed}: true, {CodexAttemptDispatched, CodexAttemptIndeterminate}: true,
-		{CodexAttemptStreaming, CodexAttemptProviderCompleted}: true, {CodexAttemptStreaming, CodexAttemptProviderFailed}: true, {CodexAttemptStreaming, CodexAttemptIndeterminate}: true,
+		{CodexAttemptDispatched, CodexAttemptAccountUnavailable}: true,
+		{CodexAttemptStreaming, CodexAttemptProviderCompleted}:   true, {CodexAttemptStreaming, CodexAttemptProviderFailed}: true, {CodexAttemptStreaming, CodexAttemptIndeterminate}: true,
+		{CodexAttemptStreaming, CodexAttemptAccountUnavailable}: true,
 	}
 	for _, from := range states {
 		for _, to := range states {

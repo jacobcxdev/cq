@@ -336,6 +336,21 @@ func (lifecycle *codexTurnReceiptLifecycle) RejectAndPrepareContext(ctx context.
 	return lifecycle.next(next, err, "", false)
 }
 
+func (lifecycle *codexTurnReceiptLifecycle) RecordAccountUnavailableContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	next, err := lifecycle.inner.RecordAccountUnavailableContext(ctx, replacementSlot)
+	return lifecycle.next(next, err, "", false)
+}
+
+func (lifecycle *codexTurnReceiptLifecycle) RecordQuotaExhaustedContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	next, err := lifecycle.inner.RecordQuotaExhaustedContext(ctx, replacementSlot)
+	return lifecycle.next(next, err, "", false)
+}
+
+func (lifecycle *codexTurnReceiptLifecycle) CompleteAccountUnavailableCycleContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	next, err := lifecycle.inner.CompleteAccountUnavailableCycleContext(ctx)
+	return lifecycle.next(next, err, "", false)
+}
+
 func (lifecycle *codexTurnReceiptLifecycle) AbandonBeforeDispatchContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
 	next, err := lifecycle.inner.AbandonBeforeDispatchContext(ctx)
 	return lifecycle.next(next, err, CodexTurnReceiptRejected, false)

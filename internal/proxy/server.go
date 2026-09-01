@@ -1188,7 +1188,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			if sessionKey == "" {
 				sessionKey = "none"
 			}
-			fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=websocket session=%s event=%s stage=%s reason=%s origin=%s frame_type=%s frame_size=%s frame_detail=%s\n", sessionKey, decision, failure.Stage, failure.Reason, failure.Origin, failure.FrameType, failure.FrameSize, failure.FrameDetail)
+			fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=websocket session=%s event=%s stage=%s reason=%s origin=%s frame_type=%s frame_size=%s frame_detail=%s event_type=%s error_status=%s error_type=%s error_code=%s\n", sessionKey, decision, failure.Stage, failure.Reason, failure.Origin, failure.FrameType, failure.FrameSize, failure.FrameDetail, failure.EventType, failure.ErrorStatus, failure.ErrorType, failure.ErrorCode)
 			diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing failed")
 			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		}

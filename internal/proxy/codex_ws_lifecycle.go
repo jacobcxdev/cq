@@ -2,7 +2,12 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/gorilla/websocket"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 // CodexWebSocketAdmissionEvidence is bounded provider authority for one exact
@@ -112,7 +117,7 @@ func (lifecycle *codexWSLifecycle) ObserveFrame(ctx context.Context, upstreamGen
 		}
 	case CodexSSECompleted:
 		if !lifecycle.attemptAdmitted {
-			return result, lifecycle.indeterminate(ctx, "completion preceded admission")
+			return result, lifecycle.indeterminateFrame(ctx, frame, codexWSInvalidFrameCompletionOrder, "completion preceded admission")
 		}
 		completed, err := lifecycle.handle.ProviderCompleted(CodexHTTPCompletionEvidence{
 			CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{
@@ -129,14 +134,19 @@ func (lifecycle *codexWSLifecycle) ObserveFrame(ctx context.Context, upstreamGen
 		lifecycle.receipt.terminal(CodexTurnReceiptCompleted)
 		result.Terminal = true
 	case CodexSSEError:
-		if !lifecycle.turnAdmitted && !lifecycle.attemptAdmitted && observation.Error.Found {
-			result.DefinitePreAdmissionRejection = true
+		if observation.Error.Found {
 			result.HardUsageLimit = observation.Error.HardUsageLimit
 			result.AuthFailure = observation.Error.AuthFailure
-			return result, nil
+			if !lifecycle.attemptAdmitted {
+				result.DefinitePreAdmissionRejection = true
+				return result, nil
+			}
+			if result.HardUsageLimit || result.AuthFailure {
+				return result, nil
+			}
 		}
 		if !lifecycle.attemptAdmitted {
-			return result, lifecycle.indeterminate(ctx, "error authority was ambiguous")
+			return result, lifecycle.indeterminateFrame(ctx, frame, codexWSInvalidFrameErrorOrder, "error authority was ambiguous")
 		}
 		failed, err := lifecycle.handle.ProviderFailed(CodexHTTPResponseEvidence{HasEncryptedState: observation.HasEncryptedState})
 		if err != nil {
@@ -146,10 +156,14 @@ func (lifecycle *codexWSLifecycle) ObserveFrame(ctx context.Context, upstreamGen
 		lifecycle.receipt.terminal(CodexTurnReceiptFailed)
 		result.Terminal = true
 	case CodexSSEMalformed, CodexSSEUnknown:
-		return result, lifecycle.indeterminate(ctx, "upstream event was malformed or unknown")
+		detail := codexWSInvalidFrameMalformedEvent
+		if observation.Kind == CodexSSEUnknown {
+			detail = codexWSInvalidFrameUnknownEvent
+		}
+		return result, lifecycle.indeterminateFrame(ctx, frame, detail, "upstream event was malformed or unknown")
 	case CodexSSEDelta:
 		if !lifecycle.attemptAdmitted {
-			return result, lifecycle.indeterminate(ctx, "delta preceded admission")
+			return result, lifecycle.indeterminateFrame(ctx, frame, codexWSInvalidFrameDeltaOrder, "delta preceded admission")
 		}
 	}
 	return result, nil
@@ -159,7 +173,7 @@ func (lifecycle *codexWSLifecycle) RejectAndPrepare(ctx context.Context, upstrea
 	if err := lifecycle.validateGeneration(upstreamGeneration); err != nil {
 		return err
 	}
-	if lifecycle.turnAdmitted || lifecycle.attemptAdmitted {
+	if lifecycle.attemptAdmitted {
 		return ErrCodexLeaseTransition
 	}
 	handle, err := lifecycle.handle.RejectAndPrepareContext(ctx, nextSlot)
@@ -168,6 +182,79 @@ func (lifecycle *codexWSLifecycle) RejectAndPrepare(ctx context.Context, upstrea
 	}
 	lifecycle.handle = handle
 	return nil
+}
+
+func (lifecycle *codexWSLifecycle) RecordAccountUnavailable(ctx context.Context, upstreamGeneration uint64, replacementSlot uint32) error {
+	return lifecycle.recordAccountUnavailable(ctx, upstreamGeneration, replacementSlot, false)
+}
+
+func (lifecycle *codexWSLifecycle) RecordQuotaExhausted(ctx context.Context, upstreamGeneration uint64, replacementSlot uint32) error {
+	return lifecycle.recordAccountUnavailable(ctx, upstreamGeneration, replacementSlot, true)
+}
+
+func (lifecycle *codexWSLifecycle) CompleteAccountUnavailableCycle(ctx context.Context, upstreamGeneration uint64) error {
+	if err := lifecycle.validateGeneration(upstreamGeneration); err != nil {
+		return err
+	}
+	handle, err := lifecycle.handle.CompleteAccountUnavailableCycleContext(ctx)
+	if err != nil {
+		return err
+	}
+	lifecycle.handle = handle
+	return nil
+}
+
+func (lifecycle *codexWSLifecycle) recordAccountUnavailable(ctx context.Context, upstreamGeneration uint64, replacementSlot uint32, quotaExhausted bool) error {
+	if err := lifecycle.validateGeneration(upstreamGeneration); err != nil {
+		return err
+	}
+	if lifecycle.attemptAdmitted && replacementSlot != 0 {
+		return ErrCodexLeaseTransition
+	}
+	var (
+		handle *CodexLeaseRequestHandle
+		err    error
+	)
+	if quotaExhausted {
+		handle, err = lifecycle.handle.RecordQuotaExhaustedContext(ctx, replacementSlot)
+	} else {
+		handle, err = lifecycle.handle.RecordAccountUnavailableContext(ctx, replacementSlot)
+	}
+	if err != nil {
+		return err
+	}
+	lifecycle.handle = handle
+	if replacementSlot == 0 {
+		terminal := CodexTurnReceiptRejected
+		if lifecycle.attemptAdmitted {
+			terminal = CodexTurnReceiptFailed
+		}
+		lifecycle.receipt.terminal(terminal)
+	}
+	return nil
+}
+
+func (lifecycle *codexWSLifecycle) replacementSlot(account codex.AccountKey) (uint32, error) {
+	if lifecycle == nil || lifecycle.handle == nil || account == "" {
+		return 0, ErrCodexLeaseWriterUnavailable
+	}
+	for index, slotAccount := range lifecycle.handle.slotAccounts {
+		if slotAccount != account {
+			continue
+		}
+		slot := uint32(index + 1)
+		used := false
+		for _, attempt := range lifecycle.handle.record.Attempts {
+			if attempt.Slot == slot {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return slot, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: replacement account slot is unavailable", ErrCodexLeaseAuthorityMismatch)
 }
 
 func (lifecycle *codexWSLifecycle) FinishRejected(upstreamGeneration uint64) error {
@@ -284,6 +371,14 @@ func (lifecycle *codexWSLifecycle) indeterminate(ctx context.Context, reason str
 	lifecycle.handle = handle
 	lifecycle.receipt.terminal(CodexTurnReceiptIndeterminate)
 	return fmt.Errorf("%w: %s", ErrCodexWSInvalidFrame, reason)
+}
+
+func (lifecycle *codexWSLifecycle) indeterminateFrame(ctx context.Context, frame []byte, detail codexWSInvalidFrameDetail, reason string) error {
+	err := lifecycle.indeterminate(ctx, reason)
+	if !errors.Is(err, ErrCodexWSInvalidFrame) {
+		return err
+	}
+	return newCodexWSInvalidFrameErrorWithDetail(codexWSInvalidFrameUpstreamResponse, websocket.TextMessage, frame, detail, err)
 }
 
 func (lifecycle *codexWSLifecycle) validateGeneration(upstreamGeneration uint64) error {

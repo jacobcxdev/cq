@@ -46,7 +46,7 @@ func TestProjectCodexRoutePolicyCandidatesProjectsEveryLogicalAccount(t *testing
 	got, err := ProjectCodexRoutePolicyCandidates(inventory, capacity, CodexRouteRequirements{
 		RequestedModel: codexSparkModel,
 		RequiredModels: []string{codexFallbackModel},
-	}, counts)
+	}, counts, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestProjectCodexRoutePolicyCandidatesNilCapacityIsUnknown(t *testing.T) {
 	}}
 	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{
 		RequestedModel: codexSparkModel,
-	}, nil)
+	}, nil, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,13 +132,50 @@ func TestProjectCodexRoutePolicyCandidatesNilCapacityIsUnknown(t *testing.T) {
 	})
 }
 
+func TestProjectCodexRoutePolicyCandidatesUsesCredentialAvailabilityAtSnapshotTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	expiredExternal := projectionReadyCandidate("account-expired", "candidate-expired")
+	expiredExternal.Source = codex.SourceExternal
+	expiredExternal.AccessExpiresAt = now.Add(-time.Minute)
+	refreshRequired := projectionReadyCandidate("account-refresh", "candidate-refresh")
+	refreshRequired.AccessExpiresAt = now.Add(-time.Minute)
+	refreshRequired.CQAuthored = true
+	refreshRequired.RefreshEligible = true
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		projectionLogicalAccount("account-expired", "plus", true, expiredExternal),
+		projectionLogicalAccount("account-refresh", "plus", true, refreshRequired),
+	}}
+
+	got, err := ProjectCodexRoutePolicyCandidates(
+		inventory,
+		nil,
+		CodexRouteRequirements{RequestedModel: codexFallbackModel},
+		nil,
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(candidates) = %d, want 2", len(got))
+	}
+	if got[0].Routable {
+		t.Fatal("known-expired external credential remained policy-routable")
+	}
+	if !got[1].Routable {
+		t.Fatal("CQ-refreshable expired credential was removed from policy routing")
+	}
+}
+
 func TestProjectCodexRoutePolicyCandidatesEmptyModelIsIncompatibleButStructurallyValid(t *testing.T) {
 	t.Parallel()
 
 	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
 		projectionLogicalAccount("account-default", "pro", true, projectionReadyCandidate("account-default", "candidate-default")),
 	}}
-	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{}, nil)
+	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{}, nil, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +208,7 @@ func TestProjectCodexRoutePolicyCandidatesPreservesUnroutableAndZeroDefaults(t *
 		projectionLogicalAccount("account-unroutable", "plus", false, projectionReadyCandidate("account-unroutable", "candidate-unroutable")),
 		projectionLogicalAccount("account-zero", "plus", true, projectionReadyCandidate("account-zero", "candidate-zero")),
 	}}
-	got, err := ProjectCodexRoutePolicyCandidates(inventory, capacity, CodexRouteRequirements{RequestedModel: codexFallbackModel}, nil)
+	got, err := ProjectCodexRoutePolicyCandidates(inventory, capacity, CodexRouteRequirements{RequestedModel: codexFallbackModel}, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +241,7 @@ func TestProjectCodexRoutePolicyCandidatesRejectsDuplicateAccountKeys(t *testing
 		{Key: privateKey},
 		{Key: privateKey},
 	}}
-	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{RequestedModel: codexFallbackModel}, nil)
+	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{RequestedModel: codexFallbackModel}, nil, time.Unix(1_700_000_000, 0))
 	projectionErr := requireCodexRouteProjectionError(t, err, CodexRouteProjectionInvalidInventory)
 	if got != nil {
 		t.Fatalf("candidates = %+v, want nil", got)
@@ -238,7 +275,7 @@ func TestProjectCodexRoutePolicyCandidatesQuarantinesBadRowsWithoutPoisoningHeal
 		emptyRevision,
 		invalidSource,
 		healthy,
-	}}, nil, CodexRouteRequirements{RequestedModel: codexFallbackModel}, nil)
+	}}, nil, CodexRouteRequirements{RequestedModel: codexFallbackModel}, nil, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +299,7 @@ func TestProjectCodexRoutePolicyCandidatesRejectsNegativeProvisionalCount(t *tes
 		projectionLogicalAccount("account-a", "plus", true, projectionReadyCandidate("account-a", "candidate-a")),
 	}}
 	counts := map[codex.AccountKey]int{"private-not-in-inventory": -1}
-	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{RequestedModel: codexFallbackModel}, counts)
+	got, err := ProjectCodexRoutePolicyCandidates(inventory, nil, CodexRouteRequirements{RequestedModel: codexFallbackModel}, counts, time.Unix(1_700_000_000, 0))
 	projectionErr := requireCodexRouteProjectionError(t, err, CodexRouteProjectionInvalidProvisionalCount)
 	if got != nil {
 		t.Fatalf("candidates = %+v, want nil", got)
@@ -285,7 +322,7 @@ func TestProjectCodexRoutePolicyCandidatesReturnsOwnedSlices(t *testing.T) {
 		RequestedModel: codexSparkModel,
 		RequiredModels: []string{codexFallbackModel},
 	}
-	first, err := ProjectCodexRoutePolicyCandidates(inventory, nil, requirements, nil)
+	first, err := ProjectCodexRoutePolicyCandidates(inventory, nil, requirements, nil, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +330,7 @@ func TestProjectCodexRoutePolicyCandidatesReturnsOwnedSlices(t *testing.T) {
 	first[0].RequiredCapacity[0].RemainingPct = 99
 	first[0].Choice.EffectiveModel = "mutated"
 
-	second, err := ProjectCodexRoutePolicyCandidates(inventory, nil, requirements, nil)
+	second, err := ProjectCodexRoutePolicyCandidates(inventory, nil, requirements, nil, time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

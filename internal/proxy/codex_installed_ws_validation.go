@@ -154,7 +154,7 @@ func runCodexInstalledWebSocketAcceptance(
 	}
 	executor := NewCodexWebSocketAttemptExecutor(core.inventory, core.inventory)
 	executor.Dialer.Proxy = nil
-	broker, err := NewCodexTerminatingWebSocketHandler(planner, executor, upstreamURL)
+	broker, err := NewCodexTerminatingWebSocketHandler(planner, executor, core.inventory, core.capacity, upstreamURL)
 	if err != nil {
 		return evidence, errCodexInstalledListenerAcceptance
 	}

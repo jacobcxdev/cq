@@ -233,6 +233,15 @@ func (lifecycle *codexTurnReceiptLifecycleStub) MarkDispatchedContext(context.Co
 func (lifecycle *codexTurnReceiptLifecycleStub) RejectAndPrepareContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error) {
 	return lifecycle, nil
 }
+func (lifecycle *codexTurnReceiptLifecycleStub) RecordAccountUnavailableContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error) {
+	return lifecycle, nil
+}
+func (lifecycle *codexTurnReceiptLifecycleStub) RecordQuotaExhaustedContext(context.Context, uint32) (CodexHTTPRequestLifecycle, error) {
+	return lifecycle, nil
+}
+func (lifecycle *codexTurnReceiptLifecycleStub) CompleteAccountUnavailableCycleContext(context.Context) (CodexHTTPRequestLifecycle, error) {
+	return lifecycle, nil
+}
 func (lifecycle *codexTurnReceiptLifecycleStub) AbandonBeforeDispatchContext(context.Context) (CodexHTTPRequestLifecycle, error) {
 	return lifecycle, nil
 }

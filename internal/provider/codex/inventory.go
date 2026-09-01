@@ -55,6 +55,29 @@ type CredentialCandidate struct {
 	externalRef     *ExternalCandidateRef
 }
 
+type CandidateAvailability uint8
+
+const (
+	CandidateUnavailable CandidateAvailability = iota
+	CandidateReady
+	CandidateRefreshRequired
+)
+
+// CandidateAvailabilityAt classifies whether a candidate may be dispatched
+// directly, must be refreshed by CQ first, or must not be routed.
+func CandidateAvailabilityAt(candidate CredentialCandidate, now time.Time) CandidateAvailability {
+	if !candidate.Routable || candidate.DispatchBlocked {
+		return CandidateUnavailable
+	}
+	if candidate.AccessExpiresAt.IsZero() || candidate.AccessExpiresAt.After(now) {
+		return CandidateReady
+	}
+	if candidate.Source == SourceManaged && candidate.CQAuthored && candidate.RefreshEligible {
+		return CandidateRefreshRequired
+	}
+	return CandidateUnavailable
+}
+
 type LogicalAccount struct {
 	Key        AccountKey
 	Identity   AccountIdentity

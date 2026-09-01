@@ -95,6 +95,25 @@ func (lifecycle *codexInstalledHTTPProbedLifecycle) RejectAndPrepareContext(ctx 
 	return lifecycle.next(next, err, 0, false, false)
 }
 
+func (lifecycle *codexInstalledHTTPProbedLifecycle) RecordAccountUnavailableContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	next, err := lifecycle.inner.RecordAccountUnavailableContext(ctx, replacementSlot)
+	return lifecycle.next(next, err, 0, false, false)
+}
+
+func (lifecycle *codexInstalledHTTPProbedLifecycle) RecordQuotaExhaustedContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	next, err := lifecycle.inner.RecordQuotaExhaustedContext(ctx, replacementSlot)
+	terminal := codexInstalledHTTPTerminalKind(0)
+	if replacementSlot == 0 {
+		terminal = codexInstalledHTTPTerminalRejected
+	}
+	return lifecycle.next(next, err, terminal, false, false)
+}
+
+func (lifecycle *codexInstalledHTTPProbedLifecycle) CompleteAccountUnavailableCycleContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	next, err := lifecycle.inner.CompleteAccountUnavailableCycleContext(ctx)
+	return lifecycle.next(next, err, 0, false, false)
+}
+
 func (lifecycle *codexInstalledHTTPProbedLifecycle) AbandonBeforeDispatchContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
 	next, err := lifecycle.inner.AbandonBeforeDispatchContext(ctx)
 	return lifecycle.next(next, err, codexInstalledHTTPTerminalIndeterminate, false, false)

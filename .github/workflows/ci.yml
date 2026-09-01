@@ -24,10 +24,20 @@ jobs:
           brew install --cask codex
           codex --version
 
-      - name: Validate normal, compaction, and rescue routing
+      - name: Validate normal, compaction, hard-limit failover, and rescue routing
         env:
           CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"
-        run: CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" go test -race -count=1 ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledRescuePassesThroughCurrentClient)$'
+        run: |
+          tests='TestCodexInstalledSupervisorSupportsRemoteCompaction TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover TestCodexInstalledRescuePassesThroughCurrentClient'
+          test_log="$RUNNER_TEMP/installed-codex-routing.log"
+          if ! CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" go test -race -count=1 -v ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover|TestCodexInstalledRescuePassesThroughCurrentClient)$' >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          for test_name in $tests; do
+            grep -F -- "--- PASS: ${test_name} " "$test_log"
+          done
 
       - name: Bind reviewed Codex corpus provenance
         run: echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go 0.0.0 ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
@@ -129,6 +139,16 @@ jobs:
           test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
           test_log="$RUNNER_TEMP/degraded-rescue-transport.log"
           if ! go test -race -count=1 -v ./internal/proxy -run "^${test_name}$" >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          grep -F -- "--- PASS: ${test_name} " "$test_log"
+      - name: Gate normal proxy transport
+        run: |
+          test_name=TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak
+          test_log="$RUNNER_TEMP/normal-proxy-transport.log"
+          if ! go test -race -count=1 -v ./internal/proxy -run '^TestNormalProxyTransport(HTTP|WebSocket)' >"$test_log" 2>&1; then
             cat "$test_log" >&2
             exit 1
           fi

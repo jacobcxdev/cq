@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -9,17 +10,20 @@ import (
 
 // CodexFrozenDispatchInput contains one caller-owned routing snapshot.
 type CodexFrozenDispatchInput struct {
-	Inventory              codex.Inventory
-	Capacity               *CodexCapacityLedger
-	Requirements           CodexRouteRequirements
-	Provisional            map[codex.AccountKey]int
-	AccountValues          map[codex.AccountKey]PoolValue
-	AffinityAccountKey     codex.AccountKey
-	AffinityEffectiveModel string
-	DefaultAccountKey      codex.AccountKey
-	BoundAccountKey        codex.AccountKey
-	AcceptedRevision       codex.Revision
-	Now                    time.Time
+	Inventory                   codex.Inventory
+	Capacity                    *CodexCapacityLedger
+	Requirements                CodexRouteRequirements
+	Provisional                 map[codex.AccountKey]int
+	AccountValues               map[codex.AccountKey]PoolValue
+	AffinityAccountKey          codex.AccountKey
+	AffinityEffectiveModel      string
+	DefaultAccountKey           codex.AccountKey
+	BoundAccountKey             codex.AccountKey
+	UnavailableAccountKeys      []codex.AccountKey
+	ProbeUnavailableAccountKeys []codex.AccountKey
+	ProbeUnavailableWhenAll     bool
+	AcceptedRevision            codex.Revision
+	Now                         time.Time
 }
 
 // CodexFrozenDispatchErrorCode classifies credential-free snapshot failures.
@@ -47,10 +51,13 @@ func (e *CodexFrozenDispatchError) Error() string {
 
 // CodexFrozenDispatchPlan is a memory-only sequence of per-account dispatches.
 type CodexFrozenDispatchPlan struct {
-	accounts         []CodexFrozenDispatchAccount
-	policyCandidates []CodexRoutePolicyCandidate
-	status           CodexRoutePlanStatus
-	probe            codexInstalledHTTPDispatchFacts
+	accounts                          []CodexFrozenDispatchAccount
+	accountUnavailableFallbacks       []CodexFrozenDispatchAccount
+	accountUnavailableResetCandidates []codex.AccountKey
+	accountUnavailablePortable        bool
+	policyCandidates                  []CodexRoutePolicyCandidate
+	status                            CodexRoutePlanStatus
+	probe                             codexInstalledHTTPDispatchFacts
 }
 
 // CodexFrozenDispatchAccount binds one frozen route choice to exact credential attempts.
@@ -72,6 +79,7 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		input.Capacity,
 		input.Requirements,
 		input.Provisional,
+		input.Now,
 	)
 	if err != nil {
 		if cancelErr := codexFrozenDispatchContextError(ctx); cancelErr != nil {
@@ -82,11 +90,22 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 	for index := range candidates {
 		candidates[index].Value = input.AccountValues[candidates[index].Choice.AccountKey]
 	}
+	candidates, unavailableProbe := filterCodexFrozenDispatchUnavailableCandidates(
+		candidates,
+		input.UnavailableAccountKeys,
+		input.ProbeUnavailableAccountKeys,
+		input.ProbeUnavailableWhenAll && input.BoundAccountKey == "",
+		input.DefaultAccountKey,
+	)
+	policyBoundAccountKey := input.BoundAccountKey
+	if policyBoundAccountKey == "" {
+		policyBoundAccountKey = unavailableProbe
+	}
 	policy, err := BuildCodexRoutePlan(ctx, candidates, CodexRoutePolicyHints{
 		AffinityAccountKey:     input.AffinityAccountKey,
 		AffinityEffectiveModel: input.AffinityEffectiveModel,
 		DefaultAccountKey:      input.DefaultAccountKey,
-		BoundAccountKey:        input.BoundAccountKey,
+		BoundAccountKey:        policyBoundAccountKey,
 	})
 	plan := CodexFrozenDispatchPlan{status: policy.Status(), policyCandidates: candidates}
 	if err != nil {
@@ -293,20 +312,28 @@ func freezeCodexDispatchAccount(logical codex.LogicalAccount, choice RouteChoice
 	}
 	account := CodexFrozenDispatchAccount{choice: cloneRoutePolicyChoice(choice), isDefault: isDefault}
 	for _, candidate := range codex.ResolveCandidate(logical, accepted, now) {
-		if !candidate.Routable {
+		availability := codex.CandidateAvailabilityAt(candidate, now)
+		if availability == codex.CandidateUnavailable {
 			continue
 		}
 		if err := validateCodexFrozenDispatchCandidate(logical, candidate); err != nil {
 			return CodexFrozenDispatchAccount{}, err
 		}
 		attempt := candidateAttemptFromPlan(codex.PlanCandidate(logical, candidate), len(account.attempts)+1)
+		if availability == codex.CandidateRefreshRequired {
+			if account.refreshAttempt == nil {
+				copy := attempt
+				account.refreshAttempt = &copy
+			}
+			continue
+		}
 		account.attempts = append(account.attempts, attempt)
-		if account.refreshAttempt == nil && candidate.Source == codex.SourceManaged && candidate.CQAuthored {
+		if account.refreshAttempt == nil && candidate.Source == codex.SourceManaged && candidate.CQAuthored && candidate.RefreshEligible {
 			copy := attempt
 			account.refreshAttempt = &copy
 		}
 	}
-	if len(account.attempts) == 0 {
+	if len(account.attempts) == 0 && account.refreshAttempt == nil {
 		return CodexFrozenDispatchAccount{}, &CodexFrozenDispatchError{Code: CodexFrozenDispatchNoDispatchableCandidate}
 	}
 	return account, nil
@@ -322,11 +349,60 @@ func frozenDispatchLogicalAccount(inventory codex.Inventory, key codex.AccountKe
 }
 
 func (p CodexFrozenDispatchPlan) Accounts() []CodexFrozenDispatchAccount {
-	accounts := make([]CodexFrozenDispatchAccount, len(p.accounts))
-	for i := range p.accounts {
-		accounts[i] = cloneCodexFrozenDispatchAccount(p.accounts[i])
+	return cloneCodexFrozenDispatchAccounts(p.accounts)
+}
+
+// AccountUnavailableFallbacks returns portable cross-account routes admitted
+// only after the selected account becomes unavailable. They are deliberately
+// absent from Accounts.
+func (p CodexFrozenDispatchPlan) AccountUnavailableFallbacks() []CodexFrozenDispatchAccount {
+	return cloneCodexFrozenDispatchAccounts(p.accountUnavailableFallbacks)
+}
+
+// AccountUnavailableResetCandidates returns detached account identities that
+// remain eligible for a new full-create route after the selected account
+// becomes unavailable. It grants no credential or replay authority.
+func (p CodexFrozenDispatchPlan) AccountUnavailableResetCandidates() []codex.AccountKey {
+	return append([]codex.AccountKey(nil), p.accountUnavailableResetCandidates...)
+}
+
+func (p CodexFrozenDispatchPlan) withAccountUnavailableResetCandidates(candidates CodexFrozenDispatchPlan, primary RouteChoice) CodexFrozenDispatchPlan {
+	seen := map[codex.AccountKey]struct{}{primary.AccountKey: {}}
+	for _, account := range candidates.accounts {
+		choice := account.Choice()
+		if _, duplicate := seen[choice.AccountKey]; duplicate ||
+			!codexFrozenDispatchOrdinarilyEligible(candidates.policyCandidates, choice) ||
+			!codexRoutePolicyCompatibleWithFrozen(choice, primary) {
+			continue
+		}
+		seen[choice.AccountKey] = struct{}{}
+		p.accountUnavailableResetCandidates = append(p.accountUnavailableResetCandidates, choice.AccountKey)
 	}
-	return accounts
+	return p
+}
+
+func (p CodexFrozenDispatchPlan) withAccountUnavailableFallbacks(fallbacks CodexFrozenDispatchPlan, primary RouteChoice) CodexFrozenDispatchPlan {
+	p.accountUnavailablePortable = true
+	seen := make(map[codex.AccountKey]struct{}, len(p.accounts))
+	for _, account := range p.accounts {
+		seen[account.choice.AccountKey] = struct{}{}
+	}
+	seen[primary.AccountKey] = struct{}{}
+	for index, account := range fallbacks.accounts {
+		choice := account.Choice()
+		if _, duplicate := seen[choice.AccountKey]; duplicate ||
+			!codexFrozenDispatchOrdinarilyEligible(fallbacks.policyCandidates, choice) ||
+			!codexRoutePolicyCompatibleWithFrozen(choice, primary) {
+			continue
+		}
+		seen[choice.AccountKey] = struct{}{}
+		p.accountUnavailableFallbacks = append(p.accountUnavailableFallbacks, cloneCodexFrozenDispatchAccount(account))
+		if fallbacks.probe.terminalDefaultOrdinal == uint32(index+1) {
+			p.probe.terminalDefaultOrdinal = uint32(len(p.accounts) + len(p.accountUnavailableFallbacks))
+		}
+	}
+	p.probe.routeCount = uint32(len(p.accounts) + len(p.accountUnavailableFallbacks))
+	return p
 }
 
 func (p CodexFrozenDispatchPlan) Status() CodexRoutePlanStatus {
@@ -368,4 +444,79 @@ func cloneCodexFrozenDispatchAccount(account CodexFrozenDispatchAccount) CodexFr
 		account.refreshAttempt = &copy
 	}
 	return account
+}
+
+func cloneCodexFrozenDispatchAccounts(source []CodexFrozenDispatchAccount) []CodexFrozenDispatchAccount {
+	accounts := make([]CodexFrozenDispatchAccount, len(source))
+	for index := range source {
+		accounts[index] = cloneCodexFrozenDispatchAccount(source[index])
+	}
+	return accounts
+}
+
+func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolicyCandidate, unavailable, probeAccounts []codex.AccountKey, probeWhenAll bool, defaultAccountKey codex.AccountKey) ([]CodexRoutePolicyCandidate, codex.AccountKey) {
+	if len(unavailable) == 0 {
+		return candidates, ""
+	}
+	excluded := make(map[codex.AccountKey]struct{}, len(unavailable))
+	for _, account := range unavailable {
+		excluded[account] = struct{}{}
+	}
+	filtered := make([]CodexRoutePolicyCandidate, 0, len(candidates))
+	ordinaryAvailable := false
+	for _, candidate := range candidates {
+		if _, ok := excluded[candidate.Choice.AccountKey]; !ok {
+			filtered = append(filtered, candidate)
+			ordinaryAvailable = ordinaryAvailable || codexFrozenDispatchPolicyCandidateEligible(candidate)
+		}
+	}
+	if ordinaryAvailable || !probeWhenAll {
+		return filtered, ""
+	}
+	probes := make(map[codex.AccountKey]struct{}, len(probeAccounts))
+	for _, account := range probeAccounts {
+		probes[account] = struct{}{}
+	}
+	probeCandidates := make([]CodexRoutePolicyCandidate, 0, len(unavailable))
+	seen := make(map[codex.AccountKey]struct{}, len(unavailable))
+	for _, candidate := range candidates {
+		if _, probe := probes[candidate.Choice.AccountKey]; !probe ||
+			!candidate.Compatible || !candidate.Routable || candidate.Choice.AccountKey == "" {
+			continue
+		}
+		if _, duplicate := seen[candidate.Choice.AccountKey]; duplicate {
+			continue
+		}
+		seen[candidate.Choice.AccountKey] = struct{}{}
+		probeCandidates = append(probeCandidates, candidate)
+	}
+	if len(probeCandidates) == 0 {
+		return filtered, ""
+	}
+	sort.SliceStable(probeCandidates, func(i, j int) bool {
+		leftEligible := codexFrozenDispatchPolicyCandidateEligible(probeCandidates[i])
+		rightEligible := codexFrozenDispatchPolicyCandidateEligible(probeCandidates[j])
+		if leftEligible != rightEligible {
+			return leftEligible
+		}
+		leftDefault := defaultAccountKey != "" && probeCandidates[i].Choice.AccountKey == defaultAccountKey
+		rightDefault := defaultAccountKey != "" && probeCandidates[j].Choice.AccountKey == defaultAccountKey
+		if leftDefault != rightDefault {
+			return leftDefault
+		}
+		return codexRoutePolicyCandidateLess(probeCandidates[i], probeCandidates[j], "", "")
+	})
+	probeKey := probeCandidates[0].Choice.AccountKey
+	selected := make([]CodexRoutePolicyCandidate, 0, 1)
+	for _, candidate := range candidates {
+		if candidate.Choice.AccountKey == probeKey {
+			selected = append(selected, candidate)
+		}
+	}
+	return selected, probeKey
+}
+
+func codexFrozenDispatchPolicyCandidateEligible(candidate CodexRoutePolicyCandidate) bool {
+	return candidate.Choice.AccountKey != "" && candidate.Compatible && candidate.Routable &&
+		codexRoutePolicyCapacity(candidate).State != CapacityZero
 }

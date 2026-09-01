@@ -82,6 +82,7 @@ type CodexLeaseRequestPlan struct {
 	RequiresAccountContinuity     bool
 	authenticatedCallerContinuity bool
 	DispatchPermitDigest          string
+	QuotaExhaustionProbe          bool
 	ingressContinuity             *codexLeaseIngressContinuityClaim
 }
 
@@ -594,12 +595,16 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if err != nil {
 		return nil, err
 	}
+	if err := runtime.validateQuotaExhaustionPlan(restored, plan); err != nil {
+		return nil, err
+	}
 	newTurn := restored.Classification == CodexRestoredLaneUnseen
 	requestIdentity := codexLeaseRuntimeRequestIdentity(restored)
+	restartableFailedHead, restartingFailedHead := codexRestoredLaneRestartableFailedHead(restored)
 	if err := runtime.validateExpectedBound(restored, plan, selected.AccountKey); err != nil {
 		return nil, err
 	}
-	if restored.Classification == CodexRestoredLaneHistorical {
+	if restored.Classification == CodexRestoredLaneHistorical && !restartingFailedHead {
 		return nil, ErrCodexStaleTurn
 	}
 	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity, ingressContinuity)
@@ -622,7 +627,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	revalidated := false
 	switch {
-	case restored.Classification == CodexRestoredLaneHistorical:
+	case restored.Classification == CodexRestoredLaneHistorical && !restartingFailedHead:
 		return nil, ErrCodexStaleTurn
 	case restored.Classification == CodexRestoredLaneUnseen && restored.Fence.Lane == 0:
 		if err := runtime.revalidateAccountForCommit(ctx, selected.AccountKey); err != nil {
@@ -647,10 +652,13 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		}
 		requestIdentity = codexLeaseRuntimeRequestIdentity(restored)
 	}
-	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != requestIdentity {
+	if !restartingFailedHead && (restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != requestIdentity) {
 		return nil, ErrCodexConcurrentTurn
 	}
 	current, ok := runtime.restoredRecord(restored, requestIdentity)
+	if restartingFailedHead {
+		current, ok = restartableFailedHead, true
+	}
 	if !ok {
 		return nil, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
 	}
@@ -665,6 +673,12 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
 	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
+	if !requiresAccountContinuity && codexLeaseAccountUnavailableCanBeginRequest(current.Record) {
+		if current.Record.EverAdmitted {
+			desired.AccountHash = current.Record.AccountHash
+		}
+		desired.NonMigratable = false
+	}
 	if requiresAccountContinuity {
 		desired.NonMigratable = true
 	}
@@ -949,7 +963,10 @@ func (handle *CodexLeaseRequestHandle) RejectAndPrepareContext(ctx context.Conte
 	}
 	desired.Attempts = append(desired.Attempts, CodexJournalAttempt{Slot: nextSlot, State: CodexAttemptPrepared})
 	desired.CurrentAttemptGeneration = 0
-	desired.AccountHash = handle.record.AttemptEnvelope.Slots[nextSlot-1].AccountHash
+	currentAccountHash := handle.record.AttemptEnvelope.Slots[current.Slot-1].AccountHash
+	if !handle.record.EverAdmitted || constantTimeCodexLeaseDigestEqual(currentAccountHash, handle.record.AccountHash) {
+		desired.AccountHash = handle.record.AttemptEnvelope.Slots[nextSlot-1].AccountHash
+	}
 	currentFence, ok := codexLeaseRuntimeRecordFence(&fence, handle.identity)
 	if !ok {
 		return nil, fmt.Errorf("%w: current retry fence is absent", ErrCodexLeaseTrustLost)
@@ -961,6 +978,151 @@ func (handle *CodexLeaseRequestHandle) RejectAndPrepareContext(ctx context.Conte
 		return nil, err
 	}
 	return handle.commitRequestMutation(fence, desired, true)
+}
+
+// RecordAccountUnavailable durably invalidates the current pre-admission
+// account. A non-zero replacement slot prepares one unused account from the
+// frozen request envelope; zero records terminal unavailability.
+func (handle *CodexLeaseRequestHandle) RecordAccountUnavailable(replacementSlot uint32) (*CodexLeaseRequestHandle, error) {
+	return handle.RecordAccountUnavailableContext(context.Background(), replacementSlot)
+}
+
+func (handle *CodexLeaseRequestHandle) RecordAccountUnavailableContext(ctx context.Context, replacementSlot uint32) (*CodexLeaseRequestHandle, error) {
+	return handle.recordAccountUnavailableContext(ctx, replacementSlot, false)
+}
+
+// RecordQuotaExhausted durably invalidates the current account for the
+// session after an exact provider usage-limit rejection.
+func (handle *CodexLeaseRequestHandle) RecordQuotaExhausted(replacementSlot uint32) (*CodexLeaseRequestHandle, error) {
+	return handle.RecordQuotaExhaustedContext(context.Background(), replacementSlot)
+}
+
+func (handle *CodexLeaseRequestHandle) RecordQuotaExhaustedContext(ctx context.Context, replacementSlot uint32) (*CodexLeaseRequestHandle, error) {
+	return handle.recordAccountUnavailableContext(ctx, replacementSlot, true)
+}
+
+// CompleteAccountUnavailableCycle clears request-scoped account exclusions
+// after the final provider authentication rejection has been surfaced.
+func (handle *CodexLeaseRequestHandle) CompleteAccountUnavailableCycle() (*CodexLeaseRequestHandle, error) {
+	return handle.CompleteAccountUnavailableCycleContext(context.Background())
+}
+
+func (handle *CodexLeaseRequestHandle) CompleteAccountUnavailableCycleContext(ctx context.Context) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil account-unavailable-cycle context", ErrCodexLeaseInvalidMutation)
+	}
+	current, found := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !found || !handle.record.EverAdmitted || handle.record.State != LeaseBoundQuiescent || current.State != CodexAttemptAccountUnavailable || handle.record.RoutingRefs != 0 || handle.record.AttemptRefs != 0 || handle.record.ResponseObserverRefs != 0 || !handle.record.SocketLineageExtinct {
+		return nil, ErrCodexLeaseTransition
+	}
+	release, err := handle.runtime.beginLifecycleMutationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+	identity := handle.identity
+	post, err := handle.runtime.store.CommitLane(fence, CodexLaneMutation{CompleteUnavailableCycle: &identity})
+	if err != nil {
+		return nil, err
+	}
+	return handle.runtime.committedRequestHandle(handle.key, handle.accounts, handle.authority, identity, post, handle.record, true, 1)
+}
+
+func (handle *CodexLeaseRequestHandle) recordAccountUnavailableContext(ctx context.Context, replacementSlot uint32, quotaExhausted bool) (*CodexLeaseRequestHandle, error) {
+	if handle == nil || handle.runtime == nil {
+		return nil, ErrCodexLeaseWriterUnavailable
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil account-unavailable context", ErrCodexLeaseInvalidMutation)
+	}
+	current, ok := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	preAdmission := current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched
+	admittedTerminal := current.State == CodexAttemptStreaming && replacementSlot == 0 && handle.record.EverAdmitted
+	if !ok || (!preAdmission && !admittedTerminal) ||
+		(handle.record.State != LeaseProvisional && handle.record.State != LeaseBoundActive) {
+		return nil, ErrCodexLeaseTransition
+	}
+
+	var nextAccount codex.AccountKey
+	if replacementSlot != 0 {
+		if int(replacementSlot) > len(handle.record.AttemptEnvelope.Slots) || int(replacementSlot) > len(handle.slotAccounts) || handle.slotAccounts[replacementSlot-1] == "" {
+			return nil, fmt.Errorf("%w: replacement slot is unavailable", ErrCodexLeaseAuthorityMismatch)
+		}
+		nextAccount = handle.slotAccounts[replacementSlot-1]
+		if handle.record.NonMigratable && nextAccount != handle.account {
+			return nil, ErrCodexLeaseTransition
+		}
+		for _, attempt := range handle.record.Attempts {
+			if attempt.Slot == replacementSlot {
+				return nil, fmt.Errorf("%w: replacement slot is already used", ErrCodexLeaseInvalidMutation)
+			}
+		}
+	}
+
+	var (
+		releaseGate func()
+		err         error
+	)
+	if nextAccount != "" {
+		manager := handle.runtime.leases
+		if manager == nil || manager.accountGates == nil {
+			return nil, ErrCodexLeaseWriterUnavailable
+		}
+		guard, acquireErr := manager.accountGates.acquire(ctx, nextAccount)
+		if acquireErr != nil {
+			return nil, acquireErr
+		}
+		releaseGate = guard.Release
+		defer releaseGate()
+	}
+	release, err := handle.runtime.beginLifecycleMutationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	fence, err := handle.refreshMutationFence()
+	if err != nil {
+		return nil, err
+	}
+
+	desired := codexLeaseRuntimeMutationRecord(handle.record)
+	for index := range desired.Attempts {
+		if desired.Attempts[index].Generation == desired.CurrentAttemptGeneration {
+			desired.Attempts[index].State = CodexAttemptAccountUnavailable
+			break
+		}
+	}
+	if replacementSlot != 0 {
+		desired.Attempts = append(desired.Attempts, CodexJournalAttempt{Slot: replacementSlot, State: CodexAttemptPrepared})
+		desired.CurrentAttemptGeneration = 0
+		currentFence, found := codexLeaseRuntimeRecordFence(&fence, handle.identity)
+		if !found {
+			return nil, fmt.Errorf("%w: current replacement fence is absent", ErrCodexLeaseTrustLost)
+		}
+		currentFence.TouchedAttempts = append(currentFence.TouchedAttempts, CodexAttemptFence{RequestGeneration: handle.record.Generation})
+		if err := handle.runtime.revalidateAccountForCommit(ctx, nextAccount); err != nil {
+			return nil, err
+		}
+		return handle.commitAccountUnavailableMutation(fence, desired, true, quotaExhausted)
+	}
+
+	if handle.record.EverAdmitted {
+		desired.State = LeaseBoundQuiescent
+	} else {
+		desired.State = LeaseFailedUnadmitted
+	}
+	desired.RoutingRefs = 0
+	desired.AttemptRefs = 0
+	desired.ResponseObserverRefs = 0
+	desired.SocketLineageExtinct = true
+	return handle.commitAccountUnavailableMutation(fence, desired, handle.record.EverAdmitted, quotaExhausted)
 }
 
 // FinishRejected records a final definite provider rejection. A never-admitted
@@ -1151,6 +1313,9 @@ func (handle *CodexLeaseRequestHandle) AdmitWebSocketContext(ctx context.Context
 				break
 			}
 		}
+		if err := handle.applyAccountUnavailableRebind(&desired); err != nil {
+			return nil, err
+		}
 	}
 	if err := handle.applyAdmissionEvidence(&desired, CodexHTTPAdmissionEvidence{
 		TurnState: evidence.TurnState, HasTurnState: evidence.HasTurnState,
@@ -1189,6 +1354,9 @@ func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGen
 				break
 			}
 		}
+		if err := handle.applyAccountUnavailableRebind(&desired); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := func(record *CodexJournalRecordV2) error {
 		if firstAttemptAdmission && record.State != LeaseProvisional && record.State != LeaseBoundActive {
@@ -1212,6 +1380,25 @@ func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGen
 	firstAdmission := firstAttemptAdmission && !handle.record.EverAdmitted && desired.Authoritative && codexLeaseCurrentRequestCacheEligible(desired)
 	admitted, err := handle.commitRequestMutation(fence, desired, true)
 	return admitted, firstAdmission, err
+}
+
+func (handle *CodexLeaseRequestHandle) applyAccountUnavailableRebind(desired *CodexJournalRecordV2) error {
+	if handle == nil || desired == nil {
+		return nil
+	}
+	current, found := codexLeaseAttemptByGeneration(handle.record.Attempts, handle.record.CurrentAttemptGeneration)
+	if !found || current.State != CodexAttemptDispatched || current.Slot == 0 || int(current.Slot) > len(handle.record.AttemptEnvelope.Slots) {
+		return ErrCodexLeaseTransition
+	}
+	accountHash := handle.record.AttemptEnvelope.Slots[current.Slot-1].AccountHash
+	if constantTimeCodexLeaseDigestEqual(accountHash, handle.record.AccountHash) {
+		return nil
+	}
+	if handle.record.NonMigratable {
+		return ErrCodexLeaseTransition
+	}
+	desired.AccountHash = accountHash
+	return nil
 }
 
 // ProviderCompleted records the terminal provider event while keeping its
@@ -1324,6 +1511,19 @@ func (handle *CodexLeaseRequestHandle) transitionAttemptWithFence(fence CodexLea
 }
 
 func (handle *CodexLeaseRequestHandle) commitRequestMutation(fence CodexLeaseGenerationFence, desired CodexJournalRecordV2, requireCurrent bool) (*CodexLeaseRequestHandle, error) {
+	return handle.commitRequestMutationWithLaneMutation(fence, desired, requireCurrent, CodexLaneMutation{})
+}
+
+func (handle *CodexLeaseRequestHandle) commitAccountUnavailableMutation(fence CodexLeaseGenerationFence, desired CodexJournalRecordV2, requireCurrent, quotaExhausted bool) (*CodexLeaseRequestHandle, error) {
+	identity := handle.identity
+	mutation := CodexLaneMutation{AccountUnavailable: &identity}
+	if quotaExhausted {
+		mutation.QuotaExhausted = &identity
+	}
+	return handle.commitRequestMutationWithLaneMutation(fence, desired, requireCurrent, mutation)
+}
+
+func (handle *CodexLeaseRequestHandle) commitRequestMutationWithLaneMutation(fence CodexLeaseGenerationFence, desired CodexJournalRecordV2, requireCurrent bool, mutation CodexLaneMutation) (*CodexLeaseRequestHandle, error) {
 	if handle == nil || handle.runtime == nil || handle.runtime.store == nil {
 		return nil, ErrCodexLeaseWriterUnavailable
 	}
@@ -1335,7 +1535,8 @@ func (handle *CodexLeaseRequestHandle) commitRequestMutation(fence CodexLeaseGen
 	expectedTouchedAttempts := len(recordFence.TouchedAttempts)
 	before := cloneCodexJournalRecordV2(handle.record)
 	var committedRecord CodexJournalRecordV2
-	post, err := handle.runtime.store.commitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{desired}}, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
+	mutation.UpsertRecords = []CodexJournalRecordV2{desired}
+	post, err := handle.runtime.store.commitLane(fence, mutation, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
 		for _, record := range installed.Records {
 			if record.Identity() == identity {
 				committedRecord = cloneCodexJournalRecordV2(record)
@@ -1553,6 +1754,8 @@ func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account 
 	lane.LastAdmittedAt = time.Time{}
 	lane.LastCacheAdmittedAt = time.Time{}
 	lane.LastCacheEffectiveModel = ""
+	lane.RequestUnavailableAccountHashes = nil
+	lane.QuotaExhaustedAccountHashes = nil
 	lane.LastObservedAt = time.Time{}
 	fenceIdentities := []CodexJournalRecordIdentity{restored.Fence.Last, restored.RequestedIdentity}
 	if predecessorCurrent == restored.Fence.Last && predecessor.Record.PredecessorTurnHash != "" {
@@ -1629,6 +1832,7 @@ func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) 
 		EffectiveModel:       plan.EffectiveModel,
 		RequiredBuckets:      append([]CapacityBucket(nil), plan.RequiredBuckets...),
 		DispatchPermitDigest: dispatchPermitDigest,
+		QuotaExhaustionProbe: plan.QuotaExhaustionProbe,
 		AttemptEnvelope:      envelope,
 		RoutingRefs:          1,
 		Attempts:             []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
@@ -1659,10 +1863,6 @@ func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts 
 			return nil, fmt.Errorf("%w: committed request attempt fence mismatch", ErrCodexLeaseTrustLost)
 		}
 	}
-	account, resolved := runtime.store.resolveCodexLeaseAccount(record.AccountHash, accounts)
-	if !resolved {
-		return nil, fmt.Errorf("%w: committed request account is unavailable", ErrCodexLeaseAuthorityMismatch)
-	}
 	slotAccounts := make([]codex.AccountKey, len(record.AttemptEnvelope.Slots))
 	for index, slot := range record.AttemptEnvelope.Slots {
 		slotAccount, resolved := runtime.store.resolveCodexLeaseAccount(slot.AccountHash, accounts)
@@ -1670,6 +1870,14 @@ func (runtime *CodexLeaseRuntime) committedRequestHandle(key LeaseKey, accounts 
 			return nil, fmt.Errorf("%w: request slot account is unavailable", ErrCodexLeaseAuthorityMismatch)
 		}
 		slotAccounts[index] = slotAccount
+	}
+	accountHash := record.AccountHash
+	if !record.NonMigratable && (attempt.State == CodexAttemptPrepared || attempt.State == CodexAttemptDispatched) && attempt.Slot > 0 && int(attempt.Slot) <= len(record.AttemptEnvelope.Slots) && !constantTimeCodexLeaseDigestEqual(record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash, record.AccountHash) {
+		accountHash = record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash
+	}
+	account, resolved := runtime.store.resolveCodexLeaseAccount(accountHash, accounts)
+	if !resolved {
+		return nil, fmt.Errorf("%w: committed request account is unavailable", ErrCodexLeaseAuthorityMismatch)
 	}
 	nextFence := cloneCodexLeaseGenerationFence(post)
 	for index := range nextFence.TouchedRecords {
@@ -1753,6 +1961,9 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		return true, nil
 	}
 	requiresAccount := authenticatedCallerContinuity || evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
+	if found && codexLeaseCurrentAttemptState(authority.Record) == CodexAttemptAccountUnavailable && evidence.PreviousResponseID == "" && !evidence.HasTurnState && !evidence.HasEncryptedState {
+		requiresAccount = false
+	}
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
 		return requiresAccount, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 	}
@@ -1940,14 +2151,47 @@ func (runtime *CodexLeaseRuntime) validateExpectedBound(restored CodexRestoredLa
 	return nil
 }
 
+func (runtime *CodexLeaseRuntime) validateQuotaExhaustionPlan(restored CodexRestoredLane, plan CodexLeaseRequestPlan) error {
+	quotaExhausted := func(account codex.AccountKey) bool {
+		hash := runtime.store.hash("account", string(account))
+		for _, unavailable := range restored.Lane.QuotaExhaustedAccountHashes {
+			if constantTimeCodexLeaseDigestEqual(unavailable, hash) {
+				return true
+			}
+		}
+		return false
+	}
+	if plan.QuotaExhaustionProbe {
+		selected := plan.Slots[plan.InitialSlot-1].AccountKey
+		if !quotaExhausted(selected) {
+			return fmt.Errorf("%w: quota probe does not name one exhausted account", ErrCodexLeaseInvalidMutation)
+		}
+		for _, slot := range plan.Slots {
+			if slot.AccountKey != selected {
+				return fmt.Errorf("%w: quota probe spans multiple accounts", ErrCodexLeaseInvalidMutation)
+			}
+		}
+		return nil
+	}
+	for _, slot := range plan.Slots {
+		if quotaExhausted(slot.AccountKey) {
+			return fmt.Errorf("%w: request plan reuses a quota-exhausted account", ErrCodexLeaseInvalidMutation)
+		}
+	}
+	return nil
+}
+
 func codexLeaseRuntimeCanBeginRequest(record CodexJournalRecordV2) bool {
 	if record.Generation == 0 {
 		return record.State == LeaseReserving && codexCurrentRequestIsZero(record.CodexCurrentRequest)
 	}
+	if record.EverAdmitted && record.State == LeaseOrphaned && codexLeaseCurrentAttemptState(record) == CodexAttemptIndeterminate && codexLeaseCurrentAttemptAccountDiffersFromBinding(record) {
+		return false
+	}
 	if record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(record)) {
 		return false
 	}
-	return record.State == LeaseContinuationPending || record.State == LeaseBoundQuiescent || record.State == LeaseOrphaned || (record.State == LeaseProvisional && codexLeaseCurrentAttemptState(record) == CodexAttemptAbandonedBeforeDispatch)
+	return record.State == LeaseContinuationPending || record.State == LeaseBoundQuiescent || record.State == LeaseOrphaned || (record.State == LeaseProvisional && codexLeaseCurrentAttemptState(record) == CodexAttemptAbandonedBeforeDispatch) || codexLeaseRestartableFailedHead(record)
 }
 
 func validCodexLeaseRuntimeRequest(kind CodexRequestKind, phase CodexCompactionPhase) bool {

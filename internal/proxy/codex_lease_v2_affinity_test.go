@@ -829,7 +829,7 @@ func TestCodexLeaseV2SchemaBindsFirstAdmissionEvidenceToItsRequest(t *testing.T)
 	})
 }
 
-func TestCodexLeaseV2SchemaRestrictsLaterAdmittedRequestPlanToBoundAccount(t *testing.T) {
+func TestCodexLeaseV2SchemaAllowsPortableLaterRequestFallbackAccounts(t *testing.T) {
 	store, base := codexLeaseV2AdmittedSchemaFixture(t)
 	foreignAccountHash := store.hash("account", "foreign-later-request-account")
 
@@ -843,7 +843,7 @@ func TestCodexLeaseV2SchemaRestrictsLaterAdmittedRequestPlanToBoundAccount(t *te
 		}
 	})
 
-	t.Run("later request rejects foreign account slot", func(t *testing.T) {
+	t.Run("later portable request retains authorised alternate slots", func(t *testing.T) {
 		value := codexLeaseV2CloneSchemaFixture(t, base)
 		record := &value.Records[0]
 		record.Generation++
@@ -851,9 +851,22 @@ func TestCodexLeaseV2SchemaRestrictsLaterAdmittedRequestPlanToBoundAccount(t *te
 		codexLeaseV2RefreshPlanDigest(t, store, record)
 		codexLeaseV2SignSchemaFixture(t, store, &value)
 
-		reopened := &CodexLeaseStore{key: append([]byte(nil), store.key...)}
-		if err := reopened.loadV2Locked(codexLeaseV2SchemaJSON(t, value)); !errors.Is(err, ErrCodexLeaseTrustLost) {
-			t.Fatalf("reopen later admitted request with foreign slot error = %T %v, want trust lost", err, err)
+		if err := store.validateV2Envelope(value); err != nil {
+			t.Fatalf("validate later admitted request with frozen alternate slot: %v", err)
+		}
+	})
+
+	t.Run("non-migratable request retains unused frozen alternate slot", func(t *testing.T) {
+		value := codexLeaseV2CloneSchemaFixture(t, base)
+		record := &value.Records[0]
+		record.Generation++
+		record.NonMigratable = true
+		record.AttemptEnvelope.Slots[1].AccountHash = foreignAccountHash
+		codexLeaseV2RefreshPlanDigest(t, store, record)
+		codexLeaseV2SignSchemaFixture(t, store, &value)
+
+		if err := store.validateV2Envelope(value); err != nil {
+			t.Fatalf("validate non-migratable request with unused frozen alternate slot: %v", err)
 		}
 	})
 }

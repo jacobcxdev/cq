@@ -340,7 +340,7 @@ func TestFetchHappyPath(t *testing.T) {
 		fs:     fs,
 	}
 
-	results, err := p.Fetch(context.Background(), time.Now())
+	results, err := p.Fetch(context.Background(), time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestFetchMultiAccountActive(t *testing.T) {
 	}
 }
 
-func TestFetch401ReturnsAuthExpiredNoRefreshToken(t *testing.T) {
+func TestFetch401ReportsProviderRejectionWithoutClaimingExpiry(t *testing.T) {
 	var callCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
@@ -548,7 +548,7 @@ func TestFetch401ReturnsAuthExpiredNoRefreshToken(t *testing.T) {
 		fs:     fs,
 	}
 
-	results, err := p.Fetch(context.Background(), time.Now())
+	results, err := p.Fetch(context.Background(), time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -561,9 +561,75 @@ func TestFetch401ReturnsAuthExpiredNoRefreshToken(t *testing.T) {
 	if results[0].Error == nil || results[0].Error.Code != "auth_expired" {
 		t.Errorf("error code = %v, want auth_expired", results[0].Error)
 	}
+	if results[0].Error == nil || results[0].Error.Message != credentialRejectedMessage {
+		t.Errorf("error message = %v, want provider rejection without unproven expiry", results[0].Error)
+	}
 	// Only one HTTP call — no refresh attempted (no refresh token).
 	if c := callCount.Load(); c != 1 {
 		t.Errorf("callCount = %d, want 1 (no refresh attempted)", c)
+	}
+}
+
+func TestFetch403RequiresExplicitAuthenticationError(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "authentication error",
+			body:        `{"error":{"type":"authentication_error","message":"private upstream detail"}}`,
+			wantCode:    "auth_expired",
+			wantMessage: credentialRejectedMessage,
+		},
+		{
+			name:        "policy denial",
+			body:        `{"error":{"type":"invalid_request_error","code":"content_policy_violation","message":"private policy detail"}}`,
+			wantCode:    "api_error",
+			wantMessage: "api error",
+		},
+		{
+			name:        "opaque forbidden",
+			body:        "Forbidden",
+			wantCode:    "api_error",
+			wantMessage: "api error",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer srv.Close()
+
+			fs := newFakeFS()
+			fs.files["/fake/home/.codex/auth.json"] = validAuthJSON(
+				"access-token",
+				"",
+				fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"),
+				"acct-1",
+			)
+			p := &Provider{client: &urlRewriter{client: srv.Client(), baseURL: srv.URL}, fs: fs}
+
+			results, err := p.Fetch(context.Background(), time.Unix(1_700_000_000, 0))
+			if err != nil || len(results) != 1 || results[0].Error == nil {
+				t.Fatalf("Fetch results/error = %+v/%v, want one provider error", results, err)
+			}
+			if got := results[0].Error.Code; got != test.wantCode {
+				t.Fatalf("error code = %q, want %q", got, test.wantCode)
+			}
+			if got := results[0].Error.Message; got != test.wantMessage {
+				t.Fatalf("error message = %q, want %q", got, test.wantMessage)
+			}
+			if got := results[0].Error.HTTPStatus; got != http.StatusForbidden {
+				t.Fatalf("HTTP status = %d, want 403", got)
+			}
+			if strings.Contains(results[0].Error.Message, "private") {
+				t.Fatalf("private provider detail leaked: %q", results[0].Error.Message)
+			}
+		})
 	}
 }
 
@@ -681,7 +747,7 @@ func TestFetch401RequestsManagedRefreshBrokerThenRetriesUsage(t *testing.T) {
 		secrets:       coordinator,
 		refreshBroker: coordinator,
 	}
-	results, err := p.Fetch(context.Background(), time.Now())
+	results, err := p.Fetch(context.Background(), time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

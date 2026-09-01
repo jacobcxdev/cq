@@ -120,16 +120,17 @@ const (
 	CodexAttemptProviderFailed
 	CodexAttemptIndeterminate
 	CodexAttemptAbandonedBeforeDispatch
+	CodexAttemptAccountUnavailable
 )
 
 func validCodexAttemptTransition(from, to CodexAttemptState) bool {
 	switch from {
 	case CodexAttemptPrepared:
-		return to == CodexAttemptDispatched
+		return to == CodexAttemptDispatched || to == CodexAttemptAccountUnavailable
 	case CodexAttemptDispatched:
-		return to == CodexAttemptStreaming || to == CodexAttemptProviderFailed || to == CodexAttemptIndeterminate
+		return to == CodexAttemptStreaming || to == CodexAttemptProviderFailed || to == CodexAttemptIndeterminate || to == CodexAttemptAccountUnavailable
 	case CodexAttemptStreaming:
-		return to == CodexAttemptProviderCompleted || to == CodexAttemptProviderFailed || to == CodexAttemptIndeterminate
+		return to == CodexAttemptProviderCompleted || to == CodexAttemptProviderFailed || to == CodexAttemptIndeterminate || to == CodexAttemptAccountUnavailable
 	default:
 		return false
 	}

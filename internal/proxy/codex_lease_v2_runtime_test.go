@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -796,6 +797,973 @@ func TestCodexLeaseRuntimeFinishRejectedReturnsCommittedLastHandleWithoutPostCom
 	assertCodexLeaseRuntimeRefs(t, failed, 0, 0, 0, true)
 }
 
+func TestCodexLeaseRuntimeRetriesRestartableFailedLaneHead(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	failed, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = failed.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = failed.FinishRejected()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.identity != failed.identity || retry.RequestGeneration() != 2 || retry.AttemptGeneration() != 1 || retry.State() != LeaseProvisional {
+		t.Fatalf("failed-head retry = identity %#v record %#v", retry.identity, retry.record)
+	}
+	if _, err := failed.MarkDispatched(); !errors.Is(err, ErrCodexLeaseStaleMutation) {
+		t.Fatalf("superseded failed handle = %T %v, want stale mutation", err, err)
+	}
+}
+
+func TestCodexLeaseRuntimeFailedHeadRestartRacesSuccessorReservation(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	failedPlan := codexLeaseRuntimeTestPlan("failed-turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "failed-a", Kind: CodexAttemptSlotDirect}})
+	failedPlan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	failed, err := runtimeLease.BeginRequest(failedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = failed.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = failed.FinishRejected()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	successorPlan := codexLeaseRuntimeTestPlan("successor-turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "successor-b", Kind: CodexAttemptSlotDirect}})
+	successorPlan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	type result struct {
+		name   string
+		handle *CodexLeaseRequestHandle
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	go func() {
+		<-start
+		handle, beginErr := runtimeLease.BeginRequest(failedPlan)
+		results <- result{name: "restart", handle: handle, err: beginErr}
+	}()
+	go func() {
+		<-start
+		handle, beginErr := runtimeLease.BeginRequest(successorPlan)
+		results <- result{name: "successor", handle: handle, err: beginErr}
+	}()
+	close(start)
+	first := <-results
+	second := <-results
+	winners := 0
+	var winner result
+	for _, candidate := range []result{first, second} {
+		if candidate.err == nil {
+			winners++
+			winner = candidate
+			continue
+		}
+		if !errors.Is(candidate.err, ErrCodexConcurrentTurn) && !errors.Is(candidate.err, ErrCodexStaleTurn) && !errors.Is(candidate.err, ErrCodexLeaseStaleMutation) {
+			t.Fatalf("%s loser = %T %v, want stale or concurrent", candidate.name, candidate.err, candidate.err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("race results = %#v / %#v, want exactly one winner", first, second)
+	}
+
+	lane := findCodexLeaseV2CASTestLane(t, coordinator.store.v2.Lanes, failed.identity.LaneDigest)
+	failedStored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, failed.identity)
+	if winner.name == "restart" {
+		if lane.CurrentTurnHash != failed.identity.TurnDigest || lane.LastTurnHash != failed.identity.TurnDigest || winner.handle.identity != failed.identity || failedStored.State != LeaseProvisional || failedStored.Generation != 2 {
+			t.Fatalf("restart winner authority = lane %#v failed %#v handle %#v", lane, failedStored, winner.handle.record)
+		}
+		return
+	}
+	if lane.CurrentTurnHash != winner.handle.identity.TurnDigest || lane.LastTurnHash != winner.handle.identity.TurnDigest || winner.handle.identity.TurnDigest == failed.identity.TurnDigest || failedStored.State != LeaseFailedUnadmitted {
+		t.Fatalf("successor winner authority = lane %#v failed %#v handle %#v", lane, failedStored, winner.handle.record)
+	}
+	if _, err := runtimeLease.BeginRequest(failedPlan); !errors.Is(err, ErrCodexStaleTurn) {
+		t.Fatalf("failed identity resurrected after successor = %T %v, want stale turn", err, err)
+	}
+}
+
+func TestCodexLeaseRestartableFailedHeadRequiresDefinitiveAccountRejection(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	failed, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = failed.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err = failed.FinishRejected()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		state CodexAttemptState
+		want  bool
+	}{
+		{state: CodexAttemptProviderFailed, want: true},
+		{state: CodexAttemptAccountUnavailable, want: true},
+		{state: CodexAttemptIndeterminate},
+		{state: CodexAttemptProviderCompleted},
+		{state: CodexAttemptAbandonedBeforeDispatch},
+	} {
+		record := cloneCodexJournalRecordV2(failed.record)
+		record.Attempts[len(record.Attempts)-1].State = test.state
+		if got := codexLeaseRestartableFailedHead(record); got != test.want {
+			t.Fatalf("restartable failed head with %v = %t, want %t", test.state, got, test.want)
+		}
+	}
+}
+
+func TestCodexLeaseRuntimeRetriesAfterAllFrozenAccountsBecomeUnavailable(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.State() != LeaseFailedUnadmitted || len(handle.record.Attempts) != 2 || handle.record.Attempts[0].State != CodexAttemptAccountUnavailable || handle.record.Attempts[1].State != CodexAttemptAccountUnavailable {
+		t.Fatalf("terminal unavailable request = %#v", handle.record)
+	}
+
+	retryPlan := plan
+	retryPlan.Accounts = []codex.AccountKey{"account-b"}
+	retryPlan.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "candidate-b-fresh", Kind: CodexAttemptSlotDirect}}
+	retryPlan.InitialSlot = 1
+	retry, err := runtimeLease.BeginRequest(retryPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.AccountKey() != "account-b" || retry.RequestGeneration() != 2 || retry.AttemptGeneration() != 1 || retry.record.AccountHash != coordinator.store.hash("account", "account-b") {
+		t.Fatalf("fresh request after terminal unavailability = %#v", retry.record)
+	}
+}
+
+func TestCodexLeaseRuntimeRetriesUnavailableFailedSuccessorOnAnotherAccount(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	seed := codexLeaseRuntimeTestPlan("seed-turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "seed-a", Kind: CodexAttemptSlotDirect}})
+	seedHandle, err := runtimeLease.BeginRequest(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedHandle, err = seedHandle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedHandle, err = seedHandle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedHandle, err = seedHandle.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{HasEncryptedState: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedHandle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	current := codexLeaseRuntimeTestPlan("current-turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "current-a", Kind: CodexAttemptSlotDirect}})
+	handle, err := runtimeLease.BeginRequest(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.State() != LeaseFailedUnadmitted || handle.record.EverAdmitted || codexLeaseCurrentAttemptState(handle.record) != CodexAttemptAccountUnavailable {
+		t.Fatalf("failed successor = %#v", handle.record)
+	}
+
+	retry := current
+	retry.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	retry.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "retry-b", Kind: CodexAttemptSlotDirect}}
+	retryHandle, err := runtimeLease.BeginRequest(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryHandle.identity != handle.identity || retryHandle.AccountKey() != "account-b" || retryHandle.RequestGeneration() != 2 || retryHandle.record.AccountHash != coordinator.store.hash("account", "account-b") {
+		t.Fatalf("failed successor retry = %#v", retryHandle.record)
+	}
+}
+
+func TestCodexLeaseRuntimeReplacesKnownUnavailableAccountBeforeDispatch(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.AccountKey() != "account-b" || len(handle.record.Attempts) != 2 || handle.record.Attempts[0].State != CodexAttemptAccountUnavailable || handle.record.Attempts[1].State != CodexAttemptPrepared {
+		t.Fatalf("known-unavailable replacement = account %q record %#v", handle.AccountKey(), handle.record)
+	}
+}
+
+func TestCodexLeaseRuntimeQuotaExhaustionPersistsAcrossSuccessorTurns(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	successor := codexLeaseRuntimeTestPlan("turn-b", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "successor-a", Kind: CodexAttemptSlotDirect}})
+	successor.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), successor.Key, successor.Accounts, successor.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("successor quota exhaustion = %#v, want account-a", snapshot.QuotaExhaustedAccountKeys)
+	}
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	if _, err := runtimeLease.BeginRequest(successor); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("successor exhausted-account BeginRequest = %T %v, want invalid mutation", err, err)
+	}
+	if !bytes.Equal(before, coordinator.store.journalBytes) {
+		t.Fatal("rejected exhausted-account successor changed authority")
+	}
+}
+
+func TestCodexLeaseRuntimeQuotaExhaustionProbeClearsOnlyOnCompletion(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.RecordQuotaExhaustedContext(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := plan
+	probe.Slots = []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a-stale", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-a", CandidateID: "candidate-a-refresh", Kind: CodexAttemptSlotEligibleManagedRefresh},
+	}
+	probe.QuotaExhaustionProbe = true
+	handle, err = runtimeLease.BeginRequest(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("quota exhaustion after admission = %#v, want account-a until terminal completion", snapshot.QuotaExhaustedAccountKeys)
+	}
+	if _, err := handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.QuotaExhaustedAccountKeys) != 0 {
+		t.Fatalf("quota exhaustion after proven recovery = %#v, want empty", snapshot.QuotaExhaustedAccountKeys)
+	}
+}
+
+func TestCodexLeaseRuntimeQuotaExhaustionSurvivesRetrySuccessorAndRestart(t *testing.T) {
+	t.Parallel()
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	plan.Accounts = []codex.AccountKey{"account-a", "account-b", "account-c"}
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.RecordQuotaExhaustedContext(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+	runtimeLease = newCodexLeaseRuntimeTest(t, reopened)
+	snapshot, err := reopened.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("reopened quota exhaustion = %#v, want account-a/account-b", snapshot.QuotaExhaustedAccountKeys)
+	}
+	retry := plan
+	retry.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-c", CandidateID: "candidate-c", Kind: CodexAttemptSlotDirect}}
+	retry.InitialSlot = 1
+	handle, err = runtimeLease.BeginRequest(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	successor := codexLeaseRuntimeTestPlan("turn-b", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "successor-a", Kind: CodexAttemptSlotDirect}})
+	successor.Accounts = plan.Accounts
+	before := append([]byte(nil), reopened.store.journalBytes...)
+	if _, err := runtimeLease.BeginRequest(successor); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("successor exhausted-account BeginRequest = %T %v, want invalid mutation", err, err)
+	}
+	if !bytes.Equal(before, reopened.store.journalBytes) {
+		t.Fatal("rejected successor exhausted-account request changed authority")
+	}
+	snapshot, err = reopened.LoadRouteSnapshot(context.Background(), successor.Key, successor.Accounts, successor.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("successor quota exhaustion = %#v, want account-a/account-b", snapshot.QuotaExhaustedAccountKeys)
+	}
+}
+
+func TestCodexLeaseRuntimeRejectsStaleAccountUnavailableCallback(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	stale, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err = stale.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := stale.RecordAccountUnavailableContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUnavailable := append([]string(nil), coordinator.store.v2.Lanes[0].RequestUnavailableAccountHashes...)
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	beforeGeneration := coordinator.store.Generation()
+	for _, replacementSlot := range []uint32{0, 2} {
+		if _, err := stale.RecordAccountUnavailableContext(context.Background(), replacementSlot); !errors.Is(err, ErrCodexLeaseStaleMutation) {
+			t.Fatalf("stale account-unavailable slot %d = %T %v, want stale mutation", replacementSlot, err, err)
+		}
+		if coordinator.store.Generation() != beforeGeneration || !bytes.Equal(before, coordinator.store.journalBytes) || !reflect.DeepEqual(coordinator.store.v2.Lanes[0].RequestUnavailableAccountHashes, wantUnavailable) || coordinator.store.poisoned != nil {
+			t.Fatalf("stale account-unavailable slot %d changed authority: generation %d hashes %#v poison %v", replacementSlot, coordinator.store.Generation(), coordinator.store.v2.Lanes[0].RequestUnavailableAccountHashes, coordinator.store.poisoned)
+		}
+	}
+	stored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, current.identity)
+	if stored.RecordGeneration != current.record.RecordGeneration || stored.CurrentAttemptGeneration != current.record.CurrentAttemptGeneration || len(stored.Attempts) != 2 || stored.Attempts[0].State != CodexAttemptAccountUnavailable || stored.Attempts[1].State != CodexAttemptPrepared {
+		t.Fatalf("stale callback changed replacement = %#v, want %#v", stored, current.record)
+	}
+}
+
+func TestCodexLeaseRuntimeRejectsStaleQuotaExhaustedCallback(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	stale, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err = stale.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := stale.RecordQuotaExhaustedContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHashes := append([]string(nil), coordinator.store.v2.Lanes[0].QuotaExhaustedAccountHashes...)
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	beforeGeneration := coordinator.store.Generation()
+	for _, replacementSlot := range []uint32{0, 2} {
+		if _, err := stale.RecordQuotaExhaustedContext(context.Background(), replacementSlot); !errors.Is(err, ErrCodexLeaseStaleMutation) {
+			t.Fatalf("stale quota-exhausted slot %d = %T %v, want stale mutation", replacementSlot, err, err)
+		}
+		if coordinator.store.Generation() != beforeGeneration || !bytes.Equal(before, coordinator.store.journalBytes) || !reflect.DeepEqual(coordinator.store.v2.Lanes[0].QuotaExhaustedAccountHashes, wantHashes) || coordinator.store.poisoned != nil {
+			t.Fatalf("stale quota-exhausted slot %d changed authority: generation %d hashes %#v poison %v", replacementSlot, coordinator.store.Generation(), coordinator.store.v2.Lanes[0].QuotaExhaustedAccountHashes, coordinator.store.poisoned)
+		}
+	}
+	stored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, current.identity)
+	if stored.RecordGeneration != current.record.RecordGeneration || stored.CurrentAttemptGeneration != current.record.CurrentAttemptGeneration {
+		t.Fatalf("stale quota callback changed replacement = %#v, want %#v", stored, current.record)
+	}
+}
+
+func TestCodexLeaseRuntimeFullCreateRebindsAfterNonPortableAccountUnavailable(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "initial-a", Kind: CodexAttemptSlotDirect}})
+	initialHandle, err := runtimeLease.BeginRequest(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHandle, err = initialHandle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHandle, err = initialHandle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHandle, err = initialHandle.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: "response-a", HasResponseAnchor: true},
+		EndTurn:                   false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHandle, err = initialHandle.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialAffinityTime := initialHandle.record.AdmittedAt
+
+	incremental := initial
+	incremental.RequiresAccountContinuity = true
+	incremental.Evidence.PreviousResponseID = "response-a"
+	handle, err := runtimeLease.BeginRequest(incremental)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handle.EverAdmitted() || !handle.record.NonMigratable || handle.State() != LeaseBoundQuiescent {
+		t.Fatalf("terminal non-portable request = %#v", handle.record)
+	}
+
+	fresh := initial
+	fresh.Accounts = []codex.AccountKey{"account-b"}
+	fresh.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "fresh-b", Kind: CodexAttemptSlotDirect}}
+	fresh.InitialSlot = 1
+	rebound, err := runtimeLease.BeginRequest(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebound.AccountKey() != "account-b" || rebound.record.NonMigratable || rebound.RequestGeneration() != 3 || rebound.record.AccountHash != coordinator.store.hash("account", "account-a") {
+		t.Fatalf("fresh full-create pending binding = %#v", rebound.record)
+	}
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), fresh.Key, []codex.AccountKey{"account-a", "account-b"}, fresh.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BoundAccountKey != "account-b" || snapshot.AffinityAccountKey != "account-a" || !snapshot.AffinityCacheAdmittedAt.Equal(initialAffinityTime) {
+		t.Fatalf("pre-admission rebound snapshot = %#v, want bound B with historical affinity A", snapshot)
+	}
+}
+
+func TestCodexLeaseRuntimeAccountUnavailableAccumulatesOnlyWithinTurn(t *testing.T) {
+	t.Parallel()
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	accounts := []codex.AccountKey{"account-a", "account-b", "account-c"}
+	planFor := func(turn string, account codex.AccountKey) CodexLeaseRequestPlan {
+		plan := codexLeaseRuntimeTestPlan(turn, []CodexLeaseAttemptSlotPlan{{
+			AccountKey: account, CandidateID: "candidate-" + string(account), Kind: CodexAttemptSlotDirect,
+		}})
+		plan.Accounts = accounts
+		return plan
+	}
+	rejectAfterAdmission := func(plan CodexLeaseRequestPlan) {
+		handle, err := runtimeLease.BeginRequest(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.MarkDispatched()
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.AdmitHTTP2xx()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handle.RecordAccountUnavailableContext(context.Background(), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := planFor("turn-a", "account-a")
+	rejectAfterAdmission(first)
+	second := planFor("turn-a", "account-b")
+	rejectAfterAdmission(second)
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+	runtimeLease = newCodexLeaseRuntimeTest(t, coordinator)
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), first.Key, accounts, first.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.UnavailableAccountKeys, []codex.AccountKey{"account-a", "account-b"}) || len(snapshot.QuotaExhaustedAccountKeys) != 0 {
+		t.Fatalf("same-turn unavailable accounts = %#v quota %#v, want A/B generic only", snapshot.UnavailableAccountKeys, snapshot.QuotaExhaustedAccountKeys)
+	}
+
+	third := planFor("turn-a", "account-c")
+	completed, err := runtimeLease.BeginRequest(third)
+	if err != nil {
+		stored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, codexLaneTupleIdentity(coordinator.store.v2.Lanes[0], true))
+		t.Fatalf("C BeginRequest after reopened A/B unavailability = %v; stored %#v", err, stored)
+	}
+	completed, err = completed.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err = completed.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err = completed.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err = completed.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.AccountKey() != "account-c" {
+		t.Fatalf("third same-turn account = %q, want account-c", completed.AccountKey())
+	}
+	successor := planFor("turn-b", "account-a")
+	snapshot, err = coordinator.LoadRouteSnapshot(context.Background(), successor.Key, accounts, successor.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.UnavailableAccountKeys) != 0 || len(snapshot.QuotaExhaustedAccountKeys) != 0 {
+		t.Fatalf("successor inherited generic unavailability: unavailable %#v quota %#v", snapshot.UnavailableAccountKeys, snapshot.QuotaExhaustedAccountKeys)
+	}
+}
+
+func TestCodexLeaseRuntimePendingAccountUnavailableRebindSurvivesRestart(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		dispatched bool
+	}{
+		{name: "prepared"},
+		{name: "dispatched", dispatched: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "a", Kind: CodexAttemptSlotDirect}})
+			plan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+			handle, err := runtimeLease.BeginRequest(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.AdmitHTTP2xx()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacementPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "b", Kind: CodexAttemptSlotDirect}})
+			replacementPlan.Accounts = plan.Accounts
+			replacement, err := runtimeLease.BeginRequest(replacementPlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.dispatched {
+				replacement, err = replacement.MarkDispatched()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			identity := replacement.identity
+			if err := coordinator.Close(); err != nil {
+				t.Fatal(err)
+			}
+			coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+			restored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, identity)
+			if restored.AccountHash != coordinator.store.hash("account", "account-a") || !restored.EverAdmitted || restored.State != LeaseOrphaned {
+				t.Fatalf("reopened pending rebind = %#v", restored)
+			}
+			runtimeLease = newCodexLeaseRuntimeTest(t, coordinator)
+			if test.dispatched {
+				if codexLeaseCurrentAttemptState(restored) != CodexAttemptIndeterminate || !restored.NonMigratable {
+					t.Fatalf("reopened dispatched rebind = %#v", restored)
+				}
+				before := append([]byte(nil), coordinator.store.journalBytes...)
+				if _, err := runtimeLease.BeginRequest(replacementPlan); !errors.Is(err, ErrCodexContinuity) {
+					t.Fatalf("indeterminate pending rebind retry = %T %v, want fail-closed continuity", err, err)
+				}
+				if !bytes.Equal(before, coordinator.store.journalBytes) {
+					t.Fatal("blocked indeterminate pending rebind changed journal")
+				}
+				return
+			}
+			if codexLeaseCurrentAttemptState(restored) != CodexAttemptAbandonedBeforeDispatch || restored.NonMigratable {
+				t.Fatalf("reopened prepared rebind = %#v", restored)
+			}
+			resumed, err := runtimeLease.BeginRequest(replacementPlan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed.AccountKey() != "account-b" || resumed.record.AccountHash != coordinator.store.hash("account", "account-a") || !resumed.EverAdmitted() {
+				t.Fatalf("resumed pending rebind = %#v", resumed.record)
+			}
+		})
+	}
+}
+
+func TestCodexLeaseRuntimeCompletesAccountUnavailableCycle(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	accounts := []codex.AccountKey{"account-a", "account-b"}
+	terminal := func(account codex.AccountKey, quota bool) *CodexLeaseRequestHandle {
+		plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: account, CandidateID: string(account), Kind: CodexAttemptSlotDirect}})
+		plan.Accounts = accounts
+		handle, err := runtimeLease.BeginRequest(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.MarkDispatched()
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.AdmitHTTP2xx()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if quota {
+			handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 0)
+		} else {
+			handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return handle
+	}
+	terminal("account-a", true)
+	final := terminal("account-b", false)
+	cleared, err := final.CompleteAccountUnavailableCycleContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), final.key, accounts, final.authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.UnavailableAccountKeys, []codex.AccountKey{"account-a"}) || !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("completed unavailable cycle = generic %#v quota %#v", snapshot.UnavailableAccountKeys, snapshot.QuotaExhaustedAccountKeys)
+	}
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	if _, err := final.CompleteAccountUnavailableCycle(); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("repeated unavailable cycle completion = %T %v, want invalid mutation", err, err)
+	}
+	if !bytes.Equal(before, coordinator.store.journalBytes) || cleared == nil {
+		t.Fatal("stale unavailable cycle completion changed journal")
+	}
+}
+
+func TestCodexLeaseCASRequiresUnavailableProvenanceForFullCreateRebind(t *testing.T) {
+	t.Parallel()
+
+	commitBegin := func(t *testing.T, coordinator *CodexContinuityCoordinator, runtimeLease *CodexLeaseRuntime, handle *CodexLeaseRequestHandle, plan CodexLeaseRequestPlan, accountHash string) error {
+		t.Helper()
+		desired := codexLeaseRuntimeMutationRecord(handle.record)
+		desired.State = LeaseBoundActive
+		desired.AccountHash = accountHash
+		desired.CodexCurrentRequest = runtimeLease.requestAfterImage(plan)
+		desired.NonMigratable = false
+		desired.DownstreamSocketGeneration = 0
+		desired.UpstreamSocketGeneration = 0
+		desired.SocketLineageExtinct = false
+		fence := cloneCodexLeaseGenerationFence(handle.fence)
+		recordFence, found := codexLeaseRuntimeRecordFence(&fence, handle.identity)
+		if !found {
+			t.Fatal("current record fence is absent")
+		}
+		recordFence.TouchedAttempts = []CodexAttemptFence{{}}
+		identity := handle.identity
+		_, err := coordinator.store.CommitLane(fence, CodexLaneMutation{BeginRequest: &identity, UpsertRecords: []CodexJournalRecordV2{desired}})
+		return err
+	}
+
+	t.Run("ordinary admitted request cannot rebind", func(t *testing.T) {
+		coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+		runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+		initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "initial-a", Kind: CodexAttemptSlotDirect}})
+		completed := completeCodexLeaseRuntimeTurn(t, runtimeLease, initial)
+		foreign := initial
+		foreign.Accounts = []codex.AccountKey{"account-a", "account-b"}
+		foreign.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "foreign-b", Kind: CodexAttemptSlotDirect}}
+		before := append([]byte(nil), coordinator.store.journalBytes...)
+		beforeGeneration := coordinator.store.Generation()
+		if err := commitBegin(t, coordinator, runtimeLease, completed, foreign, completed.record.AccountHash); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+			t.Fatalf("ordinary foreign-account BeginRequest = %T %v, want invalid mutation", err, err)
+		}
+		if coordinator.store.Generation() != beforeGeneration || !bytes.Equal(before, coordinator.store.journalBytes) || coordinator.store.poisoned != nil {
+			t.Fatalf("rejected ordinary rebind changed authority: generation %d poison %v", coordinator.store.Generation(), coordinator.store.poisoned)
+		}
+	})
+
+	t.Run("unavailable reset cannot rotate binding before admission", func(t *testing.T) {
+		coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+		runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+		initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "initial-a", Kind: CodexAttemptSlotDirect}})
+		completeCodexLeaseRuntimeTurn(t, runtimeLease, initial)
+		incremental := initial
+		incremental.RequiresAccountContinuity = true
+		handle, err := runtimeLease.BeginRequest(incremental)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.MarkDispatched()
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foreign := initial
+		foreign.Accounts = []codex.AccountKey{"account-a", "account-b", "account-c"}
+		foreign.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "foreign-b", Kind: CodexAttemptSlotDirect}}
+		before := append([]byte(nil), coordinator.store.journalBytes...)
+		beforeGeneration := coordinator.store.Generation()
+		if err := commitBegin(t, coordinator, runtimeLease, handle, foreign, coordinator.store.hash("account", "account-c")); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+			t.Fatalf("pre-admission binding rotation = %T %v, want invalid mutation", err, err)
+		}
+		if coordinator.store.Generation() != beforeGeneration || !bytes.Equal(before, coordinator.store.journalBytes) || coordinator.store.poisoned != nil {
+			t.Fatalf("rejected pre-admission rotation changed authority: generation %d poison %v", coordinator.store.Generation(), coordinator.store.poisoned)
+		}
+	})
+}
+
+func TestCodexLeaseRuntimeRetriesReboundAccountCandidateBeforeAdmission(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "initial-a", Kind: CodexAttemptSlotDirect}})
+	initialHandle := completeCodexLeaseRuntimeTurn(t, runtimeLease, initial)
+	initialAdmissionGeneration := initialHandle.record.AdmissionJournalGeneration
+	initialAdmissionRequest := initialHandle.record.AdmissionRequestGeneration
+	initialAdmittedAt := initialHandle.record.AdmittedAt
+
+	request := initial
+	request.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	request.Slots = []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b-stale", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b-current", Kind: CodexAttemptSlotEligibleManagedRefresh},
+	}
+	handle, err := runtimeLease.BeginRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RejectAndPrepare(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.AccountKey() != "account-b" || handle.record.AccountHash != coordinator.store.hash("account", "account-a") || len(handle.record.Attempts) != 3 || handle.record.Attempts[0].State != CodexAttemptAccountUnavailable || handle.record.Attempts[1].State != CodexAttemptProviderFailed || handle.record.Attempts[2].State != CodexAttemptPrepared {
+		t.Fatalf("rebound account retry = account %q record %#v", handle.AccountKey(), handle.record)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.record.AccountHash != coordinator.store.hash("account", "account-b") || handle.record.AdmissionJournalGeneration != initialAdmissionGeneration || handle.record.AdmissionRequestGeneration != initialAdmissionRequest || !handle.record.AdmittedAt.Equal(initialAdmittedAt) {
+		t.Fatalf("rebound retry admission = %#v", handle.record)
+	}
+}
+
+func TestCodexLeaseRuntimeFirstAdmissionAfterCrossAccountRetry(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RejectAndPrepare(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.AccountKey() != "account-b" || handle.record.AccountHash != coordinator.store.hash("account", "account-b") || !handle.record.EverAdmitted || handle.record.AdmissionRequestGeneration != handle.record.Generation {
+		t.Fatalf("first admission after cross-account retry = %#v", handle.record)
+	}
+}
+
 func TestCodexLeaseRuntimeTerminalAndDrainReturnCommittedHandlesWithoutPostCommitOwnerOperations(t *testing.T) {
 	t.Parallel()
 	owner := &codexLeaseRuntimeFailingOwner{err: errors.New("post-commit owner failure")}
@@ -997,15 +1965,6 @@ func TestCodexLeaseRuntimeRetriesSameAccountAfterAdmission(t *testing.T) {
 	admissionRequestGeneration := handle.record.AdmissionRequestGeneration
 	admittedAt := handle.record.AdmittedAt
 
-	crossAccount := initial
-	crossAccount.Slots = []CodexLeaseAttemptSlotPlan{
-		{AccountKey: "account-a", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
-		{AccountKey: "account-b", CandidateID: "candidate-other-account", Kind: CodexAttemptSlotDirect},
-	}
-	if _, err := runtimeLease.BeginRequest(crossAccount); !errors.Is(err, ErrCodexLeaseAuthorityMismatch) {
-		t.Fatalf("cross-account retry plan = %T %v, want authority mismatch", err, err)
-	}
-
 	continuation := initial
 	continuation.Slots = []CodexLeaseAttemptSlotPlan{
 		{AccountKey: "account-a", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
@@ -1052,6 +2011,126 @@ func TestCodexLeaseRuntimeRetriesSameAccountAfterAdmission(t *testing.T) {
 	}
 	if handle.State() != LeaseContinuationPending || !handle.EverAdmitted() || handle.record.AdmissionJournalGeneration != admissionJournalGeneration || handle.record.AdmissionRequestGeneration != admissionRequestGeneration || handle.record.AdmittedAt != admittedAt {
 		t.Fatalf("completed retry changed admission authority: %#v", handle.record)
+	}
+}
+
+func TestCodexLeaseRuntimeAdmittedPortableRequestFreezesHardLimitFallback(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-initial", Kind: CodexAttemptSlotDirect,
+	}})
+	completeCodexLeaseRuntimeTurn(t, runtimeLease, initial)
+
+	request := initial
+	request.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	request.Slots = []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-bound", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-fallback", Kind: CodexAttemptSlotDirect},
+	}
+	handle, err := runtimeLease.BeginRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.AccountKey() != "account-a" || handle.AttemptGeneration() != 1 || len(handle.record.AttemptEnvelope.Slots) != 2 {
+		t.Fatalf("portable fallback request = account %q attempt %d envelope %#v", handle.AccountKey(), handle.AttemptGeneration(), handle.record.AttemptEnvelope)
+	}
+}
+
+func TestCodexLeaseRuntimeAccountUnavailableRebindsAdmittedPortableRequest(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-initial", Kind: CodexAttemptSlotDirect,
+	}})
+	initialHandle := completeCodexLeaseRuntimeTurn(t, runtimeLease, initial)
+	initialAdmissionGeneration := initialHandle.record.AdmissionJournalGeneration
+	initialAdmissionRequest := initialHandle.record.AdmissionRequestGeneration
+	initialAdmittedAt := initialHandle.record.AdmittedAt
+
+	request := initial
+	request.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	request.Slots = []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-bound", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-fallback", Kind: CodexAttemptSlotDirect},
+	}
+	handle, err := runtimeLease.BeginRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.AccountKey() != "account-b" || handle.AttemptGeneration() != 2 || len(handle.record.Attempts) != 2 || handle.record.Attempts[0].State != CodexAttemptAccountUnavailable || handle.record.Attempts[1].State != CodexAttemptPrepared {
+		t.Fatalf("account-unavailable replacement = account %q request %#v", handle.AccountKey(), handle.record.CodexCurrentRequest)
+	}
+	if handle.record.AccountHash != coordinator.store.hash("account", "account-a") || handle.record.AdmissionJournalGeneration != initialAdmissionGeneration || handle.record.AdmissionRequestGeneration != initialAdmissionRequest || !handle.record.AdmittedAt.Equal(initialAdmittedAt) {
+		t.Fatalf("prepared replacement changed admitted binding: %#v", handle.record)
+	}
+
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.AccountKey() != "account-b" || handle.record.AccountHash != coordinator.store.hash("account", "account-b") || handle.record.AdmissionJournalGeneration != initialAdmissionGeneration || handle.record.AdmissionRequestGeneration != initialAdmissionRequest || !handle.record.AdmittedAt.Equal(initialAdmittedAt) {
+		t.Fatalf("replacement admission did not install account-b binding: %#v", handle.record)
+	}
+	lane := coordinator.store.v2.Lanes[0]
+	if lane.LastAdmittedAccountHash != handle.record.AccountHash || lane.LastAdmissionJournalGeneration != handle.record.AdmissionJournalGeneration || !lane.LastAdmittedAt.Equal(handle.record.AdmittedAt) {
+		t.Fatalf("replacement lane affinity = %#v, record %#v", lane, handle.record)
+	}
+}
+
+func TestCodexLeaseRuntimeStreamingAccountUnavailableRequiresReconnect(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionGeneration := handle.record.AdmissionJournalGeneration
+	admittedAt := handle.record.AdmittedAt
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	if _, err := handle.RecordAccountUnavailableContext(context.Background(), 2); !errors.Is(err, ErrCodexLeaseTransition) {
+		t.Fatalf("streaming in-place replacement = %T %v, want transition error", err, err)
+	}
+	if !bytes.Equal(before, coordinator.store.journalBytes) {
+		t.Fatal("rejected streaming replacement changed authority")
+	}
+
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.State() != LeaseBoundQuiescent || codexLeaseCurrentAttemptState(handle.record) != CodexAttemptAccountUnavailable || !handle.record.SocketLineageExtinct || handle.record.RoutingRefs != 0 || handle.record.AttemptRefs != 0 || handle.record.ResponseObserverRefs != 0 {
+		t.Fatalf("streaming account-unavailable terminal = %#v", handle.record)
+	}
+	if !handle.record.EverAdmitted || handle.record.AdmissionJournalGeneration != admissionGeneration || !handle.record.AdmittedAt.Equal(admittedAt) || handle.record.AccountHash != coordinator.store.hash("account", "account-a") {
+		t.Fatalf("streaming account-unavailable changed admitted binding = %#v", handle.record)
 	}
 }
 
@@ -1360,6 +2439,71 @@ func TestCodexLeaseRuntimeCreatesSuccessorAndNeverResurrectsPredecessor(t *testi
 	}
 	if third.record.PredecessorTurnHash != failed.identity.TurnDigest || third.record.PredecessorTurnHash == firstIdentity.TurnDigest {
 		t.Fatalf("third turn resurrected the wrong predecessor: %#v", third.record)
+	}
+}
+
+func TestCodexLeaseRuntimeRetriesIndeterminateSuccessorAsFullCreate(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	firstPlan := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-1", Kind: CodexAttemptSlotDirect}})
+	first, err := runtimeLease.BeginRequest(firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: "response-1", HasResponseAnchor: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	incrementalPlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-2", Kind: CodexAttemptSlotDirect}})
+	incrementalPlan.RequiresAccountContinuity = true
+	incrementalPlan.Evidence.PreviousResponseID = "response-1"
+	incremental, err := runtimeLease.BeginRequest(incrementalPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incremental, err = incremental.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indeterminate, err := incremental.Indeterminate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indeterminate, err = indeterminate.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	fullCreatePlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-3", Kind: CodexAttemptSlotDirect}})
+	fullCreatePlan.Accounts = []codex.AccountKey{"account-a", "account-b", "account-c"}
+	fullCreatePlan.ExpectedBound = &CodexLeaseBoundExpectation{
+		Identity:         indeterminate.identity,
+		AccountKey:       "account-a",
+		RecordGeneration: indeterminate.record.RecordGeneration,
+	}
+	fullCreatePlan.RequiresAccountContinuity = true
+	fullCreatePlan.authenticatedCallerContinuity = true
+	retry, err := runtimeLease.BeginRequest(fullCreatePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.State() != LeaseProvisional || retry.AccountKey() != "account-a" || retry.RequestGeneration() != 2 || !retry.record.NonMigratable {
+		t.Fatalf("full-create retry = %#v", retry.record)
 	}
 }
 

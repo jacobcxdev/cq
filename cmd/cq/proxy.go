@@ -1116,6 +1116,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		DefaultAccountKey: cfg.CodexRoutingDefaultAccountKey,
 		PinnedAccountKey:  cfg.CodexRoutingPinnedAccountKey,
 		Executor:          codexWebSocketExecutor,
+		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
 		DispatchPermits:   dispatchPermits,
 		TurnReceipts:      codexTurnReceipts,

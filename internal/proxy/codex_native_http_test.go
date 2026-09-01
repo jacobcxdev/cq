@@ -242,7 +242,7 @@ func TestCodexNativeHTTPFinalRejectionPassesThroughExactly(t *testing.T) {
 	if got := writer.header.Values("X-Multi"); len(got) != 2 || got[0] != "first" || got[1] != "second" {
 		t.Fatalf("response headers changed: %#v", writer.header)
 	}
-	wantEvents := []string{"mark", "send", "close", "finish", "write-header"}
+	wantEvents := []string{"mark", "send", "close", "quota:0", "write-header"}
 	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
 	}
