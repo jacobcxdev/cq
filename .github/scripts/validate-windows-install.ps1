@@ -2,14 +2,14 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ManifestPath,
 
-    [Parameter(Mandatory = $true)]
-    [string]$PreviousManifestPath,
+    [string]$PreviousManifestPath = "",
 
     [Parameter(Mandatory = $true)]
     [string]$ExpectedVersion,
 
-    [Parameter(Mandatory = $true)]
-    [string]$PreviousVersion,
+    [string]$PreviousVersion = "",
+
+    [string]$PreviousGoVersion = "",
 
     [ValidateRange(1024, 65535)]
     [int]$Port = 19280
@@ -21,7 +21,6 @@ Set-StrictMode -Version Latest
 $taskPath = "\cq\"
 $proxyTask = "\cq\Proxy"
 $refreshTask = "\cq\Refresh"
-$uninstallRegistryPath = "Software\Microsoft\Windows\CurrentVersion\Uninstall\cq"
 $shellFoldersPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
 $environmentPath = "Environment"
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("cq-native-install-" + [Guid]::NewGuid().ToString("N"))
@@ -45,7 +44,7 @@ $environmentSnapshot = @{}
 $wingetSettingsExisted = Test-Path -LiteralPath $wingetSettingsPath -PathType Leaf
 $wingetSettingsBytes = if ($wingetSettingsExisted) { [IO.File]::ReadAllBytes($wingetSettingsPath) } else { $null }
 $ownsCQTasks = $false
-$ownsUninstallRegistration = $false
+$ownsWinGetPackage = $false
 $processEnvironmentSnapshot = @{
     APPDATA = $env:APPDATA
     LOCALAPPDATA = $env:LOCALAPPDATA
@@ -107,6 +106,35 @@ function Invoke-GoRunner {
     if ($LASTEXITCODE -ne 0) {
         throw "Go installer runner failed with exit code $LASTEXITCODE for v$Version $Action"
     }
+}
+
+function Get-CQARPEntries {
+    return @(Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object {
+        $_.DisplayName -eq "CQ" -and $_.Publisher -eq "jacobcxdev"
+    })
+}
+
+function Set-PrivateACL {
+    param([string]$Path)
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sddl = "O:{0}G:{0}D:P(A;;FA;;;{0})(A;;FA;;;SY)(A;;FA;;;BA)" -f $sid
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) {
+        $security = [System.Security.AccessControl.DirectorySecurity]::new()
+    }
+    else {
+        $security = [System.Security.AccessControl.FileSecurity]::new()
+    }
+    $security.SetSecurityDescriptorSddlForm($sddl)
+    Set-Acl -LiteralPath $Path -AclObject $security
+}
+
+function Set-PrivateTree {
+    param([string]$Root)
+    Get-ChildItem -LiteralPath $Root -Force -Recurse | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+        Set-PrivateACL -Path $_.FullName
+    }
+    Set-PrivateACL -Path $Root
 }
 
 function Wait-File {
@@ -196,7 +224,7 @@ function Assert-TaskDefinition {
     [xml]$definition = Export-ScheduledTask -TaskPath $taskPath -TaskName $Name
     $principal = $definition.Task.Principals.Principal
     $action = $definition.Task.Actions.Exec
-    if ($principal.UserId -ne $CurrentSID -or $principal.LogonType -ne "InteractiveToken" -or $principal.RunLevel -ne "LeastPrivilege") {
+    if ($principal.UserId -ne $CurrentSID -or $principal.LogonType -ne "InteractiveToken" -or ($principal.RunLevel -and $principal.RunLevel -ne "LeastPrivilege")) {
         throw "$Name principal differs from current-user authority"
     }
     if ($action.Command -ne $Executable -or $action.Arguments -ne $Arguments) {
@@ -244,9 +272,9 @@ function Assert-Installed {
     }
     if ($ExpectWindowsMetadata) {
         $root = Split-Path -Parent $Executable
-        $arp = Get-ItemProperty -LiteralPath "HKCU:\$uninstallRegistryPath"
-        if ($arp.DisplayVersion -ne $Version.TrimStart("v") -or $arp.InstallLocation -ne $root -or $arp.CQPathAdded -ne 1) {
-            throw "Add/Remove Programs metadata differs"
+        $entries = @(Get-CQARPEntries | Where-Object { $_.DisplayVersion -eq $Version.TrimStart("v") })
+        if ($entries.Count -ne 1) {
+            throw "CQ MSI registration count is $($entries.Count)"
         }
         $userPath = $environmentKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         if (($userPath -split ";") -notcontains $root) {
@@ -280,9 +308,19 @@ function Remove-CQTaskFolder {
 
 try {
     $ManifestPath = (Resolve-Path -LiteralPath $ManifestPath).Path
-    $PreviousManifestPath = (Resolve-Path -LiteralPath $PreviousManifestPath).Path
-    if ([version]$PreviousVersion -ge [version]$ExpectedVersion) {
-        throw "previous version must be older than expected version"
+    $hasPreviousWinGet = $PreviousManifestPath -ne "" -or $PreviousVersion -ne ""
+    $hasPreviousGo = $PreviousGoVersion -ne ""
+    if ($hasPreviousWinGet -and ($PreviousManifestPath -eq "" -or $PreviousVersion -eq "")) {
+        throw "previous manifest path and version must be supplied together"
+    }
+    if ($hasPreviousWinGet) {
+        $PreviousManifestPath = (Resolve-Path -LiteralPath $PreviousManifestPath).Path
+        if ([version]$PreviousVersion -ge [version]$ExpectedVersion) {
+            throw "previous version must be older than expected version"
+        }
+    }
+    if ($hasPreviousGo -and [version]$PreviousGoVersion -ge [version]$ExpectedVersion) {
+        throw "previous Go runner version must be older than expected version"
     }
     $scheduler = New-Object -ComObject "Schedule.Service"
     $scheduler.Connect()
@@ -297,11 +335,11 @@ try {
             throw "refusing to replace existing $taskPath$name task"
         }
     }
-    if (Test-Path -LiteralPath "HKCU:\$uninstallRegistryPath") {
-        throw "refusing to replace existing CQ uninstall registration"
+    if ((Get-CQARPEntries).Count -ne 0) {
+        throw "refusing to replace existing CQ MSI registration"
     }
     $ownsCQTasks = $true
-    $ownsUninstallRegistration = $true
+    $ownsWinGetPackage = $true
 
     New-Item -ItemType Directory -Path $temporaryLocal, $temporaryRoaming, $temporaryHome, $temporaryCodex, $temporaryGoBin -Force | Out-Null
     $shellKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($shellFoldersPath, $true)
@@ -312,7 +350,7 @@ try {
     foreach ($name in @("AppData", "Local AppData")) {
         $shellSnapshot[$name] = Save-RegistryValue -Key $shellKey -Name $name
     }
-    foreach ($name in @("Path", "CODEX_HOME", "CQPathAdded", "USERPROFILE")) {
+    foreach ($name in @("Path", "CODEX_HOME", "USERPROFILE")) {
         $environmentSnapshot[$name] = Save-RegistryValue -Key $environmentKey -Name $name
     }
     $shellKey.SetValue("AppData", $temporaryRoaming, [Microsoft.Win32.RegistryValueKind]::String)
@@ -330,7 +368,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "failed to enable WinGet local manifests"
     }
-    Invoke-WinGet -Arguments @("validate", "--manifest", $PreviousManifestPath)
+    if ($hasPreviousWinGet) {
+        Invoke-WinGet -Arguments @("validate", "--manifest", $PreviousManifestPath)
+    }
     Invoke-WinGet -Arguments @("validate", "--manifest", $ManifestPath)
 
     $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -345,14 +385,22 @@ try {
     $proxyConfig = Join-Path $temporaryRoaming "cq\proxy.json"
     $proxyState = Join-Path $temporaryLocal "cq\state\proxy-resilience"
     $codexAuth = Join-Path $temporaryCodex "auth.json"
+    New-Item -ItemType Directory -Path $proxyState -Force | Out-Null
+    Set-PrivateTree -Root $temporaryLocal
     & $probeExecutable fixtures --config $proxyConfig --auth $codexAuth --state-root $proxyState --upstream $upstream --port $Port
     if ($LASTEXITCODE -ne 0) {
         throw "failed to write synthetic acceptance fixtures"
     }
+    Set-PrivateTree -Root $temporaryRoot
 
-    Invoke-WinGet -Arguments @("install", "--manifest", $PreviousManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-    $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
-    Invoke-WinGet -Arguments @("upgrade", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+    if ($hasPreviousWinGet) {
+        Invoke-WinGet -Arguments @("install", "--manifest", $PreviousManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+        $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
+        Invoke-WinGet -Arguments @("upgrade", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+    }
+    else {
+        Invoke-WinGet -Arguments @("install", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+    }
     $status = Assert-Installed -Executable $installedCQ -Version $ExpectedVersion -Owner "winget" -ExpectWindowsMetadata $true
 
     Start-ScheduledTask -TaskPath $taskPath -TaskName "Refresh"
@@ -379,17 +427,22 @@ try {
             throw "scheduled task remains after uninstall"
         }
     }
-    if (Test-Path -LiteralPath "HKCU:\$uninstallRegistryPath") {
-        throw "uninstall registration remains"
+    if ((Get-CQARPEntries).Count -ne 0) {
+        throw "CQ MSI registration remains"
     }
     $userPath = $environmentKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
     if (($userPath -split ";") -contains $installRoot) {
         throw "installer PATH entry remains"
     }
 
-    Invoke-GoRunner -Version $PreviousVersion
-    $null = Assert-Installed -Executable $goInstalledCQ -Version $PreviousVersion -Owner "go" -ExpectWindowsMetadata $false
-    Invoke-GoRunner -Version $ExpectedVersion
+    if ($hasPreviousGo) {
+        Invoke-GoRunner -Version $PreviousGoVersion
+        $null = Assert-Installed -Executable $goInstalledCQ -Version $PreviousGoVersion -Owner "go" -ExpectWindowsMetadata $false
+        Invoke-GoRunner -Version $ExpectedVersion
+    }
+    else {
+        Invoke-GoRunner -Version $ExpectedVersion
+    }
     $status = Assert-Installed -Executable $goInstalledCQ -Version $ExpectedVersion -Owner "go" -ExpectWindowsMetadata $false
     & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
     if ($LASTEXITCODE -ne 0) {
@@ -417,11 +470,16 @@ finally {
         Remove-CQTask -TaskName $refreshTask
         Remove-CQTaskFolder
     }
-    if ($ownsUninstallRegistration) {
-        Remove-Item -LiteralPath "HKCU:\$uninstallRegistryPath" -Recurse -Force -ErrorAction SilentlyContinue
+    if ($ownsWinGetPackage) {
+        foreach ($entry in @(Get-CQARPEntries)) {
+            $productCode = [string]$entry.PSChildName
+            if ($productCode -match '^\{[0-9A-Fa-f-]{36}\}$') {
+                Start-Process -FilePath "msiexec.exe" -ArgumentList @("/x", $productCode, "/qn", "/norestart") -Wait -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
     }
     if ($environmentKey) {
-        foreach ($name in @("Path", "CODEX_HOME", "CQPathAdded", "USERPROFILE")) {
+        foreach ($name in @("Path", "CODEX_HOME", "USERPROFILE")) {
             if ($environmentSnapshot.ContainsKey($name)) {
                 Restore-RegistryValue -Key $environmentKey -Name $name -Snapshot $environmentSnapshot[$name]
             }

@@ -115,19 +115,6 @@ func cachedCodexClientVersion() string {
 	return modelregistry.DiscoverCodexClientVersion(fsys, filepath.Join(codexHome, "models_cache.json"))
 }
 
-func probeCodexDesktopVersion() (string, bool) {
-	paths := []string{
-		"/Applications/ChatGPT.app/Contents/Resources/codex",
-		"/Applications/Codex.app/Contents/Resources/codex",
-	}
-	for _, path := range paths {
-		if version, ok := probeCodexVersionCommand(path); ok {
-			return version, true
-		}
-	}
-	return "", false
-}
-
 // probeCodexBinaryVersion runs `codex --version` with a short timeout and
 // returns the parsed semver. Any failure path returns ("", false) so the
 // resolver can continue to its next tier.

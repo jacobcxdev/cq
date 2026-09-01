@@ -5,8 +5,41 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestCodexInstalledHTTPValidationRuntimeRejectsNilServeBeforeReadiness(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	token, err := NewCodexInstalledHTTPValidationToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = RunCodexInstalledHTTPValidationRuntime(
+		context.Background(),
+		&Config{Port: 19281},
+		"cq-build-42",
+		"0.147.0-alpha.6.5",
+		&testCodexInstalledHTTPValidationGuard{},
+		token,
+		nil,
+	)
+	if !errors.Is(err, errCodexInstalledListenerAcceptance) {
+		t.Fatalf("nil runtime serve error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "runtime serve") {
+		t.Fatalf("nil runtime serve error = %v, want runtime serve stage", err)
+	}
+	paths, resolveErr := ResolveDefaultPaths()
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	if _, statErr := os.Lstat(codexReadinessPath(paths.StateDir, CodexRoutingHTTP)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("readiness marker exists after nil runtime serve: %v", statErr)
+	}
+}
 
 func TestCodexInstalledHTTPValidationKeepsMarkerAbsentOnFailureAndPanic(t *testing.T) {
 	for _, test := range []struct {

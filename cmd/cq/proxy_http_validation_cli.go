@@ -39,11 +39,15 @@ type proxyValidateHTTPDependencies struct {
 }
 
 type installedHTTPValidationCandidateAuthority struct {
-	binding installedHTTPValidationServiceBinding
-	pid     int
+	binding       installedHTTPValidationServiceBinding
+	pid           int
+	processStart  uint64
+	listenerInode uint64
+	worker        int
+	workerStart   uint64
 }
 
-func runDefaultProxyValidateHTTP(args []string, build string) error {
+func runDefaultProxyValidateHTTP(args []string, build string) (returnErr error) {
 	opts, err := parseProxyCommandOptionsFor("proxy validate-http", args)
 	if err != nil {
 		return err
@@ -62,11 +66,15 @@ func runDefaultProxyValidateHTTP(args []string, build string) error {
 	if err != nil {
 		return fmt.Errorf("proxy validate-http: candidate service unavailable: %w", err)
 	}
+	defer func() {
+		if cleanupErr := cleanupInstalledHTTPValidationCandidateFn(); cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("proxy validate-http: clean candidate service: %w", cleanupErr))
+		}
+	}()
 	binding := authority.binding
 	if binding.label != candidateProxyAgentLabel || binding.port != opts.Port {
 		return errors.New("proxy validate-http: candidate service port mismatch")
 	}
-	defer cleanupInstalledHTTPValidationCandidateFn()
 	resolveService := store.resolveService
 	store.resolveService = func(label string) (installedHTTPValidationServiceBinding, error) {
 		current, err := resolveService(binding.label)

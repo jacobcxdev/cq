@@ -149,7 +149,7 @@ func restartInstalledHTTPValidationCandidate(label string) error {
 	return nil
 }
 
-func cleanupInstalledHTTPValidationCandidate() {}
+func cleanupInstalledHTTPValidationCandidate() error { return nil }
 
 func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPValidationServiceBinding, error) {
 	return resolveInstalledHTTPValidationServiceWithOperations(expectedLabel, installedHTTPValidationServiceOperations{

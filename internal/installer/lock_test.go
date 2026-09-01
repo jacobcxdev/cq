@@ -115,9 +115,24 @@ func testInstallLockStateRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	localRoot := filepath.Dir(roots.State)
+	stateExisted := pathExistsForInstallLockTest(t, roots.State)
+	localRootExisted := pathExistsForInstallLockTest(t, localRoot)
 	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, roots.State); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if !stateExisted {
+			if err := os.Remove(roots.State); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove Windows installer lock state directory: %v", err)
+			}
+		}
+		if !localRootExisted {
+			if err := os.Remove(localRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove Windows installer lock root: %v", err)
+			}
+		}
+	})
 	root, err := os.MkdirTemp(roots.State, "install-lock-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -131,4 +146,17 @@ func testInstallLockStateRoot(t *testing.T) string {
 		}
 	})
 	return root
+}
+
+func pathExistsForInstallLockTest(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	t.Fatal(err)
+	return false
 }

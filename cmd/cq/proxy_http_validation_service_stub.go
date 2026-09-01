@@ -16,4 +16,4 @@ func restartInstalledHTTPValidationCandidate(string) error {
 	return errors.New("installed HTTP validation is only supported on macOS")
 }
 
-func cleanupInstalledHTTPValidationCandidate() {}
+func cleanupInstalledHTTPValidationCandidate() error { return nil }

@@ -9,6 +9,8 @@ func init() {
 	newProxyRuntimeWorkerLauncherFn = newUnixProxyRuntimeWorkerLauncher
 	runProxyAdoptedRuntimeFn = runUnixProxyAdoptedRuntime
 	runProxyOwnedRuntimeFn = runUnixProxyOwnedRuntime
+	runProxyValidationCandidateFn = runLinuxProxyValidationCandidate
+	runProxyValidationCandidateWorkerFn = runLinuxProxyValidationCandidateWorker
 }
 
 func runtimeDescriptorRoot() string { return "/proc/self/fd" }

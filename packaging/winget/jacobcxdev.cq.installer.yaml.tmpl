@@ -2,15 +2,12 @@
 PackageIdentifier: jacobcxdev.cq
 PackageVersion: {{.Version}}
 InstallerLocale: en-US
-InstallerType: exe
+InstallerType: wix
 Scope: user
 InstallModes:
   - interactive
   - silent
   - silentWithProgress
-InstallerSwitches:
-  Silent: install --owner=winget --silent
-  SilentWithProgress: install --owner=winget --silent
 UpgradeBehavior: install
 Commands:
   - cq
@@ -22,6 +19,7 @@ Installers:
       - DisplayName: CQ
         Publisher: jacobcxdev
         DisplayVersion: {{.Version}}
+        UpgradeCode: '{7B64C2EF-DF57-4C43-8C35-7D1949B09469}'
   - Architecture: arm64
     InstallerUrl: {{.ARM64URL}}
     InstallerSha256: {{.ARM64SHA256}}
@@ -29,5 +27,6 @@ Installers:
       - DisplayName: CQ
         Publisher: jacobcxdev
         DisplayVersion: {{.Version}}
+        UpgradeCode: '{7B64C2EF-DF57-4C43-8C35-7D1949B09469}'
 ManifestType: installer
 ManifestVersion: 1.10.0

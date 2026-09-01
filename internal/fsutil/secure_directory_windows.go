@@ -174,12 +174,31 @@ func (fsys OSFileSystem) CreateExclusive(name string, mode os.FileMode) (Durable
 }
 
 func (fsys OSFileSystem) OpenNoFollow(name string) (SecureReadFile, error) {
-	directory, err := fsys.OpenSecureDirectory(filepath.Dir(name))
+	selection, err := fsys.resolveSecureBoundary(name, secureBoundaryExternalFile)
 	if err != nil {
 		return nil, err
 	}
-	defer directory.Close()
-	return directory.OpenNoFollow(filepath.Base(name))
+	boundary, err := fsys.windowsPathBoundary(selection, secureBoundaryExternalFile)
+	if err != nil {
+		return nil, err
+	}
+	file, err := openWindowsAbsolutePath(
+		name,
+		windows.FILE_GENERIC_READ|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
+		windows.FILE_NON_DIRECTORY_FILE,
+		boundary,
+	)
+	if err != nil {
+		return nil, err
+	}
+	info, err := inspectWindowsHandle(windows.Handle(file.Fd()), name)
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.Join(fmt.Errorf("%w: Windows no-follow file type", ErrUnsafeSecurePath), file.Close())
+	}
+	return &windowsSecureFile{file: file}, nil
 }
 
 func (fsys OSFileSystem) OpenRetainedRegularFileNoFollow(path string, policy RetainedRegularFilePolicy) (RetainedRegularFile, error) {

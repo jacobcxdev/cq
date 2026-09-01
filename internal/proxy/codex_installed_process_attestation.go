@@ -718,13 +718,8 @@ func (buffer *codexInstalledBoundedBuffer) Write(data []byte) (int, error) {
 }
 
 func resolveCodexInstalledClientExecutable() (string, error) {
-	for _, path := range []string{
-		"/Applications/ChatGPT.app/Contents/Resources/codex",
-		"/Applications/Codex.app/Contents/Resources/codex",
-	} {
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			return path, nil
-		}
+	if path, ok := resolveCodexInstalledBundledClientExecutable(); ok {
+		return path, nil
 	}
 	return resolveCodexInstalledClientExecutableFromPath()
 }

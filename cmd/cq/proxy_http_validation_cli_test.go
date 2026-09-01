@@ -62,6 +62,34 @@ func TestRunProxyValidateHTTPRequestsConfiguredCandidateService(t *testing.T) {
 	}
 }
 
+func TestRunProxyValidateHTTPReportsCandidateCleanupFailure(t *testing.T) {
+	oldStore := defaultInstalledHTTPValidationRequestStoreFn
+	oldRestart := restartInstalledHTTPValidationCandidateFn
+	oldValidateCandidate := validateInstalledHTTPValidationCandidateFn
+	oldCleanup := cleanupInstalledHTTPValidationCandidateFn
+	t.Cleanup(func() {
+		defaultInstalledHTTPValidationRequestStoreFn = oldStore
+		restartInstalledHTTPValidationCandidateFn = oldRestart
+		validateInstalledHTTPValidationCandidateFn = oldValidateCandidate
+		cleanupInstalledHTTPValidationCandidateFn = oldCleanup
+	})
+	binding := validInstalledHTTPValidationServiceBinding()
+	binding.label = candidateProxyAgentLabel
+	binding.port = 29280
+	defaultInstalledHTTPValidationRequestStoreFn = func() (installedHTTPValidationRequestStore, error) {
+		return installedHTTPValidationTestStore(t, filepath.Join(t.TempDir(), "private", "request.json"), time.Now().UTC(), binding), nil
+	}
+	authority := installedHTTPValidationCandidateAuthority{binding: binding, pid: 4242, worker: 4243, workerStart: 91}
+	validateInstalledHTTPValidationCandidateFn = func(int) (installedHTTPValidationCandidateAuthority, error) { return authority, nil }
+	restartInstalledHTTPValidationCandidateFn = func(string) error { return nil }
+	cleanupInstalledHTTPValidationCandidateFn = func() error { return errors.New("cleanup failed") }
+
+	err := runDefaultProxyValidateHTTP([]string{"--port", "29280"}, "cq-build-42")
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("cleanup error = %v", err)
+	}
+}
+
 func TestRunProxyValidateHTTPDoesNotRestartAbsentCandidate(t *testing.T) {
 	oldLoad := loadProxyStartConfigFn
 	oldStore := defaultInstalledHTTPValidationRequestStoreFn
@@ -128,6 +156,39 @@ func TestRunProxyValidateHTTPCancelsWhenCandidateAuthorityChanges(t *testing.T) 
 		t.Fatalf("candidate authority checks = %d, want 2", checks)
 	}
 	assertNoPendingInstalledHTTPValidationRequest(t, path)
+}
+
+func TestInstalledHTTPValidationCandidateAuthorityBindsRuntimeTopology(t *testing.T) {
+	binding := validInstalledHTTPValidationServiceBinding()
+	binding.label = candidateProxyAgentLabel
+	binding.port = 29280
+	valid := installedHTTPValidationCandidateAuthority{
+		binding: binding, pid: 4242, processStart: 90, listenerInode: 702,
+		worker: 4243, workerStart: 91,
+	}
+	for name, mutate := range map[string]func(*installedHTTPValidationCandidateAuthority){
+		"binding": func(authority *installedHTTPValidationCandidateAuthority) {
+			authority.binding.serviceSHA256 = strings.Repeat("a", 64)
+		},
+		"pid":           func(authority *installedHTTPValidationCandidateAuthority) { authority.pid++ },
+		"process start": func(authority *installedHTTPValidationCandidateAuthority) { authority.processStart++ },
+		"listener inode": func(authority *installedHTTPValidationCandidateAuthority) {
+			authority.listenerInode++
+		},
+		"worker":       func(authority *installedHTTPValidationCandidateAuthority) { authority.worker++ },
+		"worker start": func(authority *installedHTTPValidationCandidateAuthority) { authority.workerStart++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			mutate(&changed)
+			if valid == changed {
+				t.Fatal("changed runtime topology accepted")
+			}
+		})
+	}
+	if valid != valid {
+		t.Fatal("stable runtime topology rejected")
+	}
 }
 
 func TestRunProxyValidateHTTPRejectsLiveMissingOrMismatchedPort(t *testing.T) {

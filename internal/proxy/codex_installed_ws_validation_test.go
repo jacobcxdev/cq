@@ -39,6 +39,9 @@ func TestRunCodexInstalledWebSocketValidationUsesIsolatedCandidate(t *testing.T)
 		if err := json.Unmarshal(authBytes, &auth); err != nil {
 			return nil, err
 		}
+		if err := requestCodexAcceptanceUserSettings(command, auth.Tokens.AccessToken); err != nil {
+			return nil, err
+		}
 		header := make(http.Header)
 		header.Set("Authorization", "Bearer "+auth.Tokens.AccessToken)
 		address := "ws" + strings.TrimPrefix(command.endpoint, "http")
@@ -121,6 +124,9 @@ func TestRunCodexInstalledWebSocketAcceptanceRejectsClientWithoutPrewarm(t *test
 			} `json:"tokens"`
 		}
 		if err := json.Unmarshal(authBytes, &auth); err != nil {
+			return nil, err
+		}
+		if err := requestCodexAcceptanceUserSettings(command, auth.Tokens.AccessToken); err != nil {
 			return nil, err
 		}
 		header := make(http.Header)

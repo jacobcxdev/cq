@@ -326,7 +326,7 @@ func (proof codexInstalledHTTPSealedProof) canaryProcessBindingDigest() [sha256.
 }
 
 func (harness *codexInstalledListenerHarness) Run(ctx context.Context, required CodexTransportRequirements) (codexInstalledHTTPSealedProof, error) {
-	return harness.run(ctx, required, nil)
+	return harness.run(ctx, required, nil, nil)
 }
 
 // RunAndCommit keeps the exact serving/process lease held through marker
@@ -339,12 +339,27 @@ func (harness *codexInstalledListenerHarness) RunAndCommit(
 	if commit == nil {
 		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
 	}
-	return harness.run(ctx, required, commit)
+	return harness.run(ctx, required, nil, commit)
+}
+
+// RunVerifyAndCommit keeps final caller authority verification and marker
+// persistence inside the same held request guard.
+func (harness *codexInstalledListenerHarness) RunVerifyAndCommit(
+	ctx context.Context,
+	required CodexTransportRequirements,
+	verify func() error,
+	commit func(CodexReadinessMarker) error,
+) (codexInstalledHTTPSealedProof, error) {
+	if verify == nil || commit == nil {
+		return codexInstalledHTTPSealedProof{}, errCodexInstalledListenerAcceptance
+	}
+	return harness.run(ctx, required, verify, commit)
 }
 
 func (harness *codexInstalledListenerHarness) run(
 	ctx context.Context,
 	required CodexTransportRequirements,
+	verify func() error,
 	commit func(CodexReadinessMarker) error,
 ) (codexInstalledHTTPSealedProof, error) {
 	if ctx == nil {
@@ -506,17 +521,36 @@ func (harness *codexInstalledListenerHarness) run(
 		if err != nil {
 			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("request guard final")
 		}
-		marker, err := buildCodexHTTPReadinessMarker(evidence, boundRequired, observedAt)
-		commitErr := err
-		if commitErr == nil {
-			commitErr = commit(marker)
+		verifyErr := runCodexInstalledBeforeCommitSafely(verify)
+		var commitErr error
+		if verifyErr == nil {
+			var marker CodexReadinessMarker
+			marker, commitErr = buildCodexHTTPReadinessMarker(evidence, boundRequired, observedAt)
+			if commitErr == nil {
+				commitErr = commit(marker)
+			}
 		}
 		releaseErr := releaseCodexInstalledHTTPValidationGuard(release)
+		if verifyErr != nil {
+			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("precommit authority")
+		}
 		if commitErr != nil || releaseErr != nil {
 			return codexInstalledHTTPSealedProof{}, codexInstalledHarnessStageError("marker commit")
 		}
 	}
 	return proof, nil
+}
+
+func runCodexInstalledBeforeCommitSafely(verify func() error) (returnErr error) {
+	if verify == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			returnErr = errCodexInstalledListenerAcceptance
+		}
+	}()
+	return verify()
 }
 
 func codexInstalledHarnessStageError(stage string) error {

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,13 @@ func newCodexInstalledHTTPValidationToken() (string, error) {
 		return "", errCodexInstalledListenerAcceptance
 	}
 	return token, nil
+}
+
+// NewCodexInstalledHTTPValidationToken creates one credential for an isolated
+// installed-client validation runtime. Callers must keep it process-local or
+// in owner-only temporary storage until the runtime exits.
+func NewCodexInstalledHTTPValidationToken() (string, error) {
+	return newCodexInstalledHTTPValidationToken()
 }
 
 // RunCodexInstalledHTTPValidation is the sole production entrypoint for the
@@ -46,6 +54,45 @@ func RunCodexInstalledHTTPValidation(
 		invalidate: invalidateCodexHTTPReadinessMarkerDurably,
 		run:        runCodexInstalledHTTPValidationListener,
 		guard:      guard,
+	})
+}
+
+// CodexInstalledHTTPValidationRuntime exposes one validation handler and its
+// listener-bound proof authority to an external owned-runtime supervisor.
+type CodexInstalledHTTPValidationRuntime struct {
+	Handler           http.Handler
+	ServingAttestor   *ServingAttestor
+	StartupValidation func(context.Context, CodexHTTPStartupValidationRuntime, func() error) error
+	AbortUnexpected   func() <-chan struct{}
+}
+
+// RunCodexInstalledHTTPValidationRuntime keeps validation state in the
+// supervisor while an exact worker process carries every data-plane request.
+func RunCodexInstalledHTTPValidationRuntime(
+	ctx context.Context,
+	cfg *Config,
+	cqBuild string,
+	clientBuild string,
+	guard CodexInstalledHTTPValidationGuard,
+	localToken string,
+	serve func(context.Context, CodexInstalledHTTPValidationRuntime) error,
+) (returnErr error) {
+	if !validCodexInstalledHTTPValidationToken(localToken) {
+		return codexInstalledHTTPValidationStageError("local authority")
+	}
+	if serve == nil {
+		return codexInstalledHTTPValidationStageError("runtime serve")
+	}
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return err
+	}
+	return runCodexInstalledHTTPValidationWithDependencies(ctx, cfg, cqBuild, clientBuild, codexInstalledHTTPValidationDependencies{
+		markerDir: paths.StateDir, invalidate: invalidateCodexHTTPReadinessMarkerDurably,
+		run: func(ctx context.Context, cfg *Config, cqBuild, clientBuild, markerDir string, guard CodexInstalledHTTPValidationGuard) error {
+			return runCodexInstalledHTTPValidationListenerOn(ctx, cfg, cqBuild, clientBuild, markerDir, guard, localToken, serve)
+		},
+		guard: guard,
 	})
 }
 
@@ -112,8 +159,26 @@ func runCodexInstalledHTTPValidationListener(
 	markerDir string,
 	guard CodexInstalledHTTPValidationGuard,
 ) (returnErr error) {
-	localToken, err := newCodexInstalledHTTPValidationToken()
-	if err != nil {
+	return runCodexInstalledHTTPValidationListenerOn(ctx, cfg, cqBuild, clientBuild, markerDir, guard, "", nil)
+}
+
+func runCodexInstalledHTTPValidationListenerOn(
+	ctx context.Context,
+	cfg *Config,
+	cqBuild string,
+	clientBuild string,
+	markerDir string,
+	guard CodexInstalledHTTPValidationGuard,
+	localToken string,
+	runtimeServe func(context.Context, CodexInstalledHTTPValidationRuntime) error,
+) (returnErr error) {
+	if localToken == "" {
+		var err error
+		localToken, err = newCodexInstalledHTTPValidationToken()
+		if err != nil {
+			return codexInstalledHTTPValidationStageError("local authority")
+		}
+	} else if !validCodexInstalledHTTPValidationToken(localToken) {
 		return codexInstalledHTTPValidationStageError("local authority")
 	}
 	corpus, err := loadCodexStage11CorpusBuildManifest(cqBuild, codexStage11CorpusBuildProvenanceSHA256)
@@ -135,58 +200,64 @@ func runCodexInstalledHTTPValidationListener(
 	}
 	servingAttestor := NewServingAttestor()
 	required, _ := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
-	validation := CodexHTTPStartupValidationFunc(func(validationCtx context.Context, runtime CodexHTTPStartupValidationRuntime) error {
-		if runtime.ServingAttestor != servingAttestor {
-			return codexInstalledHTTPValidationStageError("serving authority")
-		}
-		authority, err := newCodexInstalledListenerProcessAuthority(validationCtx, codexInstalledListenerProcessAuthorityConfig{
-			cqBuild:         cqBuild,
-			clientBuild:     clientBuild,
-			listenerAddress: runtime.ListenerAddress,
-			servingAttestor: runtime.ServingAttestor,
-			nativeHTTP:      core.nativeHTTPHandler(),
-		})
-		if err != nil {
-			return codexInstalledHTTPValidationStageError("process authority")
-		}
-		outcome := &codexInstalledHTTPClientOutcome{}
-		installedClient, err := newCodexInstalledHTTPClientExercise(
-			runtime.ListenerAddress, authority.client.baseline, localToken, osCodexAcceptanceRunner{}, outcome,
-		)
-		if err != nil {
-			return codexInstalledHTTPValidationStageError("client setup")
-		}
-		syntheticTraffic, err := core.installedListenerExercise(runtime.ListenerAddress, localToken)
-		if err != nil {
-			return codexInstalledHTTPValidationStageError("synthetic setup")
-		}
-		exercise := &codexInstalledHTTPCompositeExercise{first: installedClient, second: syntheticTraffic}
-		audit := newCodexInstalledHTTPAuditAuthority(codexInstalledHTTPAuditAuthorityConfig{
-			routes:         routes,
-			client:         outcome,
-			protectedPaths: protectedPaths,
-			privacyRoot:    core.tempRoot,
-			privacyNeedles: codexInstalledHTTPValidationPrivacyNeedles(localToken),
-		})
-		harness := &codexInstalledListenerHarness{dependencies: codexInstalledListenerHarnessDependencies{
-			authority:   authority,
-			clientBuild: authority,
-			exercise:    exercise,
-			audit:       audit,
-			quiesce:     core.nativeHTTPHandler(),
-			corpus:      corpus,
-			guard:       guard,
-			runtime:     &codexProcessRuntimeObservability,
-			admissions:  core,
-		}}
-		_, err = harness.RunAndCommit(validationCtx, required, func(marker CodexReadinessMarker) error {
-			return saveCodexHTTPReadinessMarkerDurably(markerDir, marker)
-		})
-		if err != nil {
+	validationFor := func(beforeCommit func() error) CodexHTTPStartupValidationFunc {
+		return CodexHTTPStartupValidationFunc(func(validationCtx context.Context, runtime CodexHTTPStartupValidationRuntime) error {
+			if runtime.ServingAttestor != servingAttestor {
+				return codexInstalledHTTPValidationStageError("serving authority")
+			}
+			authority, err := newCodexInstalledListenerProcessAuthority(validationCtx, codexInstalledListenerProcessAuthorityConfig{
+				cqBuild:         cqBuild,
+				clientBuild:     clientBuild,
+				listenerAddress: runtime.ListenerAddress,
+				servingAttestor: runtime.ServingAttestor,
+				nativeHTTP:      core.nativeHTTPHandler(),
+			})
+			if err != nil {
+				return codexInstalledHTTPValidationStageError("process authority")
+			}
+			outcome := &codexInstalledHTTPClientOutcome{}
+			installedClient, err := newCodexInstalledHTTPClientExercise(
+				runtime.ListenerAddress, authority.client.baseline, localToken, osCodexAcceptanceRunner{}, outcome,
+			)
+			if err != nil {
+				return codexInstalledHTTPValidationStageError("client setup")
+			}
+			syntheticTraffic, err := core.installedListenerExercise(runtime.ListenerAddress, localToken)
+			if err != nil {
+				return codexInstalledHTTPValidationStageError("synthetic setup")
+			}
+			exercise := &codexInstalledHTTPCompositeExercise{first: installedClient, second: syntheticTraffic}
+			audit := newCodexInstalledHTTPAuditAuthority(codexInstalledHTTPAuditAuthorityConfig{
+				routes:         routes,
+				client:         outcome,
+				protectedPaths: protectedPaths,
+				privacyRoot:    core.tempRoot,
+				privacyNeedles: codexInstalledHTTPValidationPrivacyNeedles(localToken),
+			})
+			harness := &codexInstalledListenerHarness{dependencies: codexInstalledListenerHarnessDependencies{
+				authority:   authority,
+				clientBuild: authority,
+				exercise:    exercise,
+				audit:       audit,
+				quiesce:     core.nativeHTTPHandler(),
+				corpus:      corpus,
+				guard:       guard,
+				runtime:     &codexProcessRuntimeObservability,
+				admissions:  core,
+			}}
+			commit := func(marker CodexReadinessMarker) error { return saveCodexHTTPReadinessMarkerDurably(markerDir, marker) }
+			if beforeCommit == nil {
+				_, err = harness.RunAndCommit(validationCtx, required, commit)
+			} else {
+				_, err = harness.RunVerifyAndCommit(validationCtx, required, beforeCommit, commit)
+			}
+			if err != nil {
+				return err
+			}
 			return err
-		}
-		return err
-	})
+		})
+	}
+	validation := validationFor(nil)
 
 	validationConfig := *cfg
 	validationConfig.LocalToken = localToken
@@ -200,6 +271,33 @@ func runCodexInstalledHTTPValidationListener(
 		codexInstalledHTTPRouteAudit: routes,
 		Catalog:                      modelregistry.NewCatalog(modelregistry.Snapshot{}),
 		shutdownGracePeriod:          codexInstalledHTTPValidationQuiesceTimeout,
+	}
+	if runtimeServe != nil {
+		handler, err := server.handler()
+		if err != nil {
+			return err
+		}
+		return runtimeServe(ctx, CodexInstalledHTTPValidationRuntime{
+			Handler: handler, ServingAttestor: servingAttestor,
+			StartupValidation: func(ctx context.Context, runtime CodexHTTPStartupValidationRuntime, beforeCommit func() error) error {
+				if beforeCommit == nil {
+					return codexInstalledHTTPValidationStageError("precommit authority")
+				}
+				validationCtx, cancel := context.WithCancel(ctx)
+				ready := make(chan struct{})
+				close(ready)
+				run := runCodexHTTPStartupValidation(validationCtx, cancel, ready, runtime, validationFor(beforeCommit))
+				select {
+				case <-run.complete:
+					return codexHTTPStartupValidationResult(run)
+				case <-ctx.Done():
+					cancel()
+					<-servingAttestor.abortUnexpected()
+					return ctx.Err()
+				}
+			},
+			AbortUnexpected: servingAttestor.abortUnexpected,
+		})
 	}
 	return server.ListenAndServe(ctx)
 }

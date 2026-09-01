@@ -336,6 +336,43 @@ func TestCodexInstalledListenerHarnessRejectsCancellationAfterExerciseBeforeComm
 	}
 }
 
+func TestCodexInstalledListenerHarnessRejectsTopologyChangeBeforePublishingMarker(t *testing.T) {
+	required := testCodexInstalledListenerRequirements()
+	binding := testCodexInstalledListenerBinding(required.CQBuild)
+	probe := newTestCodexInstalledHTTPGateProbe(t, binding.ListenerBinding)
+	harness := newTestCodexInstalledListenerHarness(required, codexInstalledListenerHarnessDependencies{
+		authority:   testCodexInstalledListenerAuthority{lease: &testCodexInstalledListenerLease{binding: binding, probe: probe}},
+		clientBuild: &testCodexInstalledClientBuildProbe{build: required.ClientBuild},
+		exercise: &testCodexInstalledHTTPExercise{run: func() {
+			setTestCodexInstalledProbeResult(probe, testCodexInstalledHTTPProbeResult(required, binding))
+		}},
+		audit:   testCodexInstalledHTTPAuditAuthority{},
+		quiesce: &testCodexInstalledHTTPQuiescer{},
+		corpus:  currentCodexStage11CorpusBuildManifest(required.CQBuild),
+		guard:   &testCodexInstalledHTTPValidationGuard{},
+	})
+	verifications := 0
+	commits := 0
+	proof, err := harness.RunVerifyAndCommit(
+		context.Background(),
+		required,
+		func() error {
+			verifications++
+			return errors.New("installed validation runtime changed after traffic")
+		},
+		func(CodexReadinessMarker) error {
+			commits++
+			return nil
+		},
+	)
+	if err == nil || proof.seal != nil {
+		t.Fatalf("changed topology minted proof=%#v error=%v", proof, err)
+	}
+	if verifications != 1 || commits != 0 {
+		t.Fatalf("topology verifications/marker commits = %d/%d, want 1/0", verifications, commits)
+	}
+}
+
 func TestCodexInstalledListenerHarnessBoundsDripBodyDrainBeforeCommit(t *testing.T) {
 	required := testCodexInstalledListenerRequirements()
 	binding := testCodexInstalledListenerBinding(required.CQBuild)

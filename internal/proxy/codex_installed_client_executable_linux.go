@@ -10,6 +10,10 @@ import (
 	"runtime"
 )
 
+func resolveCodexInstalledBundledClientExecutable() (string, bool) {
+	return "", false
+}
+
 func resolveCodexInstalledClientExecutableFromPath() (string, error) {
 	path, err := exec.LookPath("codex")
 	if err != nil {
@@ -35,12 +39,25 @@ func resolveCodexInstalledClientExecutableFromPath() (string, error) {
 	if packageName == "" || target == "" {
 		return "", errCodexInstalledProcessAttestation
 	}
-	candidate := filepath.Join(packageRoot, "node_modules", "@openai", packageName, "vendor", target, "bin", "codex")
-	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
-	if err != nil || resolvedCandidate != candidate || !linuxCodexELFExecutable(candidate) {
+	vendorRoot := filepath.Join(filepath.Dir(packageRoot), packageName, "vendor", target)
+	found := ""
+	for _, candidate := range []string{
+		filepath.Join(vendorRoot, "bin", "codex"),
+		filepath.Join(vendorRoot, "codex", "codex"),
+	} {
+		resolvedCandidate, resolveErr := filepath.EvalSymlinks(candidate)
+		if os.IsNotExist(resolveErr) {
+			continue
+		}
+		if resolveErr != nil || resolvedCandidate != candidate || !linuxCodexELFExecutable(candidate) || found != "" {
+			return "", errCodexInstalledProcessAttestation
+		}
+		found = candidate
+	}
+	if found == "" {
 		return "", errCodexInstalledProcessAttestation
 	}
-	return candidate, nil
+	return found, nil
 }
 
 func linuxCodexNativePackage(goarch string) (string, string) {

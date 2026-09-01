@@ -81,22 +81,59 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	releaserText := string(releaser)
 	for _, required := range []string{
 		"id: cq\n",
-		"id: cq-install\n",
-		"main: ./cmd/cq-install",
 		"-X main.version={{ .Version }}",
-		"formats: [binary]",
-		"cq-install_{{ .Version }}_{{ .Os }}_{{ .Arch }}",
 	} {
 		if !strings.Contains(releaserText, required) {
 			t.Fatalf("GoReleaser missing %q", required)
 		}
 	}
-	if strings.Count(releaserText, "- windows") < 2 || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
+	if strings.Count(releaserText, "- windows") != 1 || strings.Contains(releaserText, "id: cq-install") || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
 		t.Fatal("release artifact targets or optional dependency separation differ")
 	}
 	workflowText := string(workflow)
-	if !strings.Contains(workflowText, "goreleaser/goreleaser-action@v7") {
-		t.Fatal("release workflow does not use GoReleaser action v7")
+	for _, required := range []string{
+		"goreleaser/goreleaser-action@v7",
+		"runs-on: windows-latest",
+		"wix --version 5.0.2",
+		`.\.github\scripts\build-windows-msi.ps1`,
+		`@("amd64", "arm64")`,
+		`cq_${version}_windows_${architecture}.msi`,
+		"gh release upload",
+	} {
+		if !strings.Contains(workflowText, required) {
+			t.Fatalf("release workflow missing %q", required)
+		}
+	}
+}
+
+func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
+	source, err := os.ReadFile("../../packaging/windows/cq.wxs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		`Scope="perUser"`,
+		`Version="$(var.CQVersion)"`,
+		`Source="$(var.CQExecutable)"`,
+		`Name="PATH"`,
+		`Value="[INSTALLFOLDER]"`,
+		`ExeCommand="service install --owner=winget"`,
+		`ExeCommand="service uninstall --owner=winget"`,
+		`Execute="rollback"`,
+		`Return="check"`,
+		`<MajorUpgrade`,
+		`Condition="NOT Installed"`,
+		`Condition="Installed AND REMOVE~=&quot;ALL&quot;"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Windows MSI missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"SignTool", "notar", "App Store Connect"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Windows MSI depends on forbidden release mechanism %q", forbidden)
+		}
 	}
 }
 
@@ -159,11 +196,17 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		"hooks:",
 		"install: |",
 		"uninstall: |",
-		`attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false`,
-		`system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
+		`attributes = system_command "/usr/bin/xattr",`,
+		`args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
 		`raise "cq remains quarantined after installation"`,
-		`args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]`,
-		`args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]`,
+		`"service", "install", "--owner=homebrew",`,
+		`if File.executable?("#{HOMEBREW_PREFIX}/bin/cq")`,
+		`"service", "uninstall", "--owner=homebrew",`,
+		`"--service-executable=#{HOMEBREW_PREFIX}/bin/cq",`,
+		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.proxy"]`,
+		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.refresh"]`,
+		`args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"]`,
+		`args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"]`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask missing %q", required)
@@ -175,8 +218,11 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	if strings.Contains(text, "\n    uninstall:\n") {
 		t.Fatal("Homebrew Cask duplicates transactional uninstall with privileged fallback")
 	}
-	if strings.Contains(text, "must_succeed: false") {
-		t.Fatal("Homebrew Cask quarantine removal fails open")
+	if count := strings.Count(text, "must_succeed: false"); count != 2 {
+		t.Fatalf("Homebrew Cask has %d fail-open commands, want two launchd backstops", count)
+	}
+	if strings.Contains(text, `system_command "/usr/bin/sudo"`) {
+		t.Fatal("Homebrew Cask uninstall backstop requires privilege escalation")
 	}
 
 	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
@@ -216,11 +262,82 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 		`lifecycle_commands == %w[install uninstall]`,
 		`abort "CQ lifecycle command survived validation isolation"`,
 		`abort "production CQ binary path survived validation isolation"`,
-		`abort "unexpected Homebrew launchctl uninstall fallback"`,
+		`abort "missing Homebrew uninstall backstop for #{backstop}"`,
+		`abort "production CQ launchd label survived validation isolation"`,
+		`find "$validation_binary" -depth -delete`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask validation missing fail-closed guard %q", required)
 		}
+	}
+}
+
+func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
+	releaser, err := os.ReadFile("../../.goreleaser.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(releaser), "release:\n  draft: true") {
+		t.Fatal("GoReleaser does not stage release as a draft")
+	}
+	for _, required := range []string{
+		"use_existing_draft: true",
+		"replace_existing_artifacts: true",
+	} {
+		if !strings.Contains(string(releaser), required) {
+			t.Fatalf("GoReleaser draft is not retry-safe: missing %q", required)
+		}
+	}
+
+	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"args: release --clean",
+		`.github/scripts/validate-homebrew-install.sh`,
+		`winget validate --manifest $manifestPath --disable-interactivity`,
+		`$metadataText -notmatch "GOOS=windows"`,
+		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
+		`$manifestArgs = @(`,
+		`& go run ./internal/tools/wingetmanifest @manifestArgs`,
+		`.\.github\scripts\validate-windows-msi.ps1`,
+		"runs-on: ubuntu-24.04-arm",
+		`.github/scripts/validate-linux-install.sh`,
+		"name: windows-msi-validation",
+		"runner: [windows-latest, windows-11-arm]",
+		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
+		`$validationArguments.PreviousGoVersion = $previousGoVersion`,
+		`if ($statusCode -ne 404)`,
+		`$publishedVersions | Sort-Object -Descending | Select-Object -First 1`,
+		`$validationArguments.PreviousVersion = $previousVersion`,
+		"needs: [release, windows-packages, windows-acceptance]",
+		"needs: [windows-deployed, linux-install]",
+		`gh release edit "$RELEASE_TAG" --draft=false`,
+		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
+		`.\.github\scripts\validate-windows-install.ps1`,
+		"secrets.WINGET_PKGS_TOKEN",
+		"microsoft/winget-pkgs",
+		`if gh api "$upstream_path" >/dev/null 2>&1`,
+		`git -C "$checkout" diff --cached --quiet`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("release workflow missing native publication gate %q", required)
+		}
+	}
+	if count := strings.Count(text, "args: release --clean"); count != 1 {
+		t.Errorf("release workflow builds artifacts %d times, want one exact draft build", count)
+	}
+	releaseStart := strings.Index(text, "\n  release:\n")
+	windowsStart := strings.Index(text, "\n  windows-packages:\n")
+	if releaseStart < 0 || windowsStart <= releaseStart || !strings.Contains(text[releaseStart:windowsStart], "fetch-depth: 0") {
+		t.Error("release job does not fetch prior tags for upgrade validation")
+	}
+	styleIndex := strings.Index(text, "brew style --fix dist/homebrew/Casks/cq.rb")
+	lifecycleIndex := strings.Index(text, ".github/scripts/validate-homebrew-install.sh")
+	if styleIndex < 0 || lifecycleIndex < 0 || styleIndex > lifecycleIndex {
+		t.Error("release workflow does not validate formatted Homebrew Cask bytes")
 	}
 }
 
@@ -234,6 +351,9 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 		"runs-on: windows-latest",
 		"go build -o cq.exe ./cmd/cq",
 		"go build -o cq-install.exe ./cmd/cq-install",
+		`.\.github\scripts\build-windows-msi.ps1`,
+		"wix --version 5.0.2",
+		`.\.github\scripts\validate-windows-msi.ps1`,
 		"go test -race -count=1 ./...",
 		"go test -race -count=1 ./internal/fsutil",
 		"go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'",
@@ -258,6 +378,35 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 	}
 }
 
+func TestCIProfilesUbuntuConfinementWithoutWeakeningAppArmor(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"profile cq-ci-userns flags=(unconfined)",
+		"userns,",
+		"sudo apparmor_parser --replace",
+		"aa-exec --profile=cq-ci-userns -- go test -race -count=1 ./...",
+		"sudo apparmor_parser --remove",
+		"trap cleanup EXIT",
+		"AppArmor profile cleanup failed",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("CI missing Ubuntu confinement contract %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"apparmor_restrict_unprivileged_userns",
+		"t.Skip",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("CI weakens Ubuntu confinement with %q", forbidden)
+		}
+	}
+}
+
 func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	windows, err := os.ReadFile("../../.github/scripts/validate-windows-install.ps1")
 	if err != nil {
@@ -273,10 +422,11 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`\cq\Proxy`,
 		`\cq\Refresh`,
 		"Get-CimInstance Win32_Process",
-		"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\cq",
-		"CQPathAdded",
+		"Get-CQARPEntries",
+		"msiexec.exe",
+		"Set-PrivateTree",
 		"if ($ownsCQTasks)",
-		"if ($ownsUninstallRegistration)",
+		"if ($ownsWinGetPackage)",
 		"Remove-Item -LiteralPath $temporaryRoot -Recurse -Force",
 		"native-transport-probe.go",
 		`$temporaryCodex = Join-Path $temporaryHome ".codex"`,
@@ -284,6 +434,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`"upgrade", "--manifest", $ManifestPath`,
 		`"uninstall", "--id", "jacobcxdev.cq"`,
 		`github.com/jacobcxdev/cq/cmd/cq-install@v$Version`,
+		"PreviousGoVersion",
 		"GetSecurityDescriptor(4)",
 		"EnginePID",
 		"LocalManifestFiles",
@@ -294,6 +445,56 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	if strings.Contains(windowsText, "& $Path install --owner=winget") {
 		t.Fatal("Windows native validation bypasses WinGet")
+	}
+	windowsMSI, err := os.ReadFile("../../.github/scripts/validate-windows-msi.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowsMSIText := string(windowsMSI)
+	for _, required := range []string{
+		"Stop-ScheduledTask",
+		"Unregister-ScheduledTask",
+	} {
+		if !strings.Contains(windowsMSIText, required) {
+			t.Errorf("Windows MSI validation cleanup missing non-native task operation %q", required)
+		}
+	}
+	if strings.Contains(windowsMSIText, "& schtasks.exe") {
+		t.Error("Windows MSI validation cleanup leaks expected missing-task exit status")
+	}
+	foregroundIndex := strings.Index(windowsMSIText, `Start-Process -FilePath $serviceProbe -ArgumentList @("proxy", "start")`)
+	directInstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service install --owner=winget`)
+	directUninstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service uninstall --owner=winget`)
+	msiInstallIndex := strings.Index(windowsMSIText, `Invoke-MSI -Action install -Path $PreviousMSI`)
+	if foregroundIndex < 0 || directInstallIndex < foregroundIndex || directUninstallIndex < directInstallIndex || msiInstallIndex < directUninstallIndex {
+		t.Error("Windows MSI validation does not expose and clean direct service lifecycle before installer execution")
+	}
+	for _, script := range []struct {
+		text string
+		seal string
+	}{
+		{text: windowsText, seal: "Set-PrivateTree -Root $temporaryLocal"},
+		{text: windowsMSIText, seal: "Set-PrivateTree -Root $localCQ"},
+	} {
+		sealIndex := strings.Index(script.text, script.seal)
+		fixtureIndex := strings.Index(script.text, "fixtures --config")
+		if sealIndex < 0 || fixtureIndex < 0 || sealIndex > fixtureIndex {
+			t.Errorf("Windows installation script does not seal fixture state before initialisation: %q", script.seal)
+		}
+	}
+	homebrewInstall, err := os.ReadFile("../../.github/scripts/validate-homebrew-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	homebrewText := string(homebrewInstall)
+	for _, required := range []string{
+		`"$live_executable" -ef "$installed_cq"`,
+		`jq . <<<"$status_json" >&2`,
+		`tail -n 80 "$log" >&2`,
+	} {
+		if !strings.Contains(homebrewText, required) {
+			t.Errorf("Homebrew installation script missing identity/diagnostic proof %q", required)
+		}
 	}
 	linuxText := string(linux)
 	for _, required := range []string{

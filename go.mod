@@ -3,6 +3,7 @@ module github.com/jacobcxdev/cq
 go 1.26.1
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/alecthomas/kong v1.14.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/gorilla/websocket v1.5.3

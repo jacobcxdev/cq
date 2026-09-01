@@ -60,7 +60,7 @@ type windowsTaskTriggers struct {
 
 type windowsTaskLogonTrigger struct {
 	Repetition *windowsTaskRepetition `xml:"Repetition,omitempty"`
-	Enabled    bool                   `xml:"Enabled"`
+	Enabled    *bool                  `xml:"Enabled,omitempty"`
 	UserID     string                 `xml:"UserId"`
 }
 
@@ -88,7 +88,7 @@ type windowsTaskSettings struct {
 	StartWhenAvailable         bool                      `xml:"StartWhenAvailable"`
 	RunOnlyIfNetworkAvailable  bool                      `xml:"RunOnlyIfNetworkAvailable"`
 	WakeToRun                  bool                      `xml:"WakeToRun"`
-	Enabled                    bool                      `xml:"Enabled"`
+	Enabled                    *bool                     `xml:"Enabled,omitempty"`
 	Hidden                     bool                      `xml:"Hidden"`
 	ExecutionTimeLimit         string                    `xml:"ExecutionTimeLimit"`
 	Priority                   int                       `xml:"Priority"`
@@ -448,6 +448,12 @@ func (platform *windowsTaskServicePlatform) inspect(ctx context.Context, kind wi
 		return status, fmt.Errorf("inspect Windows task state %s: %w", taskPath, err)
 	}
 	status.Running = runtimeState.Running
+	if runtimeState.HasLastResult {
+		status.LastResult = fmt.Sprintf("0x%08x", runtimeState.LastResult)
+		if runtimeState.LastResult == 0 {
+			status.LastResult = "success"
+		}
+	}
 	if !validWindowsTaskSecurityDescriptor(runtimeState.SecurityDescriptor, platform.sid, false) {
 		return status, fmt.Errorf("%w: Windows task security descriptor differs", installstate.ErrOwnershipConflict)
 	}
@@ -596,7 +602,7 @@ func renderWindowsTaskDefinition(kind windowsTaskKind, sid, executable string, r
 			SecurityDescriptor: windowsTaskSecurityDescriptor(sid),
 		},
 		Triggers: windowsTaskTriggers{LogonTrigger: windowsTaskLogonTrigger{
-			Enabled: true,
+			Enabled: windowsTaskBool(true),
 			UserID:  sid,
 		}},
 		Principals: windowsTaskPrincipals{Principal: windowsTaskPrincipal{
@@ -613,7 +619,7 @@ func renderWindowsTaskDefinition(kind windowsTaskKind, sid, executable string, r
 			StartWhenAvailable:         true,
 			RunOnlyIfNetworkAvailable:  false,
 			WakeToRun:                  false,
-			Enabled:                    true,
+			Enabled:                    windowsTaskBool(true),
 			Hidden:                     false,
 			ExecutionTimeLimit:         "PT5M",
 			Priority:                   7,
@@ -711,6 +717,7 @@ func normaliseWindowsTaskXML(data []byte) ([]byte, error) {
 	if !utf8.Valid(data) {
 		return nil, fmt.Errorf("Windows task XML is not valid UTF-8 or UTF-16")
 	}
+	data = bytes.Replace(data, []byte(`encoding="UTF-16"`), []byte(`encoding="UTF-8"`), 1)
 	return append([]byte(nil), data...), nil
 }
 
@@ -736,10 +743,10 @@ func validateWindowsTaskDefinition(definition windowsTaskDefinition, kind window
 	}
 	trigger := definition.Triggers.LogonTrigger
 	principal := definition.Principals.Principal
-	if !trigger.Enabled || trigger.UserID != sid || principal.ID != "CQUser" || principal.UserID != sid || principal.LogonType != "InteractiveToken" || principal.RunLevel != "LeastPrivilege" {
+	if !windowsTaskDefaultTrue(trigger.Enabled) || !windowsTaskUserMatchesSID(trigger.UserID, sid) || principal.ID != "CQUser" || principal.UserID != sid || principal.LogonType != "InteractiveToken" || (principal.RunLevel != "" && principal.RunLevel != "LeastPrivilege") {
 		return conflict("principal or logon trigger differs")
 	}
-	if !definition.Settings.Enabled || definition.Settings.MultipleInstancesPolicy != "IgnoreNew" || !definition.Settings.StartWhenAvailable {
+	if !windowsTaskDefaultTrue(definition.Settings.Enabled) || definition.Settings.MultipleInstancesPolicy != "IgnoreNew" || !definition.Settings.StartWhenAvailable {
 		return conflict("settings differ")
 	}
 	action := definition.Actions.Exec
@@ -754,6 +761,14 @@ func validateWindowsTaskDefinition(definition windowsTaskDefinition, kind window
 		return conflict("refresh repetition differs")
 	}
 	return nil
+}
+
+func windowsTaskBool(value bool) *bool {
+	return &value
+}
+
+func windowsTaskDefaultTrue(value *bool) bool {
+	return value == nil || *value
 }
 
 func windowsTaskSecurityDescriptor(sid string) string {

@@ -72,6 +72,27 @@ func TestWindowsTaskDefinitionRejectsWrongPrincipalAndAction(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskDefinitionAcceptsSchedulerDefaultCanonicalisation(t *testing.T) {
+	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := parseWindowsTaskDefinition(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.Triggers.LogonTrigger.Enabled = nil
+	definition.Principals.Principal.RunLevel = ""
+	definition.Settings.Enabled = nil
+	if err := validateWindowsTaskDefinition(definition, windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800); err != nil {
+		t.Fatal(err)
+	}
+	definition.Triggers.LogonTrigger.Enabled = windowsTaskBool(false)
+	if err := validateWindowsTaskDefinition(definition, windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800); !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("disabled trigger error = %v", err)
+	}
+}
+
 func TestWindowsTaskDefinitionRejectsWrongSchema(t *testing.T) {
 	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
 	if err != nil {
@@ -186,6 +207,21 @@ func TestWindowsTaskDefinitionTemporaryFileUsesUTF16(t *testing.T) {
 	}
 	if parsed.Actions.Exec.Command != `C:\cq\cq.exe` {
 		t.Fatalf("round-trip command = %q", parsed.Actions.Exec.Command)
+	}
+}
+
+func TestWindowsTaskDefinitionAcceptsUTF8SchedulerOutputWithUTF16Declaration(t *testing.T) {
+	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte(`encoding="UTF-8"`), []byte(`encoding="UTF-16"`), 1)
+	parsed, err := parseWindowsTaskDefinition(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Actions.Exec.Command != `C:\cq\cq.exe` {
+		t.Fatalf("command = %q", parsed.Actions.Exec.Command)
 	}
 }
 
@@ -358,6 +394,23 @@ func TestWindowsTaskDefinitionServiceKeepsSchedulerPIDAuthoritative(t *testing.T
 		t.Fatal(err)
 	}
 	if status.Proxy.PID != 777 || status.Proxy.Healthy || !strings.Contains(status.Proxy.Error, "PID") {
+		t.Fatalf("proxy status = %#v", status.Proxy)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceReportsProxyExitCode(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.running[windowsProxyTaskPath] = false
+	runner.lastResult[windowsProxyTaskPath] = 0x80041320
+
+	status, err := platform.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Proxy.Running || status.Proxy.Healthy || status.Proxy.LastResult != "0x80041320" {
 		t.Fatalf("proxy status = %#v", status.Proxy)
 	}
 }

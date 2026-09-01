@@ -49,6 +49,65 @@ jobs:
           test -n "$archive"
           .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
 
+  homebrew-lifecycle:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Create isolated release candidate tag
+        run: |
+          set -euo pipefail
+          previous_tag="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          test -n "$previous_tag"
+          previous_version="${previous_tag#v}"
+          IFS=. read -r major minor patch <<<"$previous_version"
+          current_version="${major}.${minor}.$((patch + 1))-ci"
+          git tag "v$current_version"
+          {
+            echo "PREVIOUS_TAG=$previous_tag"
+            echo "PREVIOUS_VERSION=$previous_version"
+            echo "CURRENT_VERSION=$current_version"
+            echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$current_version" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)"
+          } >> "$GITHUB_ENV"
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean --skip=publish
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: validation
+
+      - name: Validate real Cask install, upgrade, transport, and uninstall
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) architecture=arm64 ;;
+            x86_64) architecture=amd64 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          previous_root="$RUNNER_TEMP/cq-homebrew-previous"
+          mkdir -p "$previous_root"
+          gh release download "$PREVIOUS_TAG" \
+            --pattern "cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz" \
+            --dir "$previous_root"
+          gh api repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb \
+            --jq .content | base64 --decode >"$previous_root/cq.rb"
+          .github/scripts/validate-homebrew-install.sh \
+            "$previous_root/cq.rb" \
+            "$previous_root/cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz" \
+            "$PREVIOUS_VERSION" \
+            "$PWD/dist/homebrew/Casks/cq.rb" \
+            "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \
+            "$CURRENT_VERSION"
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -86,23 +145,39 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Permit Linux acceptance namespaces
+      - name: Run full suite under Ubuntu userns profile
+        shell: bash
         run: |
-          setting=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
-          if [ -f "$setting" ]; then
-            value="$(cat "$setting")"
-            echo "CQ_APPARMOR_USERNS_ORIGINAL=$value" >> "$GITHUB_ENV"
-            echo 0 | sudo tee "$setting" >/dev/null
-          fi
-      - name: Gate Linux acceptance confinement
-        run: go test -race -count=1 ./internal/proxy -run '^TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock$'
-      - run: go test -race -count=1 ./...
-      - name: Restore Linux namespace restriction
-        if: always()
-        run: |
-          if [ -n "${CQ_APPARMOR_USERNS_ORIGINAL:-}" ]; then
-            echo "$CQ_APPARMOR_USERNS_ORIGINAL" | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns >/dev/null
-          fi
+          set -euo pipefail
+          profile_name=cq-ci-userns
+          profile_path="$RUNNER_TEMP/${profile_name}.apparmor"
+          profile_loaded=0
+          cleanup() {
+            result=$?
+            trap - EXIT
+            if [ "$profile_loaded" -eq 1 ] && ! sudo apparmor_parser --remove "$profile_path"; then
+              result=1
+            fi
+            if sudo grep -Fq -- "${profile_name} (unconfined)" /sys/kernel/security/apparmor/profiles; then
+              echo "AppArmor profile cleanup failed" >&2
+              result=1
+            fi
+            find "$profile_path" -delete
+            exit "$result"
+          }
+          trap cleanup EXIT
+          command -v apparmor_parser
+          command -v aa-exec
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            '' \
+            'profile cq-ci-userns flags=(unconfined) {' \
+            '  userns,' \
+            '}' >"$profile_path"
+          sudo apparmor_parser --replace "$profile_path"
+          profile_loaded=1
+          aa-exec --profile=cq-ci-userns -- go test -race -count=1 ./...
 
   windows:
     runs-on: windows-latest
@@ -112,6 +187,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
 
       - run: go build -o cq.exe ./cmd/cq
       - run: go build -o cq-install.exe ./cmd/cq-install
@@ -125,3 +204,21 @@ jobs:
       - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
         env:
           CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
+      - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
+      - name: Validate per-user MSI install, upgrade, and uninstall
+        shell: pwsh
+        run: |
+          $wixRoot = Join-Path $env:RUNNER_TEMP "wix"
+          dotnet tool install --tool-path $wixRoot wix --version 5.0.2
+          $wix = Join-Path $wixRoot "wix.exe"
+          $packages = Join-Path $env:RUNNER_TEMP "cq-msi"
+          $previousRoot = Join-Path $packages "previous"
+          $currentRoot = Join-Path $packages "current"
+          New-Item -ItemType Directory -Path $previousRoot, $currentRoot -Force | Out-Null
+          go build -ldflags "-X main.version=0.0.1" -o (Join-Path $previousRoot "cq.exe") ./cmd/cq
+          go build -ldflags "-X main.version=0.0.2" -o (Join-Path $currentRoot "cq.exe") ./cmd/cq
+          $previousMSI = Join-Path $packages "cq_0.0.1_windows_amd64.msi"
+          $currentMSI = Join-Path $packages "cq_0.0.2_windows_amd64.msi"
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2

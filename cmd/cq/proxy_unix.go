@@ -233,6 +233,13 @@ func initialiseUnixRuntimeLifecycle() error {
 	if err != nil {
 		return err
 	}
+	return initialiseUnixRuntimeLifecycleAt(path)
+}
+
+func initialiseUnixRuntimeLifecycleAt(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return proxy.ErrRuntimeRoleManifest
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

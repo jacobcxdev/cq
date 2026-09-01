@@ -29,33 +29,32 @@ ManifestVersion: 1.10.0
 PackageIdentifier: jacobcxdev.cq
 PackageVersion: 0.27.0
 InstallerLocale: en-US
-InstallerType: exe
+InstallerType: wix
 Scope: user
 InstallModes:
   - interactive
   - silent
   - silentWithProgress
-InstallerSwitches:
-  Silent: install --owner=winget --silent
-  SilentWithProgress: install --owner=winget --silent
 UpgradeBehavior: install
 Commands:
   - cq
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq-install_0.27.0_windows_amd64.exe
+    InstallerUrl: https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq_0.27.0_windows_amd64.msi
     InstallerSha256: 1f3f918c6a83f506aaf78021bc0b0b8a5b235f2629caa6e97a1ee59f0f816adc
     AppsAndFeaturesEntries:
       - DisplayName: CQ
         Publisher: jacobcxdev
         DisplayVersion: 0.27.0
+        UpgradeCode: '{7B64C2EF-DF57-4C43-8C35-7D1949B09469}'
   - Architecture: arm64
-    InstallerUrl: https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq-install_0.27.0_windows_arm64.exe
+    InstallerUrl: https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq_0.27.0_windows_arm64.msi
     InstallerSha256: 7b8e440c1722ca8daa2f8046d48a03b785730860046e40493616e5af0b564f10
     AppsAndFeaturesEntries:
       - DisplayName: CQ
         Publisher: jacobcxdev
         DisplayVersion: 0.27.0
+        UpgradeCode: '{7B64C2EF-DF57-4C43-8C35-7D1949B09469}'
 ManifestType: installer
 ManifestVersion: 1.10.0
 `,
@@ -104,6 +103,7 @@ func TestManifestConfigRejectsUnpinnedInputs(t *testing.T) {
 		}},
 		{name: "query", mutate: func(config *manifestConfig) { config.ARM64URL += "?download=1" }},
 		{name: "wrong architecture", mutate: func(config *manifestConfig) { config.X64URL = strings.Replace(config.X64URL, "amd64", "arm64", 1) }},
+		{name: "legacy executable", mutate: func(config *manifestConfig) { config.X64URL = strings.TrimSuffix(config.X64URL, ".msi") + ".exe" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -147,9 +147,9 @@ func TestGenerateRejectsNonemptyOutput(t *testing.T) {
 func testManifestConfig() manifestConfig {
 	return manifestConfig{
 		Version:     "0.27.0",
-		X64URL:      "https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq-install_0.27.0_windows_amd64.exe",
+		X64URL:      "https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq_0.27.0_windows_amd64.msi",
 		X64SHA256:   testX64Digest,
-		ARM64URL:    "https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq-install_0.27.0_windows_arm64.exe",
+		ARM64URL:    "https://github.com/jacobcxdev/cq/releases/download/v0.27.0/cq_0.27.0_windows_arm64.msi",
 		ARM64SHA256: testARM64Digest,
 	}
 }

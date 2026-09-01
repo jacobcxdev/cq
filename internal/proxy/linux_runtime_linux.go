@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 )
@@ -19,11 +20,17 @@ func (identity LinuxProxyRuntimeIdentity) Valid() bool {
 	return identity.Process.Valid() && identity.Listener.Valid() && identity.Listener.Process.Equal(identity.Process)
 }
 
+func (identity LinuxProxyRuntimeIdentity) Equal(other LinuxProxyRuntimeIdentity) bool {
+	return identity.Process.Equal(other.Process) && identity.Listener.Address == other.Listener.Address &&
+		identity.Listener.Inode == other.Listener.Inode && identity.Listener.Process.Equal(other.Listener.Process)
+}
+
 type linuxRuntimeInspectionOperations struct {
 	listPIDs          func() ([]int, error)
 	captureExpected   func(string) (LinuxExecutableIdentity, error)
 	resolveExecutable func(string) (string, error)
 	effectiveUID      func() int
+	prefilter         func(int, uint64, string) (bool, error)
 	captureProcess    func(int) (LinuxProcessIdentity, error)
 	captureListener   func(int, int) (LinuxListenerIdentity, error)
 }
@@ -34,13 +41,63 @@ func defaultLinuxRuntimeInspectionOperations() linuxRuntimeInspectionOperations 
 		captureExpected:   CaptureLinuxExecutable,
 		resolveExecutable: filepath.EvalSymlinks,
 		effectiveUID:      os.Geteuid,
+		prefilter:         prefilterLinuxProxyRuntimeProcess,
 		captureProcess:    CaptureLinuxProcess,
 		captureListener:   CaptureLinuxListener,
 	}
 }
 
+func prefilterLinuxProxyRuntimeProcess(pid int, uid uint64, executable string) (bool, error) {
+	facts, err := captureLinuxProcessMatchFacts(pid, defaultLinuxProcOperations())
+	if err != nil {
+		return false, err
+	}
+	return facts.UID == uid && linuxProxyRuntimeArgumentsMatch(facts.Arguments, executable) &&
+		linuxProxyRuntimeCgroupMatches(facts.CgroupPath, uid), nil
+}
+
 func InspectLinuxProxyRuntime(ctx context.Context, executable string, port int) (LinuxProxyRuntimeIdentity, error) {
 	return inspectLinuxProxyRuntimeWithOperations(ctx, executable, port, defaultLinuxRuntimeInspectionOperations())
+}
+
+// CaptureLinuxRuntimeWorker returns the sole worker-role process belonging to
+// one already-attested supervisor. Callers separately prove serving readiness.
+func CaptureLinuxRuntimeWorker(ctx context.Context, supervisor LinuxProcessIdentity) (LinuxProcessIdentity, error) {
+	if ctx == nil || !supervisor.Valid() {
+		return LinuxProcessIdentity{}, errLinuxProcIdentity
+	}
+	if err := ctx.Err(); err != nil {
+		return LinuxProcessIdentity{}, err
+	}
+	pids, err := listLinuxProcPIDs()
+	if err != nil {
+		return LinuxProcessIdentity{}, errLinuxProcIdentity
+	}
+	matches := make([]LinuxProcessIdentity, 0, 1)
+	for _, pid := range pids {
+		if err := ctx.Err(); err != nil {
+			return LinuxProcessIdentity{}, err
+		}
+		facts, err := captureLinuxProcessMatchFacts(pid, defaultLinuxProcOperations())
+		if err != nil || facts.ParentPID != supervisor.PID || facts.UID != supervisor.UID || facts.CgroupPath != supervisor.CgroupPath ||
+			len(facts.Arguments) != 23 || facts.Arguments[0] != supervisor.Executable.Path || facts.Arguments[1] != "proxy" || facts.Arguments[2] != "start" {
+			continue
+		}
+		manifest, err := ParseRuntimeRoleArguments(facts.Arguments[3:])
+		if err != nil || manifest.Role != RuntimeRoleWorker || manifest.ManifestDigest != supervisor.Executable.SHA256 {
+			continue
+		}
+		process, err := CaptureLinuxProcess(pid)
+		if err != nil || process.ParentPID != facts.ParentPID || process.StartTime != facts.StartTime || process.UID != facts.UID ||
+			process.CgroupPath != facts.CgroupPath || !slices.Equal(process.Arguments, facts.Arguments) || process.Executable != supervisor.Executable {
+			continue
+		}
+		matches = append(matches, process)
+	}
+	if len(matches) != 1 {
+		return LinuxProcessIdentity{}, errLinuxProcIdentity
+	}
+	return matches[0], nil
 }
 
 func inspectLinuxProxyRuntimeWithOperations(ctx context.Context, executable string, port int, operations linuxRuntimeInspectionOperations) (LinuxProxyRuntimeIdentity, error) {
@@ -52,7 +109,7 @@ func inspectLinuxProxyRuntimeWithOperations(ctx context.Context, executable stri
 	}
 	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable || port < 1 || port > 65_535 ||
 		operations.listPIDs == nil || operations.captureExpected == nil || operations.resolveExecutable == nil || operations.effectiveUID == nil ||
-		operations.captureProcess == nil || operations.captureListener == nil {
+		operations.prefilter == nil || operations.captureProcess == nil || operations.captureListener == nil {
 		return LinuxProxyRuntimeIdentity{}, errLinuxProcIdentity
 	}
 	resolved, err := operations.resolveExecutable(executable)
@@ -75,6 +132,10 @@ func inspectLinuxProxyRuntimeWithOperations(ctx context.Context, executable stri
 	for _, pid := range pids {
 		if err := ctx.Err(); err != nil {
 			return LinuxProxyRuntimeIdentity{}, err
+		}
+		candidate, err := operations.prefilter(pid, uint64(uid), executable)
+		if err != nil || !candidate {
+			continue
 		}
 		process, err := operations.captureProcess(pid)
 		if err != nil || !process.Valid() || process.UID != uint64(uid) || process.Executable != expected ||
