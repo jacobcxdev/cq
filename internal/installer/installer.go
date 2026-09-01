@@ -286,7 +286,7 @@ func (installer *Installer) Uninstall(ctx context.Context) (resultErr error) {
 	if err := installer.Metadata.Remove(ctx, *current); err != nil {
 		return restore(fmt.Errorf("remove CQ platform metadata: %w", err), true)
 	}
-	if err := installer.FS.Remove(current.Executable); err != nil {
+	if err := removeExecutable(ctx, installer.FS, current.Executable); err != nil {
 		return restore(fmt.Errorf("remove CQ executable: %w", err), true)
 	}
 	if err := installer.syncExecutableDirectory(); err != nil {
