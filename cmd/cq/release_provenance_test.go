@@ -444,6 +444,20 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	if strings.Contains(windowsText, "& $Path install --owner=winget") {
 		t.Fatal("Windows native validation bypasses WinGet")
 	}
+	homebrewInstall, err := os.ReadFile("../../.github/scripts/validate-homebrew-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	homebrewText := string(homebrewInstall)
+	for _, required := range []string{
+		`"$live_executable" -ef "$installed_cq"`,
+		`jq . <<<"$status_json" >&2`,
+		`tail -n 80 "$log" >&2`,
+	} {
+		if !strings.Contains(homebrewText, required) {
+			t.Errorf("Homebrew installation script missing identity/diagnostic proof %q", required)
+		}
+	}
 	linuxText := string(linux)
 	for _, required := range []string{
 		"trap cleanup EXIT INT TERM",

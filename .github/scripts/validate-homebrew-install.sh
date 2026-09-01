@@ -148,18 +148,29 @@ assert_installed() {
     return 1
   fi
   local status_json=''
+  local live_executable=''
   for _ in $(seq 1 60); do
     status_json=$($installed_cq service status --json 2>/dev/null) || true
     if jq -e \
       --arg executable "$installed_cq" \
       '.owner == "homebrew" and .proxy.running and .proxy.healthy and .refresh.healthy and
-       .proxy.configured_executable == $executable and .proxy.live_executable == $executable and
+       .proxy.configured_executable == $executable and
        .proxy.listener == "127.0.0.1:19280" and (.proxy.pid > 0)' <<<"$status_json" >/dev/null 2>&1; then
-      return 0
+      live_executable=$(jq -er '.proxy.live_executable' <<<"$status_json") || true
+      if [[ -n "$live_executable" && -e "$live_executable" && "$live_executable" -ef "$installed_cq" ]]; then
+        return 0
+      fi
     fi
     sleep 1
   done
   echo "CQ $expected_version Homebrew services did not become healthy" >&2
+  jq . <<<"$status_json" >&2 || printf '%s\n' "$status_json" >&2
+  for log in "$logs_root/proxy.log" "$logs_root/refresh.log"; do
+    if [[ -f "$log" ]]; then
+      echo "--- $log" >&2
+      tail -n 80 "$log" >&2
+    fi
+  done
   return 1
 }
 
