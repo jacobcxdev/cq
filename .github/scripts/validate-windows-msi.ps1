@@ -107,6 +107,30 @@ function Wait-ServiceStatus {
     throw "CQ $Version services did not become healthy"
 }
 
+function Get-CQMSIRegistrationCount {
+    param([string]$Version)
+    $installer = New-Object -ComObject "WindowsInstaller.Installer"
+    $count = 0
+    try {
+        foreach ($product in @($installer.ProductsEx("", "", 2))) {
+            try {
+                if ($product.InstallProperty("InstalledProductName") -eq "CQ" -and
+                    $product.InstallProperty("Publisher") -eq "jacobcxdev" -and
+                    $product.InstallProperty("VersionString") -eq $Version) {
+                    $count++
+                }
+            }
+            finally {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($product)
+            }
+        }
+    }
+    finally {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
+    }
+    return $count
+}
+
 function Assert-Installed {
     param([string]$Version)
     $status = Wait-ServiceStatus -Version $Version
@@ -119,11 +143,9 @@ function Assert-Installed {
             throw "$name task executable differs"
         }
     }
-    $entries = @(Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object {
-        $_.DisplayName -eq "CQ" -and $_.Publisher -eq "jacobcxdev" -and $_.DisplayVersion -eq $Version
-    })
-    if ($entries.Count -ne 1) {
-        throw "CQ MSI registration count is $($entries.Count)"
+    $registrationCount = Get-CQMSIRegistrationCount -Version $Version
+    if ($registrationCount -ne 1) {
+        throw "CQ MSI registration count is $registrationCount"
     }
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if (($userPath -split ";") -notcontains $installRoot) {
