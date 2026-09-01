@@ -336,6 +336,17 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	if strings.Contains(text, "[IO.File]::WriteAllLines($checksums") {
 		t.Error("release workflow rewrites checksums with platform-native CRLF endings")
 	}
+	for _, unsafe := range []string{
+		`grep -Fvx "$RELEASE_TAG" | head -1`,
+		`grep -Fvx "$GITHUB_REF_NAME" | head -1`,
+	} {
+		if strings.Contains(text, unsafe) {
+			t.Errorf("release workflow uses pipefail-unsafe previous-tag selection %q", unsafe)
+		}
+	}
+	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 2 {
+		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 2", count)
+	}
 	releaseStart := strings.Index(text, "\n  release:\n")
 	windowsStart := strings.Index(text, "\n  windows-packages:\n")
 	if releaseStart < 0 || windowsStart <= releaseStart || !strings.Contains(text[releaseStart:windowsStart], "fetch-depth: 0") {
@@ -388,6 +399,12 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 	}
 	if strings.Contains(text, "self-hosted") || strings.Contains(text, "bespoke") {
 		t.Fatal("CI requires a persistent custom runner")
+	}
+	if strings.Contains(text, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1`) {
+		t.Error("CI uses pipefail-unsafe previous-tag selection")
+	}
+	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
+		t.Error("CI does not use pipe-safe previous-tag selection")
 	}
 	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
 		t.Fatalf("full race suite runs on %d platforms, want Linux only", count)
@@ -454,10 +471,15 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		"GetSecurityDescriptor(4)",
 		"EnginePID",
 		"LocalManifestFiles",
+		`@(Get-CQARPEntries).Count`,
 	} {
 		if !strings.Contains(windowsText, required) {
 			t.Errorf("Windows installation script missing cleanup/proof %q", required)
 		}
+	}
+	withoutSafeARPCounts := strings.ReplaceAll(windowsText, `@(Get-CQARPEntries).Count`, "")
+	if strings.Contains(withoutSafeARPCounts, `(Get-CQARPEntries).Count`) {
+		t.Error("Windows installation script reads Count from potentially null or scalar pipeline output")
 	}
 	if strings.Contains(windowsText, "& $Path install --owner=winget") {
 		t.Fatal("Windows native validation bypasses WinGet")
