@@ -226,7 +226,7 @@ func buildInstaller(ctx context.Context, owner installstate.Owner, releaseVersio
 			FS:        fsys,
 			StateRoot: roots.State,
 		},
-		Temporary: installer.OSTemporaryDirectories{Root: filepath.Join(roots.Cache, "installer")},
+		Temporary: installer.OSTemporaryDirectories{Root: installerTemporaryRoot(roots)},
 		Installation: installer.Installation{
 			Owner:      owner,
 			Version:    releaseVersion,
@@ -234,6 +234,10 @@ func buildInstaller(ctx context.Context, owner installstate.Owner, releaseVersio
 			Services:   platform.Services,
 		},
 	}, nil
+}
+
+func installerTemporaryRoot(roots userdirs.Roots) string {
+	return filepath.Join(roots.Cache, "installer")
 }
 
 type platformInstallation struct {
