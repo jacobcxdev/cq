@@ -38,7 +38,7 @@ func TestServiceInstallPersistsOnlyHealthyComponents(t *testing.T) {
 	if record.Owner != installstate.OwnerGo || record.Version != "0.27.0" || record.Executable != lifecycle.Executable || !reflect.DeepEqual(record.Services, wantServices) {
 		t.Fatalf("install record = %#v, want owner/version/path/services", record)
 	}
-	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "install-refresh", "inspect"}
+	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "inspect", "install-refresh", "inspect"}
 	if !reflect.DeepEqual(platform.calls, wantCalls) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, wantCalls)
 	}
@@ -60,7 +60,7 @@ func TestServiceInstallIsIdempotent(t *testing.T) {
 	if _, err := store.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "install-refresh", "inspect"}
+	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "inspect", "install-refresh", "inspect"}
 	if !reflect.DeepEqual(platform.calls, wantCalls) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, wantCalls)
 	}
@@ -80,7 +80,7 @@ func TestServiceInstallRollsBackNewProxyWhenRefreshFails(t *testing.T) {
 	if _, err := store.Load(); !errors.Is(err, installstate.ErrNotInstalled) {
 		t.Fatalf("Load() error = %v, want not installed", err)
 	}
-	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "install-refresh", "restore"}
+	wantCalls := []string{"preflight", "inspect", "snapshot", "install-proxy", "inspect", "install-refresh", "restore"}
 	if !reflect.DeepEqual(platform.calls, wantCalls) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, wantCalls)
 	}
@@ -150,6 +150,27 @@ func TestServiceInstallRejectsOwnershipConflictBeforeMutation(t *testing.T) {
 	}
 	if len(platform.calls) != 0 {
 		t.Fatalf("platform mutated during conflict: %v", platform.calls)
+	}
+}
+
+func TestServiceInstallWaitsForProxyBeforeRefresh(t *testing.T) {
+	lifecycle, platform, _ := newServiceHarness(t)
+	platform.proxyHealthy = false
+	lifecycle.StatusAttempts = 3
+	lifecycle.Wait = func(context.Context, time.Duration) error {
+		if platform.refreshRegistered || platform.refreshRuns != 0 {
+			t.Fatal("refresh installed before proxy became healthy")
+		}
+		platform.proxyHealthy = true
+		return nil
+	}
+
+	if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	want := []string{"preflight", "inspect", "snapshot", "install-proxy", "inspect", "inspect", "install-refresh", "inspect"}
+	if !reflect.DeepEqual(platform.calls, want) {
+		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
 	}
 }
 

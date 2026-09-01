@@ -125,6 +125,9 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if err := lifecycle.Platform.InstallProxy(ctx, lifecycle.Executable); err != nil {
 		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("install proxy service: %w", err))
 	}
+	if err := lifecycle.waitProxyHealthy(ctx); err != nil {
+		return lifecycle.rollbackNew(ctx, restore, err)
+	}
 	if err := lifecycle.Platform.InstallRefresh(ctx, lifecycle.Executable); err != nil {
 		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("install refresh service: %w", err))
 	}
