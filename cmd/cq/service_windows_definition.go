@@ -448,6 +448,12 @@ func (platform *windowsTaskServicePlatform) inspect(ctx context.Context, kind wi
 		return status, fmt.Errorf("inspect Windows task state %s: %w", taskPath, err)
 	}
 	status.Running = runtimeState.Running
+	if runtimeState.HasLastResult {
+		status.LastResult = fmt.Sprintf("0x%08x", runtimeState.LastResult)
+		if runtimeState.LastResult == 0 {
+			status.LastResult = "success"
+		}
+	}
 	if !validWindowsTaskSecurityDescriptor(runtimeState.SecurityDescriptor, platform.sid, false) {
 		return status, fmt.Errorf("%w: Windows task security descriptor differs", installstate.ErrOwnershipConflict)
 	}

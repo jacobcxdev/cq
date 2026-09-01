@@ -398,6 +398,23 @@ func TestWindowsTaskDefinitionServiceKeepsSchedulerPIDAuthoritative(t *testing.T
 	}
 }
 
+func TestWindowsTaskDefinitionServiceReportsProxyExitCode(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.running[windowsProxyTaskPath] = false
+	runner.lastResult[windowsProxyTaskPath] = 0x80041320
+
+	status, err := platform.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Proxy.Running || status.Proxy.Healthy || status.Proxy.LastResult != "0x80041320" {
+		t.Fatalf("proxy status = %#v", status.Proxy)
+	}
+}
+
 func TestWindowsTaskDefinitionServiceRejectsForeignFolderSecurity(t *testing.T) {
 	platform, runner := newWindowsTaskServiceHarness(t)
 	runner.folderExists = true

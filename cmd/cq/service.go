@@ -410,13 +410,15 @@ func (lifecycle *serviceLifecycle) waitHealthy(ctx context.Context) (serviceStat
 		return serviceStatus{}, fmt.Errorf("%w: inspect: %v", ErrServiceUnhealthy, inspectErr)
 	}
 	return serviceStatus{}, fmt.Errorf(
-		"%w: proxy registered=%t running=%t healthy=%t; refresh registered=%t healthy=%t",
+		"%w: proxy registered=%t running=%t healthy=%t result=%q; refresh registered=%t healthy=%t result=%q",
 		ErrServiceUnhealthy,
 		status.Proxy.Registered,
 		status.Proxy.Running,
 		status.Proxy.Healthy,
+		status.Proxy.LastResult,
 		status.Refresh.Registered,
 		status.Refresh.Healthy,
+		status.Refresh.LastResult,
 	)
 }
 
