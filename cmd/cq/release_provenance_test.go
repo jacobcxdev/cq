@@ -451,10 +451,11 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	windowsMSIText := string(windowsMSI)
+	foregroundIndex := strings.Index(windowsMSIText, `Start-Process -FilePath $serviceProbe -ArgumentList @("proxy", "start")`)
 	directInstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service install --owner=winget`)
 	directUninstallIndex := strings.Index(windowsMSIText, `& $serviceProbe service uninstall --owner=winget`)
 	msiInstallIndex := strings.Index(windowsMSIText, `Invoke-MSI -Action install -Path $PreviousMSI`)
-	if directInstallIndex < 0 || directUninstallIndex < directInstallIndex || msiInstallIndex < directUninstallIndex {
+	if foregroundIndex < 0 || directInstallIndex < foregroundIndex || directUninstallIndex < directInstallIndex || msiInstallIndex < directUninstallIndex {
 		t.Error("Windows MSI validation does not expose and clean direct service lifecycle before installer execution")
 	}
 	for _, script := range []struct {

@@ -34,6 +34,7 @@ $probeExecutable = Join-Path $temporaryRoot "native-transport-probe.exe"
 $serviceProbe = Join-Path $temporaryRoot "cq-service-probe.exe"
 $addressFile = Join-Path $temporaryRoot "upstream-address.txt"
 $upstreamProcess = $null
+$foregroundProxy = $null
 $ownsState = $false
 $ownsTasks = $false
 
@@ -202,6 +203,42 @@ try {
         Set-PrivateTree -Root $root
     }
 
+    $foregroundStdout = Join-Path $temporaryRoot "foreground-proxy.stdout.log"
+    $foregroundStderr = Join-Path $temporaryRoot "foreground-proxy.stderr.log"
+    $foregroundProxy = Start-Process -FilePath $serviceProbe -ArgumentList @("proxy", "start") -RedirectStandardOutput $foregroundStdout -RedirectStandardError $foregroundStderr -PassThru -NoNewWindow
+    $foregroundReady = $false
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        if ($foregroundProxy.HasExited) {
+            break
+        }
+        if (Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+            $foregroundReady = $true
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $foregroundReady) {
+        foreach ($log in @($foregroundStdout, $foregroundStderr)) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+                Get-Content -LiteralPath $log | ForEach-Object { Write-Host "foreground CQ: $_" }
+            }
+        }
+        throw "foreground CQ proxy failed to start"
+    }
+    & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
+    if ($LASTEXITCODE -ne 0) {
+        throw "foreground CQ proxy transport probe failed"
+    }
+    Stop-Process -Id $foregroundProxy.Id -Force
+    $foregroundProxy.WaitForExit()
+    $foregroundProxy = $null
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        if (-not (Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
     & $serviceProbe service install --owner=winget
     if ($LASTEXITCODE -ne 0) {
         throw "direct CQ service install failed"
@@ -261,6 +298,9 @@ try {
     }
 }
 finally {
+    if ($foregroundProxy -and -not $foregroundProxy.HasExited) {
+        Stop-Process -Id $foregroundProxy.Id -Force -ErrorAction SilentlyContinue
+    }
     if ($upstreamProcess -and -not $upstreamProcess.HasExited) {
         Stop-Process -Id $upstreamProcess.Id -Force -ErrorAction SilentlyContinue
     }
@@ -271,6 +311,9 @@ finally {
             }
         }
         Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $installedCQ } | ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $serviceProbe } | ForEach-Object {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
         Remove-CQTasks
