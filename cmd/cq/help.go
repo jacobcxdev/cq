@@ -158,6 +158,7 @@ Commands:
   proxy endpoint      Explicitly inspect or transition the credential endpoint
   proxy policy        Initialise, apply, or inspect routing policy
   proxy rescue        Enter, exit, or inspect rescue mode
+  proxy leases        Manage reusable Codex account leases
   proxy hook          Emit privacy-safe Codex turn receipts for hooks
   proxy candidate     Prepare and control isolated candidate validation
 `,
@@ -229,6 +230,19 @@ Session selectors:
 
 Control durable rescue mode on the loopback proxy. Requests require the local
 proxy token and never send it upstream.
+`,
+	"proxy leases": `Usage: cq proxy leases <command>
+
+Manage reusable Codex account leases.
+
+Commands:
+  proxy leases invalidate  Invalidate reusable Codex account leases
+`,
+	"proxy leases invalidate": `Usage: cq proxy leases invalidate [--port PORT]
+
+Invalidate reusable Codex account leases across all sessions.
+Active requests and required continuity remain unchanged. Each next eligible
+request re-runs account selection using current pool membership and capacity.
 `,
 	"proxy hook": `Usage: cq proxy hook codex-stop
 
@@ -727,6 +741,11 @@ func validateProxyLexicalGrammar(args []string) error {
 			return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
 		}
 		return nil
+	case "leases":
+		if !validProxyLeaseArguments(args[1:]) {
+			return errors.New("usage: cq proxy leases invalidate [--port PORT]")
+		}
+		return nil
 	case "hook":
 		if len(args) != 2 || args[1] != "codex-stop" {
 			return errors.New("usage: cq proxy hook codex-stop")
@@ -952,7 +971,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true, "leases": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -1108,6 +1127,20 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 		}
 		return nil, false
 	}
+	if args[0] == "leases" {
+		if len(args) == 1 || args[1] == "--help" || args[1] == "-h" {
+			return []string{"proxy", "leases"}, true
+		}
+		if args[1] == "help" {
+			path := append([]string{"proxy", "leases"}, args[2:]...)
+			_, ok := manualHelp(path)
+			return path, ok
+		}
+		if args[1] == "invalidate" && helpRequested(args[2:]) {
+			return []string{"proxy", "leases", "invalidate"}, true
+		}
+		return nil, false
+	}
 	if args[0] == "candidate" {
 		if len(args) == 1 || args[1] == "--help" || args[1] == "-h" {
 			return []string{"proxy", "candidate"}, true
@@ -1136,7 +1169,7 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
 		"validate-http": true, "status": true, "pin": true,
-		"policy": true, "rescue": true, "hook": true,
+		"policy": true, "rescue": true, "leases": true, "hook": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)
 }

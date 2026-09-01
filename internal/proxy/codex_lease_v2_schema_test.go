@@ -463,6 +463,12 @@ func TestCodexLeaseV2SchemaRejectsInvalidCutoverTuples(t *testing.T) {
 			value.Cutover.CompletedAt = value.Cutover.At.Add(time.Second)
 		}},
 		{name: "fresh completion generation differs", base: fresh, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Cutover.CompletionGeneration++ }},
+		{name: "affinity invalidation at completion", base: fresh, mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.AffinityInvalidationGeneration = value.Cutover.CompletionGeneration
+		}},
+		{name: "affinity invalidation after envelope", base: fresh, mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.AffinityInvalidationGeneration = value.Generation + 1
+		}},
 		{name: "fresh legacy proof false", base: fresh, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Cutover.NoLegacyAuthority = false }},
 		{name: "fresh archive digest present", base: fresh, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Cutover.LegacyV1SHA256 = strings.Repeat("a", 64) }},
 		{name: "fresh horizon present", base: fresh, mutate: func(value *codexLeaseJournalEnvelopeV2) {
@@ -486,6 +492,9 @@ func TestCodexLeaseV2SchemaRejectsInvalidCutoverTuples(t *testing.T) {
 		{name: "legacy quarantine has completion generation", base: legacy, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Cutover.CompletionGeneration = value.Generation }},
 		{name: "legacy quarantine claims no authority", base: legacy, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Cutover.NoLegacyAuthority = true }},
 		{name: "legacy quarantine generation advanced", base: legacy, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Generation++ }},
+		{name: "legacy quarantine contains affinity invalidation", base: legacy, mutate: func(value *codexLeaseJournalEnvelopeV2) {
+			value.AffinityInvalidationGeneration = 1
+		}},
 		{name: "legacy quarantine contains lane", base: legacy, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Lanes = append(value.Lanes, fresh.Lanes[0]) }},
 		{name: "legacy quarantine contains record", base: legacy, mutate: func(value *codexLeaseJournalEnvelopeV2) { value.Records = append(value.Records, fresh.Records[0]) }},
 		{name: "legacy completion before horizon", base: legacyComplete, mutate: func(value *codexLeaseJournalEnvelopeV2) {

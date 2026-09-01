@@ -226,6 +226,15 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, []string{"proxy", "rescue"})
 		}
 		return runProxyRescue(args[1:], os.Stdout)
+	case "leases":
+		if helpRequested(args[1:]) {
+			path := []string{"proxy", "leases"}
+			if len(args) > 1 && args[1] == "invalidate" {
+				path = append(path, "invalidate")
+			}
+			return writeManualHelp(os.Stdout, path)
+		}
+		return runProxyLeases(args[1:], os.Stdout)
 	case "hook":
 		return runProxyHook(args[1:], os.Stdin, os.Stdout)
 	case "candidate":
@@ -1070,11 +1079,13 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	var codexRoutes proxy.CodexHTTPRequestRouteSnapshotter
 	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
+	var codexLeaseInvalidator proxy.CodexLeaseInvalidator
 	var sessionPolicy *proxy.SessionPolicyResolver
 	var dispatchPermits proxy.CallerDispatchPermitAuthority
 	if codexContinuity != nil {
 		codexRoutes = codexContinuity.Coordinator
 		codexPlanRuntime = codexContinuity.Runtime
+		codexLeaseInvalidator = codexContinuity.Coordinator
 	}
 	if resilienceState != nil {
 		sessionPolicy = resilienceState.Routing.Resolver()
@@ -1193,6 +1204,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		RuntimeCallerCredentials:         runtimeCallerCredentials,
 		SessionPolicy:                    sessionPolicy,
 		CodexTurnReceipts:                codexTurnReceipts,
+		CodexLeaseInvalidator:            codexLeaseInvalidator,
 	}
 	if resilienceState != nil {
 		srv.RoutingPolicy = resilienceState.Routing

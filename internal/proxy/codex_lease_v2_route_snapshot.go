@@ -124,6 +124,9 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 					snapshot.AffinityRequiresAccount = false
 				}
 			}
+			if restored.Affinity.AdmissionJournalGeneration <= restored.AffinityInvalidationGeneration && !snapshot.AffinityRequiresAccount {
+				snapshot.AffinityAccountKey = ""
+			}
 		}
 		if restored.Classification == CodexRestoredLaneCurrent {
 			for _, record := range restored.ResolvedRecords {

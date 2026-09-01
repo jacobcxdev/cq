@@ -163,6 +163,9 @@ type Server struct {
 	// CodexTurnReceipts remains worker-owned and process-local. It exposes only
 	// privacy-safe post-turn route facts through authenticated local control.
 	CodexTurnReceipts *CodexTurnReceiptStore
+	// CodexLeaseInvalidator remains worker-owned and is reachable only through
+	// authenticated local control routed by the supervisor.
+	CodexLeaseInvalidator CodexLeaseInvalidator
 }
 
 type codexWebSocketRoutingProvider interface {
@@ -374,6 +377,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("PUT "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("POST "+RuntimePolicyPoolPath, s.handlePolicyPoolControl)
 	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
+	mux.HandleFunc("POST "+RuntimeCodexLeaseInvalidationPath, s.handleCodexLeaseInvalidation)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptV2Path, s.handleCodexTurnReceipt)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)

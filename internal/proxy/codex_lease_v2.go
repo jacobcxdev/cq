@@ -172,13 +172,14 @@ type CodexJournalRecordV2 struct {
 }
 
 type codexLeaseJournalEnvelopeV2 struct {
-	Version     int                    `json:"version"`
-	HashVersion int                    `json:"hash_version"`
-	Generation  uint64                 `json:"generation"`
-	Cutover     CodexLeaseCutover      `json:"cutover"`
-	Lanes       []CodexJournalLane     `json:"lanes"`
-	Records     []CodexJournalRecordV2 `json:"records"`
-	MAC         string                 `json:"mac"`
+	Version                        int                    `json:"version"`
+	HashVersion                    int                    `json:"hash_version"`
+	Generation                     uint64                 `json:"generation"`
+	AffinityInvalidationGeneration uint64                 `json:"affinity_invalidation_generation,omitempty"`
+	Cutover                        CodexLeaseCutover      `json:"cutover"`
+	Lanes                          []CodexJournalLane     `json:"lanes"`
+	Records                        []CodexJournalRecordV2 `json:"records"`
+	MAC                            string                 `json:"mac"`
 }
 
 type CodexLeaseWriterAuthority interface {
@@ -220,14 +221,15 @@ const (
 )
 
 type CodexRestoredLane struct {
-	Classification    CodexRestoredLaneClassification
-	RequestedIdentity CodexJournalRecordIdentity
-	RequestedRecord   CodexJournalRecordV2
-	Lane              CodexJournalLane
-	Records           []CodexJournalRecordV2
-	ResolvedRecords   []CodexRestoredRecord
-	Affinity          *CodexLeaseAffinityHint
-	Fence             CodexLeaseGenerationFence
+	Classification                 CodexRestoredLaneClassification
+	RequestedIdentity              CodexJournalRecordIdentity
+	RequestedRecord                CodexJournalRecordV2
+	Lane                           CodexJournalLane
+	Records                        []CodexJournalRecordV2
+	ResolvedRecords                []CodexRestoredRecord
+	Affinity                       *CodexLeaseAffinityHint
+	AffinityInvalidationGeneration uint64
+	Fence                          CodexLeaseGenerationFence
 }
 
 // CodexLeaseAffinityHint is signed, non-authoritative routing affinity from
@@ -1089,6 +1091,9 @@ func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJour
 		return fmt.Errorf("%w: unsupported Codex lease cutover source", ErrCodexLeaseTrustLost)
 	}
 	if !cacheFieldsAllowed {
+		if envelope.AffinityInvalidationGeneration != 0 {
+			return fmt.Errorf("%w: schema-v2 journal contains affinity invalidation", ErrCodexLeaseTrustLost)
+		}
 		for _, lane := range envelope.Lanes {
 			if !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" || len(lane.RequestUnavailableAccountHashes) != 0 || len(lane.QuotaExhaustedAccountHashes) != 0 {
 				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 cache affinity", ErrCodexLeaseTrustLost)
@@ -1099,6 +1104,9 @@ func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJour
 				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 quota probe", ErrCodexLeaseTrustLost)
 			}
 		}
+	}
+	if envelope.AffinityInvalidationGeneration != 0 && (envelope.Cutover.State != CodexLeaseCutoverComplete || envelope.AffinityInvalidationGeneration <= envelope.Cutover.CompletionGeneration || envelope.AffinityInvalidationGeneration > envelope.Generation) {
+		return fmt.Errorf("%w: invalid affinity invalidation generation", ErrCodexLeaseTrustLost)
 	}
 	if err := store.validateV2SemanticStateForSchema(envelope, protocolSchema); err != nil {
 		return fmt.Errorf("%w: %v", ErrCodexLeaseTrustLost, err)
