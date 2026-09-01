@@ -16,8 +16,12 @@ const (
 )
 
 func removeExecutable(ctx context.Context, fsys installerFileSystem, path string) error {
+	return removeExecutableWithRetry(ctx, fsys, path, windowsExecutableRemovalAttempts, windowsExecutableRemovalInterval)
+}
+
+func removeExecutableWithRetry(ctx context.Context, fsys installerFileSystem, path string, attempts int, interval time.Duration) error {
 	var err error
-	for attempt := 0; attempt < windowsExecutableRemovalAttempts; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		err = fsys.Remove(path)
 		if err == nil {
 			return nil
@@ -25,8 +29,8 @@ func removeExecutable(ctx context.Context, fsys installerFileSystem, path string
 		if !isRetryableWindowsExecutableRemoval(err) {
 			return err
 		}
-		if attempt+1 < windowsExecutableRemovalAttempts {
-			timer := time.NewTimer(windowsExecutableRemovalInterval)
+		if attempt+1 < attempts {
+			timer := time.NewTimer(interval)
 			select {
 			case <-ctx.Done():
 				if !timer.Stop() {

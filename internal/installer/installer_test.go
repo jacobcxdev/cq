@@ -534,6 +534,7 @@ type failingInstallerFS struct {
 	failRenameCount       int
 	failRemoveTarget      string
 	failRemoveCount       int
+	failRemoveError       error
 	renameCalls           int
 }
 
@@ -557,6 +558,9 @@ func (fsys *failingInstallerFS) Rename(oldPath, newPath string) error {
 func (fsys *failingInstallerFS) Remove(path string) error {
 	if path == fsys.failRemoveTarget && fsys.failRemoveCount > 0 {
 		fsys.failRemoveCount--
+		if fsys.failRemoveError != nil {
+			return fsys.failRemoveError
+		}
 		return errors.New("injected removal failure")
 	}
 	return fsys.MemFS.Remove(path)

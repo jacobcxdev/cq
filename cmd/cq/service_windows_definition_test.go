@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
@@ -282,6 +283,41 @@ func TestWindowsTaskDefinitionServiceRestoresPreviousTaskOnRunFailure(t *testing
 	}
 }
 
+func TestWindowsTaskDefinitionServiceWaitsForCandidateExitBeforeRestore(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	oldDefinition, err := renderWindowsTaskDefinition(windowsProxyTask, platform.sid, `C:\Old\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.folderExists = true
+	runner.folderSDDL = windowsTaskSecurityDescriptor(platform.sid)
+	runner.tasks[windowsProxyTaskPath] = oldDefinition
+	runner.running[windowsProxyTaskPath] = true
+	runner.enginePIDs[windowsProxyTaskPath] = []uint32{901}
+	runner.failOnce["/Run\x00/TN\x00"+windowsProxyTaskPath] = errors.New("run failed")
+
+	stateQueries := 0
+	baseQueryState := platform.queryState
+	platform.queryState = func(ctx context.Context, taskPath string) (windowsTaskRuntimeState, error) {
+		stateQueries++
+		if stateQueries == 2 {
+			return windowsTaskRuntimeState{EnginePIDs: []uint32{902}}, nil
+		}
+		return baseQueryState(ctx, taskPath)
+	}
+
+	err = platform.InstallProxy(context.Background(), platform.executable)
+	if err == nil || !strings.Contains(err.Error(), "run failed") {
+		t.Fatalf("InstallProxy() error = %v", err)
+	}
+	if stateQueries != 3 {
+		t.Fatalf("task state queries = %d, want 3", stateQueries)
+	}
+	if string(runner.tasks[windowsProxyTaskPath]) != string(oldDefinition) || !runner.running[windowsProxyTaskPath] {
+		t.Fatal("previous task was not restored after candidate exit")
+	}
+}
+
 func TestWindowsTaskDefinitionServiceRestartProxyReplacesInstance(t *testing.T) {
 	platform, runner := newWindowsTaskServiceHarness(t)
 	baseRun := platform.run
@@ -313,6 +349,37 @@ func TestWindowsTaskDefinitionServiceRestartProxyReplacesInstance(t *testing.T) 
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("restart calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceWaitsForTaskInstanceExitBeforeRestart(t *testing.T) {
+	platform, _ := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+
+	polls := 0
+	baseQueryState := platform.queryState
+	platform.queryState = func(ctx context.Context, taskPath string) (windowsTaskRuntimeState, error) {
+		polls++
+		if polls == 1 {
+			return windowsTaskRuntimeState{EnginePIDs: []uint32{902}}, nil
+		}
+		return baseQueryState(ctx, taskPath)
+	}
+	baseRun := platform.run
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if reflect.DeepEqual(args, []string{"/Run", "/TN", windowsProxyTaskPath}) && polls < 2 {
+			return nil, errors.New("task restarted before its process exited")
+		}
+		return baseRun(ctx, args...)
+	}
+
+	if err := platform.RestartProxy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if polls != 2 {
+		t.Fatalf("task stop polls = %d, want 2", polls)
 	}
 }
 
@@ -381,6 +448,50 @@ func TestWindowsTaskDefinitionServiceWaitsForTaskInstanceExitBeforeDelete(t *tes
 
 	if err := platform.RemoveProxy(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if polls != 2 {
+		t.Fatalf("task stop polls = %d, want 2", polls)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceStopWaitHonoursCancellation(t *testing.T) {
+	platform, _ := newWindowsTaskServiceHarness(t)
+	platform.queryState = func(context.Context, string) (windowsTaskRuntimeState, error) {
+		return windowsTaskRuntimeState{Running: true, EnginePIDs: []uint32{902}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := platform.waitTaskStoppedWithPolicy(ctx, windowsProxyTaskPath, 3, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitTaskStoppedWithPolicy() error = %v", err)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceStopWaitRejectsInspectionError(t *testing.T) {
+	platform, _ := newWindowsTaskServiceHarness(t)
+	want := errors.New("query failed")
+	platform.queryState = func(context.Context, string) (windowsTaskRuntimeState, error) {
+		return windowsTaskRuntimeState{}, want
+	}
+
+	err := platform.waitTaskStoppedWithPolicy(context.Background(), windowsProxyTaskPath, 3, 0)
+	if !errors.Is(err, want) {
+		t.Fatalf("waitTaskStoppedWithPolicy() error = %v", err)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceStopWaitStopsAfterBoundedAttempts(t *testing.T) {
+	platform, _ := newWindowsTaskServiceHarness(t)
+	polls := 0
+	platform.queryState = func(context.Context, string) (windowsTaskRuntimeState, error) {
+		polls++
+		return windowsTaskRuntimeState{Running: true, EnginePIDs: []uint32{902}}, nil
+	}
+
+	err := platform.waitTaskStoppedWithPolicy(context.Background(), windowsProxyTaskPath, 2, 0)
+	if err == nil || !strings.Contains(err.Error(), "remained running") {
+		t.Fatalf("waitTaskStoppedWithPolicy() error = %v", err)
 	}
 	if polls != 2 {
 		t.Fatalf("task stop polls = %d, want 2", polls)
