@@ -59,6 +59,7 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	start := time.Now()
 	var model string
 	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	ctx = s.withCodexRequestIngressObservation(ctx, r.Method, r.URL.Path, "codex_compact_ingress")
 	r = r.WithContext(ctx)
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped

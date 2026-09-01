@@ -1051,6 +1051,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var model string
 	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	ctx = s.withCodexRequestIngressObservation(ctx, r.Method, r.URL.Path, "codex_native_ingress")
 	r = r.WithContext(ctx)
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped
@@ -1269,7 +1270,7 @@ func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagn
 		return nil, false
 	}
 	diagnostics := &routeDiagnostics{}
-	diagnostics.codex = codexObservationFieldsForRequestShape(classifyCodexRequestShape(request, nil))
+	diagnostics.codex = codexObservationFieldsForProtocol(request, nil)
 	return diagnostics, true
 }
 
@@ -1659,6 +1660,9 @@ func (s *Server) emitDiagnostics(event RouteEvent) {
 	event = projectCodexDiagnostics(event)
 	recorder := s.CodexCanary
 	if recorder == nil {
+		if s.Diag == nil {
+			return
+		}
 		recorder = s.Diag.codexCanary()
 	}
 	if err := rejectUnsafeCodexDiagnostics(event, recorder); err != nil {
@@ -1674,6 +1678,16 @@ func (s *Server) emitDiagnostics(event RouteEvent) {
 	if err := s.Diag.Write(event); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: diagnostics: write: %v\n", err)
 	}
+}
+
+func (s *Server) withCodexRequestIngressObservation(ctx context.Context, method, path, routeKind string) context.Context {
+	return withCodexRequestIngressObservationSink(ctx, func(diagnostics *routeDiagnostics) {
+		event := RouteEvent{
+			Time: time.Now().UTC(), Method: method, Path: path, Provider: "codex", RouteKind: routeKind,
+		}
+		event.applyRouteDiagnostics(diagnostics)
+		s.emitDiagnostics(event)
+	})
 }
 
 func (s *Server) emitPayloadDiagnostics(event PayloadEvent) {

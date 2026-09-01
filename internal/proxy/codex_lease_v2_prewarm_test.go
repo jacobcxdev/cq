@@ -530,14 +530,14 @@ func TestCodexPrewarmAdoptionMarkerCannotBeForgedOrChangedByGenericCAS(t *testin
 	forged := reservingCodexLeaseV2CASTestRecord(coordinator.store, "forged-session", "forged-thread", "forged-turn")
 	forged.AdoptedPrewarm = true
 	forged.PrewarmAdoptionJournalGeneration = 2
-	if _, _, _, err := coordinator.store.buildCodexLeaseRecordAfterImage(CodexJournalRecordV2{}, false, forged, false, CodexLeaseRecordFence{}, coordinator.store.policy.Now()); err == nil {
+	if _, _, _, err := coordinator.store.buildCodexLeaseRecordAfterImage(CodexJournalRecordV2{}, false, forged, false, false, CodexLeaseRecordFence{}, coordinator.store.policy.Now()); err == nil {
 		t.Fatal("generic CAS forged adoption marker")
 	}
 
 	changed := cloneCodexJournalRecordV2(result.Record)
 	changed.PrewarmAdoptionJournalGeneration++
 	fence := CodexLeaseRecordFence{Record: result.Record.Identity(), Revision: result.Record.RecordGeneration, Lease: result.Record.LeaseGeneration, RequestGeneration: result.Record.Generation, CurrentAttempt: result.Record.CurrentAttemptGeneration}
-	if _, _, _, err := coordinator.store.buildCodexLeaseRecordAfterImage(result.Record, true, changed, false, fence, coordinator.store.policy.Now()); err == nil {
+	if _, _, _, err := coordinator.store.buildCodexLeaseRecordAfterImage(result.Record, true, changed, false, false, fence, coordinator.store.policy.Now()); err == nil {
 		t.Fatal("generic CAS changed adoption marker")
 	}
 }

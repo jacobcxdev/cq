@@ -22,6 +22,7 @@ type CodexLeaseRouteSnapshot struct {
 	HistoricalAuthoritative   bool
 	RestartableFailedHead     bool
 	AffinityPresent           bool
+	AffinityInvalidated       bool
 	AffinityAccountKey        codex.AccountKey
 	AffinityCacheAdmittedAt   time.Time
 	AffinityEffectiveModel    string
@@ -124,7 +125,8 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 					snapshot.AffinityRequiresAccount = false
 				}
 			}
-			if restored.Affinity.AdmissionJournalGeneration <= restored.AffinityInvalidationGeneration && !snapshot.AffinityRequiresAccount {
+			snapshot.AffinityInvalidated = codexLaneAffinityJournalGeneration(restored.Lane) <= restored.AffinityInvalidationGeneration && !snapshot.AffinityRequiresAccount
+			if snapshot.AffinityInvalidated {
 				snapshot.AffinityAccountKey = ""
 			}
 		}

@@ -366,6 +366,8 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		if err != nil {
 			return err
 		}
+		mergeRouteDiagnostics(serveCtx, pending.diagnostics)
+		emitAcceptedCodexWSFrameObservation(serveCtx, pending.diagnostics)
 		err = broker.serveFrame(serveCtx, downstream, pending, &active)
 		pending.Release()
 		if err != nil {
@@ -735,7 +737,6 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 			return writeCodexWSAccountUnavailableClose(downstream)
 		}
 	}
-	emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
 	accountIndex := 0
 	for {
 		account, refreshErr := broker.prepareAccount(ctx, accounts[accountIndex])
@@ -951,7 +952,6 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 		return err
 	}
 	active.prewarm = reservation
-	emitAcceptedCodexWSFrameObservation(ctx, pending.diagnostics)
 	for accountIndex, account := range accounts {
 		account, refreshErr := broker.prepareAccount(ctx, account)
 		if refreshErr != nil {

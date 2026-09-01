@@ -673,7 +673,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
 	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
-	if !requiresAccountContinuity && codexLeaseAccountUnavailableCanBeginRequest(current.Record) {
+	if !requiresAccountContinuity && (codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence)) {
 		if current.Record.EverAdmitted {
 			desired.AccountHash = current.Record.AccountHash
 		}
@@ -728,6 +728,13 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	handle.newTurn = newTurn
 	return handle, nil
+}
+
+func codexLeaseAffinityInvalidationCanBeginRequest(restored CodexRestoredLane, record CodexJournalRecordV2, evidence CodexLeaseRequestEvidence) bool {
+	return restored.AffinityInvalidationGeneration != 0 && restored.Lane.LastAdmissionJournalGeneration != 0 &&
+		codexLaneAffinityJournalGeneration(restored.Lane) <= restored.AffinityInvalidationGeneration &&
+		evidence.PreviousResponseID == "" && !evidence.HasTurnState && !evidence.HasEncryptedState &&
+		record.EverAdmitted && !record.NonMigratable && !record.HasTurnState && !record.HasEncryptedState
 }
 
 func (runtime *CodexLeaseRuntime) adoptWebSocketPrewarmContext(ctx context.Context, accounts []codex.AccountKey, request CodexPrewarmAdoptionRequest) (*CodexLeaseRequestHandle, error) {
@@ -1751,6 +1758,7 @@ func (runtime *CodexLeaseRuntime) reserveSuccessor(ctx context.Context, account 
 	lane.LastAdmittedModeEpoch = 0
 	lane.LastAdmittedAuthoritative = false
 	lane.LastAdmissionJournalGeneration = 0
+	lane.AffinityRefreshJournalGeneration = 0
 	lane.LastAdmittedAt = time.Time{}
 	lane.LastCacheAdmittedAt = time.Time{}
 	lane.LastCacheEffectiveModel = ""

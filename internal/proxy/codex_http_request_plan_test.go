@@ -1067,6 +1067,67 @@ func TestCodexHTTPRequestAccountUnavailablePortableRejectsProviderContinuationSt
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryDetachesPortableQuotaExhaustedBoundAcrossTransports(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	frozenDispatchObserveCapacity(t, capacity, "cyber-low", CapacityBucketBase, 1, now)
+	frozenDispatchObserveCapacity(t, capacity, "cyber-high", CapacityBucketBase, 100, now)
+	frozenDispatchObserveCapacity(t, capacity, "unpooled", CapacityBucketBase, 99, now)
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("cyber-low", frozenDispatchCandidate("cyber-low", "candidate-low", "revision-low", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("cyber-high", frozenDispatchCandidate("cyber-high", "candidate-high", "revision-high", codex.SourceExternal, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("unpooled", frozenDispatchCandidate("unpooled", "candidate-unpooled", "revision-unpooled", codex.SourceExternal, false, now.Add(time.Hour))),
+	}}
+	key := []byte("01234567890123456789012345678901")
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber-low", "cyber-high"}}},
+	}
+
+	for _, transport := range []string{"http", "websocket"} {
+		t.Run(transport, func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "unpooled"}}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Capacity:  capacity,
+				Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+					Classification:            CodexRestoredLaneCurrent,
+					JournalGeneration:         2,
+					BoundAccountKey:           "cyber-low",
+					BoundIdentity:             CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 1, Authoritative: true},
+					BoundRecordGeneration:     1,
+					AffinityAccountKey:        "cyber-low",
+					QuotaExhaustedAccountKeys: []codex.AccountKey{"cyber-low"},
+				}},
+				Runtime:           runtime,
+				SessionPolicy:     NewSessionPolicyResolver(key, policy),
+				DefaultAccountKey: "unpooled",
+				Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now:               func() time.Time { return now },
+				TransportKind:     transport,
+			}
+			caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "cyber-low", IndexEpoch: 1}
+			ctx := withRuntimeCallerAuthority(context.Background(), caller)
+			ctx = withRuntimeCallerIdentity(ctx, "cyber-low\x00candidate-low\x00revision-low")
+
+			prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+				Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "portable-request"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			accounts := prepared.Dispatch.Accounts()
+			if len(accounts) == 0 || accounts[0].Choice().AccountKey != "unpooled" {
+				t.Fatalf("dispatch accounts = %#v, want unpooled first", accounts)
+			}
+			if runtime.plan.RequiresAccountContinuity || runtime.plan.authenticatedCallerContinuity {
+				t.Fatalf("portable exhausted continuity = required %t authenticated %t", runtime.plan.RequiresAccountContinuity, runtime.plan.authenticatedCallerContinuity)
+			}
+		})
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryFreezesDetachedFullCreateResetCandidates(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	for _, test := range []struct {
@@ -2013,8 +2074,9 @@ func TestCodexHTTPRequestPlanFactoryEnrichesOnlyHTTPDiagnosticsWithoutEmitting(t
 		transportKind string
 		wantLineage   string
 		wantModel     string
+		wantSession   bool
 	}{
-		{name: "HTTP", transportKind: "http", wantLineage: "previous_response_id_present", wantModel: "gpt_5_6_sol"},
+		{name: "HTTP", transportKind: "http", wantLineage: "previous_response_id_present", wantModel: "gpt_5_6_sol", wantSession: true},
 		{name: "WebSocket", transportKind: "websocket"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2023,6 +2085,13 @@ func TestCodexHTTPRequestPlanFactoryEnrichesOnlyHTTPDiagnosticsWithoutEmitting(t
 			factory.TransportKind = test.transportKind
 			factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{}}
 			ctx, diagnostics := withRouteDiagnostics(context.Background())
+			ingress := 0
+			ctx = withCodexRequestIngressObservationSink(ctx, func(observed *routeDiagnostics) {
+				if observed != diagnostics {
+					t.Fatal("ingress used different diagnostics")
+				}
+				ingress++
+			})
 			body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-prompt")), "}") + `,"previous_response_id":"private-response","reasoning":{"effort":"high"}}`)
 
 			_, _ = factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
@@ -2034,6 +2103,13 @@ func TestCodexHTTPRequestPlanFactoryEnrichesOnlyHTTPDiagnosticsWithoutEmitting(t
 			}
 			if event.RequestedReasoningEffort != map[bool]string{true: "high"}[test.transportKind == "http"] {
 				t.Fatalf("reasoning effort = %q", event.RequestedReasoningEffort)
+			}
+			if test.wantSession {
+				if event.SessionKey != hashPrefix("codex-session", "session") || event.SessionSource != "metadata:session_id" || ingress != 1 {
+					t.Fatalf("HTTP task ingress = key %q source %q count %d", event.SessionKey, event.SessionSource, ingress)
+				}
+			} else if event.SessionKey != "" || event.SessionSource != "" || ingress != 0 {
+				t.Fatalf("WebSocket planner emitted HTTP ingress = key %q source %q count %d", event.SessionKey, event.SessionSource, ingress)
 			}
 		})
 	}

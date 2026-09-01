@@ -44,6 +44,38 @@ func codexObservationFieldsForRequestShape(shape codexRequestShape) codexObserva
 	}
 }
 
+func codexObservationFieldsForProtocol(request CodexProtocolRequest, parseErr error) codexObservationFields {
+	fields := codexObservationFieldsForRequestShape(classifyCodexRequestShape(request, parseErr))
+	if parseErr != nil || !request.Metadata.Found || validateCodexTurnMetadata(request.Metadata.Metadata) != nil {
+		return fields
+	}
+	if session := request.Metadata.Metadata.SessionID; session != "" {
+		fields.SessionKey = hashPrefix("codex-session", session)
+		fields.SessionSource = "metadata:session_id"
+	}
+	return fields
+}
+
+func replaceCodexRequestObservation(ctx context.Context, request CodexProtocolRequest, parseErr error) {
+	if ctx == nil {
+		return
+	}
+	diagnostics, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics)
+	if diagnostics == nil {
+		return
+	}
+	fields := codexObservationFieldsForProtocol(request, parseErr)
+	diagnostics.mu.Lock()
+	diagnostics.codex.SessionKey = fields.SessionKey
+	diagnostics.codex.SessionSource = fields.SessionSource
+	diagnostics.codex.RequestKind = fields.RequestKind
+	diagnostics.codex.RequestLineage = fields.RequestLineage
+	diagnostics.codex.RequestedReasoningEffort = fields.RequestedReasoningEffort
+	diagnostics.codex.RequestedModelClass = fields.RequestedModelClass
+	diagnostics.codex.CompactionPhase = fields.CompactionPhase
+	diagnostics.mu.Unlock()
+}
+
 func replaceCodexRequestShapeObservation(ctx context.Context, shape codexRequestShape) {
 	if ctx == nil {
 		return

@@ -50,6 +50,9 @@ type RouteEvent struct {
 }
 
 type routeDiagnosticsContextKey struct{}
+type codexRequestIngressObservationSinkContextKey struct{}
+
+type codexRequestIngressObservationSink func(*routeDiagnostics)
 
 type routeDiagnostics struct {
 	mu          sync.Mutex
@@ -59,6 +62,8 @@ type routeDiagnostics struct {
 }
 
 type codexObservationFields struct {
+	SessionKey               string
+	SessionSource            string
 	TurnHint                 string
 	RequestKind              string
 	RequestLineage           string
@@ -85,6 +90,21 @@ func withRouteDiagnostics(ctx context.Context) (context.Context, *routeDiagnosti
 	return context.WithValue(ctx, routeDiagnosticsContextKey{}, diag), diag
 }
 
+func withCodexRequestIngressObservationSink(ctx context.Context, sink codexRequestIngressObservationSink) context.Context {
+	return context.WithValue(ctx, codexRequestIngressObservationSinkContextKey{}, sink)
+}
+
+func emitCodexRequestIngressObservation(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	sink, _ := ctx.Value(codexRequestIngressObservationSinkContextKey{}).(codexRequestIngressObservationSink)
+	diagnostics, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics)
+	if sink != nil && diagnostics != nil {
+		sink(diagnostics)
+	}
+}
+
 func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
 	if ctx == nil {
 		return
@@ -95,6 +115,10 @@ func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
 	}
 	diag.mu.Lock()
 	defer diag.mu.Unlock()
+	if fields.SessionKey != "" {
+		diag.codex.SessionKey = fields.SessionKey
+		diag.codex.SessionSource = fields.SessionSource
+	}
 	if fields.TurnHint != "" {
 		diag.codex.TurnHint = fields.TurnHint
 	}
@@ -160,6 +184,19 @@ func noteRouteAccount(ctx context.Context, accountHint string, failover bool) {
 	diag.failover = diag.failover || failover
 }
 
+func mergeRouteDiagnostics(ctx context.Context, source *routeDiagnostics) {
+	if ctx == nil || source == nil {
+		return
+	}
+	source.mu.Lock()
+	fields := source.codex
+	accountHint := source.accountHint
+	failover := source.failover
+	source.mu.Unlock()
+	noteCodexObservation(ctx, fields)
+	noteRouteAccount(ctx, accountHint, failover)
+}
+
 func (d *routeDiagnostics) fields() (accountHint string, failover bool) {
 	if d == nil {
 		return "", false
@@ -186,6 +223,10 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 	diag.mu.Lock()
 	codex := diag.codex
 	diag.mu.Unlock()
+	if codex.SessionKey != "" {
+		event.SessionKey = codex.SessionKey
+		event.SessionSource = codex.SessionSource
+	}
 	event.TurnHint = codex.TurnHint
 	event.RequestKind = codex.RequestKind
 	event.RequestLineage = codex.RequestLineage
@@ -211,7 +252,7 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 }
 
 func (event *RouteEvent) applySessionCorrelation(headers http.Header) {
-	if event == nil {
+	if event == nil || event.SessionKey != "" {
 		return
 	}
 	event.SessionKey, event.SessionSource = sessionCorrelation(headers)
@@ -673,7 +714,7 @@ func safeCodexDiagnosticsMethod(value string) bool {
 
 func safeCodexRouteKind(value string) bool {
 	switch value {
-	case "", "anthropic_count_tokens", "anthropic_messages", "codex_app_server", "codex_compact", "codex_images", "codex_legacy_websocket", "codex_live_call", "codex_live_sideband", "codex_native", "codex_search", "codex_websocket_broker", "codex_websocket_frame", "openai_unsupported":
+	case "", "anthropic_count_tokens", "anthropic_messages", "codex_app_server", "codex_compact", "codex_compact_ingress", "codex_images", "codex_legacy_websocket", "codex_live_call", "codex_live_sideband", "codex_native", "codex_native_ingress", "codex_search", "codex_websocket_broker", "codex_websocket_frame", "openai_unsupported":
 		return true
 	default:
 		return false
@@ -692,6 +733,8 @@ func safeCodexSessionCorrelation(key, source string) bool {
 	case "x-claude-code-session-id":
 		return safeHashedHint(key, "claude-session")
 	case "session_id":
+		return safeHashedHint(key, "codex-session")
+	case "metadata:session_id":
 		return safeHashedHint(key, "codex-session")
 	case "x-codex-window-id":
 		return safeHashedHint(key, "codex-window")

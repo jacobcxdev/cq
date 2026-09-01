@@ -59,27 +59,28 @@ type CodexLeaseCutover struct {
 }
 
 type CodexJournalLane struct {
-	SessionHash                     string    `json:"session_hash"`
-	ThreadHash                      string    `json:"thread_hash"`
-	NamespaceHash                   string    `json:"namespace_hash"`
-	Generation                      uint64    `json:"generation"`
-	CurrentTurnHash                 string    `json:"current_turn_hash,omitempty"`
-	CurrentModeEpoch                uint64    `json:"current_mode_epoch,omitempty"`
-	CurrentAuthoritative            bool      `json:"current_authoritative,omitempty"`
-	LastTurnHash                    string    `json:"last_turn_hash,omitempty"`
-	LastModeEpoch                   uint64    `json:"last_mode_epoch,omitempty"`
-	LastAuthoritative               bool      `json:"last_authoritative,omitempty"`
-	LastAdmittedAccountHash         string    `json:"last_admitted_account_hash,omitempty"`
-	LastAdmittedTurnHash            string    `json:"last_admitted_turn_hash,omitempty"`
-	LastAdmittedModeEpoch           uint64    `json:"last_admitted_mode_epoch,omitempty"`
-	LastAdmittedAuthoritative       bool      `json:"last_admitted_authoritative,omitempty"`
-	LastAdmissionJournalGeneration  uint64    `json:"last_admission_journal_generation,omitempty"`
-	LastAdmittedAt                  time.Time `json:"last_admitted_at,omitempty"`
-	LastCacheAdmittedAt             time.Time `json:"last_cache_admitted_at,omitzero"`
-	LastCacheEffectiveModel         string    `json:"last_cache_effective_model,omitempty"`
-	RequestUnavailableAccountHashes []string  `json:"request_unavailable_account_hashes,omitempty"`
-	QuotaExhaustedAccountHashes     []string  `json:"quota_exhausted_account_hashes,omitempty"`
-	LastObservedAt                  time.Time `json:"last_observed_at"`
+	SessionHash                      string    `json:"session_hash"`
+	ThreadHash                       string    `json:"thread_hash"`
+	NamespaceHash                    string    `json:"namespace_hash"`
+	Generation                       uint64    `json:"generation"`
+	CurrentTurnHash                  string    `json:"current_turn_hash,omitempty"`
+	CurrentModeEpoch                 uint64    `json:"current_mode_epoch,omitempty"`
+	CurrentAuthoritative             bool      `json:"current_authoritative,omitempty"`
+	LastTurnHash                     string    `json:"last_turn_hash,omitempty"`
+	LastModeEpoch                    uint64    `json:"last_mode_epoch,omitempty"`
+	LastAuthoritative                bool      `json:"last_authoritative,omitempty"`
+	LastAdmittedAccountHash          string    `json:"last_admitted_account_hash,omitempty"`
+	LastAdmittedTurnHash             string    `json:"last_admitted_turn_hash,omitempty"`
+	LastAdmittedModeEpoch            uint64    `json:"last_admitted_mode_epoch,omitempty"`
+	LastAdmittedAuthoritative        bool      `json:"last_admitted_authoritative,omitempty"`
+	LastAdmissionJournalGeneration   uint64    `json:"last_admission_journal_generation,omitempty"`
+	AffinityRefreshJournalGeneration uint64    `json:"affinity_refresh_journal_generation,omitempty"`
+	LastAdmittedAt                   time.Time `json:"last_admitted_at,omitempty"`
+	LastCacheAdmittedAt              time.Time `json:"last_cache_admitted_at,omitzero"`
+	LastCacheEffectiveModel          string    `json:"last_cache_effective_model,omitempty"`
+	RequestUnavailableAccountHashes  []string  `json:"request_unavailable_account_hashes,omitempty"`
+	QuotaExhaustedAccountHashes      []string  `json:"quota_exhausted_account_hashes,omitempty"`
+	LastObservedAt                   time.Time `json:"last_observed_at"`
 }
 
 type CodexAttemptSlotKind string
@@ -1095,7 +1096,7 @@ func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJour
 			return fmt.Errorf("%w: schema-v2 journal contains affinity invalidation", ErrCodexLeaseTrustLost)
 		}
 		for _, lane := range envelope.Lanes {
-			if !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" || len(lane.RequestUnavailableAccountHashes) != 0 || len(lane.QuotaExhaustedAccountHashes) != 0 {
+			if lane.AffinityRefreshJournalGeneration != 0 || !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" || len(lane.RequestUnavailableAccountHashes) != 0 || len(lane.QuotaExhaustedAccountHashes) != 0 {
 				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 cache affinity", ErrCodexLeaseTrustLost)
 			}
 		}

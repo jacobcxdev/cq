@@ -259,7 +259,7 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 		key = NewCodexLeaseKey(request.Metadata.Metadata)
 	}
 	diagnostics := &routeDiagnostics{}
-	diagnostics.codex = codexObservationFieldsForRequestShape(classifyCodexRequestShape(request, nil))
+	diagnostics.codex = codexObservationFieldsForProtocol(request, nil)
 	return &codexWSPendingFrame{
 		messageType: messageType,
 		encoded:     append([]byte(nil), payload...),
