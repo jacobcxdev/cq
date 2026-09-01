@@ -1293,6 +1293,11 @@ func TestWindowsOwnerControlledDirectoryOpensOutsideCQRoots(t *testing.T) {
 	if err := os.Mkdir(directoryPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestSecurity(t, directoryPath, fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;WD)", user.String(), user.String()))
 	directory, err := OpenOwnerControlledDirectory(OSFileSystem{}, directoryPath)
 	if err != nil {
 		t.Fatal(err)
