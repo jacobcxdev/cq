@@ -146,10 +146,6 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 	if store.v2 == nil {
 		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: schema-v2 journal unavailable", ErrCodexLeaseTrustLost)
 	}
-	if err := store.revalidateV2InstalledLocked(); err != nil {
-		store.poisoned = err
-		return CodexLeaseGenerationFence{}, err
-	}
 	if store.v2.Cutover.State != CodexLeaseCutoverComplete || !store.v2.Cutover.NoLegacyAuthority {
 		return CodexLeaseGenerationFence{}, ErrCodexLegacyQuarantine
 	}
@@ -158,9 +154,12 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 	if err != nil {
 		return CodexLeaseGenerationFence{}, err
 	}
-	data, err := store.marshalV2Envelope(next)
+	if err := validateCodexLeaseRepresentedModes(representedCodexLeaseAuthoritativeEpochs(next.Records), store.modes); err != nil {
+		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: strict candidate validation: %w", ErrCodexLeaseInvalidMutation, err)
+	}
+	installedEnvelope, data, err := store.prepareV2Envelope(next)
 	if err != nil {
-		return CodexLeaseGenerationFence{}, err
+		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: strict candidate validation: %w", ErrCodexLeaseInvalidMutation, err)
 	}
 	beforeReplace := func() error {
 		if err := store.revalidateV2InstalledLocked(); err != nil {
@@ -183,22 +182,6 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 		if err == nil {
 			poison.Err = errors.New("installed bytes differ from committed bytes")
 		}
-		store.poisoned = poison
-		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: %w", ErrCodexLeaseStorePoisoned, poison)
-	}
-	var installedEnvelope codexLeaseJournalEnvelopeV2
-	if err := decodeCodexLeaseV2StrictJSON(installed, &installedEnvelope); err != nil {
-		poison := &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "decode committed Codex lane mutation", Err: err}
-		store.poisoned = poison
-		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: %w", ErrCodexLeaseStorePoisoned, poison)
-	}
-	if err := store.validateV2Envelope(installedEnvelope); err != nil {
-		poison := &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "validate committed Codex lane mutation", Err: err}
-		store.poisoned = poison
-		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: %w", ErrCodexLeaseStorePoisoned, poison)
-	}
-	if err := store.validateCodexLeaseV2State(installedEnvelope); err != nil {
-		poison := &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "validate committed Codex lane state", Err: err}
 		store.poisoned = poison
 		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: %w", ErrCodexLeaseStorePoisoned, poison)
 	}
@@ -616,9 +599,6 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 
 	next.Generation++
 	canonicaliseCodexLeaseV2(&next)
-	if err := store.validateCodexLeaseV2CandidateLocked(next); err != nil {
-		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: strict candidate validation: %w", ErrCodexLeaseInvalidMutation, err)
-	}
 	post, err := buildCodexLeasePostFence(next, targetLane, expected.TouchedRecords, appendGenerations)
 	if err != nil {
 		return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err

@@ -1158,6 +1158,22 @@ func TestCodexLeaseV2CommitLanePoisonsOnPreReplaceTrustLoss(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseV2CommitLaneAvoidsRedundantJournalRevalidation(t *testing.T) {
+	store, fence, _, streaming := openDispatchedCodexLeaseV2AffinityTestStore(t)
+	directory := &countCodexLeaseV2JournalReadsDirectory{
+		SecureDirectory: store.directory,
+		journalName:     store.journalName,
+	}
+	store.directory = directory
+
+	if _, err := store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{streaming}}); err != nil {
+		t.Fatal(err)
+	}
+	if directory.journalReads != 7 {
+		t.Fatalf("journal reads = %d, want one pre-replace journal proof", directory.journalReads)
+	}
+}
+
 func TestCodexLeaseV2CommitLaneRejectsUnrepresentedAuthoritativeEpochWithoutWriting(t *testing.T) {
 	store, fsys, _ := openCodexLeaseV2CASTestStore(t)
 	store.mu.Lock()
@@ -1549,6 +1565,31 @@ type failCodexLeaseV2PreReplaceReadDirectory struct {
 	journalReads int
 }
 
+type countCodexLeaseV2JournalReadsDirectory struct {
+	fsutil.SecureDirectory
+	journalName  string
+	journalReads int
+}
+
+func (directory *countCodexLeaseV2JournalReadsDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRenameChecked(directory.SecureDirectory, oldName, newName, expected)
+}
+
+func (directory *countCodexLeaseV2JournalReadsDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRenameNoReplaceChecked(directory.SecureDirectory, oldName, newName, expected)
+}
+
+func (directory *countCodexLeaseV2JournalReadsDirectory) RemoveChecked(name string, expected fsutil.SecureFileIdentity) error {
+	return forwardCodexLeaseRemoveChecked(directory.SecureDirectory, name, expected)
+}
+
+func (directory *countCodexLeaseV2JournalReadsDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	if name == directory.journalName {
+		directory.journalReads++
+	}
+	return directory.SecureDirectory.OpenNoFollow(name)
+}
+
 func (directory *failCodexLeaseV2PreReplaceReadDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
 	return forwardCodexLeaseRenameChecked(directory.SecureDirectory, oldName, newName, expected)
 }
@@ -1564,7 +1605,7 @@ func (directory *failCodexLeaseV2PreReplaceReadDirectory) RemoveChecked(name str
 func (directory *failCodexLeaseV2PreReplaceReadDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
 	if name == directory.journalName {
 		directory.journalReads++
-		if directory.journalReads == 4 {
+		if directory.journalReads == 3 {
 			return nil, errors.New("injected pre-replace journal trust loss")
 		}
 	}

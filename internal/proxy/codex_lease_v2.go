@@ -794,31 +794,9 @@ func (store *CodexLeaseStore) revalidateV2InstalledLocked() error {
 	if err != nil || journalID != store.journalID || !bytes.Equal(journal, store.journalBytes) {
 		return fmt.Errorf("%w: Codex lease journal replaced", ErrCodexLeaseTrustLost)
 	}
-	var envelope codexLeaseJournalEnvelopeV2
-	if err := decodeCodexLeaseV2StrictJSON(journal, &envelope); err != nil {
-		return fmt.Errorf("%w: decode installed Codex lease journal: %v", ErrCodexLeaseTrustLost, err)
-	}
-	var validateErr error
-	switch envelope.Version {
-	case codexLeaseJournalVersionV2:
-		validateErr = store.validateLegacyV2Envelope(envelope)
-		if validateErr == nil {
-			validateErr = store.validateCodexLeaseV2StateForSchema(envelope, codexLeaseJournalVersionV2)
-		}
-	case codexLeaseJournalVersionV3:
-		validateErr = store.validateV2Envelope(envelope)
-		if validateErr == nil {
-			validateErr = store.validateCodexLeaseV2State(envelope)
-		}
-	default:
-		validateErr = ErrCodexLeaseTrustLost
-	}
-	if validateErr != nil || envelope.Generation != store.v2.Generation || envelope.Version != store.v2.Version {
-		return fmt.Errorf("%w: installed Codex lease journal invalid", ErrCodexLeaseTrustLost)
-	}
 	if store.legacyArchive != "" {
 		archive, archiveID, archiveErr := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, store.legacyArchive, codexLeaseJournalMaxBytes)
-		if archiveErr != nil || archiveID != store.legacyArchiveID || !bytes.Equal(archive, store.legacyArchiveBytes) || codexLeaseSHA256(archive) != envelope.Cutover.LegacyV1SHA256 || store.validateLegacyArchive(archive, envelope.Cutover.JournalGeneration-1) != nil {
+		if archiveErr != nil || archiveID != store.legacyArchiveID || !bytes.Equal(archive, store.legacyArchiveBytes) || codexLeaseSHA256(archive) != store.v2.Cutover.LegacyV1SHA256 || store.validateLegacyArchive(archive, store.v2.Cutover.JournalGeneration-1) != nil {
 			return fmt.Errorf("%w: legacy Codex lease archive replaced", ErrCodexLeaseTrustLost)
 		}
 	}
@@ -1050,6 +1028,24 @@ func (store *CodexLeaseStore) marshalV2Envelope(envelope codexLeaseJournalEnvelo
 	}
 	envelope.MAC = mac
 	return json.MarshalIndent(envelope, "", "  ")
+}
+
+func (store *CodexLeaseStore) prepareV2Envelope(envelope codexLeaseJournalEnvelopeV2) (codexLeaseJournalEnvelopeV2, []byte, error) {
+	data, err := store.marshalV2Envelope(envelope)
+	if err != nil {
+		return codexLeaseJournalEnvelopeV2{}, nil, err
+	}
+	var signed codexLeaseJournalEnvelopeV2
+	if err := decodeCodexLeaseV2StrictJSON(data, &signed); err != nil {
+		return codexLeaseJournalEnvelopeV2{}, nil, err
+	}
+	if err := store.validateV2Envelope(signed); err != nil {
+		return codexLeaseJournalEnvelopeV2{}, nil, err
+	}
+	if err := store.validateCodexLeaseV2State(signed); err != nil {
+		return codexLeaseJournalEnvelopeV2{}, nil, err
+	}
+	return signed, data, nil
 }
 
 func (store *CodexLeaseStore) validateV2Envelope(envelope codexLeaseJournalEnvelopeV2) error {
