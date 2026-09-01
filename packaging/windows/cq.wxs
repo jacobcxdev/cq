@@ -1,0 +1,83 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="CQ"
+      Manufacturer="jacobcxdev"
+      Version="$(var.CQVersion)"
+      UpgradeCode="{7B64C2EF-DF57-4C43-8C35-7D1949B09469}"
+      Scope="perUser"
+      InstallerVersion="500"
+      Compressed="yes">
+    <SummaryInformation Description="CQ command-line quota and proxy services" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A later version of CQ is already installed." />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="cq">
+          <Component Id="CQExecutable" Guid="$(var.CQComponentGuid)" Bitness="always64">
+            <File Id="CQExe" Source="$(var.CQExecutable)" />
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\jacobcxdev\CQ\Installer"
+                Name="Installed"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+            <RemoveFolder Id="RemoveCQInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+            <RemoveFolder Id="RemoveProgramsFolderIfEmpty" Directory="ProgramsFolder" On="uninstall" />
+            <Environment
+                Id="CQPath"
+                Name="PATH"
+                Value="[INSTALLFOLDER]"
+                Action="set"
+                Part="last"
+                System="no" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="CQFeature" Title="CQ" Level="1">
+      <ComponentRef Id="CQExecutable" />
+    </Feature>
+
+    <CustomAction
+        Id="RollbackCQServices"
+        FileRef="CQExe"
+        ExeCommand="service uninstall --owner=winget"
+        Execute="rollback"
+        Impersonate="yes"
+        Return="ignore" />
+    <CustomAction
+        Id="InstallCQServices"
+        FileRef="CQExe"
+        ExeCommand="service install --owner=winget"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="check" />
+    <CustomAction
+        Id="UninstallCQServices"
+        FileRef="CQExe"
+        ExeCommand="service uninstall --owner=winget"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="check" />
+
+    <InstallExecuteSequence>
+      <Custom
+          Action="UninstallCQServices"
+          Before="RemoveFiles"
+          Condition="Installed AND REMOVE~=&quot;ALL&quot;" />
+      <Custom
+          Action="RollbackCQServices"
+          After="InstallFiles"
+          Condition="NOT Installed" />
+      <Custom
+          Action="InstallCQServices"
+          After="RollbackCQServices"
+          Condition="NOT Installed" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

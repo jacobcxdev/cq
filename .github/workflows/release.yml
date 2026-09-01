@@ -151,12 +151,9 @@ jobs:
           test "${tag_name}" = "${RELEASE_TAG}"
           test "${draft}" = "false"
           grep -q '^## Changelog$' <<<"${body}"
-          test "${assets}" -ge 9
+          test "${assets}" -ge 7
           version="${RELEASE_TAG#v}"
           for arch in amd64 arm64; do
-            installer="cq-install_${version}_windows_${arch}.exe"
-            jq -e --arg name "${installer}" '.assets[] | select(.name == $name)' <<<"${release}" >/dev/null
-
             verification_dir="${RUNNER_TEMP}/cq-darwin-${arch}"
             mkdir -p "${verification_dir}"
             archive="cq_${version}_darwin_${arch}.tar.gz"
@@ -165,3 +162,79 @@ jobs:
             go version -m "${verification_dir}/cq" |
               grep -F "github.com/jacobcxdev/cq/cmd/cq"
           done
+
+  windows-packages:
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build and publish WinGet MSI assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $releaseRoot = Join-Path $env:RUNNER_TEMP "cq-release"
+          $wixRoot = Join-Path $env:RUNNER_TEMP "wix"
+          New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
+          gh release download $env:RELEASE_TAG --pattern "cq_${version}_windows_*.zip" --pattern "checksums.txt" --dir $releaseRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to download Windows release payload"
+          }
+          $checksums = Join-Path $releaseRoot "checksums.txt"
+          dotnet tool install --tool-path $wixRoot wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to install WiX 5.0.2"
+          }
+          $wix = Join-Path $wixRoot "wix.exe"
+          $msiPaths = @()
+          foreach ($architecture in @("amd64", "arm64")) {
+            $archiveName = "cq_${version}_windows_${architecture}.zip"
+            $archive = Join-Path $releaseRoot $archiveName
+            $checksumLine = @(Get-Content -LiteralPath $checksums | Where-Object { $_ -match ("  " + [regex]::Escape($archiveName) + '$') })
+            if ($checksumLine.Count -ne 1) {
+              throw "release checksum is absent or ambiguous for $archiveName"
+            }
+            $expected = ($checksumLine[0] -split '\s+')[0].ToLowerInvariant()
+            $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "release checksum differs for $archiveName"
+            }
+            $payloadRoot = Join-Path $releaseRoot $architecture
+            Expand-Archive -LiteralPath $archive -DestinationPath $payloadRoot
+            $payload = @(Get-ChildItem -LiteralPath $payloadRoot -Force)
+            if ($payload.Count -ne 1 -or $payload[0].Name -ne "cq.exe") {
+              throw "Windows release archive has unexpected payload"
+            }
+            $reportedVersion = (& $payload[0].FullName --version).TrimStart("v")
+            if ($reportedVersion -ne $version) {
+              throw "Windows release binary version differs"
+            }
+            $msi = Join-Path $releaseRoot "cq_${version}_windows_${architecture}.msi"
+            .\.github\scripts\build-windows-msi.ps1 -Executable $payload[0].FullName -Version $version -Architecture $architecture -Output $msi -Wix $wix
+            $msiPaths += $msi
+          }
+          $baseChecksums = @(Get-Content -LiteralPath $checksums | Where-Object { $_ -notmatch 'cq_[0-9]+\.[0-9]+\.[0-9]+_windows_(amd64|arm64)\.msi$' })
+          foreach ($msi in $msiPaths) {
+            $digest = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
+            $baseChecksums += "$digest  $([IO.Path]::GetFileName($msi))"
+          }
+          [IO.File]::WriteAllLines($checksums, [string[]]($baseChecksums | Sort-Object), [Text.UTF8Encoding]::new($false))
+          gh release upload $env:RELEASE_TAG @msiPaths $checksums --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to publish Windows MSI assets"
+          }
+          $release = gh release view $env:RELEASE_TAG --json assets | ConvertFrom-Json
+          foreach ($architecture in @("amd64", "arm64")) {
+            $name = "cq_${version}_windows_${architecture}.msi"
+            if (@($release.assets | Where-Object { $_.name -eq $name }).Count -ne 1) {
+              throw "published release is missing $name"
+            }
+          }

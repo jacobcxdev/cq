@@ -19,20 +19,6 @@ builds:
       - amd64
       - arm64
 
-  - id: cq-install
-    main: ./cmd/cq-install
-    binary: cq-install
-    env:
-      - CGO_ENABLED=0
-    ldflags:
-      - -s -w
-      - -X main.version={{ .Version }}
-    goos:
-      - windows
-    goarch:
-      - amd64
-      - arm64
-
 archives:
   - id: cq
     ids: [cq]
@@ -43,11 +29,6 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
-
-  - id: cq-install
-    ids: [cq-install]
-    formats: [binary]
-    name_template: "cq-install_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"

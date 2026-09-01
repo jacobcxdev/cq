@@ -113,6 +113,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
       - run: go build -o cq.exe ./cmd/cq
       - run: go build -o cq-install.exe ./cmd/cq-install
       - run: .\cq.exe --help
@@ -125,3 +129,21 @@ jobs:
       - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
         env:
           CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
+      - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
+      - name: Validate per-user MSI install, upgrade, and uninstall
+        shell: pwsh
+        run: |
+          $wixRoot = Join-Path $env:RUNNER_TEMP "wix"
+          dotnet tool install --tool-path $wixRoot wix --version 5.0.2
+          $wix = Join-Path $wixRoot "wix.exe"
+          $packages = Join-Path $env:RUNNER_TEMP "cq-msi"
+          $previousRoot = Join-Path $packages "previous"
+          $currentRoot = Join-Path $packages "current"
+          New-Item -ItemType Directory -Path $previousRoot, $currentRoot -Force | Out-Null
+          go build -ldflags "-X main.version=0.0.1" -o (Join-Path $previousRoot "cq.exe") ./cmd/cq
+          go build -ldflags "-X main.version=0.0.2" -o (Join-Path $currentRoot "cq.exe") ./cmd/cq
+          $previousMSI = Join-Path $packages "cq_0.0.1_windows_amd64.msi"
+          $currentMSI = Join-Path $packages "cq_0.0.2_windows_amd64.msi"
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2

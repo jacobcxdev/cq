@@ -72,6 +72,27 @@ func TestWindowsTaskDefinitionRejectsWrongPrincipalAndAction(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskDefinitionAcceptsSchedulerDefaultCanonicalisation(t *testing.T) {
+	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := parseWindowsTaskDefinition(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition.Triggers.LogonTrigger.Enabled = nil
+	definition.Principals.Principal.RunLevel = ""
+	definition.Settings.Enabled = nil
+	if err := validateWindowsTaskDefinition(definition, windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800); err != nil {
+		t.Fatal(err)
+	}
+	definition.Triggers.LogonTrigger.Enabled = windowsTaskBool(false)
+	if err := validateWindowsTaskDefinition(definition, windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800); !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("disabled trigger error = %v", err)
+	}
+}
+
 func TestWindowsTaskDefinitionRejectsWrongSchema(t *testing.T) {
 	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
 	if err != nil {
@@ -186,6 +207,21 @@ func TestWindowsTaskDefinitionTemporaryFileUsesUTF16(t *testing.T) {
 	}
 	if parsed.Actions.Exec.Command != `C:\cq\cq.exe` {
 		t.Fatalf("round-trip command = %q", parsed.Actions.Exec.Command)
+	}
+}
+
+func TestWindowsTaskDefinitionAcceptsUTF8SchedulerOutputWithUTF16Declaration(t *testing.T) {
+	data, err := renderWindowsTaskDefinition(windowsProxyTask, testWindowsSID, `C:\cq\cq.exe`, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte(`encoding="UTF-8"`), []byte(`encoding="UTF-16"`), 1)
+	parsed, err := parseWindowsTaskDefinition(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Actions.Exec.Command != `C:\cq\cq.exe` {
+		t.Fatalf("command = %q", parsed.Actions.Exec.Command)
 	}
 }
 

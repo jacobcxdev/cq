@@ -60,7 +60,7 @@ func validateInstallerURL(rawURL, version, architecture string) error {
 		return fmt.Errorf("parse URL: %w", err)
 	}
 	wantPath := fmt.Sprintf(
-		"/jacobcxdev/cq/releases/download/v%s/cq-install_%s_windows_%s.exe",
+		"/jacobcxdev/cq/releases/download/v%s/cq_%s_windows_%s.msi",
 		version,
 		version,
 		architecture,

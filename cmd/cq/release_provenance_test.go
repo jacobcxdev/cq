@@ -81,22 +81,59 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	releaserText := string(releaser)
 	for _, required := range []string{
 		"id: cq\n",
-		"id: cq-install\n",
-		"main: ./cmd/cq-install",
 		"-X main.version={{ .Version }}",
-		"formats: [binary]",
-		"cq-install_{{ .Version }}_{{ .Os }}_{{ .Arch }}",
 	} {
 		if !strings.Contains(releaserText, required) {
 			t.Fatalf("GoReleaser missing %q", required)
 		}
 	}
-	if strings.Count(releaserText, "- windows") < 2 || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
+	if strings.Count(releaserText, "- windows") != 1 || strings.Contains(releaserText, "id: cq-install") || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
 		t.Fatal("release artifact targets or optional dependency separation differ")
 	}
 	workflowText := string(workflow)
-	if !strings.Contains(workflowText, "goreleaser/goreleaser-action@v7") {
-		t.Fatal("release workflow does not use GoReleaser action v7")
+	for _, required := range []string{
+		"goreleaser/goreleaser-action@v7",
+		"runs-on: windows-latest",
+		"wix --version 5.0.2",
+		`.\.github\scripts\build-windows-msi.ps1`,
+		`@("amd64", "arm64")`,
+		`cq_${version}_windows_${architecture}.msi`,
+		"gh release upload",
+	} {
+		if !strings.Contains(workflowText, required) {
+			t.Fatalf("release workflow missing %q", required)
+		}
+	}
+}
+
+func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
+	source, err := os.ReadFile("../../packaging/windows/cq.wxs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		`Scope="perUser"`,
+		`Version="$(var.CQVersion)"`,
+		`Source="$(var.CQExecutable)"`,
+		`Name="PATH"`,
+		`Value="[INSTALLFOLDER]"`,
+		`ExeCommand="service install --owner=winget"`,
+		`ExeCommand="service uninstall --owner=winget"`,
+		`Execute="rollback"`,
+		`Return="check"`,
+		`<MajorUpgrade`,
+		`Condition="NOT Installed"`,
+		`Condition="Installed AND REMOVE~=&quot;ALL&quot;"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Windows MSI missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"SignTool", "notar", "App Store Connect"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Windows MSI depends on forbidden release mechanism %q", forbidden)
+		}
 	}
 }
 
@@ -234,6 +271,9 @@ func TestCIExercisesNativeInstallerSurfaces(t *testing.T) {
 		"runs-on: windows-latest",
 		"go build -o cq.exe ./cmd/cq",
 		"go build -o cq-install.exe ./cmd/cq-install",
+		`.\.github\scripts\build-windows-msi.ps1`,
+		"wix --version 5.0.2",
+		`.\.github\scripts\validate-windows-msi.ps1`,
 		"go test -race -count=1 ./...",
 		"go test -race -count=1 ./internal/fsutil",
 		"go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'",
@@ -273,10 +313,11 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`\cq\Proxy`,
 		`\cq\Refresh`,
 		"Get-CimInstance Win32_Process",
-		"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\cq",
-		"CQPathAdded",
+		"Get-CQARPEntries",
+		"msiexec.exe",
+		"Set-PrivateTree",
 		"if ($ownsCQTasks)",
-		"if ($ownsUninstallRegistration)",
+		"if ($ownsWinGetPackage)",
 		"Remove-Item -LiteralPath $temporaryRoot -Recurse -Force",
 		"native-transport-probe.go",
 		`$temporaryCodex = Join-Path $temporaryHome ".codex"`,

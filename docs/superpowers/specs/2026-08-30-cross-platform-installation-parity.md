@@ -241,25 +241,24 @@ brew install --cask jacobcxdev/tap/cq
 ## WinGet packaging
 
 WinGet portable/ZIP manifests cannot run the lifecycle hooks required here.
-Windows releases therefore add an x64 and arm64 per-user installer executable.
-The WinGet manifest uses installer type `exe`, user scope, pinned SHA-256, and
-documented silent install and uninstall switches.
+Windows releases therefore add x64 and arm64 per-user MSI packages. The WinGet
+manifest uses installer type `wix`, user scope, a fixed UpgradeCode, and a
+pinned SHA-256 for each architecture.
 
-The installer executable is the release-built `cq-install.exe` bootstrap. It:
+Each MSI embeds the matching release-built `cq.exe` directly. It:
 
-1. resolves its own tagged release version;
-2. downloads that version's CQ archive and `checksums.txt` from GitHub Releases;
-3. verifies the archive SHA-256 before extraction;
-4. installs `cq.exe` and a durable uninstaller copy under
-   `%LOCALAPPDATA%\Programs\cq`;
-5. adds that directory to the current user's `PATH` when absent;
-6. invokes `cq service install` with WinGet ownership;
-7. registers a per-user Add/Remove Programs entry used by WinGet;
-8. validates the complete-install contract before returning success.
+1. installs `cq.exe` under `%LOCALAPPDATA%\Programs\cq`;
+2. adds that directory to the current user's `PATH`;
+3. registers per-user Windows Installer metadata used by WinGet and
+   Add/Remove Programs;
+4. invokes `cq service install --owner=winget` after files are staged;
+5. invokes `cq service uninstall --owner=winget` before file removal;
+6. runs service removal as a rollback action if first installation fails.
 
-Upgrade uses the same executable and preserves the prior binary until new
-service validation succeeds. Uninstall uses the durable helper, removes the CQ
-directory and only the exact PATH entry it added, and preserves user data.
+Major-upgrade semantics replace the previous MSI product while retaining the
+fixed UpgradeCode. Uninstall removes package-owned files, PATH metadata, and
+services while preserving user data. The package requires no bootstrap
+executable, code-signing service, Apple credential, or notarisation service.
 
 ## Go installer runner
 
@@ -372,10 +371,12 @@ equivalent finally blocks.
 - macOS validates fresh Cask install, Cask upgrade, Cask uninstall, Go-runner
   install/upgrade/uninstall, exact LaunchAgent identity, proxy HTTP and
   WebSocket traffic, refresh execution, and cleanup.
-- Windows validates WinGet local-manifest install/upgrade/uninstall and Go-runner
-  install/upgrade/uninstall on existing host `h1`, including exact Task
-  Scheduler definitions, process/listener identity, real proxy HTTP and
-  WebSocket traffic, refresh execution, PATH/ARP state, and cleanup.
+- Windows validates MSI install/upgrade/uninstall on a standard ephemeral
+  GitHub-hosted runner. Published WinGet manifests and Go-runner
+  install/upgrade/uninstall can additionally run from an isolated temporary
+  root on existing host `h1`. Validation includes exact Task Scheduler
+  definitions, process/listener identity, real proxy HTTP and WebSocket
+  traffic, refresh execution, PATH/ARP state, and cleanup.
 - Linux validates Go-runner install/upgrade/uninstall on a disposable native
   systemd-user environment, including units, timer, process/listener identity,
   real proxy traffic, refresh execution, and cleanup.
@@ -402,7 +403,7 @@ capabilities listed.
 - Go's install command builds and copies executables but exposes no package
   post-install hook: <https://go.dev/ref/mod#go-install>
 - WinGet community manifests prohibit arbitrary scripts, so complete setup needs
-  an installer executable: <https://github.com/microsoft/winget-pkgs/blob/master/.github/instructions/manifests.instructions.md>
+  an installer package with lifecycle actions: <https://github.com/microsoft/winget-pkgs/blob/master/.github/instructions/manifests.instructions.md>
 - Homebrew Casks expose install and uninstall lifecycle hooks needed for exact
   service cleanup: <https://docs.brew.sh/Cask-Cookbook>
 - Windows Task Scheduler supplies per-user logon and periodic execution:
