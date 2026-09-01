@@ -437,7 +437,7 @@ try {
             throw "installed HTTP/SSE/WebSocket probe failed"
         }
 
-        Invoke-WinGet -Arguments @("uninstall", "--id", "jacobcxdev.cq", "--exact", "--scope", "user", "--silent", "--accept-source-agreements", "--disable-interactivity")
+        Invoke-WinGet -Arguments @("uninstall", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-source-agreements", "--disable-interactivity")
         Wait-Removed -Path $installedCQ
         foreach ($name in @("Proxy", "Refresh")) {
             if (Get-ScheduledTask -TaskPath $taskPath -TaskName $name -ErrorAction SilentlyContinue) {

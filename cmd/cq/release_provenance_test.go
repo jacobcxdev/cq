@@ -493,7 +493,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`DiagOutputDir`,
 		`"install", "--manifest", $PreviousManifestPath`,
 		`"upgrade", "--manifest", $ManifestPath`,
-		`"uninstall", "--id", "jacobcxdev.cq"`,
+		`"uninstall", "--manifest", $ManifestPath`,
 		`github.com/jacobcxdev/cq/cmd/cq-install@v$Version`,
 		"PreviousGoVersion",
 		"GetSecurityDescriptor(4)",
