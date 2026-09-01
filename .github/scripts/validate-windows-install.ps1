@@ -83,7 +83,15 @@ function Invoke-GoRunner {
 }
 
 function Get-CQARPEntries {
-    return @(Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object {
+    $roots = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    return @($roots | ForEach-Object {
+        Get-ItemProperty $_ -ErrorAction SilentlyContinue
+    } | Where-Object {
         $_.DisplayName -eq "CQ" -and $_.Publisher -eq "jacobcxdev"
     })
 }
