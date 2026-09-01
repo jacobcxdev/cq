@@ -123,7 +123,13 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          previous_tag="$(git tag --sort=-v:refname | grep -Fvx "$RELEASE_TAG" | head -1)"
+          previous_tag=
+          while IFS= read -r candidate; do
+            if [[ "$candidate" != "$RELEASE_TAG" ]]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done < <(git tag --sort=-v:refname)
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
           current_version="${RELEASE_TAG#v}"
@@ -341,7 +347,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          previous_tag="$(git tag --sort=-v:refname | grep -Fvx "$GITHUB_REF_NAME" | head -1)"
+          previous_tag=
+          while IFS= read -r candidate; do
+            if [[ "$candidate" != "$GITHUB_REF_NAME" ]]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done < <(git tag --sort=-v:refname)
           test -n "$previous_tag"
           .github/scripts/validate-linux-install.sh "$GITHUB_REF_NAME" "$previous_tag"
 

@@ -335,7 +335,7 @@ try {
             throw "refusing to replace existing $taskPath$name task"
         }
     }
-    if ((Get-CQARPEntries).Count -ne 0) {
+    if (@(Get-CQARPEntries).Count -ne 0) {
         throw "refusing to replace existing CQ MSI registration"
     }
     $ownsCQTasks = $true
@@ -427,7 +427,7 @@ try {
             throw "scheduled task remains after uninstall"
         }
     }
-    if ((Get-CQARPEntries).Count -ne 0) {
+    if (@(Get-CQARPEntries).Count -ne 0) {
         throw "CQ MSI registration remains"
     }
     $userPath = $environmentKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)

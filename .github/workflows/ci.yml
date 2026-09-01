@@ -73,7 +73,13 @@ jobs:
       - name: Create isolated release candidate tag
         run: |
           set -euo pipefail
-          previous_tag="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          previous_tag=
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done < <(git tag --sort=-v:refname)
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
           IFS=. read -r major minor patch <<<"$previous_version"
