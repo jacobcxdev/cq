@@ -65,13 +65,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for command in go jq systemctl systemd readlink; do
-  command -v "$command" >/dev/null
+for command in go jq systemctl readlink; do
+  if ! command -v "$command" >/dev/null; then
+    echo "missing required command: $command" >&2
+    exit 1
+  fi
 done
+systemd_executable=/usr/lib/systemd/systemd
+if [[ ! -x "$systemd_executable" ]]; then
+  echo "systemd user manager unavailable: $systemd_executable" >&2
+  exit 1
+fi
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$GOBIN" "$CODEX_HOME"
 chmod 700 "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$GOBIN" "$CODEX_HOME"
 
-systemd --user --unit=basic.target >"$manager_log" 2>&1 &
+"$systemd_executable" --user --unit=basic.target >"$manager_log" 2>&1 &
 manager_pid=$!
 for _ in $(seq 1 100); do
   if systemctl --user show-environment >/dev/null 2>&1; then
