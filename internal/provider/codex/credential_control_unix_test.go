@@ -125,6 +125,125 @@ func TestCredentialControlPreparedDelegateSkipsInitializer(t *testing.T) {
 	}
 }
 
+func TestCredentialControlPreparedDelegateWaitsForOwnerInitializer(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := shortControlPath(t)
+	initializerStarted := make(chan struct{})
+	releaseInitializer := make(chan struct{})
+	type openResult struct {
+		control *CredentialControl
+		err     error
+	}
+	ownerResult := make(chan openResult, 1)
+	go func() {
+		control, err := OpenCredentialControlPrepared(context.Background(), path, coordinator, func(context.Context, *CredentialCoordinator, CredentialOwnerCapability) error {
+			close(initializerStarted)
+			<-releaseInitializer
+			return nil
+		})
+		ownerResult <- openResult{control: control, err: err}
+	}()
+
+	select {
+	case <-initializerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("owner initializer did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	delegateResult := make(chan openResult, 1)
+	go func() {
+		control, err := OpenCredentialControlPrepared(ctx, path, coordinator, nil)
+		delegateResult <- openResult{control: control, err: err}
+	}()
+
+	var delegate openResult
+	returnedBeforeInitialization := false
+	select {
+	case delegate = <-delegateResult:
+		returnedBeforeInitialization = true
+	case <-time.After(400 * time.Millisecond):
+	}
+	close(releaseInitializer)
+
+	var owner openResult
+	select {
+	case owner = <-ownerResult:
+	case <-time.After(time.Second):
+		t.Fatal("owner did not finish initialization")
+	}
+	if !returnedBeforeInitialization {
+		select {
+		case delegate = <-delegateResult:
+		case <-time.After(time.Second):
+			t.Fatal("delegate did not connect after owner initialization")
+		}
+	}
+	if owner.control != nil {
+		defer owner.control.Close()
+	}
+	if delegate.control != nil {
+		defer delegate.control.Close()
+	}
+	if owner.err != nil {
+		t.Fatalf("owner startup failed: %v", owner.err)
+	}
+	if returnedBeforeInitialization {
+		t.Fatalf("delegate returned before owner initialization completed: %v", delegate.err)
+	}
+	if delegate.err != nil {
+		t.Fatalf("delegate startup failed: %v", delegate.err)
+	}
+	if !owner.control.Owner() || delegate.control.Owner() {
+		t.Fatalf("owner/delegate authority = %t/%t", owner.control.Owner(), delegate.control.Owner())
+	}
+}
+
+func TestCredentialControlPreparedDelegateHonoursStartupContext(t *testing.T) {
+	coordinator, _ := testCoordinator(t)
+	path := shortControlPath(t)
+	initializerStarted := make(chan struct{})
+	releaseInitializer := make(chan struct{})
+	type openResult struct {
+		control *CredentialControl
+		err     error
+	}
+	ownerResult := make(chan openResult, 1)
+	go func() {
+		control, err := OpenCredentialControlPrepared(context.Background(), path, coordinator, func(context.Context, *CredentialCoordinator, CredentialOwnerCapability) error {
+			close(initializerStarted)
+			<-releaseInitializer
+			return nil
+		})
+		ownerResult <- openResult{control: control, err: err}
+	}()
+
+	select {
+	case <-initializerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("owner initializer did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	delegate, err := OpenCredentialControlPrepared(ctx, path, coordinator, nil)
+	close(releaseInitializer)
+	owner := <-ownerResult
+	if owner.control != nil {
+		defer owner.control.Close()
+	}
+	if delegate != nil {
+		defer delegate.Close()
+	}
+	if owner.err != nil {
+		t.Fatalf("owner startup failed: %v", owner.err)
+	}
+	if delegate != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("delegate startup = %v, %v, want context deadline", delegate, err)
+	}
+}
+
 func TestCredentialControlFirstOwnerSecondDelegates(t *testing.T) {
 	coordinator, fs := testCoordinator(t)
 	path := shortControlPath(t)

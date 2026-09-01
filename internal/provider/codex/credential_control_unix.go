@@ -100,9 +100,9 @@ func openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObserv
 	var client *rpc.Client
 	var err error
 	if recoveryRecordRequired {
-		endpoint, client, err = openCredentialEndpointWithRecoveryRecorder(path, allowRecovery, phaseHook, recorder)
+		endpoint, client, err = openCredentialEndpointWithRecoveryRecorderContext(ctx, path, allowRecovery, phaseHook, recorder)
 	} else {
-		endpoint, client, err = openCredentialEndpoint(path, allowRecovery, phaseHook)
+		endpoint, client, err = openCredentialEndpointWithContext(ctx, path, allowRecovery, phaseHook)
 	}
 	if err != nil {
 		return nil, err
