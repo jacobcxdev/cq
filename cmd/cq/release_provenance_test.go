@@ -196,11 +196,16 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		"hooks:",
 		"install: |",
 		"uninstall: |",
-		`attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false`,
-		`system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
+		`attributes = system_command "/usr/bin/xattr",`,
+		`args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
 		`raise "cq remains quarantined after installation"`,
-		`args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]`,
-		`args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]`,
+		`"service", "install", "--owner=homebrew",`,
+		`"service", "uninstall", "--owner=homebrew",`,
+		`"--service-executable=#{HOMEBREW_PREFIX}/bin/cq",`,
+		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.proxy"]`,
+		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.refresh"]`,
+		`args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"]`,
+		`args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"]`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask missing %q", required)
@@ -212,8 +217,11 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	if strings.Contains(text, "\n    uninstall:\n") {
 		t.Fatal("Homebrew Cask duplicates transactional uninstall with privileged fallback")
 	}
-	if strings.Contains(text, "must_succeed: false") {
-		t.Fatal("Homebrew Cask quarantine removal fails open")
+	if count := strings.Count(text, "must_succeed: false"); count != 2 {
+		t.Fatalf("Homebrew Cask has %d fail-open commands, want two launchd backstops", count)
+	}
+	if strings.Contains(text, `system_command "/usr/bin/sudo"`) {
+		t.Fatal("Homebrew Cask uninstall backstop requires privilege escalation")
 	}
 
 	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
@@ -253,11 +261,81 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 		`lifecycle_commands == %w[install uninstall]`,
 		`abort "CQ lifecycle command survived validation isolation"`,
 		`abort "production CQ binary path survived validation isolation"`,
-		`abort "unexpected Homebrew launchctl uninstall fallback"`,
+		`abort "missing Homebrew uninstall backstop for #{backstop}"`,
+		`abort "production CQ launchd label survived validation isolation"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask validation missing fail-closed guard %q", required)
 		}
+	}
+}
+
+func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
+	releaser, err := os.ReadFile("../../.goreleaser.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(releaser), "release:\n  draft: true") {
+		t.Fatal("GoReleaser does not stage release as a draft")
+	}
+	for _, required := range []string{
+		"use_existing_draft: true",
+		"replace_existing_artifacts: true",
+	} {
+		if !strings.Contains(string(releaser), required) {
+			t.Fatalf("GoReleaser draft is not retry-safe: missing %q", required)
+		}
+	}
+
+	workflow, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"args: release --clean",
+		`.github/scripts/validate-homebrew-install.sh`,
+		`winget validate --manifest $manifestPath --disable-interactivity`,
+		`$metadataText -notmatch "GOOS=windows"`,
+		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
+		`$manifestArgs = @(`,
+		`& go run ./internal/tools/wingetmanifest @manifestArgs`,
+		`.\.github\scripts\validate-windows-msi.ps1`,
+		"runs-on: ubuntu-24.04-arm",
+		`.github/scripts/validate-linux-install.sh`,
+		"name: windows-msi-validation",
+		"runner: [windows-latest, windows-11-arm]",
+		`$metadataText -notmatch ("GOARCH=" + [regex]::Escape($architecture))`,
+		`$validationArguments.PreviousGoVersion = $previousGoVersion`,
+		`if ($statusCode -ne 404)`,
+		`$publishedVersions | Sort-Object -Descending | Select-Object -First 1`,
+		`$validationArguments.PreviousVersion = $previousVersion`,
+		"needs: [release, windows-packages, windows-acceptance]",
+		"needs: [windows-deployed, linux-install]",
+		`gh release edit "$RELEASE_TAG" --draft=false`,
+		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
+		`.\.github\scripts\validate-windows-install.ps1`,
+		"secrets.WINGET_PKGS_TOKEN",
+		"microsoft/winget-pkgs",
+		`if gh api "$upstream_path" >/dev/null 2>&1`,
+		`git -C "$checkout" diff --cached --quiet`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("release workflow missing native publication gate %q", required)
+		}
+	}
+	if count := strings.Count(text, "args: release --clean"); count != 1 {
+		t.Errorf("release workflow builds artifacts %d times, want one exact draft build", count)
+	}
+	releaseStart := strings.Index(text, "\n  release:\n")
+	windowsStart := strings.Index(text, "\n  windows-packages:\n")
+	if releaseStart < 0 || windowsStart <= releaseStart || !strings.Contains(text[releaseStart:windowsStart], "fetch-depth: 0") {
+		t.Error("release job does not fetch prior tags for upgrade validation")
+	}
+	styleIndex := strings.Index(text, "brew style --fix dist/homebrew/Casks/cq.rb")
+	lifecycleIndex := strings.Index(text, ".github/scripts/validate-homebrew-install.sh")
+	if styleIndex < 0 || lifecycleIndex < 0 || styleIndex > lifecycleIndex {
+		t.Error("release workflow does not validate formatted Homebrew Cask bytes")
 	}
 }
 
@@ -354,6 +432,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`"upgrade", "--manifest", $ManifestPath`,
 		`"uninstall", "--id", "jacobcxdev.cq"`,
 		`github.com/jacobcxdev/cq/cmd/cq-install@v$Version`,
+		"PreviousGoVersion",
 		"GetSecurityDescriptor(4)",
 		"EnginePID",
 		"LocalManifestFiles",

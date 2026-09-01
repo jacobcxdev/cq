@@ -34,7 +34,9 @@ checksum:
   name_template: "checksums.txt"
 
 release:
-  draft: false
+  draft: true
+  use_existing_draft: true
+  replace_existing_artifacts: true
 
 changelog:
   sort: asc
@@ -59,15 +61,40 @@ homebrew_casks:
     hooks:
       pre:
         uninstall: |
-          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "uninstall", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
+          system_command "#{HOMEBREW_PREFIX}/bin/cq",
+                         args: [
+                           "service", "uninstall", "--owner=homebrew",
+                           "--service-executable=#{HOMEBREW_PREFIX}/bin/cq",
+                         ]
+          system_command "/bin/launchctl",
+                         args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.proxy"],
+                         must_succeed: false
+          system_command "/bin/launchctl",
+                         args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.refresh"],
+                         must_succeed: false
+          system_command "/bin/rm",
+                         args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"]
+          system_command "/bin/rm",
+                         args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"]
       post:
         install: |
           if OS.mac?
-            attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false
+            attributes = system_command "/usr/bin/xattr",
+                                        args: ["#{HOMEBREW_PREFIX}/bin/cq"],
+                                        print_stdout: false
             if attributes.stdout.lines(chomp: true).include?("com.apple.quarantine")
-              system_command "/usr/bin/xattr", args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]
+              system_command "/usr/bin/xattr",
+                             args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]
             end
-            remaining_attributes = system_command "/usr/bin/xattr", args: ["#{HOMEBREW_PREFIX}/bin/cq"], print_stdout: false
-            raise "cq remains quarantined after installation" if remaining_attributes.stdout.lines(chomp: true).include?("com.apple.quarantine")
+            remaining_attributes = system_command "/usr/bin/xattr",
+                                                  args: ["#{HOMEBREW_PREFIX}/bin/cq"],
+                                                  print_stdout: false
+            if remaining_attributes.stdout.lines(chomp: true).include?("com.apple.quarantine")
+              raise "cq remains quarantined after installation"
+            end
           end
-          system_command "#{HOMEBREW_PREFIX}/bin/cq", args: ["service", "install", "--owner=homebrew", "--service-executable=#{HOMEBREW_PREFIX}/bin/cq"]
+          system_command "#{HOMEBREW_PREFIX}/bin/cq",
+                         args: [
+                           "service", "install", "--owner=homebrew",
+                           "--service-executable=#{HOMEBREW_PREFIX}/bin/cq",
+                         ]

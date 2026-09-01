@@ -227,5 +227,5 @@ func windowsCredentialPipePath(path string) (string, string, error) {
 }
 
 func windowsCredentialPipeSDDL(sid string) string {
-	return "O:" + sid + "G:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)(A;;GA;;;BA)"
+	return "O:" + sid + "G:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)"
 }

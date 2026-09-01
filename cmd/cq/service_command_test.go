@@ -16,7 +16,6 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
-	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func TestRunServiceInstallDefaultsToManualOwner(t *testing.T) {
@@ -252,29 +251,7 @@ func TestRunServiceAcceptsInheritedInstallerLock(t *testing.T) {
 
 func testServiceInstallerLockStateRoot(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		return filepath.Join(t.TempDir(), "state")
-	}
-	roots, err := userdirs.Default()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, roots.State); err != nil {
-		t.Fatal(err)
-	}
-	root, err := os.MkdirTemp(roots.State, "service-lock-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(root); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(root); err != nil {
-			t.Errorf("remove Windows service lock test root: %v", err)
-		}
-	})
-	return root
+	return testServiceStateRoot(t)
 }
 
 func TestServiceHelpIsPureAndHidesOwnerFlag(t *testing.T) {

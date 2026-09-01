@@ -2,14 +2,14 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ManifestPath,
 
-    [Parameter(Mandatory = $true)]
-    [string]$PreviousManifestPath,
+    [string]$PreviousManifestPath = "",
 
     [Parameter(Mandatory = $true)]
     [string]$ExpectedVersion,
 
-    [Parameter(Mandatory = $true)]
-    [string]$PreviousVersion,
+    [string]$PreviousVersion = "",
+
+    [string]$PreviousGoVersion = "",
 
     [ValidateRange(1024, 65535)]
     [int]$Port = 19280
@@ -308,9 +308,19 @@ function Remove-CQTaskFolder {
 
 try {
     $ManifestPath = (Resolve-Path -LiteralPath $ManifestPath).Path
-    $PreviousManifestPath = (Resolve-Path -LiteralPath $PreviousManifestPath).Path
-    if ([version]$PreviousVersion -ge [version]$ExpectedVersion) {
-        throw "previous version must be older than expected version"
+    $hasPreviousWinGet = $PreviousManifestPath -ne "" -or $PreviousVersion -ne ""
+    $hasPreviousGo = $PreviousGoVersion -ne ""
+    if ($hasPreviousWinGet -and ($PreviousManifestPath -eq "" -or $PreviousVersion -eq "")) {
+        throw "previous manifest path and version must be supplied together"
+    }
+    if ($hasPreviousWinGet) {
+        $PreviousManifestPath = (Resolve-Path -LiteralPath $PreviousManifestPath).Path
+        if ([version]$PreviousVersion -ge [version]$ExpectedVersion) {
+            throw "previous version must be older than expected version"
+        }
+    }
+    if ($hasPreviousGo -and [version]$PreviousGoVersion -ge [version]$ExpectedVersion) {
+        throw "previous Go runner version must be older than expected version"
     }
     $scheduler = New-Object -ComObject "Schedule.Service"
     $scheduler.Connect()
@@ -358,7 +368,9 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "failed to enable WinGet local manifests"
     }
-    Invoke-WinGet -Arguments @("validate", "--manifest", $PreviousManifestPath)
+    if ($hasPreviousWinGet) {
+        Invoke-WinGet -Arguments @("validate", "--manifest", $PreviousManifestPath)
+    }
     Invoke-WinGet -Arguments @("validate", "--manifest", $ManifestPath)
 
     $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -379,9 +391,14 @@ try {
     }
     Set-PrivateTree -Root $temporaryRoot
 
-    Invoke-WinGet -Arguments @("install", "--manifest", $PreviousManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-    $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
-    Invoke-WinGet -Arguments @("upgrade", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+    if ($hasPreviousWinGet) {
+        Invoke-WinGet -Arguments @("install", "--manifest", $PreviousManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+        $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
+        Invoke-WinGet -Arguments @("upgrade", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+    }
+    else {
+        Invoke-WinGet -Arguments @("install", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+    }
     $status = Assert-Installed -Executable $installedCQ -Version $ExpectedVersion -Owner "winget" -ExpectWindowsMetadata $true
 
     Start-ScheduledTask -TaskPath $taskPath -TaskName "Refresh"
@@ -416,9 +433,14 @@ try {
         throw "installer PATH entry remains"
     }
 
-    Invoke-GoRunner -Version $PreviousVersion
-    $null = Assert-Installed -Executable $goInstalledCQ -Version $PreviousVersion -Owner "go" -ExpectWindowsMetadata $false
-    Invoke-GoRunner -Version $ExpectedVersion
+    if ($hasPreviousGo) {
+        Invoke-GoRunner -Version $PreviousGoVersion
+        $null = Assert-Installed -Executable $goInstalledCQ -Version $PreviousGoVersion -Owner "go" -ExpectWindowsMetadata $false
+        Invoke-GoRunner -Version $ExpectedVersion
+    }
+    else {
+        Invoke-GoRunner -Version $ExpectedVersion
+    }
     $status = Assert-Installed -Executable $goInstalledCQ -Version $ExpectedVersion -Owner "go" -ExpectWindowsMetadata $false
     & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
     if ($LASTEXITCODE -ne 0) {

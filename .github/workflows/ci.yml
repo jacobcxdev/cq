@@ -49,6 +49,65 @@ jobs:
           test -n "$archive"
           .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
 
+  homebrew-lifecycle:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Create isolated release candidate tag
+        run: |
+          set -euo pipefail
+          previous_tag="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+          test -n "$previous_tag"
+          previous_version="${previous_tag#v}"
+          IFS=. read -r major minor patch <<<"$previous_version"
+          current_version="${major}.${minor}.$((patch + 1))-ci"
+          git tag "v$current_version"
+          {
+            echo "PREVIOUS_TAG=$previous_tag"
+            echo "PREVIOUS_VERSION=$previous_version"
+            echo "CURRENT_VERSION=$current_version"
+            echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$current_version" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)"
+          } >> "$GITHUB_ENV"
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean --skip=publish
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: validation
+
+      - name: Validate real Cask install, upgrade, transport, and uninstall
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) architecture=arm64 ;;
+            x86_64) architecture=amd64 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          previous_root="$RUNNER_TEMP/cq-homebrew-previous"
+          mkdir -p "$previous_root"
+          gh release download "$PREVIOUS_TAG" \
+            --pattern "cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz" \
+            --dir "$previous_root"
+          gh api repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb \
+            --jq .content | base64 --decode >"$previous_root/cq.rb"
+          .github/scripts/validate-homebrew-install.sh \
+            "$previous_root/cq.rb" \
+            "$previous_root/cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz" \
+            "$PREVIOUS_VERSION" \
+            "$PWD/dist/homebrew/Casks/cq.rb" \
+            "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \
+            "$CURRENT_VERSION"
+
   test:
     runs-on: ubuntu-latest
     steps:

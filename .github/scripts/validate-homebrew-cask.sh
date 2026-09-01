@@ -91,15 +91,34 @@ text.sub!(/^cask "cq" do$/, 'cask "cq-cask-validation" do') or abort "missing cq
 text.gsub!(/^(\s*)url ".*"$/) { "#{Regexp.last_match(1)}url \"file://#{archive}\"" }
 text.sub!(/^\s*binary "cq"$/, '  binary "cq", target: "cq-cask-validation"') or abort "missing cq binary artifact"
 text.gsub!('#{HOMEBREW_PREFIX}/bin/cq', '#{HOMEBREW_PREFIX}/bin/cq-cask-validation')
-lifecycle_pattern = /^([ \t]*)system_command "#\{HOMEBREW_PREFIX\}\/bin\/cq-cask-validation", args: \["service", "(install|uninstall)".*$/
+[
+  'dev.jacobcx.cq.proxy',
+  'dev.jacobcx.cq.refresh',
+  '#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist',
+  '#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist',
+].each do |backstop|
+  abort "missing Homebrew uninstall backstop for #{backstop}" unless text.include?(backstop)
+end
+[
+  'dev.jacobcx.cq.proxy',
+  'dev.jacobcx.cq.refresh',
+].each do |label|
+  pattern = /args:\s*\["bootout",\s*"gui\/#\{Process\.uid\}\/#{Regexp.escape(label)}"\],\s*must_succeed:\s*false/m
+  abort "Homebrew launchd uninstall backstop can fail uninstall: #{label}" unless text.match?(pattern)
+end
+{
+  'dev.jacobcx.cq.proxy' => 'dev.jacobcx.cq.cask-validation.proxy',
+  'dev.jacobcx.cq.refresh' => 'dev.jacobcx.cq.cask-validation.refresh',
+}.each { |production, validation| text.gsub!(production, validation) }
+lifecycle_pattern = /^([ \t]*)system_command "#\{HOMEBREW_PREFIX\}\/bin\/cq-cask-validation",\s+args:\s*\[\s*"service",\s*"(install|uninstall)".*?\]\n/m
 lifecycle_commands = text.scan(lifecycle_pattern).map { |match| match.fetch(1) }.sort
 abort "expected one CQ service install and uninstall command" unless lifecycle_commands == %w[install uninstall]
 text.gsub!(lifecycle_pattern) do
-  "#{Regexp.last_match(1)}system_command \"/usr/bin/true\""
+  "#{Regexp.last_match(1)}system_command \"/usr/bin/true\"\n"
 end
 abort "CQ lifecycle command survived validation isolation" if text.match?(/args: \["service", "(?:install|uninstall)"/)
 abort "production CQ binary path survived validation isolation" if text.include?('#{HOMEBREW_PREFIX}/bin/cq"')
-abort "unexpected Homebrew launchctl uninstall fallback" if text.match?(/^\s*uninstall launchctl:/)
+abort "production CQ launchd label survived validation isolation" if text.match?(/dev\.jacobcx\.cq\.(?:proxy|refresh)/)
 preflight = <<~'BLOCK'
   preflight do
     system_command "/usr/bin/xattr",

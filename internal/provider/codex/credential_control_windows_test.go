@@ -49,3 +49,11 @@ func TestWindowsCredentialPipePathIsStableAndPrivate(t *testing.T) {
 		t.Fatalf("pipe path leaked identity: %q", first)
 	}
 }
+
+func TestWindowsCredentialPipeDACLExcludesAdministrators(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	want := "O:" + sid + "G:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)"
+	if got := windowsCredentialPipeSDDL(sid); got != want {
+		t.Fatalf("credential pipe SDDL = %q, want %q", got, want)
+	}
+}

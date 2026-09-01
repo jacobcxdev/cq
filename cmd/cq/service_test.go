@@ -402,9 +402,24 @@ func testServiceStateRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	localRoot := filepath.Dir(roots.State)
+	stateExisted := pathExistsForServiceTest(t, roots.State)
+	localRootExisted := pathExistsForServiceTest(t, localRoot)
 	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, roots.State); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if !stateExisted {
+			if err := os.Remove(roots.State); err != nil && !os.IsNotExist(err) {
+				t.Errorf("remove Windows service test state directory: %v", err)
+			}
+		}
+		if !localRootExisted {
+			if err := os.Remove(localRoot); err != nil && !os.IsNotExist(err) {
+				t.Errorf("remove Windows service test root: %v", err)
+			}
+		}
+	})
 	root, err := os.MkdirTemp(roots.State, "service-state-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -418,6 +433,19 @@ func testServiceStateRoot(t *testing.T) string {
 		}
 	})
 	return root
+}
+
+func pathExistsForServiceTest(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Stat(path)
+	if err == nil {
+		return true
+	}
+	if os.IsNotExist(err) {
+		return false
+	}
+	t.Fatal(err)
+	return false
 }
 
 func serviceExecutableName() string {
