@@ -13,6 +13,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 const maxExtractedExecutableBytes int64 = 128 << 20
@@ -151,7 +153,7 @@ func validateArchiveEntry(name, executableName string) error {
 
 func writeStagedExecutable(destination, executableName string, source io.Reader, declaredSize int64) (staged StagedBinary, resultErr error) {
 	staged.Path = filepath.Join(destination, executableName)
-	file, err := os.OpenFile(staged.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	file, err := (fsutil.OSFileSystem{}).CreateExclusive(staged.Path, 0o700)
 	if err != nil {
 		return StagedBinary{}, fmt.Errorf("create staged CQ executable: %w", err)
 	}
@@ -173,10 +175,6 @@ func writeStagedExecutable(destination, executableName string, source io.Reader,
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
 		return StagedBinary{}, fmt.Errorf("sync staged CQ executable: %w", err)
-	}
-	if err := file.Chmod(0o700); err != nil {
-		_ = file.Close()
-		return StagedBinary{}, fmt.Errorf("set staged CQ executable permissions: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return StagedBinary{}, fmt.Errorf("close staged CQ executable: %w", err)
