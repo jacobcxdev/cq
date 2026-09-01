@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,10 +53,21 @@ func newWindowsInstallerTestRoot(t *testing.T) string {
 	if _, err := rand.Read(random); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(cache, "cq-installer-test-"+hex.EncodeToString(random))
+	cqRoot := filepath.Join(cache, "cq")
+	_, statErr := os.Stat(cqRoot)
+	cqRootExisted := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal(statErr)
+	}
+	root := filepath.Join(cqRoot, "installer-test-"+hex.EncodeToString(random))
 	t.Cleanup(func() {
 		if err := os.RemoveAll(root); err != nil {
 			t.Errorf("remove test root: %v", err)
+		}
+		if !cqRootExisted {
+			if err := os.Remove(cqRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove test CQ root: %v", err)
+			}
 		}
 	})
 	return root
