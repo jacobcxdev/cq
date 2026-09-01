@@ -86,8 +86,9 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 		Authoritative: policy.Authoritative,
 	}
 	restored := CodexRestoredLane{
-		Classification:    CodexRestoredLaneUnseen,
-		RequestedIdentity: requestedIdentity,
+		Classification:                 CodexRestoredLaneUnseen,
+		RequestedIdentity:              requestedIdentity,
+		AffinityInvalidationGeneration: store.v2.AffinityInvalidationGeneration,
 		RequestedRecord: CodexJournalRecordV2{
 			SessionHash:    sessionHash,
 			ThreadHash:     threadHash,

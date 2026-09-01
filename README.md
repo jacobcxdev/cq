@@ -325,6 +325,16 @@ Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `
 
 Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first. Session bindings and task affinity remain hard constraints.
 
+### Lease invalidation
+
+```bash
+cq proxy leases invalidate
+```
+
+Lease invalidation clears reusable Codex account affinity across all sessions.
+Active requests and required continuity remain unchanged. Each next eligible
+request selects again using current pool membership and account capacity.
+
 ### Rescue mode
 
 ```bash
@@ -579,6 +589,8 @@ cq proxy endpoint transition-legacy rollback
 cq proxy hook
 cq proxy hook codex-stop
 cq proxy install
+cq proxy leases
+cq proxy leases invalidate
 cq proxy pin
 cq proxy pin claude
 cq proxy pin codex

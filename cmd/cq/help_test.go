@@ -143,6 +143,37 @@ func TestProxyHelpShowsEveryImmediateCommand(t *testing.T) {
 	}
 }
 
+func TestProxyLeasesHelpDocumentsReselectionBoundary(t *testing.T) {
+	for _, fixture := range []struct {
+		args []string
+		path []string
+		want []string
+	}{
+		{
+			args: []string{"proxy", "leases", "--help"},
+			path: []string{"proxy", "leases"},
+			want: []string{"Usage: cq proxy leases <command>", "proxy leases invalidate"},
+		},
+		{
+			args: []string{"proxy", "leases", "invalidate", "--help"},
+			path: []string{"proxy", "leases", "invalidate"},
+			want: []string{"Usage: cq proxy leases invalidate [--port PORT]", "Active requests and required continuity remain unchanged", "re-runs account selection"},
+		},
+	} {
+		stdout := &bytes.Buffer{}
+		handled, exitCode, err := runPureGlobalInspection(fixture.args, stdout, io.Discard)
+		help, ok := manualHelp(fixture.path)
+		if !ok || !handled || exitCode != 0 || err != nil || stdout.String() != help {
+			t.Fatalf("help(%v) = %t, %d, %v, %q; want %q", fixture.args, handled, exitCode, err, stdout.String(), help)
+		}
+		for _, want := range fixture.want {
+			if !strings.Contains(help, want) {
+				t.Fatalf("help(%v) missing %q:\n%s", fixture.args, want, help)
+			}
+		}
+	}
+}
+
 func TestProxyHookCommandReachesHandler(t *testing.T) {
 	handled, exitCode, err := runPureGlobalInspection([]string{"proxy", "hook", "codex-stop"}, io.Discard, io.Discard)
 	if handled || exitCode != 0 || err != nil {

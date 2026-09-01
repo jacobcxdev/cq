@@ -319,4 +319,8 @@ func TestProxyCommandClassifiesReconciledStatusAndRescue(t *testing.T) {
 	if err != nil || rescue.Row != "proxy_rescue" || rescue.Terminating || rescue.Deadline.Total != 30*time.Second {
 		t.Fatalf("rescue authority = %+v err=%v", rescue, err)
 	}
+	leases, err := ClassifyProxyCommand([]string{"proxy", "leases", "invalidate", "--port", "29280"})
+	if err != nil || leases.Row != "proxy_leases_invalidate" || leases.Terminating || leases.Deadline.Total != proxyLeaseInvalidationTimeout {
+		t.Fatalf("leases authority = %+v err=%v", leases, err)
+	}
 }
