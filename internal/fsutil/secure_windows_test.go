@@ -381,8 +381,8 @@ func TestWindowsOpenNoFollowAcceptsExternalCredentialOutsideCQRoots(t *testing.T
 		"O:%sG:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)",
 		user.String(), user.String(), user.String(),
 	)
-	setWindowsTestSecurity(t, root, private)
 	setWindowsTestSecurity(t, path, private)
+	setWindowsTestSecurity(t, root, private)
 
 	file, err := (OSFileSystem{}).OpenNoFollow(path)
 	if err != nil {
