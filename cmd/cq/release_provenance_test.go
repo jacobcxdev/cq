@@ -371,7 +371,7 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	}
 }
 
-func TestCIUsesMacOSRunnersOnly(t *testing.T) {
+func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -379,6 +379,16 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 	text := string(workflow)
 	for _, required := range []string{
 		"runs-on: macos-15",
+		"runner: ubuntu-24.04",
+		"runner: ubuntu-24.04-arm",
+		"architecture: amd64",
+		"architecture: arm64",
+		"runs-on: windows-latest",
+		"kernel.apparmor_restrict_unprivileged_userns",
+		"TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock",
+		"TestLinuxAcceptanceCancellationReapsDescendants",
+		"CQ_NATIVE_WINDOWS_SCHEDULER_TEST",
+		"validate-windows-msi.ps1",
 		"go build ./...",
 		"go vet ./...",
 		"go test -race -count=1 ./...",
@@ -386,16 +396,20 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 		"./cmd/cq-install",
 	} {
 		if !strings.Contains(text, required) {
-			t.Errorf("CI missing macOS gate %q", required)
+			t.Errorf("CI missing native platform gate %q", required)
 		}
 	}
-	for _, forbidden := range []string{"runs-on: ubuntu", "runs-on: windows", "GOOS=windows", "GOOS=linux", "linux-confinement:", "\n  windows:\n"} {
+	for _, forbidden := range []string{
+		"self-hosted",
+		"bespoke",
+		"apparmor_parser",
+		"aa-exec",
+		"sysctl -w",
+		"-skip '^TestLinuxAcceptanceConfinement",
+	} {
 		if strings.Contains(text, forbidden) {
-			t.Errorf("CI still uses non-macOS surface %q", forbidden)
+			t.Errorf("CI uses forbidden platform bypass %q", forbidden)
 		}
-	}
-	if strings.Contains(text, "self-hosted") || strings.Contains(text, "bespoke") {
-		t.Fatal("CI requires a persistent custom runner")
 	}
 	if strings.Contains(text, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1`) {
 		t.Error("CI uses pipefail-unsafe previous-tag selection")
@@ -403,8 +417,8 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
 		t.Error("CI does not use pipe-safe previous-tag selection")
 	}
-	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
-		t.Fatalf("full race suite runs %d times, want one macOS run", count)
+	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 2 {
+		t.Fatalf("full race suite appears in %d job definitions, want macOS and Linux", count)
 	}
 }
 
