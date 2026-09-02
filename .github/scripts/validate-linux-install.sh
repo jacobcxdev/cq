@@ -7,7 +7,8 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
 fi
 
 version=${1#v}
-previous_version=${2#v}
+previous_version=${2:-}
+previous_version=${previous_version#v}
 case "$version" in
   ''|*[!0-9.]*|.*|*..*|*.) echo "invalid version" >&2; exit 2 ;;
 esac
