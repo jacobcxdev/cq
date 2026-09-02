@@ -114,6 +114,7 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 		`.\.github\scripts\validate-windows-install.ps1`,
 		"secrets.WINGET_PKGS_TOKEN",
 		"microsoft/winget-pkgs",
+		"remote set-url upstream https://github.com/microsoft/winget-pkgs.git",
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("release workflow missing %q", required)
