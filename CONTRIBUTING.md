@@ -71,24 +71,27 @@ To release a new version:
    This runs normal WebSocket, repeated HTTP, compaction, and rescue traffic through isolated proxy listeners. It leaves any production listener unchanged and publishes the commit-bound `cq/live-normal-routing` status required by the tag workflow.
 3. Tag the commit: `git tag v0.x.y`
 4. Push the tag: `git push origin v0.x.y`
-5. GitHub Actions runs GoReleaser, which:
-   - Builds cross-platform binaries (darwin/linux/windows amd64+arm64)
-   - Creates a GitHub Release with auto-generated changelog
-   - Opens a PR against [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap) to update the formula
-6. Merge the Homebrew formula PR.
+5. Run the `Release` workflow against that tag. It builds and validates release
+   artifacts, publishes the GitHub release, and publishes the generated
+   Homebrew Cask to [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap).
+6. Verify the published package channels and installed transport validation.
 
-## Homebrew Proxy Service
+## Homebrew Cask Service Lifecycle
 
-Homebrew-managed installs should run the proxy via `brew services`, not `cq proxy install`.
+The Homebrew Cask owns CQ as one complete installation. Its hooks call
+`cq service install --owner=homebrew` after installation and
+`cq service uninstall --owner=homebrew` before removal. Users should not run a
+manual post-install service command.
 
-- Start on first install: `brew services start cq`
-- Restart after upgrades or config changes: `brew services restart cq`
-- Stop the service: `brew services stop cq`
-- Check proxy health with `cq proxy status`
+- Install: `brew install --cask jacobcxdev/tap/cq`
+- Upgrade: `brew upgrade --cask cq`
+- Uninstall: `brew uninstall --cask cq`
+- Inspect or restart both components: `cq service status --json` or
+  `cq service restart`
 
-The generated formula service runs `cq proxy start` and writes logs to `~/Library/Logs/cq/proxy.log`.
-
-Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain available for manual macOS workflows, but they are no longer the supported Homebrew path.
+Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain
+available for focused development and repair work, but they are not a complete
+Homebrew installation path.
 
 For local development rollouts, never overwrite the running executable in place
 with `cp`, `install`, or shell redirection. macOS can kill the mapped process with
