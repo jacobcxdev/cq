@@ -121,45 +121,6 @@ jobs:
             "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \
             "$CURRENT_VERSION"
 
-  test:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Provide pinned Go path
-        run: |
-          sudo mkdir -p /opt/homebrew/bin
-          sudo ln -sf "$(command -v go)" /opt/homebrew/bin/go
-
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test -race -count=1 ./internal/installer ./cmd/cq-install
-      - name: Gate degraded rescue transport
-        run: |
-          test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
-          test_log="$RUNNER_TEMP/degraded-rescue-transport.log"
-          if ! go test -race -count=1 -v ./internal/proxy -run "^${test_name}$" >"$test_log" 2>&1; then
-            cat "$test_log" >&2
-            exit 1
-          fi
-          cat "$test_log"
-          grep -F -- "--- PASS: ${test_name} " "$test_log"
-      - name: Gate normal proxy transport
-        run: |
-          test_name=TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak
-          test_log="$RUNNER_TEMP/normal-proxy-transport.log"
-          if ! go test -race -count=1 -v ./internal/proxy -run '^TestNormalProxyTransport(HTTP|WebSocket)' >"$test_log" 2>&1; then
-            cat "$test_log" >&2
-            exit 1
-          fi
-          cat "$test_log"
-          grep -F -- "--- PASS: ${test_name} " "$test_log"
-      - run: go test -race -count=1 ./...
-
   linux:
     strategy:
       fail-fast: false
@@ -187,6 +148,27 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
+      - run: go test -race -count=1 ./internal/installer ./cmd/cq-install
+      - name: Gate degraded rescue transport
+        run: |
+          test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
+          test_log="$RUNNER_TEMP/degraded-rescue-transport.log"
+          if ! go test -race -count=1 -v ./internal/proxy -run "^${test_name}$" >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          grep -F -- "--- PASS: ${test_name} " "$test_log"
+      - name: Gate normal proxy transport
+        run: |
+          test_name=TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak
+          test_log="$RUNNER_TEMP/normal-proxy-transport.log"
+          if ! go test -race -count=1 -v ./internal/proxy -run '^TestNormalProxyTransport(HTTP|WebSocket)' >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          grep -F -- "--- PASS: ${test_name} " "$test_log"
       - name: Gate stock-AppArmor confinement and cleanup
         shell: bash
         run: |

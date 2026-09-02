@@ -402,6 +402,7 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	for _, forbidden := range []string{
 		"self-hosted",
 		"bespoke",
+		"Provide pinned Go path",
 		"apparmor_parser",
 		"aa-exec",
 		"sysctl -w",
@@ -417,8 +418,11 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
 		t.Error("CI does not use pipe-safe previous-tag selection")
 	}
-	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 2 {
-		t.Fatalf("full race suite appears in %d job definitions, want macOS and Linux", count)
+	if count := strings.Count(text, "runs-on: macos-15"); count != 2 {
+		t.Fatalf("CI has %d macOS jobs, want Codex and Homebrew only", count)
+	}
+	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
+		t.Fatalf("full race suite appears in %d job definitions, want Linux matrix only", count)
 	}
 }
 
