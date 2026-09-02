@@ -102,6 +102,7 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 		"goreleaser/goreleaser-action@v7",
 		"runs-on: windows-latest",
 		"runs-on: ubuntu-24.04-arm",
+		`CQ_LINUX_USE_EXISTING_USER_MANAGER: "1"`,
 		"wix --version 5.0.2",
 		`.\.github\scripts\build-windows-msi.ps1`,
 		`@("amd64", "arm64")`,
@@ -592,6 +593,8 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		"find \"$temporary_root\" -depth -delete",
 		"native-transport-probe.go",
 		`export CODEX_HOME="$HOME/.codex"`,
+		`use_existing_user_manager=${CQ_LINUX_USE_EXISTING_USER_MANAGER:-}`,
+		`if [[ "$use_existing_user_manager" == "1" ]]; then`,
 	} {
 		if !strings.Contains(linuxText, required) {
 			t.Errorf("Linux installation script missing cleanup/proof %q", required)

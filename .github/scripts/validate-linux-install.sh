@@ -15,10 +15,17 @@ esac
 
 temporary_root=$(mktemp -d /tmp/cqni.XXXXXX)
 temporary_root=$(cd "$temporary_root" && pwd -P)
-export HOME="$temporary_root/home"
-export XDG_CONFIG_HOME="$temporary_root/config"
+use_existing_user_manager=${CQ_LINUX_USE_EXISTING_USER_MANAGER:-}
+if [[ "$use_existing_user_manager" == "1" ]]; then
+  : "${HOME:?HOME must be set}"
+  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+else
+  export HOME="$temporary_root/home"
+  export XDG_CONFIG_HOME="$temporary_root/config"
+  export XDG_RUNTIME_DIR="$temporary_root/runtime"
+fi
 export XDG_CACHE_HOME="$temporary_root/cache"
-export XDG_RUNTIME_DIR="$temporary_root/runtime"
 export GOBIN="$temporary_root/bin"
 export PATH="$GOBIN:$PATH"
 export CODEX_HOME="$HOME/.codex"
@@ -55,7 +62,9 @@ cleanup() {
     kill "$upstream_pid" 2>/dev/null
     wait "$upstream_pid" 2>/dev/null
   fi
-  systemctl --user exit 2>/dev/null
+  if [[ "$use_existing_user_manager" != "1" ]]; then
+    systemctl --user exit 2>/dev/null
+  fi
   if [[ "$manager_pid" =~ ^[1-9][0-9]*$ ]]; then
     kill "$manager_pid" 2>/dev/null
     wait "$manager_pid" 2>/dev/null
@@ -79,20 +88,27 @@ if [[ ! -x "$systemd_executable" ]]; then
   exit 1
 fi
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$GOBIN" "$CODEX_HOME"
-chmod 700 "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$GOBIN" "$CODEX_HOME"
+chmod 700 "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" "$GOBIN" "$CODEX_HOME"
+if [[ "$use_existing_user_manager" != "1" ]]; then
+  chmod 700 "$HOME"
+fi
 
-"$systemd_executable" --user --unit=basic.target >"$manager_log" 2>&1 &
-manager_pid=$!
-for _ in $(seq 1 100); do
-  if systemctl --user show-environment >/dev/null 2>&1; then
-    break
-  fi
-  if ! kill -0 "$manager_pid" 2>/dev/null; then
-    cat "$manager_log" >&2
-    exit 1
-  fi
-  sleep 0.1
-done
+if [[ "$use_existing_user_manager" == "1" ]]; then
+  systemctl --user show-environment >/dev/null
+else
+  "$systemd_executable" --user --unit=basic.target >"$manager_log" 2>&1 &
+  manager_pid=$!
+  for _ in $(seq 1 100); do
+    if systemctl --user show-environment >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$manager_pid" 2>/dev/null; then
+      cat "$manager_log" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+fi
 systemctl --user show-environment >/dev/null
 
 repository_root=$(cd "$PWD" && pwd -P)
