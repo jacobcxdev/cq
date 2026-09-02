@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -545,7 +547,6 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	for _, required := range []string{
 		"trap cleanup EXIT INT TERM",
 		`echo "missing required command: $command" >&2`,
-		`previous_version=${2:-}`,
 		`export PATH="$GOBIN:$PATH"`,
 		`systemd_executable=/usr/lib/systemd/systemd`,
 		`echo "systemd user manager unavailable: $systemd_executable" >&2`,
@@ -565,5 +566,33 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	if strings.Contains(linuxText, "for command in go jq systemctl systemd readlink") {
 		t.Error("Linux installation script requires systemd daemon on PATH")
+	}
+}
+
+func TestLinuxNativeInstallAcceptsMissingPreviousVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell tools")
+	}
+	toolDirectory := t.TempDir()
+	for _, name := range []string{"mktemp", "mkdir", "chmod", "find"} {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(toolDirectory, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command("bash", "../../.github/scripts/validate-linux-install.sh", "0.30.1")
+	command.Env = []string{"PATH=" + toolDirectory}
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatal("validation unexpectedly succeeded without Go")
+	}
+	if strings.Contains(string(output), "unbound variable") {
+		t.Fatalf("optional previous version failed under nounset:\n%s", output)
+	}
+	if !strings.Contains(string(output), "missing required command: go") {
+		t.Fatalf("validation did not reach command preflight:\n%s", output)
 	}
 }
