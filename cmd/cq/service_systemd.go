@@ -265,13 +265,19 @@ func supportedSystemdUnitFileState(state string) bool {
 	}
 }
 
-func (platform *systemdServicePlatform) InstallProxy(_ context.Context, executable string) error {
+func (platform *systemdServicePlatform) InstallProxy(ctx context.Context, executable string) error {
 	definitions, err := renderSystemdServiceDefinitions(executable)
 	if err != nil {
 		return err
 	}
 	if err := atomicWriteSystemdUnit(platform.unitPath(systemdProxyUnit), definitions[systemdProxyUnit]); err != nil {
 		return fmt.Errorf("write %s: %w", systemdProxyUnit, err)
+	}
+	if _, err := platform.run(ctx, "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("reload user systemd manager: %w", err)
+	}
+	if _, err := platform.run(ctx, "--user", "enable", "--now", systemdProxyUnit); err != nil {
+		return fmt.Errorf("enable %s: %w", systemdProxyUnit, err)
 	}
 	return nil
 }
@@ -289,8 +295,8 @@ func (platform *systemdServicePlatform) InstallRefresh(ctx context.Context, exec
 	if _, err := platform.run(ctx, "--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("reload user systemd manager: %w", err)
 	}
-	if _, err := platform.run(ctx, "--user", "enable", "--now", systemdProxyUnit, systemdRefreshTimer); err != nil {
-		return fmt.Errorf("enable CQ systemd units: %w", err)
+	if _, err := platform.run(ctx, "--user", "enable", "--now", systemdRefreshTimer); err != nil {
+		return fmt.Errorf("enable %s: %w", systemdRefreshTimer, err)
 	}
 	if _, err := platform.run(ctx, "--user", "start", systemdRefreshService); err != nil {
 		return fmt.Errorf("run initial credential refresh: %w", err)
@@ -299,16 +305,7 @@ func (platform *systemdServicePlatform) InstallRefresh(ctx context.Context, exec
 }
 
 func (platform *systemdServicePlatform) installProxyOnly(ctx context.Context, executable string) error {
-	if err := platform.InstallProxy(ctx, executable); err != nil {
-		return err
-	}
-	if _, err := platform.run(ctx, "--user", "daemon-reload"); err != nil {
-		return fmt.Errorf("reload user systemd manager: %w", err)
-	}
-	if _, err := platform.run(ctx, "--user", "enable", "--now", systemdProxyUnit); err != nil {
-		return fmt.Errorf("enable %s: %w", systemdProxyUnit, err)
-	}
-	return nil
+	return platform.InstallProxy(ctx, executable)
 }
 
 func (platform *systemdServicePlatform) installRefreshOnly(ctx context.Context, executable string, interval int) error {
