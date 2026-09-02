@@ -138,7 +138,6 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 		ExtraFiles: []*os.File{client},
 		SysProcAttr: &syscall.SysProcAttr{
 			Pdeathsig: syscall.SIGKILL,
-			Setpgid:   true,
 		},
 	}
 	networkListenerTarget := make(chan *os.File)
@@ -184,7 +183,7 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 		return errors.New("Linux acceptance command failed")
 	}
 	if err := sender.ready(); err != nil {
-		killLinuxAcceptanceGroup(command.Process.Pid)
+		killLinuxAcceptanceProcess(command.Process.Pid)
 		_ = command.Wait()
 		_ = stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
 		return errors.New("Linux acceptance helper unavailable")
@@ -200,7 +199,6 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 	}()
 	select {
 	case err := <-wait:
-		killLinuxAcceptanceGroup(command.Process.Pid)
 		networkErr := stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
 		if networkErr != nil {
 			return errors.New("Linux acceptance network confinement unavailable")
@@ -210,13 +208,13 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 		}
 		return nil
 	case <-networkDone:
-		killLinuxAcceptanceGroup(command.Process.Pid)
+		killLinuxAcceptanceProcess(command.Process.Pid)
 		<-wait
 		close(stopNetwork)
 		_ = networkListener.Close()
 		return errors.New("Linux acceptance network confinement unavailable")
 	case <-ctx.Done():
-		killLinuxAcceptanceGroup(command.Process.Pid)
+		killLinuxAcceptanceProcess(command.Process.Pid)
 		<-wait
 		_ = stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
 		return errors.New("Linux acceptance command timed out")

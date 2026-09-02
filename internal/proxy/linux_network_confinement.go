@@ -76,6 +76,8 @@ func installLinuxAcceptanceNetworkFilter() (*os.File, error) {
 		uint32(unix.SYS_BPF),
 		uint32(unix.SYS_SECCOMP),
 		uint32(unix.SYS_PRCTL),
+		uint32(unix.SYS_SETPGID),
+		uint32(unix.SYS_SETSID),
 	}
 	program := make([]syscall.SockFilter, 0, 5+len(filtered)*4)
 	program = append(program,

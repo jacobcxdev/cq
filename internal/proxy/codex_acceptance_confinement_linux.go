@@ -90,6 +90,7 @@ func (linuxCodexAcceptanceConfinement) Execute(ctx context.Context, execution co
 	if err := startLinuxAcceptanceCommand(command); err != nil {
 		return nil, fmt.Errorf("Codex acceptance process confinement unavailable: %w", err)
 	}
+	defer killLinuxAcceptanceGroup(command.Process.Pid)
 	_ = child.Close()
 	_ = helper.Close()
 	encoded, err := json.Marshal(config)
@@ -222,5 +223,11 @@ func openLinuxAcceptanceClient(execution codexAcceptanceExecution) (*os.File, er
 func killLinuxAcceptanceGroup(pid int) {
 	if pid > 1 {
 		_ = unix.Kill(-pid, unix.SIGKILL)
+	}
+}
+
+func killLinuxAcceptanceProcess(pid int) {
+	if pid > 1 {
+		_ = unix.Kill(pid, unix.SIGKILL)
 	}
 }

@@ -81,6 +81,20 @@ func TestLinuxAcceptanceNetworkPreventsFilterReplacement(t *testing.T) {
 	}
 }
 
+func TestLinuxAcceptanceNetworkPreventsProcessGroupEscape(t *testing.T) {
+	for _, number := range []int32{int32(unix.SYS_SETPGID), int32(unix.SYS_SETSID)} {
+		response, err := handleLinuxAcceptanceNetworkNotification(-1, linuxSeccompNotification{
+			Data: linuxSeccompData{Number: number},
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Error != -int32(syscall.EPERM) || response.Flags != 0 {
+			t.Fatalf("syscall %d response = %#v, want EPERM", number, response)
+		}
+	}
+}
+
 func TestLinuxAcceptanceNetworkRestrictsFastOpen(t *testing.T) {
 	tests := []struct {
 		name      string
