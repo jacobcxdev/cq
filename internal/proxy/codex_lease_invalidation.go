@@ -78,7 +78,7 @@ func codexLeaseLaneAffinityRequiresAccount(envelope codexLeaseJournalEnvelopeV2,
 	}
 	for _, record := range envelope.Records {
 		if record.Identity() == source {
-			return record.HasEncryptedState
+			return codexLeaseRecordRequiresAccount(record)
 		}
 	}
 	return true

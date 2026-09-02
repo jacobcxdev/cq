@@ -159,6 +159,7 @@ Commands:
   proxy policy        Initialise, apply, or inspect routing policy
   proxy rescue        Enter, exit, or inspect rescue mode
   proxy leases        Manage reusable Codex account leases
+  proxy trace         Query or follow causal Codex request traces
   proxy hook          Emit privacy-safe Codex turn receipts for hooks
   proxy candidate     Prepare and control isolated candidate validation
 `,
@@ -243,6 +244,14 @@ Commands:
 Invalidate reusable Codex account leases across all sessions.
 Active requests and required continuity remain unchanged. Each next eligible
 request re-runs account selection using current pool membership and capacity.
+`,
+	"proxy trace": `Usage: cq proxy trace [--session SELECTOR] [--trace ID] [--since DURATION] [--tail N] [--follow] [--json] [--payload]
+
+Query retained causal Codex request traces without contacting or changing the proxy.
+Session selectors accept a raw ID or codex://threads/ID. By default, output is
+human-readable and limited to the newest 200 matching records. --tail 0 returns
+all matching records. --json emits JSONL. --follow streams new records.
+--payload reads the opt-in payload log instead of the causal route log.
 `,
 	"proxy hook": `Usage: cq proxy hook codex-stop
 
@@ -554,6 +563,12 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 		}
 		return true, 0, nil
 	}
+	if authority.Catalogue == "proxy" && authority.Row == "proxy_trace" && !authority.Terminating {
+		if err := runProxyTrace(args[2:], stdout); err != nil {
+			return true, 1, err
+		}
+		return true, 0, nil
+	}
 	if len(args) >= 3 && args[0] == "proxy" && args[1] == "status" && args[2] == "--port" && authority.Row == "ordinary_usage_error" && !proxyStatusHasReconciledSelector(args[3:]) {
 		_, parseErr := parseProxyCommandOptionsFor("proxy status", args[2:])
 		if parseErr == nil {
@@ -746,6 +761,9 @@ func validateProxyLexicalGrammar(args []string) error {
 			return errors.New("usage: cq proxy leases invalidate [--port PORT]")
 		}
 		return nil
+	case "trace":
+		_, err := parseProxyTraceOptions(args[1:])
+		return err
 	case "hook":
 		if len(args) != 2 || args[1] != "codex-stop" {
 			return errors.New("usage: cq proxy hook codex-stop")
@@ -971,7 +989,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true, "leases": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true, "leases": true, "trace": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -1141,6 +1159,12 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 		}
 		return nil, false
 	}
+	if args[0] == "trace" {
+		if len(args) == 1 || helpRequested(args[1:]) {
+			return []string{"proxy", "trace"}, true
+		}
+		return nil, false
+	}
 	if args[0] == "candidate" {
 		if len(args) == 1 || args[1] == "--help" || args[1] == "-h" {
 			return []string{"proxy", "candidate"}, true
@@ -1169,7 +1193,7 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
 		"validate-http": true, "status": true, "pin": true,
-		"policy": true, "rescue": true, "leases": true, "hook": true,
+		"policy": true, "rescue": true, "leases": true, "trace": true, "hook": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)
 }

@@ -23,6 +23,9 @@ func TestCodexResyncRequiresNewGenerationAndPortableFullRequest(t *testing.T) {
 					t.Fatalf("matched=%v error=%v", matched, err)
 				}
 				request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
+				if trial%2 == 1 {
+					request.HasEncryptedState = true
+				}
 				transport := "websocket"
 				if trial%2 == 1 {
 					transport = "http"
@@ -71,7 +74,6 @@ func TestCodexResyncNeverReplaysIncrementalFrameOrSameSocket(t *testing.T) {
 		{name: "same upstream", request: strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, ""), downstream: 12, upstream: 13},
 		{name: "retry exhausted", request: strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, ""), downstream: 12, upstream: 14, retries: 2},
 		{name: "previous response", request: protocolWithPrevious(t), downstream: 12, upstream: 14},
-		{name: "encrypted state", request: protocolWithEncrypted(t), downstream: 12, upstream: 14},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -166,11 +168,5 @@ func TestCodexWebSocketPreupgradeProjectionUnitPassedUnwired(t *testing.T) {
 func protocolWithPrevious(t *testing.T) CodexProtocolRequest {
 	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
 	request.PreviousResponseID = "response"
-	return request
-}
-
-func protocolWithEncrypted(t *testing.T) CodexProtocolRequest {
-	request := strongHTTPProtocolRequest(t, "thread", "turn", CodexRequestTurn, "")
-	request.HasEncryptedState = true
 	return request
 }

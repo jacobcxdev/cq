@@ -463,22 +463,30 @@ Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. 
 | `codex_continuity_state_dir` | cq config directory | Optional Codex lease/continuity state-root override. |
 | `proxy_resilience_state_dir` | unset | Optional policy/runtime authority root; resilience controls stay inactive while unset. |
 | `codex_window_priming` | disabled | Priming enablement and per-window model overrides. |
-| `diagnostics_log` | unset | Redacted routing metadata JSONL path. |
-| `payload_diagnostics_log` | unset | Raw payload JSONL path; restart required. |
+| `diagnostics_log` | unset | Causal routing trace JSONL path; restart required. |
+| `payload_diagnostics_log` | unset | Raw request/response and WebSocket payload JSONL path; restart required. |
 
 ## Diagnostics and privacy
 
 ### Routing diagnostics
 
-Set `diagnostics_log` and restart. JSONL entries contain redacted route metadata: method, path, provider, route kind, model, status, latency, selected-account hint, failover state, session correlation, and safe error code. Enabling it does not change routing policy.
+Set `diagnostics_log` and restart. Every Codex HTTP request and WebSocket `response.create` frame receives a trace ID. Ordered JSONL events record ingress, request identity, candidate eligibility and exclusion, selected account hint, pool, durable lease state before and after transitions, credential refresh, upstream dispatch/status, retries, failover, relay result, close/error classification, and terminal outcome. WebSocket events also carry a stable connection ID. Route summaries share the same trace ID. Logs rotate at 64 MiB and retain four prior files. Enabling diagnostics does not change routing policy.
+
+Query one user-facing task, one trace, or recent traffic without manually searching JSONL:
+
+```bash
+cq proxy trace --session codex://threads/THREAD_ID --since 15m
+cq proxy trace --trace trace:ID --json
+cq proxy trace --follow
+```
 
 ### Payload diagnostics
 
-`payload_diagnostics_log` is disabled by default and requires restart. It records request/frame bodies plus correlation metadata for supported HTTP and Codex WebSocket traffic.
+`payload_diagnostics_log` is disabled by default and requires restart. It records exact HTTP request and response bodies plus downstream and upstream Codex WebSocket frames. Every entry contains its causal trace ID, direction, byte count, encoding, account hint where applicable, and whether capture reached a complete body. Credential-bearing headers are excluded. Query it with `cq proxy trace --payload` and the same session/trace/time filters.
 
-> **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, and other sensitive content. Do not share without review. cq does not intentionally add headers, tokens, or credential values to this log, but request bodies can themselves contain secrets.
+> **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, provider responses, and other sensitive content. Do not share without review. Request and response bodies can themselves contain secrets.
 
-Session keys in diagnostics are short deterministic hashes, not raw session identifiers. `session_source` records which header/body/WebSocket signal supplied correlation.
+Session and thread keys in diagnostics are short deterministic hashes, not raw identifiers. `session_source` records which header/body/WebSocket signal supplied session correlation.
 
 ## Environment and files
 
@@ -619,6 +627,7 @@ cq proxy rescue status
 cq proxy restart
 cq proxy start
 cq proxy status
+cq proxy trace
 cq proxy uninstall
 cq proxy validate-http
 cq refresh

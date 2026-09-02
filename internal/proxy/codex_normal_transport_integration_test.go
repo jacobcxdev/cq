@@ -34,7 +34,8 @@ import (
 type normalTransportGateScenario uint8
 
 const (
-	normalTransportGateHTTPAuthRetry normalTransportGateScenario = iota + 1
+	normalTransportGateHTTPSuccess normalTransportGateScenario = iota + 1
+	normalTransportGateHTTPAuthRetry
 	normalTransportGateHTTPForbiddenRetry
 	normalTransportGateHTTPAdmittedAuthRetry
 	normalTransportGateHTTPPortableUnauthorized
@@ -786,11 +787,14 @@ func (planner normalTransportGateCloseAfterPrecheckPlanner) Build(ctx context.Co
 }
 
 type normalTransportGateHarness struct {
-	backend     *normalTransportGateBackend
-	proxy       *httptest.Server
-	continuity  *CodexContinuityCoordinator
-	callerToken string
-	refresh     *normalTransportGateRefreshInventory
+	backend          *normalTransportGateBackend
+	proxy            *httptest.Server
+	continuity       *CodexContinuityCoordinator
+	httpPlanner      *CodexHTTPRequestPlanFactory
+	webSocketPlanner *CodexHTTPRequestPlanFactory
+	inventory        *codexInstalledHTTPValidationInventory
+	callerToken      string
+	refresh          *normalTransportGateRefreshInventory
 }
 
 type normalTransportGateMultiCredentialInventory struct {
@@ -1127,6 +1131,14 @@ func normalTransportGateAccessExpiryFixture(t *testing.T) (codex.Inventory, code
 }
 
 func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateScenario) *normalTransportGateHarness {
+	return newNormalTransportGateHarnessWithCaller(t, scenario, false)
+}
+
+func newNormalTransportGateCodexCallerHarness(t *testing.T, scenario normalTransportGateScenario) *normalTransportGateHarness {
+	return newNormalTransportGateHarnessWithCaller(t, scenario, true)
+}
+
+func newNormalTransportGateHarnessWithCaller(t *testing.T, scenario normalTransportGateScenario, authenticatedCodexCaller bool) *normalTransportGateHarness {
 	t.Helper()
 	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
 	if err != nil {
@@ -1145,6 +1157,16 @@ func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateSce
 			inventory.Accounts[0].Key: material,
 		}
 		codexCaller = &caller
+	} else if authenticatedCodexCaller {
+		account := core.inventory.inventory.Accounts[0]
+		candidate := account.Candidates[0]
+		material := core.inventory.material[account.Key]
+		codexCaller = &NormalCallerCredentialV1{
+			Domain:     NormalCallerCodex,
+			Bearer:     material.AccessToken,
+			SubjectID:  string(account.Key) + "\x00" + string(candidate.Ref.CandidateID) + "\x00" + string(candidate.Revision),
+			ValidUntil: candidate.AccessExpiresAt,
+		}
 	}
 	if normalTransportGateAllAccountsLimited(scenario) {
 		accounts := core.inventory.inventory.Accounts[:0]
@@ -1301,7 +1323,16 @@ func newNormalTransportGateHarness(t *testing.T, scenario normalTransportGateSce
 	} else {
 		proxyServer, _ = newCodexRuntimeSupervisorAcceptanceServer(t, handler, localToken)
 	}
-	return &normalTransportGateHarness{backend: backend, proxy: proxyServer, continuity: core.continuity, callerToken: callerToken, refresh: refreshInventory}
+	return &normalTransportGateHarness{
+		backend:          backend,
+		proxy:            proxyServer,
+		continuity:       core.continuity,
+		httpPlanner:      httpPlanner,
+		webSocketPlanner: webSocketPlanner,
+		inventory:        core.inventory,
+		callerToken:      callerToken,
+		refresh:          refreshInventory,
+	}
 }
 
 func normalTransportGateAllAccountsLimited(scenario normalTransportGateScenario) bool {
@@ -1374,6 +1405,39 @@ func TestNormalProxyTransportRoutesWhenAccessTokenOutlivesIDToken(t *testing.T) 
 	}
 }
 
+func TestNormalProxyTransportHTTPSuccessorRoutesAfterAbandonedPredecessor(t *testing.T) {
+	harness := newNormalTransportGateHarness(t, normalTransportGateHTTPSuccess)
+	predecessor := CodexTurnMetadata{
+		SessionID:   "normal-transport-session-abandoned",
+		ThreadID:    "normal-transport-thread-abandoned",
+		TurnID:      "normal-transport-turn-abandoned-predecessor",
+		RequestKind: CodexRequestTurn,
+	}
+	prepared, err := harness.httpPlanner.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: normalTransportGateHTTPBody(t, predecessor),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+		prepared.Frozen.Release()
+		t.Fatal(err)
+	}
+	prepared.Frozen.Release()
+
+	successor := predecessor
+	successor.TurnID = "normal-transport-turn-abandoned-successor"
+	status, responseBody := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, successor))
+	if status != http.StatusOK || !bytes.Contains(responseBody, []byte(`"type":"response.completed"`)) {
+		t.Fatalf("successor HTTP response = %d %q, want completed 200", status, responseBody)
+	}
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 1 || receipts[0].status != http.StatusOK {
+		t.Fatalf("successor provider receipts = %#v, want one completed request", receipts)
+	}
+	harness.backend.assertNoFailure(t)
+}
+
 func TestNormalProxyTransportHTTPRejectedTurnCanRetry(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1431,6 +1495,172 @@ func TestNormalProxyTransportHTTPHardLimitMigratesBeforeLeak(t *testing.T) {
 		t.Fatalf("hard-limit provider receipts = %#v, want A/429 then byte-identical B/200", receipts)
 	}
 	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportHTTPPortableSuccessorReplaysAfterEncryptedPredecessorHardLimit(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateWSNonPortableApplicationHardLimit)
+	predecessor := CodexTurnMetadata{
+		SessionID: "normal-transport-session-http-encrypted-429", ThreadID: "normal-transport-thread-http-encrypted-429", TurnID: "normal-transport-turn-http-encrypted-predecessor", RequestKind: CodexRequestTurn,
+	}
+	status, body := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, predecessor))
+	if status != http.StatusOK || !bytes.Contains(body, []byte(`"encrypted_content":"opaque-normal-transport-state"`)) {
+		t.Fatalf("encrypted predecessor = %d %q, want A/200", status, body)
+	}
+
+	harness.backend.scenario = normalTransportGateHTTPHardLimit
+	successor := predecessor
+	successor.TurnID = "normal-transport-turn-http-encrypted-successor"
+	var request map[string]any
+	if err := json.Unmarshal(normalTransportGateHTTPBody(t, successor), &request); err != nil {
+		t.Fatal(err)
+	}
+	request["input"] = []any{map[string]any{"encrypted_content": "opaque-normal-transport-state"}}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
+		t.Fatalf("encrypted successor = %d %q, want replayed B/200", status, body)
+	}
+
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 3 ||
+		receipts[0].accountID != "validation-upstream-a" || receipts[0].status != http.StatusOK ||
+		receipts[1].accountID != "validation-upstream-a" || receipts[1].status != http.StatusTooManyRequests ||
+		receipts[2].accountID != "validation-upstream-b" || receipts[2].status != http.StatusOK ||
+		receipts[1].payload != receipts[2].payload {
+		t.Fatalf("encrypted successor receipts = %#v, want A/200 then byte-identical A/429 and B/200", receipts)
+	}
+	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportWebSocketPortableSuccessorMigratesAfterExhaustedEncryptedPredecessor(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateWSNonPortableApplicationHardLimit)
+	allAccounts := append([]codex.LogicalAccount(nil), harness.inventory.inventory.Accounts...)
+	if len(allAccounts) < 2 || allAccounts[0].Key != codexInstalledHTTPValidationAccountA || allAccounts[1].Key != codexInstalledHTTPValidationAccountB {
+		t.Fatalf("validation inventory = %#v, want A then B", allAccounts)
+	}
+	harness.inventory.inventory.Accounts = append([]codex.LogicalAccount(nil), allAccounts[:1]...)
+
+	predecessor := CodexTurnMetadata{
+		SessionID: "normal-transport-session-ws-successor", ThreadID: "normal-transport-thread-ws-successor", TurnID: "normal-transport-turn-ws-predecessor", RequestKind: CodexRequestTurn,
+	}
+	seedStatus, seedBody := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, predecessor))
+	if seedStatus != http.StatusOK || !bytes.Contains(seedBody, []byte(`"encrypted_content":"opaque-normal-transport-state"`)) {
+		t.Fatalf("predecessor seed = %d %q, want encrypted A/200", seedStatus, seedBody)
+	}
+	var encryptedContinuation map[string]any
+	if err := json.Unmarshal(normalTransportGateHTTPContinuationBody(t, predecessor, "normal-transport-http"), &encryptedContinuation); err != nil {
+		t.Fatal(err)
+	}
+	encryptedContinuation["input"] = []any{map[string]any{"encrypted_content": "opaque-normal-transport-state"}}
+	encryptedBody, err := json.Marshal(encryptedContinuation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuationStatus, continuationBody := normalTransportGateHTTPCall(t, harness, encryptedBody)
+	if continuationStatus != http.StatusOK || !bytes.Contains(continuationBody, []byte(`"type":"response.completed"`)) {
+		t.Fatalf("encrypted predecessor continuation = %d %q, want A/200", continuationStatus, continuationBody)
+	}
+	predecessorSnapshot, err := harness.continuity.LoadRouteSnapshot(context.Background(), NewCodexLeaseKey(predecessor), []codex.AccountKey{codexInstalledHTTPValidationAccountA}, CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predecessorSnapshot.AffinityRequiresAccount || predecessorSnapshot.BoundRequiresAccount {
+		t.Fatalf("encrypted predecessor snapshot = %#v, want portable account affinity", predecessorSnapshot)
+	}
+
+	exhausted := normalTransportGateWebSocket(t, harness)
+	if err := exhausted.WriteMessage(websocket.TextMessage, normalTransportGateWSFrameForLane(predecessor.SessionID, predecessor.ThreadID, predecessor.TurnID, "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := exhausted.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	messageType, payload, err := exhausted.ReadMessage()
+	if err != nil || messageType != websocket.TextMessage {
+		t.Fatalf("exhausted predecessor = type %d payload %q err %v, want final 429", messageType, payload, err)
+	}
+	normalTransportGateRequireSemanticJSON(t, payload, []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`), "exhausted predecessor")
+	_ = exhausted.Close()
+	harness.inventory.inventory.Accounts = append([]codex.LogicalAccount(nil), allAccounts...)
+
+	successor := normalTransportGateWebSocket(t, harness)
+	successorFrame := bytes.Replace(
+		normalTransportGateWSFrameForLane(predecessor.SessionID, predecessor.ThreadID, "normal-transport-turn-ws-successor", ""),
+		[]byte(`"input":[]`),
+		[]byte(`"input":[{"encrypted_content":"opaque-normal-transport-state"}]`),
+		1,
+	)
+	if err := successor.WriteMessage(websocket.TextMessage, successorFrame); err != nil {
+		t.Fatal(err)
+	}
+	normalTransportGateReadWSCompletion(t, successor)
+	_ = successor.Close()
+
+	receipts := harness.backend.snapshot()
+	handshakes := normalTransportGateReceipts(receipts, "websocket_handshake")
+	frames := normalTransportGateReceipts(receipts, "websocket_frame")
+	if len(handshakes) != 2 || len(frames) != 2 || handshakes[0].accountID != "validation-upstream-a" || handshakes[1].accountID != "validation-upstream-b" || frames[0].accountID != "validation-upstream-a" || frames[1].accountID != "validation-upstream-b" {
+		t.Fatalf("successor migration receipts = handshakes %#v frames %#v, want A then B", handshakes, frames)
+	}
+	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportLeaseInvalidationReselectsCurrentPortableTurn(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		t.Run(transport, func(t *testing.T) {
+			harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateWSNonPortableApplicationHardLimit)
+			predecessor := CodexTurnMetadata{
+				SessionID:   "normal-transport-session-invalidate-" + transport,
+				ThreadID:    "normal-transport-thread-invalidate-" + transport,
+				TurnID:      "normal-transport-turn-invalidate-predecessor-" + transport,
+				RequestKind: CodexRequestTurn,
+			}
+			status, body := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, predecessor))
+			if status != http.StatusOK || !bytes.Contains(body, []byte(`"encrypted_content":"opaque-normal-transport-state"`)) {
+				t.Fatalf("continuity seed = %d %q, want encrypted A/200", status, body)
+			}
+
+			result, err := harness.continuity.InvalidateTaskAffinities(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.InvalidatedLeases != 1 {
+				t.Fatalf("invalidated leases = %d, want 1", result.InvalidatedLeases)
+			}
+			harness.httpPlanner.PinnedAccountKey = codexInstalledHTTPValidationAccountB
+			harness.webSocketPlanner.PinnedAccountKey = codexInstalledHTTPValidationAccountB
+			successor := predecessor
+			successor.TurnID = "normal-transport-turn-invalidate-successor-" + transport
+
+			switch transport {
+			case "http":
+				status, body := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, successor))
+				if status != http.StatusOK || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
+					t.Fatalf("post-invalidation response = %d %q, want completed B/200", status, body)
+				}
+				receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+				if len(receipts) != 2 || receipts[0].accountID != "validation-upstream-a" || receipts[1].accountID != "validation-upstream-b" {
+					t.Fatalf("post-invalidation HTTP receipts = %#v, want A then B", receipts)
+				}
+			case "websocket":
+				connection := normalTransportGateWebSocket(t, harness)
+				if err := connection.WriteMessage(websocket.TextMessage, normalTransportGateWSFrameForLane(successor.SessionID, successor.ThreadID, successor.TurnID, "")); err != nil {
+					t.Fatal(err)
+				}
+				normalTransportGateReadWSCompletion(t, connection)
+				_ = connection.Close()
+				handshakes := normalTransportGateReceipts(harness.backend.snapshot(), "websocket_handshake")
+				frames := normalTransportGateReceipts(harness.backend.snapshot(), "websocket_frame")
+				if len(handshakes) != 1 || len(frames) != 1 || frames[0].accountID != "validation-upstream-b" {
+					t.Fatalf("post-invalidation WebSocket receipts = handshakes %#v frames %#v, want B only", handshakes, frames)
+				}
+			}
+			harness.backend.assertNoFailure(t)
+		})
+	}
 }
 
 func TestNormalProxyTransportHTTPSoftLimitDoesNotMigrate(t *testing.T) {
@@ -1569,8 +1799,10 @@ func TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak(t *testing.T) 
 		name       string
 		scenario   normalTransportGateScenario
 		contentEnc string
+		encrypted  bool
 	}{
 		{name: "application frame", scenario: normalTransportGateWSApplicationHardLimit},
+		{name: "encrypted application frame", scenario: normalTransportGateWSApplicationHardLimit, encrypted: true},
 		{name: "handshake", scenario: normalTransportGateWSHandshakeHardLimit},
 		{name: "gzip handshake", scenario: normalTransportGateWSHandshakeHardLimit, contentEnc: "gzip"},
 		{name: "zstd handshake", scenario: normalTransportGateWSHandshakeHardLimit, contentEnc: "zstd"},
@@ -1587,6 +1819,9 @@ func TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak(t *testing.T) 
 			}
 			connection := normalTransportGateWebSocket(t, harness)
 			frame := normalTransportGateWSFrame("normal-transport-turn-ws-429", "")
+			if test.encrypted {
+				frame = bytes.Replace(frame, []byte(`"input":[]`), []byte(`"input":[{"encrypted_content":"opaque-normal-transport-state"}]`), 1)
+			}
 			if err := connection.WriteMessage(websocket.TextMessage, frame); err != nil {
 				t.Fatal(err)
 			}

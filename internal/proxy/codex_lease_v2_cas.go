@@ -684,7 +684,7 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 		return fmt.Errorf("%w: lane current and last authority diverged", ErrCodexLeaseTrustLost)
 	}
 	prior := originalRecords[storedLast]
-	if prior.State != LeaseContinuationPending && prior.State != LeaseBoundQuiescent && prior.State != LeaseOrphaned {
+	if prior.State != LeaseContinuationPending && prior.State != LeaseBoundQuiescent && prior.State != LeaseOrphaned && !codexLeaseAbandonedUnadmittedHead(prior) {
 		return fmt.Errorf("%w: predecessor work is not replaceable", ErrCodexLeaseInvalidMutation)
 	}
 	if _, updated := upsertIDs[storedLast]; !updated || predecessor.State != LeaseSuperseded || predecessor.RoutingRefs != 0 || predecessor.AttemptRefs != 0 || predecessor.ResponseObserverRefs != 0 {
@@ -696,7 +696,7 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
 	result := cloneCodexJournalRecordV2(input)
 	bindingReassignment := exists && codexLeaseAccountUnavailableAdmission(old, input)
-	bindingReset := exists && beginRequest && codexLeaseAccountUnavailableBeginRequest(old, input)
+	bindingReset := exists && beginRequest && (codexLeaseAccountUnavailableBeginRequest(old, input) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old))
 	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if result.SessionHash == "" || result.ThreadHash == "" || result.NamespaceHash == "" || result.TurnHash == "" || result.ModeEpoch == 0 || result.ProtocolSchema != CurrentCodexLeaseSchema {
 		return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: incomplete record identity/protocol", ErrCodexLeaseInvalidMutation)
@@ -716,7 +716,8 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: record generation overflow", ErrCodexLeaseInvalidMutation)
 		}
 		provisionalUncertainty := !beginRequest && old.State == LeaseProvisional && input.State == LeaseOrphaned
-		if !provisionalUncertainty && !beginRequest && old.State != input.State && !validLeaseTransition(old.State, input.State) {
+		abandonedSuccessor := !beginRequest && input.State == LeaseSuperseded && codexLeaseAbandonedUnadmittedHead(old)
+		if !provisionalUncertainty && !abandonedSuccessor && !beginRequest && old.State != input.State && !validLeaseTransition(old.State, input.State) {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: forbidden lease transition %s -> %s", ErrCodexLeaseInvalidMutation, old.State, input.State)
 		}
 		if old.PredecessorTurnHash != input.PredecessorTurnHash || old.PredecessorModeEpoch != input.PredecessorModeEpoch || old.PredecessorAuthoritative != input.PredecessorAuthoritative {
@@ -902,7 +903,7 @@ func codexLeaseAccountUnavailableBeginRequest(old, desired CodexJournalRecordV2)
 
 func codexLeaseAffinityInvalidationBeginRequest(old, desired CodexJournalRecordV2, lane CodexJournalLane, invalidationGeneration uint64) bool {
 	if invalidationGeneration == 0 || lane.LastAdmissionJournalGeneration == 0 || lane.LastAdmissionJournalGeneration > invalidationGeneration ||
-		!old.EverAdmitted || old.NonMigratable || old.HasEncryptedState || old.HasTurnState || desired.NonMigratable ||
+		!old.EverAdmitted || codexLeaseRecordRequiresAccount(old) || desired.NonMigratable ||
 		len(desired.AttemptEnvelope.Slots) == 0 || len(desired.Attempts) != 1 {
 		return false
 	}
@@ -1029,7 +1030,7 @@ func codexLeaseCurrentRequestCacheRefreshEligible(old, result CodexJournalRecord
 
 func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired CodexJournalRecordV2, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexCurrentRequest, error) {
 	request := cloneCodexCurrentRequest(desired.CodexCurrentRequest)
-	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired) || affinityInvalidationReset
+	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old)
 	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if request.Generation != 0 || request.CurrentAttemptGeneration != 0 || len(request.Attempts) != 1 {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest requires a store-owned generation and one prepared attempt", ErrCodexLeaseInvalidMutation)

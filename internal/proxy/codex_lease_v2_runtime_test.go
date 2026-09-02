@@ -482,7 +482,7 @@ func TestCodexLeaseRuntimeRetriesPinnedAccountCandidate(t *testing.T) {
 	}
 }
 
-func TestCodexLeaseRuntimePersistsInheritedAccountContinuityWithoutRawState(t *testing.T) {
+func TestCodexLeaseRuntimeDoesNotInheritAccountContinuityFromEncryptedResponseState(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
@@ -512,24 +512,17 @@ func TestCodexLeaseRuntimePersistsInheritedAccountContinuityWithoutRawState(t *t
 		t.Fatal(err)
 	}
 
-	unsafePlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{
+	portablePlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{
 		{AccountKey: "account-a", CandidateID: "candidate-2a", Kind: CodexAttemptSlotDirect},
 		{AccountKey: "account-b", CandidateID: "candidate-2b", Kind: CodexAttemptSlotDirect},
 	})
-	unsafePlan.Accounts = []codex.AccountKey{"account-a", "account-b"}
-	if _, err := runtimeLease.BeginRequest(unsafePlan); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
-		t.Fatalf("hard predecessor alternate slots = %v, want invalid mutation", err)
-	}
-
-	secondPlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{
-		AccountKey: "account-a", CandidateID: "candidate-2", Kind: CodexAttemptSlotDirect,
-	}})
-	second, err := runtimeLease.BeginRequest(secondPlan)
+	portablePlan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	second, err := runtimeLease.BeginRequest(portablePlan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !second.record.NonMigratable || second.record.HasEncryptedState {
-		t.Fatalf("inherited continuity = non-migratable %v current encrypted %v, want true/false", second.record.NonMigratable, second.record.HasEncryptedState)
+	if second.record.NonMigratable || second.record.HasEncryptedState {
+		t.Fatalf("inherited continuity = non-migratable %v current encrypted %v, want false/false", second.record.NonMigratable, second.record.HasEncryptedState)
 	}
 }
 

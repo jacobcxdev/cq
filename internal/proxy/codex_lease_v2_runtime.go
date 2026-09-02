@@ -287,6 +287,7 @@ func (runtime *CodexLeaseRuntime) acquireRequestPlanningWithContinuityContext(ct
 	if err != nil {
 		return nil, nil, err
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "planning_gate", Outcome: "acquired"})
 	claim := newCodexLeaseIngressContinuityClaim(runtime, ingress)
 	var releaseOnce sync.Once
 	release := func() {
@@ -295,19 +296,31 @@ func (runtime *CodexLeaseRuntime) acquireRequestPlanningWithContinuityContext(ct
 			guard.Release()
 		})
 	}
+	waiting := false
 	for {
-		available, err := runtime.requestPlanningAvailable(key, accounts, authority)
+		available, reason, err := runtime.requestPlanningAvailable(key, accounts, authority)
 		if err != nil {
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "planning_wait", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 			release()
 			return nil, nil, err
 		}
 		if available {
+			outcome := "immediate"
+			if waiting {
+				outcome = "ready"
+			}
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "planning_wait", Outcome: outcome})
 			return claim, release, nil
+		}
+		if !waiting {
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "planning_wait", Outcome: "blocked", Reason: reason})
+			waiting = true
 		}
 		timer := time.NewTimer(codexLeaseRequestPlanningRetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "planning_wait", Outcome: "error", Reason: string(codexRequestFailureReason(ctx.Err()))})
 			release()
 			return nil, nil, ctx.Err()
 		case <-timer.C:
@@ -545,26 +558,51 @@ func (set *codexLanePlanningGateSet) releaseReference(lane LaneKey, entry *codex
 	}
 }
 
-func (runtime *CodexLeaseRuntime) requestPlanningAvailable(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (bool, error) {
+func (runtime *CodexLeaseRuntime) requestPlanningAvailable(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (bool, string, error) {
 	restored, err := runtime.store.LoadLane(key, accounts, authority)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	switch restored.Classification {
 	case CodexRestoredLaneCurrent:
 		current, ok := runtime.restoredRecord(restored, restored.Fence.Current)
 		if !ok {
-			return false, fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
+			return false, "", fmt.Errorf("%w: current runtime record is absent", ErrCodexLeaseTrustLost)
 		}
-		return codexLeaseRuntimeCanBeginRequest(current.Record), nil
+		if codexLeaseRuntimeCanBeginRequest(current.Record) {
+			return true, "", nil
+		}
+		return false, codexLeasePlanningWaitReason(restored.Classification, current.Record), nil
 	case CodexRestoredLaneUnseen:
 		if restored.Fence.Lane == 0 {
-			return true, nil
+			return true, "", nil
 		}
-		return runtime.canReserveSuccessor(restored)
+		available, err := runtime.canReserveSuccessor(restored)
+		if err != nil || available {
+			return available, "", err
+		}
+		predecessor, ok := runtime.restoredRecord(restored, restored.Fence.Last)
+		if !ok {
+			return false, "classification=" + string(restored.Classification) + " predecessor=absent", nil
+		}
+		return false, codexLeasePlanningWaitReason(restored.Classification, predecessor.Record), nil
 	default:
-		return true, nil
+		return true, "", nil
 	}
+}
+
+func codexLeasePlanningWaitReason(classification CodexRestoredLaneClassification, record CodexJournalRecordV2) string {
+	return fmt.Sprintf(
+		"classification=%s state=%s attempt=%s routing_refs=%d attempt_refs=%d observer_refs=%d socket_lineage_extinct=%t ever_admitted=%t",
+		classification,
+		record.State,
+		codexLeaseCurrentAttemptState(record),
+		record.RoutingRefs,
+		record.AttemptRefs,
+		record.ResponseObserverRefs,
+		record.SocketLineageExtinct,
+		record.EverAdmitted,
+	)
 }
 
 // BeginRequestContext durably reserves an unseen turn, then atomically installs
@@ -673,7 +711,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
 	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
-	if !requiresAccountContinuity && (codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence)) {
+	if !requiresAccountContinuity && (codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence) || codexLeaseRecordAllowsPortableReset(current.Record)) {
 		if current.Record.EverAdmitted {
 			desired.AccountHash = current.Record.AccountHash
 		}
@@ -730,11 +768,33 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	return handle, nil
 }
 
+func codexLeaseRecordRequiresAccount(record CodexJournalRecordV2) bool {
+	if record.HasTurnState {
+		return true
+	}
+	if !record.NonMigratable {
+		return false
+	}
+	if record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !record.SocketLineageExtinct {
+		return true
+	}
+	switch codexLeaseCurrentAttemptState(record) {
+	case CodexAttemptProviderCompleted, CodexAttemptProviderFailed, CodexAttemptAbandonedBeforeDispatch, CodexAttemptAccountUnavailable:
+		return false
+	default:
+		return true
+	}
+}
+
+func codexLeaseRecordAllowsPortableReset(record CodexJournalRecordV2) bool {
+	return record.NonMigratable && !codexLeaseRecordRequiresAccount(record)
+}
+
 func codexLeaseAffinityInvalidationCanBeginRequest(restored CodexRestoredLane, record CodexJournalRecordV2, evidence CodexLeaseRequestEvidence) bool {
 	return restored.AffinityInvalidationGeneration != 0 && restored.Lane.LastAdmissionJournalGeneration != 0 &&
 		codexLaneAffinityJournalGeneration(restored.Lane) <= restored.AffinityInvalidationGeneration &&
-		evidence.PreviousResponseID == "" && !evidence.HasTurnState && !evidence.HasEncryptedState &&
-		record.EverAdmitted && !record.NonMigratable && !record.HasTurnState && !record.HasEncryptedState
+		evidence.PreviousResponseID == "" && !evidence.HasTurnState &&
+		record.EverAdmitted && !codexLeaseRecordRequiresAccount(record)
 }
 
 func (runtime *CodexLeaseRuntime) adoptWebSocketPrewarmContext(ctx context.Context, accounts []codex.AccountKey, request CodexPrewarmAdoptionRequest) (*CodexLeaseRequestHandle, error) {
@@ -1806,7 +1866,7 @@ func (runtime *CodexLeaseRuntime) canReserveSuccessor(restored CodexRestoredLane
 		}
 		return predecessor.Record.Generation == 0 || codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)), nil
 	case restored.Fence.Current == restored.Fence.Last:
-		terminalState := predecessor.Record.State == LeaseContinuationPending || predecessor.Record.State == LeaseBoundQuiescent || predecessor.Record.State == LeaseOrphaned
+		terminalState := predecessor.Record.State == LeaseContinuationPending || predecessor.Record.State == LeaseBoundQuiescent || predecessor.Record.State == LeaseOrphaned || codexLeaseAbandonedUnadmittedHead(predecessor.Record)
 		return terminalState && codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(predecessor.Record)) && predecessor.Record.SocketLineageExtinct, nil
 	default:
 		return false, fmt.Errorf("%w: lane current and last authority diverged", ErrCodexLeaseTrustLost)
@@ -1959,17 +2019,8 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 			return false, &codexContinuityError{reason: codexContinuityPreviousResponseMismatch}
 		}
 	}
-	if evidence.HasEncryptedState && (!found || (!authority.Record.EverAdmitted && !authority.Record.NonMigratable && !authority.Record.HasEncryptedState)) {
-		if restored.Affinity == nil || !restored.Affinity.Resolved || restored.Affinity.AccountKey == "" {
-			return false, &codexContinuityError{reason: codexContinuityEncryptedAffinityMissing}
-		}
-		if restored.Affinity.AccountKey != selected {
-			return true, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
-		}
-		return true, nil
-	}
-	requiresAccount := authenticatedCallerContinuity || evidence.PreviousResponseID != "" || evidence.HasTurnState || evidence.HasEncryptedState || (found && (authority.Record.HasEncryptedState || (!newTurn && authority.Record.NonMigratable)))
-	if found && codexLeaseCurrentAttemptState(authority.Record) == CodexAttemptAccountUnavailable && evidence.PreviousResponseID == "" && !evidence.HasTurnState && !evidence.HasEncryptedState {
+	requiresAccount := authenticatedCallerContinuity || evidence.PreviousResponseID != "" || evidence.HasTurnState || (found && !newTurn && codexLeaseRecordRequiresAccount(authority.Record))
+	if found && codexLeaseCurrentAttemptState(authority.Record) == CodexAttemptAccountUnavailable && evidence.PreviousResponseID == "" && !evidence.HasTurnState {
 		requiresAccount = false
 	}
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
@@ -2111,7 +2162,7 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
 	}
-	hasCallerContinuityEvidence := plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState || plan.Evidence.HasEncryptedState
+	hasCallerContinuityEvidence := plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState
 	if plan.authenticatedCallerContinuity && (!plan.RequiresAccountContinuity || !plan.Authority.Authoritative || (!hasCallerContinuityEvidence && plan.ExpectedBound == nil)) {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid authenticated caller continuity", ErrCodexLeaseInvalidMutation)
 	}
@@ -2199,7 +2250,7 @@ func codexLeaseRuntimeCanBeginRequest(record CodexJournalRecordV2) bool {
 	if record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(record)) {
 		return false
 	}
-	return record.State == LeaseContinuationPending || record.State == LeaseBoundQuiescent || record.State == LeaseOrphaned || (record.State == LeaseProvisional && codexLeaseCurrentAttemptState(record) == CodexAttemptAbandonedBeforeDispatch) || codexLeaseRestartableFailedHead(record)
+	return record.State == LeaseContinuationPending || record.State == LeaseBoundQuiescent || record.State == LeaseOrphaned || codexLeaseAbandonedUnadmittedHead(record) || codexLeaseRestartableFailedHead(record)
 }
 
 func validCodexLeaseRuntimeRequest(kind CodexRequestKind, phase CodexCompactionPhase) bool {

@@ -1746,7 +1746,20 @@ func (h *codexStage11LifecycleHarness) assertEvidence(t *testing.T, expected cod
 		t.Fatalf("journal records/lanes = %d/%d, want %d/%d", len(envelope.Records), len(envelope.Lanes), expected.journalRecords, expected.journalLanes)
 	}
 	h.assertDurableJournalSemantics(t, envelope, expected)
-	lines := bytes.Split(bytes.TrimSpace(diagnostics), []byte("\n"))
+	rawLines := bytes.Split(bytes.TrimSpace(diagnostics), []byte("\n"))
+	lines := make([][]byte, 0, len(rawLines))
+	for _, line := range rawLines {
+		var envelope struct {
+			EventType string `json:"event_type"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			t.Fatalf("decode diagnostic envelope: %v", err)
+		}
+		if envelope.EventType == "codex_trace" {
+			continue
+		}
+		lines = append(lines, line)
+	}
 	wantEvents := expected.httpRequests + expected.webSocketConnections + expected.webSocketRequests
 	if len(lines) != wantEvents {
 		t.Fatalf("diagnostic route events = %d, want %d", len(lines), wantEvents)

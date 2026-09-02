@@ -167,6 +167,9 @@ func (handler *CodexNativeHTTPHandler) CloseAndDrain(ctx context.Context) error 
 // reading it, so every return path reports handled and legacy routing cannot run.
 func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, request *http.Request, compact bool) (bool, string) {
 	if handler == nil || handler.planner == nil || handler.session == nil || writer == nil || request == nil {
+		if request != nil {
+			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "admission", Outcome: "error", Reason: "handler_unavailable"})
+		}
 		if writer != nil {
 			writeError(writer, http.StatusServiceUnavailable, "api_error", "Codex native HTTP routing unavailable")
 		}
@@ -174,11 +177,13 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 	}
 	release, admitted := handler.requests.enter()
 	if !admitted {
+		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "admission", Outcome: "rejected", Reason: "admission_closed"})
 		closeCodexNativeHTTPRejectedRequestBody(request.Body)
 		writeError(writer, http.StatusServiceUnavailable, "api_error", "Codex native HTTP routing unavailable")
 		return true, ""
 	}
 	defer release()
+	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "admission", Outcome: "accepted"})
 	path := codexInstalledHTTPProbeResponses
 	if compact {
 		path = codexInstalledHTTPProbeCompact
@@ -190,15 +195,24 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 	}
 	encoded, err := readCodexNativeHTTPRequest(request)
 	if err != nil {
+		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "request_body", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		writeError(writer, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
 		return true, ""
 	}
+	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "request_body", Outcome: "read", BytesIn: int64(len(encoded))})
+	payloadBody, payloadEncoding := encodeCodexTracePayload(encoded)
+	emitCodexTracePayload(request.Context(), PayloadEvent{
+		Method: request.Method, Path: request.URL.Path, Provider: "codex", RouteKind: "codex_native",
+		Direction: "downstream_request", Headers: codexTraceHeaders(request.Header), Complete: true,
+		BodyBytes: len(encoded), BodyEncoding: payloadEncoding, Body: payloadBody,
+	})
 
 	return handler.serveEncoded(writer, request, compact, encoded, nil)
 }
 
 func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, request *http.Request, compact bool, encoded []byte, claim *CodexRetainedHTTPRequestClaim) (bool, string) {
 	trace := codexInstalledHTTPTraceFromContext(request.Context())
+	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "planning", Outcome: "started"})
 	prepared, err := func() (CodexPreparedHTTPRequest, error) {
 		ctx, release := handler.requestPlanningContext(request.Context())
 		defer release()
@@ -227,6 +241,9 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 			}
 		}
 		noteCodexObservation(request.Context(), codexObservationFields{Decision: "plan_failed", Reason: string(failure.Reason)})
+		emitCodexTrace(request.Context(), CodexTraceEvent{
+			Phase: "planning", Stage: string(failure.Stage), Outcome: "error", Reason: string(failure.Reason), StatusCode: status,
+		})
 		if handler.reportPlanFailure != nil {
 			handler.reportPlanFailure(failure)
 		}
@@ -238,7 +255,11 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	if accounts := prepared.Dispatch.Accounts(); len(accounts) > 0 {
 		model = accounts[0].Choice().EffectiveModel
 	}
+	emitCodexTrace(request.Context(), CodexTraceEvent{
+		Phase: "planning", Outcome: "success", Candidates: codexTraceDispatchCandidates(prepared.Dispatch),
+	})
 	template := handler.requestTemplate(request, compact)
+	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Outcome: "started"})
 	result, err := handler.session.Do(
 		request.Context(),
 		template,
@@ -249,6 +270,11 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	if err != nil {
 		failure := classifyCodexNativeHTTPSessionFailure(err)
 		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
+		event := CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway}
+		if failure.roundTrip != nil {
+			event.ErrorClass = string(failure.roundTrip.reason)
+		}
+		emitCodexTrace(request.Context(), event)
 		if handler.reportSessionFailure != nil {
 			handler.reportSessionFailure(failure)
 		}
@@ -258,16 +284,22 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	if result.Response == nil || result.Response.Body == nil {
 		failure := codexNativeHTTPSessionFailure{stage: "response_validate", reason: "response_unavailable"}
 		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
+		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway})
 		if handler.reportSessionFailure != nil {
 			handler.reportSessionFailure(failure)
 		}
 		writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream response unavailable")
 		return true, model
 	}
+	emitCodexTrace(request.Context(), CodexTraceEvent{
+		Phase: "upstream_response", Outcome: codexTraceHTTPOutcome(result.Response.StatusCode),
+		UpstreamStatus: result.Response.StatusCode, AccountHint: codexTraceAccountHint(result.Choice.AccountKey), Attempt: result.Attempt.Ordinal,
+	})
 
 	if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
 		defer closeCodexHTTPResponseBody(result.Response.Body)
 		relayErr := relayCodexHTTPResponse(writer, result.Response, false)
+		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "relay", Outcome: codexTraceRelayOutcome(relayErr), UpstreamStatus: result.Response.StatusCode, Reason: codexTraceErrorReason(relayErr)})
 		trace.relayedResponse(false, true, relayErr)
 		return true, model
 	}
@@ -277,6 +309,7 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		mode = codexHTTPResponseModeCompact
 	}
 	relayErr := relayCodexAcceptedHTTPResponse(request.Context(), writer, result.Response, mode, result.Lifecycle)
+	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "relay", Outcome: codexTraceRelayOutcome(relayErr), UpstreamStatus: result.Response.StatusCode, Reason: codexTraceErrorReason(relayErr)})
 	trace.relayedResponse(true, false, relayErr)
 	return true, model
 }

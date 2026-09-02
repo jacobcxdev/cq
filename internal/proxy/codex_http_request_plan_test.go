@@ -568,10 +568,10 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 		{name: "missing timing stays sticky", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
 		{name: "clock rollback stays sticky", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(time.Minute), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
 		{name: "model change has no reusable cache", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
-		{name: "encrypted predecessor remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
-		{name: "encrypted predecessor survives model change", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
-		{name: "encrypted predecessor survives hard zero", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, hardZero: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
-		{name: "encrypted request remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), encryptedRequest: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "required predecessor remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "required predecessor survives model change", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "required predecessor survives hard zero", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, hardZero: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "encrypted request permits fairness after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), encryptedRequest: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
 		{name: "exact turn remains bound after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1},
 		{name: "indeterminate turn remains pinned for full create", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, boundRequires: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
 		{name: "warm unresolved account permits fairness", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), unresolved: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
@@ -687,7 +687,7 @@ func TestCodexGPT56PromptCacheModelRecognisesOnlyInstalledPolicy(t *testing.T) {
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryPrefersExactBoundForRawContinuity(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryPrefersExactBoundForPortableEncryptedInput(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
@@ -721,8 +721,8 @@ func TestCodexHTTPRequestPlanFactoryPrefersExactBoundForRawContinuity(t *testing
 	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" || accounts[0].decision != codexRuntimeDecisionNone {
 		t.Fatalf("hard exact-turn dispatch = %#v, want bound account-b only", accounts)
 	}
-	if !runtime.plan.RequiresAccountContinuity {
-		t.Fatal("raw hard continuity was not carried into the durable request plan")
+	if runtime.plan.RequiresAccountContinuity {
+		t.Fatal("encrypted input was incorrectly carried as durable account continuity")
 	}
 }
 
@@ -1057,7 +1057,7 @@ func TestCodexHTTPRequestAccountUnavailablePortableRejectsProviderContinuationSt
 		{name: "explicit empty previous response", protocol: CodexProtocolRequest{HasPreviousResponseID: true}},
 		{name: "previous response", protocol: CodexProtocolRequest{PreviousResponseID: "response", HasPreviousResponseID: true}},
 		{name: "turn state", protocol: CodexProtocolRequest{HasTurnState: true}},
-		{name: "encrypted state", protocol: CodexProtocolRequest{HasEncryptedState: true}},
+		{name: "encrypted state", protocol: CodexProtocolRequest{HasEncryptedState: true}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := codexHTTPRequestAccountUnavailablePortable(test.protocol); got != test.want {
@@ -2108,7 +2108,10 @@ func TestCodexHTTPRequestPlanFactoryEnrichesOnlyHTTPDiagnosticsWithoutEmitting(t
 				if event.SessionKey != hashPrefix("codex-session", "session") || event.SessionSource != "metadata:session_id" || ingress != 1 {
 					t.Fatalf("HTTP task ingress = key %q source %q count %d", event.SessionKey, event.SessionSource, ingress)
 				}
-			} else if event.SessionKey != "" || event.SessionSource != "" || ingress != 0 {
+				if event.ThreadKey != hashPrefix("codex-thread", "thread") {
+					t.Fatalf("HTTP thread correlation = %q", event.ThreadKey)
+				}
+			} else if event.SessionKey != "" || event.SessionSource != "" || event.ThreadKey != "" || ingress != 0 {
 				t.Fatalf("WebSocket planner emitted HTTP ingress = key %q source %q count %d", event.SessionKey, event.SessionSource, ingress)
 			}
 		})

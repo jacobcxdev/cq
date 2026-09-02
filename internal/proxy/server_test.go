@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1204,16 +1205,30 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 			return
 		}
 		defer conn.Close()
-		messageType, message, err := conn.ReadMessage()
-		if err != nil {
-			t.Errorf("upstream read error = %v", err)
-			return
+		wantRequests := []struct {
+			messageType int
+			body        []byte
+		}{
+			{messageType: websocket.TextMessage, body: []byte(`{"jsonrpc":"2.0","id":1,"method":"response/create","params":{"model":"gpt-5.5","previous_response_id":"resp_prev"}}`)},
+			{messageType: websocket.BinaryMessage, body: []byte{0x00, 0xff, 0x10, 0x7f}},
 		}
-		if !strings.Contains(string(message), "response/create") {
-			t.Errorf("upstream message = %q, want response/create frame", message)
+		responses := [][]byte{
+			[]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`),
+			{0xfe, 0x01, 0x80, 0x02},
 		}
-		if err := conn.WriteMessage(messageType, []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
-			t.Errorf("upstream write error = %v", err)
+		for index, want := range wantRequests {
+			messageType, message, err := conn.ReadMessage()
+			if err != nil {
+				t.Errorf("upstream read %d error = %v", index+1, err)
+				return
+			}
+			if messageType != want.messageType || !bytes.Equal(message, want.body) {
+				t.Errorf("upstream message %d = type %d %x, want type %d %x", index+1, messageType, message, want.messageType, want.body)
+			}
+			if err := conn.WriteMessage(messageType, responses[index]); err != nil {
+				t.Errorf("upstream write %d error = %v", index+1, err)
+				return
+			}
 		}
 	}))
 	defer upstream.Close()
@@ -1242,32 +1257,71 @@ func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.
 		t.Fatalf("Dial() error = %v", err)
 	}
 	defer conn.Close()
-	frame := []byte(`{"jsonrpc":"2.0","id":1,"method":"response/create","params":{"model":"gpt-5.5","previous_response_id":"resp_prev"}}`)
-	if err := conn.WriteMessage(websocket.TextMessage, frame); err != nil {
-		t.Fatalf("WriteMessage() error = %v", err)
+	frames := []struct {
+		messageType int
+		body        []byte
+	}{
+		{messageType: websocket.TextMessage, body: []byte(`{"jsonrpc":"2.0","id":1,"method":"response/create","params":{"model":"gpt-5.5","previous_response_id":"resp_prev"}}`)},
+		{messageType: websocket.BinaryMessage, body: []byte{0x00, 0xff, 0x10, 0x7f}},
 	}
-	if _, _, err := conn.ReadMessage(); err != nil {
-		t.Fatalf("ReadMessage() error = %v", err)
+	for index, frame := range frames {
+		if err := conn.WriteMessage(frame.messageType, frame.body); err != nil {
+			t.Fatalf("WriteMessage(%d) error = %v", index+1, err)
+		}
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("ReadMessage(%d) error = %v", index+1, err)
+		}
 	}
 	if err := payloadDiag.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	events := readPayloadEvents(t, path)
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1", len(events))
+	events := readLargePayloadEvents(t, path)
+	if len(events) != 4 {
+		t.Fatalf("events = %d, want 4", len(events))
 	}
-	ev := events[0]
-	if ev.Path != legacyCodexResponsesPath || ev.RouteKind != "codex_websocket_frame" || ev.Provider != "codex" {
-		t.Fatalf("event route = %+v", ev)
+	requestEvent := events[0]
+	wantFrames := map[string]struct {
+		direction string
+		frameType string
+		body      []byte
+	}{
+		"downstream_request:text":   {direction: "downstream_request", frameType: "text", body: frames[0].body},
+		"downstream_request:binary": {direction: "downstream_request", frameType: "binary", body: frames[1].body},
+		"upstream_response:text":    {direction: "upstream_response", frameType: "text", body: []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)},
+		"upstream_response:binary":  {direction: "upstream_response", frameType: "binary", body: []byte{0xfe, 0x01, 0x80, 0x02}},
 	}
-	if ev.Model != "gpt-5.5" {
-		t.Fatalf("Model = %q, want gpt-5.5", ev.Model)
+	connectionID := events[0].ConnectionID
+	if connectionID == "" {
+		t.Fatal("ConnectionID is empty")
 	}
-	if ev.SessionSource != "ws:previous_response_id" || ev.SessionSignal != "continuation" {
-		t.Fatalf("source/signal = %q/%q, want ws:previous_response_id/continuation", ev.SessionSource, ev.SessionSignal)
+	for _, ev := range events {
+		if ev.EventType != "codex_payload" || ev.Transport != "websocket" || ev.ConnectionID != connectionID {
+			t.Fatalf("event trace context = %+v", ev)
+		}
+		if ev.Path != legacyCodexResponsesPath || ev.RouteKind != "codex_websocket_frame" || ev.Provider != "codex" {
+			t.Fatalf("event route = %+v", ev)
+		}
+		key := ev.Direction + ":" + ev.FrameType
+		want, ok := wantFrames[key]
+		if !ok {
+			t.Fatalf("unexpected or duplicate payload frame = %+v", ev)
+		}
+		if got := decodePayloadEventBody(t, ev); !bytes.Equal(got, want.body) {
+			t.Fatalf("Body for %s = %x, want %x", key, got, want.body)
+		}
+		if ev.BodyBytes != len(want.body) || ev.Truncated || !ev.Complete {
+			t.Fatalf("capture metadata for %s = bytes %d truncated %t complete %t", key, ev.BodyBytes, ev.Truncated, ev.Complete)
+		}
+		delete(wantFrames, key)
 	}
-	if ev.SessionKey == "" || !strings.HasPrefix(ev.SessionKey, "ws-session:") {
-		t.Fatalf("SessionKey = %q, want ws-session:<hash>", ev.SessionKey)
+	if len(wantFrames) != 0 {
+		t.Fatalf("missing payload frames = %#v", wantFrames)
+	}
+	if requestEvent.SessionSource != "ws:previous_response_id" || requestEvent.SessionSignal != "continuation" {
+		t.Fatalf("source/signal = %q/%q, want ws:previous_response_id/continuation", requestEvent.SessionSource, requestEvent.SessionSignal)
+	}
+	if requestEvent.SessionKey == "" || !strings.HasPrefix(requestEvent.SessionKey, "ws-session:") {
+		t.Fatalf("SessionKey = %q, want ws-session:<hash>", requestEvent.SessionKey)
 	}
 	assertPayloadLogDoesNotContain(t, path, "codex-tok")
 	assertPayloadLogDoesNotContain(t, path, "acct-codex")
@@ -2624,6 +2678,66 @@ func TestServerCodexWebSocketPost101PinsFirstCandidateAcrossDialFailures(t *test
 	}
 }
 
+func TestServerLegacyCodexWebSocketPayloadDiagnosticsCaptureHandshakeRejection(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"type":"error","status":401,"error":{"type":"authentication_error"}}`},
+		{name: "forbidden", status: http.StatusForbidden, body: `{"type":"error","status":403,"error":{"type":"authentication_error"}}`},
+		{name: "usage limit", status: http.StatusTooManyRequests, body: `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+			payloads, err := OpenPayloadWriter(payloadPath)
+			if err != nil {
+				t.Fatalf("OpenPayloadWriter: %v", err)
+			}
+			plan := requestPlan("account-a", "candidate-a")
+			executor := codexWebSocketExecutorFunc(func(_ context.Context, _ RouteChoice, _ CandidateAttempt, _ string, _ http.Header) (*websocket.Conn, *http.Response, []byte, error) {
+				return nil, &http.Response{
+					Status:     fmt.Sprintf("%d %s", test.status, http.StatusText(test.status)),
+					StatusCode: test.status,
+					Header:     http.Header{"X-Request-Id": {"provider-request"}},
+					Body:       http.NoBody,
+				}, []byte(test.body), errors.New("websocket: bad handshake")
+			})
+			server := &Server{
+				CodexRequests:          &CodexRequestRouter{Scope: &queuedRequestScope{plans: []CodexRequestPlan{plan}}},
+				CodexWebSocketExecutor: executor,
+			}
+			ctx := withCodexTrace(context.Background(), nil, payloads, CodexTraceStart{Transport: "websocket"})
+
+			connection, choice, attempt, _, err := server.dialCodexWebSocketWithCapacity(
+				ctx, "wss://upstream.test/responses", nil, "gpt-5.4",
+			)
+			if connection != nil || err == nil {
+				t.Fatalf("connection=%p error=%v", connection, err)
+			}
+			if choice.AccountKey != "account-a" || attempt.Candidate.CandidateID != "candidate-a" {
+				t.Fatalf("choice=%q attempt=%q", choice.AccountKey, attempt.Candidate.CandidateID)
+			}
+			if err := payloads.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			events := readCodexPayloadEvents(t, payloadPath)
+			if len(events) != 1 {
+				t.Fatalf("payload events = %d, want exactly 1", len(events))
+			}
+			event := events[0]
+			if event.Direction != "upstream_handshake_response" || event.StatusCode != test.status || event.AccountHint != codexTraceAccountHint("account-a") || event.Attempt != 1 || !event.Complete || string(event.Body) != test.body {
+				t.Fatalf("payload event = %+v", event)
+			}
+			if event.Headers.Get("X-Request-Id") != "provider-request" {
+				t.Fatalf("payload headers = %#v", event.Headers)
+			}
+		})
+	}
+}
+
 func TestServerCodexWebSocketProductionPost101Characterisation(t *testing.T) {
 	first := requestPlan("one", "first", "same-identity-second")
 	routes := make(chan CodexRouteRequirements, 2)
@@ -3665,8 +3779,11 @@ func TestServer_NativeCodex_ZstdHeadroomCompressesDecodedBody(t *testing.T) {
 		t.Fatalf("close payload diagnostics: %v", err)
 	}
 	events := readPayloadEvents(t, payloadPath)
-	if len(events) != 1 {
-		t.Fatalf("payload events = %d, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("payload events = %d, want request and response", len(events))
+	}
+	if events[0].Direction != "downstream_request" || events[1].Direction != "upstream_response" {
+		t.Fatalf("payload directions = %q, %q", events[0].Direction, events[1].Direction)
 	}
 	if events[0].Model != "gpt-5.4" {
 		t.Fatalf("payload model = %q, want gpt-5.4", events[0].Model)
@@ -4630,8 +4747,12 @@ func TestServerPayloadDiagnosticsNativeCodexEmitsEvent(t *testing.T) {
 			Inner: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
-					Header:     http.Header{"Content-Type": []string{"application/json"}},
-					Body:       io.NopCloser(strings.NewReader(`{"id":"resp_codex"}`)),
+					Header: http.Header{
+						"Content-Type":  []string{"application/json"},
+						"X-Test-Header": []string{"safe"},
+						"Set-Cookie":    []string{"secret=value"},
+					},
+					Body: io.NopCloser(strings.NewReader(`{"id":"resp_codex"}`)),
 				}, nil
 			}),
 		},
@@ -4652,21 +4773,27 @@ func TestServerPayloadDiagnosticsNativeCodexEmitsEvent(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	events := readPayloadEvents(t, path)
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
 	}
-	ev := events[0]
-	if ev.Provider != "codex" || ev.RouteKind != "codex_native" {
-		t.Fatalf("event = %+v, want codex/codex_native", ev)
+	requestEvent, responseEvent := events[0], events[1]
+	if requestEvent.EventType != "codex_payload" || requestEvent.TraceID == "" || requestEvent.Transport != "http" || requestEvent.Direction != "downstream_request" {
+		t.Fatalf("request trace context = %+v", requestEvent)
 	}
-	if ev.Model != "gpt-5.4" {
-		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	if requestEvent.Provider != "codex" || requestEvent.RouteKind != "codex_native" || requestEvent.Model != "gpt-5.4" || requestEvent.ClientKind != "codex" {
+		t.Fatalf("request event = %+v", requestEvent)
 	}
-	if ev.ClientKind != "codex" {
-		t.Fatalf("ClientKind = %q, want codex", ev.ClientKind)
+	if requestEvent.BodyBytes != len(reqBody) || string(requestEvent.Body) != reqBody {
+		t.Fatalf("request body = (%d, %s), want (%d, %s)", requestEvent.BodyBytes, requestEvent.Body, len(reqBody), reqBody)
 	}
-	if ev.BodyBytes != len(reqBody) {
-		t.Fatalf("BodyBytes = %d, want %d", ev.BodyBytes, len(reqBody))
+	if responseEvent.EventType != "codex_payload" || responseEvent.TraceID != requestEvent.TraceID || responseEvent.Transport != "http" || responseEvent.Direction != "upstream_response" {
+		t.Fatalf("response trace context = %+v", responseEvent)
+	}
+	if responseEvent.RouteKind != "codex_native" || responseEvent.StatusCode != http.StatusOK || !responseEvent.Complete || responseEvent.BodyEncoding != "json" || string(responseEvent.Body) != `{"id":"resp_codex"}` {
+		t.Fatalf("response event = %+v", responseEvent)
+	}
+	if responseEvent.Headers.Get("X-Test-Header") != "safe" || responseEvent.Headers.Get("Set-Cookie") != "" {
+		t.Fatalf("response headers = %#v", responseEvent.Headers)
 	}
 	assertPayloadLogDoesNotContain(t, path, "codex-tok")
 }
@@ -4714,21 +4841,26 @@ func TestServerPayloadDiagnosticsCompactEmitsEvent(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	events := readPayloadEvents(t, path)
-	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
 	}
-	ev := events[0]
-	if ev.Provider != "codex" || ev.RouteKind != "codex_compact" {
-		t.Fatalf("event = %+v, want codex/codex_compact", ev)
+	requestEvent, responseEvent := events[0], events[1]
+	if requestEvent.EventType != "codex_payload" || requestEvent.TraceID == "" || requestEvent.Transport != "http" || requestEvent.Direction != "downstream_request" {
+		t.Fatalf("request trace context = %+v", requestEvent)
 	}
-	if ev.Model != "gpt-5.4" {
-		t.Fatalf("Model = %q, want gpt-5.4", ev.Model)
+	if requestEvent.Provider != "codex" || requestEvent.RouteKind != "codex_compact" || requestEvent.Model != "gpt-5.4" || string(requestEvent.Body) != reqBody {
+		t.Fatalf("request event = %+v", requestEvent)
+	}
+	if responseEvent.EventType != "codex_payload" || responseEvent.TraceID != requestEvent.TraceID || responseEvent.Transport != "http" || responseEvent.Direction != "upstream_response" {
+		t.Fatalf("response trace context = %+v", responseEvent)
+	}
+	if responseEvent.RouteKind != "codex_compact" || responseEvent.StatusCode != http.StatusOK || !responseEvent.Complete || responseEvent.BodyEncoding != "json" || string(responseEvent.Body) != `{"object":"response.compact"}` {
+		t.Fatalf("response event = %+v", responseEvent)
 	}
 	assertPayloadLogDoesNotContain(t, path, "codex-tok")
 }
 
-func TestServerPayloadDiagnosticsNoEventForBinaryWebSocketFrame(t *testing.T) {
-	// Binary WebSocket frames are not captured by payload diagnostics.
+func TestServerPayloadDiagnosticsBoundsBinaryWebSocketFrame(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "payloads.jsonl")
 	payloadDiag, err := OpenPayloadWriter(path)
 	if err != nil {
@@ -4743,8 +4875,8 @@ func TestServerPayloadDiagnosticsNoEventForBinaryWebSocketFrame(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_, msg, _ := conn.ReadMessage()
-		_ = conn.WriteMessage(websocket.TextMessage, msg)
+		messageType, msg, _ := conn.ReadMessage()
+		_ = conn.WriteMessage(messageType, msg)
 	}))
 	defer upstream.Close()
 
@@ -4776,22 +4908,77 @@ func TestServerPayloadDiagnosticsNoEventForBinaryWebSocketFrame(t *testing.T) {
 		}
 		t.Fatalf("Dial() error = %v", err)
 	}
-	_ = conn.WriteMessage(websocket.BinaryMessage, []byte("ping"))
-	conn.ReadMessage()
+	payload := bytes.Repeat([]byte{0xff}, codexPayloadCaptureMaxBytes+1)
+	if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatalf("WriteMessage() error = %v", err)
+	}
+	if messageType, message, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	} else if messageType != websocket.BinaryMessage || !bytes.Equal(message, payload) {
+		t.Fatalf("echo = type %d bytes %d, want binary bytes %d", messageType, len(message), len(payload))
+	}
 	_ = conn.Close()
 
-	// Allow brief time for any async writes.
-	time.Sleep(50 * time.Millisecond)
 	if err := payloadDiag.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-
-	// No payload event should be emitted for binary WebSocket frames.
-	if _, err := os.Stat(path); err == nil {
-		events := readPayloadEvents(t, path)
-		if len(events) != 0 {
-			t.Fatalf("binary websocket emitted %d payload events, want 0", len(events))
+	events := readLargePayloadEvents(t, path)
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	for _, event := range events {
+		if event.FrameType != "binary" || event.BodyBytes != len(payload) || !event.Truncated || !event.Complete {
+			t.Fatalf("bounded binary event = %+v", event)
 		}
+		got := decodePayloadEventBody(t, event)
+		if len(got) != codexPayloadCaptureMaxBytes || !bytes.Equal(got, payload[:codexPayloadCaptureMaxBytes]) {
+			t.Fatalf("captured body = %d bytes with expected prefix %t, want %d", len(got), bytes.Equal(got, payload[:min(len(got), len(payload))]), codexPayloadCaptureMaxBytes)
+		}
+	}
+}
+
+func decodePayloadEventBody(t *testing.T, event PayloadEvent) []byte {
+	t.Helper()
+	if event.BodyEncoding == "json" {
+		return append([]byte(nil), event.Body...)
+	}
+	var encoded string
+	if err := json.Unmarshal(event.Body, &encoded); err != nil {
+		t.Fatalf("decode payload body string: %v", err)
+	}
+	switch event.BodyEncoding {
+	case "utf8":
+		return []byte(encoded)
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatalf("decode payload body base64: %v", err)
+		}
+		return decoded
+	default:
+		t.Fatalf("BodyEncoding = %q", event.BodyEncoding)
+		return nil
+	}
+}
+
+func readLargePayloadEvents(t *testing.T, path string) []PayloadEvent {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open payload log: %v", err)
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	var events []PayloadEvent
+	for {
+		var event PayloadEvent
+		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+			return events
+		} else if err != nil {
+			t.Fatalf("decode payload log: %v", err)
+		}
+		events = append(events, event)
 	}
 }
 

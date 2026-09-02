@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"time"
 )
 
 // codexLegacyNativeHTTPFallback owns the pre-enforcement native Responses path.
@@ -69,22 +68,14 @@ func (handler *legacyCodexNativeHTTPHandler) Handle(w http.ResponseWriter, r *ht
 	fmt.Fprintf(os.Stderr, "cq: route POST /responses model_family=%s provider=codex (native)\n", projectCodexDiagnosticsModel(model))
 
 	// Emit payload diagnostics before any body rewrite.
-	if s.PayloadDiag != nil {
-		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, decodedBody)
-		s.emitPayloadDiagnostics(PayloadEvent{
-			Time:          time.Now().UTC(),
-			Method:        r.Method,
-			Path:          r.URL.Path,
-			Provider:      "codex",
-			RouteKind:     "codex_native",
-			Model:         model,
-			ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
-			SessionKey:    sessionKey,
-			SessionSource: sessionSource,
-			BodyBytes:     len(body),
-			Body:          encodeBody(body),
-		})
-	}
+	sessionKey, sessionSource := payloadSessionCorrelation(r.Header, decodedBody)
+	payloadBody, payloadEncoding := encodeCodexTracePayload(body)
+	emitCodexTracePayload(ctx, PayloadEvent{
+		Method: r.Method, Path: r.URL.Path, Provider: "codex", RouteKind: "codex_native", Direction: "downstream_request",
+		Model: model, ClientKind: clientKindFromUserAgent(r.Header.Get("User-Agent")),
+		SessionKey: sessionKey, SessionSource: sessionSource, Headers: codexTraceHeaders(r.Header), Complete: true,
+		BodyBytes: len(body), BodyEncoding: payloadEncoding, Body: payloadBody,
+	})
 
 	// Compress Responses API input via headroom bridge if available.
 	// Fail-open: on error, log and continue with original body.
@@ -147,6 +138,10 @@ func (handler *legacyCodexNativeHTTPHandler) Handle(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return model
 	}
+	captureCodexHTTPResponsePayloadWithEvent(ctx, resp, PayloadEvent{
+		Method: r.Method, Path: r.URL.Path, Provider: "codex", RouteKind: "codex_native", Direction: "upstream_response",
+		Model: model, ClientKind: clientKindFromUserAgent(r.Header.Get("User-Agent")), AccountHint: codexTraceAccountHint(choice.AccountKey),
+	})
 	if observation != nil {
 		routeDiag, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics)
 		_, failover := routeDiag.fields()

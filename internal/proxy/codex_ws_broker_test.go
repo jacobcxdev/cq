@@ -22,6 +22,11 @@ import (
 
 func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.T) {
 	t.Parallel()
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
 	receiptStore, err := NewCodexTurnReceiptStore(strings.NewReader(strings.Repeat("r", 32)), time.Now)
@@ -63,7 +68,8 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 		t.Fatal(err)
 	}
 	accepted := 0
-	ctx := withCodexWSFrameObservationSink(context.Background(), func(*routeDiagnostics) { accepted++ })
+	ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "websocket"})
+	ctx = withCodexWSFrameObservationSink(ctx, func(*routeDiagnostics) { accepted++ })
 	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +101,22 @@ func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.
 	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-b") {
 		t.Fatalf("rotated receipt = (%+v, %v)", gotReceipt, found)
 	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	traceEvents := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "account_unavailable" && event.Reason == "capacity_exhausted" && event.AccountHint == codexTraceAccountHint("account-a")
+	}, "WebSocket 429 exhaustion")
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "failover" && event.AccountHint == codexTraceAccountHint("account-b") && event.Failover
+	}, "WebSocket account failover")
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "lease_transition" && event.Stage == "quota_exhausted" && event.Outcome == "before" && event.Lease != nil && event.Lease.RequestGeneration != 0
+	}, "WebSocket lease state before quota transition")
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "lease_transition" && event.Stage == "quota_exhausted" && event.Outcome == "after" && event.Lease != nil && event.Lease.AttemptGeneration != 0
+	}, "WebSocket lease state after quota transition")
 }
 
 func TestCodexTerminatingWSBrokerRotatesLaterPortableRequestAfterHard429(t *testing.T) {
@@ -383,6 +405,11 @@ func TestCodexTerminatingWSBrokerDoesNotRotateResponseFailedPolicy(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+			diagnostics, traceErr := OpenDiagnosticsWriter(tracePath)
+			if traceErr != nil {
+				t.Fatal(traceErr)
+			}
 			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 			planner := &codexWSBrokerPlannerStub{
 				runtime: newCodexLeaseRuntimeTest(t, coordinator),
@@ -402,8 +429,21 @@ func TestCodexTerminatingWSBrokerDoesNotRotateResponseFailedPolicy(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := broker.Serve(context.Background(), downstream); err != nil {
+			ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "websocket"})
+			if err := broker.Serve(ctx, downstream); err != nil {
 				t.Fatal(err)
+			}
+			if err := diagnostics.Close(); err != nil {
+				t.Fatal(err)
+			}
+			traceEvents := readCodexTraceEvents(t, tracePath)
+			requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+				return event.Phase == "terminal" && event.Outcome == "error" && event.EventName == string(CodexSSEError)
+			}, "WebSocket provider failure terminal outcome")
+			for _, event := range traceEvents {
+				if event.Phase == "terminal" && event.Outcome == "success" {
+					t.Fatalf("provider failure traced as terminal success: %+v", event)
+				}
 			}
 			if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a"}) {
 				t.Fatalf("dial accounts = %#v, want no policy failover", got)
@@ -418,15 +458,21 @@ func TestCodexTerminatingWSBrokerDoesNotRotateResponseFailedPolicy(t *testing.T)
 func TestCodexTerminatingWSBrokerDoesNotReplayAdmittedAccountUnavailableOutcome(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name  string
-		frame []byte
+		name       string
+		frame      []byte
+		wantReason string
 	}{
-		{name: "401", frame: []byte(`{"type":"error","status":401,"error":{"type":"authentication_error"}}`)},
-		{name: "auth-shaped 403", frame: []byte(`{"type":"error","status":403,"error":{"type":"authentication_error"}}`)},
-		{name: "hard 429", frame: codexWSBrokerHard429()},
-		{name: "response.failed hard limit", frame: []byte(`{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","message":"usage exhausted"}}}`)},
+		{name: "401", frame: []byte(`{"type":"error","status":401,"error":{"type":"authentication_error"}}`), wantReason: "auth_rejected"},
+		{name: "auth-shaped 403", frame: []byte(`{"type":"error","status":403,"error":{"type":"authentication_error"}}`), wantReason: "auth_rejected"},
+		{name: "hard 429", frame: codexWSBrokerHard429(), wantReason: "capacity_exhausted"},
+		{name: "response.failed hard limit", frame: []byte(`{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","message":"usage exhausted"}}}`), wantReason: "capacity_exhausted"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+			diagnostics, traceErr := OpenDiagnosticsWriter(tracePath)
+			if traceErr != nil {
+				t.Fatal(traceErr)
+			}
 			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 			planner := &codexWSBrokerPlannerStub{
 				runtime: newCodexLeaseRuntimeTest(t, coordinator),
@@ -450,8 +496,24 @@ func TestCodexTerminatingWSBrokerDoesNotReplayAdmittedAccountUnavailableOutcome(
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := broker.Serve(context.Background(), downstream); err != nil {
+			ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "websocket"})
+			if err := broker.Serve(ctx, downstream); err != nil {
 				t.Fatal(err)
+			}
+			if err := diagnostics.Close(); err != nil {
+				t.Fatal(err)
+			}
+			traceEvents := readCodexTraceEvents(t, tracePath)
+			requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+				return event.Phase == "account_unavailable" && event.Outcome == "observed" && event.Reason == test.wantReason && event.AccountHint != ""
+			}, "WebSocket provider account-unavailable frame")
+			requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+				return event.Phase == "terminal" && event.Outcome == "error" && event.Reason == test.wantReason && event.EventName == string(CodexSSEError) && event.AccountHint == codexTraceAccountHint("account-a")
+			}, "WebSocket account-unavailable terminal outcome")
+			for _, event := range traceEvents {
+				if event.Phase == "terminal" && event.Outcome == "success" {
+					t.Fatalf("account-unavailable frame traced as terminal success: %+v", event)
+				}
 			}
 			if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a"}) {
 				t.Fatalf("dial accounts = %#v, admitted outcome must not replay", got)
@@ -538,6 +600,16 @@ func testCodexTerminatingWSBrokerRotatesLaterPortableRequest(t *testing.T, unava
 
 func TestCodexTerminatingWSBrokerRotatesLaterPortableHandshakeHard429(t *testing.T) {
 	t.Parallel()
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	diagnostics, traceErr := OpenDiagnosticsWriter(tracePath)
+	if traceErr != nil {
+		t.Fatal(traceErr)
+	}
+	payloads, payloadErr := OpenPayloadWriter(payloadPath)
+	if payloadErr != nil {
+		t.Fatal(payloadErr)
+	}
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
@@ -565,7 +637,8 @@ func TestCodexTerminatingWSBrokerRotatesLaterPortableHandshakeHard429(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.Serve(context.Background(), downstream); err != nil {
+	ctx := withCodexTrace(context.Background(), diagnostics, payloads, CodexTraceStart{Transport: "websocket"})
+	if err := broker.Serve(ctx, downstream); err != nil {
 		t.Fatal(err)
 	}
 	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
@@ -576,6 +649,31 @@ func TestCodexTerminatingWSBrokerRotatesLaterPortableHandshakeHard429(t *testing
 	}
 	if got := capacity.Capacity("account-a", CapacityBucketForModel("gpt-5.6-sol")); got.State != CapacityZero || got.Source != CapacitySourceHardLimit || !got.ResetAt.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("A handshake hard-limit capacity = %+v", got)
+	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := payloads.Close(); err != nil {
+		t.Fatal(err)
+	}
+	traceEvents := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "upstream_dial" && event.Outcome == "error" && event.UpstreamStatus == http.StatusTooManyRequests && event.ErrorClass == "capacity_exhausted"
+	}, "WebSocket 429 handshake")
+	payloadEvents := readCodexPayloadEvents(t, payloadPath)
+	var handshake *PayloadEvent
+	for index := range payloadEvents {
+		if payloadEvents[index].Direction == "upstream_handshake_response" {
+			handshake = &payloadEvents[index]
+			break
+		}
+	}
+	if handshake == nil {
+		t.Fatalf("payload events = %+v, want rejected handshake", payloadEvents)
+	}
+	wantBody := `{"error":{"type":"usage_limit_reached"}}`
+	if handshake.StatusCode != http.StatusTooManyRequests || handshake.AccountHint != codexTraceAccountHint("account-a") || handshake.Attempt != 1 || !handshake.Complete || string(handshake.Body) != wantBody {
+		t.Fatalf("handshake payload = %+v, want account-a attempt 1 status 429 body %s", *handshake, wantBody)
 	}
 }
 
@@ -1301,6 +1399,51 @@ func TestCodexTerminatingWSBrokerDoesNotReuseDifferentCredentialProvenance(t *te
 	}
 }
 
+func TestCodexTerminatingWSBrokerPayloadDiagnosticsCaptureHiddenPrewarmFailureBeforeFailover(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloads, err := OpenPayloadWriter(payloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hardLimit := codexWSBrokerHard429()
+	downstream := &codexWSBrokerConnStub{}
+	active := &codexWSActiveUpstream{
+		conn:       &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: hardLimit}}},
+		account:    "account-a",
+		generation: 1,
+	}
+	broker := &codexTerminatingWSBroker{}
+	account := CodexFrozenDispatchAccount{choice: RouteChoice{AccountKey: "account-a"}}
+	ctx := withCodexTrace(context.Background(), nil, payloads, CodexTraceStart{Transport: "websocket"})
+	rotate, err := broker.readPrewarmResponse(ctx, ctx, downstream, nil, account, true, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rotate {
+		t.Fatal("hidden prewarm capacity failure did not request failover")
+	}
+	if err := payloads.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readCodexPayloadEvents(t, payloadPath)
+	if len(events) != 1 {
+		t.Fatalf("payload events = %d, want hidden prewarm failure", len(events))
+	}
+	event := events[0]
+	if event.EventType != "codex_payload" || event.TraceID == "" || event.ConnectionID == "" || event.Transport != "websocket" {
+		t.Fatalf("payload trace context = %+v", event)
+	}
+	if event.Direction != "upstream_response" || event.AccountHint != codexTraceAccountHint("account-a") || event.FrameType != "text" || !event.Complete {
+		t.Fatalf("payload event = %+v", event)
+	}
+	if string(event.Body) != string(hardLimit) {
+		t.Fatalf("payload body = %s, want %s", event.Body, hardLimit)
+	}
+	if got := downstream.writtenPayloads(); len(got) != 0 {
+		t.Fatalf("hidden failure was relayed downstream: %#v", got)
+	}
+}
+
 func TestCodexTerminatingWSBrokerPrewarmTracksActualCredentialProvenance(t *testing.T) {
 	t.Parallel()
 	planned := CandidateAttempt{
@@ -1420,6 +1563,67 @@ func TestCodexTerminatingWSBrokerRoutesTurnWithoutPrewarmAdoption(t *testing.T) 
 	}
 	if got := downstream.writtenPayloads(); len(got) != 4 {
 		t.Fatalf("downstream writes = %#v", got)
+	}
+}
+
+func TestCodexTerminatingWSBrokerRoutesSuccessorAfterAbandonedPredecessor(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	planner := codexHTTPRequestPlanTestFactory(runtimeLease)
+	planner.Routes = coordinator
+	planner.TransportKind = "websocket"
+	planner.Authority = CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true}
+
+	predecessorPlan := codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	predecessorPlan.Key.Lane = LaneKey{Session: "session", Thread: "thread", Namespace: CodexResponsesNamespace}
+	predecessorPlan.Authority = planner.Authority
+	predecessorPlan.RequestedModel = "gpt-5"
+	predecessorPlan.EffectiveModel = "gpt-5"
+	predecessor, err := runtimeLease.BeginRequest(predecessorPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := predecessor.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+
+	successorFrame := bytes.Replace(
+		frozenRequestBody("gpt-5", CodexRequestTurn, "successor"),
+		[]byte(`"turn_id":"turn"`),
+		[]byte(`"turn_id":"turn-b"`),
+		1,
+	)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: successorFrame},
+		{err: io.EOF},
+	}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"turn-b"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"turn-b","end_turn":true}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{
+		"account": {upstream},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := broker.Serve(ctx, downstream); err != nil {
+		t.Fatalf("successor WebSocket route after abandoned predecessor = %T %v", err, err)
+	}
+	if got := upstream.writtenPayloads(); len(got) != 1 || !reflect.DeepEqual(got[0], successorFrame) {
+		t.Fatalf("successor upstream writes = %#v", got)
+	}
+	if got := downstream.writtenPayloads(); len(got) != 2 {
+		t.Fatalf("successor downstream writes = %#v", got)
 	}
 }
 
@@ -2228,6 +2432,11 @@ func TestCodexTerminatingWSBrokerReconnectsKnownClosedIdleUpstreamBeforeDispatch
 }
 
 func TestCodexTerminatingWSBrokerPreservesHandledHandshakeFailureWithoutLoggingBody(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, traceErr := OpenDiagnosticsWriter(tracePath)
+	if traceErr != nil {
+		t.Fatal(traceErr)
+	}
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: newCodexLeaseRuntimeTest(t, coordinator),
@@ -2246,6 +2455,7 @@ func TestCodexTerminatingWSBrokerPreservesHandledHandshakeFailureWithoutLoggingB
 		t.Fatal(err)
 	}
 	ctx, routeDiagnostics := withRouteDiagnostics(context.Background())
+	ctx = withCodexTrace(ctx, diagnostics, nil, CodexTraceStart{Transport: "websocket"})
 	stderr := captureStderr(t, func() {
 		if err := broker.Serve(ctx, downstream); err != nil {
 			t.Fatal(err)
@@ -2270,6 +2480,13 @@ func TestCodexTerminatingWSBrokerPreservesHandledHandshakeFailureWithoutLoggingB
 			t.Fatalf("provider handshake detail escaped into trace: trace=%q frame=%q", stderr, writes[0])
 		}
 	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	traceEvents := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "upstream_dial" && event.Outcome == "error" && event.UpstreamStatus == http.StatusUnauthorized && event.ErrorClass == "auth_rejected"
+	}, "WebSocket 401 handshake")
 }
 
 func TestCodexTerminatingWSBrokerReportsHandledPrewarmTransportFailure(t *testing.T) {
@@ -2377,6 +2594,11 @@ func TestCodexWSDialErrorClassifiesBoundedRepresentationsAndAuthAuthority(t *tes
 
 func TestCodexTerminatingWSBrokerCancellationUnblocksUpstreamRead(t *testing.T) {
 	t.Parallel()
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, traceErr := OpenDiagnosticsWriter(tracePath)
+	if traceErr != nil {
+		t.Fatal(traceErr)
+	}
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: newCodexLeaseRuntimeTest(t, coordinator),
@@ -2389,7 +2611,8 @@ func TestCodexTerminatingWSBrokerCancellationUnblocksUpstreamRead(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx := withCodexTrace(baseCtx, diagnostics, nil, CodexTraceStart{Transport: "websocket"})
 	done := make(chan error, 1)
 	go func() { done <- broker.Serve(ctx, downstream) }()
 	select {
@@ -2408,6 +2631,13 @@ func TestCodexTerminatingWSBrokerCancellationUnblocksUpstreamRead(t *testing.T) 
 		<-done
 		t.Fatal("cancellation did not unblock upstream read")
 	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	traceEvents := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "upstream_read" && event.Outcome == "error" && event.Reason == "context_canceled"
+	}, "WebSocket cancelled read")
 }
 
 func TestCodexTerminatingWSBrokerPeerCloseCancelsBlockedPlanning(t *testing.T) {
@@ -2706,6 +2936,11 @@ func TestCodexWSDownstreamReaderClearsQueuedAndBlockedPayloadsOnCancel(t *testin
 
 func TestCodexTerminatingWSBrokerClassifiesUpstreamCloseBeforeCompletion(t *testing.T) {
 	t.Parallel()
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, traceErr := OpenDiagnosticsWriter(tracePath)
+	if traceErr != nil {
+		t.Fatal(traceErr)
+	}
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	planner := &codexWSBrokerPlannerStub{
 		runtime: newCodexLeaseRuntimeTest(t, coordinator),
@@ -2719,7 +2954,8 @@ func TestCodexTerminatingWSBrokerClassifiesUpstreamCloseBeforeCompletion(t *test
 		t.Fatal(err)
 	}
 
-	err = broker.Serve(context.Background(), downstream)
+	ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "websocket"})
+	err = broker.Serve(ctx, downstream)
 	if err == nil {
 		t.Fatal("upstream close before completion succeeded")
 	}
@@ -2730,6 +2966,13 @@ func TestCodexTerminatingWSBrokerClassifiesUpstreamCloseBeforeCompletion(t *test
 	if strings.Contains(err.Error(), "token-should-not-leak") {
 		t.Fatalf("broker error leaked private upstream text: %q", err)
 	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	traceEvents := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "terminal" && event.Stage == "upstream_read" && event.Reason == "upstream_outcome_indeterminate"
+	}, "WebSocket close before completion")
 }
 
 func TestCodexTerminatingWSBrokerTreatsNormalDownstreamCloseAfterCompletedTurnAsClean(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1050,12 +1051,24 @@ func (s *Server) isValidToken(token string) bool {
 func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var model string
-	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	sessionKey, sessionSource := sessionCorrelation(r.Header)
+	ctx := withCodexTrace(r.Context(), s.Diag, s.PayloadDiag, CodexTraceStart{
+		Transport: "http", SessionKey: sessionKey, SessionSource: sessionSource,
+	})
+	ctx, routeDiag := withRouteDiagnostics(ctx)
 	ctx = s.withCodexRequestIngressObservation(ctx, r.Method, r.URL.Path, "codex_native_ingress")
 	r = r.WithContext(ctx)
+	emitCodexTrace(ctx, CodexTraceEvent{
+		Phase: "ingress", Outcome: "accepted", Method: r.Method, Path: r.URL.Path,
+	})
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
 		w = wrapped
 		defer func() {
+			emitCodexTrace(ctx, CodexTraceEvent{
+				Phase: "terminal", Outcome: codexTraceHTTPOutcome(rec.statusCode()),
+				StatusCode: rec.statusCode(), LatencyMS: time.Since(start).Milliseconds(),
+				Reason: rec.diagnosticsError(),
+			})
 			event := RouteEvent{
 				Time:       start.UTC(),
 				Method:     r.Method,
@@ -1069,6 +1082,7 @@ func (s *Server) handleNativeCodex(w http.ResponseWriter, r *http.Request) {
 			}
 			event.applyRouteDiagnostics(routeDiag)
 			event.applySessionCorrelation(r.Header)
+			event.applyCodexTrace(ctx)
 			s.emitDiagnostics(event)
 		}()
 	}
@@ -1107,8 +1121,8 @@ func (s *Server) parseCodexHTTPEnforcementDecoded(body []byte, header http.Heade
 // blind relay behaviour.
 //
 // Note: native Codex WebSocket traffic is intentionally out of scope for
-// headroom compression — the handshake body is minimal and the subsequent
-// binary/text frames are not buffered by this proxy.
+// headroom compression — the handshake body is minimal and subsequent frames
+// are relayed without transformation.
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	statusCode := 0
@@ -1119,9 +1133,18 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	if webSocketEnforcing {
 		routeKind = "codex_websocket_broker"
 	}
-	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	sessionKey, sessionSource := sessionCorrelation(r.Header)
+	ctx := withCodexTrace(r.Context(), s.Diag, s.PayloadDiag, CodexTraceStart{
+		Transport: "websocket", SessionKey: sessionKey, SessionSource: sessionSource,
+	})
+	ctx, routeDiag := withRouteDiagnostics(ctx)
 	r = r.WithContext(ctx)
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "connection_ingress", Outcome: "accepted", Method: r.Method, Path: r.URL.Path})
 	defer func() {
+		emitCodexTrace(ctx, CodexTraceEvent{
+			Phase: "connection_terminal", Outcome: codexTraceHTTPOutcome(statusCode), StatusCode: statusCode,
+			LatencyMS: time.Since(start).Milliseconds(), Reason: diagError,
+		})
 		event := RouteEvent{
 			Time:       start.UTC(),
 			Method:     r.Method,
@@ -1134,6 +1157,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		event.applyRouteDiagnostics(routeDiag)
 		event.applySessionCorrelation(r.Header)
+		event.applyCodexTrace(ctx)
 		s.emitDiagnostics(event)
 	}()
 
@@ -1172,9 +1196,11 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	clientConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "downstream_upgrade", Outcome: "error", Reason: codexTraceErrorReason(err)})
 		return
 	}
 	statusCode = http.StatusSwitchingProtocols
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "downstream_upgrade", Outcome: "success", StatusCode: statusCode})
 	defer clientConn.Close()
 	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
@@ -1207,8 +1233,8 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	requestedModel := ""
 	if messageType == websocket.TextMessage {
 		requestedModel = extractCodexWebSocketFrameModel(message)
-		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, message, 1)
 	}
+	s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, "downstream_request", messageType, message, 1)
 	if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
 		s.emitCodexWebSocketFrameObservation(diagnostics)
 	}
@@ -1233,7 +1259,17 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	var downstreamFrameIndex atomic.Int64
+	downstreamFrameIndex.Store(1)
+	var upstreamFrameIndex atomic.Int64
 	relayErr := relayWebSocketPairObserved(r.Context(), clientConn, upstreamConn, func(fromClient bool, messageType int, message []byte) {
+		direction := "upstream_response"
+		frameIndex := int(upstreamFrameIndex.Add(1))
+		if fromClient {
+			direction = "downstream_request"
+			frameIndex = int(downstreamFrameIndex.Add(1))
+		}
+		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, direction, messageType, message, frameIndex)
 		if fromClient {
 			if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
 				s.emitCodexWebSocketFrameObservation(diagnostics)
@@ -1702,25 +1738,44 @@ func (s *Server) emitPayloadDiagnostics(event PayloadEvent) {
 	}
 }
 
-func (s *Server) emitCodexWebSocketPayloadDiagnostics(r *http.Request, path, model string, frame []byte, frameIndex int) {
+func (s *Server) emitCodexWebSocketPayloadDiagnostics(r *http.Request, path, model, direction string, messageType int, frame []byte, frameIndex int) {
 	if s == nil || s.PayloadDiag == nil || r == nil {
 		return
 	}
+	frameType := ""
+	switch messageType {
+	case websocket.TextMessage:
+		frameType = "text"
+	case websocket.BinaryMessage:
+		frameType = "binary"
+	default:
+		return
+	}
 	sessionKey, sessionSource, signal := codexWebSocketFrameCorrelation(r.Header, frame)
-	s.emitPayloadDiagnostics(PayloadEvent{
-		Time:          time.Now().UTC(),
+	captured := frame
+	truncated := len(captured) > codexPayloadCaptureMaxBytes
+	if truncated {
+		captured = captured[:codexPayloadCaptureMaxBytes]
+	}
+	payloadBody, payloadEncoding := encodeCodexTracePayload(captured)
+	emitCodexTracePayload(r.Context(), PayloadEvent{
 		Method:        r.Method,
 		Path:          path,
 		Provider:      "codex",
 		RouteKind:     "codex_websocket_frame",
+		Direction:     direction,
 		Model:         model,
 		ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
 		SessionKey:    sessionKey,
 		SessionSource: sessionSource,
 		SessionSignal: signal,
 		FrameIndex:    frameIndex,
+		FrameType:     frameType,
+		Complete:      true,
 		BodyBytes:     len(frame),
-		Body:          encodeBody(frame),
+		Truncated:     truncated,
+		BodyEncoding:  payloadEncoding,
+		Body:          payloadBody,
 	})
 }
 

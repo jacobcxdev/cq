@@ -314,6 +314,57 @@ func TestCodexNativeHTTPPlanFailureReportsSafeStage(t *testing.T) {
 	}
 }
 
+func TestCodexNativeHTTPTraceCaptures503PlanCause(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := &codexNativeHTTPPlannerStub{err: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)}
+	handler, err := NewCodexNativeHTTPHandler(planner, &codexNativeHTTPSessionStub{}, "https://codex.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodPost, "http://localhost/responses", strings.NewReader(`{"input":"hello"}`))
+	request = request.WithContext(withCodexTrace(request.Context(), diagnostics, nil, CodexTraceStart{Transport: "http"}))
+	writer := newCodexNativeHTTPOrderWriter(new([]string))
+	handler.TryServe(writer, request, false)
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readCodexTraceEvents(t, path)
+	requireCodexTraceEvent(t, events, func(event CodexTraceEvent) bool {
+		return event.Phase == "planning" && event.Stage == string(CodexHTTPRequestPlanDispatch) && event.Reason == "lease_authority_mismatch" && event.StatusCode == 503
+	}, "503 dispatch/lease_authority_mismatch")
+}
+
+func TestCodexNativeHTTPTraceCaptures502SessionCause(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewCodexNativeHTTPHandler(
+		&codexNativeHTTPPlannerStub{prepared: CodexPreparedHTTPRequest{}},
+		&codexNativeHTTPSessionStub{err: &codexHTTPRoundTripError{reason: codexHTTPTransportFailureConnectionReset}},
+		"https://codex.example",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodPost, "http://localhost/responses", strings.NewReader(`{"input":"hello"}`))
+	request = request.WithContext(withCodexTrace(request.Context(), diagnostics, nil, CodexTraceStart{Transport: "http"}))
+	writer := newCodexNativeHTTPOrderWriter(new([]string))
+	handler.TryServe(writer, request, false)
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readCodexTraceEvents(t, path)
+	requireCodexTraceEvent(t, events, func(event CodexTraceEvent) bool {
+		return event.Phase == "session" && event.StatusCode == 502 && event.ErrorClass == "connection_reset"
+	}, "502 connection_reset")
+}
+
 func TestCodexNativeHTTPPlanFailureRedactsUnknownStage(t *testing.T) {
 	planner := &codexNativeHTTPPlannerStub{err: &CodexHTTPRequestPlanError{Code: "private-stage-value"}}
 	handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{}, "https://codex.example")

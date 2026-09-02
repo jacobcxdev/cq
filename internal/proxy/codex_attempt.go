@@ -381,10 +381,16 @@ func executeCodexAttempt(executor ExplicitAccountExecutor, ctx context.Context, 
 		if !dispatched {
 			actual = resolved
 		}
+		if response != nil && response.Body != nil {
+			captureCodexHTTPAttemptPayload(ctx, req, response, choice, actual)
+		}
 		return response, actual, dispatched, err
 	}
 	markDispatched(attempt)
 	response, err := executor.Do(ctx, choice, attempt, req)
+	if response != nil && response.Body != nil {
+		captureCodexHTTPAttemptPayload(ctx, req, response, choice, actual)
+	}
 	return response, actual, dispatched, err
 }
 

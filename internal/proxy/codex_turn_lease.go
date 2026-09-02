@@ -123,6 +123,29 @@ const (
 	CodexAttemptAccountUnavailable
 )
 
+func (state CodexAttemptState) String() string {
+	switch state {
+	case CodexAttemptPrepared:
+		return "prepared"
+	case CodexAttemptDispatched:
+		return "dispatched"
+	case CodexAttemptStreaming:
+		return "streaming"
+	case CodexAttemptProviderCompleted:
+		return "provider_completed"
+	case CodexAttemptProviderFailed:
+		return "provider_failed"
+	case CodexAttemptIndeterminate:
+		return "indeterminate"
+	case CodexAttemptAbandonedBeforeDispatch:
+		return "abandoned_before_dispatch"
+	case CodexAttemptAccountUnavailable:
+		return "account_unavailable"
+	default:
+		return "unknown"
+	}
+}
+
 func validCodexAttemptTransition(from, to CodexAttemptState) bool {
 	switch from {
 	case CodexAttemptPrepared:
@@ -156,8 +179,8 @@ type CodexTurnLease struct {
 	LastSeen                 time.Time
 }
 
-func (lease CodexTurnLease) CheckContinuation(account codex.AccountKey, socketGeneration uint64, previousResponseID string, encryptedState bool) error {
-	if (previousResponseID != "" || encryptedState || lease.HasEncryptedState) && account != lease.AccountKey {
+func (lease CodexTurnLease) CheckContinuation(account codex.AccountKey, socketGeneration uint64, previousResponseID string) error {
+	if previousResponseID != "" && account != lease.AccountKey {
 		return fmt.Errorf("%w: account mismatch", ErrCodexContinuity)
 	}
 	if previousResponseID != "" && (socketGeneration == 0 || socketGeneration != lease.UpstreamSocketGeneration) {

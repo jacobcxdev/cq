@@ -614,8 +614,8 @@ func TestCodexLeaseV2RetentionKeepsOpaqueAffinityUntilFinalLaneExpires(t *testin
 		CodexLeaseRequestEvidence{HasEncryptedState: true},
 		false,
 	)
-	if err != nil || !requiresAccount {
-		t.Fatalf("pruned-source encrypted affinity = required %v error %v", requiresAccount, err)
+	if err != nil || requiresAccount {
+		t.Fatalf("pruned-source encrypted replay = required %v error %v", requiresAccount, err)
 	}
 	currentKey := key
 	currentKey.Turn = "retention-anchor"
@@ -630,14 +630,14 @@ func TestCodexLeaseV2RetentionKeepsOpaqueAffinityUntilFinalLaneExpires(t *testin
 		CodexLeaseRequestEvidence{HasEncryptedState: true},
 		false,
 	)
-	if err != nil || !requiresAccount {
-		t.Fatalf("pruned-source current encrypted affinity = required %v error %v", requiresAccount, err)
+	if err != nil || requiresAccount {
+		t.Fatalf("pruned-source current encrypted replay = required %v error %v", requiresAccount, err)
 	}
-	if _, err := runtimeLease.validateRequestContinuity(resolved, codexLeaseRuntimeRequestIdentity(resolved), "other", CodexLeaseRequestEvidence{HasEncryptedState: true}, false); !errors.Is(err, ErrCodexContinuity) {
-		t.Fatalf("pruned-source account mismatch = %v, want continuity error", err)
+	if requiresAccount, err := runtimeLease.validateRequestContinuity(resolved, codexLeaseRuntimeRequestIdentity(resolved), "other", CodexLeaseRequestEvidence{HasEncryptedState: true}, false); err != nil || requiresAccount {
+		t.Fatalf("pruned-source alternate account replay = required %v error %v", requiresAccount, err)
 	}
-	if _, err := runtimeLease.validateRequestContinuity(restored, codexLeaseRuntimeRequestIdentity(restored), "account", CodexLeaseRequestEvidence{HasEncryptedState: true}, false); !errors.Is(err, ErrCodexContinuity) {
-		t.Fatalf("unresolved pruned-source affinity = %v, want continuity error", err)
+	if requiresAccount, err := runtimeLease.validateRequestContinuity(restored, codexLeaseRuntimeRequestIdentity(restored), "account", CodexLeaseRequestEvidence{HasEncryptedState: true}, false); err != nil || requiresAccount {
+		t.Fatalf("unresolved pruned-source encrypted replay = required %v error %v", requiresAccount, err)
 	}
 	removal, summary, err := coordinator.BeginAccountRemoval(context.Background(), "account")
 	if err != nil {

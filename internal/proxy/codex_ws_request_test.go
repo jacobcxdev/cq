@@ -36,6 +36,9 @@ func TestCodexWSPendingFrameUsesStrongFrameAuthorityWithoutHandshake(t *testing.
 	if event.SessionKey != hashPrefix("codex-session", "session") || event.SessionSource != "metadata:session_id" {
 		t.Fatalf("frame task correlation = %q/%q", event.SessionKey, event.SessionSource)
 	}
+	if event.ThreadKey != hashPrefix("codex-thread", "thread") {
+		t.Fatalf("frame thread correlation = %q", event.ThreadKey)
+	}
 }
 
 func TestCodexWSPendingFrameExplicitEmptyPreviousResponseIDIsNotPortable(t *testing.T) {
@@ -394,19 +397,26 @@ func TestCodexWSPendingFrameOwnsAndReleasesPortableBytes(t *testing.T) {
 	}
 }
 
-func TestCodexWSPendingFrameMarksGenerationBoundInputNonPortable(t *testing.T) {
-	for _, field := range []string{
-		`"previous_response_id":"response",`,
-		`"input":[{"type":"reasoning","encrypted_content":"opaque"}],`,
-	} {
-		payload := []byte(`{"type":"response.create",` + field + `"model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
-		pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if pending.portable {
-			t.Fatalf("generation-bound field %s marked portable", field)
-		}
-		pending.Release()
+func TestCodexWSPendingFrameMarksPreviousResponseNonPortable(t *testing.T) {
+	payload := []byte(`{"type":"response.create","previous_response_id":"response","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if pending.portable {
+		t.Fatal("previous response input marked portable")
+	}
+	pending.Release()
+}
+
+func TestCodexWSPendingFrameMarksEncryptedInputPortable(t *testing.T) {
+	payload := []byte(`{"type":"response.create","input":[{"type":"reasoning","encrypted_content":"opaque"}],"model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending.portable {
+		t.Fatal("encrypted replay input marked non-portable")
+	}
+	pending.Release()
 }

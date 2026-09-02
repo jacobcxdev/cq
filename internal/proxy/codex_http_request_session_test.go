@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -342,6 +343,11 @@ func TestCodexHTTPRequestSessionRefreshesManagedCandidateOnce(t *testing.T) {
 }
 
 func TestCodexHTTPRequestSessionAdvancesAccountOnlyForExactHard429(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstChoice := codexHTTPSessionChoice("account-a")
 	secondChoice := codexHTTPSessionChoice("account-b")
 	first := codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)
@@ -376,8 +382,9 @@ func TestCodexHTTPRequestSessionAdvancesAccountOnlyForExactHard429(t *testing.T)
 		t.Fatal(err)
 	}
 
+	ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "http"})
 	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Capacity: ledger}).Do(
-		context.Background(), template, plan, frozen, lifecycle,
+		ctx, template, plan, frozen, lifecycle,
 	)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -394,6 +401,89 @@ func TestCodexHTTPRequestSessionAdvancesAccountOnlyForExactHard429(t *testing.T)
 	wantEvents := []string{"mark", "send:candidate-a", "quota:2", "mark", "send:candidate-b", "admit"}
 	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
 		t.Fatalf("events = %v, want %v", events, wantEvents)
+	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+	traceEvents := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "attempt" && event.UpstreamStatus == 429 && event.Reason == "capacity_exhausted" && event.AccountHint == codexTraceAccountHint("account-a")
+	}, "HTTP 429 exhaustion")
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "failover" && event.AccountHint == codexTraceAccountHint("account-b") && event.Failover
+	}, "HTTP account failover")
+}
+
+func TestCodexHTTPRequestSessionPayloadDiagnosticsCaptureEveryProviderAttempt(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloads, err := OpenPayloadWriter(payloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := []codex.AccountKey{"account-a", "account-b", "account-c", "account-d"}
+	plan := CodexFrozenDispatchPlan{status: CodexRoutePlanReady}
+	slotAccounts := make(map[uint32]codex.AccountKey, len(accounts))
+	for index, account := range accounts {
+		choice := codexHTTPSessionChoice(account)
+		plan.accounts = append(plan.accounts, CodexFrozenDispatchAccount{
+			choice:   choice,
+			attempts: []CandidateAttempt{codexHTTPSessionAttempt(account, codex.CandidateID(fmt.Sprintf("candidate-%c", 'a'+index)), "revision", 1)},
+		})
+		slotAccounts[uint32(index+1)] = account
+	}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, codexHTTPSessionChoice("account-a"))
+	bodies := [][]byte{
+		[]byte(`{"type":"error","status":401,"error":{"type":"authentication_error"}}`),
+		[]byte(`{"type":"error","status":403,"error":{"type":"authentication_error"}}`),
+		[]byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"response-d"}}`),
+	}
+	statuses := []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusOK}
+	outcomes := make([]codexHTTPSessionOutcome, 0, len(statuses))
+	for index, status := range statuses {
+		outcomes = append(outcomes, codexHTTPSessionOutcome{response: &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"X-Upstream-Attempt": {fmt.Sprint(index + 1)}},
+			Body:       io.NopCloser(bytes.NewReader(bodies[index])),
+		}})
+	}
+	events := make([]string, 0, 16)
+	dispatcher := &codexHTTPSessionDispatcher{t: t, events: &events, outcomes: outcomes, wantBody: encoded}
+	lifecycle := &codexHTTPSessionLifecycle{account: "account-a", slotAccounts: slotAccounts, events: &events}
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := withCodexTrace(context.Background(), nil, payloads, CodexTraceStart{Transport: "http"})
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Capacity: NewCodexCapacityLedger(nil, 0)}).Do(ctx, template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil {
+		t.Fatal("final response is nil")
+	}
+	finalBody, readErr := io.ReadAll(result.Response.Body)
+	closeErr := result.Response.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read/close final response: %v", errors.Join(readErr, closeErr))
+	}
+	if !bytes.Equal(finalBody, bodies[3]) {
+		t.Fatalf("final body = %s, want %s", finalBody, bodies[3])
+	}
+	if err := payloads.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payloadEvents := readCodexPayloadEvents(t, payloadPath)
+	if len(payloadEvents) != len(statuses) {
+		t.Fatalf("payload events = %d, want %d provider attempts", len(payloadEvents), len(statuses))
+	}
+	for index, event := range payloadEvents {
+		if event.Direction != "upstream_response" || event.StatusCode != statuses[index] || event.AccountHint != codexTraceAccountHint(accounts[index]) || event.Attempt != 1 {
+			t.Fatalf("payload event %d metadata = %+v", index+1, event)
+		}
+		if event.Headers.Get("X-Upstream-Attempt") != fmt.Sprint(index+1) || !event.Complete || string(event.Body) != string(bodies[index]) {
+			t.Fatalf("payload event %d content = %+v, want body %s", index+1, event, bodies[index])
+		}
 	}
 }
 

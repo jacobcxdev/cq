@@ -53,6 +53,9 @@ func codexObservationFieldsForProtocol(request CodexProtocolRequest, parseErr er
 		fields.SessionKey = hashPrefix("codex-session", session)
 		fields.SessionSource = "metadata:session_id"
 	}
+	if thread := request.Metadata.Metadata.ThreadID; thread != "" {
+		fields.ThreadKey = hashPrefix("codex-thread", thread)
+	}
 	return fields
 }
 
@@ -65,9 +68,11 @@ func replaceCodexRequestObservation(ctx context.Context, request CodexProtocolRe
 		return
 	}
 	fields := codexObservationFieldsForProtocol(request, parseErr)
+	updateCodexTraceIdentity(ctx, fields.SessionKey, fields.SessionSource, fields.ThreadKey, fields.RequestKind)
 	diagnostics.mu.Lock()
 	diagnostics.codex.SessionKey = fields.SessionKey
 	diagnostics.codex.SessionSource = fields.SessionSource
+	diagnostics.codex.ThreadKey = fields.ThreadKey
 	diagnostics.codex.RequestKind = fields.RequestKind
 	diagnostics.codex.RequestLineage = fields.RequestLineage
 	diagnostics.codex.RequestedReasoningEffort = fields.RequestedReasoningEffort
