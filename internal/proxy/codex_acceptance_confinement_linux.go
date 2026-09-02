@@ -84,16 +84,13 @@ func (linuxCodexAcceptanceConfinement) Execute(ctx context.Context, execution co
 		command.Stdout = io.Discard
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET | syscall.CLONE_NEWNS,
-		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Geteuid(), Size: 1}},
-		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getegid(), Size: 1}},
-		GidMappingsEnableSetgroups: false,
-		Pdeathsig:                  syscall.SIGKILL,
-		Setpgid:                    true,
+		Pdeathsig: syscall.SIGKILL,
+		Setpgid:   true,
 	}
 	if err := startLinuxAcceptanceCommand(command); err != nil {
-		return nil, fmt.Errorf("Codex acceptance namespace confinement unavailable: %w", err)
+		return nil, fmt.Errorf("Codex acceptance process confinement unavailable: %w", err)
 	}
+	defer killLinuxAcceptanceGroup(command.Process.Pid)
 	_ = child.Close()
 	_ = helper.Close()
 	encoded, err := json.Marshal(config)
@@ -226,5 +223,11 @@ func openLinuxAcceptanceClient(execution codexAcceptanceExecution) (*os.File, er
 func killLinuxAcceptanceGroup(pid int) {
 	if pid > 1 {
 		_ = unix.Kill(-pid, unix.SIGKILL)
+	}
+}
+
+func killLinuxAcceptanceProcess(pid int) {
+	if pid > 1 {
+		_ = unix.Kill(pid, unix.SIGKILL)
 	}
 }

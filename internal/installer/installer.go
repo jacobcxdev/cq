@@ -193,7 +193,7 @@ func (installer *Installer) Install(ctx context.Context) (resultErr error) {
 		}
 	}
 	mutated = true
-	if err := installer.FS.Rename(installer.candidatePath(), installer.Installation.Executable); err != nil {
+	if err := replaceExecutable(ctx, installer.FS, installer.candidatePath(), installer.Installation.Executable); err != nil {
 		return fail(fmt.Errorf("replace CQ executable: %w", err))
 	}
 	if _, _, installedDigest, err := installer.readBinary(installer.Installation.Executable); err != nil {
@@ -434,7 +434,7 @@ func (installer *Installer) rollback(ctx context.Context, previous *Installation
 	if err := installer.writeExclusive(installer.candidatePath(), rollbackBody, rollbackMode); err != nil {
 		return errors.Join(result, err)
 	}
-	if err := installer.FS.Rename(installer.candidatePath(), previous.Executable); err != nil {
+	if err := replaceExecutable(ctx, installer.FS, installer.candidatePath(), previous.Executable); err != nil {
 		return errors.Join(result, err)
 	}
 	result = errors.Join(result, installer.syncExecutableDirectory())

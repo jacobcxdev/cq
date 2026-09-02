@@ -55,6 +55,21 @@ func TestSystemdServiceSupportsCustomRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestSystemdInstallProxyStartsUnitBeforeReturning(t *testing.T) {
+	platform, runner := newSystemdServiceHarness(t)
+
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatalf("InstallProxy() error = %v", err)
+	}
+	want := [][]string{
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "--now", systemdProxyUnit},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("systemctl calls = %#v\nwant = %#v", runner.calls, want)
+	}
+}
+
 func TestSystemdServiceInstallUsesUserManagerInOrder(t *testing.T) {
 	platform, runner := newSystemdServiceHarness(t)
 	if err := platform.Preflight(context.Background(), platform.executable); err != nil {
@@ -73,7 +88,9 @@ func TestSystemdServiceInstallUsesUserManagerInOrder(t *testing.T) {
 		{"--user", "show", systemdRefreshService, "--no-pager", "--property=" + strings.Join(systemdShowProperties, ",")},
 		{"--user", "show", systemdRefreshTimer, "--no-pager", "--property=" + strings.Join(systemdShowProperties, ",")},
 		{"--user", "daemon-reload"},
-		{"--user", "enable", "--now", systemdProxyUnit, systemdRefreshTimer},
+		{"--user", "enable", "--now", systemdProxyUnit},
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "--now", systemdRefreshTimer},
 		{"--user", "start", systemdRefreshService},
 	}
 	if !reflect.DeepEqual(runner.calls, wantCalls) {

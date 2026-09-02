@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -82,16 +84,14 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	for _, required := range []string{
 		"id: cq\n",
 		"-X main.version={{ .Version }}",
-		"goos:\n      - darwin",
+		"goos:\n      - darwin\n      - linux\n      - windows",
 		"goarch:\n      - amd64\n      - arm64",
+		"format_overrides:",
+		"goos: windows",
+		"formats: [zip]",
 	} {
 		if !strings.Contains(releaserText, required) {
 			t.Fatalf("GoReleaser missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{"- linux", "- windows", "format_overrides:"} {
-		if strings.Contains(releaserText, forbidden) {
-			t.Fatalf("GoReleaser still targets non-macOS platform %q", forbidden)
 		}
 	}
 	if strings.Contains(releaserText, "id: cq-install") || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
@@ -100,17 +100,27 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	workflowText := string(workflow)
 	for _, required := range []string{
 		"goreleaser/goreleaser-action@v7",
-		"runs-on: macos-15",
+		"runs-on: windows-latest",
+		"runs-on: ubuntu-24.04-arm",
+		"wix --version 5.0.2",
+		`.\.github\scripts\build-windows-msi.ps1`,
+		`@("amd64", "arm64")`,
+		`cq_${version}_windows_${architecture}.msi`,
+		"go run ./internal/tools/wingetmanifest",
+		"gh release upload",
 		`archive="cq_${version}_darwin_${arch}.tar.gz"`,
-		"needs: release",
+		`.github/scripts/validate-linux-install.sh "$GITHUB_REF_NAME" "$previous_tag"`,
+		`.\.github\scripts\validate-windows-install.ps1`,
+		"secrets.WINGET_PKGS_TOKEN",
+		"microsoft/winget-pkgs",
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("release workflow missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"runs-on: ubuntu", "runs-on: windows", "windows-packages:", "windows-acceptance:", "linux-install:", "windows-deployed:", "winget-publish:"} {
-		if strings.Contains(workflowText, forbidden) {
-			t.Fatalf("release workflow still uses non-macOS surface %q", forbidden)
+	for _, required := range []string{"windows-packages:", "windows-acceptance:", "linux-install:", "windows-deployed:", "winget-publish:"} {
+		if !strings.Contains(workflowText, required) {
+			t.Fatalf("release workflow missing native lifecycle job %q", required)
 		}
 	}
 }
@@ -281,7 +291,7 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
+func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -312,6 +322,10 @@ func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
 		`brew style --fix "$cask"`,
 		`for arch in amd64 arm64; do`,
+		`needs: [release, windows-packages, windows-acceptance]`,
+		`needs: [windows-deployed, linux-install]`,
+		`test "$(jq '.assets | length' <<<"$release")" -ge 9`,
+		`git fetch --force --tags origin`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("release workflow missing macOS publication gate %q", required)
@@ -331,8 +345,11 @@ func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
 			t.Errorf("release workflow uses pipefail-unsafe previous-tag selection %q", unsafe)
 		}
 	}
-	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 1 {
-		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 1", count)
+	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 2 {
+		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 2", count)
+	}
+	if count := strings.Count(text, "git fetch --force --tags origin"); count != 2 {
+		t.Errorf("release workflow refreshes tag inventory %d times, want Linux and Windows deployment jobs", count)
 	}
 	releaseStart := strings.Index(text, "\n  release:\n")
 	publishStart := strings.Index(text, "\n  publish:\n")
@@ -354,7 +371,7 @@ func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
 	}
 }
 
-func TestCIUsesMacOSRunnersOnly(t *testing.T) {
+func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +379,16 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 	text := string(workflow)
 	for _, required := range []string{
 		"runs-on: macos-15",
+		"runner: ubuntu-24.04",
+		"runner: ubuntu-24.04-arm",
+		"architecture: amd64",
+		"architecture: arm64",
+		"runs-on: windows-latest",
+		"kernel.apparmor_restrict_unprivileged_userns",
+		"TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock",
+		"TestLinuxAcceptanceCancellationReapsDescendants",
+		"CQ_NATIVE_WINDOWS_SCHEDULER_TEST",
+		"validate-windows-msi.ps1",
 		"go build ./...",
 		"go vet ./...",
 		"go test -race -count=1 ./...",
@@ -369,16 +396,21 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 		"./cmd/cq-install",
 	} {
 		if !strings.Contains(text, required) {
-			t.Errorf("CI missing macOS gate %q", required)
+			t.Errorf("CI missing native platform gate %q", required)
 		}
 	}
-	for _, forbidden := range []string{"runs-on: ubuntu", "runs-on: windows", "GOOS=windows", "GOOS=linux", "linux-confinement:", "\n  windows:\n"} {
+	for _, forbidden := range []string{
+		"self-hosted",
+		"bespoke",
+		"Provide pinned Go path",
+		"apparmor_parser",
+		"aa-exec",
+		"sysctl -w",
+		"-skip '^TestLinuxAcceptanceConfinement",
+	} {
 		if strings.Contains(text, forbidden) {
-			t.Errorf("CI still uses non-macOS surface %q", forbidden)
+			t.Errorf("CI uses forbidden platform bypass %q", forbidden)
 		}
-	}
-	if strings.Contains(text, "self-hosted") || strings.Contains(text, "bespoke") {
-		t.Fatal("CI requires a persistent custom runner")
 	}
 	if strings.Contains(text, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1`) {
 		t.Error("CI uses pipefail-unsafe previous-tag selection")
@@ -386,8 +418,11 @@ func TestCIUsesMacOSRunnersOnly(t *testing.T) {
 	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
 		t.Error("CI does not use pipe-safe previous-tag selection")
 	}
+	if count := strings.Count(text, "runs-on: macos-15"); count != 2 {
+		t.Fatalf("CI has %d macOS jobs, want Codex and Homebrew only", count)
+	}
 	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
-		t.Fatalf("full race suite runs %d times, want one macOS run", count)
+		t.Fatalf("full race suite appears in %d job definitions, want Linux matrix only", count)
 	}
 }
 
@@ -545,6 +580,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	for _, required := range []string{
 		"trap cleanup EXIT INT TERM",
 		`echo "missing required command: $command" >&2`,
+		`export PATH="$GOBIN:$PATH"`,
 		`systemd_executable=/usr/lib/systemd/systemd`,
 		`echo "systemd user manager unavailable: $systemd_executable" >&2`,
 		`"$systemd_executable" --user --unit=basic.target`,
@@ -563,5 +599,33 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	if strings.Contains(linuxText, "for command in go jq systemctl systemd readlink") {
 		t.Error("Linux installation script requires systemd daemon on PATH")
+	}
+}
+
+func TestLinuxNativeInstallAcceptsMissingPreviousVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell tools")
+	}
+	toolDirectory := t.TempDir()
+	for _, name := range []string{"mktemp", "mkdir", "chmod", "find"} {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(toolDirectory, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command("bash", "../../.github/scripts/validate-linux-install.sh", "0.30.1")
+	command.Env = []string{"PATH=" + toolDirectory}
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatal("validation unexpectedly succeeded without Go")
+	}
+	if strings.Contains(string(output), "unbound variable") {
+		t.Fatalf("optional previous version failed under nounset:\n%s", output)
+	}
+	if !strings.Contains(string(output), "missing required command: go") {
+		t.Fatalf("validation did not reach command preflight:\n%s", output)
 	}
 }

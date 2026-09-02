@@ -7,7 +7,8 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
 fi
 
 version=${1#v}
-previous_version=${2#v}
+previous_version=${2:-}
+previous_version=${previous_version#v}
 case "$version" in
   ''|*[!0-9.]*|.*|*..*|*.) echo "invalid version" >&2; exit 2 ;;
 esac
@@ -19,6 +20,7 @@ export XDG_CONFIG_HOME="$temporary_root/config"
 export XDG_CACHE_HOME="$temporary_root/cache"
 export XDG_RUNTIME_DIR="$temporary_root/runtime"
 export GOBIN="$temporary_root/bin"
+export PATH="$GOBIN:$PATH"
 export CODEX_HOME="$HOME/.codex"
 install_root="$GOBIN"
 installed_cq="$install_root/cq"

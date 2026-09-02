@@ -121,8 +121,16 @@ jobs:
             "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \
             "$CURRENT_VERSION"
 
-  test:
-    runs-on: macos-15
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
 
@@ -130,10 +138,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Provide pinned Go path
+      - name: Require stock Ubuntu AppArmor policy
+        shell: bash
         run: |
-          sudo mkdir -p /opt/homebrew/bin
-          sudo ln -sf "$(command -v go)" /opt/homebrew/bin/go
+          set -euo pipefail
+          test "$(go env GOARCH)" = "${{ matrix.architecture }}"
+          test "$(tr -d '\n' </sys/module/apparmor/parameters/enabled)" = Y
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
 
       - run: go build ./...
       - run: go vet ./...
@@ -158,4 +169,62 @@ jobs:
           fi
           cat "$test_log"
           grep -F -- "--- PASS: ${test_name} " "$test_log"
+      - name: Gate stock-AppArmor confinement and cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests='TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock TestLinuxAcceptanceCancellationReapsDescendants'
+          test_log="$RUNNER_TEMP/linux-confinement.log"
+          if ! go test -race -count=1 -v ./internal/proxy -run '^(TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock|TestLinuxAcceptanceCancellationReapsDescendants)$' >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          for test_name in $tests; do
+            grep -F -- "--- PASS: ${test_name} " "$test_log"
+          done
       - run: go test -race -count=1 ./...
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - run: go build -o cq.exe ./cmd/cq
+      - run: go build -o cq-install.exe ./cmd/cq-install
+      - run: .\cq.exe --help
+      - run: .\cq.exe --version
+      - run: .\cq-install.exe --help
+      - run: go vet ./...
+      - run: go test -race -count=1 ./internal/fsutil
+      - run: go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'
+      - run: go test -race -count=1 ./cmd/cq-install
+      - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
+        env:
+          CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
+      - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
+      - name: Validate per-user MSI install, upgrade, and uninstall
+        shell: pwsh
+        run: |
+          $wixRoot = Join-Path $env:RUNNER_TEMP "wix"
+          dotnet tool install --tool-path $wixRoot wix --version 5.0.2
+          $wix = Join-Path $wixRoot "wix.exe"
+          $packages = Join-Path $env:RUNNER_TEMP "cq-msi"
+          $previousRoot = Join-Path $packages "previous"
+          $currentRoot = Join-Path $packages "current"
+          New-Item -ItemType Directory -Path $previousRoot, $currentRoot -Force | Out-Null
+          go build -ldflags "-X main.version=0.0.1" -o (Join-Path $previousRoot "cq.exe") ./cmd/cq
+          go build -ldflags "-X main.version=0.0.2" -o (Join-Path $currentRoot "cq.exe") ./cmd/cq
+          $previousMSI = Join-Path $packages "cq_0.0.1_windows_amd64.msi"
+          $currentMSI = Join-Path $packages "cq_0.0.2_windows_amd64.msi"
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
