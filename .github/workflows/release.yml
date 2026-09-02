@@ -344,6 +344,8 @@ jobs:
 
       - name: Validate Go runner install, upgrade, transport, and uninstall
         shell: bash
+        env:
+          CQ_LINUX_USE_EXISTING_USER_MANAGER: "1"
         run: |
           set -euo pipefail
           git fetch --force --tags origin
