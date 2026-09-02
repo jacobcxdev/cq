@@ -545,6 +545,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	for _, required := range []string{
 		"trap cleanup EXIT INT TERM",
 		`echo "missing required command: $command" >&2`,
+		`export PATH="$GOBIN:$PATH"`,
 		`systemd_executable=/usr/lib/systemd/systemd`,
 		`echo "systemd user manager unavailable: $systemd_executable" >&2`,
 		`"$systemd_executable" --user --unit=basic.target`,
