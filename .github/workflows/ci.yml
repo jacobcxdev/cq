@@ -68,18 +68,29 @@ jobs:
           go-version-file: go.mod
 
       - name: Create isolated release candidate tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          previous_tag=
+          latest_tag=
           while IFS= read -r candidate; do
             if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              previous_tag="$candidate"
+              latest_tag="$candidate"
               break
             fi
           done < <(git tag --sort=-v:refname)
+          previous_tag="$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName')"
+          test -n "$latest_tag"
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
-          IFS=. read -r major minor patch <<<"$previous_version"
+          latest_version="${latest_tag#v}"
+          IFS=. read -r major minor patch <<<"$latest_version"
           current_version="${major}.${minor}.$((patch + 1))-ci"
           git tag "v$current_version"
           {
