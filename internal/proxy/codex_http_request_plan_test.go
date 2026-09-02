@@ -1725,7 +1725,7 @@ func TestCodexHTTPRequestPlanFactoryWaitsForLongRunningPredecessor(t *testing.T)
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryPreservesQueuedContinuityAcrossWebSocketRotation(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryPreservesQueuedContinuityAcrossLaterWebSocketMetadata(t *testing.T) {
 	t.Parallel()
 
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

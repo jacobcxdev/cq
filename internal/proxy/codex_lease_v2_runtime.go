@@ -711,6 +711,13 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	desired.AccountHash = runtime.store.hash("account", string(selected.AccountKey))
 	desired.CodexCurrentRequest = runtime.requestAfterImage(plan)
+	migrateTurnStateLatch := runtime.canMigrateAuthenticatedTurnStateLatch(current.Record, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity)
+	if migrateTurnStateLatch {
+		desired.TurnStateLatchCurrent = true
+	}
+	if migrateTurnStateLatch && !constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, runtime.store.hash("turn-state", plan.Evidence.TurnState)) {
+		desired.TurnStateHash = runtime.store.hash("turn-state", plan.Evidence.TurnState)
+	}
 	if !requiresAccountContinuity && (codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence) || codexLeaseRecordAllowsPortableReset(current.Record)) {
 		if current.Record.EverAdmitted {
 			desired.AccountHash = current.Record.AccountHash
@@ -744,11 +751,15 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		}
 	}
 	identity := requestIdentity
-	var committedRecord CodexJournalRecordV2
-	post, err := runtime.store.commitLane(fence, CodexLaneMutation{
+	mutation := CodexLaneMutation{
 		BeginRequest:  &identity,
 		UpsertRecords: []CodexJournalRecordV2{desired},
-	}, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
+	}
+	if migrateTurnStateLatch {
+		mutation.MigrateTurnStateLatch = &identity
+	}
+	var committedRecord CodexJournalRecordV2
+	post, err := runtime.store.commitLane(fence, mutation, func(_ CodexLeaseGenerationFence, installed codexLeaseJournalEnvelopeV2) {
 		for _, record := range installed.Records {
 			if record.Identity() == identity {
 				committedRecord = cloneCodexJournalRecordV2(record)
@@ -2002,7 +2013,8 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 	}
 	if !newTurn && found {
 		ingress := firstIngressContinuity(ingressContinuity)
-		if ingress != nil && (ingress.kind == codexLeaseIngressContinuityInvalid || !runtime.validIngressContinuityTarget(restored, requestIdentity, selected, ingress)) {
+		canMigrateLatch := runtime.canMigrateAuthenticatedTurnStateLatch(authority.Record, selected, evidence, authenticatedCallerContinuity)
+		if ingress != nil && (ingress.kind == codexLeaseIngressContinuityInvalid || !runtime.validIngressContinuityTarget(restored, requestIdentity, selected, ingress)) && !canMigrateLatch {
 			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
 		}
 		missingAuthenticatedState := authenticatedCallerContinuity && authority.Record.HasTurnState && !evidence.HasTurnState
@@ -2010,7 +2022,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) &&
-			!runtime.validIngressTurnStateRotation(restored, requestIdentity, selected, evidence, firstIngressContinuity(ingressContinuity)) {
+			!runtime.validIngressTurnStateRotation(restored, requestIdentity, selected, evidence, ingress) && !canMigrateLatch {
 			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
 		}
 	}
@@ -2027,6 +2039,12 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		return requiresAccount, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 	}
 	return requiresAccount, nil
+}
+
+func (runtime *CodexLeaseRuntime) canMigrateAuthenticatedTurnStateLatch(record CodexJournalRecordV2, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool) bool {
+	return runtime != nil && runtime.store != nil && authenticatedCallerContinuity && evidence.HasTurnState && record.HasTurnState && !record.TurnStateLatchCurrent &&
+		record.AccountHash != "" && constantTimeCodexLeaseDigestEqual(record.AccountHash, runtime.store.hash("account", string(selected))) &&
+		codexLeaseRuntimeCanBeginRequest(record)
 }
 
 func firstIngressContinuity(bindings []*codexLeaseIngressContinuityBinding) *codexLeaseIngressContinuityBinding {
@@ -2098,8 +2116,12 @@ func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJourn
 	if !evidence.HasTurnState {
 		return nil
 	}
+	if record.HasTurnState {
+		return nil
+	}
 	record.TurnStateHash = handle.runtime.store.hash("turn-state", evidence.TurnState)
 	record.HasTurnState = true
+	record.TurnStateLatchCurrent = true
 	return nil
 }
 

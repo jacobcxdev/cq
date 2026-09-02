@@ -203,6 +203,21 @@ func TestCodexLeaseV2CommitLaneRejectsNonTerminalAttemptRolloverWithoutWriting(t
 	}
 }
 
+func TestCodexLeaseV2CommitLaneRejectsFirstTurnStateWithoutCurrentLatch(t *testing.T) {
+	store, fence, _, streaming := openDispatchedCodexLeaseV2AffinityTestStore(t)
+	streaming.HasTurnState = true
+	streaming.TurnStateHash = store.hash("turn-state", "private-provider-state")
+	before := append([]byte(nil), store.journalBytes...)
+	beforeGeneration := store.Generation()
+
+	if _, err := store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{streaming}}); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+		t.Fatalf("unlatched first turn state error = %T %v, want invalid mutation", err, err)
+	}
+	if store.Generation() != beforeGeneration || !bytes.Equal(store.journalBytes, before) || store.poisoned != nil {
+		t.Fatalf("unlatched first turn state changed authority: generation %d poison %v", store.Generation(), store.poisoned)
+	}
+}
+
 func TestCodexLeaseV2CommitLaneRunsStrictValidationBeforeWriting(t *testing.T) {
 	store, fsys, _ := openCodexLeaseV2CASTestStore(t)
 	record := reservingCodexLeaseV2CASTestRecord(store, "memory-session", "memory-thread", "memory-turn")

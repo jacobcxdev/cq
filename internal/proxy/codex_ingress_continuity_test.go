@@ -118,7 +118,7 @@ waitForIngress:
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryPreservesTerminalIngressContinuityAcrossDrain(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryPreservesLatchedTurnStateAcrossDrain(t *testing.T) {
 	t.Parallel()
 
 	fixture := newCodexTerminalIngressContinuityFixture(t)
@@ -174,18 +174,24 @@ func TestCodexHTTPRequestPlanFactoryPreservesTerminalIngressContinuityAcrossDrai
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryRejectsStaleTurnStateFirstSeenAfterDrain(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryPreservesLatchedTurnStateFirstSeenAfterDrain(t *testing.T) {
 	t.Parallel()
 
 	fixture := newCodexTerminalIngressContinuityFixture(t)
 	if _, err := fixture.predecessor.Drain(); err != nil {
 		t.Fatal(err)
 	}
-	_, err := fixture.factory.Build(codexIngressContinuityCallerContext(t), CodexHTTPRequestPlanInput{
+	prepared, err := fixture.factory.Build(codexIngressContinuityCallerContext(t), CodexHTTPRequestPlanInput{
 		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
 		Headers: http.Header{"X-Codex-Turn-State": {"private-state-a"}},
 	})
-	assertCodexIngressContinuityMismatch(t, err)
+	if err != nil {
+		t.Fatalf("latched turn-state continuation = %T %v, want success", err, err)
+	}
+	if _, err := prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	prepared.Frozen.Release()
 }
 
 func TestCodexHTTPRequestPlanFactoryRejectsArbitraryTerminalIngressTurnState(t *testing.T) {
@@ -234,7 +240,7 @@ func TestCodexHTTPRequestPlanFactoryRejectsArbitraryTerminalIngressTurnState(t *
 	}
 }
 
-func TestCodexHTTPRequestPlanFactoryRejectsTerminalContinuityAfterRuntimeRestart(t *testing.T) {
+func TestCodexHTTPRequestPlanFactoryPreservesLatchedTurnStateAfterRuntimeRestart(t *testing.T) {
 	t.Parallel()
 
 	fixture := newCodexTerminalIngressContinuityFixture(t)
@@ -247,21 +253,17 @@ func TestCodexHTTPRequestPlanFactoryRejectsTerminalContinuityAfterRuntimeRestart
 		release: inventoryRelease,
 	}
 	ctx := codexIngressContinuityCallerContext(t)
-	result := make(chan error, 1)
+	type buildResult struct {
+		prepared CodexPreparedHTTPRequest
+		err      error
+	}
+	result := make(chan buildResult, 1)
 	go func() {
 		prepared, buildErr := fixture.factory.Build(ctx, CodexHTTPRequestPlanInput{
 			Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
 			Headers: http.Header{"X-Codex-Turn-State": {"private-state-a"}},
 		})
-		if buildErr == nil {
-			if prepared.Lifecycle != nil {
-				_, _ = prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background())
-			}
-			if prepared.Frozen != nil {
-				prepared.Frozen.Release()
-			}
-		}
-		result <- buildErr
+		result <- buildResult{prepared: prepared, err: buildErr}
 	}()
 
 	select {
@@ -274,8 +276,14 @@ func TestCodexHTTPRequestPlanFactoryRejectsTerminalContinuityAfterRuntimeRestart
 	}
 	close(inventoryRelease)
 	select {
-	case err := <-result:
-		assertCodexIngressContinuityMismatch(t, err)
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("latched turn-state continuation after restart = %T %v, want success", got.err, got.err)
+		}
+		if _, err := got.prepared.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		got.prepared.Frozen.Release()
 	case <-ctx.Done():
 		t.Fatal("restarted successor did not finish after drain")
 	}

@@ -119,6 +119,7 @@ func (observer *codexHTTPResponseObserver) observeSSELocked(chunk []byte) error 
 	for _, observation := range observations {
 		if observation.Kind == CodexSSEMetadata && observation.TurnState != "" {
 			turnState = observation.TurnState
+			break
 		}
 	}
 	for _, observation := range observations {

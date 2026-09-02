@@ -539,7 +539,7 @@ func TestCodexStage12AMonotonicAdmittedTurn(t *testing.T) {
 
 	inventory.setActive(accountB, defaultAccount)
 	secondResponse := httptest.NewRecorder()
-	stage12AServeWithWriter(t, server, secondInput, "stage12a-private-session-header", "stage12a-private-turn-state-b", secondResponse)
+	stage12AServeWithWriter(t, server, secondInput, "stage12a-private-session-header", "stage12a-private-turn-state-a", secondResponse)
 	if secondResponse.Code != http.StatusTooManyRequests {
 		t.Fatalf("second response status = %d, want %d", secondResponse.Code, http.StatusTooManyRequests)
 	}
