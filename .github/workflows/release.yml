@@ -625,6 +625,5 @@ jobs:
             --repo microsoft/winget-pkgs \
             --base master \
             --head "jacobcxdev:$branch" \
-            --assignee jacobcxdev \
             --title "New version: jacobcxdev.cq version $version" \
             --body "Published CQ $version MSI installers for x64 and ARM64."

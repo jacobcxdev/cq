@@ -125,6 +125,9 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 			t.Fatalf("release workflow missing native lifecycle job %q", required)
 		}
 	}
+	if strings.Contains(workflowText, "--assignee jacobcxdev") {
+		t.Fatal("WinGet publisher requests unsupported upstream assignee permission")
+	}
 }
 
 func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
