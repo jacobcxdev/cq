@@ -84,16 +84,14 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	for _, required := range []string{
 		"id: cq\n",
 		"-X main.version={{ .Version }}",
-		"goos:\n      - darwin",
+		"goos:\n      - darwin\n      - linux\n      - windows",
 		"goarch:\n      - amd64\n      - arm64",
+		"format_overrides:",
+		"goos: windows",
+		"formats: [zip]",
 	} {
 		if !strings.Contains(releaserText, required) {
 			t.Fatalf("GoReleaser missing %q", required)
-		}
-	}
-	for _, forbidden := range []string{"- linux", "- windows", "format_overrides:"} {
-		if strings.Contains(releaserText, forbidden) {
-			t.Fatalf("GoReleaser still targets non-macOS platform %q", forbidden)
 		}
 	}
 	if strings.Contains(releaserText, "id: cq-install") || strings.Contains(releaserText, "headroom-ai") || strings.Contains(releaserText, "python@3") {
@@ -102,17 +100,27 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 	workflowText := string(workflow)
 	for _, required := range []string{
 		"goreleaser/goreleaser-action@v7",
-		"runs-on: macos-15",
+		"runs-on: windows-latest",
+		"runs-on: ubuntu-24.04-arm",
+		"wix --version 5.0.2",
+		`.\.github\scripts\build-windows-msi.ps1`,
+		`@("amd64", "arm64")`,
+		`cq_${version}_windows_${architecture}.msi`,
+		"go run ./internal/tools/wingetmanifest",
+		"gh release upload",
 		`archive="cq_${version}_darwin_${arch}.tar.gz"`,
-		"needs: release",
+		`.github/scripts/validate-linux-install.sh "$GITHUB_REF_NAME" "$previous_tag"`,
+		`.\.github\scripts\validate-windows-install.ps1`,
+		"secrets.WINGET_PKGS_TOKEN",
+		"microsoft/winget-pkgs",
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("release workflow missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"runs-on: ubuntu", "runs-on: windows", "windows-packages:", "windows-acceptance:", "linux-install:", "windows-deployed:", "winget-publish:"} {
-		if strings.Contains(workflowText, forbidden) {
-			t.Fatalf("release workflow still uses non-macOS surface %q", forbidden)
+	for _, required := range []string{"windows-packages:", "windows-acceptance:", "linux-install:", "windows-deployed:", "winget-publish:"} {
+		if !strings.Contains(workflowText, required) {
+			t.Fatalf("release workflow missing native lifecycle job %q", required)
 		}
 	}
 }
@@ -283,7 +291,7 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 	}
 }
 
-func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
+func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -314,6 +322,10 @@ func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
 		`brew style --fix "$cask"`,
 		`for arch in amd64 arm64; do`,
+		`needs: [release, windows-packages, windows-acceptance]`,
+		`needs: [windows-deployed, linux-install]`,
+		`test "$(jq '.assets | length' <<<"$release")" -ge 9`,
+		`git fetch --force --tags origin`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("release workflow missing macOS publication gate %q", required)
@@ -333,8 +345,11 @@ func TestReleasePublishesAfterMacOSPackageProof(t *testing.T) {
 			t.Errorf("release workflow uses pipefail-unsafe previous-tag selection %q", unsafe)
 		}
 	}
-	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 1 {
-		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 1", count)
+	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 2 {
+		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 2", count)
+	}
+	if count := strings.Count(text, "git fetch --force --tags origin"); count != 2 {
+		t.Errorf("release workflow refreshes tag inventory %d times, want Linux and Windows deployment jobs", count)
 	}
 	releaseStart := strings.Index(text, "\n  release:\n")
 	publishStart := strings.Index(text, "\n  publish:\n")
