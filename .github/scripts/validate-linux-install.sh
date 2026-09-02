@@ -145,7 +145,7 @@ else
 fi
 run_installer "$version"
 
-[[ "$($installed_cq --version)" == "v$version" ]]
+[[ "$("$installed_cq" --version)" == "$version" ]]
 for unit in cq-proxy.service cq-refresh.service cq-refresh.timer; do
   [[ -f "$XDG_CONFIG_HOME/systemd/user/$unit" ]]
 done

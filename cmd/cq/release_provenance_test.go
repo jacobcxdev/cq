@@ -595,10 +595,14 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`export CODEX_HOME="$HOME/.codex"`,
 		`use_existing_user_manager=${CQ_LINUX_USE_EXISTING_USER_MANAGER:-}`,
 		`if [[ "$use_existing_user_manager" == "1" ]]; then`,
+		`[[ "$("$installed_cq" --version)" == "$version" ]]`,
 	} {
 		if !strings.Contains(linuxText, required) {
 			t.Errorf("Linux installation script missing cleanup/proof %q", required)
 		}
+	}
+	if strings.Contains(linuxText, `== "v$version"`) {
+		t.Error("Linux installation script expects a version prefix not printed by cq")
 	}
 	if strings.Contains(linuxText, "for command in go jq systemctl systemd readlink") {
 		t.Error("Linux installation script requires systemd daemon on PATH")
