@@ -611,6 +611,12 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	if strings.Contains(linuxText, "for command in go jq systemctl systemd readlink") {
 		t.Error("Linux installation script requires systemd daemon on PATH")
 	}
+	isolatedManagerEnvironment := `else
+  unset DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK
+  export HOME="$temporary_root/home"`
+	if !strings.Contains(linuxText, isolatedManagerEnvironment) {
+		t.Error("Linux installation script does not isolate user-manager session transport before temporary HOME")
+	}
 }
 
 func TestLinuxNativeInstallAcceptsMissingPreviousVersion(t *testing.T) {
