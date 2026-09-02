@@ -4,7 +4,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,12 +21,13 @@ import (
 )
 
 const (
-	linuxNamespaceProtocolVersion uint8 = 1
-	linuxNamespaceConfigMaxBytes        = 64 << 10
-	linuxNamespaceMaxArguments          = 128
-	linuxNamespaceMaxEnvironment        = 128
-	linuxNamespaceControlFD             = 4
-	linuxNamespaceClientFD              = 5
+	linuxNamespaceProtocolVersion       uint8 = 1
+	linuxNamespaceConfigMaxBytes              = 64 << 10
+	linuxNamespaceMaxArguments                = 128
+	linuxNamespaceMaxEnvironment              = 128
+	linuxNamespaceControlFD                   = 4
+	linuxNamespaceClientFD                    = 5
+	linuxAcceptanceNetworkThreadTimeout       = 3 * time.Second
 )
 
 type linuxNamespaceConfig struct {
@@ -115,32 +116,7 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 	if err != nil {
 		return errors.New("Linux acceptance helper unavailable")
 	}
-	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
-		return errors.New("Linux acceptance mount confinement unavailable")
-	}
-	if err := bringLinuxLoopbackUp(); err != nil {
-		return errors.New("Linux acceptance network confinement unavailable")
-	}
-	listeners, err := openLinuxRelayListeners(config.Relays)
-	if err != nil {
-		return errors.New("Linux acceptance relay confinement unavailable")
-	}
-	defer closeLinuxRelayListeners(listeners)
-	if err := applyLinuxLandlockWriteConfinement(config.WriteRoot); err != nil {
-		return errors.New("Linux acceptance filesystem confinement unavailable")
-	}
-	if err := verifyLinuxNamespaceDescriptors(map[int]bool{controlFD: true, clientFD: true}); err != nil {
-		return errors.New("Linux acceptance descriptor confinement unavailable")
-	}
 	sender := &linuxRelaySender{fd: controlFD}
-	acceptErrors := make(chan error, 1)
-	for index, listener := range listeners {
-		definition := config.Relays[index]
-		go runLinuxRelayAcceptor(ctx, listener, definition.ID, sender, acceptErrors)
-	}
-	if err := sender.ready(); err != nil {
-		return errors.New("Linux acceptance helper unavailable")
-	}
 	client := os.NewFile(uintptr(clientFD), "linux-acceptance-client")
 	if client == nil {
 		return errors.New("Linux acceptance executable unavailable")
@@ -162,10 +138,56 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 		ExtraFiles: []*os.File{client},
 		SysProcAttr: &syscall.SysProcAttr{
 			Pdeathsig: syscall.SIGKILL,
+			Setpgid:   true,
 		},
 	}
+	networkListenerTarget := make(chan *os.File)
+	networkReady := make(chan struct{})
+	stopNetwork := make(chan struct{})
+	networkDone := make(chan error, 1)
+	go func() {
+		networkDone <- runLinuxAcceptanceNetworkSupervisorSafely(func() error {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			close(networkReady)
+			listener, ok := <-networkListenerTarget
+			if !ok {
+				return errors.New("Linux acceptance network supervisor unavailable")
+			}
+			return runLinuxAcceptanceNetworkSupervisor(listener, config.Relays, stopNetwork)
+		})
+	}()
+	if err := waitLinuxAcceptanceNetworkSupervisorReady(ctx, networkListenerTarget, networkReady, networkDone); err != nil {
+		return errors.New("Linux acceptance network confinement unavailable")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := applyLinuxLandlockWriteConfinement(config.WriteRoot); err != nil {
+		stopLinuxAcceptanceNetworkSupervisorBeforeAttach(networkListenerTarget, networkDone)
+		return errors.New("Linux acceptance filesystem confinement unavailable")
+	}
+	if err := verifyLinuxNamespaceDescriptors(map[int]bool{controlFD: true, clientFD: true}); err != nil {
+		stopLinuxAcceptanceNetworkSupervisorBeforeAttach(networkListenerTarget, networkDone)
+		return errors.New("Linux acceptance descriptor confinement unavailable")
+	}
+	networkListener, err := installLinuxAcceptanceNetworkFilter()
+	if err != nil {
+		stopLinuxAcceptanceNetworkSupervisorBeforeAttach(networkListenerTarget, networkDone)
+		return errors.New("Linux acceptance network confinement unavailable")
+	}
+	if err := attachLinuxAcceptanceNetworkSupervisor(ctx, networkListenerTarget, networkListener, networkDone); err != nil {
+		_ = networkListener.Close()
+		return errors.New("Linux acceptance network confinement unavailable")
+	}
 	if err := command.Start(); err != nil {
+		_ = stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
 		return errors.New("Linux acceptance command failed")
+	}
+	if err := sender.ready(); err != nil {
+		killLinuxAcceptanceGroup(command.Process.Pid)
+		_ = command.Wait()
+		_ = stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
+		return errors.New("Linux acceptance helper unavailable")
 	}
 	wait := make(chan error, 1)
 	go func() {
@@ -178,18 +200,96 @@ func RunLinuxAcceptanceNamespaceHelper(ctx context.Context) error {
 	}()
 	select {
 	case err := <-wait:
+		killLinuxAcceptanceGroup(command.Process.Pid)
+		networkErr := stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
+		if networkErr != nil {
+			return errors.New("Linux acceptance network confinement unavailable")
+		}
 		if err != nil {
 			return errors.New("Linux acceptance command failed")
 		}
 		return nil
-	case <-acceptErrors:
-		_ = command.Process.Kill()
+	case <-networkDone:
+		killLinuxAcceptanceGroup(command.Process.Pid)
 		<-wait
-		return errors.New("Linux acceptance relay failed")
+		close(stopNetwork)
+		_ = networkListener.Close()
+		return errors.New("Linux acceptance network confinement unavailable")
 	case <-ctx.Done():
-		_ = command.Process.Kill()
+		killLinuxAcceptanceGroup(command.Process.Pid)
 		<-wait
+		_ = stopLinuxAcceptanceNetworkSupervisor(networkListener, stopNetwork, networkDone)
 		return errors.New("Linux acceptance command timed out")
+	}
+}
+
+func runLinuxAcceptanceNetworkSupervisorSafely(run func() error) (returnErr error) {
+	defer func() {
+		if recover() != nil {
+			returnErr = errors.New("Linux acceptance network supervisor panic")
+		}
+	}()
+	if run == nil {
+		return errors.New("Linux acceptance network supervisor unavailable")
+	}
+	return run()
+}
+
+func waitLinuxAcceptanceNetworkSupervisorReady(ctx context.Context, target chan *os.File, ready <-chan struct{}, done <-chan error) error {
+	timer := time.NewTimer(linuxAcceptanceNetworkThreadTimeout)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		return nil
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		stopLinuxAcceptanceNetworkSupervisorBeforeAttach(target, done)
+		return ctx.Err()
+	case <-timer.C:
+		stopLinuxAcceptanceNetworkSupervisorBeforeAttach(target, done)
+		return errors.New("Linux acceptance network supervisor startup timed out")
+	}
+}
+
+func attachLinuxAcceptanceNetworkSupervisor(ctx context.Context, target chan<- *os.File, listener *os.File, done <-chan error) error {
+	timer := time.NewTimer(linuxAcceptanceNetworkThreadTimeout)
+	defer timer.Stop()
+	select {
+	case target <- listener:
+		return nil
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		close(target)
+		_ = awaitLinuxAcceptanceNetworkSupervisor(done)
+		return ctx.Err()
+	case <-timer.C:
+		close(target)
+		_ = awaitLinuxAcceptanceNetworkSupervisor(done)
+		return errors.New("Linux acceptance network supervisor attach timed out")
+	}
+}
+
+func stopLinuxAcceptanceNetworkSupervisorBeforeAttach(target chan *os.File, done <-chan error) {
+	close(target)
+	_ = awaitLinuxAcceptanceNetworkSupervisor(done)
+}
+
+func stopLinuxAcceptanceNetworkSupervisor(listener *os.File, stop chan struct{}, done <-chan error) error {
+	close(stop)
+	_ = listener.Close()
+	return awaitLinuxAcceptanceNetworkSupervisor(done)
+}
+
+func awaitLinuxAcceptanceNetworkSupervisor(done <-chan error) error {
+	timer := time.NewTimer(linuxAcceptanceNetworkThreadTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errors.New("Linux acceptance network supervisor cleanup timed out")
 	}
 }
 
@@ -207,61 +307,6 @@ func receiveLinuxNamespaceConfig(controlFD int) (linuxNamespaceConfig, error) {
 		return linuxNamespaceConfig{}, errors.New("invalid Linux namespace config")
 	}
 	return config, nil
-}
-
-func openLinuxRelayListeners(definitions []linuxRelayDefinition) ([]*net.TCPListener, error) {
-	listeners := make([]*net.TCPListener, 0, len(definitions))
-	for _, definition := range definitions {
-		listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: definition.Port})
-		if err != nil {
-			closeLinuxRelayListeners(listeners)
-			return nil, err
-		}
-		listeners = append(listeners, listener)
-	}
-	return listeners, nil
-}
-
-func closeLinuxRelayListeners(listeners []*net.TCPListener) {
-	for _, listener := range listeners {
-		_ = listener.Close()
-	}
-}
-
-func runLinuxRelayAcceptor(ctx context.Context, listener *net.TCPListener, id linuxRelayID, sender *linuxRelaySender, failures chan<- error) {
-	defer func() {
-		if recover() != nil {
-			select {
-			case failures <- errors.New("Linux relay panic"):
-			default:
-			}
-		}
-	}()
-	for {
-		connection, err := listener.AcceptTCP()
-		if err != nil {
-			if ctx.Err() == nil {
-				select {
-				case failures <- err:
-				default:
-				}
-			}
-			return
-		}
-		file, err := connection.File()
-		_ = connection.Close()
-		if err == nil {
-			err = sender.connection(id, int(file.Fd()))
-			_ = file.Close()
-		}
-		if err != nil {
-			select {
-			case failures <- err:
-			default:
-			}
-			return
-		}
-	}
 }
 
 func verifyLinuxNamespaceDescriptors(explicit map[int]bool) error {
@@ -304,41 +349,6 @@ func closeLinuxNamespaceDescriptorOnExec(fd int, flags uintptr) error {
 	}
 	if verified&unix.FD_CLOEXEC == 0 {
 		return errors.New("Linux descriptor remained inheritable")
-	}
-	return nil
-}
-
-func bringLinuxLoopbackUp() error {
-	link, err := net.InterfaceByName("lo")
-	if err != nil || link.Index <= 0 {
-		return errors.New("resolve loopback")
-	}
-	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-	sequence := uint32(time.Now().UnixNano())
-	message := make([]byte, unix.NLMSG_HDRLEN+unix.SizeofIfInfomsg)
-	native := binary.NativeEndian
-	native.PutUint32(message[0:4], uint32(len(message)))
-	native.PutUint16(message[4:6], unix.RTM_NEWLINK)
-	native.PutUint16(message[6:8], unix.NLM_F_REQUEST|unix.NLM_F_ACK)
-	native.PutUint32(message[8:12], sequence)
-	message[unix.NLMSG_HDRLEN] = unix.AF_UNSPEC
-	native.PutUint32(message[unix.NLMSG_HDRLEN+4:unix.NLMSG_HDRLEN+8], uint32(link.Index))
-	native.PutUint32(message[unix.NLMSG_HDRLEN+8:unix.NLMSG_HDRLEN+12], unix.IFF_UP)
-	native.PutUint32(message[unix.NLMSG_HDRLEN+12:unix.NLMSG_HDRLEN+16], unix.IFF_UP)
-	if err := unix.Sendto(fd, message, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
-		return err
-	}
-	response := make([]byte, 4096)
-	count, _, err := unix.Recvfrom(fd, response, 0)
-	if err != nil || count < unix.NLMSG_HDRLEN+4 || native.Uint32(response[8:12]) != sequence || native.Uint16(response[4:6]) != unix.NLMSG_ERROR {
-		return errors.New("configure loopback")
-	}
-	if errno := int32(native.Uint32(response[unix.NLMSG_HDRLEN : unix.NLMSG_HDRLEN+4])); errno != 0 {
-		return syscall.Errno(-errno)
 	}
 	return nil
 }
