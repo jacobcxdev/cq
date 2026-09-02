@@ -21,6 +21,7 @@ if [[ "$use_existing_user_manager" == "1" ]]; then
   export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 else
+  unset DBUS_SESSION_BUS_ADDRESS SSH_AUTH_SOCK
   export HOME="$temporary_root/home"
   export XDG_CONFIG_HOME="$temporary_root/config"
   export XDG_RUNTIME_DIR="$temporary_root/runtime"
