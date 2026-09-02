@@ -159,6 +159,7 @@ type CodexJournalRecordV2 struct {
 	HasEncryptedState                bool                 `json:"has_encrypted_state,omitempty"`
 	HasResponseAnchor                bool                 `json:"has_response_anchor,omitempty"`
 	HasTurnState                     bool                 `json:"has_turn_state,omitempty"`
+	TurnStateLatchCurrent            bool                 `json:"turn_state_latch_current,omitempty"`
 	NonMigratable                    bool                 `json:"non_migratable,omitempty"`
 	AdoptedPrewarm                   bool                 `json:"adopted_prewarm,omitempty"`
 	PrewarmAdoptionJournalGeneration uint64               `json:"prewarm_adoption_journal_generation,omitempty"`
@@ -1245,6 +1246,9 @@ func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelop
 	}
 	if record.HasResponseAnchor != (record.CorrelationHash != "") || record.HasTurnState != (record.TurnStateHash != "") {
 		return errors.New("continuation hash presence flag mismatch")
+	}
+	if record.TurnStateLatchCurrent && !record.HasTurnState {
+		return errors.New("turn-state latch marker exists without turn state")
 	}
 	if record.AdoptedPrewarm != (record.PrewarmAdoptionJournalGeneration != 0) {
 		return errors.New("partial prewarm adoption marker")

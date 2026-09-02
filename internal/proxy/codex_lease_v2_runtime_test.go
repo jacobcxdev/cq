@@ -110,12 +110,11 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	if _, err := resumed.AbandonBeforeDispatch(); err != nil {
 		t.Fatal(err)
 	}
-	authenticatedMismatch := matching
-	authenticatedMismatch.Evidence.TurnState = "wrong-private-state"
-	authenticatedMismatch.RequiresAccountContinuity = true
-	authenticatedMismatch.authenticatedCallerContinuity = true
-	if _, err := runtimeLease.BeginRequest(authenticatedMismatch); !errors.Is(err, ErrCodexContinuity) {
-		t.Fatalf("authenticated retry with mismatched turn state = %T %v, want continuity error", err, err)
+	mismatch := matching
+	mismatch.Evidence.TurnState = "wrong-private-state"
+	mismatch.RequiresAccountContinuity = true
+	if _, err := runtimeLease.BeginRequest(mismatch); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("unauthenticated retry with mismatched turn state = %T %v, want continuity error", err, err)
 	} else {
 		var continuityErr *codexContinuityError
 		if !errors.As(err, &continuityErr) || continuityErr.reason != codexContinuityTurnStateMismatch {
@@ -134,14 +133,14 @@ func TestCodexLeaseRuntimePersistsPrivateHTTPEvidence(t *testing.T) {
 	nextState := "next-response-state"
 	next, err = next.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: nextState, HasTurnState: true})
 	if err != nil {
-		t.Fatalf("rotated admission state = %T %v", err, err)
+		t.Fatalf("later admission state = %T %v", err, err)
 	}
-	if !next.record.HasTurnState || next.record.TurnStateHash != store.hash("turn-state", nextState) {
-		t.Fatalf("rotated admission state = %#v", next.record)
+	if !next.record.HasTurnState || next.record.TurnStateHash != store.hash("turn-state", turnState) {
+		t.Fatalf("latched admission state = %#v", next.record)
 	}
 }
 
-func TestCodexLeaseRuntimeRotatesTurnStateWhileStreaming(t *testing.T) {
+func TestCodexLeaseRuntimeLatchesInitialTurnStateWhileStreaming(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	store := coordinator.Store()
@@ -175,8 +174,8 @@ func TestCodexLeaseRuntimeRotatesTurnStateWhileStreaming(t *testing.T) {
 	if handle.RequestGeneration() != requestGeneration || handle.AttemptGeneration() != attemptGeneration || codexLeaseCurrentAttemptState(handle.record) != CodexAttemptStreaming {
 		t.Fatalf("streamed admission changed request identity: request %d attempt %d state %v", handle.RequestGeneration(), handle.AttemptGeneration(), codexLeaseCurrentAttemptState(handle.record))
 	}
-	if !handle.record.HasTurnState || handle.record.TurnStateHash != store.hash("turn-state", streamedState) {
-		t.Fatalf("streamed turn state = %#v", handle.record)
+	if !handle.record.HasTurnState || handle.record.TurnStateHash != store.hash("turn-state", initialState) {
+		t.Fatalf("latched turn state = %#v", handle.record)
 	}
 	assertCodexLeaseRuntimeRefs(t, handle, 1, 1, 1, false)
 	if bytes.Contains(store.journalBytes, []byte(initialState)) || bytes.Contains(store.journalBytes, []byte(streamedState)) {
@@ -202,13 +201,174 @@ func TestCodexLeaseRuntimeRotatesTurnStateWhileStreaming(t *testing.T) {
 	nextPlan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
 		AccountKey: "account-a", CandidateID: "candidate-next", Kind: CodexAttemptSlotDirect,
 	}})
-	nextPlan.Evidence = CodexLeaseRequestEvidence{TurnState: streamedState, HasTurnState: true}
+	nextPlan.Evidence = CodexLeaseRequestEvidence{TurnState: initialState, HasTurnState: true}
 	next, err := runtimeLease.BeginRequest(nextPlan)
 	if err != nil {
-		t.Fatalf("follow-up with streamed turn state = %T %v", err, err)
+		t.Fatalf("follow-up with initial turn state = %T %v", err, err)
 	}
 	if _, err := next.AbandonBeforeDispatch(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCodexLeaseRuntimeLatchesFirstTurnStateAcrossRequests(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	const firstState = "private-first-turn-state"
+	const laterState = "private-later-turn-state"
+
+	first, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: firstState, HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan.Evidence = CodexLeaseRequestEvidence{TurnState: firstState, HasTurnState: true}
+	second, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: laterState, HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := second.record.TurnStateHash, store.hash("turn-state", firstState); got != want {
+		t.Fatalf("latched turn state hash = %q, want first state hash %q", got, want)
+	}
+	second, err = second.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = second.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	third, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatalf("same-turn follow-up with latched state = %T %v, want success", err, err)
+	}
+	if _, err := third.AbandonBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexLeaseRuntimeRelatchesAuthenticatedClientStateAfterLegacyRotation(t *testing.T) {
+	t.Parallel()
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	store := coordinator.Store()
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	const clientState = "private-client-turn-state"
+	const rotatedState = "private-provider-rotated-state"
+
+	first, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: clientState, HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := cloneCodexLeaseV2Envelope(*store.v2)
+	found := false
+	for index := range legacy.Records {
+		if legacy.Records[index].Identity() != first.identity {
+			continue
+		}
+		legacy.Records[index].TurnStateHash = store.hash("turn-state", rotatedState)
+		legacy.Records[index].TurnStateLatchCurrent = false
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("legacy record %#v not found", first.identity)
+	}
+	payload, err := store.marshalV2Envelope(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/state/leases.json", payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restartedCoordinator := reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+	store = restartedCoordinator.Store()
+	restarted := newCodexLeaseRuntimeTest(t, restartedCoordinator)
+	plan.Evidence = CodexLeaseRequestEvidence{TurnState: clientState, HasTurnState: true}
+	plan.RequiresAccountContinuity = true
+	plan.authenticatedCallerContinuity = true
+	next, err := restarted.BeginRequest(plan)
+	if err != nil {
+		t.Fatalf("authenticated continuation after legacy rotation = %T %v, want success", err, err)
+	}
+	if got, want := next.record.TurnStateHash, store.hash("turn-state", clientState); got != want {
+		t.Fatalf("relatched turn state hash = %q, want client state hash %q", got, want)
+	}
+	next, err = next.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = next.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: rotatedState, HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = next.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = next.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restartedCoordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restartedCoordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+	restarted = newCodexLeaseRuntimeTest(t, restartedCoordinator)
+	plan.Evidence.TurnState = "private-stale-client-state"
+	if _, err := restarted.BeginRequest(plan); !errors.Is(err, ErrCodexContinuity) {
+		t.Fatalf("second authenticated turn-state mismatch = %T %v, want continuity error", err, err)
 	}
 }
 

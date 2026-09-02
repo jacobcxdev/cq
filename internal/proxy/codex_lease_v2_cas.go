@@ -79,6 +79,7 @@ type CodexLeaseGenerationFence struct {
 type CodexLaneMutation struct {
 	Lane                     *CodexJournalLane
 	BeginRequest             *CodexJournalRecordIdentity
+	MigrateTurnStateLatch    *CodexJournalRecordIdentity
 	AccountUnavailable       *CodexJournalRecordIdentity
 	QuotaExhausted           *CodexJournalRecordIdentity
 	CompleteUnavailableCycle *CodexJournalRecordIdentity
@@ -246,6 +247,13 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: BeginRequest must name its sole existing record upsert", ErrCodexLeaseInvalidMutation)
 		}
 	}
+	var migrateTurnStateLatch CodexJournalRecordIdentity
+	if mutation.MigrateTurnStateLatch != nil {
+		migrateTurnStateLatch = *mutation.MigrateTurnStateLatch
+		if migrateTurnStateLatch.IsZero() || migrateTurnStateLatch != beginRequest {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: turn-state latch migration must name BeginRequest record", ErrCodexLeaseInvalidMutation)
+		}
+	}
 	var accountUnavailable CodexJournalRecordIdentity
 	if mutation.AccountUnavailable != nil {
 		accountUnavailable = *mutation.AccountUnavailable
@@ -406,7 +414,7 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 			predecessorChanged = true
 		}
 		beginRequestAffinityReset := identity == beginRequest && codexLeaseAffinityInvalidationBeginRequest(old, input, storedLane, next.AffinityInvalidationGeneration)
-		result, appended, firstAdmission, err := store.buildCodexLeaseRecordAfterImage(old, exists, input, identity == beginRequest, beginRequestAffinityReset, fences[identity], now)
+		result, appended, firstAdmission, err := store.buildCodexLeaseRecordAfterImage(old, exists, input, identity == beginRequest, identity == migrateTurnStateLatch, beginRequestAffinityReset, fences[identity], now)
 		if err != nil {
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
 		}
@@ -693,7 +701,7 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 	return nil
 }
 
-func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
+func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest, migrateTurnStateLatch, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
 	result := cloneCodexJournalRecordV2(input)
 	bindingReassignment := exists && codexLeaseAccountUnavailableAdmission(old, input)
 	bindingReset := exists && beginRequest && (codexLeaseAccountUnavailableBeginRequest(old, input) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old))
@@ -731,6 +739,14 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		}
 		if old.HasTurnState && !input.HasTurnState {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state authority was cleared", ErrCodexLeaseInvalidMutation)
+		}
+		if !old.HasTurnState && input.HasTurnState && !input.TurnStateLatchCurrent {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: first turn-state authority is missing current latch marker", ErrCodexLeaseInvalidMutation)
+		}
+		validLatchMigration := migrateTurnStateLatch && beginRequest && old.HasTurnState && !old.TurnStateLatchCurrent && input.TurnStateLatchCurrent && old.EverAdmitted &&
+			constantTimeCodexLeaseDigestEqual(old.AccountHash, input.AccountHash) && codexLeaseRuntimeCanBeginRequest(old)
+		if old.TurnStateLatchCurrent != input.TurnStateLatchCurrent && !validLatchMigration && !(old.HasTurnState == false && input.HasTurnState && input.TurnStateLatchCurrent) {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state latch marker changed outside admission or migration", ErrCodexLeaseInvalidMutation)
 		}
 		if old.HasResponseAnchor && (!input.HasResponseAnchor || input.CorrelationHash == "") {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: response anchor was cleared", ErrCodexLeaseInvalidMutation)
@@ -801,7 +817,9 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		oldAttempt, oldFound := codexLeaseAttemptByGeneration(old.Attempts, old.CurrentAttemptGeneration)
 		resultAttempt, resultFound := codexLeaseAttemptByGeneration(result.Attempts, result.CurrentAttemptGeneration)
 		oldAdmitted := oldAttempt.State == CodexAttemptDispatched || oldAttempt.State == CodexAttemptStreaming
-		if beginRequest || !oldFound || !resultFound || !oldAdmitted || resultAttempt.State != CodexAttemptStreaming || result.CurrentAttemptGeneration != old.CurrentAttemptGeneration || !codexLeaseExactCurrentAttemptFence(fence, old) {
+		validRelatch := migrateTurnStateLatch && beginRequest && old.HasTurnState && !old.TurnStateLatchCurrent && result.TurnStateLatchCurrent && old.EverAdmitted &&
+			constantTimeCodexLeaseDigestEqual(old.AccountHash, result.AccountHash) && codexLeaseRuntimeCanBeginRequest(old)
+		if !validRelatch && (beginRequest || !oldFound || !resultFound || !oldAdmitted || resultAttempt.State != CodexAttemptStreaming || result.CurrentAttemptGeneration != old.CurrentAttemptGeneration || !codexLeaseExactCurrentAttemptFence(fence, old)) {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state authority changed outside provider admission", ErrCodexLeaseInvalidMutation)
 		}
 	}
@@ -1751,6 +1769,7 @@ func sameCodexLeaseSemantics(left, right CodexJournalRecordV2) bool {
 		left.HasEncryptedState == right.HasEncryptedState &&
 		left.HasResponseAnchor == right.HasResponseAnchor &&
 		left.HasTurnState == right.HasTurnState &&
+		left.TurnStateLatchCurrent == right.TurnStateLatchCurrent &&
 		left.NonMigratable == right.NonMigratable &&
 		left.AdoptedPrewarm == right.AdoptedPrewarm &&
 		left.PrewarmAdoptionJournalGeneration == right.PrewarmAdoptionJournalGeneration &&

@@ -119,7 +119,7 @@ func TestRelayCodexAcceptedHTTPResponsePersistsStreamedTurnStateBeforeRelay(t *t
 	}
 }
 
-func TestRelayCodexAcceptedHTTPResponseStagesLatestTurnStatePerChunk(t *testing.T) {
+func TestRelayCodexAcceptedHTTPResponseStagesFirstTurnStatePerChunk(t *testing.T) {
 	t.Parallel()
 	const firstState = "private-first-streamed-state"
 	const finalState = "private-final-streamed-state"
@@ -138,7 +138,7 @@ func TestRelayCodexAcceptedHTTPResponseStagesLatestTurnStatePerChunk(t *testing.
 		t.Fatalf("relayed body = %q, want exact body", got)
 	}
 	got := calls.snapshot()
-	if got.admissionCalls != 1 || got.admissionEvidence != (CodexHTTPAdmissionEvidence{TurnState: finalState, HasTurnState: true}) {
+	if got.admissionCalls != 1 || got.admissionEvidence != (CodexHTTPAdmissionEvidence{TurnState: firstState, HasTurnState: true}) {
 		t.Fatalf("staged admission = calls %d evidence %#v", got.admissionCalls, got.admissionEvidence)
 	}
 	if !reflect.DeepEqual(got.order, []string{"admit@1", "close", "completed@2", "drain@3"}) {
