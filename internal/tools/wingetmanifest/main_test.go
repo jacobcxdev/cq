@@ -69,7 +69,7 @@ Author: jacobcxdev
 PackageName: CQ
 PackageUrl: https://github.com/jacobcxdev/cq
 License: MIT
-LicenseUrl: https://github.com/jacobcxdev/cq/blob/v0.27.0/LICENSE
+LicenseUrl: https://github.com/jacobcxdev/cq/blob/v0.27.0/LICENCE
 ShortDescription: Check AI provider usage limits and run CQ proxy services.
 Moniker: cq
 Tags:
