@@ -58,7 +58,12 @@ func rejectCodexCompactWebSocket(w http.ResponseWriter, requestPath string) {
 func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request, requestPath string) {
 	start := time.Now()
 	var model string
-	ctx, routeDiag := withRouteDiagnostics(r.Context())
+	sessionKey, sessionSource := sessionCorrelation(r.Header)
+	ctx := withCodexTrace(r.Context(), s.Diag, s.PayloadDiag, CodexTraceStart{
+		Transport: "http", SessionKey: sessionKey, SessionSource: sessionSource,
+	})
+	ctx, routeDiag := withRouteDiagnostics(ctx)
+	routeDiag.applyCodexTrace(ctx)
 	ctx = s.withCodexRequestIngressObservation(ctx, r.Method, r.URL.Path, "codex_compact_ingress")
 	r = r.WithContext(ctx)
 	if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil {
@@ -130,22 +135,14 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model_family=%s provider=codex (native compact)\n", requestPath, projectCodexDiagnosticsModel(model))
 
 	// Emit payload diagnostics before forwarding.
-	if s.PayloadDiag != nil {
-		sessionKey, sessionSource := payloadSessionCorrelation(r.Header, decodedBody)
-		s.emitPayloadDiagnostics(PayloadEvent{
-			Time:          time.Now().UTC(),
-			Method:        r.Method,
-			Path:          r.URL.Path,
-			Provider:      "codex",
-			RouteKind:     "codex_compact",
-			Model:         model,
-			ClientKind:    clientKindFromUserAgent(r.Header.Get("User-Agent")),
-			SessionKey:    sessionKey,
-			SessionSource: sessionSource,
-			BodyBytes:     len(body),
-			Body:          encodeBody(body),
-		})
-	}
+	payloadSessionKey, payloadSessionSource := payloadSessionCorrelation(r.Header, decodedBody)
+	payloadBody, payloadEncoding := encodeCodexTracePayload(body)
+	emitCodexTracePayload(ctx, PayloadEvent{
+		Method: r.Method, Path: r.URL.Path, Provider: "codex", RouteKind: "codex_compact", Direction: "downstream_request",
+		Model: model, ClientKind: clientKindFromUserAgent(r.Header.Get("User-Agent")),
+		SessionKey: payloadSessionKey, SessionSource: payloadSessionSource, Headers: codexTraceHeaders(r.Header), Complete: true,
+		BodyBytes: len(body), BodyEncoding: payloadEncoding, Body: payloadBody,
+	})
 
 	// Build upstream request targeting /responses/compact (no headroom applied).
 	forwardBody := decodedRequest.Replay()
@@ -178,6 +175,10 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
 	}
+	captureCodexHTTPResponsePayloadWithEvent(ctx, resp, PayloadEvent{
+		Method: r.Method, Path: r.URL.Path, Provider: "codex", RouteKind: "codex_compact", Direction: "upstream_response",
+		Model: model, ClientKind: clientKindFromUserAgent(r.Header.Get("User-Agent")), AccountHint: codexTraceAccountHint(choice.AccountKey),
+	})
 	if observation != nil {
 		_, failover := routeDiag.fields()
 		observation.Selected(choice, failover)

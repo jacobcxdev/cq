@@ -1085,6 +1085,15 @@ func readDiagnosticsEvents(t *testing.T, path string) []RouteEvent {
 	var events []RouteEvent
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
+		var envelope struct {
+			EventType string `json:"event_type"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			t.Fatalf("invalid diagnostics JSON line %q: %v", scanner.Text(), err)
+		}
+		if envelope.EventType == "codex_trace" {
+			continue
+		}
 		var event RouteEvent
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			t.Fatalf("invalid diagnostics JSON line %q: %v", scanner.Text(), err)

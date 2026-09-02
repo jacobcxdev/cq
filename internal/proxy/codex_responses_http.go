@@ -181,7 +181,7 @@ func (enforcer *CodexHTTPEnforcer) do(ctx context.Context, requirements CodexRou
 		_ = enforcer.Leases.ReleaseRouting(key)
 		return nil, choice, CandidateAttempt{}, fmt.Errorf("%w: unexpected request turn state", ErrCodexContinuity)
 	}
-	if err := lease.CheckContinuation(choice.AccountKey, 0, request.PreviousResponseID, request.HasEncryptedState); err != nil {
+	if err := lease.CheckContinuation(choice.AccountKey, 0, request.PreviousResponseID); err != nil {
 		_ = enforcer.Leases.ReleaseRouting(key)
 		return nil, choice, CandidateAttempt{}, err
 	}

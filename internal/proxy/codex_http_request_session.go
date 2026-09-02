@@ -296,32 +296,44 @@ func (lifecycle *codexLeaseHTTPRequestLifecycle) next(handle *CodexLeaseRequestH
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) MarkDispatchedContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "mark_dispatched", lifecycle.handle)
 	handle, err := lifecycle.handle.MarkDispatchedContext(ctx)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) RejectAndPrepareContext(ctx context.Context, slot uint32) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "reject_and_prepare", lifecycle.handle)
 	handle, err := lifecycle.handle.RejectAndPrepareContext(ctx, slot)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) RecordAccountUnavailableContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "account_unavailable", lifecycle.handle)
 	handle, err := lifecycle.handle.RecordAccountUnavailableContext(ctx, replacementSlot)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) RecordQuotaExhaustedContext(ctx context.Context, replacementSlot uint32) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "quota_exhausted", lifecycle.handle)
 	handle, err := lifecycle.handle.RecordQuotaExhaustedContext(ctx, replacementSlot)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) CompleteAccountUnavailableCycleContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "complete_account_unavailable", lifecycle.handle)
 	handle, err := lifecycle.handle.CompleteAccountUnavailableCycleContext(ctx)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) AbandonBeforeDispatchContext(ctx context.Context) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "abandon_before_dispatch", lifecycle.handle)
 	handle, err := lifecycle.handle.AbandonBeforeDispatchContext(ctx)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
@@ -331,7 +343,9 @@ func (lifecycle *codexLeaseHTTPRequestLifecycle) FinishRejected() (CodexHTTPRequ
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) IndeterminateContext(ctx context.Context, evidence CodexHTTPResponseEvidence) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "indeterminate", lifecycle.handle)
 	handle, err := lifecycle.handle.IndeterminateContext(ctx, evidence)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
@@ -341,7 +355,9 @@ func (lifecycle *codexLeaseHTTPRequestLifecycle) Drain() (CodexHTTPRequestLifecy
 }
 
 func (lifecycle *codexLeaseHTTPRequestLifecycle) AdmitHTTP2xxContext(ctx context.Context, evidence CodexHTTPAdmissionEvidence) (CodexHTTPRequestLifecycle, error) {
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "admit_http", lifecycle.handle)
 	handle, err := lifecycle.handle.AdmitHTTP2xxContext(ctx, evidence)
+	finishTrace(handle, err)
 	return lifecycle.next(handle, err)
 }
 
@@ -448,12 +464,17 @@ func (session *CodexHTTPRequestSession) Do(
 accountsLoop:
 	for accountIndex, account := range accounts {
 		choice := account.Choice()
+		emitCodexTrace(ctx, CodexTraceEvent{
+			Phase: "account", Outcome: "considered", AccountHint: codexTraceAccountHint(choice.AccountKey),
+			Attempt: accountIndex + 1, Failover: accountIndex > 0,
+		})
 		attempts := account.Attempts()
 		decisionRecorded := false
 		directAttempts := len(attempts)
 		refreshPlanned, hasRefresh := account.RefreshAttempt()
 		refreshConsidered := false
 		if len(attempts) == 0 && hasRefresh {
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "credential_refresh", Outcome: "started", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 			refreshConsidered = true
 			result.Choice = choice
 			result.Attempt = refreshPlanned
@@ -475,6 +496,7 @@ accountsLoop:
 				}
 			}
 			if refreshErr != nil {
+				emitCodexTrace(ctx, CodexTraceEvent{Phase: "credential_refresh", Outcome: "error", AccountHint: codexTraceAccountHint(choice.AccountKey), Reason: string(codexRequestFailureReason(refreshErr))})
 				nextAccountIndex, hasReplacement := codexHTTPRequestNextUnavailableAccount(
 					accountIndex,
 					ordinaryAccountCount,
@@ -494,6 +516,7 @@ accountsLoop:
 				}
 				result.Lifecycle = next
 				if hasReplacement {
+					emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "scheduled", AccountHint: codexTraceAccountHint(accounts[nextAccountIndex].Choice().AccountKey), Reason: "credential_refresh_failed", Retry: true, Failover: true})
 					continue accountsLoop
 				}
 				return result, refreshErr
@@ -501,6 +524,10 @@ accountsLoop:
 		}
 		for attemptIndex := 0; attemptIndex < len(attempts); attemptIndex++ {
 			attempt := attempts[attemptIndex]
+			emitCodexTrace(ctx, CodexTraceEvent{
+				Phase: "attempt", Stage: "prepare", Outcome: "started", AccountHint: codexTraceAccountHint(choice.AccountKey),
+				Attempt: attempt.Ordinal, Retry: attemptIndex > 0 || accountIndex > 0, Failover: accountIndex > 0,
+			})
 			result.Choice = choice
 			result.Attempt = attempt
 			if result.Lifecycle.AccountKey() != choice.AccountKey {
@@ -522,6 +549,10 @@ accountsLoop:
 				}
 				result.Lifecycle = next
 				marked = true
+				emitCodexTrace(ctx, CodexTraceEvent{
+					Phase: "attempt", Stage: "dispatch", Outcome: "dispatched", AccountHint: codexTraceAccountHint(choice.AccountKey),
+					Attempt: attempt.Ordinal, Retry: attemptIndex > 0 || accountIndex > 0, Failover: accountIndex > 0,
+				})
 				if !decisionRecorded {
 					codexProcessRuntimeObservability.recordDecision(ctx, account.decision)
 					decisionRecorded = true
@@ -532,6 +563,10 @@ accountsLoop:
 			replay.Release()
 			result.Attempt = actual
 			if err != nil {
+				emitCodexTrace(ctx, CodexTraceEvent{
+					Phase: "attempt", Stage: "round_trip", Outcome: "error", AccountHint: codexTraceAccountHint(choice.AccountKey),
+					Attempt: actual.Ordinal, Reason: codexTraceErrorReason(err), Retry: attemptIndex > 0 || accountIndex > 0, Failover: accountIndex > 0,
+				})
 				discardCodexHTTPRequestResponse(ctx, response)
 				if dispatched || marked {
 					return session.finishIndeterminate(ctx, result, err)
@@ -545,8 +580,13 @@ accountsLoop:
 				}
 				return session.abandonPrepared(ctx, result, errors.New("Codex HTTP attempt did not cross dispatch fence"))
 			}
+			captureCodexHTTPAttemptPayload(ctx, template, response, choice, actual)
 			result.Response = response
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				emitCodexTrace(ctx, CodexTraceEvent{
+					Phase: "attempt", Stage: "response", Outcome: "accepted", AccountHint: codexTraceAccountHint(choice.AccountKey),
+					Attempt: actual.Ordinal, UpstreamStatus: response.StatusCode, Retry: attemptIndex > 0 || accountIndex > 0, Failover: accountIndex > 0,
+				})
 				turnState, hasTurnState, evidenceErr := ParseCodexTurnStateHeader(response.Header)
 				next, admitErr := result.Lifecycle.AdmitHTTP2xxContext(ctx, CodexHTTPAdmissionEvidence{
 					TurnState:    turnState,
@@ -575,6 +615,17 @@ accountsLoop:
 			}
 			authRejected := failure == CodexPinnedAuthFailure
 			hardRejected := failure == CodexPinnedHardLimit
+			rejectReason := "upstream_rejected"
+			if authRejected {
+				rejectReason = "auth_rejected"
+			} else if hardRejected {
+				rejectReason = "capacity_exhausted"
+			}
+			emitCodexTrace(ctx, CodexTraceEvent{
+				Phase: "attempt", Stage: "response", Outcome: "rejected", AccountHint: codexTraceAccountHint(choice.AccountKey),
+				Attempt: actual.Ordinal, UpstreamStatus: response.StatusCode, Reason: rejectReason,
+				Retry: authRejected || hardRejected, Failover: accountIndex > 0,
+			})
 			rejectKind := codexInstalledHTTPRejectOther
 			if authRejected {
 				rejectKind = codexInstalledHTTPRejectAuth
@@ -618,6 +669,7 @@ accountsLoop:
 					return session.finishIndeterminate(ctx, result, retryErr)
 				}
 				result.Lifecycle = next
+				emitCodexTrace(ctx, CodexTraceEvent{Phase: "retry", Outcome: "credential", AccountHint: codexTraceAccountHint(choice.AccountKey), Attempt: attempts[attemptIndex+1].Ordinal, Reason: "auth_rejected", Retry: true})
 				continue
 			}
 			if accountUnavailable := authRejected || hardRejected; accountUnavailable {
@@ -628,6 +680,7 @@ accountsLoop:
 					result.Lifecycle.EverAdmitted(),
 				)
 				if hasReplacement {
+					nextChoice := accounts[nextAccountIndex].Choice()
 					if account.IsDefault() {
 						retainErr := retention.Reject(ctx, response, true)
 						if retainErr != nil {
@@ -659,6 +712,10 @@ accountsLoop:
 						return session.finishIndeterminate(ctx, result, retryErr)
 					}
 					result.Lifecycle = next
+					emitCodexTrace(ctx, CodexTraceEvent{
+						Phase: "failover", Outcome: "account", AccountHint: codexTraceAccountHint(nextChoice.AccountKey),
+						Reason: rejectReason, Retry: true, Failover: true,
+					})
 					continue accountsLoop
 				}
 			}

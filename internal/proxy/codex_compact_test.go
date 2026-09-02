@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -368,8 +369,11 @@ func TestServer_CodexCompact_ZstdUsesDecodedDiagnosticsAndPreservesFrame(t *test
 		t.Fatalf("close payload diagnostics: %v", err)
 	}
 	events := readPayloadEvents(t, payloadPath)
-	if len(events) != 1 {
-		t.Fatalf("payload events = %d, want 1", len(events))
+	if len(events) != 2 {
+		t.Fatalf("payload events = %d, want request and response", len(events))
+	}
+	if events[0].Direction != "downstream_request" || events[1].Direction != "upstream_response" {
+		t.Fatalf("payload directions = %q, %q", events[0].Direction, events[1].Direction)
 	}
 	if events[0].Model != "gpt-5.4" {
 		t.Fatalf("payload model = %q, want gpt-5.4", events[0].Model)
@@ -380,12 +384,15 @@ func TestServer_CodexCompact_ZstdUsesDecodedDiagnosticsAndPreservesFrame(t *test
 	if events[0].BodyBytes != len(encoded) {
 		t.Fatalf("payload body bytes = %d, want original encoded length %d", events[0].BodyBytes, len(encoded))
 	}
-	wantCapturedBody, err := json.Marshal(string(encoded))
+	if events[0].BodyEncoding != "base64" {
+		t.Fatalf("payload body encoding = %q, want base64", events[0].BodyEncoding)
+	}
+	wantCapturedBody, err := json.Marshal(base64.StdEncoding.EncodeToString(encoded))
 	if err != nil {
 		t.Fatalf("encode expected payload body: %v", err)
 	}
 	if !bytes.Equal(events[0].Body, wantCapturedBody) {
-		t.Fatal("payload diagnostics did not retain existing encoded-body semantics")
+		t.Fatal("payload diagnostics did not retain the encoded request frame")
 	}
 	health := observer.Health()
 	if health.Requests != 1 || health.ZstdRequests != 1 || health.RequestDecodeErrors != 0 {

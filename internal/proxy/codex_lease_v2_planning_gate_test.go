@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,6 +172,102 @@ func TestCodexLeaseRuntimePlanningGateQueuesSuccessorBeginsSerially(t *testing.T
 		t.Fatalf("successor identities = %#v and %#v, want distinct durable requests", byOrder[1].identity, byOrder[2].identity)
 	}
 	waitCodexLeasePlanningGateState(t, runtimeLease, acquireKey.Lane, 0, false)
+}
+
+func TestCodexLeaseRuntimePlanningGateAllowsSuccessorAfterAbandonedPredecessor(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	predecessorPlan := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-1", Kind: CodexAttemptSlotDirect,
+	}})
+	predecessor, err := runtimeLease.BeginRequest(predecessorPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessor.AbandonBeforeDispatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predecessor.State() != LeaseProvisional || predecessor.EverAdmitted() ||
+		codexLeaseCurrentAttemptState(predecessor.record) != CodexAttemptAbandonedBeforeDispatch ||
+		predecessor.record.RoutingRefs != 0 || predecessor.record.AttemptRefs != 0 ||
+		predecessor.record.ResponseObserverRefs != 0 || !predecessor.record.SocketLineageExtinct {
+		t.Fatalf("abandoned predecessor = %#v", predecessor.record)
+	}
+
+	successorPlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-2", Kind: CodexAttemptSlotDirect,
+	}})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	release, err := runtimeLease.AcquireRequestPlanningContext(ctx, successorPlan.Key, successorPlan.Accounts, successorPlan.Authority)
+	if err != nil {
+		t.Fatalf("successor planning after abandoned predecessor = %T %v", err, err)
+	}
+	defer release()
+
+	successor, err := runtimeLease.BeginRequestContext(ctx, successorPlan)
+	if err != nil {
+		t.Fatalf("successor after abandoned predecessor = %T %v", err, err)
+	}
+	if successor.record.PredecessorTurnHash != predecessor.identity.TurnDigest {
+		t.Fatalf("successor predecessor = %q, want %q", successor.record.PredecessorTurnHash, predecessor.identity.TurnDigest)
+	}
+}
+
+func TestCodexLeaseRuntimePlanningGateTracesBlockedPredecessorState(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	predecessorPlan := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-1", Kind: CodexAttemptSlotDirect,
+	}})
+	if _, err := runtimeLease.BeginRequest(predecessorPlan); err != nil {
+		t.Fatal(err)
+	}
+	successorPlan := codexLeaseRuntimeTestPlan("turn-2", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-2", Kind: CodexAttemptSlotDirect,
+	}})
+
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "websocket"})
+	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if _, err := runtimeLease.AcquireRequestPlanningContext(ctx, successorPlan.Key, successorPlan.Accounts, successorPlan.Authority); !errors.Is(err, context.DeadlineExceeded) {
+		_ = diagnostics.Close()
+		t.Fatalf("blocked successor planning = %T %v, want deadline", err, err)
+	}
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := readCodexTraceEvents(t, tracePath)
+	requireCodexTraceEvent(t, events, func(event CodexTraceEvent) bool {
+		return event.Phase == "planning_gate" && event.Outcome == "acquired"
+	}, "planning gate acquisition")
+	requireCodexTraceEvent(t, events, func(event CodexTraceEvent) bool {
+		return event.Phase == "planning_wait" && event.Outcome == "blocked" &&
+			strings.Contains(event.Reason, "classification=unseen state=provisional attempt=prepared")
+	}, "blocked durable predecessor state")
+	requireCodexTraceEvent(t, events, func(event CodexTraceEvent) bool {
+		return event.Phase == "planning_wait" && event.Outcome == "error" && event.Reason == "deadline_exceeded"
+	}, "planning wait deadline")
+	blocked := 0
+	for _, event := range events {
+		if event.Phase == "planning_wait" && event.Outcome == "blocked" {
+			blocked++
+		}
+	}
+	if blocked != 1 {
+		t.Fatalf("blocked planning trace events = %d, want 1", blocked)
+	}
 }
 
 func completeCodexLeasePlanningGateRequest(handle *CodexLeaseRequestHandle) error {

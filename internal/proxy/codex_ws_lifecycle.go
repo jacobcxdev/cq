@@ -176,7 +176,9 @@ func (lifecycle *codexWSLifecycle) RejectAndPrepare(ctx context.Context, upstrea
 	if lifecycle.attemptAdmitted {
 		return ErrCodexLeaseTransition
 	}
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "reject_and_prepare", lifecycle.handle)
 	handle, err := lifecycle.handle.RejectAndPrepareContext(ctx, nextSlot)
+	finishTrace(handle, err)
 	if err != nil {
 		return err
 	}
@@ -196,7 +198,9 @@ func (lifecycle *codexWSLifecycle) CompleteAccountUnavailableCycle(ctx context.C
 	if err := lifecycle.validateGeneration(upstreamGeneration); err != nil {
 		return err
 	}
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "complete_account_unavailable", lifecycle.handle)
 	handle, err := lifecycle.handle.CompleteAccountUnavailableCycleContext(ctx)
+	finishTrace(handle, err)
 	if err != nil {
 		return err
 	}
@@ -215,11 +219,17 @@ func (lifecycle *codexWSLifecycle) recordAccountUnavailable(ctx context.Context,
 		handle *CodexLeaseRequestHandle
 		err    error
 	)
+	stage := "account_unavailable"
+	if quotaExhausted {
+		stage = "quota_exhausted"
+	}
+	finishTrace := beginCodexTraceLeaseTransition(ctx, stage, lifecycle.handle)
 	if quotaExhausted {
 		handle, err = lifecycle.handle.RecordQuotaExhaustedContext(ctx, replacementSlot)
 	} else {
 		handle, err = lifecycle.handle.RecordAccountUnavailableContext(ctx, replacementSlot)
 	}
+	finishTrace(handle, err)
 	if err != nil {
 		return err
 	}
@@ -284,7 +294,9 @@ func (lifecycle *codexWSLifecycle) MarkReplacementDispatched(ctx context.Context
 	if lifecycle == nil || upstreamGeneration == 0 || upstreamGeneration == lifecycle.upstreamGeneration {
 		return ErrCodexWSStaleGeneration
 	}
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "mark_replacement_dispatched", lifecycle.handle)
 	handle, err := lifecycle.handle.MarkDispatchedContext(ctx)
+	finishTrace(handle, err)
 	if err != nil {
 		return err
 	}
@@ -350,7 +362,9 @@ func (lifecycle *codexWSLifecycle) admit(ctx context.Context, evidence CodexWebS
 	if lifecycle == nil || lifecycle.handle == nil {
 		return ErrCodexLeaseWriterUnavailable
 	}
+	finishTrace := beginCodexTraceLeaseTransition(ctx, "admit_websocket", lifecycle.handle)
 	handle, err := lifecycle.handle.AdmitWebSocketContext(ctx, evidence)
+	finishTrace(handle, err)
 	if err != nil {
 		return err
 	}

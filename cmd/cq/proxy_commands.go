@@ -303,6 +303,15 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		}
 		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_leases_invalidate", Deadline: CommandDeadlineV1{Total: proxyLeaseInvalidationTimeout, Forward: proxyLeaseInvalidationTimeout}}, nil
 	}
+	if len(argv) >= 2 && argv[1] == "trace" {
+		if helpRequested(argv[2:]) {
+			return terminatingOrdinary("ordinary_help"), nil
+		}
+		if _, err := parseProxyTraceOptions(argv[2:]); err != nil {
+			return terminatingOrdinary("ordinary_usage_error"), nil
+		}
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_trace"}, nil
+	}
 	if len(argv) >= 2 && argv[1] == "policy" {
 		if helpRequested(argv[2:]) {
 			return terminatingOrdinary("ordinary_help"), nil

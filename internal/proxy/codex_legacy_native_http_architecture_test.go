@@ -27,9 +27,12 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 	assertCodexNativeStatementShape(t, fileSet, handler.Body.List, []string{
 		"start := time.Now()",
 		"var model string",
-		"ctx, routeDiag := withRouteDiagnostics(r.Context())",
+		"sessionKey, sessionSource := sessionCorrelation(r.Header)",
+		"ctx := withCodexTrace(r.Context(), s.Diag, s.PayloadDiag, CodexTraceStart{\n\tTransport: \"http\", SessionKey: sessionKey, SessionSource: sessionSource,\n})",
+		"ctx, routeDiag := withRouteDiagnostics(ctx)",
 		"ctx = s.withCodexRequestIngressObservation(ctx, r.Method, r.URL.Path, \"codex_native_ingress\")",
 		"r = r.WithContext(ctx)",
+		"emitCodexTrace(ctx, CodexTraceEvent{\n\tPhase: \"ingress\", Outcome: \"accepted\", Method: r.Method, Path: r.URL.Path,\n})",
 		"if wrapped, rec := s.wrapDiagnosticsResponseWriter(w); rec != nil",
 		"if s.CodexNativeHTTP != nil",
 		"legacy := s.codexLegacyNativeHTTP",
@@ -37,7 +40,7 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"model = legacy.Handle(w, r)",
 	})
 
-	diagnostics := requireCodexNativeIf(t, handler.Body.List[5])
+	diagnostics := requireCodexNativeIf(t, handler.Body.List[8])
 	assertCodexNativeStatementShape(t, fileSet, diagnostics.Body.List, []string{
 		"w = wrapped",
 		"defer func literal",
@@ -51,13 +54,15 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		t.Fatalf("diagnostics defer = %T, want function literal", deferred.Call.Fun)
 	}
 	assertCodexNativeStatementShape(t, fileSet, deferredFunction.Body.List, []string{
+		"emitCodexTrace(ctx, CodexTraceEvent{\n\tPhase: \"terminal\", Outcome: codexTraceHTTPOutcome(rec.statusCode()),\n\tStatusCode: rec.statusCode(), LatencyMS: time.Since(start).Milliseconds(),\n\tReason: rec.diagnosticsError(),\n})",
 		"event := RouteEvent{...}",
 		"event.applyRouteDiagnostics(routeDiag)",
 		"event.applySessionCorrelation(r.Header)",
+		"event.applyCodexTrace(ctx)",
 		"s.emitDiagnostics(event)",
 	})
 
-	authoritative := requireCodexNativeIf(t, handler.Body.List[6])
+	authoritative := requireCodexNativeIf(t, handler.Body.List[9])
 	assertCodexNativeStatementShape(t, fileSet, authoritative.Body.List, []string{
 		"if handled, routedModel := s.CodexNativeHTTP.TryServe(w, r, false); handled",
 	})
@@ -67,12 +72,15 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"return",
 	})
 
-	fallback := requireCodexNativeIf(t, handler.Body.List[8])
+	fallback := requireCodexNativeIf(t, handler.Body.List[11])
 	assertCodexNativeStatementShape(t, fileSet, fallback.Body.List, []string{
 		"legacy = newLegacyCodexNativeHTTPHandler(s)",
 	})
 
 	wantCalls := map[string]int{
+		"codexTraceHTTPOutcome":                1,
+		"emitCodexTrace":                       2,
+		"event.applyCodexTrace":                1,
 		"func literal":                         1,
 		"event.applyRouteDiagnostics":          1,
 		"event.applySessionCorrelation":        1,
@@ -80,16 +88,18 @@ func TestServerNativeCodexOwnsOnlyRoutePolicy(t *testing.T) {
 		"newLegacyCodexNativeHTTPHandler":      1,
 		"r.Context":                            1,
 		"r.WithContext":                        1,
-		"rec.diagnosticsError":                 1,
-		"rec.statusCode":                       1,
+		"rec.diagnosticsError":                 2,
+		"rec.statusCode":                       3,
+		"sessionCorrelation":                   1,
 		"s.CodexNativeHTTP.TryServe":           1,
 		"s.emitDiagnostics":                    1,
 		"s.withCodexRequestIngressObservation": 1,
 		"s.wrapDiagnosticsResponseWriter":      1,
 		"start.UTC":                            1,
 		"time.Now":                             1,
-		"time.Since":                           1,
-		"time.Since(start).Milliseconds":       1,
+		"time.Since":                           2,
+		"time.Since(start).Milliseconds":       2,
+		"withCodexTrace":                       1,
 		"withRouteDiagnostics":                 1,
 	}
 	gotCalls := make(map[string]int)

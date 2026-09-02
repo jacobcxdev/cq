@@ -88,11 +88,11 @@ type Config struct {
 	PinnedClaudeAccount string `json:"pinned_claude_account,omitempty"`
 	DiagnosticsLog      string `json:"diagnostics_log,omitempty"`
 	// PayloadDiagnosticsLog is the optional path to a JSONL file for payload
-	// diagnostics. When set, the proxy logs request body metadata (including raw
-	// request bodies) for every buffered request. Disabled by default.
-	// WARNING: this log contains raw request bodies including prompts, tool
-	// inputs, system prompts, compact summaries, and message content. Do not
-	// share without review. Requires a proxy restart to take effect.
+	// diagnostics. When set, the proxy logs exact HTTP request/response bodies
+	// and WebSocket frames with causal trace metadata. Disabled by default.
+	// WARNING: this log contains prompts, tool inputs, system prompts, compact
+	// summaries, messages, and provider responses. Credential-bearing headers
+	// are excluded. Do not share without review. Requires restart.
 	PayloadDiagnosticsLog string `json:"payload_diagnostics_log,omitempty"`
 	// CodexTurnRouting and CodexWSTurnRouting apply only after proxy restart.
 	CodexTurnRouting              CodexRoutingMode         `json:"codex_turn_routing"`

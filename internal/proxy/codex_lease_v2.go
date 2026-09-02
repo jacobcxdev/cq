@@ -1477,6 +1477,12 @@ func codexLeaseRestartableFailedHead(record CodexJournalRecordV2) bool {
 		record.CurrentAttemptGeneration > 0 && (state == CodexAttemptProviderFailed || state == CodexAttemptAccountUnavailable)
 }
 
+func codexLeaseAbandonedUnadmittedHead(record CodexJournalRecordV2) bool {
+	return record.Generation > 0 && record.State == LeaseProvisional && !record.EverAdmitted &&
+		record.RoutingRefs == 0 && record.AttemptRefs == 0 && record.ResponseObserverRefs == 0 && record.SocketLineageExtinct &&
+		record.CurrentAttemptGeneration > 0 && codexLeaseCurrentAttemptState(record) == CodexAttemptAbandonedBeforeDispatch
+}
+
 func codexRestoredLaneRestartableFailedHead(restored CodexRestoredLane) (CodexRestoredRecord, bool) {
 	if restored.Classification != CodexRestoredLaneHistorical || !restored.Fence.Current.IsZero() || restored.Fence.Last != restored.RequestedIdentity {
 		return CodexRestoredRecord{}, false

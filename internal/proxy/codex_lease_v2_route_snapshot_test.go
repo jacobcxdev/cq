@@ -457,7 +457,7 @@ func TestCodexLeaseV2FailedUnadmittedCompactionDoesNotCreateCacheAdmission(t *te
 	}
 }
 
-func TestCodexLeaseRouteSnapshotProjectsEncryptedAffinityWhenAccountIsUnavailable(t *testing.T) {
+func TestCodexLeaseRouteSnapshotProjectsEncryptedAffinityAsPortable(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
@@ -495,7 +495,7 @@ func TestCodexLeaseRouteSnapshotProjectsEncryptedAffinityWhenAccountIsUnavailabl
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resolved.AffinityPresent || resolved.AffinityAccountKey != "account-a" || !resolved.AffinityRequiresAccount || resolved.AffinityCacheAdmittedAt != predecessor.record.AdmittedAt || resolved.AffinityEffectiveModel != predecessor.record.EffectiveModel {
+	if !resolved.AffinityPresent || resolved.AffinityAccountKey != "account-a" || resolved.AffinityRequiresAccount || resolved.AffinityCacheAdmittedAt != predecessor.record.AdmittedAt || resolved.AffinityEffectiveModel != predecessor.record.EffectiveModel {
 		t.Fatalf("resolved encrypted affinity = %#v", resolved)
 	}
 
@@ -503,7 +503,7 @@ func TestCodexLeaseRouteSnapshotProjectsEncryptedAffinityWhenAccountIsUnavailabl
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !unresolved.AffinityPresent || unresolved.AffinityAccountKey != "" || !unresolved.AffinityRequiresAccount || unresolved.AffinityCacheAdmittedAt != predecessor.record.AdmittedAt || unresolved.AffinityEffectiveModel != predecessor.record.EffectiveModel {
+	if !unresolved.AffinityPresent || unresolved.AffinityAccountKey != "" || unresolved.AffinityRequiresAccount || unresolved.AffinityCacheAdmittedAt != predecessor.record.AdmittedAt || unresolved.AffinityEffectiveModel != predecessor.record.EffectiveModel {
 		t.Fatalf("unresolved encrypted affinity = %#v", unresolved)
 	}
 }

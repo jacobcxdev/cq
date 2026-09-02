@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -17,6 +19,8 @@ import (
 
 type RouteEvent struct {
 	Time                     time.Time `json:"time"`
+	TraceID                  string    `json:"trace_id,omitempty"`
+	ConnectionID             string    `json:"connection_id,omitempty"`
 	Method                   string    `json:"method"`
 	Path                     string    `json:"path"`
 	Provider                 string    `json:"provider"`
@@ -34,6 +38,7 @@ type RouteEvent struct {
 	Error                    string    `json:"error,omitempty"`
 	SessionKey               string    `json:"session_key,omitempty"`
 	SessionSource            string    `json:"session_source,omitempty"`
+	ThreadKey                string    `json:"thread_key,omitempty"`
 	TurnHint                 string    `json:"turn_hint,omitempty"`
 	RequestKind              string    `json:"request_kind,omitempty"`
 	LeasePhase               string    `json:"lease_phase,omitempty"`
@@ -55,15 +60,18 @@ type codexRequestIngressObservationSinkContextKey struct{}
 type codexRequestIngressObservationSink func(*routeDiagnostics)
 
 type routeDiagnostics struct {
-	mu          sync.Mutex
-	accountHint string
-	failover    bool
-	codex       codexObservationFields
+	mu           sync.Mutex
+	accountHint  string
+	failover     bool
+	traceID      string
+	connectionID string
+	codex        codexObservationFields
 }
 
 type codexObservationFields struct {
 	SessionKey               string
 	SessionSource            string
+	ThreadKey                string
 	TurnHint                 string
 	RequestKind              string
 	RequestLineage           string
@@ -118,6 +126,9 @@ func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
 	if fields.SessionKey != "" {
 		diag.codex.SessionKey = fields.SessionKey
 		diag.codex.SessionSource = fields.SessionSource
+	}
+	if fields.ThreadKey != "" {
+		diag.codex.ThreadKey = fields.ThreadKey
 	}
 	if fields.TurnHint != "" {
 		diag.codex.TurnHint = fields.TurnHint
@@ -192,9 +203,28 @@ func mergeRouteDiagnostics(ctx context.Context, source *routeDiagnostics) {
 	fields := source.codex
 	accountHint := source.accountHint
 	failover := source.failover
+	traceID := source.traceID
+	connectionID := source.connectionID
 	source.mu.Unlock()
 	noteCodexObservation(ctx, fields)
 	noteRouteAccount(ctx, accountHint, failover)
+	if destination, _ := ctx.Value(routeDiagnosticsContextKey{}).(*routeDiagnostics); destination != nil {
+		destination.mu.Lock()
+		destination.traceID = traceID
+		destination.connectionID = connectionID
+		destination.mu.Unlock()
+	}
+}
+
+func (d *routeDiagnostics) applyCodexTrace(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	traceID, connectionID := codexTraceIDs(ctx)
+	d.mu.Lock()
+	d.traceID = traceID
+	d.connectionID = connectionID
+	d.mu.Unlock()
 }
 
 func (d *routeDiagnostics) fields() (accountHint string, failover bool) {
@@ -222,11 +252,14 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 	}
 	diag.mu.Lock()
 	codex := diag.codex
+	event.TraceID = diag.traceID
+	event.ConnectionID = diag.connectionID
 	diag.mu.Unlock()
 	if codex.SessionKey != "" {
 		event.SessionKey = codex.SessionKey
 		event.SessionSource = codex.SessionSource
 	}
+	event.ThreadKey = codex.ThreadKey
 	event.TurnHint = codex.TurnHint
 	event.RequestKind = codex.RequestKind
 	event.RequestLineage = codex.RequestLineage
@@ -256,6 +289,13 @@ func (event *RouteEvent) applySessionCorrelation(headers http.Header) {
 		return
 	}
 	event.SessionKey, event.SessionSource = sessionCorrelation(headers)
+}
+
+func (event *RouteEvent) applyCodexTrace(ctx context.Context) {
+	if event == nil {
+		return
+	}
+	event.TraceID, event.ConnectionID = codexTraceIDs(ctx)
 }
 
 func redactedAccountHint(prefix string, identifiers ...string) string {
@@ -465,11 +505,17 @@ func hashPrefix(prefix, value string) string {
 	return prefix + ":" + hex.EncodeToString(sum[:])[:12]
 }
 
-// PayloadEvent is a single payload diagnostics log entry. It records
-// request-body metadata (and the body itself) for buffered requests.
-// It never records headers, tokens, or credential values.
+// PayloadEvent is a single payload diagnostics log entry. It records request
+// and response bodies or WebSocket frames when payload diagnostics are
+// explicitly enabled. Large streaming responses contain a bounded prefix and
+// set Truncated. Credential-bearing headers are excluded.
 type PayloadEvent struct {
 	Time          time.Time       `json:"time"`
+	EventType     string          `json:"event_type,omitempty"`
+	TraceID       string          `json:"trace_id,omitempty"`
+	ConnectionID  string          `json:"connection_id,omitempty"`
+	Transport     string          `json:"transport,omitempty"`
+	Direction     string          `json:"direction,omitempty"`
 	Method        string          `json:"method"`
 	Path          string          `json:"path"`
 	Provider      string          `json:"provider"`
@@ -478,9 +524,18 @@ type PayloadEvent struct {
 	ClientKind    string          `json:"client_kind,omitempty"`
 	SessionKey    string          `json:"session_key,omitempty"`
 	SessionSource string          `json:"session_source,omitempty"`
+	ThreadKey     string          `json:"thread_key,omitempty"`
 	SessionSignal string          `json:"session_signal,omitempty"`
 	FrameIndex    int             `json:"frame_index,omitempty"`
+	FrameType     string          `json:"frame_type,omitempty"`
+	Attempt       int             `json:"attempt,omitempty"`
+	AccountHint   string          `json:"account_hint,omitempty"`
+	StatusCode    int             `json:"status_code,omitempty"`
+	Headers       http.Header     `json:"headers,omitempty"`
+	Complete      bool            `json:"complete"`
+	Truncated     bool            `json:"truncated,omitempty"`
 	BodyBytes     int             `json:"body_bytes"`
+	BodyEncoding  string          `json:"body_encoding,omitempty"`
 	Body          json.RawMessage `json:"body,omitempty"`
 }
 
@@ -500,11 +555,33 @@ func encodeBody(raw []byte) json.RawMessage {
 
 // jsonlWriter is a low-level JSONL file writer with a mutex for concurrent safety.
 type jsonlWriter struct {
-	mu   sync.Mutex
-	file *os.File
+	mu       sync.Mutex
+	file     *os.File
+	path     string
+	size     int64
+	maxBytes int64
+	retained int
+}
+
+const (
+	defaultDiagnosticsMaxBytes = 64 << 20
+	defaultDiagnosticsRetained = 4
+)
+
+// DiagnosticsLogPaths returns retained JSONL files in chronological order.
+func DiagnosticsLogPaths(path string) []string {
+	paths := make([]string, 0, defaultDiagnosticsRetained+1)
+	for index := defaultDiagnosticsRetained; index >= 1; index-- {
+		paths = append(paths, fmt.Sprintf("%s.%d", path, index))
+	}
+	return append(paths, path)
 }
 
 func openJSONLWriter(path string) (*jsonlWriter, error) {
+	return openJSONLWriterWithLimits(path, defaultDiagnosticsMaxBytes, defaultDiagnosticsRetained)
+}
+
+func openJSONLWriterWithLimits(path string, maxBytes int64, retained int) (*jsonlWriter, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
@@ -513,16 +590,95 @@ func openJSONLWriter(path string) (*jsonlWriter, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	return &jsonlWriter{file: f}, nil
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &jsonlWriter{file: f, path: path, size: info.Size(), maxBytes: maxBytes, retained: retained}, nil
 }
 
 func (w *jsonlWriter) encode(v any) error {
+	return w.encodeInternal(v, false)
+}
+
+func (w *jsonlWriter) encodeAndSync(v any) error {
+	return w.encodeInternal(v, true)
+}
+
+func (w *jsonlWriter) encodeInternal(v any, syncWrite bool) error {
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
 		return nil
 	}
-	return json.NewEncoder(w.file).Encode(v)
+	if w.maxBytes > 0 && w.size > 0 && w.size+int64(len(encoded)) > w.maxBytes {
+		if err := w.rotateLocked(); err != nil {
+			return err
+		}
+	}
+	n, err := w.file.Write(encoded)
+	w.size += int64(n)
+	if err != nil {
+		return err
+	}
+	if n != len(encoded) {
+		return io.ErrShortWrite
+	}
+	if syncWrite {
+		return w.file.Sync()
+	}
+	return nil
+}
+
+func (w *jsonlWriter) rotateLocked() error {
+	if w == nil || w.file == nil || w.path == "" {
+		return nil
+	}
+	if err := w.file.Close(); err != nil {
+		return err
+	}
+	w.file = nil
+	if w.retained > 0 {
+		_ = os.Remove(fmt.Sprintf("%s.%d", w.path, w.retained))
+		for index := w.retained - 1; index >= 1; index-- {
+			from := fmt.Sprintf("%s.%d", w.path, index)
+			to := fmt.Sprintf("%s.%d", w.path, index+1)
+			if err := os.Rename(from, to); err != nil && !os.IsNotExist(err) {
+				return errors.Join(err, w.reopenLocked())
+			}
+		}
+		if err := os.Rename(w.path, w.path+".1"); err != nil && !os.IsNotExist(err) {
+			return errors.Join(err, w.reopenLocked())
+		}
+	} else if err := os.Remove(w.path); err != nil && !os.IsNotExist(err) {
+		return errors.Join(err, w.reopenLocked())
+	}
+	return w.reopenLocked()
+}
+
+func (w *jsonlWriter) reopenLocked() error {
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	w.file = file
+	w.size = info.Size()
+	return nil
 }
 
 func (w *jsonlWriter) close() error {
@@ -666,6 +822,20 @@ func (w *DiagnosticsWriter) Write(event RouteEvent) error {
 	if err := rejectUnsafeCodexDiagnostics(event, w.canary.Load()); err != nil {
 		return err
 	}
+	if event.StatusCode >= 500 {
+		return w.w.encodeAndSync(event)
+	}
+	return w.w.encode(event)
+}
+
+// WriteTrace appends one causal Codex lifecycle event.
+func (w *DiagnosticsWriter) WriteTrace(event CodexTraceEvent) error {
+	if w == nil || w.w == nil {
+		return nil
+	}
+	if event.Phase == "terminal" || event.Phase == "connection_terminal" || event.Outcome == "error" {
+		return w.w.encodeAndSync(event)
+	}
 	return w.w.encode(event)
 }
 
@@ -682,10 +852,13 @@ func rejectUnsafeCodexDiagnostics(event RouteEvent, recorder *CodexCanaryRecorde
 }
 
 func safeCodexRouteEvent(event RouteEvent) bool {
-	return safeCodexDiagnosticsMethod(event.Method) &&
+	return safeCodexTraceIdentifier(event.TraceID, "trace") &&
+		safeCodexTraceIdentifier(event.ConnectionID, "connection") &&
+		safeCodexDiagnosticsMethod(event.Method) &&
 		safeCodexRouteKind(event.RouteKind) &&
 		safeCodexAccountHint(event.AccountHint) &&
 		safeCodexSessionCorrelation(event.SessionKey, event.SessionSource) &&
+		safeHashedHint(event.ThreadKey, "codex-thread") &&
 		safeHashedHint(event.TurnHint, "turn") &&
 		safeCodexRequestKind(event.RequestKind) &&
 		safeCodexRequestLineage(event.RequestLineage) &&
@@ -701,6 +874,22 @@ func safeCodexRouteEvent(event RouteEvent) bool {
 		safeCodexDiagnosticsError(event.Error) &&
 		safeCodexModel(event.Model) &&
 		safeCodexDiagnosticsPath(event.Path)
+}
+
+func safeCodexTraceIdentifier(value, prefix string) bool {
+	if value == "" {
+		return true
+	}
+	wantPrefix := prefix + ":"
+	if !strings.HasPrefix(value, wantPrefix) || len(value) != len(wantPrefix)+32 {
+		return false
+	}
+	for _, char := range value[len(wantPrefix):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func safeCodexDiagnosticsMethod(value string) bool {

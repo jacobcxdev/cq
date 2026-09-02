@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -413,6 +414,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 
 	inspection, err := factory.inspect(ctx, input.Encoded, input.Headers)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_inspection", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 	}
 	defer inspection.Release()
@@ -423,8 +425,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		emitCodexRequestIngressObservation(ctx)
 	}
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_inspection", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_inspection", Outcome: "success", RequestKind: string(protocol.Metadata.Metadata.RequestKind)})
 	metadata := protocol.Metadata.Metadata
 	key := NewCodexLeaseKey(metadata)
 	evidence := codexLeaseRequestEvidenceFromProtocol(protocol)
@@ -438,8 +442,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 
 	inventory, err := factory.Inventory.List(ctx)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "inventory", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInventory, err)
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "inventory", Outcome: "success", Reason: fmt.Sprintf("accounts=%d", len(inventory.Accounts))})
 	unfilteredInventory := inventory
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
 	releasePlanning, ingressContinuity, err := factory.acquireOrConsumeRequestPlanning(ctx, key, accounts, evidence, ingressObservation, input.retainedPlanning)
@@ -449,8 +455,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	defer releasePlanning()
 	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, accounts, factory.Authority)
 	if err != nil || snapshot.JournalGeneration == 0 {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_snapshot", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, err)
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_snapshot", Outcome: "loaded", Lease: codexTraceLeaseSnapshot(snapshot)})
 	if !codexHTTPRequestExpectedBoundMatchesSnapshot(input.ExpectedBound, snapshot) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexLeaseAuthorityMismatch)
 	}
@@ -466,12 +474,17 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if factory.SessionPolicy != nil {
 		policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
 		if err != nil {
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "pool_policy", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 		}
 		if policyDecision.Status == PolicyDecisionSelected {
 			inventory = filterCodexHTTPRequestInventory(inventory, policyDecision.Allowed)
 		}
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{
+		Phase: "pool_policy", Outcome: string(policyDecision.Status), Pool: policyDecision.Pool,
+		PoolID: string(policyDecision.PoolID), Reason: fmt.Sprintf("allowed=%d revision=%d", len(policyDecision.Allowed), policyDecision.PolicyRevision),
+	})
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
 	authenticatedCallerAccount := codex.AccountKey("")
@@ -512,7 +525,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		snapshot.BoundAccountKey != "" && snapshot.BoundIdentity.Authoritative && snapshot.BoundRecordGeneration != 0
 	authenticatedCallerContinuity := authenticatedBoundContinuation ||
 		(authenticatedCodexCaller && continuityAccountKey != "" &&
-			(protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState))
+			(protocol.PreviousResponseID != "" || protocol.HasTurnState))
 	expectedBound := input.ExpectedBound
 	if expectedBound == nil && authenticatedBoundContinuation {
 		expectedBound = &CodexLeaseBoundExpectation{
@@ -555,6 +568,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	dispatch, err := factory.buildDispatch(ctx, dispatchInput)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "route_selection", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 	}
 	dispatchAccounts := dispatch.Accounts()
@@ -562,6 +576,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, dispatch.TerminalError())
 	}
 	choice := dispatchAccounts[0].Choice()
+	emitCodexTrace(ctx, CodexTraceEvent{
+		Phase: "route_selection", Outcome: string(dispatch.Status()), AccountHint: codexTraceAccountHint(choice.AccountKey),
+		Candidates: codexTraceDispatchCandidates(dispatch), Pool: policyDecision.Pool, PoolID: string(policyDecision.PoolID),
+	})
 	if policyDecision.Status == PolicyDecisionSelected {
 		capabilityPolicy, capabilityEvidence, active := factory.SessionPolicy.capabilityPolicy(policyDecision.PoolID, policyDecision.PolicyRevision)
 		if active {
@@ -670,6 +688,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	leasePlan.ingressContinuity = ingressContinuity
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "error", AccountHint: codexTraceAccountHint(choice.AccountKey), Reason: string(codexRequestFailureReason(err))})
 		if handle != nil {
 			_, cleanupErr := handle.AbandonBeforeDispatchContext(context.WithoutCancel(ctx))
 			err = errors.Join(err, cleanupErr)
@@ -678,9 +697,11 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
 	}
 	if handle == nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "error", AccountHint: codexTraceAccountHint(choice.AccountKey), Reason: "nil_handle"})
 		frozen.Release()
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, nil)
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "success", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 
 	result.Dispatch = dispatch
 	result.Frozen = frozen
@@ -708,7 +729,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 
 func codexHTTPRequestAccountUnavailablePortable(protocol CodexProtocolRequest) bool {
 	return protocol.PreviousResponseID == "" && !protocol.HasPreviousResponseID &&
-		!protocol.HasTurnState && !protocol.HasEncryptedState
+		!protocol.HasTurnState
 }
 
 func codexHTTPRequestDetachPortableUnavailableRoute(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, expected *CodexLeaseBoundExpectation) CodexLeaseRouteSnapshot {
@@ -1101,7 +1122,7 @@ const codexGPT56PromptCacheFairnessFloor = 30 * time.Minute
 
 func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, now time.Time) (codex.AccountKey, codex.AccountKey, error) {
 	affinityPresent := snapshot.AffinityPresent || snapshot.AffinityAccountKey != ""
-	requiresContinuity := snapshot.BoundRequiresAccount || snapshot.AffinityRequiresAccount || protocol.PreviousResponseID != "" || protocol.HasTurnState || protocol.HasEncryptedState
+	requiresContinuity := snapshot.BoundRequiresAccount || snapshot.AffinityRequiresAccount || protocol.PreviousResponseID != "" || protocol.HasTurnState
 	if requiresContinuity {
 		account := snapshot.BoundAccountKey
 		if account == "" {

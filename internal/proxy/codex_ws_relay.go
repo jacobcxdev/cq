@@ -88,12 +88,15 @@ func (e *CodexWebSocketAttemptExecutor) dialOnDispatch(ctx context.Context, choi
 
 func executeCodexWebSocketAttempt(executor ExplicitWebSocketExecutor, ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, incoming http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
 	if aware, ok := executor.(explicitWebSocketDispatchExecutor); ok {
-		return aware.dialOnDispatch(ctx, choice, attempt, upstreamURL, incoming, onDispatch)
+		conn, response, body, actual, err := aware.dialOnDispatch(ctx, choice, attempt, upstreamURL, incoming, onDispatch)
+		emitCodexWSHandshakePayload(ctx, response, body, choice, actual)
+		return conn, response, body, actual, err
 	}
 	if onDispatch != nil {
 		onDispatch(attempt)
 	}
 	conn, response, body, err := executor.Dial(ctx, choice, attempt, upstreamURL, incoming)
+	emitCodexWSHandshakePayload(ctx, response, body, choice, attempt)
 	return conn, response, body, attempt, err
 }
 

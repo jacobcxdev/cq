@@ -110,7 +110,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 			sourceFound := false
 			for _, record := range restored.ResolvedRecords {
 				if record.Identity == restored.Affinity.Source {
-					snapshot.AffinityRequiresAccount = record.Record.HasEncryptedState
+					snapshot.AffinityRequiresAccount = codexLeaseRecordRequiresAccount(record.Record)
 					sourceFound = true
 					break
 				}
@@ -152,7 +152,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 				snapshot.BoundIdentity = record.Identity
 				snapshot.BoundRecordGeneration = record.Record.RecordGeneration
 				snapshot.BoundChoice = cloneRouteChoice(record.Choice)
-				snapshot.BoundRequiresAccount = record.Record.NonMigratable
+				snapshot.BoundRequiresAccount = codexLeaseRecordRequiresAccount(record.Record)
 				break
 			}
 		}

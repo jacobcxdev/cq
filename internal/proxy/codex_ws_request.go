@@ -265,7 +265,7 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 		encoded:     append([]byte(nil), payload...),
 		request:     request,
 		key:         key,
-		portable:    request.PreviousResponseID == "" && !request.HasPreviousResponseID && !request.HasEncryptedState && !request.HasTurnState,
+		portable:    request.PreviousResponseID == "" && !request.HasPreviousResponseID && !request.HasTurnState,
 		prewarm:     prewarm,
 		diagnostics: diagnostics,
 	}, nil

@@ -358,7 +358,7 @@ func (intent *CodexWSRotationIntent) ConsumeReplacement(request CodexProtocolReq
 	if (!intent.PreviousResponseFailed && !intent.FullNewTurn) || clientBuild != intent.ClientBuild || retriesUsed > intent.RetryBudget || downstreamGeneration == intent.DownstreamGeneration || upstreamGeneration == intent.UpstreamGeneration {
 		return ErrCodexWSResyncRequired
 	}
-	if NewCodexLeaseKey(request.Metadata.Metadata) != intent.Key || request.PreviousResponseID != "" || request.HasEncryptedState {
+	if NewCodexLeaseKey(request.Metadata.Metadata) != intent.Key || request.PreviousResponseID != "" {
 		return ErrCodexWSResyncRequired
 	}
 	if transport != "websocket" && transport != "http" {

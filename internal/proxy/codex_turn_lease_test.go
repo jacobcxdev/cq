@@ -160,11 +160,11 @@ func TestCodexTurnThreadLanesAndContinuity(t *testing.T) {
 		t.Fatalf("turn state error = %v", err)
 	}
 	got, _ := manager.Get(root)
-	if err := got.CheckContinuation("account-a", 20, "resp", false); !errors.Is(err, ErrCodexContinuity) {
+	if err := got.CheckContinuation("account-a", 20, "resp"); !errors.Is(err, ErrCodexContinuity) {
 		t.Fatalf("socket continuity error = %v", err)
 	}
-	if err := got.CheckContinuation("account-b", 19, "", true); !errors.Is(err, ErrCodexContinuity) {
-		t.Fatalf("encrypted continuity error = %v", err)
+	if err := got.CheckContinuation("account-b", 19, ""); err != nil {
+		t.Fatalf("encrypted replay account switch = %v", err)
 	}
 }
 

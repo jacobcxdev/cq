@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -596,6 +597,49 @@ func TestCodexRequestRouterFailsOverUncompressedHard429(t *testing.T) {
 	}
 	if body.closeCalls != 1 {
 		t.Fatalf("body close calls = %d, want 1", body.closeCalls)
+	}
+}
+
+func TestCodexRequestRouterPayloadDiagnosticsCaptureFailedAndSuccessfulAttempts(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloads, err := OpenPayloadWriter(payloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hardLimit := `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`
+	accepted := `{"type":"response.completed","response":{"id":"response-two"}}`
+	scope := &queuedRequestScope{plans: []CodexRequestPlan{requestPlan("one", "first"), requestPlan("two", "second")}}
+	executor := &queuedAttemptExecutor{results: map[codex.CandidateID][]attemptResult{
+		"first":  {{status: http.StatusTooManyRequests, body: hardLimit}},
+		"second": {{status: http.StatusOK, body: accepted}},
+	}}
+	router := &CodexRequestRouter{Scope: scope, Executor: executor, Capacity: NewCodexCapacityLedger(time.Now, time.Hour)}
+	request := makeCodexRequest(`{"model":"gpt-5.4"}`)
+	ctx := withCodexTrace(context.Background(), nil, payloads, CodexTraceStart{Transport: "http"})
+	response, _, _, err := router.Do(ctx, CodexRouteRequirements{}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := payloads.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readCodexPayloadEvents(t, payloadPath)
+	if len(events) != 2 {
+		t.Fatalf("payload events = %d, want both provider attempts", len(events))
+	}
+	wantBodies := []string{hardLimit, accepted}
+	wantAccounts := []codex.AccountKey{"one", "two"}
+	wantStatuses := []int{http.StatusTooManyRequests, http.StatusOK}
+	for index, event := range events {
+		if event.StatusCode != wantStatuses[index] || event.AccountHint != codexTraceAccountHint(wantAccounts[index]) || event.Attempt != 1 || string(event.Body) != wantBodies[index] {
+			t.Fatalf("payload event %d = %+v", index+1, event)
+		}
 	}
 }
 

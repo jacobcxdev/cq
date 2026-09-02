@@ -235,6 +235,11 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, path)
 		}
 		return runProxyLeases(args[1:], os.Stdout)
+	case "trace":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "trace"})
+		}
+		return runProxyTrace(args[1:], os.Stdout)
 	case "hook":
 		return runProxyHook(args[1:], os.Stdin, os.Stdout)
 	case "candidate":
@@ -1166,7 +1171,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: payload diagnostics: %v (continuing without payload diagnostics)\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "cq: payload diagnostics enabled — WARNING: log contains raw request bodies including prompts and message content\n")
+			fmt.Fprintf(os.Stderr, "cq: payload diagnostics enabled — WARNING: log contains raw request/response bodies and WebSocket frames\n")
 			defer func() {
 				if err := payloadDiag.Close(); err != nil {
 					fmt.Fprintf(os.Stderr, "cq: payload diagnostics: close: %v\n", err)

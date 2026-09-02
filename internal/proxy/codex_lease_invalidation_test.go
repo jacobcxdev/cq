@@ -135,14 +135,12 @@ func TestCodexLeaseAffinityInvalidationPreservesRequiredContinuity(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	handle, err = handle.AdmitHTTP2xx()
+	handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "turn-state-1", HasTurnState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{
-		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{
-			ResponseAnchor: "response-1", HasResponseAnchor: true, HasEncryptedState: true,
-		},
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: "response-1", HasResponseAnchor: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -164,5 +162,61 @@ func TestCodexLeaseAffinityInvalidationPreservesRequiredContinuity(t *testing.T)
 	}
 	if snapshot.AffinityAccountKey != "account-a" || !snapshot.AffinityRequiresAccount || snapshot.AffinityInvalidated {
 		t.Fatalf("required affinity after invalidation = account %q required %v invalidated %v", snapshot.AffinityAccountKey, snapshot.AffinityRequiresAccount, snapshot.AffinityInvalidated)
+	}
+}
+
+func TestCodexLeaseAffinityInvalidationReleasesLegacyEncryptedBinding(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	plan.RequiresAccountContinuity = true
+	plan.Evidence.HasEncryptedState = true
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{
+		CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{HasEncryptedState: true},
+		EndTurn:                   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle, err = handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	if !handle.record.NonMigratable || !handle.record.HasEncryptedState {
+		t.Fatalf("legacy encrypted binding = non-migratable %t encrypted %t, want true/true", handle.record.NonMigratable, handle.record.HasEncryptedState)
+	}
+
+	result, err := coordinator.InvalidateTaskAffinities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.InvalidatedLeases != 1 {
+		t.Fatalf("invalidated legacy encrypted leases = %d, want 1", result.InvalidatedLeases)
+	}
+
+	migrated := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect,
+	}})
+	migrated.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	migrated.Evidence.HasEncryptedState = true
+	migratedHandle, err := runtimeLease.BeginRequest(migrated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migratedHandle.AccountKey() != "account-b" || migratedHandle.record.NonMigratable {
+		t.Fatalf("migrated legacy encrypted binding = account %q non-migratable %t, want account-b/false", migratedHandle.AccountKey(), migratedHandle.record.NonMigratable)
 	}
 }
