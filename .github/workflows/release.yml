@@ -122,13 +122,13 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          previous_tag=
-          while IFS= read -r candidate; do
-            if [[ "$candidate" != "$RELEASE_TAG" ]]; then
-              previous_tag="$candidate"
-              break
-            fi
-          done < <(git tag --sort=-v:refname)
+          previous_tag="$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName')"
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
           current_version="${RELEASE_TAG#v}"
@@ -346,16 +346,17 @@ jobs:
         shell: bash
         env:
           CQ_LINUX_USE_EXISTING_USER_MANAGER: "1"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          previous_tag=
-          while IFS= read -r candidate; do
-            if [[ "$candidate" != "$GITHUB_REF_NAME" ]]; then
-              previous_tag="$candidate"
-              break
-            fi
-          done < <(git tag --sort=-v:refname)
+          previous_tag="$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName')"
           test -n "$previous_tag"
           .github/scripts/validate-linux-install.sh "$GITHUB_REF_NAME" "$previous_tag"
 
