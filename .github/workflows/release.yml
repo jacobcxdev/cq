@@ -126,9 +126,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --exclude-drafts \
             --exclude-pre-releases \
-            --limit 1 \
+            --limit 100 \
             --json tagName \
-            --jq '.[0].tagName')"
+            --jq "map(. + {parts: (.tagName | ltrimstr(\"v\") | split(\".\") | map(tonumber))}) | map(select(.parts < (\"${RELEASE_TAG#v}\" | split(\".\") | map(tonumber)))) | sort_by(.parts) | last | .tagName")"
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
           current_version="${RELEASE_TAG#v}"
@@ -354,9 +354,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --exclude-drafts \
             --exclude-pre-releases \
-            --limit 1 \
+            --limit 100 \
             --json tagName \
-            --jq '.[0].tagName')"
+            --jq "map(. + {parts: (.tagName | ltrimstr(\"v\") | split(\".\") | map(tonumber))}) | map(select(.parts < (\"${GITHUB_REF_NAME#v}\" | split(\".\") | map(tonumber)))) | sort_by(.parts) | last | .tagName")"
           test -n "$previous_tag"
           .github/scripts/validate-linux-install.sh "$GITHUB_REF_NAME" "$previous_tag"
 
@@ -479,6 +479,30 @@ jobs:
         shell: pwsh
         run: git fetch --force --tags origin
 
+      - name: Resolve previous published release
+        id: previous-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $currentVersion = [version]$env:RELEASE_TAG.TrimStart("v")
+          $publishedReleases = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --exclude-pre-releases --limit 100 --json tagName
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to query published stable releases"
+          }
+          $previousReleases = @($publishedReleases | ConvertFrom-Json | ForEach-Object {
+            $candidate = $null
+            if ([version]::TryParse($_.tagName.TrimStart("v"), [ref]$candidate) -and $candidate -lt $currentVersion) {
+              [pscustomobject]@{ TagName = $_.tagName; Version = $candidate }
+            }
+          } | Sort-Object Version -Descending | Select-Object -First 1)
+          if ($previousReleases.Count -ne 1) {
+            throw "previous published stable release is absent or ambiguous"
+          }
+          "version=$($previousReleases[0].Version)" >> $env:GITHUB_OUTPUT
+
       - name: Validate deployed WinGet and Go runner lifecycle
         if: matrix.winget
         shell: pwsh
@@ -496,11 +520,7 @@ jobs:
             ManifestPath = $manifestPath[0].FullName
             ExpectedVersion = $version
           }
-          $previousTag = @(git tag --sort=-v:refname | Where-Object { $_ -ne $env:RELEASE_TAG } | Select-Object -First 1)
-          if ($previousTag.Count -ne 1) {
-            throw "previous stable tag is absent or ambiguous"
-          }
-          $previousGoVersion = $previousTag[0].TrimStart("v")
+          $previousGoVersion = "${{ steps.previous-release.outputs.version }}"
           $validationArguments.PreviousGoVersion = $previousGoVersion
           $headers = @{
             Accept = "application/vnd.github+json"
@@ -555,11 +575,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $version = $env:RELEASE_TAG.TrimStart("v")
-          $previousTag = @(git tag --sort=-v:refname | Where-Object { $_ -ne $env:RELEASE_TAG } | Select-Object -First 1)
-          if ($previousTag.Count -ne 1) {
-            throw "previous stable tag is absent or ambiguous"
-          }
-          $previousGoVersion = $previousTag[0].TrimStart("v")
+          $previousGoVersion = "${{ steps.previous-release.outputs.version }}"
           $validationRoot = Join-Path $env:RUNNER_TEMP "windows-msi-validation"
           $publicRoot = Join-Path $env:RUNNER_TEMP "public-windows-msi"
           New-Item -ItemType Directory -Path $publicRoot -Force | Out-Null
