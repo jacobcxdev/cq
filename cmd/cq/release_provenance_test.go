@@ -350,8 +350,19 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 			t.Errorf("release workflow uses pipefail-unsafe previous-tag selection %q", unsafe)
 		}
 	}
-	if count := strings.Count(text, "done < <(git tag --sort=-v:refname)"); count != 2 {
-		t.Errorf("release workflow uses pipe-safe previous-tag selection %d times, want 2", count)
+	for _, selector := range []struct {
+		text string
+		want int
+	}{
+		{text: "--exclude-drafts", want: 3},
+		{text: "--exclude-pre-releases", want: 3},
+		{text: "--limit 100", want: 3},
+		{text: "sort_by(.parts) | last | .tagName", want: 2},
+		{text: "Sort-Object Version -Descending | Select-Object -First 1", want: 1},
+	} {
+		if count := strings.Count(text, selector.text); count != selector.want {
+			t.Errorf("release workflow uses published-release selector %q %d times, want %d", selector.text, count, selector.want)
+		}
 	}
 	if count := strings.Count(text, "git fetch --force --tags origin"); count != 2 {
 		t.Errorf("release workflow refreshes tag inventory %d times, want Linux and Windows deployment jobs", count)
