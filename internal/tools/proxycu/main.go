@@ -633,6 +633,7 @@ type goTestEvent struct {
 	Test        string  `json:"Test"`
 	Elapsed     float64 `json:"Elapsed"`
 	Output      string  `json:"Output"`
+	OutputType  string  `json:"OutputType"`
 	FailedBuild string  `json:"FailedBuild"`
 }
 
@@ -820,7 +821,7 @@ func rejectDuplicateGoTestEventMembers(line []byte) error {
 		}
 		seen[name] = struct{}{}
 		switch name {
-		case "Time", "Action", "Package", "Test", "Elapsed", "Output", "FailedBuild":
+		case "Time", "Action", "Package", "Test", "Elapsed", "Output", "OutputType", "FailedBuild":
 		default:
 			if unsupported == "" {
 				unsupported = name

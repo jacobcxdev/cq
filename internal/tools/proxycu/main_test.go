@@ -365,6 +365,25 @@ func TestVerifyTestEventsAcceptsExactRunAndPass(t *testing.T) {
 	}
 }
 
+func TestVerifyTestEventsAcceptsOutputType(t *testing.T) {
+	selection := proxy.CUTestPackageV1{
+		Package:          "./internal/proxy",
+		TopLevelTests:    []string{"TestOne"},
+		FullTestIDs:      []string{"TestOne"},
+		MinimumPassCount: 1,
+	}
+	events := strings.Join([]string{
+		`{"Action":"start","Package":"github.com/jacobcxdev/cq/internal/proxy"}`,
+		`{"Action":"run","Package":"github.com/jacobcxdev/cq/internal/proxy","Test":"TestOne"}`,
+		`{"Action":"output","Package":"github.com/jacobcxdev/cq/internal/proxy","Test":"TestOne","Output":"=== RUN   TestOne\n","OutputType":"frame"}`,
+		`{"Action":"pass","Package":"github.com/jacobcxdev/cq/internal/proxy","Test":"TestOne"}`,
+		`{"Action":"pass","Package":"github.com/jacobcxdev/cq/internal/proxy"}`,
+	}, "\n") + "\n"
+	if err := verifyTestEvents(selection, strings.NewReader(events), true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestVerifyTestEventsRejectsDuplicateObjectMembers(t *testing.T) {
 	selection := proxy.CUTestPackageV1{
 		Package:          "./internal/proxy",
