@@ -114,6 +114,39 @@ func TestResetCreditClientListPreservesUnknownValuesAndNilExpiry(t *testing.T) {
 	}
 }
 
+func TestResetCreditClientListAcceptsUpstreamMetadataFields(t *testing.T) {
+	client := ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) {
+		return resetJSONResponse(http.StatusOK, `{
+			"credits":[{
+				"id":"credit-1",
+				"reset_type":"codex_rate_limits",
+				"is_supported_by_plan":true,
+				"status":"available",
+				"granted_at":"2026-08-22T00:19:47.144410Z",
+				"expires_at":"2026-09-21T00:19:47.144410Z",
+				"redeem_started_at":null,
+				"redeemed_at":null,
+				"profile_image_url":"https://example.test/profile.png",
+				"profile_user_id":"profile-1",
+				"title":"Full reset",
+				"description":"Reset current usage limits"
+			}],
+			"available_count":1,
+			"history_enabled":false,
+			"immediate_reset_purchase_eligible":false,
+			"total_earned_count":0
+		}`), nil
+	})}
+
+	got, err := client.List(context.Background(), resetMaterial())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AvailableCount != 1 || len(got.Credits) != 1 || got.Credits[0].ID != "credit-1" {
+		t.Fatalf("inventory = %+v", got)
+	}
+}
+
 func TestResetCreditClientListReturnsValidEntriesWithEntryErrors(t *testing.T) {
 	client := ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) {
 		return resetJSONResponse(http.StatusOK, `{
@@ -146,7 +179,6 @@ func TestResetCreditClientListRejectsInvalidInventory(t *testing.T) {
 		{name: "contradictory count", body: `{"credits":[],"available_count":1}`},
 		{name: "empty ID", body: `{"credits":[{"id":"","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-08-30T08:00:00Z"}],"available_count":1}`},
 		{name: "invalid expiry", body: `{"credits":[{"id":"bad","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-08-30T08:00:00Z","expires_at":"bad"}],"available_count":1}`},
-		{name: "unknown field", body: `{"credits":[],"available_count":0,"new_contract":true}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -230,8 +262,21 @@ func TestResetCreditClientConsumeMapsKnownCodes(t *testing.T) {
 	}
 }
 
+func TestResetCreditClientConsumeAcceptsUpstreamMetadataFields(t *testing.T) {
+	client := ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) {
+		return resetJSONResponse(http.StatusOK, `{"code":"reset","windows_reset":2,"new_contract":true}`), nil
+	})}
+	got, err := client.Consume(context.Background(), resetMaterial(), "credit", "request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != ConsumeReset || got.WindowsReset != 2 {
+		t.Fatalf("Consume() = %+v", got)
+	}
+}
+
 func TestResetCreditClientConsumeRejectsMalformedSuccess(t *testing.T) {
-	for _, body := range []string{`{}`, `{"code":"future"}`, `{"code":"reset","extra":true}`, `not-json`} {
+	for _, body := range []string{`{}`, `{"code":"future"}`, `not-json`} {
 		client := ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) {
 			return resetJSONResponse(http.StatusOK, body), nil
 		})}
