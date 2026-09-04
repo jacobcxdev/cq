@@ -406,6 +406,9 @@ func TestCodexRuntimeHealthDegradesForEachPressureSignal(t *testing.T) {
 	if codexRuntimeHealthDegraded(codexRuntimeObservabilitySnapshot{}, proxyEphemeralStateSnapshot{}) {
 		t.Fatal("zero runtime health degraded")
 	}
+	if codexRuntimeHealthDegraded(codexRuntimeObservabilitySnapshot{}, proxyEphemeralStateSnapshot{AdmissionActive: true, DispatchActive: true}) {
+		t.Fatal("active background prune degraded health")
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if !codexRuntimeHealthDegraded(test.runtime, test.ephemeral) {

@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -42,6 +44,8 @@ type proxyEphemeralStateObservability struct {
 	pruneErrors       uint64
 	admissionFailed   bool
 	dispatchFailed    bool
+	admissionActive   bool
+	dispatchActive    bool
 }
 
 type proxyEphemeralStateSnapshot struct {
@@ -51,6 +55,8 @@ type proxyEphemeralStateSnapshot struct {
 	PruneErrors       uint64 `json:"prune_errors"`
 	AdmissionFailed   bool   `json:"admission_prune_failed"`
 	DispatchFailed    bool   `json:"dispatch_prune_failed"`
+	AdmissionActive   bool   `json:"admission_prune_active"`
+	DispatchActive    bool   `json:"dispatch_prune_active"`
 }
 
 var proxyProcessEphemeralState proxyEphemeralStateObservability
@@ -65,14 +71,59 @@ func (state *proxyEphemeralStateObservability) recordScan(kind ephemeralReceiptK
 	case ephemeralReceiptAdmission:
 		state.admissionReceipts = count
 		state.admissionFailed = err != nil
+		state.admissionActive = false
 	case ephemeralReceiptDispatch:
 		state.dispatchReceipts = count
 		state.dispatchFailed = err != nil
+		state.dispatchActive = false
 	}
 	state.prunedReceipts += pruned
 	if err != nil {
 		state.pruneErrors++
 	}
+}
+
+func (state *proxyEphemeralStateObservability) recordPruneStart(kind ephemeralReceiptKind) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if kind == ephemeralReceiptAdmission {
+		state.admissionActive = true
+	} else if kind == ephemeralReceiptDispatch {
+		state.dispatchActive = true
+	}
+}
+
+func (state *proxyEphemeralStateObservability) recordPruneStopped(kind ephemeralReceiptKind, pruned uint64) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if kind == ephemeralReceiptAdmission {
+		state.admissionActive = false
+	} else if kind == ephemeralReceiptDispatch {
+		state.dispatchActive = false
+	}
+	state.prunedReceipts += pruned
+}
+
+func (state *proxyEphemeralStateObservability) recordPruneFailure(kind ephemeralReceiptKind, err error) {
+	if state == nil || err == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if kind == ephemeralReceiptAdmission {
+		state.admissionActive = false
+		state.admissionFailed = true
+	} else if kind == ephemeralReceiptDispatch {
+		state.dispatchActive = false
+		state.dispatchFailed = true
+	}
+	state.pruneErrors++
 }
 
 func (state *proxyEphemeralStateObservability) recordCreate(kind ephemeralReceiptKind) {
@@ -101,15 +152,84 @@ func (state *proxyEphemeralStateObservability) snapshot() proxyEphemeralStateSna
 		PruneErrors:       state.pruneErrors,
 		AdmissionFailed:   state.admissionFailed,
 		DispatchFailed:    state.dispatchFailed,
+		AdmissionActive:   state.admissionActive,
+		DispatchActive:    state.dispatchActive,
 	}
 }
 
-func pruneEphemeralReceipts(inspector fsutil.SecurePathInspector, directory fsutil.SecureDirectory, prefix string, now time.Time) (remaining, pruned uint64, returnErr error) {
+type ephemeralReceiptPruner struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+	err    error
+}
+
+func startEphemeralReceiptPruner(fsys fsutil.FileSystem, path, prefix string, kind ephemeralReceiptKind, now func() time.Time) *ephemeralReceiptPruner {
+	opener, openOK := fsys.(fsutil.SecureDirectoryOpener)
+	inspector, inspectOK := fsys.(fsutil.SecurePathInspector)
+	if !openOK || !inspectOK {
+		proxyProcessEphemeralState.recordPruneFailure(kind, fsutil.ErrSecureCapabilityUnavailable)
+		return nil
+	}
+	directory, err := opener.OpenSecureDirectory(path)
+	if err != nil {
+		proxyProcessEphemeralState.recordPruneFailure(kind, err)
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	pruner := &ephemeralReceiptPruner{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(pruner.done)
+		defer func() {
+			closeErr := directory.Close()
+			if recovered := recover(); recovered != nil {
+				pruner.err = errors.Join(closeErr, fmt.Errorf("ephemeral receipt prune panic: %v", recovered))
+				proxyProcessEphemeralState.recordPruneFailure(kind, pruner.err)
+			} else if closeErr != nil && ctx.Err() == nil {
+				pruner.err = closeErr
+				proxyProcessEphemeralState.recordPruneFailure(kind, closeErr)
+			} else {
+				pruner.err = closeErr
+			}
+		}()
+		ticker := time.NewTicker(ephemeralReceiptPruneInterval)
+		defer ticker.Stop()
+		for {
+			proxyProcessEphemeralState.recordPruneStart(kind)
+			remaining, pruned, scanErr := pruneEphemeralReceipts(ctx, inspector, directory, prefix, now())
+			if ctx.Err() != nil {
+				proxyProcessEphemeralState.recordPruneStopped(kind, pruned)
+				return
+			}
+			proxyProcessEphemeralState.recordScan(kind, remaining, pruned, scanErr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return pruner
+}
+
+func (pruner *ephemeralReceiptPruner) stop() error {
+	if pruner == nil {
+		return nil
+	}
+	pruner.once.Do(pruner.cancel)
+	<-pruner.done
+	return pruner.err
+}
+
+func pruneEphemeralReceipts(ctx context.Context, inspector fsutil.SecurePathInspector, directory fsutil.SecureDirectory, prefix string, now time.Time) (remaining, pruned uint64, returnErr error) {
 	remover, removeOK := directory.(fsutil.IdentityBoundRemover)
-	if inspector == nil || !removeOK {
+	if ctx == nil || inspector == nil || !removeOK {
 		return 0, 0, fsutil.ErrSecureCapabilityUnavailable
 	}
 	visit := func(entry os.DirEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		name := entry.Name()
 		id, recognised := ephemeralReceiptID(name, prefix)
 		if !recognised {

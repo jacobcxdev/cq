@@ -56,11 +56,10 @@ type CallerDispatchPermitAuthority interface {
 type CallerDispatchPermitStore struct {
 	mu        sync.Mutex
 	directory fsutil.SecureDirectory
-	inspector fsutil.SecurePathInspector
+	pruner    *ephemeralReceiptPruner
 	key       [sha256.Size]byte
 	now       func() time.Time
 	random    io.Reader
-	lastPrune time.Time
 	closed    bool
 }
 
@@ -79,14 +78,14 @@ func OpenCallerDispatchPermitStore(fsys fsutil.FileSystem, path string, key []by
 	if err != nil {
 		return nil, err
 	}
-	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	_, ok = fsys.(fsutil.SecurePathInspector)
 	if !ok {
 		_ = directory.Close()
 		return nil, ErrCallerDispatchPermitInvalid
 	}
-	store := &CallerDispatchPermitStore{directory: directory, inspector: inspector, now: now, random: random}
+	store := &CallerDispatchPermitStore{directory: directory, now: now, random: random}
 	copy(store.key[:], key)
-	store.pruneLocked(now())
+	store.pruner = startEphemeralReceiptPruner(fsys, path, "dispatch-permit-", ephemeralReceiptDispatch, now)
 	return store, nil
 }
 
@@ -127,7 +126,6 @@ func (store *CallerDispatchPermitStore) IssueAndConsume(ctx context.Context, req
 	if store.closed || store.directory == nil {
 		return CallerDispatchPermitV2{}, ErrCallerDispatchPermitInvalid
 	}
-	store.pruneLocked(issuedAt)
 	file, err := store.directory.CreateExclusive("dispatch-permit-"+permit.PermitID+".json", 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -158,15 +156,6 @@ func (store *CallerDispatchPermitStore) IssueAndConsume(ctx context.Context, req
 	committed = true
 	proxyProcessEphemeralState.recordCreate(ephemeralReceiptDispatch)
 	return permit, nil
-}
-
-func (store *CallerDispatchPermitStore) pruneLocked(now time.Time) {
-	if store == nil || store.directory == nil || (!store.lastPrune.IsZero() && now.Before(store.lastPrune.Add(ephemeralReceiptPruneInterval))) {
-		return
-	}
-	store.lastPrune = now
-	remaining, pruned, err := pruneEphemeralReceipts(store.inspector, store.directory, "dispatch-permit-", now)
-	proxyProcessEphemeralState.recordScan(ephemeralReceiptDispatch, remaining, pruned, err)
 }
 
 func validateCallerDispatchPermitRequest(request CallerDispatchPermitRequestV2) error {
@@ -220,18 +209,22 @@ func (store *CallerDispatchPermitStore) Close() error {
 		return nil
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	if store.closed {
+		store.mu.Unlock()
 		return nil
 	}
 	store.closed = true
 	for index := range store.key {
 		store.key[index] = 0
 	}
-	if store.directory == nil {
-		return nil
-	}
-	err := store.directory.Close()
+	pruner := store.pruner
+	store.pruner = nil
+	directory := store.directory
 	store.directory = nil
-	return err
+	store.mu.Unlock()
+	pruneErr := pruner.stop()
+	if directory == nil {
+		return pruneErr
+	}
+	return errors.Join(pruneErr, directory.Close())
 }
