@@ -196,16 +196,17 @@ func (err *codexLeaseAccountRevalidationError) Unwrap() error {
 // Transition methods return a new handle; retained copies become stale after a
 // successful transition and cannot mutate later authority.
 type CodexLeaseRequestHandle struct {
-	runtime      *CodexLeaseRuntime
-	newTurn      bool
-	key          LeaseKey
-	accounts     []codex.AccountKey
-	authority    CodexLeaseAuthorityPolicy
-	identity     CodexJournalRecordIdentity
-	record       CodexJournalRecordV2
-	account      codex.AccountKey
-	slotAccounts []codex.AccountKey
-	fence        CodexLeaseGenerationFence
+	runtime                     *CodexLeaseRuntime
+	newTurn                     bool
+	relatchTurnStateOnAdmission bool
+	key                         LeaseKey
+	accounts                    []codex.AccountKey
+	authority                   CodexLeaseAuthorityPolicy
+	identity                    CodexJournalRecordIdentity
+	record                      CodexJournalRecordV2
+	account                     codex.AccountKey
+	slotAccounts                []codex.AccountKey
+	fence                       CodexLeaseGenerationFence
 }
 
 // NewCodexLeaseRuntime binds runtime transitions to a coordinator's exact
@@ -776,6 +777,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		return nil, err
 	}
 	handle.newTurn = newTurn
+	handle.relatchTurnStateOnAdmission = runtime.canRelatchAuthenticatedTurnState(current.Record, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity)
 	return handle, nil
 }
 
@@ -1415,7 +1417,14 @@ func (handle *CodexLeaseRequestHandle) AdmitWebSocketContext(ctx context.Context
 		desired.AttemptRefs++
 		desired.ResponseObserverRefs++
 	}
-	return handle.commitRequestMutation(fence, desired, true)
+	admitted, err := handle.commitRequestMutation(fence, desired, true)
+	if err != nil {
+		return nil, err
+	}
+	if evidence.HasTurnState {
+		admitted.relatchTurnStateOnAdmission = false
+	}
+	return admitted, nil
 }
 
 func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGenerationFence, evidence CodexHTTPAdmissionEvidence) (*CodexLeaseRequestHandle, bool, error) {
@@ -1457,6 +1466,9 @@ func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGen
 	}
 	firstAdmission := firstAttemptAdmission && !handle.record.EverAdmitted && desired.Authoritative && codexLeaseCurrentRequestCacheEligible(desired)
 	admitted, err := handle.commitRequestMutation(fence, desired, true)
+	if err == nil && evidence.HasTurnState {
+		admitted.relatchTurnStateOnAdmission = false
+	}
 	return admitted, firstAdmission, err
 }
 
@@ -1626,7 +1638,12 @@ func (handle *CodexLeaseRequestHandle) commitRequestMutationWithLaneMutation(fen
 	if err != nil {
 		return nil, err
 	}
-	return handle.runtime.committedRequestHandle(handle.key, handle.accounts, handle.authority, identity, post, committedRecord, requireCurrent, expectedTouchedAttempts)
+	next, err := handle.runtime.committedRequestHandle(handle.key, handle.accounts, handle.authority, identity, post, committedRecord, requireCurrent, expectedTouchedAttempts)
+	if err != nil {
+		return nil, err
+	}
+	next.relatchTurnStateOnAdmission = handle.relatchTurnStateOnAdmission
+	return next, nil
 }
 
 func (handle *CodexLeaseRequestHandle) refreshMutationFence() (CodexLeaseGenerationFence, error) {
@@ -2047,6 +2064,12 @@ func (runtime *CodexLeaseRuntime) canMigrateAuthenticatedTurnStateLatch(record C
 		codexLeaseRuntimeCanBeginRequest(record)
 }
 
+func (runtime *CodexLeaseRuntime) canRelatchAuthenticatedTurnState(record CodexJournalRecordV2, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool) bool {
+	return runtime != nil && runtime.store != nil && authenticatedCallerContinuity && !evidence.HasTurnState && record.HasTurnState && record.TurnStateLatchCurrent &&
+		record.AccountHash != "" && constantTimeCodexLeaseDigestEqual(record.AccountHash, runtime.store.hash("account", string(selected))) &&
+		codexLeaseRuntimeCanBeginRequest(record)
+}
+
 func firstIngressContinuity(bindings []*codexLeaseIngressContinuityBinding) *codexLeaseIngressContinuityBinding {
 	if len(bindings) == 0 {
 		return nil
@@ -2116,7 +2139,7 @@ func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJourn
 	if !evidence.HasTurnState {
 		return nil
 	}
-	if record.HasTurnState {
+	if record.HasTurnState && !handle.relatchTurnStateOnAdmission {
 		return nil
 	}
 	record.TurnStateHash = handle.runtime.store.hash("turn-state", evidence.TurnState)

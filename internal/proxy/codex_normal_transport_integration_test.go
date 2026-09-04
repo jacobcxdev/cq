@@ -1497,6 +1497,65 @@ func TestNormalProxyTransportHTTPHardLimitMigratesBeforeLeak(t *testing.T) {
 	harness.backend.assertNoFailure(t)
 }
 
+func TestNormalProxyTransportRequiredAffinityHardLimitReplaysPortableRequest(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		transport string
+		scenario  normalTransportGateScenario
+	}{
+		{name: "http", transport: "http", scenario: normalTransportGateHTTPHardLimit},
+		{name: "websocket", transport: "websocket", scenario: normalTransportGateWSApplicationHardLimit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newNormalTransportGateHarness(t, test.scenario)
+			snapshotter := &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+				Classification:          CodexRestoredLaneUnseen,
+				AffinityPresent:         true,
+				AffinityAccountKey:      codexInstalledHTTPValidationAccountA,
+				AffinityCacheAdmittedAt: time.Now(),
+				AffinityEffectiveModel:  "gpt-5.6-sol",
+				AffinityRequiresAccount: true,
+				JournalGeneration:       harness.continuity.Store().Generation(),
+			}}
+			harness.httpPlanner.Routes = snapshotter
+			harness.webSocketPlanner.Routes = snapshotter
+
+			switch test.transport {
+			case "http":
+				metadata := CodexTurnMetadata{
+					SessionID: "normal-transport-session-required-affinity-http", ThreadID: "normal-transport-thread-required-affinity-http", TurnID: "normal-transport-turn-required-affinity-http", RequestKind: CodexRequestTurn,
+				}
+				status, body := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, metadata))
+				if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
+					t.Fatalf("required-affinity hard-limit response = %d %q, want replayed 200", status, body)
+				}
+				receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+				if len(receipts) != 2 || receipts[0].accountID != "validation-upstream-a" || receipts[0].status != http.StatusTooManyRequests || receipts[1].accountID != "validation-upstream-b" || receipts[1].status != http.StatusOK || receipts[0].payload != receipts[1].payload {
+					t.Fatalf("required-affinity HTTP receipts = %#v, want byte-identical A/429 then B/200", receipts)
+				}
+			case "websocket":
+				frame := normalTransportGateWSFrameForLane("normal-transport-session-required-affinity-ws", "normal-transport-thread-required-affinity-ws", "normal-transport-turn-required-affinity-ws", "")
+				connection := normalTransportGateWebSocket(t, harness)
+				if err := connection.WriteMessage(websocket.TextMessage, frame); err != nil {
+					t.Fatal(err)
+				}
+				replies := normalTransportGateReadWSCompletion(t, connection)
+				_ = connection.Close()
+				if bytes.Contains(bytes.Join(replies, nil), []byte("usage_limit_reached")) {
+					t.Fatalf("required-affinity hard-limit leaked downstream: %q", replies)
+				}
+				receipts := harness.backend.snapshot()
+				handshakes := normalTransportGateReceipts(receipts, "websocket_handshake")
+				frames := normalTransportGateReceipts(receipts, "websocket_frame")
+				if len(handshakes) != 2 || handshakes[0].accountID != "validation-upstream-a" || handshakes[1].accountID != "validation-upstream-b" || len(frames) != 2 || frames[0].accountID != "validation-upstream-a" || frames[1].accountID != "validation-upstream-b" || frames[0].payload != frames[1].payload {
+					t.Fatalf("required-affinity WebSocket receipts = handshakes %#v frames %#v, want byte-identical A then B", handshakes, frames)
+				}
+			}
+			harness.backend.assertNoFailure(t)
+		})
+	}
+}
+
 func TestNormalProxyTransportHTTPPortableSuccessorReplaysAfterEncryptedPredecessorHardLimit(t *testing.T) {
 	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateWSNonPortableApplicationHardLimit)
 	predecessor := CodexTurnMetadata{

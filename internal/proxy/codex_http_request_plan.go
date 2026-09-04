@@ -487,6 +487,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	})
 	requirements := codexHTTPRequestPlanRequirements(protocol)
 	affinityAccountKey, continuityAccountKey, err := codexHTTPRequestTaskAffinityAccounts(snapshot, protocol, now)
+	affinityEffectiveModel := snapshot.AffinityEffectiveModel
+	if codexHTTPRequestPortableRequiredAffinity(snapshot, protocol) {
+		affinityEffectiveModel = ""
+	}
 	authenticatedCallerAccount := codex.AccountKey("")
 	authenticatedCodexCaller := false
 	callerIdentity, callerIdentityPresent := runtimeCallerIdentity(ctx)
@@ -557,7 +561,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		Provisional:                 cloneCodexHTTPRequestPlanProvisional(snapshot.Provisional),
 		AccountValues:               policyDecision.AccountValues,
 		AffinityAccountKey:          affinityAccountKey,
-		AffinityEffectiveModel:      snapshot.AffinityEffectiveModel,
+		AffinityEffectiveModel:      affinityEffectiveModel,
 		DefaultAccountKey:           factory.DefaultAccountKey,
 		BoundAccountKey:             boundAccountKey,
 		UnavailableAccountKeys:      dispatchUnavailable,
@@ -1122,6 +1126,12 @@ const codexGPT56PromptCacheFairnessFloor = 30 * time.Minute
 
 func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, now time.Time) (codex.AccountKey, codex.AccountKey, error) {
 	affinityPresent := snapshot.AffinityPresent || snapshot.AffinityAccountKey != ""
+	if codexHTTPRequestPortableRequiredAffinity(snapshot, protocol) {
+		if snapshot.AffinityAccountKey == "" {
+			return "", "", ErrCodexLeaseAuthorityMismatch
+		}
+		return snapshot.AffinityAccountKey, "", nil
+	}
 	requiresContinuity := snapshot.BoundRequiresAccount || snapshot.AffinityRequiresAccount || protocol.PreviousResponseID != "" || protocol.HasTurnState
 	if requiresContinuity {
 		account := snapshot.BoundAccountKey
@@ -1143,6 +1153,11 @@ func codexHTTPRequestTaskAffinityAccounts(snapshot CodexLeaseRouteSnapshot, prot
 		return "", "", nil
 	}
 	return snapshot.AffinityAccountKey, "", nil
+}
+
+func codexHTTPRequestPortableRequiredAffinity(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest) bool {
+	return snapshot.Classification == CodexRestoredLaneUnseen && snapshot.AffinityRequiresAccount &&
+		codexHTTPRequestAccountUnavailablePortable(protocol)
 }
 
 func codexAuthenticatedCallerMapping(inventory codex.Inventory, caller RuntimeCallerAuthorityV1, identity string) (codex.AccountKey, bool) {

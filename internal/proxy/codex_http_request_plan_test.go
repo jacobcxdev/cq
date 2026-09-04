@@ -568,9 +568,9 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 		{name: "missing timing stays sticky", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
 		{name: "clock rollback stays sticky", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(time.Minute), want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
 		{name: "model change has no reusable cache", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
-		{name: "required predecessor remains pinned after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
-		{name: "required predecessor survives model change", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
-		{name: "required predecessor survives hard zero", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, hardZero: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
+		{name: "required predecessor remains preferred after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "required predecessor remains preferred after model change", model: "gpt-5.6-codex", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Minute), requiresAccount: true, want: "account-a", wantDecision: codexRuntimeDecisionAffinityReuse, wantAccounts: 2},
+		{name: "required predecessor yields after hard zero", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), requiresAccount: true, hardZero: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 1},
 		{name: "encrypted request permits fairness after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), encryptedRequest: true, want: "account-b", wantDecision: codexRuntimeDecisionFairnessSelect, wantAccounts: 2},
 		{name: "exact turn remains bound after floor", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1},
 		{name: "indeterminate turn remains pinned for full create", model: "gpt-5.6-sol", affinityModel: "gpt-5.6-sol", cacheAdmittedAt: now.Add(-time.Hour), bound: true, boundRequires: true, want: "account-a", wantDecision: codexRuntimeDecisionNone, wantAccounts: 1, wantContinuity: true},
@@ -589,6 +589,7 @@ func TestCodexHTTPRequestPlanFactoryMakesFairnessEligibleAtGPT56CacheFloor(t *te
 				frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
 			}}
 			snapshot := CodexLeaseRouteSnapshot{
+				Classification:          CodexRestoredLaneUnseen,
 				JournalGeneration:       1,
 				AffinityPresent:         true,
 				AffinityCacheAdmittedAt: test.cacheAdmittedAt,

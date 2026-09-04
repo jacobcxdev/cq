@@ -194,6 +194,88 @@ func TestCodexHTTPRequestPlanFactoryPreservesLatchedTurnStateFirstSeenAfterDrain
 	prepared.Frozen.Release()
 }
 
+func TestCodexHTTPRequestPlanFactoryRelatchesTurnStateAfterAuthenticatedResume(t *testing.T) {
+	t.Parallel()
+
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtime := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account", CandidateID: "candidate", Kind: CodexAttemptSlotDirect,
+	}})
+	plan.Key.Lane.Session = "session"
+	plan.Key.Lane.Thread = "thread"
+	plan.RequestedModel = "gpt-5"
+	plan.EffectiveModel = "gpt-5"
+
+	seed, err := runtime.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err = seed.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err = seed.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{
+		TurnState: "private-state-a", HasTurnState: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err = seed.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = seed.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	factory.Routes = coordinator
+	factory.Authority = plan.Authority
+	resumed, err := factory.Build(codexIngressContinuityCallerContext(t), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatalf("state-less authenticated resume = %T %v, want success", err, err)
+	}
+	defer resumed.Frozen.Release()
+	lifecycle, err := resumed.Lifecycle.MarkDispatchedContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err = lifecycle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{
+		TurnState: "private-state-b", HasTurnState: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err = lifecycle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{
+		TurnState: "private-state-c", HasTurnState: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err = lifecycle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = lifecycle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	continued, err := factory.Build(codexIngressContinuityCallerContext(t), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+		Headers: http.Header{"X-Codex-Turn-State": {"private-state-b"}},
+	})
+	if err != nil {
+		t.Fatalf("resumed turn-state continuation = %T %v, want success", err, err)
+	}
+	if _, err := continued.Lifecycle.AbandonBeforeDispatchContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	continued.Frozen.Release()
+}
+
 func TestCodexHTTPRequestPlanFactoryRejectsArbitraryTerminalIngressTurnState(t *testing.T) {
 	t.Parallel()
 
