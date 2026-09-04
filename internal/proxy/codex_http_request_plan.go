@@ -667,10 +667,13 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if factory.TurnReceipts != nil && codexTurnReceiptEligible(protocol) {
 		shadowAdvice = codexNoAffinityShadowAdvice(ctx, dispatch, dispatchInput.DefaultAccountKey, dispatchInput.BoundAccountKey, dispatchAccounts[0])
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_freeze", Outcome: "started", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 	frozen, err := factory.freeze(ctx, inspection, choice)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_freeze", Outcome: "error", AccountHint: codexTraceAccountHint(choice.AccountKey), Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanFreeze, err)
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_freeze", Outcome: "success", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 	permitDigest := ""
 	if policyDecision.Status == PolicyDecisionSelected {
 		if !callerOK || factory.DispatchPermits == nil {
@@ -690,6 +693,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, expectedBound, continuityAccountKey != "" || authenticatedBoundContinuation, authenticatedCallerContinuity, permitDigest, quotaExhaustionProbe)
 	leasePlan.ingressContinuity = ingressContinuity
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "started", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)
 	if err != nil {
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "error", AccountHint: codexTraceAccountHint(choice.AccountKey), Reason: string(codexRequestFailureReason(err))})

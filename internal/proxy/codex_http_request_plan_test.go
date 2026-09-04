@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -160,6 +161,50 @@ func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
 	choice, err := result.Frozen.Choice()
 	if err != nil || !reflect.DeepEqual(choice, choices[0].Choice()) {
 		t.Fatalf("frozen choice = %#v, %v", choice, err)
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryTracesFreezeAndDurableBeginBoundaries(t *testing.T) {
+	t.Parallel()
+
+	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")
+	diagnostics, err := OpenDiagnosticsWriter(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{
+		handle: &CodexLeaseRequestHandle{account: "account"},
+	})
+	ctx := withCodexTrace(context.Background(), diagnostics, nil, CodexTraceStart{Transport: "http"})
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		_ = diagnostics.Close()
+		t.Fatal(err)
+	}
+	prepared.Frozen.Release()
+	if err := diagnostics.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events := readCodexTraceEvents(t, tracePath)
+	want := []string{
+		"request_freeze/started",
+		"request_freeze/success",
+		"lease_begin/started",
+		"lease_begin/success",
+	}
+	got := make([]string, 0, len(want))
+	for _, event := range events {
+		for _, expected := range want {
+			if event.Phase+"/"+event.Outcome == expected {
+				got = append(got, expected)
+			}
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("phase boundaries = %v, want %v", got, want)
 	}
 }
 

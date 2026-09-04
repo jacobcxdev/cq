@@ -1082,6 +1082,42 @@ func TestCodexFrozenRequestBridgeAdapterFailsOpenWithoutPrivateError(t *testing.
 	}
 }
 
+func TestCodexFrozenRequestBridgeAdapterBoundsOptionalCompression(t *testing.T) {
+	dispatched := make(chan struct{}, 1)
+	bridge := headroomTestBridge(t, func([]byte) headroomTestAction {
+		dispatched <- struct{}{}
+		return headroomTestAction{}
+	})
+	body := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private-headroom-input")
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	got, saved, err := NewCodexRequestHeadroomAdapter(bridge).CompressResponses(ctx, body, HeadroomModeCache)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("slow optional compression was not fail-open: %v", err)
+	}
+	if saved != 0 || !bytes.Equal(got, body) {
+		t.Fatalf("slow fail-open result = %d bytes/%d saved, want %d/0", len(got), saved, len(body))
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("slow optional compression blocked for %v, want <500ms", elapsed)
+	}
+	select {
+	case <-dispatched:
+	default:
+		t.Fatal("optional compression was not dispatched")
+	}
+	retryStarted := time.Now()
+	got, saved, err = NewCodexRequestHeadroomAdapter(bridge).CompressResponses(context.Background(), body, HeadroomModeCache)
+	if err != nil || saved != 0 || !bytes.Equal(got, body) {
+		t.Fatalf("retired bridge retry = %d bytes/%d saved/%v", len(got), saved, err)
+	}
+	if retryElapsed := time.Since(retryStarted); retryElapsed >= 100*time.Millisecond {
+		t.Fatalf("retired bridge retry blocked for %v, want <100ms", retryElapsed)
+	}
+}
+
 func TestCodexFrozenRequestInfersHeaderlessZstdBeforeHeadroom(t *testing.T) {
 	body := frozenRequestBody("gpt-5.4", CodexRequestTurn, "private-zstd-input")
 	encoded := encodeCodexZstd(t, body)
