@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -321,10 +322,25 @@ func runModelsList(args []string, deps modelsDeps) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(entries)
 	}
-	for _, entry := range entries {
-		fmt.Fprintf(deps.Stdout, "%s\t%s\t%s\n", entry.Provider, entry.ID, entry.Source)
+	table := tabwriter.NewWriter(deps.Stdout, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(table, "MODEL\tROUTE\tDISCOVERED FROM"); err != nil {
+		return err
 	}
-	return nil
+	for _, entry := range entries {
+		route := "Codex API"
+		origin := "Codex cache"
+		if entry.Provider == modelregistry.ProviderAnthropic {
+			route = "Anthropic API"
+			origin = "Claude cache"
+		}
+		if entry.Source == modelregistry.SourceOverlay {
+			origin = "User overlay"
+		}
+		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\n", entry.ID, route, origin); err != nil {
+			return err
+		}
+	}
+	return table.Flush()
 }
 
 func runModelsOverlay(args []string, deps modelsDeps) error {

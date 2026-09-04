@@ -254,6 +254,82 @@ func TestRunModels_ListShowsCachedNatives(t *testing.T) {
 	}
 }
 
+func TestRunModels_ListHumanAlignsDynamicColumns(t *testing.T) {
+	fsys, stdout, _, deps := testModelsDeps()
+	_ = fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
+"models":[{"slug":"gpt-daybreak-blue-latest"}]
+}`), 0o600)
+	_ = fsys.WriteFile("/home/test/.claude/cache/model-capabilities.json", []byte(`{
+"timestamp":1700000000,
+"models":[{"id":"gpt-4o"}]
+}`), 0o600)
+
+	if err := runModels([]string{"list"}, deps); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines = %q, want header and two models", lines)
+	}
+	if strings.Contains(stdout.String(), "\t") {
+		t.Fatalf("output contains raw tabs: %q", stdout.String())
+	}
+
+	routeStarts := []int{
+		strings.Index(lines[0], "ROUTE"),
+		strings.Index(lines[1], "Codex API"),
+		strings.Index(lines[2], "Anthropic API"),
+	}
+	originStarts := []int{
+		strings.Index(lines[0], "DISCOVERED FROM"),
+		strings.Index(lines[1], "Codex cache"),
+		strings.Index(lines[2], "Claude cache"),
+	}
+	for i := 1; i < len(lines); i++ {
+		if routeStarts[i] != routeStarts[0] {
+			t.Errorf("route column starts = %v; output:\n%s", routeStarts, stdout.String())
+		}
+		if originStarts[i] != originStarts[0] {
+			t.Errorf("origin column starts = %v; output:\n%s", originStarts, stdout.String())
+		}
+	}
+}
+
+func TestRunModels_ListHumanExplainsRouteAndOrigin(t *testing.T) {
+	fsys, stdout, _, deps := testModelsDeps()
+	_ = fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
+"models":[{"slug":"gpt-5.4"}]
+}`), 0o600)
+	_ = fsys.WriteFile("/home/test/.claude/cache/model-capabilities.json", []byte(`{
+"timestamp":1700000000,
+"models":[{"id":"gpt-4o"}]
+}`), 0o600)
+	if err := runModels([]string{"overlay", "add", "--provider", "codex", "--id", "local-model"}, deps); err != nil {
+		t.Fatalf("overlay add: %v", err)
+	}
+	stdout.Reset()
+
+	if err := runModels([]string{"list"}, deps); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("lines = %q, want header and three models", lines)
+	}
+	for i, want := range []string{
+		"MODEL ROUTE DISCOVERED FROM",
+		"gpt-5.4 Codex API Codex cache",
+		"gpt-4o Anthropic API Claude cache",
+		"local-model Codex API User overlay",
+	} {
+		if got := strings.Join(strings.Fields(lines[i]), " "); got != want {
+			t.Errorf("line %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
 func TestRunModels_ListRejectsUnknownProvider(t *testing.T) {
 	_, _, _, deps := testModelsDeps()
 
