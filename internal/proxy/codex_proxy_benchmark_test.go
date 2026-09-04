@@ -9,10 +9,65 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 const codexProxyBenchmarkBodyBytes = 1 << 20
+
+func TestCodexLeaseDecodeAllocationBound(t *testing.T) {
+	const lanes = 64
+	store, envelope := codexProxyBenchmarkLargeJournal(t, lanes)
+	_, encoded, err := store.prepareV2Envelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocations := testing.AllocsPerRun(1, func() {
+		var decoded codexLeaseJournalEnvelopeV2
+		if err := decodeCodexLeaseV2StrictJSON(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if limit := float64(lanes * 400); allocations > limit {
+		t.Fatalf("strict decode allocations = %.0f, want <= %.0f", allocations, limit)
+	}
+	var decodeErr error
+	result := testing.Benchmark(func(b *testing.B) {
+		for range b.N {
+			var decoded codexLeaseJournalEnvelopeV2
+			decodeErr = decodeCodexLeaseV2StrictJSON(encoded, &decoded)
+		}
+	})
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if limit := int64(len(encoded) * 8); result.AllocedBytesPerOp() > limit {
+		t.Fatalf("strict decode allocated %d bytes/op, want <= %d", result.AllocedBytesPerOp(), limit)
+	}
+}
+
+func TestCodexLeaseVersionDecodeAllocationBound(t *testing.T) {
+	store, envelope := codexProxyBenchmarkLargeJournal(t, 64)
+	_, encoded, err := store.prepareV2Envelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		version   int
+		decodeErr error
+	)
+	result := testing.Benchmark(func(b *testing.B) {
+		for range b.N {
+			version, decodeErr = decodeCodexLeaseVersion(encoded)
+		}
+	})
+	if decodeErr != nil || version != codexLeaseJournalVersionV3 {
+		t.Fatalf("decode version = %d, %v", version, decodeErr)
+	}
+	if limit := int64(len(encoded) / 20); result.AllocedBytesPerOp() > limit {
+		t.Fatalf("version decode allocated %d bytes/op, want <= %d", result.AllocedBytesPerOp(), limit)
+	}
+}
 
 func BenchmarkCodexDisabledPayloadTrace(b *testing.B) {
 	payload := codexProxyBenchmarkRequest(codexProxyBenchmarkBodyBytes)
@@ -119,6 +174,76 @@ func BenchmarkCodexLeasePrepareLargeJournal(b *testing.B) {
 	b.ReportMetric(float64(len(encoded))/(1<<20), "journal-MiB")
 }
 
+func BenchmarkCodexLeaseDecodeLargeJournal(b *testing.B) {
+	store, envelope := codexProxyBenchmarkLargeJournal(b, 2_000)
+	_, encoded, err := store.prepareV2Envelope(envelope)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(encoded)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		var decoded codexLeaseJournalEnvelopeV2
+		if err := decodeCodexLeaseV2StrictJSON(encoded, &decoded); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCodexLeaseVersionLargeJournal(b *testing.B) {
+	store, envelope := codexProxyBenchmarkLargeJournal(b, 2_000)
+	_, encoded, err := store.prepareV2Envelope(envelope)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(encoded)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		version, err := decodeCodexLeaseVersion(encoded)
+		if err != nil || version != codexLeaseJournalVersionV3 {
+			b.Fatalf("decode version = %d, %v", version, err)
+		}
+	}
+}
+
+func BenchmarkCodexLeaseRestartOpenLargeJournal(b *testing.B) {
+	store, envelope := codexProxyBenchmarkLargeJournal(b, 2_000)
+	_, encoded, err := store.prepareV2Envelope(envelope)
+	if err != nil {
+		b.Fatal(err)
+	}
+	key := append([]byte(nil), store.key...)
+	b.SetBytes(int64(len(encoded)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		b.StopTimer()
+		fsys := fsutil.NewMemFS()
+		if err := fsys.MkdirAll("/state", 0o700); err != nil {
+			b.Fatal(err)
+		}
+		if err := fsys.WriteFile("/state/leases.key", key, 0o600); err != nil {
+			b.Fatal(err)
+		}
+		if err := fsys.WriteFile("/state/leases.json", encoded, 0o600); err != nil {
+			b.Fatal(err)
+		}
+		options := testCodexContinuityOptions(fsys)
+		options.Modes = CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{1}}
+		b.StartTimer()
+		coordinator, err := OpenCodexContinuityCoordinator(options, testCodexLeaseOwner{})
+		b.StopTimer()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := coordinator.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkCodexLeaseRouteSnapshotLargeJournal(b *testing.B) {
 	store, envelope := codexProxyBenchmarkLargeJournal(b, 2_000)
 	store.v2 = &envelope
@@ -154,7 +279,7 @@ func BenchmarkCodexLeaseRetentionLargeJournal(b *testing.B) {
 	}
 }
 
-func codexProxyBenchmarkLargeJournal(b *testing.B, laneCount int) (*CodexLeaseStore, codexLeaseJournalEnvelopeV2) {
+func codexProxyBenchmarkLargeJournal(b testing.TB, laneCount int) (*CodexLeaseStore, codexLeaseJournalEnvelopeV2) {
 	b.Helper()
 	store, envelope := codexLeaseV2SchemaFixture(b)
 	templateLane := envelope.Lanes[0]

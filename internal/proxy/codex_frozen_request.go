@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 var ErrCodexFrozenRequestReleased = errors.New("Codex frozen request released")
@@ -81,6 +82,8 @@ type codexRequestHeadroomAdapter struct {
 	bridge *HeadroomBridge
 }
 
+const codexRequestHeadroomTimeout = 250 * time.Millisecond
+
 // NewCodexRequestHeadroomAdapter adapts the live bridge to one context-aware
 // pre-freeze transform. A nil bridge disables Headroom preparation.
 func NewCodexRequestHeadroomAdapter(bridge *HeadroomBridge) CodexRequestHeadroom {
@@ -91,16 +94,28 @@ func NewCodexRequestHeadroomAdapter(bridge *HeadroomBridge) CodexRequestHeadroom
 }
 
 func (adapter codexRequestHeadroomAdapter) CompressResponses(ctx context.Context, body []byte, mode HeadroomMode) ([]byte, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	compressionCtx, cancel := context.WithTimeout(ctx, codexRequestHeadroomTimeout)
+	defer cancel()
 	var transformed []byte
 	var saved int
 	var err error
 	if mode == HeadroomModeCache {
-		transformed, saved, err = adapter.bridge.CompressResponsesCacheContext(ctx, body)
+		transformed, saved, err = adapter.bridge.CompressResponsesCacheContext(compressionCtx, body)
 	} else {
-		transformed, saved, err = adapter.bridge.CompressResponsesContext(ctx, body, mode)
+		transformed, saved, err = adapter.bridge.CompressResponsesContext(compressionCtx, body, mode)
 	}
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil {
 		return transformed, saved, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return transformed, saved, ctxErr
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		fmt.Fprintln(os.Stderr, "cq: headroom: compression timed out; bypassed")
+		return bytes.Clone(body), 0, nil
 	}
 	fmt.Fprintln(os.Stderr, "cq: headroom: compression unavailable")
 	return bytes.Clone(body), 0, nil

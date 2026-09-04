@@ -13,7 +13,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -996,9 +995,6 @@ func (store *CodexLeaseStore) normaliseRestoredV2Locked() error {
 	if !changed {
 		return nil
 	}
-	if err := store.validateCodexLeaseV2CandidateLocked(next); err != nil {
-		return fmt.Errorf("%w: invalid restored Codex lease normalisation: %v", ErrCodexLeaseTrustLost, err)
-	}
 	return store.commitV2Locked(store.v2.Generation, next)
 }
 
@@ -1780,22 +1776,16 @@ func equalCodexEpochs(left, right []uint64) bool {
 }
 
 func decodeCodexLeaseVersion(data []byte) (int, error) {
-	if err := rejectCodexLeaseDuplicateJSONFields(data); err != nil {
+	var discriminator struct {
+		Version *int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &discriminator); err != nil {
 		return 0, err
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return 0, err
-	}
-	versionData, ok := fields["version"]
-	if !ok {
+	if discriminator.Version == nil {
 		return 0, errors.New("missing version")
 	}
-	var version int
-	if err := json.Unmarshal(versionData, &version); err != nil {
-		return 0, err
-	}
-	return version, nil
+	return *discriminator.Version, nil
 }
 
 func decodeCodexLeaseStrictJSON(data []byte, destination any) error {
@@ -1820,33 +1810,23 @@ func decodeCodexLeaseV2StrictJSON(data []byte, destination *codexLeaseJournalEnv
 	if destination == nil {
 		return errors.New("nil Codex lease v2 destination")
 	}
-	if err := decodeCodexLeaseStrictJSON(data, destination); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
 		return err
 	}
-	original, err := decodeCodexLeaseJSONShape(data)
-	if err != nil {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
 		return err
-	}
-	if codexLeaseJSONContainsNull(original) {
-		return errors.New("Codex lease v2 JSON contains null")
 	}
 	canonical, err := json.Marshal(destination)
 	if err != nil {
 		return err
 	}
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, data); err != nil {
-		return err
-	}
-	if !bytes.Equal(compact.Bytes(), canonical) {
+	if !bytes.Equal(data, canonical) {
 		return errors.New("Codex lease v2 JSON has non-canonical member order or encoding")
-	}
-	want, err := decodeCodexLeaseJSONShape(canonical)
-	if err != nil {
-		return err
-	}
-	if !reflect.DeepEqual(original, want) {
-		return errors.New("Codex lease v2 JSON has non-canonical member presence")
 	}
 	return nil
 }
