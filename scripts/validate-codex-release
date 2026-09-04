@@ -32,6 +32,13 @@ case "$auth_file" in
 esac
 [ -f "$auth_file" ] || fail "auth file must be a regular file"
 [ -r "$auth_file" ] || fail "auth file must be readable"
+normal_client_auth_file=${CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE:-$auth_file}
+case "$normal_client_auth_file" in
+/*) ;;
+*) fail "normal client auth file must be absolute" ;;
+esac
+[ -f "$normal_client_auth_file" ] || fail "normal client auth file must be a regular file"
+[ -r "$normal_client_auth_file" ] || fail "normal client auth file must be readable"
 sha=$(git rev-parse HEAD)
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 codexbar_root=${CQ_CODEXBAR_LIVE_ROOT:-$HOME/Library/Application Support/CodexBar}
@@ -147,6 +154,7 @@ if ! env \
 	CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE=1 \
 	CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE=1 \
 	CQ_CODEX_LIVE_AUTH_FILE="$auth_file" \
+	CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE="$normal_client_auth_file" \
 	CQ_CODEXBAR_LIVE_ROOT="$codexbar_root" \
 	CQ_CODEX_ACCEPTANCE_EXECUTABLE="$codex_executable" \
 	CQ_CODEX_PROXY_ACCEPTANCE_EXECUTABLE="$validation_binary" \

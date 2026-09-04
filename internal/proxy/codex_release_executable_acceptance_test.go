@@ -33,9 +33,30 @@ import (
 )
 
 const (
-	codexReleaseExecutableAcceptanceEnvironment     = "CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE"
-	codexReleaseExecutableRoutingAccountEnvironment = "CQ_CODEX_LIVE_ROUTING_ACCOUNT_ID"
+	codexReleaseExecutableAcceptanceEnvironment       = "CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE"
+	codexReleaseExecutableNormalClientAuthEnvironment = "CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE"
+	codexReleaseExecutableRoutingAccountEnvironment   = "CQ_CODEX_LIVE_ROUTING_ACCOUNT_ID"
 )
+
+func codexReleaseExecutableNormalClientAuthPath() string {
+	if path := os.Getenv(codexReleaseExecutableNormalClientAuthEnvironment); path != "" {
+		return path
+	}
+	return os.Getenv("CQ_CODEX_LIVE_AUTH_FILE")
+}
+
+func TestCodexReleaseExecutableNormalClientAuthPath(t *testing.T) {
+	t.Setenv("CQ_CODEX_LIVE_AUTH_FILE", "/global/auth.json")
+	t.Setenv("CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE", "")
+	if got := codexReleaseExecutableNormalClientAuthPath(); got != "/global/auth.json" {
+		t.Fatalf("normal client auth path = %q, want global auth path", got)
+	}
+
+	t.Setenv("CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE", "/normal/auth.json")
+	if got := codexReleaseExecutableNormalClientAuthPath(); got != "/normal/auth.json" {
+		t.Fatalf("normal client auth path = %q, want normal auth path", got)
+	}
+}
 
 type codexReleaseExecutableIsolation struct {
 	root        string
@@ -560,7 +581,7 @@ func TestCodexExactExecutableNormalPassesThroughLiveUpstream(t *testing.T) {
 	if !filepath.IsAbs(codexBarRoot) {
 		t.Fatal("CQ_CODEXBAR_LIVE_ROOT must be absolute")
 	}
-	clientCredential, err := readCodexLiveAcceptanceCredential(os.Getenv("CQ_CODEX_LIVE_AUTH_FILE"))
+	clientCredential, err := readCodexLiveAcceptanceCredential(codexReleaseExecutableNormalClientAuthPath())
 	if err != nil {
 		t.Fatalf("snapshot system Codex client auth: %v", err)
 	}

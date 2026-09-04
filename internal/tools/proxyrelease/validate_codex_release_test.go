@@ -46,6 +46,38 @@ func TestValidateCodexReleasePrefersExplicitSystemAuth(t *testing.T) {
 	}
 }
 
+func TestValidateCodexReleaseDefaultsNormalClientAuthToSystemAuth(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	want := filepath.Join(home, ".codex", "auth.json")
+	writeValidateCodexReleaseAuth(t, want, 0o600)
+	decoy := filepath.Join(t.TempDir(), "decoy-codex-home")
+	writeValidateCodexReleaseAuth(t, filepath.Join(decoy, "auth.json"), 0o600)
+
+	_, events, err := runValidateCodexReleaseShell(t, repositoryRoot, home, decoy, "")
+	if err != nil {
+		t.Fatalf("validate-codex-release: %v", err)
+	}
+	if !strings.Contains(events, "normal-client-auth="+want+"\n") {
+		t.Fatalf("normal client auth was not propagated exactly:\n%s", events)
+	}
+}
+
+func TestValidateCodexReleaseRejectsInvalidNormalClientAuthBeforeStatusOrBuild(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+	decoy := filepath.Join(t.TempDir(), "decoy-codex-home")
+
+	_, events, err := runValidateCodexReleaseShellWithNormalAuth(t, repositoryRoot, home, decoy, "", "relative-auth.json")
+	if err == nil || !strings.Contains(err.Error(), "normal client auth file must be absolute") {
+		t.Fatalf("validate-codex-release = %v, want invalid normal client auth failure", err)
+	}
+	if events != "" {
+		t.Fatalf("invalid normal client auth performed status or build work:\n%s", events)
+	}
+}
+
 func TestValidateCodexReleaseHonoursExplicitAcceptanceExecutable(t *testing.T) {
 	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
 	home := t.TempDir()
@@ -174,6 +206,14 @@ func runValidateCodexReleaseShell(t *testing.T, repositoryRoot, home, codexHome,
 }
 
 func runValidateCodexReleaseShellOmittingTest(t *testing.T, repositoryRoot, home, codexHome, explicitAuth, omittedTest string) (string, string, error) {
+	return runValidateCodexReleaseShellOptions(t, repositoryRoot, home, codexHome, explicitAuth, "", omittedTest)
+}
+
+func runValidateCodexReleaseShellWithNormalAuth(t *testing.T, repositoryRoot, home, codexHome, explicitAuth, normalAuth string) (string, string, error) {
+	return runValidateCodexReleaseShellOptions(t, repositoryRoot, home, codexHome, explicitAuth, normalAuth, "")
+}
+
+func runValidateCodexReleaseShellOptions(t *testing.T, repositoryRoot, home, codexHome, explicitAuth, normalAuth, omittedTest string) (string, string, error) {
 	t.Helper()
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
@@ -219,6 +259,7 @@ case "$1" in
 	  exit 96
 	}
     printf 'test\n' >>"$CQ_TEST_EVENTS"
+	printf 'normal-client-auth=%s\n' "$CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE" >>"$CQ_TEST_EVENTS"
     printf '%s\n' "$CQ_CODEX_LIVE_AUTH_FILE" >"$CQ_TEST_AUTH_CAPTURE"
 	for release_test in \
 		TestCodexInstalledNormalPassesThroughLiveUpstream \
@@ -261,6 +302,9 @@ esac
 	}
 	if explicitAuth != "" {
 		env = append(env, "CQ_CODEX_LIVE_AUTH_FILE="+explicitAuth)
+	}
+	if normalAuth != "" {
+		env = append(env, "CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE="+normalAuth)
 	}
 
 	command := exec.Command(filepath.Join(repositoryRoot, "scripts", "validate-codex-release"))
