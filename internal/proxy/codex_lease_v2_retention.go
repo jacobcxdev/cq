@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const codexLeaseRetentionSweepInterval = time.Hour
+
 type codexLeaseRetentionAction uint8
 
 const (
@@ -40,14 +42,22 @@ func (store *CodexLeaseStore) compactV2() error {
 		return ErrCodexLegacyQuarantine
 	}
 
-	next, changed, err := store.compactCodexLeaseV2Locked(store.policy.Now().UTC(), store.policy.Retention)
+	now := store.policy.Now().UTC()
+	next, changed, err := store.compactCodexLeaseV2Locked(now, store.policy.Retention)
 	if err != nil || !changed {
+		if err == nil {
+			store.lastRetentionSweep = now
+		}
 		return err
 	}
 	if err := store.validateCodexLeaseV2CandidateLocked(next); err != nil {
 		return err
 	}
-	return store.commitV2Locked(store.v2.Generation, next)
+	if err := store.commitV2Locked(store.v2.Generation, next); err != nil {
+		return err
+	}
+	store.lastRetentionSweep = now
+	return nil
 }
 
 func (store *CodexLeaseStore) compactCodexLeaseV2Locked(now time.Time, retention time.Duration) (codexLeaseJournalEnvelopeV2, bool, error) {
@@ -55,6 +65,10 @@ func (store *CodexLeaseStore) compactCodexLeaseV2Locked(now time.Time, retention
 		return codexLeaseJournalEnvelopeV2{}, false, fmt.Errorf("%w: journal generation overflow", ErrCodexLeaseInvalidMutation)
 	}
 	next := cloneCodexLeaseV2Envelope(*store.v2)
+	return compactCodexLeaseV2Envelope(next, now, retention)
+}
+
+func compactCodexLeaseV2Envelope(next codexLeaseJournalEnvelopeV2, now time.Time, retention time.Duration) (codexLeaseJournalEnvelopeV2, bool, error) {
 	actions := make(map[CodexJournalRecordIdentity]codexLeaseRetentionAction, len(next.Records))
 	for _, record := range next.Records {
 		identity := record.Identity()
@@ -82,15 +96,15 @@ func (store *CodexLeaseStore) compactCodexLeaseV2Locked(now time.Time, retention
 
 	// Every retained lane keeps its signed last-turn anchor. If all records in
 	// the lane are collectible, the lane and its anchor are removed together.
+	survivorsByLane := make(map[string]int, len(next.Lanes))
+	for identity, action := range actions {
+		if action != codexLeaseRetentionDelete {
+			survivorsByLane[identity.LaneDigest]++
+		}
+	}
 	for _, lane := range next.Lanes {
 		laneDigest := codexJournalLaneDigest(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash)
-		survivors := 0
-		for identity, action := range actions {
-			if identity.LaneDigest == laneDigest && action != codexLeaseRetentionDelete {
-				survivors++
-			}
-		}
-		if survivors == 0 {
+		if survivorsByLane[laneDigest] == 0 {
 			continue
 		}
 		last := codexLaneTupleIdentity(lane, false)
@@ -118,21 +132,21 @@ func (store *CodexLeaseStore) compactCodexLeaseV2Locked(now time.Time, retention
 		keptRecords = append(keptRecords, record)
 	}
 	next.Records = keptRecords
+	hasRecordByLane := make(map[string]bool, len(next.Lanes))
+	transitionedByLane := make(map[string]bool, len(next.Lanes))
+	for _, record := range next.Records {
+		identity := record.Identity()
+		hasRecordByLane[identity.LaneDigest] = true
+		if _, expired := transitioned[identity]; expired {
+			transitionedByLane[identity.LaneDigest] = true
+		}
+	}
 
 	keptLanes := make([]CodexJournalLane, 0, len(next.Lanes))
+	updatedLaneGenerations := make(map[string]uint64)
 	for _, lane := range next.Lanes {
 		laneDigest := codexJournalLaneDigest(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash)
-		hasRecord := false
-		laneTransitioned := false
-		for _, record := range next.Records {
-			if record.Identity().LaneDigest == laneDigest {
-				hasRecord = true
-				if _, expired := transitioned[record.Identity()]; expired {
-					laneTransitioned = true
-				}
-			}
-		}
-		if !hasRecord {
+		if !hasRecordByLane[laneDigest] {
 			changed = true
 			continue
 		}
@@ -146,20 +160,22 @@ func (store *CodexLeaseStore) compactCodexLeaseV2Locked(now time.Time, retention
 			lane.CurrentModeEpoch = 0
 			lane.CurrentAuthoritative = false
 			lane.LastObservedAt = monotonicCodexLeaseTime(now, lane.LastObservedAt)
+			updatedLaneGenerations[laneDigest] = lane.Generation
 			changed = true
-		} else if laneTransitioned {
+		} else if transitionedByLane[laneDigest] {
 			lane.LastObservedAt = monotonicCodexLeaseTime(now, lane.LastObservedAt)
-		}
-		for index := range next.Records {
-			if next.Records[index].Identity().LaneDigest == laneDigest {
-				if _, expired := transitioned[next.Records[index].Identity()]; expired {
-					next.Records[index].LaneGeneration = lane.Generation
-				}
-			}
 		}
 		keptLanes = append(keptLanes, lane)
 	}
 	next.Lanes = keptLanes
+	for index := range next.Records {
+		identity := next.Records[index].Identity()
+		if generation, updated := updatedLaneGenerations[identity.LaneDigest]; updated {
+			if _, expired := transitioned[identity]; expired {
+				next.Records[index].LaneGeneration = generation
+			}
+		}
+	}
 	return next, changed, nil
 }
 

@@ -122,6 +122,20 @@ func TestValidateCodexReleaseRejectsMissingHardLimitFailoverGate(t *testing.T) {
 	}
 }
 
+func TestValidateCodexReleaseRejectsMissingLatencyGate(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+	decoy := filepath.Join(t.TempDir(), "decoy-codex-home")
+	writeValidateCodexReleaseAuth(t, filepath.Join(decoy, "auth.json"), 0o600)
+	const omitted = "TestCodexLiveProxyLatencyMatchesDirect"
+
+	_, _, err := runValidateCodexReleaseShellOmittingTest(t, repositoryRoot, home, decoy, "", omitted)
+	if err == nil || !strings.Contains(err.Error(), omitted+" did not execute") {
+		t.Fatalf("validate-codex-release = %v, want missing latency gate failure", err)
+	}
+}
+
 func TestCodexValidationWorkflowsRunHardLimitFailoverGate(t *testing.T) {
 	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
 	const testName = "TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover"
@@ -258,6 +272,10 @@ case "$1" in
 	  printf 'hard-limit failover opt-in missing\n' >&2
 	  exit 96
 	}
+	[ "${CQ_RUN_CODEX_LIVE_LATENCY_ACCEPTANCE:-}" = 1 ] || {
+	  printf 'live latency opt-in missing\n' >&2
+	  exit 96
+	}
     printf 'test\n' >>"$CQ_TEST_EVENTS"
 	printf 'normal-client-auth=%s\n' "$CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE" >>"$CQ_TEST_EVENTS"
     printf '%s\n' "$CQ_CODEX_LIVE_AUTH_FILE" >"$CQ_TEST_AUTH_CAPTURE"
@@ -268,7 +286,8 @@ case "$1" in
 		TestCodexInstalledLiveRescueTaskResumesInNormal \
 		TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover \
 		TestCodexExactExecutableNormalPassesThroughLiveUpstream \
-		TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream
+		TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream \
+		TestCodexLiveProxyLatencyMatchesDirect
 	do
 		[ "$release_test" = "$CQ_TEST_OMIT_RELEASE_TEST" ] || printf '%s\n' "--- PASS: $release_test (0.01s)"
 	done

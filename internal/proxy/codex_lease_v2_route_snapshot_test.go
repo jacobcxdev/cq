@@ -746,6 +746,28 @@ func TestCodexLeaseRouteSnapshotHonoursCancellationBeforePersistence(t *testing.
 	}
 }
 
+func TestCodexLeaseRouteSnapshotDoesNotWaitForLifecyclePersistence(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("target", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "target-a", Kind: CodexAttemptSlotDirect}})
+	if _, err := runtimeLease.BeginRequest(plan); err != nil {
+		t.Fatal(err)
+	}
+
+	coordinator.leases.lifecycle.persistence.Lock()
+	defer coordinator.leases.lifecycle.persistence.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	snapshot, err := coordinator.LoadRouteSnapshot(ctx, plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatalf("LoadRouteSnapshot waited for unrelated lifecycle persistence: %v", err)
+	}
+	if snapshot.JournalGeneration != coordinator.store.Generation() {
+		t.Fatalf("snapshot generation = %d, store = %d", snapshot.JournalGeneration, coordinator.store.Generation())
+	}
+}
+
 func TestCodexLeaseRouteSnapshotRetriesGenerationDrift(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)

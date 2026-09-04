@@ -284,7 +284,7 @@ func TestCodexInstalledHTTPGateProbeAccountsReplayEnvelopeBytes(t *testing.T) {
 	probe.mu.Lock()
 	diagnostics := probe.health.Diagnostics
 	probe.mu.Unlock()
-	if diagnostics.ReplayEnvelopeCurrentBytes != 0 || diagnostics.ReplayEnvelopePeakBytes != retained*3 || diagnostics.ReplayEnvelopeErrors != 0 {
+	if diagnostics.ReplayEnvelopeCurrentBytes != 0 || diagnostics.ReplayEnvelopePeakBytes != retained || diagnostics.ReplayEnvelopeErrors != 0 {
 		t.Fatalf("replay diagnostics = %#v", diagnostics)
 	}
 }

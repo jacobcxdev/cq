@@ -314,6 +314,9 @@ func normalCallerIndexMAC(key []byte, index NormalCallerIndexV1) string {
 type NormalCallerAdmissionStore struct {
 	mu        sync.Mutex
 	directory fsutil.SecureDirectory
+	inspector fsutil.SecurePathInspector
+	now       func() time.Time
+	lastPrune time.Time
 	closed    bool
 }
 
@@ -344,7 +347,14 @@ func OpenNormalCallerAdmissionStore(fsys fsutil.FileSystem, path string) (*Norma
 	if err != nil {
 		return nil, errors.Join(ErrNormalCallerAuthUnavailable, err)
 	}
-	return &NormalCallerAdmissionStore{directory: directory}, nil
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	if !ok {
+		_ = directory.Close()
+		return nil, ErrNormalCallerAuthUnavailable
+	}
+	store := &NormalCallerAdmissionStore{directory: directory, inspector: inspector, now: time.Now}
+	store.pruneLocked(store.now())
+	return store, nil
 }
 
 func (store *NormalCallerAdmissionStore) Consume(_ context.Context, consumption ProviderBranchAdmissionConsumptionV1) error {
@@ -363,6 +373,7 @@ func (store *NormalCallerAdmissionStore) Consume(_ context.Context, consumption 
 	if store.closed || store.directory == nil {
 		return ErrNormalCallerAuthUnavailable
 	}
+	store.pruneLocked(store.now())
 	name := "consumed-" + consumption.AdmissionID + ".json"
 	file, err := store.directory.CreateExclusive(name, 0o600)
 	if err != nil {
@@ -392,7 +403,17 @@ func (store *NormalCallerAdmissionStore) Consume(_ context.Context, consumption 
 		return err
 	}
 	committed = true
+	proxyProcessEphemeralState.recordCreate(ephemeralReceiptAdmission)
 	return nil
+}
+
+func (store *NormalCallerAdmissionStore) pruneLocked(now time.Time) {
+	if store == nil || store.directory == nil || (!store.lastPrune.IsZero() && now.Before(store.lastPrune.Add(ephemeralReceiptPruneInterval))) {
+		return
+	}
+	store.lastPrune = now
+	remaining, pruned, err := pruneEphemeralReceipts(store.inspector, store.directory, "consumed-", now)
+	proxyProcessEphemeralState.recordScan(ephemeralReceiptAdmission, remaining, pruned, err)
 }
 
 func (store *NormalCallerAdmissionStore) Close() error {

@@ -226,7 +226,7 @@ func classifyCodexWSFrameSize(size int) codexWSFrameSize {
 		return codexWSFrameSizeSmall
 	case size <= 1<<20:
 		return codexWSFrameSizeMedium
-	case size <= codexWebSocketMessageMaxBytes:
+	case size <= codexWebSocketUpstreamRequestMaxBytes:
 		return codexWSFrameSizeLarge
 	default:
 		return codexWSFrameSizeOversize
@@ -234,10 +234,24 @@ func classifyCodexWSFrameSize(size int) codexWSFrameSize {
 }
 
 func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFrame, error) {
-	if messageType != websocket.TextMessage || len(payload) == 0 || codexLimitExceeded(len(payload), codexWebSocketMessageMaxBytes) {
+	return parseCodexWSPendingFrame(messageType, payload, true)
+}
+
+// newCodexWSPendingFrameOwned consumes payload. WebSocket ReadMessage already
+// returns caller-owned bytes, so broker ingress must not clone them again.
+func newCodexWSPendingFrameOwned(messageType int, payload []byte) (*codexWSPendingFrame, error) {
+	pending, err := parseCodexWSPendingFrame(messageType, payload, false)
+	if err != nil {
+		clearBytes(payload)
+	}
+	return pending, err
+}
+
+func parseCodexWSPendingFrame(messageType int, payload []byte, clone bool) (*codexWSPendingFrame, error) {
+	if messageType != websocket.TextMessage || len(payload) == 0 || codexLimitExceeded(len(payload), codexWebSocketUpstreamRequestMaxBytes) {
 		return nil, newCodexWSInvalidFrameError(codexWSInvalidFrameEnvelope, messageType, payload, nil)
 	}
-	request, err := parseCodexProtocolRequest(payload, "", nil, codexWebSocketMessageMaxBytes)
+	request, err := parseCodexProtocolRequest(payload, "", nil, codexWebSocketUpstreamRequestMaxBytes)
 	if err != nil {
 		return nil, newCodexWSInvalidFrameError(codexWSInvalidFrameProtocol, messageType, payload, err)
 	}
@@ -260,9 +274,13 @@ func newCodexWSPendingFrame(messageType int, payload []byte) (*codexWSPendingFra
 	}
 	diagnostics := &routeDiagnostics{}
 	diagnostics.codex = codexObservationFieldsForProtocol(request, nil)
+	encoded := payload
+	if clone {
+		encoded = bytes.Clone(payload)
+	}
 	return &codexWSPendingFrame{
 		messageType: messageType,
-		encoded:     append([]byte(nil), payload...),
+		encoded:     encoded,
 		request:     request,
 		key:         key,
 		portable:    request.PreviousResponseID == "" && !request.HasPreviousResponseID && !request.HasTurnState,
@@ -281,11 +299,11 @@ func codexWSFrameWithoutPrewarmAnchor(original *codexWSPendingFrame, anchor stri
 	if err != nil {
 		return nil, err
 	}
-	defer clearBytes(encoded)
 	if removed == 0 {
+		clearBytes(encoded)
 		return nil, ErrCodexWSInvalidFrame
 	}
-	rewritten, err := newCodexWSPendingFrame(original.messageType, encoded)
+	rewritten, err := newCodexWSPendingFrameOwned(original.messageType, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +323,12 @@ func codexWSObjectWithoutPrewarmAnchor(source []byte, anchor string, rewritePara
 	var encoded bytes.Buffer
 	encoded.Grow(len(source))
 	encoded.WriteByte('{')
-	defer func() { clearBytes(encoded.Bytes()) }()
+	transferred := false
+	defer func() {
+		if !transferred {
+			clearBytes(encoded.Bytes())
+		}
+	}()
 	written := 0
 	previousFound := false
 	for decoder.More() {
@@ -366,7 +389,9 @@ func codexWSObjectWithoutPrewarmAnchor(source []byte, anchor string, rewritePara
 		return nil, 0, errors.Join(ErrCodexWSInvalidFrame, err)
 	}
 	encoded.WriteByte('}')
-	return append([]byte(nil), encoded.Bytes()...), removed, nil
+	result = encoded.Bytes()
+	transferred = true
+	return result, removed, nil
 }
 
 func validateCodexWSPrewarmRequest(payload []byte, request CodexProtocolRequest) (CodexProtocolRequest, error) {

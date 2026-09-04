@@ -369,6 +369,9 @@ func OpenCodexContinuityCoordinator(options CodexContinuityOpenOptions, owner Co
 	if err := store.loadOrMigrateV2Locked(journal); err != nil {
 		return nil, err
 	}
+	if store.v2 != nil {
+		codexProcessRuntimeObservability.recordJournalState(len(store.journalBytes), len(store.v2.Lanes), len(store.v2.Records), false)
+	}
 	keepDirectory = true
 	epoch := uint64(1)
 	if len(store.modes.RecognisedAuthoritativeEpochs) != 0 {
@@ -464,6 +467,7 @@ func (store *CodexLeaseStore) close() error {
 	store.journalName = ""
 	store.keyName = ""
 	store.legacyArchive = ""
+	store.lastRetentionSweep = time.Time{}
 	store.directoryID = fsutil.SecureFileIdentity{}
 	store.keyID = fsutil.SecureFileIdentity{}
 	store.journalID = fsutil.SecureFileIdentity{}
@@ -825,13 +829,17 @@ func (store *CodexLeaseStore) commitV2LockedWithPrecondition(expectedGeneration 
 	envelope.Version = codexLeaseJournalVersionV3
 	envelope.HashVersion = codexLeaseHashVersion
 	envelope.Generation = expectedGeneration + 1
-	canonicaliseCodexLeaseV2(&envelope)
-	data, err := store.marshalV2Envelope(envelope)
+	commitStarted := time.Now()
+	defer func() {
+		lanes, records := 0, 0
+		if store.v2 != nil {
+			lanes, records = len(store.v2.Lanes), len(store.v2.Records)
+		}
+		codexProcessRuntimeObservability.recordJournalCommit(time.Since(commitStarted), len(store.journalBytes), lanes, records, store.poisoned != nil)
+	}()
+	installedEnvelope, data, err := store.prepareV2Envelope(envelope)
 	if err != nil {
 		return err
-	}
-	if _, err := store.decodeAndValidateV2Candidate(data); err != nil {
-		return fmt.Errorf("validate Codex lease journal candidate: %w", err)
 	}
 	if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, store.journalName, data, beforeWrite); err != nil {
 		if fsutil.AtomicWriteOutcome(err) == fsutil.CommitIndeterminate || errors.Is(err, ErrCodexLeaseTrustLost) {
@@ -845,15 +853,9 @@ func (store *CodexLeaseStore) commitV2LockedWithPrecondition(expectedGeneration 
 		store.poisoned = uncertain
 		return uncertain
 	}
-	installedEnvelope, err := store.decodeAndValidateV2Candidate(installed)
-	if err != nil {
-		uncertain := fmt.Errorf("%w: validate committed Codex lease journal", fsutil.ErrCommitIndeterminate)
-		store.poisoned = uncertain
-		return uncertain
-	}
 	store.v2 = &installedEnvelope
 	store.generation = installedEnvelope.Generation
-	store.journalBytes = append([]byte(nil), installed...)
+	store.journalBytes = installed
 	store.journalID = installedID
 	return nil
 }
@@ -1026,48 +1028,61 @@ func (store *CodexLeaseStore) revalidateDirectoryLocked() error {
 func (store *CodexLeaseStore) marshalV2Envelope(envelope codexLeaseJournalEnvelopeV2) ([]byte, error) {
 	envelope = cloneCodexLeaseV2Envelope(envelope)
 	canonicaliseCodexLeaseV2(&envelope)
-	mac, err := store.v2EnvelopeMAC(envelope)
-	if err != nil {
-		return nil, err
-	}
-	envelope.MAC = mac
-	return json.MarshalIndent(envelope, "", "  ")
+	return store.marshalCanonicalV2Envelope(&envelope)
 }
 
 func (store *CodexLeaseStore) prepareV2Envelope(envelope codexLeaseJournalEnvelopeV2) (codexLeaseJournalEnvelopeV2, []byte, error) {
-	data, err := store.marshalV2Envelope(envelope)
+	signed := envelope
+	canonicaliseCodexLeaseV2(&signed)
+	signed.MAC = ""
+	if err := store.validateCodexLeaseEnvelope(signed, codexLeaseJournalVersionV3, compat.CurrentEpoch, CurrentCodexLeaseSchema, true, false); err != nil {
+		return codexLeaseJournalEnvelopeV2{}, nil, err
+	}
+	data, err := store.marshalCanonicalV2Envelope(&signed)
 	if err != nil {
-		return codexLeaseJournalEnvelopeV2{}, nil, err
-	}
-	var signed codexLeaseJournalEnvelopeV2
-	if err := decodeCodexLeaseV2StrictJSON(data, &signed); err != nil {
-		return codexLeaseJournalEnvelopeV2{}, nil, err
-	}
-	if err := store.validateV2Envelope(signed); err != nil {
-		return codexLeaseJournalEnvelopeV2{}, nil, err
-	}
-	if err := store.validateCodexLeaseV2State(signed); err != nil {
 		return codexLeaseJournalEnvelopeV2{}, nil, err
 	}
 	return signed, data, nil
 }
 
+func (store *CodexLeaseStore) marshalCanonicalV2Envelope(envelope *codexLeaseJournalEnvelopeV2) ([]byte, error) {
+	if envelope == nil {
+		return nil, errors.New("nil Codex lease v2 envelope")
+	}
+	envelope.MAC = ""
+	unsigned, err := json.Marshal(*envelope)
+	if err != nil {
+		return nil, err
+	}
+	const emptyMACSuffix = `"mac":""}`
+	if !bytes.HasSuffix(unsigned, []byte(emptyMACSuffix)) {
+		return nil, errors.New("Codex lease v2 MAC field is not canonical")
+	}
+	mac := store.v2PayloadMAC(unsigned)
+	envelope.MAC = mac
+	insertAt := len(unsigned) - 2
+	unsigned = append(unsigned, make([]byte, len(mac))...)
+	copy(unsigned[insertAt+len(mac):], unsigned[insertAt:len(unsigned)-len(mac)])
+	copy(unsigned[insertAt:], mac)
+	return unsigned, nil
+}
+
 func (store *CodexLeaseStore) validateV2Envelope(envelope codexLeaseJournalEnvelopeV2) error {
-	return store.validateCodexLeaseEnvelope(envelope, codexLeaseJournalVersionV3, compat.CurrentEpoch, CurrentCodexLeaseSchema, true)
+	return store.validateCodexLeaseEnvelope(envelope, codexLeaseJournalVersionV3, compat.CurrentEpoch, CurrentCodexLeaseSchema, true, true)
 }
 
 func (store *CodexLeaseStore) validateLegacyV2Envelope(envelope codexLeaseJournalEnvelopeV2) error {
-	return store.validateCodexLeaseEnvelope(envelope, codexLeaseJournalVersionV2, 3, codexLeaseJournalVersionV2, false)
+	return store.validateCodexLeaseEnvelope(envelope, codexLeaseJournalVersionV2, 3, codexLeaseJournalVersionV2, false, true)
 }
 
-func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJournalEnvelopeV2, journalVersion, compatibilityEpoch, protocolSchema int, cacheFieldsAllowed bool) error {
+func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJournalEnvelopeV2, journalVersion, compatibilityEpoch, protocolSchema int, cacheFieldsAllowed, verifyMAC bool) error {
 	if envelope.Version != journalVersion || envelope.HashVersion != codexLeaseHashVersion {
 		return fmt.Errorf("%w: unsupported Codex lease schema/hash version", ErrCodexLeaseTrustLost)
 	}
 	if envelope.Cutover.CompatibilityEpoch != compatibilityEpoch || envelope.Generation < envelope.Cutover.JournalGeneration || envelope.Cutover.JournalGeneration == 0 || envelope.Cutover.At.IsZero() || !codexLeaseUTCTime(envelope.Cutover.At) {
 		return fmt.Errorf("%w: invalid Codex lease cutover tuple", ErrCodexLeaseTrustLost)
 	}
-	if !store.validV2EnvelopeMAC(envelope) {
+	if verifyMAC && !store.validV2EnvelopeMAC(envelope) {
 		return fmt.Errorf("%w: Codex lease journal v2 MAC mismatch", ErrCodexLeaseTrustLost)
 	}
 	if !validSortedCodexEpochs(envelope.Cutover.AuthoritativeModeEpochs) || !validSortedCodexEpochs(envelope.Cutover.ShadowModeEpochs) {
@@ -1417,14 +1432,24 @@ func validCodexLeaseSHA256(value string) bool {
 }
 
 func validCodexLeaseDigest(value string) bool {
-	decoded, err := base64.RawURLEncoding.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == value
+	if len(value) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
+		return false
+	}
+	var decoded [sha256.Size]byte
+	decodedLength, err := base64.RawURLEncoding.Decode(decoded[:], []byte(value))
+	if err != nil || decodedLength != sha256.Size {
+		return false
+	}
+	var canonical [43]byte
+	base64.RawURLEncoding.Encode(canonical[:], decoded[:])
+	return bytes.Equal(canonical[:], []byte(value))
 }
 
 func constantTimeCodexLeaseDigestEqual(left, right string) bool {
-	leftBytes, leftErr := base64.RawURLEncoding.DecodeString(left)
-	rightBytes, rightErr := base64.RawURLEncoding.DecodeString(right)
-	return leftErr == nil && rightErr == nil && len(leftBytes) == sha256.Size && len(rightBytes) == sha256.Size && hmac.Equal(leftBytes, rightBytes)
+	var leftBytes, rightBytes [sha256.Size]byte
+	leftLength, leftErr := base64.RawURLEncoding.Decode(leftBytes[:], []byte(left))
+	rightLength, rightErr := base64.RawURLEncoding.Decode(rightBytes[:], []byte(right))
+	return leftErr == nil && rightErr == nil && leftLength == sha256.Size && rightLength == sha256.Size && hmac.Equal(leftBytes[:], rightBytes[:])
 }
 
 func codexJournalLaneLess(left, right CodexJournalLane) bool {
@@ -1526,14 +1551,23 @@ func validCodexLeaseBuckets(buckets []CapacityBucket, effectiveModel string) boo
 func (store *CodexLeaseStore) v2EnvelopeMAC(envelope codexLeaseJournalEnvelopeV2) (string, error) {
 	envelope = cloneCodexLeaseV2Envelope(envelope)
 	canonicaliseCodexLeaseV2(&envelope)
+	return store.canonicalV2EnvelopeMAC(envelope)
+}
+
+func (store *CodexLeaseStore) canonicalV2EnvelopeMAC(envelope codexLeaseJournalEnvelopeV2) (string, error) {
 	envelope.MAC = ""
 	payload, err := json.Marshal(envelope)
 	if err != nil {
 		return "", fmt.Errorf("encode Codex lease journal v2 MAC payload: %w", err)
 	}
+	defer clear(payload)
+	return store.v2PayloadMAC(payload), nil
+}
+
+func (store *CodexLeaseStore) v2PayloadMAC(payload []byte) string {
 	mac := hmac.New(sha256.New, store.key)
 	_, _ = mac.Write(payload)
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func (store *CodexLeaseStore) validV2EnvelopeMAC(envelope codexLeaseJournalEnvelopeV2) bool {
@@ -1656,12 +1690,12 @@ func canonicaliseCodexLeaseV2(envelope *codexLeaseJournalEnvelopeV2) {
 		return left.NamespaceHash < right.NamespaceHash
 	})
 	for index := range envelope.Lanes {
-		if envelope.Lanes[index].RequestUnavailableAccountHashes == nil {
-			envelope.Lanes[index].RequestUnavailableAccountHashes = []string{}
+		if len(envelope.Lanes[index].RequestUnavailableAccountHashes) == 0 {
+			envelope.Lanes[index].RequestUnavailableAccountHashes = nil
 		}
 		sort.Strings(envelope.Lanes[index].RequestUnavailableAccountHashes)
-		if envelope.Lanes[index].QuotaExhaustedAccountHashes == nil {
-			envelope.Lanes[index].QuotaExhaustedAccountHashes = []string{}
+		if len(envelope.Lanes[index].QuotaExhaustedAccountHashes) == 0 {
+			envelope.Lanes[index].QuotaExhaustedAccountHashes = nil
 		}
 		sort.Strings(envelope.Lanes[index].QuotaExhaustedAccountHashes)
 	}

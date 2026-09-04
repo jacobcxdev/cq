@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -77,6 +78,32 @@ func (directory *unixSecureDirectory) ReadDir() ([]os.DirEntry, error) {
 		return nil, err
 	}
 	return directory.file.ReadDir(-1)
+}
+
+func (directory *unixSecureDirectory) VisitEntries(batchSize int, visit func(os.DirEntry) error) error {
+	if batchSize <= 0 || visit == nil {
+		return ErrSecureCapabilityUnavailable
+	}
+	if _, err := directory.file.Seek(0, 0); err != nil {
+		return err
+	}
+	for {
+		entries, err := directory.file.ReadDir(batchSize)
+		for _, entry := range entries {
+			if visitErr := visit(entry); visitErr != nil {
+				return visitErr
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+	}
 }
 
 func (directory *unixSecureDirectory) OpenDirectory(name string) (DurableDirectory, error) {

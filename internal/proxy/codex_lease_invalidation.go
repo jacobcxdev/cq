@@ -21,7 +21,7 @@ func (coordinator *CodexContinuityCoordinator) InvalidateTaskAffinities(ctx cont
 	if ctx == nil {
 		return CodexLeaseInvalidationResult{}, fmt.Errorf("%w: nil affinity invalidation context", ErrCodexLeaseInvalidMutation)
 	}
-	release, err := coordinator.beginCodexLeaseRouteSnapshot(ctx)
+	release, err := coordinator.beginCodexLeasePersistenceContext(ctx)
 	if err != nil {
 		return CodexLeaseInvalidationResult{}, err
 	}

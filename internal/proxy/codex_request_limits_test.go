@@ -12,4 +12,7 @@ func TestCodexWebSocketPolicyMatchesInstalledClient(t *testing.T) {
 	if codexWebSocketMessageMaxBytes != 64<<20 {
 		t.Fatalf("WebSocket message limit = %d, want %d", codexWebSocketMessageMaxBytes, 64<<20)
 	}
+	if codexWebSocketUpstreamRequestMaxBytes != 32<<20 {
+		t.Fatalf("WebSocket upstream request limit = %d, want %d", codexWebSocketUpstreamRequestMaxBytes, 32<<20)
+	}
 }

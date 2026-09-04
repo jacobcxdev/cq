@@ -288,8 +288,8 @@ func TestCodexRequestEnvelopeAccountsForExactOwnedCloneBytes(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	afterReplay := codexProcessRuntimeObservability.snapshot()
-	if got := afterReplay.CurrentReplayBytes - before.CurrentReplayBytes; got != 2*wantOwned {
-		t.Fatalf("envelope plus replay owned-byte delta = %d, want %d", got, 2*wantOwned)
+	if got := afterReplay.CurrentReplayBytes - before.CurrentReplayBytes; got != wantOwned {
+		t.Fatalf("shared envelope and replay owned-byte delta = %d, want %d", got, wantOwned)
 	}
 
 	replay.Release()
@@ -299,6 +299,20 @@ func TestCodexRequestEnvelopeAccountsForExactOwnedCloneBytes(t *testing.T) {
 	afterRelease := codexProcessRuntimeObservability.snapshot()
 	if got := afterRelease.CurrentReplayBytes - before.CurrentReplayBytes; got != 0 {
 		t.Fatalf("released owned-byte delta = %d, want 0", got)
+	}
+}
+
+func TestCodexRuntimeHealthTracksCurrentJournalFailure(t *testing.T) {
+	var observability codexRuntimeObservability
+	observability.recordJournalCommit(time.Millisecond, 10, 2, 3, true)
+	failed := observability.snapshot()
+	if !failed.StateFailed || failed.StateFailures != 1 {
+		t.Fatalf("failed journal health = %#v", failed)
+	}
+	observability.recordJournalCommit(time.Millisecond, 10, 2, 3, false)
+	recovered := observability.snapshot()
+	if recovered.StateFailed || recovered.StateFailures != 1 {
+		t.Fatalf("recovered journal health = %#v", recovered)
 	}
 }
 
@@ -317,7 +331,7 @@ func TestCodexFrozenRequestAccountsForTransferredReplayBytes(t *testing.T) {
 		t.Fatalf("Freeze: %v", err)
 	}
 	afterFreeze := codexProcessRuntimeObservability.snapshot()
-	wantOwned := uint64(2 * len(body))
+	wantOwned := uint64(len(body))
 	if got := afterFreeze.CurrentReplayBytes - before.CurrentReplayBytes; got != wantOwned {
 		t.Fatalf("frozen owned-byte delta = %d, want encoded+decoded %d", got, wantOwned)
 	}
@@ -354,6 +368,9 @@ func TestServerHealthExposesOnlyAggregateCodexRuntimeObservability(t *testing.T)
 	if health.Runtime == nil {
 		t.Fatal("health omitted codex_runtime_observability")
 	}
+	want.HeapAllocBytes = health.Runtime.HeapAllocBytes
+	want.HeapSysBytes = health.Runtime.HeapSysBytes
+	want.Goroutines = health.Runtime.Goroutines
 	if *health.Runtime != want {
 		t.Fatalf("health runtime observability = %+v, want %+v", *health.Runtime, want)
 	}
@@ -365,6 +382,36 @@ func TestServerHealthExposesOnlyAggregateCodexRuntimeObservability(t *testing.T)
 		if strings.Contains(response.Body.String(), private) {
 			t.Fatalf("health exposed private fixture %q", private)
 		}
+	}
+}
+
+func TestCodexRuntimeHealthDegradesForEachPressureSignal(t *testing.T) {
+	tests := []struct {
+		name      string
+		runtime   codexRuntimeObservabilitySnapshot
+		ephemeral proxyEphemeralStateSnapshot
+	}{
+		{name: "journal failure", runtime: codexRuntimeObservabilitySnapshot{StateFailed: true}},
+		{name: "persistence backlog", runtime: codexRuntimeObservabilitySnapshot{PersistenceWaiters: 101}},
+		{name: "persistence wait", runtime: codexRuntimeObservabilitySnapshot{LastWaitMicros: 1_000_001}},
+		{name: "journal commit", runtime: codexRuntimeObservabilitySnapshot{LastCommitMicros: 1_000_001}},
+		{name: "journal size", runtime: codexRuntimeObservabilitySnapshot{JournalBytes: 12<<20 + 1}},
+		{name: "replay memory", runtime: codexRuntimeObservabilitySnapshot{CurrentReplayBytes: 256<<20 + 1}},
+		{name: "heap memory", runtime: codexRuntimeObservabilitySnapshot{HeapAllocBytes: 512<<20 + 1}},
+		{name: "admission backlog", ephemeral: proxyEphemeralStateSnapshot{AdmissionReceipts: 10_001}},
+		{name: "dispatch backlog", ephemeral: proxyEphemeralStateSnapshot{DispatchReceipts: 10_001}},
+		{name: "admission prune", ephemeral: proxyEphemeralStateSnapshot{AdmissionFailed: true}},
+		{name: "dispatch prune", ephemeral: proxyEphemeralStateSnapshot{DispatchFailed: true}},
+	}
+	if codexRuntimeHealthDegraded(codexRuntimeObservabilitySnapshot{}, proxyEphemeralStateSnapshot{}) {
+		t.Fatal("zero runtime health degraded")
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !codexRuntimeHealthDegraded(test.runtime, test.ephemeral) {
+				t.Fatal("pressure signal did not degrade health")
+			}
+		})
 	}
 }
 
@@ -445,10 +492,10 @@ func TestCodexRequestEnvelopeDefersReplayAccountingUntilActiveBodyCloses(t *test
 		t.Fatalf("Body: %v", err)
 	}
 	afterOwn := codexProcessRuntimeObservability.snapshot()
-	if got := afterOwn.CurrentReplayBytes - before.CurrentReplayBytes; got != 2*wantOwned {
-		t.Fatalf("owned-byte delta = %d, want %d", got, 2*wantOwned)
+	if got := afterOwn.CurrentReplayBytes - before.CurrentReplayBytes; got != wantOwned {
+		t.Fatalf("owned-byte delta = %d, want %d", got, wantOwned)
 	}
-	if afterOwn.PeakReplayBytes < before.CurrentReplayBytes+2*wantOwned || afterOwn.PeakReplayBytes < before.PeakReplayBytes {
+	if afterOwn.PeakReplayBytes < before.CurrentReplayBytes+wantOwned || afterOwn.PeakReplayBytes < before.PeakReplayBytes {
 		t.Fatalf("peak = %d, baseline current/peak = %d/%d", afterOwn.PeakReplayBytes, before.CurrentReplayBytes, before.PeakReplayBytes)
 	}
 
@@ -518,7 +565,7 @@ func TestCodexRequestEnvelopeConcurrentOwnershipReturnsToBaseline(t *testing.T) 
 		owned = append(owned, pair)
 	}
 	afterOwn := codexProcessRuntimeObservability.snapshot()
-	wantDelta := uint64(2*count) * wantEach
+	wantDelta := uint64(count) * wantEach
 	if got := afterOwn.CurrentReplayBytes - before.CurrentReplayBytes; got != wantDelta {
 		t.Fatalf("concurrent owned-byte delta = %d, want %d", got, wantDelta)
 	}

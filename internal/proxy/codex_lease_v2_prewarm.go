@@ -69,8 +69,11 @@ func (coordinator *CodexContinuityCoordinator) AdoptPrewarm(ctx context.Context,
 	}
 	defer gate.Release()
 
-	coordinator.leases.lifecycle.persistence.Lock()
-	defer coordinator.leases.lifecycle.persistence.Unlock()
+	releasePersistence, err := coordinator.beginCodexLeasePersistenceContext(ctx)
+	if err != nil {
+		return CodexPrewarmAdoptionResult{}, err
+	}
+	defer releasePersistence()
 	if coordinator.leases.writerUnavailable() {
 		return CodexPrewarmAdoptionResult{}, ErrCodexLeaseWriterUnavailable
 	}

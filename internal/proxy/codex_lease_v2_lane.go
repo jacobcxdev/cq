@@ -20,14 +20,21 @@ type CodexRestoredRecord struct {
 }
 
 func (store *CodexLeaseStore) LoadLane(key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy) (CodexRestoredLane, error) {
-	return store.loadLane(key, accounts, policy, true)
+	return store.loadLane(key, accounts, policy, true, true)
 }
 
 func (store *CodexLeaseStore) loadLaneForIngress(key LeaseKey, policy CodexLeaseAuthorityPolicy) (CodexRestoredLane, error) {
-	return store.loadLane(key, nil, policy, false)
+	return store.loadLane(key, nil, policy, false, false)
 }
 
-func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy, requireResolvedCurrent bool) (CodexRestoredLane, error) {
+// loadLaneSnapshot reads the last authenticated in-memory generation. Callers
+// may use it for routing and lifecycle planning; every durable mutation still
+// revalidates the installed journal immediately before replacement.
+func (store *CodexLeaseStore) loadLaneSnapshot(key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy) (CodexRestoredLane, error) {
+	return store.loadLane(key, accounts, policy, true, false)
+}
+
+func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy, requireResolvedCurrent, revalidateInstalled bool) (CodexRestoredLane, error) {
 	blocked := CodexRestoredLane{Classification: CodexRestoredLaneRecoveryBlocked}
 	if store == nil {
 		return blocked, ErrCodexLeaseWriterUnavailable
@@ -53,9 +60,11 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 	if store.poisoned != nil {
 		return blocked, fmt.Errorf("%w: %v", ErrCodexLeaseStorePoisoned, store.poisoned)
 	}
-	if err := store.revalidateV2InstalledLocked(); err != nil {
-		store.poisoned = err
-		return blocked, err
+	if revalidateInstalled {
+		if err := store.revalidateV2InstalledLocked(); err != nil {
+			store.poisoned = err
+			return blocked, err
+		}
 	}
 	if store.v2 == nil {
 		return blocked, fmt.Errorf("%w: schema-v2 journal unavailable", ErrCodexLeaseTrustLost)
@@ -100,6 +109,7 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 		},
 		Fence: CodexLeaseGenerationFence{Journal: store.v2.Generation},
 	}
+	accountResolver := newCodexLeaseAccountResolver(store, accounts)
 
 	laneFound := false
 	for _, lane := range store.v2.Lanes {
@@ -120,7 +130,7 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 		return cloneCodexRestoredLane(restored), nil
 	}
 	if !codexLaneAffinityIsZero(restored.Lane) {
-		resolvedAccount, resolved := store.resolveCodexLeaseAccount(restored.Lane.LastAdmittedAccountHash, accounts)
+		resolvedAccount, resolved := accountResolver.resolve(restored.Lane.LastAdmittedAccountHash)
 		restored.Affinity = &CodexLeaseAffinityHint{
 			Resolved: resolved,
 			Source: CodexJournalRecordIdentity{
@@ -149,7 +159,7 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 		clone := cloneCodexJournalRecordV2(record)
 		identity := clone.Identity()
 		fence := codexLeaseFenceForRestoredRecord(clone)
-		resolvedAccount, resolved := store.resolveCodexLeaseAccount(clone.AccountHash, accounts)
+		resolvedAccount, resolved := accountResolver.resolve(clone.AccountHash)
 		exactRequestedTurn := constantTimeCodexLeaseDigestEqual(clone.TurnHash, turnHash) && codexLeaseRecordAllowedByPolicy(clone, policy)
 		if requireResolvedCurrent && clone.AccountHash != "" && !resolved && exactRequestedTurn && codexLeaseRecordRequiresResolvedAccount(clone) {
 			return blocked, fmt.Errorf("%w: persisted route account is unavailable", ErrCodexLeaseAuthorityMismatch)
@@ -281,18 +291,39 @@ func (restored CodexRestoredLane) MutationFence(identities ...CodexJournalRecord
 }
 
 func (store *CodexLeaseStore) resolveCodexLeaseAccount(accountHash string, accounts []codex.AccountKey) (codex.AccountKey, bool) {
+	return newCodexLeaseAccountResolver(store, accounts).resolve(accountHash)
+}
+
+type codexLeaseAccountResolverEntry struct {
+	hash    string
+	account codex.AccountKey
+}
+
+type codexLeaseAccountResolver []codexLeaseAccountResolverEntry
+
+func newCodexLeaseAccountResolver(store *CodexLeaseStore, accounts []codex.AccountKey) codexLeaseAccountResolver {
+	resolver := make(codexLeaseAccountResolver, 0, len(accounts))
+	for _, account := range accounts {
+		if account != "" {
+			resolver = append(resolver, codexLeaseAccountResolverEntry{hash: store.hash("account", string(account)), account: account})
+		}
+	}
+	return resolver
+}
+
+func (resolver codexLeaseAccountResolver) resolve(accountHash string) (codex.AccountKey, bool) {
 	if accountHash == "" {
 		return "", false
 	}
 	var resolved codex.AccountKey
-	for _, account := range accounts {
-		if account == "" || !constantTimeCodexLeaseDigestEqual(accountHash, store.hash("account", string(account))) {
+	for _, entry := range resolver {
+		if !constantTimeCodexLeaseDigestEqual(accountHash, entry.hash) {
 			continue
 		}
-		if resolved != "" && resolved != account {
+		if resolved != "" && resolved != entry.account {
 			return "", false
 		}
-		resolved = account
+		resolved = entry.account
 	}
 	return resolved, resolved != ""
 }

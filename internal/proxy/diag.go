@@ -833,9 +833,6 @@ func (w *DiagnosticsWriter) WriteTrace(event CodexTraceEvent) error {
 	if w == nil || w.w == nil {
 		return nil
 	}
-	if event.Phase == "terminal" || event.Phase == "connection_terminal" || event.Outcome == "error" {
-		return w.w.encodeAndSync(event)
-	}
 	return w.w.encode(event)
 }
 
@@ -1004,7 +1001,7 @@ func safeCodexReason(value string) bool {
 		return true
 	}
 	switch value {
-	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "invalid_frame", "downstream_read_failed", "response_unavailable", "cancelled", "deadline", "timeout", "dns", "connect", "connection_reset", "broken_pipe", "server_closed_idle", "unexpected_eof", "eof", "tls", "protocol", "unknown":
+	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "message_too_big", "invalid_frame", "downstream_read_failed", "response_unavailable", "cancelled", "deadline", "timeout", "dns", "connect", "connection_reset", "broken_pipe", "server_closed_idle", "unexpected_eof", "eof", "tls", "protocol", "unknown":
 		return true
 	}
 	if suffix, ok := strings.CutPrefix(value, "candidate_attempt_"); ok {

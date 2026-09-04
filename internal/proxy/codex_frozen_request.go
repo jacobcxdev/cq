@@ -53,9 +53,13 @@ func (e *CodexFrozenRequestError) Is(target error) bool {
 
 func newCodexFrozenRequestError(code CodexFrozenRequestErrorCode, cause error) error {
 	var identity error
-	switch cause {
-	case context.Canceled, context.DeadlineExceeded, ErrCodexFrozenRequestReleased:
-		identity = cause
+	switch {
+	case errors.Is(cause, context.Canceled):
+		identity = context.Canceled
+	case errors.Is(cause, context.DeadlineExceeded):
+		identity = context.DeadlineExceeded
+	case errors.Is(cause, ErrCodexFrozenRequestReleased):
+		identity = ErrCodexFrozenRequestReleased
 	}
 	return &CodexFrozenRequestError{Code: code, identity: identity}
 }
@@ -133,6 +137,7 @@ type codexFrozenRequestState struct {
 	protocol        CodexProtocolRequest
 	choice          RouteChoice
 	headroomSavings int
+	transformed     bool
 	released        bool
 }
 
@@ -334,7 +339,10 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 	}
 
 	meter := codexInstalledHTTPReplayMeterFromContext(ctx)
-	retainedBytes := uint64(len(preparedEncoded)) + uint64(len(preparedDecoded))
+	retainedBytes := uint64(len(preparedEncoded))
+	if !sameByteView(preparedEncoded, preparedDecoded) {
+		retainedBytes += uint64(len(preparedDecoded))
+	}
 	if meter != nil && !meter.retain(retainedBytes) {
 		return nil, newCodexFrozenRequestError(CodexFrozenRequestEncodeFailed, errors.New("replay envelope accounting unavailable"))
 	}
@@ -353,6 +361,7 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 			protocol:        protocol,
 			choice:          choice,
 			headroomSavings: headroomSavings,
+			transformed:     modelChanged || headroomChanged,
 		},
 	}
 	encoded = nil
@@ -360,6 +369,18 @@ func (inspection *CodexFrozenRequestInspection) Freeze(ctx context.Context, choi
 	headers = nil
 	cleanup = false
 	return frozen, nil
+}
+
+func (request *CodexFrozenRequest) transformed() (bool, error) {
+	if request == nil || request.state == nil {
+		return false, ErrCodexFrozenRequestReleased
+	}
+	request.state.mu.Lock()
+	defer request.state.mu.Unlock()
+	if request.state.released {
+		return false, ErrCodexFrozenRequestReleased
+	}
+	return request.state.transformed, nil
 }
 
 func (inspection *CodexFrozenRequestInspection) encode(body []byte, contentEncoding string, limits CodexZstdLimits) ([]byte, error) {

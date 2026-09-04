@@ -499,6 +499,7 @@ func codexLiveAppServerArguments(baseURL string, webSocket bool) []string {
 	provider := "model_providers.cq_acceptance."
 	return []string{
 		"app-server", "--stdio", "--strict-config",
+		"-c", "openai_base_url=" + strconv.Quote(baseURL),
 		"-c", `model_provider="cq_acceptance"`,
 		"-c", provider + `name="OpenAI"`,
 		"-c", provider + "base_url=" + strconv.Quote(baseURL),
