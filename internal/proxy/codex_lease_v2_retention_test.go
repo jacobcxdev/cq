@@ -125,6 +125,38 @@ func TestCodexLeaseV2CompactHonoursConfiguredBoundaries(t *testing.T) {
 	}
 }
 
+func TestCodexLeaseV2CommitPiggybacksPeriodicRetentionSweep(t *testing.T) {
+	store, _, now := openCodexLeaseV2CASTestStore(t)
+	failed := reservingCodexLeaseV2CASTestRecord(store, "expired-session", "expired-thread", "expired-turn")
+	fence, err := store.CommitLane(CodexLeaseGenerationFence{
+		Journal: store.Generation(), TouchedRecords: []CodexLeaseRecordFence{{Record: failed.Identity()}},
+	}, CodexLaneMutation{Lane: codexLeaseV2CASTestLane(failed), UpsertRecords: []CodexJournalRecordV2{failed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Second)
+	stored := findCodexLeaseV2CASTestRecord(t, store.v2.Records, failed.Identity())
+	failedMutation := codexLeaseV2CASTestMutationRecord(stored)
+	failedMutation.State = LeaseFailedUnadmitted
+	failedMutation.SocketLineageExtinct = true
+	lane := codexLeaseV2CASTestMutationLane(findCodexLeaseV2CASTestLane(t, store.v2.Lanes, failed.Identity().LaneDigest))
+	fence.TouchedRecords = []CodexLeaseRecordFence{codexLeaseV2CASTestRecordFence(store.v2.Records, failed.Identity())}
+	if _, err := store.CommitLane(fence, CodexLaneMutation{Lane: &lane, UpsertRecords: []CodexJournalRecordV2{failedMutation}}); err != nil {
+		t.Fatal(err)
+	}
+
+	*now = now.Add(store.policy.Retention + time.Second)
+	fresh := reservingCodexLeaseV2CASTestRecord(store, "fresh-session", "fresh-thread", "fresh-turn")
+	if _, err := store.CommitLane(CodexLeaseGenerationFence{
+		Journal: store.Generation(), TouchedRecords: []CodexLeaseRecordFence{{Record: fresh.Identity()}},
+	}, CodexLaneMutation{Lane: codexLeaseV2CASTestLane(fresh), UpsertRecords: []CodexJournalRecordV2{fresh}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.v2.Records) != 1 || store.v2.Records[0].Identity() != fresh.Identity() || len(store.v2.Lanes) != 1 {
+		t.Fatalf("piggyback retention left records=%#v lanes=%#v", store.v2.Records, store.v2.Lanes)
+	}
+}
+
 func TestCodexLeaseV2CompactPreservesCompletedLegacyCutoverEvidence(t *testing.T) {
 	fsys := fsutil.NewMemFS()
 	now := time.Date(2026, 8, 9, 4, 5, 6, 700, time.UTC)

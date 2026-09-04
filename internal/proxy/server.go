@@ -899,10 +899,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if codexHealth.RoutingDefault.Configured && codexHealth.RoutingDefault.Status != CodexRoutingDefaultStatusResolved {
 		status = "degraded"
 	}
+	runtimeHealth := codexProcessRuntimeObservability.snapshot()
+	ephemeralHealth := proxyProcessEphemeralState.snapshot()
+	if codexRuntimeHealthDegraded(runtimeHealth, ephemeralHealth) {
+		status = "degraded"
+	}
 	resp := map[string]any{
 		"status":                      status,
 		"headroom":                    s.Headroom != nil,
-		"codex_runtime_observability": codexProcessRuntimeObservability.snapshot(),
+		"codex_runtime_observability": runtimeHealth,
+		"ephemeral_state":             ephemeralHealth,
 		"accounts": map[string]any{
 			"claude": claudeCount,
 			"codex":  codexCount,
@@ -952,6 +958,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = w.Write(body.Bytes())
+}
+
+func codexRuntimeHealthDegraded(runtimeHealth codexRuntimeObservabilitySnapshot, ephemeralHealth proxyEphemeralStateSnapshot) bool {
+	return runtimeHealth.StateFailed ||
+		runtimeHealth.PersistenceWaiters > 100 ||
+		runtimeHealth.LastWaitMicros > uint64(time.Second/time.Microsecond) ||
+		runtimeHealth.LastCommitMicros > uint64(time.Second/time.Microsecond) ||
+		runtimeHealth.JournalBytes > 12<<20 ||
+		runtimeHealth.CurrentReplayBytes > 256<<20 ||
+		runtimeHealth.HeapAllocBytes > 512<<20 ||
+		ephemeralHealth.AdmissionReceipts > 10_000 ||
+		ephemeralHealth.DispatchReceipts > 10_000 ||
+		ephemeralHealth.AdmissionFailed ||
+		ephemeralHealth.DispatchFailed
 }
 
 func (s *Server) annotateCodexWebSocketSkew(ctx context.Context, mode *CodexModeStatus) {
@@ -1220,8 +1240,14 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 				sessionKey = "none"
 			}
 			fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=websocket session=%s event=%s stage=%s reason=%s origin=%s frame_type=%s frame_size=%s frame_detail=%s event_type=%s error_status=%s error_type=%s error_code=%s\n", sessionKey, decision, failure.Stage, failure.Reason, failure.Origin, failure.FrameType, failure.FrameSize, failure.FrameDetail, failure.EventType, failure.ErrorStatus, failure.ErrorType, failure.ErrorCode)
-			diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing failed")
-			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
+			closeCode, closeReason := websocket.CloseInternalServerErr, "upstream error"
+			if failure.FrameSize == codexWSFrameSizeOversize || failure.Reason == codexWebSocketFailureReasonMessageTooBig {
+				closeCode, closeReason = websocket.CloseMessageTooBig, "message too big"
+				diagError = diagnosticsErrorCode("invalid_request_error", "Codex WebSocket request exceeded upstream size limit")
+			} else {
+				diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing failed")
+			}
+			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeCode, closeReason), time.Now().Add(time.Second))
 		}
 		return
 	}
@@ -1752,13 +1778,7 @@ func (s *Server) emitCodexWebSocketPayloadDiagnostics(r *http.Request, path, mod
 		return
 	}
 	sessionKey, sessionSource, signal := codexWebSocketFrameCorrelation(r.Header, frame)
-	captured := frame
-	truncated := len(captured) > codexPayloadCaptureMaxBytes
-	if truncated {
-		captured = captured[:codexPayloadCaptureMaxBytes]
-	}
-	payloadBody, payloadEncoding := encodeCodexTracePayload(captured)
-	emitCodexTracePayload(r.Context(), PayloadEvent{
+	emitCodexRawTracePayload(r.Context(), PayloadEvent{
 		Method:        r.Method,
 		Path:          path,
 		Provider:      "codex",
@@ -1772,11 +1792,7 @@ func (s *Server) emitCodexWebSocketPayloadDiagnostics(r *http.Request, path, mod
 		FrameIndex:    frameIndex,
 		FrameType:     frameType,
 		Complete:      true,
-		BodyBytes:     len(frame),
-		Truncated:     truncated,
-		BodyEncoding:  payloadEncoding,
-		Body:          payloadBody,
-	})
+	}, frame)
 }
 
 func (s *Server) claudePinActive() bool {

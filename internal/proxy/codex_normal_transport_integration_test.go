@@ -1622,7 +1622,19 @@ func TestNormalProxyTransportWebSocketPortableSuccessorMigratesAfterExhaustedEnc
 	if continuationStatus != http.StatusOK || !bytes.Contains(continuationBody, []byte(`"type":"response.completed"`)) {
 		t.Fatalf("encrypted predecessor continuation = %d %q, want A/200", continuationStatus, continuationBody)
 	}
-	predecessorSnapshot, err := harness.continuity.LoadRouteSnapshot(context.Background(), NewCodexLeaseKey(predecessor), []codex.AccountKey{codexInstalledHTTPValidationAccountA}, CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true})
+	predecessorKey := NewCodexLeaseKey(predecessor)
+	predecessorAccounts := []codex.AccountKey{codexInstalledHTTPValidationAccountA}
+	predecessorPolicy := CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true}
+	waiter, ok := harness.httpPlanner.Runtime.(codexHTTPRequestPlanRuntimeWaiter)
+	if !ok {
+		t.Fatal("HTTP planner runtime lacks request-planning barrier")
+	}
+	releasePlanning, err := waiter.AcquireRequestPlanningContext(context.Background(), predecessorKey, predecessorAccounts, predecessorPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasePlanning()
+	predecessorSnapshot, err := harness.continuity.LoadRouteSnapshot(context.Background(), predecessorKey, predecessorAccounts, predecessorPolicy)
 	if err != nil {
 		t.Fatal(err)
 	}

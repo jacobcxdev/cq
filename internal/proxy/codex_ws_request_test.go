@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -38,6 +39,37 @@ func TestCodexWSPendingFrameUsesStrongFrameAuthorityWithoutHandshake(t *testing.
 	}
 	if event.ThreadKey != hashPrefix("codex-thread", "thread") {
 		t.Fatalf("frame thread correlation = %q", event.ThreadKey)
+	}
+}
+
+func TestCodexWSUnchangedPreparationReusesOwnedPendingFrame(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)
+	pending, err := newCodexWSPendingFrameOwned(websocket.TextMessage, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+	if !sameByteView(pending.encoded, payload) {
+		t.Fatal("owned pending frame cloned its input")
+	}
+	inspection, err := InspectCodexNativeRequest(context.Background(), payload, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := inspection.Freeze(context.Background(), RouteChoice{
+		AccountKey: "account", RequestedModel: "gpt-5.6-sol", EffectiveModel: "gpt-5.6-sol", RequiredBuckets: []CapacityBucket{CapacityBucketBase},
+	}, nil, HeadroomModeCache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer frozen.Release()
+	prepared, err := codexWSPreparedPendingFrame(frozen, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared != pending {
+		prepared.Release()
+		t.Fatal("unchanged request created a second pending frame")
 	}
 }
 
@@ -83,7 +115,7 @@ func TestCodexWSPendingFrameRejectsInvalidAuthorityAndBounds(t *testing.T) {
 		payload     []byte
 	}{
 		{name: "binary", messageType: websocket.BinaryMessage, payload: valid},
-		{name: "oversize", messageType: websocket.TextMessage, payload: bytes.Repeat([]byte{'x'}, codexWebSocketMessageMaxBytes+1)},
+		{name: "oversize", messageType: websocket.TextMessage, payload: bytes.Repeat([]byte{'x'}, codexWebSocketUpstreamRequestMaxBytes+1)},
 		{name: "wrong type", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.cancel","model":"gpt-5.6-sol"}`)},
 		{name: "missing metadata", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","model":"gpt-5.6-sol"}`)},
 		{name: "missing model", messageType: websocket.TextMessage, payload: []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"turn","request_kind":"turn"}}}`)},
@@ -268,7 +300,7 @@ func TestCodexWSInvalidFrameClassifiesAllowlistedEventMetadata(t *testing.T) {
 }
 
 func TestCodexWSPendingFrameAcceptsInstalledLimit(t *testing.T) {
-	payload := codexProtocolRequestBodyAtSize(t, codexWebSocketMessageMaxBytes)
+	payload := codexProtocolRequestBodyAtSize(t, codexWebSocketUpstreamRequestMaxBytes)
 	pending, err := newCodexWSPendingFrame(websocket.TextMessage, payload)
 	if err != nil {
 		t.Fatalf("installed limit rejected: %v", err)

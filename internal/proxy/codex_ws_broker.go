@@ -42,6 +42,7 @@ const (
 	codexWebSocketFailureReasonDownstreamReadFailed         codexWebSocketFailureReason = "downstream_read_failed"
 	codexWebSocketFailureReasonLeaseTransition              codexWebSocketFailureReason = "lease_transition"
 	codexWebSocketFailureReasonStaleGeneration              codexWebSocketFailureReason = "stale_generation"
+	codexWebSocketFailureReasonMessageTooBig                codexWebSocketFailureReason = "message_too_big"
 )
 
 type codexWebSocketFailure struct {
@@ -60,10 +61,18 @@ type codexWebSocketFailure struct {
 
 type codexWebSocketBrokerError struct {
 	failure codexWebSocketFailure
+	cause   error
 }
 
 func (err *codexWebSocketBrokerError) Error() string {
 	return "Codex WebSocket broker failed"
+}
+
+func (err *codexWebSocketBrokerError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
 }
 
 func newCodexWebSocketBrokerError(stage codexWebSocketFailureStage, reason codexWebSocketFailureReason) error {
@@ -140,7 +149,8 @@ func safeCodexWebSocketFailureReason(reason codexWebSocketFailureReason) codexWe
 		codexWebSocketFailureReasonInvalidFrame,
 		codexWebSocketFailureReasonDownstreamReadFailed,
 		codexWebSocketFailureReasonLeaseTransition,
-		codexWebSocketFailureReasonStaleGeneration:
+		codexWebSocketFailureReasonStaleGeneration,
+		codexWebSocketFailureReasonMessageTooBig:
 		return reason
 	default:
 		requestReason := safeCodexRequestFailureReason(CodexRequestFailureReason(reason))
@@ -368,7 +378,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		if err != nil {
 			return classifyCodexWSDownstreamReadError(err)
 		}
-		pending, err := newCodexWSPendingFrame(messageType, encoded)
+		pending, err := newCodexWSPendingFrameOwned(messageType, encoded)
 		if err != nil {
 			return err
 		}
@@ -381,12 +391,10 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		emitCodexTrace(frameCtx, CodexTraceEvent{
 			Phase: "downstream_frame", Outcome: "accepted", FrameType: codexTraceWebSocketFrameType(messageType), FrameBytes: len(encoded),
 		})
-		payloadBody, payloadEncoding := encodeCodexTracePayload(encoded)
-		emitCodexTracePayload(frameCtx, PayloadEvent{
+		emitCodexRawTracePayload(frameCtx, PayloadEvent{
 			Provider: "codex", RouteKind: "codex_websocket_frame", Direction: "downstream_request",
 			FrameType: codexTraceWebSocketFrameType(messageType), Complete: true,
-			BodyBytes: len(encoded), BodyEncoding: payloadEncoding, Body: payloadBody,
-		})
+		}, encoded)
 		err = broker.serveFrame(frameCtx, downstream, pending, &active)
 		pending.Release()
 		if err != nil {
@@ -589,7 +597,7 @@ func codexWSIdleUpstreamError(active *codexWSActiveUpstream) error {
 				return newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamIdle, codexWebSocketFailureReasonUpstreamClosed)
 			}
 			if !codexWSIdleMaintenanceFrame(result) {
-				return ErrCodexWSInvalidFrame
+				return newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamIdle, codexWebSocketFailureReasonUpstreamClosed)
 			}
 		default:
 			return nil
@@ -780,14 +788,14 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 	resetAvailable := len(prepared.Dispatch.AccountUnavailableResetCandidates()) != 0
 	if idleErr := codexWSIdleUpstreamError(active); idleErr != nil {
 		closeCodexWSActiveUpstream(active)
-		if !codexWSIdleUpstreamClosed(idleErr) {
-			return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, idleErr)
-		}
-		if !pending.portable {
+		if codexWSIdleUpstreamClosed(idleErr) && !pending.portable {
 			if err := codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, nil); err != nil {
 				return err
 			}
 			return writeCodexWSAccountUnavailableClose(downstream)
+		}
+		if !codexWSIdleUpstreamClosed(idleErr) {
+			return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, idleErr)
 		}
 	}
 	accountIndex := 0
@@ -1160,12 +1168,10 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx conte
 			closeCodexWSActiveUpstream(active)
 			return false, newCodexWSInvalidFrameErrorWithDetail(codexWSInvalidFrameUpstreamPrewarm, messageType, frame, codexWSInvalidFrameNonText, nil)
 		}
-		payloadBody, payloadEncoding := encodeCodexTracePayload(frame)
-		emitCodexTracePayload(ctx, PayloadEvent{
+		emitCodexRawTracePayload(ctx, PayloadEvent{
 			Provider: "codex", RouteKind: "codex_websocket_frame", Direction: "upstream_response",
 			FrameType: codexTraceWebSocketFrameType(messageType), AccountHint: codexTraceAccountHint(active.account), Complete: true,
-			BodyBytes: len(frame), BodyEncoding: payloadEncoding, Body: payloadBody,
-		})
+		}, frame)
 		observation := classifyCodexSSEData(frame)
 		if observation.Kind == CodexSSEError && observation.Error.HardUsageLimit {
 			broker.observeHardLimit(account, nil)
@@ -1321,6 +1327,11 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 				CloseCode:   closeCode,
 				CloseReason: closeReason,
 			})
+			if codexWSMessageTooBig(err) {
+				rejectedErr := lifecycle.FinishRejected(active.generation)
+				closeCodexWSActiveUpstream(active)
+				return false, errors.Join(&codexWebSocketBrokerError{failure: codexWebSocketFailure{Stage: codexWebSocketFailureStageUpstreamRead, Reason: codexWebSocketFailureReasonMessageTooBig}, cause: err}, rejectedErr)
+			}
 			indeterminateErr := codexWSMarkIndeterminate(ctx, lifecycle, active.generation)
 			if ctx.Err() != nil {
 				return false, errors.Join(ctx.Err(), indeterminateErr)
@@ -1328,18 +1339,16 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			if indeterminateErr != nil {
 				return false, indeterminateErr
 			}
-			return false, newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamRead, codexWebSocketFailureReasonUpstreamOutcomeIndeterminate)
+			return false, errors.Join(&codexWebSocketBrokerError{failure: codexWebSocketFailure{Stage: codexWebSocketFailureStageUpstreamRead, Reason: codexWebSocketFailureReasonUpstreamOutcomeIndeterminate}, cause: err}, indeterminateErr)
 		}
 		if messageType != websocket.TextMessage {
 			_ = lifecycle.Indeterminate(ctx, active.generation)
 			return false, newCodexWSInvalidFrameErrorWithDetail(codexWSInvalidFrameUpstreamResponse, messageType, frame, codexWSInvalidFrameNonText, nil)
 		}
-		payloadBody, payloadEncoding := encodeCodexTracePayload(frame)
-		emitCodexTracePayload(ctx, PayloadEvent{
+		emitCodexRawTracePayload(ctx, PayloadEvent{
 			Provider: "codex", RouteKind: "codex_websocket_frame", Direction: "upstream_response",
 			FrameType: codexTraceWebSocketFrameType(messageType), AccountHint: codexTraceAccountHint(active.account), Complete: true,
-			BodyBytes: len(frame), BodyEncoding: payloadEncoding, Body: payloadBody,
-		})
+		}, frame)
 		result, observeErr := lifecycle.ObserveFrame(ctx, active.generation, frame)
 		if observeErr != nil {
 			emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_frame", Outcome: "invalid", FrameType: codexTraceWebSocketFrameType(messageType), FrameBytes: len(frame), Reason: codexTraceErrorReason(observeErr), AccountHint: codexTraceAccountHint(active.account)})
@@ -1662,6 +1671,13 @@ func codexWSPreparedPendingFrame(frozen *CodexFrozenRequest, original *codexWSPe
 	if frozen == nil {
 		return original, nil
 	}
+	transformed, err := frozen.transformed()
+	if err != nil {
+		return nil, err
+	}
+	if !transformed {
+		return original, nil
+	}
 	replay, err := frozen.Replay()
 	if err != nil {
 		return nil, err
@@ -1671,12 +1687,17 @@ func codexWSPreparedPendingFrame(frozen *CodexFrozenRequest, original *codexWSPe
 	if err != nil {
 		return nil, err
 	}
-	encoded, readErr := ioReadBounded(body, codexWebSocketMessageMaxBytes)
+	encoded, readErr := ioReadBounded(body, codexWebSocketUpstreamRequestMaxBytes)
 	closeErr := body.Close()
 	if readErr != nil || closeErr != nil {
 		return nil, errors.Join(readErr, closeErr)
 	}
-	return newCodexWSPendingFrame(websocket.TextMessage, encoded)
+	return newCodexWSPendingFrameOwned(websocket.TextMessage, encoded)
+}
+
+func codexWSMessageTooBig(err error) bool {
+	var closeErr *websocket.CloseError
+	return errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig
 }
 
 func reportCodexWSHandshakeFailure(ctx context.Context, response *http.Response, wrapped CodexWrappedError) {

@@ -412,6 +412,45 @@ func (directory *windowsSecureDirectory) ReadDir() ([]os.DirEntry, error) {
 	return directory.file.ReadDir(-1)
 }
 
+func (directory *windowsSecureDirectory) VisitEntries(batchSize int, visit func(os.DirEntry) error) error {
+	if batchSize <= 0 || visit == nil {
+		return ErrSecureCapabilityUnavailable
+	}
+	directory.mutex.Lock()
+	if directory.closed {
+		directory.mutex.Unlock()
+		return os.ErrClosed
+	}
+	_, err := directory.file.Seek(0, io.SeekStart)
+	directory.mutex.Unlock()
+	if err != nil {
+		return err
+	}
+	for {
+		directory.mutex.Lock()
+		if directory.closed {
+			directory.mutex.Unlock()
+			return os.ErrClosed
+		}
+		entries, readErr := directory.file.ReadDir(batchSize)
+		directory.mutex.Unlock()
+		for _, entry := range entries {
+			if visitErr := visit(entry); visitErr != nil {
+				return visitErr
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+	}
+}
+
 func (directory *windowsSecureDirectory) OpenDirectory(name string) (DurableDirectory, error) {
 	result, err := openWindowsRelative(
 		windows.Handle(directory.file.Fd()),

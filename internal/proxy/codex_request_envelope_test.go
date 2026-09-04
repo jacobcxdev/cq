@@ -558,7 +558,7 @@ func TestCodexRequestEnvelopeReleaseLetsExistingBodyFinish(t *testing.T) {
 	}
 }
 
-func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
+func TestCodexRequestReplayReleaseKeepsSharedEnvelopeState(t *testing.T) {
 	envelope, err := NewCodexRequestEnvelope(
 		[]byte("encoded-request"),
 		[]byte("decoded-request"),
@@ -568,8 +568,6 @@ func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCodexRequestEnvelope: %v", err)
 	}
-	defer envelope.Release()
-
 	replay, err := envelope.Replay()
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
@@ -578,7 +576,6 @@ func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other Replay: %v", err)
 	}
-	defer otherReplay.Release()
 	body, err := replay.Body()
 	if err != nil {
 		t.Fatalf("Body: %v", err)
@@ -615,14 +612,8 @@ func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
 	if closeErr := getBody.Close(); closeErr != nil {
 		t.Fatalf("close GetBody: %v", closeErr)
 	}
-	if !allZero(ownedEncoded) {
-		t.Fatalf("replay encoded bytes not overwritten: %q", ownedEncoded)
-	}
-	if !allZero(ownedDecoded) {
-		t.Fatalf("replay decoded bytes not overwritten: %q", ownedDecoded)
-	}
-	if len(ownedHeaders) != 0 {
-		t.Fatalf("replay headers not cleared: %q", ownedHeaders)
+	if allZero(ownedEncoded) || allZero(ownedDecoded) || len(ownedHeaders) == 0 {
+		t.Fatal("shared envelope state cleared while another replay remained")
 	}
 	if state.encoded != nil || state.decoded != nil || state.headers != nil || state.effectiveModel != "" || !state.released {
 		t.Fatalf("released replay retains owned state: %#v", state)
@@ -650,9 +641,14 @@ func TestCodexRequestReplayReleaseClearsOwnedState(t *testing.T) {
 	if got := readCodexReplayBody(t, otherBody); got != "encoded-request" {
 		t.Fatalf("other replay body = %q", got)
 	}
+	otherReplay.Release()
+	envelope.Release()
+	if !allZero(ownedEncoded) || !allZero(ownedDecoded) || len(ownedHeaders) != 0 {
+		t.Fatal("shared envelope state was not cleared after final release")
+	}
 }
 
-func TestCodexRequestReplayRemainsRegisteredUntilInvalidated(t *testing.T) {
+func TestCodexRequestReplayReleaseWaitsForActiveReader(t *testing.T) {
 	envelope, err := NewCodexRequestEnvelope([]byte("encoded"), []byte("decoded"), nil, "gpt-5.4")
 	if err != nil {
 		t.Fatalf("NewCodexRequestEnvelope: %v", err)
@@ -668,27 +664,21 @@ func TestCodexRequestReplayRemainsRegisteredUntilInvalidated(t *testing.T) {
 		replay.Release()
 		close(releaseDone)
 	}()
-
-	unregistered := false
-	for attempt := 0; attempt < 1_000; attempt++ {
-		envelope.mu.Lock()
-		_, registered := envelope.replays[state]
-		envelope.mu.Unlock()
-		if !registered {
-			unregistered = true
-			break
-		}
-		runtime.Gosched()
-	}
-	if unregistered {
+	select {
+	case <-releaseDone:
+		state.mu.RUnlock()
 		envelope.Release()
+		t.Fatal("replay release completed while state had an active reader")
+	case <-time.After(10 * time.Millisecond):
 	}
 	state.mu.RUnlock()
 	<-releaseDone
+	envelope.mu.RLock()
+	_, registered := envelope.replays[state]
+	envelope.mu.RUnlock()
 	envelope.Release()
-
-	if unregistered {
-		t.Fatal("replay was unregistered before its owned state was invalidated")
+	if registered {
+		t.Fatal("released replay remained registered")
 	}
 }
 
@@ -759,6 +749,7 @@ func TestCodexRequestReplayBodiesRaceRelease(t *testing.T) {
 		defer wait.Done()
 		<-start
 		replay.Release()
+		envelope.Release()
 	}()
 	close(start)
 	wait.Wait()

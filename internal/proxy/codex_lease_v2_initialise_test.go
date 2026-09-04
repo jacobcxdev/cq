@@ -289,11 +289,11 @@ func TestInitialiseCodexContinuityAuthorityRequiresExactGenesis(t *testing.T) {
 		t.Fatal(err)
 	}
 	badMAC := append([]byte(nil), journal...)
-	macIndex := bytes.Index(badMAC, []byte(`"mac": "`))
+	macIndex := bytes.Index(badMAC, []byte(`"mac":"`))
 	if macIndex < 0 {
 		t.Fatal("fresh journal MAC member missing")
 	}
-	macIndex += len(`"mac": "`)
+	macIndex += len(`"mac":"`)
 	if badMAC[macIndex] == 'A' {
 		badMAC[macIndex] = 'B'
 	} else {

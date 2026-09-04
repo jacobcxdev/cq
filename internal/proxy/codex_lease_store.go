@@ -79,6 +79,7 @@ type CodexLeaseStore struct {
 	legacyArchive      string
 	legacyArchiveID    fsutil.SecureFileIdentity
 	legacyArchiveBytes []byte
+	lastRetentionSweep time.Time
 	poisoned           error
 	closed             bool
 }

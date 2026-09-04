@@ -136,13 +136,11 @@ func (s *Server) handleNativeCodexCompact(w http.ResponseWriter, r *http.Request
 
 	// Emit payload diagnostics before forwarding.
 	payloadSessionKey, payloadSessionSource := payloadSessionCorrelation(r.Header, decodedBody)
-	payloadBody, payloadEncoding := encodeCodexTracePayload(body)
-	emitCodexTracePayload(ctx, PayloadEvent{
+	emitCodexRawTracePayload(ctx, PayloadEvent{
 		Method: r.Method, Path: r.URL.Path, Provider: "codex", RouteKind: "codex_compact", Direction: "downstream_request",
 		Model: model, ClientKind: clientKindFromUserAgent(r.Header.Get("User-Agent")),
 		SessionKey: payloadSessionKey, SessionSource: payloadSessionSource, Headers: codexTraceHeaders(r.Header), Complete: true,
-		BodyBytes: len(body), BodyEncoding: payloadEncoding, Body: payloadBody,
-	})
+	}, body)
 
 	// Build upstream request targeting /responses/compact (no headroom applied).
 	forwardBody := decodedRequest.Replay()

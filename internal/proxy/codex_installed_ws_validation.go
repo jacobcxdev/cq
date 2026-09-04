@@ -265,7 +265,7 @@ func (traffic *codexInstalledWebSocketTraffic) serveUpstream(writer http.Respons
 			traffic.unexpectedRoutes.Add(1)
 			return
 		}
-		pending, err := newCodexWSPendingFrame(messageType, frame)
+		pending, err := newCodexWSPendingFrameOwned(messageType, frame)
 		if err != nil {
 			traffic.unexpectedRoutes.Add(1)
 			return

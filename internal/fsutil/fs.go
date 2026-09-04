@@ -214,6 +214,12 @@ type SecureDirectoryReader interface {
 	ReadDir() ([]os.DirEntry, error)
 }
 
+// SecureDirectoryVisitor enumerates retained directory entries in bounded
+// batches. Callbacks may mutate entries through same retained capability.
+type SecureDirectoryVisitor interface {
+	VisitEntries(batchSize int, visit func(os.DirEntry) error) error
+}
+
 // SecureDirectoryOpener opens a directory without following its final path
 // component and retains the handle for the complete atomic transaction.
 type SecureDirectoryOpener interface {

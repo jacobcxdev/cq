@@ -138,6 +138,14 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	commitStarted := time.Now()
+	defer func() {
+		lanes, records := 0, 0
+		if store.v2 != nil {
+			lanes, records = len(store.v2.Lanes), len(store.v2.Records)
+		}
+		codexProcessRuntimeObservability.recordJournalCommit(time.Since(commitStarted), len(store.journalBytes), lanes, records, store.poisoned != nil)
+	}()
 	if store.closed {
 		return CodexLeaseGenerationFence{}, ErrCodexLeaseWriterUnavailable
 	}
@@ -154,6 +162,17 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 	next, post, err := store.applyCodexLaneMutationLocked(expected, mutation)
 	if err != nil {
 		return CodexLeaseGenerationFence{}, err
+	}
+	retentionSweepAt := time.Time{}
+	if store.policy.Retention > 0 && store.policy.Now != nil {
+		now := store.policy.Now().UTC()
+		if store.lastRetentionSweep.IsZero() || !now.Before(store.lastRetentionSweep.Add(codexLeaseRetentionSweepInterval)) {
+			next, _, err = compactCodexLeaseV2Envelope(next, now, store.policy.Retention)
+			if err != nil {
+				return CodexLeaseGenerationFence{}, fmt.Errorf("%w: retention sweep: %w", ErrCodexLeaseInvalidMutation, err)
+			}
+			retentionSweepAt = now
+		}
 	}
 	if err := validateCodexLeaseRepresentedModes(representedCodexLeaseAuthoritativeEpochs(next.Records), store.modes); err != nil {
 		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: strict candidate validation: %w", ErrCodexLeaseInvalidMutation, err)
@@ -188,8 +207,11 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 	}
 	store.v2 = &installedEnvelope
 	store.generation = installedEnvelope.Generation
-	store.journalBytes = append([]byte(nil), installed...)
+	store.journalBytes = installed
 	store.journalID = installedID
+	if !retentionSweepAt.IsZero() {
+		store.lastRetentionSweep = retentionSweepAt
+	}
 	if capture != nil {
 		capture(cloneCodexLeaseGenerationFence(post), installedEnvelope)
 	}

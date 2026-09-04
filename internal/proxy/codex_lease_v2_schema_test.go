@@ -910,7 +910,7 @@ func TestCodexLeaseV2SchemaRejectsInvalidLifecycleTimestampsAndOrdering(t *testi
 	codexLeaseV2RunSemanticRejectionTable(t, store, tests)
 }
 
-func codexLeaseV2SchemaFixture(t *testing.T) (*CodexLeaseStore, codexLeaseJournalEnvelopeV2) {
+func codexLeaseV2SchemaFixture(t testing.TB) (*CodexLeaseStore, codexLeaseJournalEnvelopeV2) {
 	t.Helper()
 	store := &CodexLeaseStore{key: bytes.Repeat([]byte{0x5a}, codexLeaseHMACKeyBytes)}
 	cutoverAt := time.Date(2026, time.August, 9, 1, 0, 0, 0, time.UTC)
@@ -1103,7 +1103,7 @@ func codexLeaseV2SignSchemaFixture(t *testing.T, store *CodexLeaseStore, envelop
 	}
 }
 
-func codexLeaseV2RefreshPlanDigest(t *testing.T, store *CodexLeaseStore, record *CodexJournalRecordV2) {
+func codexLeaseV2RefreshPlanDigest(t testing.TB, store *CodexLeaseStore, record *CodexJournalRecordV2) {
 	t.Helper()
 	slots, err := json.Marshal(record.AttemptEnvelope.Slots)
 	if err != nil {

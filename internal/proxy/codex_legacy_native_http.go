@@ -69,13 +69,11 @@ func (handler *legacyCodexNativeHTTPHandler) Handle(w http.ResponseWriter, r *ht
 
 	// Emit payload diagnostics before any body rewrite.
 	sessionKey, sessionSource := payloadSessionCorrelation(r.Header, decodedBody)
-	payloadBody, payloadEncoding := encodeCodexTracePayload(body)
-	emitCodexTracePayload(ctx, PayloadEvent{
+	emitCodexRawTracePayload(ctx, PayloadEvent{
 		Method: r.Method, Path: r.URL.Path, Provider: "codex", RouteKind: "codex_native", Direction: "downstream_request",
 		Model: model, ClientKind: clientKindFromUserAgent(r.Header.Get("User-Agent")),
 		SessionKey: sessionKey, SessionSource: sessionSource, Headers: codexTraceHeaders(r.Header), Complete: true,
-		BodyBytes: len(body), BodyEncoding: payloadEncoding, Body: payloadBody,
-	})
+	}, body)
 
 	// Compress Responses API input via headroom bridge if available.
 	// Fail-open: on error, log and continue with original body.

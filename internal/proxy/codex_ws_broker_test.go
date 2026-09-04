@@ -1734,30 +1734,53 @@ func TestServerCodexWebSocketEnforceTracesSafeBrokerFailure(t *testing.T) {
 		brokerErr    error
 		wantDecision string
 		wantReason   string
+		wantClose    int
 	}{
 		{
 			name:         "plan failure",
 			brokerErr:    fmt.Errorf("private wrapped cause: %w", newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch)),
 			wantDecision: "plan_failed",
 			wantReason:   "lease_authority_mismatch",
+			wantClose:    websocket.CloseInternalServerErr,
 		},
 		{
 			name:         "unknown broker failure",
 			brokerErr:    errors.New("private broker failure token-should-not-leak"),
 			wantDecision: "broker_failed",
 			wantReason:   "unknown",
+			wantClose:    websocket.CloseInternalServerErr,
 		},
 		{
 			name:         "lease transition",
 			brokerErr:    ErrCodexLeaseTransition,
 			wantDecision: "broker_failed",
 			wantReason:   "lease_transition",
+			wantClose:    websocket.CloseInternalServerErr,
 		},
 		{
 			name:         "concurrent turn",
 			brokerErr:    ErrCodexConcurrentTurn,
 			wantDecision: "broker_failed",
 			wantReason:   "concurrent_turn",
+			wantClose:    websocket.CloseInternalServerErr,
+		},
+		{
+			name: "message too big",
+			brokerErr: &codexWebSocketBrokerError{failure: codexWebSocketFailure{
+				Stage: codexWebSocketFailureStageUpstreamRead, Reason: codexWebSocketFailureReasonMessageTooBig,
+			}},
+			wantDecision: "broker_failed",
+			wantReason:   "message_too_big",
+			wantClose:    websocket.CloseMessageTooBig,
+		},
+		{
+			name: "local oversize frame",
+			brokerErr: &codexWSInvalidFrameError{
+				Origin: codexWSInvalidFrameEnvelope, Type: codexWSFrameText, Size: codexWSFrameSizeOversize,
+			},
+			wantDecision: "broker_failed",
+			wantReason:   "invalid_frame",
+			wantClose:    websocket.CloseMessageTooBig,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1795,8 +1818,8 @@ func TestServerCodexWebSocketEnforceTracesSafeBrokerFailure(t *testing.T) {
 			if err := client.WriteMessage(websocket.TextMessage, codexTerminatingWSFrame("turn-private", "")); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseInternalServerErr) {
-				t.Fatalf("downstream close = %v, want 1011", err)
+			if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, test.wantClose) {
+				t.Fatalf("downstream close = %v, want %d", err, test.wantClose)
 			}
 
 			events := waitForDiagnosticsEvents(t, path, 1)
@@ -2318,7 +2341,7 @@ func TestCodexWSIdleUpstreamDropsLateMaintenanceFrame(t *testing.T) {
 	}
 }
 
-func TestCodexWSIdleUpstreamRejectsLateResponseFrame(t *testing.T) {
+func TestCodexWSIdleUpstreamClosesSocketWithLateResponseFrame(t *testing.T) {
 	t.Parallel()
 	readFrames := make(chan codexWSUpstreamRead, 2)
 	readFrames <- codexWSUpstreamRead{
@@ -2334,8 +2357,8 @@ func TestCodexWSIdleUpstreamRejectsLateResponseFrame(t *testing.T) {
 		readFrames: readFrames,
 	}
 
-	if err := codexWSIdleUpstreamError(active); !errors.Is(err, ErrCodexWSInvalidFrame) {
-		t.Fatalf("idle response frame = %v, want %v", err, ErrCodexWSInvalidFrame)
+	if err := codexWSIdleUpstreamError(active); !codexWSIdleUpstreamClosed(err) {
+		t.Fatalf("idle response frame = %v, want stale upstream closure", err)
 	}
 }
 
@@ -2973,6 +2996,51 @@ func TestCodexTerminatingWSBrokerClassifiesUpstreamCloseBeforeCompletion(t *test
 	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
 		return event.Phase == "terminal" && event.Stage == "upstream_read" && event.Reason == "upstream_outcome_indeterminate"
 	}, "WebSocket close before completion")
+}
+
+func TestCodexTerminatingWSBrokerRejectsUpstreamMessageTooBigWithoutIndeterminateLease(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	plan := codexLeaseRuntimeTestPlan("turn-a", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect,
+	}})
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator), slots: plan.Slots}
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{
+		messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", ""),
+	}}}
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{
+		err: &websocket.CloseError{Code: websocket.CloseMessageTooBig, Text: "private upstream detail"},
+	}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = broker.Serve(context.Background(), downstream)
+	if err == nil {
+		t.Fatal("upstream close 1009 succeeded")
+	}
+	failure := classifyCodexWebSocketFailure(err)
+	if failure.Stage != codexWebSocketFailureStageUpstreamRead || failure.Reason != codexWebSocketFailureReasonMessageTooBig {
+		t.Fatalf("upstream close 1009 = %s/%s, want upstream_read/message_too_big", failure.Stage, failure.Reason)
+	}
+	if strings.Contains(err.Error(), "private upstream detail") {
+		t.Fatalf("broker error leaked upstream detail: %q", err)
+	}
+	restored, err := coordinator.store.LoadLane(plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.ResolvedRecords) != 1 {
+		t.Fatalf("rejected lane records = %#v", restored.ResolvedRecords)
+	}
+	record := restored.ResolvedRecords[0].Record
+	if record.State != LeaseFailedUnadmitted || codexLeaseCurrentAttemptState(record) != CodexAttemptProviderFailed || record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 {
+		t.Fatalf("close 1009 lease = %#v, want reusable rejected head", record)
+	}
 }
 
 func TestCodexTerminatingWSBrokerTreatsNormalDownstreamCloseAfterCompletedTurnAsClean(t *testing.T) {

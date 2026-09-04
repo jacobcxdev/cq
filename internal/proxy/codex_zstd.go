@@ -77,8 +77,8 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		if codexLimitExceeded(len(body), limits.MaxDecodedBytes) {
 			return CodexDecodedRequest{}, errors.New("Codex decoded request exceeds limit")
 		}
-		original := append([]byte(nil), body...)
-		return CodexDecodedRequest{original: original, decoded: append([]byte(nil), body...), encoding: encoding}, nil
+		original := bytes.Clone(body)
+		return CodexDecodedRequest{original: original, decoded: original, encoding: encoding}, nil
 	}
 	if encoding != "zstd" {
 		return CodexDecodedRequest{}, fmt.Errorf("unsupported Codex content encoding %q", contentEncoding)
@@ -134,7 +134,7 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 		return CodexDecodedRequest{}, errors.New("Codex zstd expansion ratio exceeds limit")
 	}
 	original := append([]byte(nil), body...)
-	return CodexDecodedRequest{original: original, decoded: bytes.Clone(decoded), encoding: encoding}, nil
+	return CodexDecodedRequest{original: original, decoded: decoded, encoding: encoding}, nil
 }
 
 func codexZstdFrame(body []byte) bool {
@@ -204,7 +204,7 @@ func EncodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 	if ratioLimited && len(body) > decodeLimit {
 		return nil, errors.New("Codex zstd expansion ratio exceeds limit")
 	}
-	return bytes.Clone(encoded), nil
+	return encoded, nil
 }
 
 func codexHTTPZstdLimits() CodexZstdLimits {

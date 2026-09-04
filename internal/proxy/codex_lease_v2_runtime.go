@@ -560,7 +560,7 @@ func (set *codexLanePlanningGateSet) releaseReference(lane LaneKey, entry *codex
 }
 
 func (runtime *CodexLeaseRuntime) requestPlanningAvailable(key LeaseKey, accounts []codex.AccountKey, authority CodexLeaseAuthorityPolicy) (bool, string, error) {
-	restored, err := runtime.store.LoadLane(key, accounts, authority)
+	restored, err := runtime.store.loadLaneSnapshot(key, accounts, authority)
 	if err != nil {
 		return false, "", err
 	}
@@ -630,7 +630,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	defer release()
 
-	restored, err := runtime.store.LoadLane(plan.Key, plan.Accounts, plan.Authority)
+	restored, err := runtime.store.loadLaneSnapshot(plan.Key, plan.Accounts, plan.Authority)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +685,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		break
 	}
 	if revalidated {
-		restored, err = runtime.store.LoadLane(plan.Key, plan.Accounts, plan.Authority)
+		restored, err = runtime.store.loadLaneSnapshot(plan.Key, plan.Accounts, plan.Authority)
 		if err != nil {
 			return nil, err
 		}
@@ -1650,7 +1650,7 @@ func (handle *CodexLeaseRequestHandle) refreshMutationFence() (CodexLeaseGenerat
 	if handle == nil || handle.runtime == nil || len(handle.fence.TouchedRecords) == 0 {
 		return CodexLeaseGenerationFence{}, ErrCodexLeaseWriterUnavailable
 	}
-	restored, err := handle.runtime.store.LoadLane(handle.key, handle.accounts, handle.authority)
+	restored, err := handle.runtime.store.loadLaneSnapshot(handle.key, handle.accounts, handle.authority)
 	if err != nil {
 		return CodexLeaseGenerationFence{}, err
 	}
@@ -1727,6 +1727,8 @@ func (runtime *CodexLeaseRuntime) beginLifecycleMutationContext(ctx context.Cont
 		return nil, fmt.Errorf("%w: nil lifecycle context", ErrCodexLeaseInvalidMutation)
 	}
 	lifecycle := runtime.leases.lifecycle
+	finishWait := codexProcessRuntimeObservability.beginPersistenceWait()
+	defer finishWait()
 	for !lifecycle.persistence.TryLock() {
 		timer := time.NewTimer(time.Millisecond)
 		select {

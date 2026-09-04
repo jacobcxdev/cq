@@ -34,8 +34,9 @@ type CodexLeaseRouteSnapshot struct {
 }
 
 // LoadRouteSnapshot returns the requested lane's bound and affinity accounts
-// together with global provisional route counts from the same signed journal
-// generation.
+// together with global provisional route counts from the same authenticated
+// in-memory journal generation. A later durable mutation revalidates installed
+// bytes before replacement, so route probes never queue behind journal I/O.
 func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Context, key LeaseKey, accounts []codex.AccountKey, policy CodexLeaseAuthorityPolicy) (CodexLeaseRouteSnapshot, error) {
 	if coordinator == nil || coordinator.store == nil || coordinator.leases == nil || coordinator.leases.lifecycle == nil || coordinator.leases.mu == nil {
 		return CodexLeaseRouteSnapshot{}, ErrCodexLeaseWriterUnavailable
@@ -44,17 +45,12 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 		return CodexLeaseRouteSnapshot{}, fmt.Errorf("%w: nil route snapshot context", ErrCodexLeaseInvalidMutation)
 	}
 	policy = cloneCodexLeaseAuthorityPolicy(policy)
-	release, err := coordinator.beginCodexLeaseRouteSnapshot(ctx)
-	if err != nil {
-		return CodexLeaseRouteSnapshot{}, err
-	}
-	defer release()
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return CodexLeaseRouteSnapshot{}, err
 		}
-		restored, err := coordinator.store.LoadLane(key, accounts, policy)
+		restored, err := coordinator.store.loadLaneSnapshot(key, accounts, policy)
 		if err != nil {
 			return CodexLeaseRouteSnapshot{}, err
 		}
@@ -74,12 +70,13 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 			Provisional:       provisional,
 			JournalGeneration: restored.Fence.Journal,
 		}
+		accountResolver := newCodexLeaseAccountResolver(coordinator.store, accounts)
 		_, snapshot.RestartableFailedHead = codexRestoredLaneRestartableFailedHead(restored)
 		unavailable := make(map[codex.AccountKey]struct{})
 		quotaUnavailable := make(map[codex.AccountKey]struct{})
 		if restored.RequestedIdentity == codexLaneRequestScopeIdentity(restored.Lane) {
 			for _, accountHash := range restored.Lane.RequestUnavailableAccountHashes {
-				account, resolved := coordinator.store.resolveCodexLeaseAccount(accountHash, accounts)
+				account, resolved := accountResolver.resolve(accountHash)
 				if !resolved {
 					continue
 				}
@@ -88,7 +85,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 			}
 		}
 		for _, accountHash := range restored.Lane.QuotaExhaustedAccountHashes {
-			account, resolved := coordinator.store.resolveCodexLeaseAccount(accountHash, accounts)
+			account, resolved := accountResolver.resolve(accountHash)
 			if !resolved {
 				continue
 			}
@@ -143,7 +140,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 				}
 				attempt, found := codexLeaseAttemptByGeneration(record.Record.Attempts, record.Record.CurrentAttemptGeneration)
 				if found && !record.Record.NonMigratable && (attempt.State == CodexAttemptPrepared || attempt.State == CodexAttemptDispatched) && attempt.Slot > 0 && int(attempt.Slot) <= len(record.Record.AttemptEnvelope.Slots) && !constantTimeCodexLeaseDigestEqual(record.Record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash, record.Record.AccountHash) {
-					boundAccount, _ = coordinator.store.resolveCodexLeaseAccount(record.Record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash, accounts)
+					boundAccount, _ = accountResolver.resolve(record.Record.AttemptEnvelope.Slots[attempt.Slot-1].AccountHash)
 				}
 				if boundAccount == "" {
 					return CodexLeaseRouteSnapshot{}, fmt.Errorf("%w: persisted bound account is unavailable", ErrCodexLeaseAuthorityMismatch)
@@ -168,8 +165,10 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 	}
 }
 
-func (coordinator *CodexContinuityCoordinator) beginCodexLeaseRouteSnapshot(ctx context.Context) (func(), error) {
+func (coordinator *CodexContinuityCoordinator) beginCodexLeasePersistenceContext(ctx context.Context) (func(), error) {
 	lifecycle := coordinator.leases.lifecycle
+	finishWait := codexProcessRuntimeObservability.beginPersistenceWait()
+	defer finishWait()
 	for !lifecycle.persistence.TryLock() {
 		timer := time.NewTimer(time.Millisecond)
 		select {
@@ -210,10 +209,9 @@ func (store *CodexLeaseStore) loadCodexLeaseProvisionalRouteCounts(expectedGener
 	if store.poisoned != nil {
 		return nil, false, fmt.Errorf("%w: %v", ErrCodexLeaseStorePoisoned, store.poisoned)
 	}
-	if err := store.revalidateV2InstalledLocked(); err != nil {
-		store.poisoned = err
-		return nil, false, err
-	}
+	// loadLaneSnapshot already read the last authenticated in-memory state. A
+	// generation comparison keeps this separate calculation coherent without
+	// holding lifecycle.persistence across either read.
 	if store.v2 == nil {
 		return nil, false, fmt.Errorf("%w: schema-v2 journal unavailable", ErrCodexLeaseTrustLost)
 	}
@@ -227,23 +225,45 @@ func (store *CodexLeaseStore) loadCodexLeaseProvisionalRouteCounts(expectedGener
 		return nil, false, nil
 	}
 
-	current := make(map[CodexJournalRecordIdentity]struct{}, len(store.v2.Lanes))
+	type currentRecord struct {
+		sessionHash   string
+		threadHash    string
+		namespaceHash string
+		turnHash      string
+		modeEpoch     uint64
+		authoritative bool
+	}
+	current := make(map[currentRecord]struct{}, len(store.v2.Lanes))
 	for _, lane := range store.v2.Lanes {
-		identity := codexLaneTupleIdentity(lane, true)
-		if !identity.IsZero() {
-			current[identity] = struct{}{}
+		if lane.CurrentTurnHash != "" {
+			current[currentRecord{
+				sessionHash:   lane.SessionHash,
+				threadHash:    lane.ThreadHash,
+				namespaceHash: lane.NamespaceHash,
+				turnHash:      lane.CurrentTurnHash,
+				modeEpoch:     lane.CurrentModeEpoch,
+				authoritative: lane.CurrentAuthoritative,
+			}] = struct{}{}
 		}
 	}
 	provisional := make(map[codex.AccountKey]int)
+	accountResolver := newCodexLeaseAccountResolver(store, accounts)
 	for _, record := range store.v2.Records {
-		if _, ok := current[record.Identity()]; !ok || record.EverAdmitted || record.State != LeaseProvisional || record.RoutingRefs != 1 {
+		if _, ok := current[currentRecord{
+			sessionHash:   record.SessionHash,
+			threadHash:    record.ThreadHash,
+			namespaceHash: record.NamespaceHash,
+			turnHash:      record.TurnHash,
+			modeEpoch:     record.ModeEpoch,
+			authoritative: record.Authoritative,
+		}]; !ok || record.EverAdmitted || record.State != LeaseProvisional || record.RoutingRefs != 1 {
 			continue
 		}
 		attempt := codexLeaseCurrentAttemptState(record)
 		if attempt != CodexAttemptPrepared && attempt != CodexAttemptDispatched {
 			continue
 		}
-		account, resolved := store.resolveCodexLeaseAccount(record.AccountHash, accounts)
+		account, resolved := accountResolver.resolve(record.AccountHash)
 		if !resolved {
 			return nil, false, fmt.Errorf("%w: active provisional account is unavailable", ErrCodexLeaseAuthorityMismatch)
 		}
