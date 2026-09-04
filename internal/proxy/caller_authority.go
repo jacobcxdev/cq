@@ -314,9 +314,7 @@ func normalCallerIndexMAC(key []byte, index NormalCallerIndexV1) string {
 type NormalCallerAdmissionStore struct {
 	mu        sync.Mutex
 	directory fsutil.SecureDirectory
-	inspector fsutil.SecurePathInspector
-	now       func() time.Time
-	lastPrune time.Time
+	pruner    *ephemeralReceiptPruner
 	closed    bool
 }
 
@@ -347,13 +345,13 @@ func OpenNormalCallerAdmissionStore(fsys fsutil.FileSystem, path string) (*Norma
 	if err != nil {
 		return nil, errors.Join(ErrNormalCallerAuthUnavailable, err)
 	}
-	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	_, ok = fsys.(fsutil.SecurePathInspector)
 	if !ok {
 		_ = directory.Close()
 		return nil, ErrNormalCallerAuthUnavailable
 	}
-	store := &NormalCallerAdmissionStore{directory: directory, inspector: inspector, now: time.Now}
-	store.pruneLocked(store.now())
+	store := &NormalCallerAdmissionStore{directory: directory}
+	store.pruner = startEphemeralReceiptPruner(fsys, path, "consumed-", ephemeralReceiptAdmission, time.Now)
 	return store, nil
 }
 
@@ -373,7 +371,6 @@ func (store *NormalCallerAdmissionStore) Consume(_ context.Context, consumption 
 	if store.closed || store.directory == nil {
 		return ErrNormalCallerAuthUnavailable
 	}
-	store.pruneLocked(store.now())
 	name := "consumed-" + consumption.AdmissionID + ".json"
 	file, err := store.directory.CreateExclusive(name, 0o600)
 	if err != nil {
@@ -407,31 +404,26 @@ func (store *NormalCallerAdmissionStore) Consume(_ context.Context, consumption 
 	return nil
 }
 
-func (store *NormalCallerAdmissionStore) pruneLocked(now time.Time) {
-	if store == nil || store.directory == nil || (!store.lastPrune.IsZero() && now.Before(store.lastPrune.Add(ephemeralReceiptPruneInterval))) {
-		return
-	}
-	store.lastPrune = now
-	remaining, pruned, err := pruneEphemeralReceipts(store.inspector, store.directory, "consumed-", now)
-	proxyProcessEphemeralState.recordScan(ephemeralReceiptAdmission, remaining, pruned, err)
-}
-
 func (store *NormalCallerAdmissionStore) Close() error {
 	if store == nil {
 		return nil
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	if store.closed {
+		store.mu.Unlock()
 		return nil
 	}
 	store.closed = true
-	if store.directory == nil {
-		return nil
-	}
-	err := store.directory.Close()
+	pruner := store.pruner
+	store.pruner = nil
+	directory := store.directory
 	store.directory = nil
-	return err
+	store.mu.Unlock()
+	pruneErr := pruner.stop()
+	if directory == nil {
+		return pruneErr
+	}
+	return errors.Join(pruneErr, directory.Close())
 }
 
 func NewProductionNormalCallerAuthority(key []byte, epoch uint64, credentials []NormalCallerCredentialV1, store *NormalCallerAdmissionStore) (*NormalCallerAuthority, error) {
