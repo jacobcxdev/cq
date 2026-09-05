@@ -115,6 +115,7 @@ func (state *runtimeCallerCredentialState) snapshot(ctx context.Context) ([]Norm
 		return nil, NormalCallerIndexV1{}, err
 	}
 	bound := append([]NormalCallerCredentialV1(nil), published...)
+	indexed := append([]NormalCallerCredentialV1(nil), published...)
 	now := state.now()
 	for _, existing := range state.bound {
 		duplicate := false
@@ -132,19 +133,29 @@ func (state *runtimeCallerCredentialState) snapshot(ctx context.Context) ([]Norm
 		}
 		if now.Before(existing.ValidUntil) {
 			bound = append(bound, existing)
+			duplicateBearer := false
+			for _, current := range indexed {
+				if current.Domain == existing.Domain && current.Bearer == existing.Bearer {
+					duplicateBearer = true
+					break
+				}
+			}
+			if !duplicateBearer {
+				indexed = append(indexed, existing)
+			}
 		}
 	}
 	epoch := state.epoch
 	if epoch == 0 {
 		epoch = 1
 	}
-	index, err := BuildNormalCallerIndexV1(state.key, epoch, bound)
+	index, err := BuildNormalCallerIndexV1(state.key, epoch, indexed)
 	if err != nil {
 		return nil, NormalCallerIndexV1{}, err
 	}
 	if state.epoch != 0 && !slices.Equal(index.Entries, state.index.Entries) {
 		epoch++
-		index, err = BuildNormalCallerIndexV1(state.key, epoch, bound)
+		index, err = BuildNormalCallerIndexV1(state.key, epoch, indexed)
 		if err != nil {
 			return nil, NormalCallerIndexV1{}, err
 		}

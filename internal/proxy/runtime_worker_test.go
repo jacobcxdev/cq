@@ -47,8 +47,12 @@ func TestRuntimeCallerCredentialStateRetainsKnownExpiryBeyondAdmissionLifetime(t
 	current = []NormalCallerCredentialV1{{
 		Domain: NormalCallerCodex, Bearer: "new-bearer", SubjectID: "account\x00candidate\x00revision-b", ValidUntil: expires,
 	}}
-	if _, _, err := state.snapshot(context.Background()); err != nil {
+	_, index, err := state.snapshot(context.Background())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(index.Entries) != 2 {
+		t.Fatalf("published caller entries = %d, want current and superseded bearers", len(index.Entries))
 	}
 	now = now.Add(6 * time.Second)
 
@@ -161,6 +165,51 @@ func TestRuntimeCallerCredentialStateBoundsOpaqueBearerRollover(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expired opaque rollover status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestRuntimeCallerCredentialStatePublishesOpaqueBearerOnceAfterRollover(t *testing.T) {
+	key := bytes.Repeat([]byte{0x73}, sha256.Size)
+	current := []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "opaque-bearer", SubjectID: "account\x00candidate\x00revision-a",
+	}}
+	state, err := newRuntimeCallerCredentialState(key, func(context.Context) ([]NormalCallerCredentialV1, error) {
+		return append([]NormalCallerCredentialV1(nil), current...), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.snapshot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current = []NormalCallerCredentialV1{{
+		Domain: NormalCallerCodex, Bearer: "opaque-bearer", SubjectID: "account\x00candidate\x00revision-b",
+	}}
+	bound, index, err := state.snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bound) != 2 {
+		t.Fatalf("bound credentials = %d, want current and retained", len(bound))
+	}
+	if len(index.Entries) != 1 {
+		t.Fatalf("published caller entries = %d, want one", len(index.Entries))
+	}
+
+	authority, err := NewNormalCallerAuthorityFromIndex(
+		key,
+		index,
+		&callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)},
+		time.Now,
+		rand.Reader,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", nil)
+	request.Header.Set("Authorization", "Bearer opaque-bearer")
+	if _, err := authority.authenticate(request, normalCallerRouteCodex); err != nil {
+		t.Fatalf("current opaque bearer rejected after rollover: %v", err)
 	}
 }
 
