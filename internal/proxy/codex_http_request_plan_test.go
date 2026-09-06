@@ -1461,6 +1461,85 @@ func TestCodexHTTPRequestPlanFactorySurvivesCallerRevisionRotation(t *testing.T)
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryProbesStatefulBoundAccountForAuthenticatedPortableRetry(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	seed := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account", CandidateID: "candidate-current", Kind: CodexAttemptSlotDirect},
+	})
+	seed.Key.Lane.Session = "session"
+	seed.Key.Lane.Thread = "thread"
+	seed.RequestedModel = "gpt-5"
+	seed.EffectiveModel = "gpt-5"
+	seed.RequiredBuckets = []CapacityBucket{CapacityBucketBase}
+	handle, err := runtimeLease.BeginRequest(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitWebSocketContext(context.Background(), CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: 1,
+		UpstreamGeneration:   1,
+		TurnState:            "private-turn-state",
+		HasTurnState:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	account := frozenDispatchTestLogicalAccount(
+		"account",
+		frozenDispatchCandidate("account", "candidate-stale", "revision-stale", codex.SourceSystem, false, now.Add(time.Hour)),
+		frozenDispatchCandidate("account", "candidate-current", "revision-current", codex.SourceSystem, false, now.Add(time.Hour)),
+	)
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory:         &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{account}}},
+		Routes:            coordinator,
+		Runtime:           runtimeLease,
+		DefaultAccountKey: "account",
+		Authority:         seed.Authority,
+		Now:               func() time.Time { return now },
+	}
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerCodex})
+	ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate-current\x00revision-current")
+
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "portable retry"),
+	})
+	if err != nil {
+		var planErr *CodexHTTPRequestPlanError
+		if errors.As(err, &planErr) {
+			t.Fatalf("authenticated portable retry = stage %s reason %s", planErr.Code, planErr.Reason)
+		}
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	if prepared.leaseHandle.AccountKey() != "account" || prepared.leaseHandle.RequestGeneration() != 2 {
+		t.Fatalf("retry authority = account %q generation %d, want account/2", prepared.leaseHandle.AccountKey(), prepared.leaseHandle.RequestGeneration())
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryRejectsAuthenticatedCallerWithoutRoutableCandidate(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
