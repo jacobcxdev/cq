@@ -462,6 +462,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if !codexHTTPRequestExpectedBoundMatchesSnapshot(input.ExpectedBound, snapshot) {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexLeaseAuthorityMismatch)
 	}
+	boundSnapshot := snapshot
 	snapshot = codexHTTPRequestDetachPortableUnavailableRoute(snapshot, protocol, input.ExpectedBound)
 	snapshot = codexHTTPRequestDetachInvalidatedPortableRoute(snapshot, protocol, input.ExpectedBound)
 
@@ -628,6 +629,18 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			if routeErr != nil || finalChoice.AccountKey != choice.AccountKey {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
 			}
+		}
+	}
+	if expectedBound == nil && authenticatedCodexCaller && snapshot.BoundAccountKey == "" &&
+		boundSnapshot.Classification == CodexRestoredLaneCurrent && !boundSnapshot.RestartableFailedHead &&
+		boundSnapshot.BoundAccountKey == choice.AccountKey && boundSnapshot.BoundIdentity.Authoritative &&
+		boundSnapshot.BoundRecordGeneration != 0 && containsCodexHTTPRequestAccountKey(boundSnapshot.QuotaExhaustedAccountKeys, choice.AccountKey) {
+		authenticatedBoundContinuation = true
+		authenticatedCallerContinuity = true
+		expectedBound = &CodexLeaseBoundExpectation{
+			Identity:         boundSnapshot.BoundIdentity,
+			AccountKey:       boundSnapshot.BoundAccountKey,
+			RecordGeneration: boundSnapshot.BoundRecordGeneration,
 		}
 	}
 	quotaExhaustionProbe := containsCodexHTTPRequestAccountKey(snapshot.QuotaExhaustedAccountKeys, choice.AccountKey)
