@@ -194,8 +194,18 @@ func TestCodexReserveNaturalResetNeedsNewObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = now.Add(2 * time.Second)
-	if reserve.Status().Enabled {
+	status := reserve.Status()
+	if status.Enabled {
 		t.Fatal("clock alone rearmed bypass")
+	}
+	if !status.Blocked || status.Reason != "usage_stale" {
+		t.Fatalf("expired bypass admitted account without fresh reset evidence: %+v", status)
+	}
+	if blocked, _ := reserve.Blocked("system"); !blocked {
+		t.Fatal("expired bypass admitted system account during usage outage")
+	}
+	if blocked, _ := reserve.Blocked("other"); blocked {
+		t.Fatal("expired system bypass blocked another account")
 	}
 	ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 100, ResetAtUnix: now.Add(7 * 24 * time.Hour).Unix()}}}})
 	if !reserve.Status().Enabled {

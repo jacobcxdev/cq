@@ -256,6 +256,10 @@ func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email strin
 		} else {
 			status.Enabled = false
 			status.Reason = "disabled_until_reset"
+			if r.now().Unix() >= b.ResetAt {
+				status.Blocked = true
+				status.Reason = "usage_stale"
+			}
 			return status
 		}
 	}
