@@ -39,6 +39,7 @@ const (
 
 // CapacityFact is one bounded, ordered observation for an account and bucket.
 type CapacityFact struct {
+	Windows              map[quota.WindowName]quota.Window
 	AccountKey           codex.AccountKey
 	Bucket               CapacityBucket
 	RemainingPct         int
@@ -87,7 +88,10 @@ type CodexCapacityObservationStream struct {
 
 // CodexCapacityLedger holds bounded capacity facts and active lease counts.
 type CodexCapacityLedger struct {
-	mu sync.RWMutex
+	// Reserve is bound before serving requests.
+	Reserve *CodexReserve
+	windows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	mu      sync.RWMutex
 
 	now    func() time.Time
 	maxAge time.Duration
@@ -173,6 +177,7 @@ func (l *CodexCapacityLedger) observeLocked(fact CapacityFact) bool {
 	if current, ok := l.facts[key]; ok && !capacityFactAdvances(current, fact) {
 		return false
 	}
+	l.observeWindowsLocked(fact)
 	l.facts[key] = fact
 	l.updateHardFenceState(key, fact)
 	return true
@@ -232,6 +237,7 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 		return
 	}
 	type aggregate struct {
+		windows   map[quota.WindowName]quota.Window
 		remaining int
 		reset     time.Time
 		set       bool
@@ -243,6 +249,10 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 			bucket = CapacityBucket(capacityBucketModelPrefix + strings.ToLower(ParseModel(scoped)))
 		}
 		current := aggregates[bucket]
+		if current.windows == nil {
+			current.windows = make(map[quota.WindowName]quota.Window)
+		}
+		current.windows[name] = window
 		reset := time.Time{}
 		if window.ResetAtUnix > 0 {
 			reset = time.Unix(window.ResetAtUnix, 0)
@@ -261,6 +271,7 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 		l.seq++
 		fact := CapacityFact{
 			AccountKey:   account,
+			Windows:      aggregate.windows,
 			Bucket:       bucket,
 			RemainingPct: aggregate.remaining,
 			Source:       CapacitySourceUsageCache,
@@ -277,6 +288,11 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 // Capacity returns exact bucket state, falling scoped requests back to shared
 // state without letting an authoritative shared zero gate another bucket.
 func (l *CodexCapacityLedger) Capacity(account codex.AccountKey, bucket CapacityBucket) CapacityView {
+	if l != nil && l.Reserve != nil {
+		if blocked, reset := l.Reserve.Blocked(account); blocked {
+			return CapacityView{State: CapacityZero, ResetAt: time.Unix(reset, 0), Exact: true}
+		}
+	}
 	if l == nil || account == "" {
 		return CapacityView{State: CapacityUnknown}
 	}

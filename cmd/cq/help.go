@@ -154,6 +154,7 @@ Commands:
   proxy validate-http Request one-shot installed HTTP validation
   proxy pin           Pin Claude or Codex proxy routing
   proxy default       Configure provider routing defaults
+  proxy reserve       Protect a selected quota window for the system account
   proxy prime         Manage Codex quota-window priming
   proxy endpoint      Explicitly inspect or transition the credential endpoint
   proxy policy        Initialise, apply, or inspect routing policy
@@ -339,6 +340,51 @@ Restart proxy to apply changes.
 
 Options:
   --clear            Clear the Codex routing default
+`,
+	"proxy reserve": `Usage: cq proxy reserve <set|disable|enable|clear|status|windows>
+
+Protect remaining quota for the current system account only. Other accounts
+remain eligible independently of pool membership. Requires the running CQ service.
+
+Commands:
+  set --window WINDOW --percent PERCENT  Configure remaining quota to protect
+  disable                              Release the reserve until the window resets
+  enable                               Re-enable protection
+  clear                                Remove reserve configuration
+  status                               Show configuration, availability, and freshness
+  windows                              List exact available window selectors
+
+Options: --json, --port PORT
+`,
+	"proxy reserve set": `Usage: cq proxy reserve set --window WINDOW --percent PERCENT [--json] [--port PORT]
+
+Configure remaining quota to protect for the current system account.
+Requires the running CQ service.
+`,
+	"proxy reserve disable": `Usage: cq proxy reserve disable [--json] [--port PORT]
+
+Release the reserve until fresh usage confirms a reset.
+Requires the running CQ service.
+`,
+	"proxy reserve enable": `Usage: cq proxy reserve enable [--json] [--port PORT]
+
+Re-enable system account reserve protection.
+Requires the running CQ service.
+`,
+	"proxy reserve clear": `Usage: cq proxy reserve clear [--json] [--port PORT]
+
+Remove the system account reserve configuration.
+Requires the running CQ service.
+`,
+	"proxy reserve status": `Usage: cq proxy reserve status [--json] [--port PORT]
+
+Show system account reserve state.
+Requires the running CQ service.
+`,
+	"proxy reserve windows": `Usage: cq proxy reserve windows [--json] [--port PORT]
+
+List exact available system account quota window selectors.
+Requires the running CQ service.
 `,
 	"proxy prime": `Usage: cq proxy prime <command>
 
@@ -736,6 +782,9 @@ func validateProxyLexicalGrammar(args []string) error {
 		if len(args) > 3 || (len(args) == 3 && args[2] != "--clear" && strings.HasPrefix(args[2], "-")) {
 			return errors.New(proxyCodexDefaultUsageMessage)
 		}
+	case "reserve":
+		_, err := parseProxyReserveOptions(args[1:])
+		return err
 	case "prime":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: cq proxy prime <status|enable|disable>")
@@ -989,7 +1038,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "endpoint": true, "policy": true, "rescue": true, "leases": true, "trace": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "reserve": true, "endpoint": true, "policy": true, "rescue": true, "leases": true, "trace": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -1122,6 +1171,19 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 			return []string{"proxy", "default", "codex"}, true
 		}
 		return nil, false
+	}
+	if args[0] == "reserve" {
+		if len(args) < 2 {
+			return nil, false
+		}
+		path := []string{"proxy", "reserve"}
+		if args[1] == "help" {
+			path = append(path, args[2:]...)
+		} else if !isHelpToken(args[1]) {
+			path = append(path, args[1])
+		}
+		_, ok := manualHelp(path)
+		return path, ok && helpRequested(args[1:])
 	}
 	if args[0] == "endpoint" {
 		if len(args) == 1 || helpRequested(args[1:]) {

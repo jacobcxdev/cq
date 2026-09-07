@@ -203,6 +203,11 @@ func (executor *CodexAttemptExecutor) DispatchFrozen(
 	request *http.Request,
 	markDispatched func(CandidateAttempt) error,
 ) (*http.Response, CandidateAttempt, bool, error) {
+	if executor != nil && request != nil && request.Method != http.MethodGet {
+		if err := reserveDispatchError(executor.Reserve, choice.AccountKey); err != nil {
+			return nil, attempt, false, err
+		}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

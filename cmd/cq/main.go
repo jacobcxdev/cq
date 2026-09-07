@@ -98,6 +98,7 @@ type AgentUninstallCmd struct{}
 
 // ProxyCmd groups local proxy commands.
 type ProxyCmd struct {
+	Reserve      ProxyReserveCmd      `cmd:"" help:"Manage the system account quota reserve"`
 	Start        ProxyStartCmd        `cmd:"" help:"Start local Claude and Codex proxy"`
 	Install      ProxyInstallCmd      `cmd:"" help:"Install proxy launch agent"`
 	Uninstall    ProxyUninstallCmd    `cmd:"" help:"Uninstall proxy launch agent"`

@@ -2,27 +2,33 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 const (
-	defaultCodexRoutingCapacityRefreshInterval = 5 * time.Minute
+	defaultCodexRoutingCapacityRefreshInterval = time.Minute
 	defaultCodexRoutingCapacityRetryInterval   = 30 * time.Second
 )
 
 // CodexRoutingCapacityRefresher fetches bounded usage observations when route
 // capacity has gone stale. It never turns failed observations into capacity.
 type CodexRoutingCapacityRefresher struct {
-	Usage    CodexPrimerUsageReaderAPI
-	Capacity *CodexCapacityLedger
-	Now      func() time.Time
-	Interval time.Duration
+	Usage              CodexPrimerUsageReaderAPI
+	Capacity           *CodexCapacityLedger
+	Now                func() time.Time
+	Interval           time.Duration
+	IntervalForAccount func(codex.AccountKey, map[quota.WindowName]quota.Window) time.Duration
+	OnInventory        func(codex.Inventory)
 
 	mu          sync.Mutex
 	nextRefresh map[codex.AccountKey]time.Time
+	inFlight    map[codex.AccountKey]bool
+	lastSuccess map[codex.AccountKey]time.Time
 }
 
 // CodexPrimerUsageReaderAPI is the read-only usage boundary needed by routing.
@@ -57,13 +63,22 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 	r.mu.Lock()
 	if r.nextRefresh == nil {
 		r.nextRefresh = make(map[codex.AccountKey]time.Time)
+		r.inFlight = make(map[codex.AccountKey]bool)
+		r.lastSuccess = make(map[codex.AccountKey]time.Time)
 	}
 	eligible := make([]codex.AccountKey, 0, len(unique))
 	for _, account := range unique {
-		if now.Before(r.nextRefresh[account]) {
+		next := r.nextRefresh[account]
+		if r.Interval <= 0 && !r.lastSuccess[account].IsZero() {
+			windows, _ := r.Capacity.WindowSnapshot(account)
+			if len(windows) > 0 {
+				next = minRefreshTime(next, r.lastSuccess[account].Add(r.refreshInterval(account, windows)))
+			}
+		}
+		if r.inFlight[account] || now.Before(next) {
 			continue
 		}
-		r.nextRefresh[account] = now.Add(defaultCodexRoutingCapacityRetryInterval)
+		r.inFlight[account] = true
 		eligible = append(eligible, account)
 	}
 	r.mu.Unlock()
@@ -93,29 +108,117 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 	}
 
 	published := false
-	var successful []codex.AccountKey
 	for range eligible {
 		outcome := <-results
-		if outcome.panicked || outcome.err != nil || !outcome.observation.Result.IsUsable() || len(outcome.observation.Result.Windows) == 0 {
-			continue
+		completedAt := time.Now()
+		if r.Now != nil {
+			completedAt = r.Now()
 		}
-		r.Capacity.ObserveQuotaSnapshot(outcome.account, QuotaSnapshot{
-			Result:    outcome.observation.Result,
-			FetchedAt: now,
-		})
-		published = true
-		successful = append(successful, outcome.account)
-	}
-	if published {
-		interval := r.Interval
-		if interval <= 0 {
-			interval = defaultCodexRoutingCapacityRefreshInterval
+		retryAt := completedAt.Add(defaultCodexRoutingCapacityRetryInterval)
+		var httpError *CodexUsageHTTPError
+		if errors.As(outcome.err, &httpError) && httpError.RetryAt.After(retryAt) {
+			retryAt = httpError.RetryAt
+		}
+		valid := !outcome.panicked && outcome.err == nil && outcome.observation.Result.IsUsable() && len(outcome.observation.Result.Windows) > 0
+		if valid {
+			interval := r.refreshInterval(outcome.account, outcome.observation.Result.Windows)
+			retryAt = completedAt.Add(interval)
+		}
+		if valid {
+			r.Capacity.ObserveQuotaSnapshot(outcome.account, QuotaSnapshot{
+				Result:    outcome.observation.Result,
+				FetchedAt: now,
+			})
+			published = true
 		}
 		r.mu.Lock()
-		for _, account := range successful {
-			r.nextRefresh[account] = now.Add(interval)
+		delete(r.inFlight, outcome.account)
+		r.nextRefresh[outcome.account] = retryAt
+		if valid {
+			r.lastSuccess[outcome.account] = completedAt
+		} else {
+			delete(r.lastSuccess, outcome.account)
 		}
 		r.mu.Unlock()
 	}
 	return published
+}
+
+// Run refreshes routable accounts for the lifetime of the service. Route-triggered
+// reads share the same in-flight guard and cooldowns.
+func (r *CodexRoutingCapacityRefresher) Run(ctx context.Context, inventory codex.CredentialInventory) {
+	if r == nil || inventory == nil || r.Usage == nil || r.Capacity == nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		r.refreshInventory(ctx, inventory)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *CodexRoutingCapacityRefresher) refreshInventory(ctx context.Context, inventory codex.CredentialInventory) {
+	defer func() { _ = recover() }()
+	view, err := inventory.List(ctx)
+	if err != nil {
+		return
+	}
+	if r.OnInventory != nil {
+		r.OnInventory(view)
+	}
+	accounts := make([]codex.AccountKey, 0, len(view.Accounts))
+	for _, account := range view.Accounts {
+		if account.Routable && !account.Unstable {
+			accounts = append(accounts, account.Key)
+		}
+	}
+	r.Refresh(ctx, accounts)
+}
+
+func codexUsageRefreshInterval(windows map[quota.WindowName]quota.Window) time.Duration {
+	remaining := 100.0
+	for _, window := range windows {
+		value := float64(window.RemainingPct)
+		if window.RemainingPctExact != nil {
+			value = *window.RemainingPctExact
+		}
+		remaining = min(remaining, value)
+	}
+	switch {
+	case remaining <= 1:
+		return 5 * time.Second
+	case remaining <= 10:
+		return 15 * time.Second
+	case remaining <= 25:
+		return 30 * time.Second
+	default:
+		return defaultCodexRoutingCapacityRefreshInterval
+	}
+}
+
+func minRefreshTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+func (r *CodexRoutingCapacityRefresher) refreshInterval(account codex.AccountKey, windows map[quota.WindowName]quota.Window) time.Duration {
+	if r.Interval > 0 {
+		return r.Interval
+	}
+	interval := codexUsageRefreshInterval(windows)
+	if r.IntervalForAccount != nil {
+		if configured := r.IntervalForAccount(account, windows); configured > 0 {
+			interval = min(interval, configured)
+		}
+	}
+	return interval
 }

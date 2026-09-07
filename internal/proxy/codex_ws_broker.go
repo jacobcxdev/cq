@@ -234,6 +234,13 @@ type codexExplicitWSUpstreamDialer struct {
 	executor ExplicitWebSocketExecutor
 }
 
+func (dialer codexExplicitWSUpstreamDialer) reserveDispatchError(account codex.AccountKey) error {
+	if checker, ok := dialer.executor.(interface{ reserveDispatchError(codex.AccountKey) error }); ok {
+		return checker.reserveDispatchError(account)
+	}
+	return nil
+}
+
 func (dialer codexExplicitWSUpstreamDialer) Dial(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, header http.Header, onDispatch func(CandidateAttempt)) (websocketRelayConn, *http.Response, []byte, CandidateAttempt, error) {
 	if dialer.executor == nil {
 		return nil, nil, nil, attempt, ErrCodexLeaseWriterUnavailable
@@ -397,6 +404,13 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		}, encoded)
 		err = broker.serveFrame(frameCtx, downstream, pending, &active)
 		pending.Release()
+		var limit *CachedUsageLimitError
+		if errors.As(err, &limit) {
+			if writeErr := writeCodexWSMessage(serveCtx, downstream, websocket.TextMessage, []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`)); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
 		if err != nil {
 			failure := classifyCodexWebSocketFailure(err)
 			closeCode, closeReason := codexTraceWebSocketClose(err)
@@ -1243,6 +1257,11 @@ func (broker *codexTerminatingWSBroker) cancelActivePrewarm(active *codexWSActiv
 
 func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *CodexLeaseRequestHandle, receipt *codexTurnReceiptHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream, anchored bool) codexWSDialResult {
 	choice := account.Choice()
+	if checker, ok := broker.config.Upstream.(interface{ reserveDispatchError(codex.AccountKey) error }); ok {
+		if err := checker.reserveDispatchError(choice.AccountKey); err != nil {
+			return codexWSDialResult{err: err}
+		}
+	}
 	if codexWSActiveUpstreamMatchesFirstAttempt(active, account) || (anchored && codexWSActiveUpstreamMatchesAnchoredCandidate(active, account)) {
 		finishTrace := beginCodexTraceLeaseTransition(ctx, "mark_dispatched", handle)
 		marked, err := handle.MarkDispatchedContext(ctx)

@@ -137,3 +137,126 @@ func TestCodexRoutingCapacityRefresherContainsFailureAndPanic(t *testing.T) {
 		t.Fatalf("retry calls = failed:%d available:%d, want 2/1", reader.callCount("failed"), reader.callCount("available"))
 	}
 }
+
+func TestCodexAdaptiveRefreshInterval(t *testing.T) {
+	for _, tc := range []struct {
+		remaining int
+		want      time.Duration
+	}{{100, time.Minute}, {26, time.Minute}, {25, 30 * time.Second}, {10, 15 * time.Second}, {1, 5 * time.Second}, {0, 5 * time.Second}} {
+		got := codexUsageRefreshInterval(map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: tc.remaining}})
+		if got != tc.want {
+			t.Fatalf("remaining %v: got %v want %v", tc.remaining, got, tc.want)
+		}
+	}
+}
+
+func TestCodexRefreshHonoursRetryAfter(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	reader := &codexRoutingUsageReaderStub{errors: map[codex.AccountKey]error{"a": &CodexUsageHTTPError{StatusCode: 429, RetryAt: now.Add(2 * time.Minute)}}, calls: make(map[codex.AccountKey]int)}
+	r := &CodexRoutingCapacityRefresher{Usage: reader, Capacity: NewCodexCapacityLedger(nil, time.Minute), Now: func() time.Time { return now }}
+	r.Refresh(context.Background(), []codex.AccountKey{"a"})
+	now = now.Add(time.Minute)
+	r.Refresh(context.Background(), []codex.AccountKey{"a"})
+	if reader.callCount("a") != 1 {
+		t.Fatal("retried before Retry-After")
+	}
+	now = now.Add(time.Minute)
+	r.Refresh(context.Background(), []codex.AccountKey{"a"})
+	if reader.callCount("a") != 2 {
+		t.Fatal("did not retry at Retry-After")
+	}
+}
+
+type blockingCapacityUsageReader struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingCapacityUsageReader) Read(ctx context.Context, _ codex.AccountKey) (codex.UsageObservation, error) {
+	select {
+	case r.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return codex.UsageObservation{}, ctx.Err()
+	}
+	return codex.UsageObservation{Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 50}}}}, nil
+}
+func TestCodexRefreshCoalescesLongRunningReads(t *testing.T) {
+	reader := &blockingCapacityUsageReader{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	r := &CodexRoutingCapacityRefresher{Usage: reader, Capacity: NewCodexCapacityLedger(nil, time.Minute)}
+	done := make(chan struct{})
+	go func() { defer close(done); r.Refresh(context.Background(), []codex.AccountKey{"a"}) }()
+	<-reader.entered
+	r.mu.Lock()
+	r.nextRefresh["a"] = time.Now().Add(-time.Minute)
+	r.mu.Unlock()
+	if r.Refresh(context.Background(), []codex.AccountKey{"a"}) {
+		t.Fatal("concurrent read published")
+	}
+	select {
+	case <-reader.entered:
+		t.Fatal("duplicate in-flight read")
+	default:
+	}
+	close(reader.release)
+	<-done
+}
+func TestCodexRefresherRunRefreshesInventoryAndStops(t *testing.T) {
+	reader := &blockingCapacityUsageReader{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	r := &CodexRoutingCapacityRefresher{Usage: reader, Capacity: NewCodexCapacityLedger(nil, time.Minute)}
+	inventory := &staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{{Key: "a", Routable: true}, {Key: "b"}}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(ctx, inventory) }()
+	select {
+	case <-reader.entered:
+	case <-time.After(time.Second):
+		t.Fatal("no immediate service refresh")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("service refresh ignored cancellation")
+	}
+}
+
+func TestCodexRefreshAcceleratesFromLiveSnapshot(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	reader := &codexRoutingUsageReaderStub{results: map[codex.AccountKey]codex.UsageObservation{"a": {Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 90}}}}}, calls: make(map[codex.AccountKey]int)}
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Minute)
+	r := &CodexRoutingCapacityRefresher{Usage: reader, Capacity: ledger, Now: func() time.Time { return now }}
+	r.Refresh(context.Background(), []codex.AccountKey{"a"})
+	now = now.Add(5 * time.Second)
+	ledger.ObserveQuotaSnapshot("a", QuotaSnapshot{Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 1}}}, FetchedAt: now})
+	if !r.Refresh(context.Background(), []codex.AccountKey{"a"}) {
+		t.Fatal("latest near-exhausted snapshot did not accelerate refresh")
+	}
+}
+func TestCodexReserveIntervalCallbackAndOverride(t *testing.T) {
+	r := &CodexRoutingCapacityRefresher{IntervalForAccount: func(account codex.AccountKey, _ map[quota.WindowName]quota.Window) time.Duration {
+		if account == "system" {
+			return 5 * time.Second
+		}
+		return time.Minute
+	}}
+	windows := map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 80}}
+	if r.refreshInterval("system", windows) != 5*time.Second || r.refreshInterval("other", windows) != time.Minute {
+		t.Fatal("account callback leaked across accounts")
+	}
+	r.Interval = 2 * time.Minute
+	if r.refreshInterval("system", windows) != 2*time.Minute {
+		t.Fatal("explicit interval override ignored")
+	}
+}
+
+func TestCodexAdaptiveRefreshUsesExactPercent(t *testing.T) {
+	remaining := 1.4
+	windows := map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 1, RemainingPctExact: &remaining}}
+	if got := codexUsageRefreshInterval(windows); got != 15*time.Second {
+		t.Fatalf("fractional remaining cadence = %v", got)
+	}
+}

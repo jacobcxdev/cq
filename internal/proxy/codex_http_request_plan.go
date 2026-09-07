@@ -249,6 +249,11 @@ func (err *CodexHTTPRequestPlanError) Is(target error) bool {
 }
 
 func newCodexHTTPRequestPlanError(code CodexHTTPRequestPlanErrorCode, cause error) error {
+	var capacityErr *CachedUsageLimitError
+	if errors.As(cause, &capacityErr) {
+		return capacityErr
+	}
+
 	return &CodexHTTPRequestPlanError{
 		Code:     code,
 		Reason:   codexRequestFailureReason(cause),

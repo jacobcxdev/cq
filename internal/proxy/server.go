@@ -159,6 +159,7 @@ type Server struct {
 	Refresher RegistryRefresher
 	// RoutingPolicy remains worker-owned while local authenticated control
 	// reads or publishes policy through this process.
+	Reserve       *CodexReserve
 	RoutingPolicy *RoutingPolicyStore
 	SessionPolicy *SessionPolicyResolver
 	// CodexTurnReceipts remains worker-owned and process-local. It exposes only
@@ -374,6 +375,8 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("GET /models", s.handleCodexNativeModels)
 	mux.HandleFunc("GET /v1/registry", s.handleRegistry)
 	mux.HandleFunc("POST /v1/registry/refresh", s.handleRegistryRefresh)
+	mux.HandleFunc("GET "+RuntimeReservePath, s.handleReserveControl)
+	mux.HandleFunc("POST "+RuntimeReservePath, s.handleReserveControl)
 	mux.HandleFunc("GET "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("PUT "+RuntimePolicyPath, s.handlePolicyControl)
 	mux.HandleFunc("POST "+RuntimePolicyPoolPath, s.handlePolicyPoolControl)
@@ -760,6 +763,9 @@ func (s *Server) handleCodexHTTPRoute(w http.ResponseWriter, r *http.Request, ro
 	if err != nil {
 		statusCode = http.StatusBadGateway
 		diagError = diagnosticsErrorCode("api_error", fmt.Sprintf("codex upstream error: %v", err))
+		if writeCodexCapacityError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return
 	}
@@ -1270,6 +1276,11 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamConn, choice, _, capacity, err := s.dialCodexWebSocketWithCapacity(r.Context(), upstreamURL, r.Header, requestedModel)
 	if err != nil {
+		var limit *CachedUsageLimitError
+		if errors.As(err, &limit) {
+			_ = clientConn.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
+			return
+		}
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
 	}
@@ -1278,6 +1289,17 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	observation := newCodexWSObservationSession(wsObserver, r.Context(), choice, capacity)
 	if observation != nil && messageType == websocket.TextMessage {
 		observation.ObserveClient(message)
+	}
+
+	guard := func(_ int, _ []byte) error {
+		if s.CodexRequests != nil && s.CodexRequests.Capacity != nil {
+			return reserveDispatchError(s.CodexRequests.Capacity.Reserve, choice.AccountKey)
+		}
+		return nil
+	}
+	if err := guard(messageType, message); err != nil {
+		_ = clientConn.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
+		return
 	}
 	if err := upstreamConn.WriteMessage(messageType, message); err != nil {
 		if observation != nil {
@@ -1288,7 +1310,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	var downstreamFrameIndex atomic.Int64
 	downstreamFrameIndex.Store(1)
 	var upstreamFrameIndex atomic.Int64
-	relayErr := relayWebSocketPairObserved(r.Context(), clientConn, upstreamConn, func(fromClient bool, messageType int, message []byte) {
+	relayErr := relayWebSocketPairGuarded(r.Context(), clientConn, upstreamConn, func(fromClient bool, messageType int, message []byte) {
 		direction := "upstream_response"
 		frameIndex := int(upstreamFrameIndex.Add(1))
 		if fromClient {
@@ -1309,7 +1331,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		} else {
 			observation.ObserveUpstream(message)
 		}
-	})
+	}, guard)
 	if observation != nil {
 		observation.Close(relayErr)
 	}

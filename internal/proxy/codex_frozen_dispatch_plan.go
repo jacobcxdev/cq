@@ -87,6 +87,15 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		}
 		return CodexFrozenDispatchPlan{}, err
 	}
+	if input.BoundAccountKey != "" && input.Capacity != nil {
+		for _, candidate := range candidates {
+			if candidate.Choice.AccountKey == input.BoundAccountKey && candidate.Compatible && candidate.Routable {
+				if reserveErr := reserveDispatchError(input.Capacity.Reserve, input.BoundAccountKey); reserveErr != nil {
+					return CodexFrozenDispatchPlan{}, reserveErr
+				}
+			}
+		}
+	}
 	for index := range candidates {
 		candidates[index].Value = input.AccountValues[candidates[index].Choice.AccountKey]
 	}
@@ -108,6 +117,22 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		BoundAccountKey:        policyBoundAccountKey,
 	})
 	plan := CodexFrozenDispatchPlan{status: policy.Status(), policyCandidates: candidates}
+	if policy.Status() != CodexRoutePlanReady && (len(policy.Choices()) == 0 || input.BoundAccountKey != "") && input.Capacity != nil {
+		var reservedAccount codex.AccountKey
+		switch policy.Status() {
+		case CodexRoutePlanBoundUnroutable:
+			reservedAccount = input.BoundAccountKey
+		case CodexRoutePlanDefaultUnroutable:
+			reservedAccount = input.DefaultAccountKey
+		case CodexRoutePlanAffinityUnroutable:
+			reservedAccount = input.AffinityAccountKey
+		}
+		if reservedAccount != "" {
+			if reserveErr := reserveDispatchError(input.Capacity.Reserve, reservedAccount); reserveErr != nil {
+				return plan, reserveErr
+			}
+		}
+	}
 	if err != nil {
 		return plan, err
 	}
