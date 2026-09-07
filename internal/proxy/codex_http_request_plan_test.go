@@ -1634,6 +1634,77 @@ func TestCodexHTTPRequestPlanFactoryRoutesFreshAuthenticatedCallerWithinSessionP
 	}
 }
 
+func TestCodexNativeHTTPExhaustedSessionPoolReturns429(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []CodexRequestKind{CodexRequestTurn, CodexRequestCompaction} {
+		for _, defaultKey := range []codex.AccountKey{"", "outside"} {
+			t.Run(string(kind)+"/default="+string(defaultKey), func(t *testing.T) {
+				now := time.Unix(1_700_000_000, 0).UTC()
+				capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+				inventory := codex.Inventory{}
+				for _, key := range []codex.AccountKey{"outside", "pool-a", "pool-b"} {
+					inventory.Accounts = append(inventory.Accounts, frozenDispatchTestLogicalAccount(key,
+						frozenDispatchCandidate(key, "candidate", "revision", codex.SourceSystem, false, now.Add(time.Hour))))
+					remaining := 0
+					if key == "outside" {
+						remaining = 100
+					}
+					frozenDispatchObserveCapacity(t, capacity, key, CapacityBucketBase, remaining, now)
+				}
+				key := []byte("01234567890123456789012345678901")
+				runtime := &codexHTTPRequestPlanTestRuntime{}
+				factory := &CodexHTTPRequestPlanFactory{
+					Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+					Capacity:  capacity,
+					Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+						JournalGeneration: 1,
+					}},
+					Runtime: runtime, DefaultAccountKey: defaultKey,
+					Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+					Now:       func() time.Time { return now },
+					SessionPolicy: NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
+						SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+						Pools:           []AccountPoolV1{{Name: "Cyber", Members: []codex.AccountKey{"pool-a", "pool-b"}}},
+						SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "Cyber"}},
+					})),
+				}
+				dispatcher := &codexNativeHTTPDispatcher{}
+				handler, err := NewCodexNativeHTTPHandler(factory, &CodexHTTPRequestSession{Executor: dispatcher}, "https://codex.example/")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{
+					Domain: NormalCallerCodex, SubjectID: "outside", ConsumptionDigest: strings.Repeat("a", 64),
+				})
+				ctx = withRuntimeCallerIdentity(ctx, "outside\x00candidate\x00revision")
+				path := "/responses"
+				if kind == CodexRequestCompaction {
+					path += "/compact"
+				}
+				request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(frozenRequestBody("gpt-5", kind, "body"))).WithContext(ctx)
+				writer := httptest.NewRecorder()
+				handler.TryServe(writer, request, kind == CodexRequestCompaction)
+
+				if writer.Code != http.StatusTooManyRequests {
+					t.Fatalf("status = %d, want 429; body = %s", writer.Code, writer.Body.String())
+				}
+				var body struct {
+					Error struct {
+						Type string `json:"type"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(writer.Body.Bytes(), &body); err != nil || body.Error.Type != "usage_limit_reached" {
+					t.Fatalf("error response = %s (decode error %v)", writer.Body.String(), err)
+				}
+				if runtime.calls != 0 || dispatcher.calls != 0 {
+					t.Fatalf("exhausted pool began %d leases and %d upstream calls", runtime.calls, dispatcher.calls)
+				}
+			})
+		}
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryRejectsUnverifiedCallerContinuity(t *testing.T) {
 	t.Parallel()
 	factory := codexHTTPRequestPlanTestFactory(&codexHTTPRequestPlanTestRuntime{})

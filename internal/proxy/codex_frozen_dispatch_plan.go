@@ -136,6 +136,24 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 	if err != nil {
 		return plan, err
 	}
+	if len(policy.Choices()) == 0 && policyBoundAccountKey == "" {
+		// Preserve quota exhaustion when no default route can be attempted.
+		// Missing credentials or incompatible models are not quota failures.
+		exhausted := false
+		for _, candidate := range candidates {
+			if !candidate.Compatible || !candidate.Routable {
+				continue
+			}
+			if codexRoutePolicyCapacity(candidate).State != CapacityZero {
+				exhausted = false
+				break
+			}
+			exhausted = true
+		}
+		if exhausted {
+			return plan, &CachedUsageLimitError{RequestedModel: input.Requirements.RequestedModel}
+		}
+	}
 	if input.BoundAccountKey != "" {
 		if err := codexFrozenDispatchContextError(ctx); err != nil {
 			return CodexFrozenDispatchPlan{status: CodexRoutePlanCanceled}, err

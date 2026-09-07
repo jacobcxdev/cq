@@ -97,6 +97,85 @@ func TestBuildCodexFrozenDispatchPlanUsesProvisionalCounts(t *testing.T) {
 	}
 }
 
+func TestBuildCodexFrozenDispatchPlanClassifiesExhaustedCapacity(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		remaining    []int
+		defaultKey   codex.AccountKey
+		boundKey     codex.AccountKey
+		unroutable   bool
+		incompatible bool
+		excluded     bool
+		modelZero    bool
+		wantLimit    bool
+		wantAccounts int
+	}{
+		{name: "all exhausted", remaining: []int{0, 0}, wantLimit: true},
+		{name: "default outside pool", remaining: []int{0, 0}, defaultKey: "outside", wantLimit: true},
+		{name: "positive alternate", remaining: []int{0, 10}, wantAccounts: 1},
+		{name: "unknown alternate", remaining: []int{0, -1}, wantAccounts: 1},
+		{name: "required model bucket exhausted", remaining: []int{-1, 10}, modelZero: true, wantLimit: true},
+		{name: "empty inventory"},
+		{name: "credentials unavailable", remaining: []int{0, 0}, unroutable: true},
+		{name: "model incompatible", remaining: []int{0, 0}, incompatible: true},
+		{name: "accounts excluded", remaining: []int{0, 0}, excluded: true},
+		{name: "terminal default probe", remaining: []int{0, 0}, defaultKey: "account-a", wantAccounts: 1},
+		{name: "bound probe", remaining: []int{0, 0}, boundKey: "account-a", wantAccounts: 1},
+		{name: "missing bound account", remaining: []int{0, 0}, boundKey: "outside"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0)
+			capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			input := CodexFrozenDispatchInput{
+				Capacity: capacity, Requirements: CodexRouteRequirements{RequestedModel: "gpt-5"},
+				DefaultAccountKey: test.defaultKey, BoundAccountKey: test.boundKey, Now: now,
+			}
+			if test.incompatible {
+				input.Requirements.RequestedModel = ""
+			}
+			if test.modelZero {
+				input.Requirements.RequiredModels = []string{codexSparkModel}
+			}
+			for index, remaining := range test.remaining {
+				key := []codex.AccountKey{"account-a", "account-b"}[index]
+				account := frozenDispatchTestLogicalAccount(key,
+					frozenDispatchCandidate(key, "candidate", "revision", codex.SourceSystem, false, now.Add(time.Hour)))
+				account.Routable = !test.unroutable
+				input.Inventory.Accounts = append(input.Inventory.Accounts, account)
+				if remaining >= 0 {
+					frozenDispatchObserveCapacity(t, capacity, key, CapacityBucketBase, remaining, now)
+				}
+				if test.modelZero {
+					frozenDispatchObserveCapacity(t, capacity, key, CapacityBucketForModel(codexSparkModel), 0, now)
+				}
+				if test.excluded {
+					input.UnavailableAccountKeys = append(input.UnavailableAccountKeys, key)
+				}
+			}
+
+			plan, err := BuildCodexFrozenDispatchPlan(context.Background(), input)
+			if got := len(plan.Accounts()); got != test.wantAccounts {
+				t.Fatalf("dispatch accounts = %d, want %d (error %v)", got, test.wantAccounts, err)
+			}
+			if test.wantAccounts > 0 && err != nil {
+				t.Fatalf("available dispatch rejected: %v", err)
+			}
+			if err == nil && test.wantAccounts == 0 {
+				err = plan.TerminalError()
+				if err == nil {
+					t.Fatal("empty dispatch did not report a failure")
+				}
+			}
+			var limit *CachedUsageLimitError
+			if got := errors.As(err, &limit); got != test.wantLimit {
+				t.Fatalf("capacity error = %t, want %t (error %v)", got, test.wantLimit, err)
+			}
+		})
+	}
+}
+
 func TestBuildCodexFrozenDispatchPlanExcludesDurablyUnavailableAccounts(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	plan, err := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{
