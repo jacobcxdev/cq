@@ -3,61 +3,21 @@ name: CI
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  validate-codex:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Install current Codex client
-        run: |
-          brew update
-          brew install --cask codex
-          codex --version
-
-      - name: Validate normal, compaction, hard-limit failover, and rescue routing
-        env:
-          CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"
-        run: |
-          tests='TestCodexInstalledSupervisorSupportsRemoteCompaction TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover TestCodexInstalledRescuePassesThroughCurrentClient'
-          test_log="$RUNNER_TEMP/installed-codex-routing.log"
-          if ! CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" go test -race -count=1 -v ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover|TestCodexInstalledRescuePassesThroughCurrentClient)$' >"$test_log" 2>&1; then
-            cat "$test_log" >&2
-            exit 1
-          fi
-          cat "$test_log"
-          for test_name in $tests; do
-            grep -F -- "--- PASS: ${test_name} " "$test_log"
-          done
-
-      - name: Bind reviewed Codex corpus provenance
-        run: echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go 0.0.0 ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
-
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          version: "~> v2"
-          args: release --snapshot --clean --skip=publish
-        env:
-          GEMINI_ANTIGRAVITY_CLIENT_SECRET: validation
-
-      - name: Validate Homebrew Cask quarantine handling
-        run: |
-          case "$(uname -m)" in
-            arm64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_arm64.tar.gz' -print -quit)" ;;
-            x86_64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_amd64.tar.gz' -print -quit)" ;;
-            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
-          esac
-          test -n "$archive"
-          .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
-
-  homebrew-lifecycle:
-    runs-on: macos-15
+  packages:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    outputs:
+      previous_tag: ${{ steps.candidate.outputs.previous_tag }}
+      previous_version: ${{ steps.candidate.outputs.previous_version }}
+      current_version: ${{ steps.candidate.outputs.current_version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -68,6 +28,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Create isolated release candidate tag
+        id: candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -99,6 +60,11 @@ jobs:
             echo "CURRENT_VERSION=$current_version"
             echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$current_version" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)"
           } >> "$GITHUB_ENV"
+          {
+            echo "previous_tag=$previous_tag"
+            echo "previous_version=$previous_version"
+            echo "current_version=$current_version"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: goreleaser/goreleaser-action@v7
         with:
@@ -106,6 +72,83 @@ jobs:
           args: release --clean --skip=publish
         env:
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: validation
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-darwin-packages
+          path: |
+            dist/*_darwin_*.tar.gz
+            dist/homebrew/Casks/cq.rb
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  validate-codex:
+    needs: packages
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install current Codex client
+        run: |
+          brew update
+          brew install --cask codex
+          codex --version
+
+      - name: Validate normal, compaction, hard-limit failover, and rescue routing
+        env:
+          CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"
+        run: |
+          tests='TestCodexInstalledSupervisorSupportsRemoteCompaction TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover TestCodexInstalledRescuePassesThroughCurrentClient'
+          test_log="$RUNNER_TEMP/installed-codex-routing.log"
+          if ! CQ_CODEX_ACCEPTANCE_EXECUTABLE="$(command -v codex)" go test -race -count=1 -v ./internal/proxy -run '^(TestCodexInstalledSupervisorSupportsRemoteCompaction|TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover|TestCodexInstalledRescuePassesThroughCurrentClient)$' >"$test_log" 2>&1; then
+            cat "$test_log" >&2
+            exit 1
+          fi
+          cat "$test_log"
+          for test_name in $tests; do
+            grep -F -- "--- PASS: ${test_name} " "$test_log"
+          done
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-darwin-packages
+          path: dist
+
+      - name: Validate Homebrew Cask quarantine handling
+        run: |
+          case "$(uname -m)" in
+            arm64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_arm64.tar.gz' -print -quit)" ;;
+            x86_64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_amd64.tar.gz' -print -quit)" ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          test -n "$archive"
+          .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
+
+  homebrew-lifecycle:
+    needs: packages
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      PREVIOUS_TAG: ${{ needs.packages.outputs.previous_tag }}
+      PREVIOUS_VERSION: ${{ needs.packages.outputs.previous_version }}
+      CURRENT_VERSION: ${{ needs.packages.outputs.current_version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-darwin-packages
+          path: dist
 
       - name: Validate real Cask install, upgrade, transport, and uninstall
         env:
@@ -133,6 +176,7 @@ jobs:
             "$CURRENT_VERSION"
 
   linux:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -159,45 +203,25 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
-      - run: go test -race -count=1 ./internal/installer ./cmd/cq-install
-      - name: Gate degraded rescue transport
-        run: |
-          test_name=TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport
-          test_log="$RUNNER_TEMP/degraded-rescue-transport.log"
-          if ! go test -race -count=1 -v ./internal/proxy -run "^${test_name}$" >"$test_log" 2>&1; then
-            cat "$test_log" >&2
-            exit 1
-          fi
-          cat "$test_log"
-          grep -F -- "--- PASS: ${test_name} " "$test_log"
-      - name: Gate normal proxy transport
-        run: |
-          test_name=TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak
-          test_log="$RUNNER_TEMP/normal-proxy-transport.log"
-          if ! go test -race -count=1 -v ./internal/proxy -run '^TestNormalProxyTransport(HTTP|WebSocket)' >"$test_log" 2>&1; then
-            cat "$test_log" >&2
-            exit 1
-          fi
-          cat "$test_log"
-          grep -F -- "--- PASS: ${test_name} " "$test_log"
-      - name: Gate stock-AppArmor confinement and cleanup
+      - name: Run full race suite and require native transport gates
         shell: bash
         run: |
           set -euo pipefail
-          tests='TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock TestLinuxAcceptanceCancellationReapsDescendants'
-          test_log="$RUNNER_TEMP/linux-confinement.log"
-          if ! go test -race -count=1 -v ./internal/proxy -run '^(TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock|TestLinuxAcceptanceCancellationReapsDescendants)$' >"$test_log" 2>&1; then
+          test_log="$RUNNER_TEMP/linux-tests.log"
+          # Includes ./internal/installer and ./cmd/cq-install once per architecture.
+          if ! go test -race -count=1 ./... -v >"$test_log" 2>&1; then
             cat "$test_log" >&2
             exit 1
           fi
           cat "$test_log"
+          tests='TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport TestNormalProxyTransportWebSocketHardLimitMigratesBeforeLeak TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock TestLinuxAcceptanceCancellationReapsDescendants'
           for test_name in $tests; do
             grep -F -- "--- PASS: ${test_name} " "$test_log"
           done
-      - run: go test -race -count=1 ./...
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
