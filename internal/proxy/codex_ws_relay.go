@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,7 @@ type explicitWebSocketDispatchExecutor interface {
 
 // CodexWebSocketAttemptExecutor resolves secrets only for one upstream dial.
 type CodexWebSocketAttemptExecutor struct {
+	Reserve   *CodexReserve
 	Inventory codex.CredentialInventory
 	Secrets   codex.ExactSecretResolver
 	Dialer    websocket.Dialer
@@ -48,6 +50,9 @@ func (e *CodexWebSocketAttemptExecutor) Dial(ctx context.Context, choice RouteCh
 }
 
 func (e *CodexWebSocketAttemptExecutor) dialOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, upstreamURL string, incoming http.Header, onDispatch func(CandidateAttempt)) (*websocket.Conn, *http.Response, []byte, CandidateAttempt, error) {
+	if err := e.reserveDispatchError(choice.AccountKey); err != nil {
+		return nil, nil, nil, attempt, err
+	}
 	if e == nil || e.Secrets == nil {
 		return nil, nil, nil, attempt, fmt.Errorf("Codex WebSocket executor unavailable")
 	}
@@ -119,6 +124,11 @@ func relayWebSocketPair(ctx context.Context, left, right websocketRelayConn) err
 }
 
 func relayWebSocketPairObserved(ctx context.Context, left, right websocketRelayConn, observe func(fromClient bool, messageType int, message []byte)) error {
+	return relayWebSocketPairGuarded(ctx, left, right, observe, nil)
+}
+
+func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayConn, observe func(bool, int, []byte), guard func(int, []byte) error) error {
+	var downstreamWrite sync.Mutex
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -141,13 +151,31 @@ func relayWebSocketPairObserved(ctx context.Context, left, right websocketRelayC
 				errCh <- context.Canceled
 				return
 			}
+
+			if fromClient && guard != nil {
+				if err := guard(messageType, message); err != nil {
+					downstreamWrite.Lock()
+					_ = left.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
+					downstreamWrite.Unlock()
+					errCh <- err
+					return
+				}
+			}
 			if observe != nil {
 				func() {
 					defer func() { _ = recover() }()
 					observe(fromClient, messageType, message)
 				}()
 			}
-			if err := dst.WriteMessage(messageType, message); err != nil {
+
+			if !fromClient {
+				downstreamWrite.Lock()
+			}
+			writeErr := dst.WriteMessage(messageType, message)
+			if !fromClient {
+				downstreamWrite.Unlock()
+			}
+			if err := writeErr; err != nil {
 				errCh <- err
 				return
 			}
@@ -183,4 +211,11 @@ func ioReadBounded(body io.Reader, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("response exceeds %d bytes", limit)
 	}
 	return data, nil
+}
+
+func (e *CodexWebSocketAttemptExecutor) reserveDispatchError(account codex.AccountKey) error {
+	if e == nil {
+		return nil
+	}
+	return reserveDispatchError(e.Reserve, account)
 }

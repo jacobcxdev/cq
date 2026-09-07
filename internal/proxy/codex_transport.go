@@ -30,6 +30,7 @@ type explicitAccountDispatchExecutor interface {
 
 // CodexAttemptExecutor resolves secrets only inside attempt execution.
 type CodexAttemptExecutor struct {
+	Reserve   *CodexReserve
 	Inventory codex.CredentialInventory
 	Secrets   codex.ExactSecretResolver
 	Transport *CodexTokenTransport
@@ -67,6 +68,11 @@ func (e *CodexAttemptExecutor) resolveAttempt(ctx context.Context, choice RouteC
 }
 
 func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+	if e != nil && req != nil && req.Method != http.MethodGet {
+		if err := reserveDispatchError(e.Reserve, choice.AccountKey); err != nil {
+			return nil, attempt, err
+		}
+	}
 	material, actual, err := e.resolveAttempt(ctx, choice, attempt)
 	if err != nil {
 		return nil, actual, err
@@ -81,6 +87,11 @@ func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteCho
 }
 
 func (e *CodexAttemptExecutor) doFrozenOnDispatch(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request, onDispatch func(CandidateAttempt)) (*http.Response, CandidateAttempt, error) {
+	if e != nil && req != nil && req.Method != http.MethodGet {
+		if err := reserveDispatchError(e.Reserve, choice.AccountKey); err != nil {
+			return nil, attempt, err
+		}
+	}
 	material, actual, err := e.resolveAttempt(ctx, choice, attempt)
 	if err != nil {
 		return nil, actual, err

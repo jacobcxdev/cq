@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -170,6 +171,8 @@ func runProxy(args []string) error {
 		return fmt.Errorf("missing subcommand")
 	}
 	switch args[0] {
+	case "reserve":
+		return runProxyReserve(args[1:], os.Stdout)
 	case "start":
 		if helpRequested(args[1:]) {
 			return writeManualHelp(os.Stdout, []string{"proxy", "start"})
@@ -941,6 +944,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexQuotaCache := proxy.NewCodexQuotaCache(roots.Cache)
 	codexCapacity := codexQuotaCache.CodexCapacityLedger()
+	codexReserve, err := proxy.OpenCodexReserve(fsys, filepath.Join(roots.State, "codex-reserve.json"), codexCapacity, credentialControl, time.Now)
+	if err != nil {
+		return fmt.Errorf("Codex reserve: %w", err)
+	}
+	codexCapacity.Reserve = codexReserve
 	codexObserver, codexWebSocketObserver, err := newProxyCodexV2Observers(proxyCodexV2ObserverDependencies{
 		Routing:    codexRouting,
 		Continuity: codexContinuity,
@@ -963,6 +971,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Inventory: codexRoutingInventory,
 	}
 	codexAttemptExecutor := &proxy.CodexAttemptExecutor{
+		Reserve:   codexReserve,
 		Inventory: credentialControl,
 		Secrets:   credentialControl,
 		Transport: &proxy.CodexTokenTransport{
@@ -975,13 +984,30 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher: credentialControl,
 		Capacity:  codexCapacity,
 	}
-	codexCapacityRefresher, err := newProxyCodexRoutingCapacityRefresher(cfg.CodexUpstream, codexRequestRouter, codexCapacity)
+	// Usage refresh covers the full inventory, independent of routing allowlists.
+	codexUsageRouter := *codexRequestRouter
+	codexUsageRouter.Scope = &proxy.CodexRequestScope{Inventory: credentialControl}
+	codexCapacityRefresher, err := newProxyCodexRoutingCapacityRefresher(cfg.CodexUpstream, &codexUsageRouter, codexCapacity)
 	if err != nil {
 		return err
 	}
+	codexCapacityRefresher.IntervalForAccount = codexReserve.RefreshInterval
+	codexCapacityRefresher.OnInventory = codexReserve.ObserveInventory
+	codexRefreshDone := make(chan struct{})
+	go func() {
+		defer close(codexRefreshDone)
+		defer func() {
+			if recover() != nil {
+				fmt.Fprintln(os.Stderr, "cq: Codex usage refresh stopped after panic")
+			}
+		}()
+		codexCapacityRefresher.Run(proxyCtx, credentialControl)
+	}()
+	defer func() { proxyCancel(); <-codexRefreshDone }()
 	codexSelector := proxy.NewCodexInventorySelector(codexRoutingInventory, codexQuotaCache, codexCapacityRefresher)
 	codexRequestScope.Chooser = codexSelector
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
+	codexWebSocketExecutor.Reserve = codexReserve
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
@@ -1207,6 +1233,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Catalog:                          catalog,
 		Refresher:                        proxyRefresher,
 		RuntimeCallerCredentials:         runtimeCallerCredentials,
+		Reserve:                          codexReserve,
 		SessionPolicy:                    sessionPolicy,
 		CodexTurnReceipts:                codexTurnReceipts,
 		CodexLeaseInvalidator:            codexLeaseInvalidator,

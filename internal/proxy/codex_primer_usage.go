@@ -55,6 +55,10 @@ func (r *CodexPrimerUsageReader) Read(ctx context.Context, account codex.Account
 	if err != nil {
 		return codex.UsageObservation{}, fmt.Errorf("read Codex primer usage: %w", err)
 	}
+	if response != nil && response.StatusCode != http.StatusOK && response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden {
+		defer closeResponse(response)
+		return codex.UsageObservation{}, &CodexUsageHTTPError{StatusCode: response.StatusCode, RetryAt: retryAfterReset(time.Now(), response.Header.Get("Retry-After"))}
+	}
 	if failure != CodexPinnedAccepted || response == nil || response.Body == nil {
 		if response != nil {
 			closeResponse(response)
@@ -70,11 +74,21 @@ func (r *CodexPrimerUsageReader) Read(ctx context.Context, account codex.Account
 		return codex.UsageObservation{}, fmt.Errorf("Codex primer usage response exceeds 1 MiB")
 	}
 	if response.StatusCode != http.StatusOK {
-		return codex.UsageObservation{}, fmt.Errorf("Codex primer usage HTTP %d", response.StatusCode)
+		return codex.UsageObservation{}, &CodexUsageHTTPError{StatusCode: response.StatusCode, RetryAt: retryAfterReset(time.Now(), response.Header.Get("Retry-After"))}
 	}
 	observation := codex.ParseUsageObservation(data, "", "")
 	if !observation.Result.IsUsable() {
 		return codex.UsageObservation{}, fmt.Errorf("Codex primer usage response invalid")
 	}
 	return observation, nil
+}
+
+// CodexUsageHTTPError retains the server retry deadline without exposing bodies.
+type CodexUsageHTTPError struct {
+	StatusCode int
+	RetryAt    time.Time
+}
+
+func (e *CodexUsageHTTPError) Error() string {
+	return fmt.Sprintf("Codex primer usage HTTP %d", e.StatusCode)
 }

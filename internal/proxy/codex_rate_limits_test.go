@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 func TestParseCodexRateLimitHeadersProducesExactBucketObservations(t *testing.T) {
@@ -476,7 +478,7 @@ func TestCodexRateLimitObservationProducesNeutralCapacityFact(t *testing.T) {
 		ResetAt:              resetAt,
 		Confidence:           CapacityConfidenceAuthoritative,
 	}
-	if fact != want {
+	if !reflect.DeepEqual(fact, want) {
 		t.Fatalf("fact = %+v, want %+v", fact, want)
 	}
 }
@@ -965,5 +967,97 @@ func assertCodexRateLimitObservations(t *testing.T, got, want []CodexRateLimitOb
 		if got[i].Bucket != want[i].Bucket || got[i].RemainingPct != want[i].RemainingPct || !got[i].ResetAt.Equal(want[i].ResetAt) {
 			t.Fatalf("observation[%d] = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestCodexRateLimitsPreserveExactWindows(t *testing.T) {
+	for _, transport := range []string{"headers", "event"} {
+		t.Run(transport, func(t *testing.T) {
+			var observations []CodexRateLimitObservation
+			var err error
+			if transport == "headers" {
+				observations, err = ParseCodexRateLimitHeaders(http.Header{
+					"X-Codex-Primary-Used-Percent":     {"40.25"},
+					"X-Codex-Primary-Window-Minutes":   {"300"},
+					"X-Codex-Primary-Reset-At":         {"1704069000"},
+					"X-Codex-Secondary-Used-Percent":   {"97.99"},
+					"X-Codex-Secondary-Window-Minutes": {"10080"},
+					"X-Codex-Secondary-Reset-At":       {"1704070000"},
+				})
+			} else {
+				observations, err = ParseCodexRateLimitEvent([]byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":40.25,"window_minutes":300,"reset_at":1704069000},"secondary":{"used_percent":97.99,"window_minutes":10080,"reset_at":1704070000}}}`))
+			}
+			if err != nil || len(observations) != 1 {
+				t.Fatalf("observations=%+v err=%v", observations, err)
+			}
+			windows := observations[0].CapacityFact("account", CapacitySourceLiveRateLimits, 1, 1, time.Now()).Windows
+			if len(windows) != 2 {
+				t.Fatalf("windows=%+v", windows)
+			}
+			for name, used := range map[quota.WindowName]float64{"5h": 40.25, "7d": 97.99} {
+				window := windows[name]
+				if window.RemainingPctExact == nil || *window.RemainingPctExact != 100-used {
+					t.Fatalf("%s: %+v", name, window)
+				}
+			}
+			if windows["5h"].ResetAtUnix != 1704069000 || windows["7d"].ResetAtUnix != 1704070000 {
+				t.Fatal(windows)
+			}
+		})
+	}
+}
+
+func TestCodexRateLimitsPreserveScopedWindow(t *testing.T) {
+	observations, err := ParseCodexRateLimitEvent([]byte(`{"type":"codex.rate_limits","metered_limit_name":"GPT-5.3-Codex-Spark","rate_limits":{"primary":{"used_percent":98.25,"window_minutes":10080}}}`))
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("observations=%+v err=%v", observations, err)
+	}
+	window, ok := observations[0].Windows["7d:gpt-5.3-codex-spark"]
+	if !ok || window.RemainingPctExact == nil || *window.RemainingPctExact != 1.75 || window.ResetAtUnix != 0 {
+		t.Fatalf("window=%+v", window)
+	}
+}
+
+func TestCodexRateLimitsPreserveGPTReserveWindow(t *testing.T) {
+	for _, transport := range []string{"headers", "event"} {
+		t.Run(transport, func(t *testing.T) {
+			var observations []CodexRateLimitObservation
+			var err error
+			if transport == "headers" {
+				observations, err = ParseCodexRateLimitHeaders(http.Header{
+					"X-Codex-Reserve-Primary-Used-Percent":   {"98.25"},
+					"X-Codex-Reserve-Primary-Window-Minutes": {"10080"},
+					"X-Codex-Reserve-Limit-Name":             {"gpt-reserve"},
+				})
+			} else {
+				observations, err = ParseCodexRateLimitEvent([]byte(`{"type":"codex.rate_limits","metered_limit_name":"gpt-reserve","rate_limits":{"primary":{"used_percent":98.25,"window_minutes":10080}}}`))
+			}
+			if err != nil || len(observations) != 1 {
+				t.Fatalf("observations=%+v err=%v", observations, err)
+			}
+			window, ok := observations[0].Windows["7d:gpt-reserve"]
+			if !ok || window.RemainingPctExact == nil || *window.RemainingPctExact != 1.75 {
+				t.Fatalf("window=%+v", window)
+			}
+		})
+	}
+}
+
+func TestCodexRateLimitsRejectAmbiguousWindowDurations(t *testing.T) {
+	for _, minutes := range []string{"9223372036854775807", "300"} {
+		_, err := ParseCodexRateLimitEvent([]byte(fmt.Sprintf(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":10,"window_minutes":300},"secondary":{"used_percent":98,"window_minutes":%s}}}`, minutes)))
+		if !errors.Is(err, ErrCodexRateLimitInvalid) {
+			t.Fatalf("minutes=%s err=%v", minutes, err)
+		}
+	}
+}
+
+func TestCodexRateLimitsWithoutDurationDoNotInventWindow(t *testing.T) {
+	observations, err := ParseCodexRateLimitEvent([]byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98.25,"reset_at":1704070000}}}`))
+	if err != nil || len(observations) != 1 {
+		t.Fatalf("observations=%+v err=%v", observations, err)
+	}
+	if len(observations[0].Windows) != 0 || observations[0].RemainingPct != 2 {
+		t.Fatalf("observation=%+v", observations[0])
 	}
 }

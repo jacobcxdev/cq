@@ -224,6 +224,9 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	}()
 	clearBytes(encoded)
 	if err != nil {
+		if writeCodexCapacityError(writer, err) {
+			return true, ""
+		}
 		status := http.StatusServiceUnavailable
 		errorType := "api_error"
 		message := "Codex native HTTP routing unavailable"
@@ -266,6 +269,9 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		prepared.Lifecycle,
 	)
 	if err != nil {
+		if writeCodexCapacityError(writer, err) {
+			return true, model
+		}
 		failure := classifyCodexNativeHTTPSessionFailure(err)
 		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
 		event := CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway}

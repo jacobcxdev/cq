@@ -303,6 +303,37 @@ cq proxy prime disable
 
 Claude pin changes hot-reload. Codex pin/default/priming changes require proxy restart. A Codex pin affects new and unbound work but does not break existing hard continuity.
 
+### System account reserve
+
+The running CQ service can protect a percentage of one Codex quota window for the current system account.
+The reserve follows the system account when it changes. Other accounts remain available under their existing routing rules.
+
+```bash
+cq proxy reserve windows                     # List available window selectors
+cq proxy reserve set --window 7d --percent 2   # Protect the final 2% of weekly quota
+cq proxy reserve status
+cq proxy reserve status --json
+cq proxy reserve disable                     # Release the reserve until this window resets
+cq proxy reserve enable                      # Restore protection immediately
+cq proxy reserve clear                       # Remove the configuration
+```
+
+Use the selectors from `reserve windows` for scoped limits, such as `7d:gpt-reserve` or `5h:gpt-5.3-codex-spark`.
+The commands require the running service. Changes apply immediately and survive service restarts.
+
+At or below the threshold, the system account becomes unavailable to routing. Pools can continue through their other eligible accounts.
+Pinned work receives HTTP 429 or the equivalent WebSocket usage-limit error when its account reaches the reserve.
+The reserve applies to the account, not to a pool or its aggregate percentage.
+
+`disable` requires fresh usage and reset evidence. A confirmed natural or forced reset restores protection automatically.
+CQ never consumes a reset credit for this feature. A system account change also removes the previous account's temporary bypass.
+
+The service consumes live response telemetry and refreshes usage in the background.
+Polling follows Codex's 60/30/15/5-second cadence as usage approaches exhaustion; the reserve threshold can shorten that interval.
+Concurrent refreshes share one request per account. Failed reads wait at least 30 seconds and honour longer `Retry-After` values.
+If selected-window data exceeds its refresh interval plus 10 seconds, CQ temporarily excludes the protected account until fresh data arrives.
+Already-running requests and usage outside CQ can cross the threshold before CQ receives an update.
+
 ### Capability policy and session pools
 
 Advanced policy commands manage authenticated, capability-aware Codex account pools and privacy-safe session bindings:
@@ -624,6 +655,13 @@ cq proxy rescue
 cq proxy rescue enter
 cq proxy rescue exit
 cq proxy rescue status
+cq proxy reserve
+cq proxy reserve clear
+cq proxy reserve disable
+cq proxy reserve enable
+cq proxy reserve set
+cq proxy reserve status
+cq proxy reserve windows
 cq proxy restart
 cq proxy start
 cq proxy status

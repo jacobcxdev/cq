@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -56,5 +57,27 @@ func TestCodexPrimerUsageBoundsTotalTime(t *testing.T) {
 	}
 	if _, err := reader.Read(context.Background(), "account-1"); err == nil {
 		t.Fatal("usage timeout returned no error")
+	}
+}
+
+type retryAfterUsageExecutor struct {
+	primerCaptureExecutor
+	retryAfter string
+}
+
+func (e *retryAfterUsageExecutor) Do(ctx context.Context, choice RouteChoice, attempt CandidateAttempt, req *http.Request) (*http.Response, error) {
+	response, err := e.primerCaptureExecutor.Do(ctx, choice, attempt, req)
+	response.Header.Set("Retry-After", e.retryAfter)
+	return response, err
+}
+func TestCodexPrimerUsageRetainsRetryAfter(t *testing.T) {
+	for _, value := range []string{"120", time.Now().Add(2 * time.Minute).UTC().Format(http.TimeFormat)} {
+		executor := &retryAfterUsageExecutor{primerCaptureExecutor: primerCaptureExecutor{status: 429}, retryAfter: value}
+		reader := &CodexPrimerUsageReader{Router: primerTestRouter(executor), UsageURL: "https://chatgpt.example/backend-api/wham/usage"}
+		_, err := reader.Read(context.Background(), "account-1")
+		var failure *CodexUsageHTTPError
+		if !errors.As(err, &failure) || failure.StatusCode != 429 || failure.RetryAt.Before(time.Now().Add(119*time.Second)) {
+			t.Fatalf("retry deadline missing: %v", err)
+		}
 	}
 }

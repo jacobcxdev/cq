@@ -15,6 +15,7 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // ErrCodexRateLimitInvalid marks rate-limit telemetry that cannot safely
@@ -31,6 +32,7 @@ const (
 // CodexRateLimitObservation is a source-neutral capacity observation. The
 // caller owns source ordering and connection-generation assignment.
 type CodexRateLimitObservation struct {
+	Windows      map[quota.WindowName]quota.Window
 	Bucket       CapacityBucket
 	RemainingPct int
 	ResetAt      time.Time
@@ -144,6 +146,7 @@ func (o CodexRateLimitObservation) CapacityFact(
 		AccountKey:           account,
 		Bucket:               o.Bucket,
 		RemainingPct:         o.RemainingPct,
+		Windows:              o.Windows,
 		Source:               source,
 		Sequence:             sequence,
 		ConnectionGeneration: connectionGeneration,
@@ -154,8 +157,9 @@ func (o CodexRateLimitObservation) CapacityFact(
 }
 
 type codexRateLimitWindow struct {
-	usedPercent float64
-	resetAt     time.Time
+	usedPercent   float64
+	windowMinutes int64
+	resetAt       time.Time
 }
 
 var codexRateLimitHeaderSuffixes = []string{
@@ -231,7 +235,11 @@ func ParseCodexRateLimitHeaders(headers http.Header) ([]CodexRateLimitObservatio
 			return nil, invalidCodexRateLimit("multiple header families target bucket %q", bucket)
 		}
 		seenBuckets[bucket] = struct{}{}
-		observations = append(observations, aggregateCodexRateLimitWindows(bucket, windows))
+		observation, err := aggregateCodexRateLimitWindows(bucket, windows)
+		if err != nil {
+			return nil, err
+		}
+		observations = append(observations, observation)
 	}
 	return observations, nil
 }
@@ -302,9 +310,10 @@ func parseCodexRateLimitHeaderWindow(values map[string][]string, prefix string) 
 	if err != nil || !validCodexUsedPercent(usedPercent) {
 		return codexRateLimitWindow{}, false, invalidCodexRateLimit("%s used percent is invalid", prefix)
 	}
+	var windowMinutes int64
 	if hasWindow {
-		windowMinutes, err := strconv.ParseInt(windowRaw, 10, 64)
-		if err != nil || windowMinutes <= 0 {
+		windowMinutes, err = strconv.ParseInt(windowRaw, 10, 64)
+		if err != nil || windowMinutes <= 0 || windowMinutes > int64(1<<63-1)/int64(time.Minute) {
 			return codexRateLimitWindow{}, false, invalidCodexRateLimit("%s window minutes is invalid", prefix)
 		}
 	}
@@ -316,7 +325,7 @@ func parseCodexRateLimitHeaderWindow(values map[string][]string, prefix string) 
 		}
 		resetAt = time.Unix(resetUnix, 0)
 	}
-	return codexRateLimitWindow{usedPercent: usedPercent, resetAt: resetAt}, true, nil
+	return codexRateLimitWindow{usedPercent: usedPercent, resetAt: resetAt, windowMinutes: windowMinutes}, true, nil
 }
 
 func singleCodexRateLimitHeader(values map[string][]string, name string) (string, bool, error) {
@@ -341,8 +350,11 @@ func codexRateLimitHeaderBucket(family, limitName string) (CapacityBucket, bool)
 		}
 		return "", false
 	}
-	if normaliseCodexRateLimitName(limitName) == codexSparkModel {
+	switch normaliseCodexRateLimitName(limitName) {
+	case codexSparkModel:
 		return CapacityBucketForModel(codexSparkModel), true
+	case "gpt-reserve":
+		return CapacityBucket("model:gpt-reserve"), true
 	}
 	return "", false
 }
@@ -399,7 +411,11 @@ func ParseCodexRateLimitEvent(payload []byte) ([]CodexRateLimitObservation, erro
 	if !known {
 		return nil, nil
 	}
-	return []CodexRateLimitObservation{aggregateCodexRateLimitWindows(bucket, windows)}, nil
+	observation, err := aggregateCodexRateLimitWindows(bucket, windows)
+	if err != nil {
+		return nil, err
+	}
+	return []CodexRateLimitObservation{observation}, nil
 }
 
 func parseOptionalCodexRateLimitName(raw json.RawMessage) (string, bool, error) {
@@ -459,9 +475,9 @@ func parseCodexRateLimitEventWindow(raw json.RawMessage, name string) (codexRate
 	if err := json.Unmarshal(window.UsedPercent, &usedPercent); err != nil || !validCodexUsedPercent(usedPercent) {
 		return codexRateLimitWindow{}, false, invalidCodexRateLimit("%s window used percent is invalid", name)
 	}
+	var windowMinutes int64
 	if len(window.WindowMinutes) != 0 && !bytes.Equal(bytes.TrimSpace(window.WindowMinutes), []byte("null")) {
-		var windowMinutes int64
-		if err := json.Unmarshal(window.WindowMinutes, &windowMinutes); err != nil || windowMinutes <= 0 {
+		if err := json.Unmarshal(window.WindowMinutes, &windowMinutes); err != nil || windowMinutes <= 0 || windowMinutes > int64(1<<63-1)/int64(time.Minute) {
 			return codexRateLimitWindow{}, false, invalidCodexRateLimit("%s window minutes is invalid", name)
 		}
 	}
@@ -473,7 +489,7 @@ func parseCodexRateLimitEventWindow(raw json.RawMessage, name string) (codexRate
 		}
 		resetAt = time.Unix(resetUnix, 0)
 	}
-	return codexRateLimitWindow{usedPercent: usedPercent, resetAt: resetAt}, true, nil
+	return codexRateLimitWindow{usedPercent: usedPercent, resetAt: resetAt, windowMinutes: windowMinutes}, true, nil
 }
 
 func codexRateLimitEventBucket(limitName string) (CapacityBucket, bool) {
@@ -482,6 +498,8 @@ func codexRateLimitEventBucket(limitName string) (CapacityBucket, bool) {
 		return CapacityBucketBase, true
 	case codexSparkModel:
 		return CapacityBucketForModel(codexSparkModel), true
+	case "gpt-reserve":
+		return CapacityBucket("model:gpt-reserve"), true
 	default:
 		return "", false
 	}
@@ -495,13 +513,29 @@ func validCodexUsedPercent(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 100
 }
 
-func aggregateCodexRateLimitWindows(bucket CapacityBucket, windows []codexRateLimitWindow) CodexRateLimitObservation {
+func aggregateCodexRateLimitWindows(bucket CapacityBucket, windows []codexRateLimitWindow) (CodexRateLimitObservation, error) {
 	remaining := 100
+	exactWindows := make(map[quota.WindowName]quota.Window)
+	scope := strings.TrimPrefix(string(bucket), "model:")
+	if bucket == CapacityBucketBase {
+		scope = ""
+	}
 	haveLimitingWindow := false
 	limitingResetKnown := false
 	var resetAt time.Time
 	for _, window := range windows {
 		windowRemaining := int(math.Round(100 - window.usedPercent))
+		if name, ok := quota.WindowNameForPeriod(window.windowMinutes*60, scope); ok {
+			if _, exists := exactWindows[name]; exists {
+				return CodexRateLimitObservation{}, invalidCodexRateLimit("duplicate window duration")
+			}
+			exact := 100 - window.usedPercent
+			var resetUnix int64
+			if !window.resetAt.IsZero() {
+				resetUnix = window.resetAt.Unix()
+			}
+			exactWindows[name] = quota.Window{RemainingPct: windowRemaining, RemainingPctExact: &exact, ResetAtUnix: resetUnix}
+		}
 		switch {
 		case !haveLimitingWindow || windowRemaining < remaining:
 			remaining = windowRemaining
@@ -517,7 +551,7 @@ func aggregateCodexRateLimitWindows(bucket CapacityBucket, windows []codexRateLi
 			}
 		}
 	}
-	return CodexRateLimitObservation{Bucket: bucket, RemainingPct: remaining, ResetAt: resetAt}
+	return CodexRateLimitObservation{Bucket: bucket, RemainingPct: remaining, ResetAt: resetAt, Windows: exactWindows}, nil
 }
 
 func rejectDuplicateCodexRateLimitJSONFields(payload []byte) error {
