@@ -391,6 +391,8 @@ type CodexHTTPRequestSessionResult struct {
 	Choice    RouteChoice
 	Attempt   CandidateAttempt
 	Lifecycle CodexHTTPRequestLifecycle
+
+	quotaExhausted bool
 }
 
 // CodexHTTPAttemptSlotPlan is one raw-free bridge entry for the durable lease
@@ -741,7 +743,7 @@ accountsLoop:
 				result.Attempt = retainedAttempt
 				return result, nil
 			}
-			if (authRejected || hardRejected) && plan.TerminalError() != nil && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
+			if authRejected && plan.TerminalError() != nil && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
 				discardCodexHTTPRequestResponse(ctx, response)
 				result.Response = nil
 				next, finishErr := codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
@@ -763,6 +765,7 @@ accountsLoop:
 				return result, finishErr
 			}
 			result.Lifecycle = next
+			result.quotaExhausted = hardRejected && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle)
 			return result, nil
 		}
 	}

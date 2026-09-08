@@ -759,7 +759,7 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		if old.HasEncryptedState && !input.HasEncryptedState {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: encrypted-state authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
-		if old.HasTurnState && !input.HasTurnState {
+		if old.HasTurnState && !input.HasTurnState && !bindingReassignment {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
 		if !old.HasTurnState && input.HasTurnState && !input.TurnStateLatchCurrent {
@@ -767,10 +767,10 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		}
 		validLatchMigration := migrateTurnStateLatch && beginRequest && old.HasTurnState && !old.TurnStateLatchCurrent && input.TurnStateLatchCurrent && old.EverAdmitted &&
 			constantTimeCodexLeaseDigestEqual(old.AccountHash, input.AccountHash) && codexLeaseRuntimeCanBeginRequest(old)
-		if old.TurnStateLatchCurrent != input.TurnStateLatchCurrent && !validLatchMigration && !(old.HasTurnState == false && input.HasTurnState && input.TurnStateLatchCurrent) {
+		if old.TurnStateLatchCurrent != input.TurnStateLatchCurrent && !validLatchMigration && !(bindingReassignment && !input.HasTurnState && !input.TurnStateLatchCurrent) && !(old.HasTurnState == false && input.HasTurnState && input.TurnStateLatchCurrent) {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state latch marker changed outside admission or migration", ErrCodexLeaseInvalidMutation)
 		}
-		if old.HasResponseAnchor && (!input.HasResponseAnchor || input.CorrelationHash == "") {
+		if old.HasResponseAnchor && (!input.HasResponseAnchor || input.CorrelationHash == "") && !bindingReassignment {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: response anchor was cleared", ErrCodexLeaseInvalidMutation)
 		}
 		result.RecordGeneration = old.RecordGeneration + 1

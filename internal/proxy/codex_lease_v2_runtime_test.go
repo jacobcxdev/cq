@@ -4393,3 +4393,108 @@ func waitCodexLeaseRuntimeGateRefs(t *testing.T, gates *codexAccountGateSet, acc
 	}
 	t.Fatalf("account gate %q did not reach %d references", account, want)
 }
+
+func TestCodexLeaseRuntimePortableQuotaResetReplacesTurnStateOnAdmission(t *testing.T) {
+	t.Parallel()
+	for _, replacementState := range []string{"state-b", ""} {
+		t.Run("replacement_state="+replacementState, func(t *testing.T) {
+			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "initial-a", Kind: CodexAttemptSlotDirect}})
+			plan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+			handle, err := runtimeLease.BeginRequest(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "state-a", HasTurnState: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{CodexHTTPResponseEvidence: CodexHTTPResponseEvidence{ResponseAnchor: "response-a", HasResponseAnchor: true}, EndTurn: false})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.Drain()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// An authenticated full create can omit the provider's latched turn state.
+			bound := plan
+			bound.RequiresAccountContinuity = true
+			bound.authenticatedCallerContinuity = true
+			bound.ExpectedBound = &CodexLeaseBoundExpectation{Identity: handle.identity, AccountKey: "account-a", RecordGeneration: handle.record.RecordGeneration}
+			handle, err = runtimeLease.BeginRequest(bound)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.RecordQuotaExhausted(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fresh := plan
+			fresh.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "retry-b", Kind: CodexAttemptSlotDirect}}
+			for _, evidence := range []CodexLeaseRequestEvidence{
+				{PreviousResponseID: "response-a"},
+				{TurnState: "state-a", HasTurnState: true},
+			} {
+				invalid := fresh
+				invalid.Evidence = evidence
+				if _, err := runtimeLease.BeginRequest(invalid); !errors.Is(err, ErrCodexContinuity) {
+					t.Fatalf("provider continuation migrated: %v", err)
+				}
+			}
+			handle, err = runtimeLease.BeginRequest(fresh)
+			if err != nil {
+				t.Fatalf("portable quota reset: %v", err)
+			}
+			if handle.record.TurnStateHash != coordinator.store.hash("turn-state", "state-a") {
+				t.Fatal("prepared retry changed admitted evidence")
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: replacementState, HasTurnState: replacementState != ""})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handle.AccountKey() != "account-b" {
+				t.Fatal("new admission retained exhausted account evidence")
+			}
+			handle, err = handle.ProviderFailed(CodexHTTPResponseEvidence{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.Drain()
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldAnchor := fresh
+			oldAnchor.Evidence = CodexLeaseRequestEvidence{PreviousResponseID: "response-a", TurnState: replacementState, HasTurnState: replacementState != ""}
+			if _, err := runtimeLease.BeginRequest(oldAnchor); !errors.Is(err, ErrCodexContinuity) {
+				t.Fatalf("old account response anchor accepted after replacement: %v", err)
+			}
+			if replacementState == "" {
+				fresh.Evidence = CodexLeaseRequestEvidence{TurnState: "state-a", HasTurnState: true}
+				if _, err := runtimeLease.BeginRequest(fresh); !errors.Is(err, ErrCodexContinuity) {
+					t.Fatalf("old account state accepted after stateless replacement: %v", err)
+				}
+			} else {
+				fresh.Evidence = CodexLeaseRequestEvidence{TurnState: replacementState, HasTurnState: true}
+				if _, err := runtimeLease.BeginRequest(fresh); err != nil {
+					t.Fatalf("replacement continuation: %v", err)
+				}
+			}
+		})
+	}
+}

@@ -777,7 +777,8 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		return nil, err
 	}
 	handle.newTurn = newTurn
-	handle.relatchTurnStateOnAdmission = runtime.canRelatchAuthenticatedTurnState(current.Record, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity)
+	handle.relatchTurnStateOnAdmission = runtime.canRelatchAuthenticatedTurnState(current.Record, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity) ||
+		(current.Record.HasTurnState && codexLeasePortableUnavailableContinuation(current.Record, plan.Evidence))
 	return handle, nil
 }
 
@@ -1488,6 +1489,9 @@ func (handle *CodexLeaseRequestHandle) applyAccountUnavailableRebind(desired *Co
 		return ErrCodexLeaseTransition
 	}
 	desired.AccountHash = accountHash
+	// The previous account's response ID cannot authorise this account.
+	desired.CorrelationHash = ""
+	desired.HasResponseAnchor = false
 	return nil
 }
 
@@ -2030,6 +2034,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 	if newTurn && authenticatedCallerContinuity && (!found || !authority.Record.Authoritative) {
 		return true, nil
 	}
+	portableUnavailable := found && !newTurn && codexLeasePortableUnavailableContinuation(authority.Record, evidence)
 	if !newTurn && found {
 		ingress := firstIngressContinuity(ingressContinuity)
 		canMigrateLatch := runtime.canMigrateAuthenticatedTurnStateLatch(authority.Record, selected, evidence, authenticatedCallerContinuity)
@@ -2037,7 +2042,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
 		}
 		missingAuthenticatedState := authenticatedCallerContinuity && authority.Record.HasTurnState && !evidence.HasTurnState
-		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState {
+		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState && !portableUnavailable {
 			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) &&
@@ -2051,13 +2056,19 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		}
 	}
 	requiresAccount := authenticatedCallerContinuity || evidence.PreviousResponseID != "" || evidence.HasTurnState || (found && !newTurn && codexLeaseRecordRequiresAccount(authority.Record))
-	if found && codexLeaseCurrentAttemptState(authority.Record) == CodexAttemptAccountUnavailable && evidence.PreviousResponseID == "" && !evidence.HasTurnState {
+	if portableUnavailable {
 		requiresAccount = false
 	}
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {
 		return requiresAccount, &codexContinuityError{reason: codexContinuityAccountAffinityMismatch}
 	}
 	return requiresAccount, nil
+}
+
+// A full create after a drained account rejection can establish new provider
+// state. Keep the old admission evidence until the replacement is admitted.
+func codexLeasePortableUnavailableContinuation(record CodexJournalRecordV2, evidence CodexLeaseRequestEvidence) bool {
+	return evidence.PreviousResponseID == "" && !evidence.HasTurnState && codexLeaseAccountUnavailableCanBeginRequest(record)
 }
 
 func (runtime *CodexLeaseRuntime) canMigrateAuthenticatedTurnStateLatch(record CodexJournalRecordV2, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool) bool {
@@ -2139,6 +2150,11 @@ func (handle *CodexLeaseRequestHandle) applyAdmissionEvidence(record *CodexJourn
 		return fmt.Errorf("%w: invalid HTTP admission evidence", ErrCodexLeaseInvalidMutation)
 	}
 	if !evidence.HasTurnState {
+		if codexLeaseAccountUnavailableAdmission(handle.record, *record) {
+			record.TurnStateHash = ""
+			record.HasTurnState = false
+			record.TurnStateLatchCurrent = false
+		}
 		return nil
 	}
 	if record.HasTurnState && !handle.relatchTurnStateOnAdmission {
