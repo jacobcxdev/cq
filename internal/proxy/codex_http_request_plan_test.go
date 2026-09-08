@@ -2693,3 +2693,110 @@ func assertCodexHTTPRequestPlanError(t *testing.T, err error, code CodexHTTPRequ
 		}
 	}
 }
+
+func TestCodexHTTPRequestPlanFactoryProbesQuotaExhaustedBoundAccount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, test := range []struct {
+		name          string
+		previous      bool
+		turnState     bool
+		expected      bool
+		restartable   bool
+		allExhausted  bool
+		authenticated bool
+		zeroAlternate bool
+	}{
+		{name: "previous response", previous: true},
+		{name: "zero capacity alternate", previous: true, zeroAlternate: true},
+		{name: "authenticated continuation", previous: true, authenticated: true},
+		{name: "turn state", turnState: true},
+		{name: "expected binding", expected: true},
+		{name: "restartable portable", restartable: true},
+		{name: "all exhausted continuation", previous: true, allExhausted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+				frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+				frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceExternal, false, now.Add(time.Hour))),
+			}}
+			identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 1, Authoritative: true}
+			snapshot := CodexLeaseRouteSnapshot{
+				Classification: CodexRestoredLaneCurrent, JournalGeneration: 2,
+				BoundAccountKey: "account-a", BoundIdentity: identity, BoundRecordGeneration: 1,
+				BoundChoice:               RouteChoice{AccountKey: "account-a", EffectiveModel: "gpt-5", RequiredBuckets: []CapacityBucket{CapacityBucketBase}},
+				RestartableFailedHead:     test.restartable,
+				UnavailableAccountKeys:    []codex.AccountKey{"account-a"},
+				QuotaExhaustedAccountKeys: []codex.AccountKey{"account-a"},
+			}
+			if test.allExhausted {
+				snapshot.UnavailableAccountKeys = append(snapshot.UnavailableAccountKeys, "account-b")
+				snapshot.QuotaExhaustedAccountKeys = append(snapshot.QuotaExhaustedAccountKeys, "account-b")
+			}
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-a"}}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Routes:    &codexHTTPRequestPlanTestSnapshotter{snapshot: snapshot}, Runtime: runtime,
+				DefaultAccountKey: "account-a", Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now: func() time.Time { return now },
+			}
+			if test.zeroAlternate {
+				capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+				frozenDispatchObserveCapacity(t, capacity, "account-b", CapacityBucketBase, 0, now)
+				factory.Capacity = capacity
+			}
+			key := []byte("01234567890123456789012345678901")
+			factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
+				SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+				Pools:           []AccountPoolV1{{Name: "team", Members: []codex.AccountKey{"account-a", "account-b"}}},
+				SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "team"}},
+			}))
+			permits := &sessionPolicyPermitRecorder{}
+			factory.DispatchPermits = permits
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local-caller", ConsumptionDigest: strings.Repeat("a", 64)})
+			if test.authenticated {
+				ctx = withRuntimeCallerAuthority(ctx, RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "account-a", IndexEpoch: 1, ConsumptionDigest: strings.Repeat("a", 64)})
+				ctx = withRuntimeCallerIdentity(ctx, "account-a\x00candidate-a\x00revision-a")
+			}
+			input := CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "private-body")}
+			if test.previous {
+				input.Encoded = []byte(strings.TrimSuffix(string(input.Encoded), "}") + `,"previous_response_id":"response-a"}`)
+			}
+			if test.turnState {
+				input.Headers = http.Header{"X-Codex-Turn-State": {"private-turn-state"}}
+			}
+			if test.expected {
+				input.ExpectedBound = &CodexLeaseBoundExpectation{Identity: identity, AccountKey: "account-a", RecordGeneration: 1}
+			}
+			prepared, err := factory.Build(ctx, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			if prepared.portableQuotaRetry != (!test.previous && !test.turnState) {
+				t.Fatalf("portable quota retry = %t", prepared.portableQuotaRetry)
+			}
+			if len(permits.requests) != 1 || !slices.Equal(permits.requests[0].AllowedAccounts, []codex.AccountKey{"account-a"}) {
+				t.Fatalf("bound probe permit scope = %#v, want only account-a", permits.requests)
+			}
+			accounts := prepared.Dispatch.Accounts()
+			if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-a" {
+				t.Fatalf("bound probe accounts = %#v, want only account-a", accounts)
+			}
+			if !runtime.plan.QuotaExhaustionProbe {
+				t.Fatal("bound account was not a quota probe")
+			}
+			for _, slot := range runtime.plan.Slots {
+				if slot.AccountKey != "account-a" {
+					t.Fatalf("quota probe contains alternate slot: %#v", slot)
+				}
+			}
+			wantReset := []codex.AccountKey{"account-b"}
+			if test.allExhausted || test.zeroAlternate {
+				wantReset = nil
+			}
+			if got := prepared.Dispatch.AccountUnavailableResetCandidates(); !slices.Equal(got, wantReset) {
+				t.Fatalf("reset candidates = %v, want %v", got, wantReset)
+			}
+		})
+	}
+}

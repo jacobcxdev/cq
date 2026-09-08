@@ -182,8 +182,9 @@ type CodexPreparedHTTPRequest struct {
 	Frozen    *CodexFrozenRequest
 	Lifecycle CodexHTTPRequestLifecycle
 
-	leaseHandle *CodexLeaseRequestHandle
-	receipt     *codexTurnReceiptHandle
+	leaseHandle        *CodexLeaseRequestHandle
+	receipt            *codexTurnReceiptHandle
+	portableQuotaRetry bool
 }
 
 // CodexHTTPRequestPlanErrorCode classifies preparation failures without
@@ -576,6 +577,13 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		AcceptedRevision:            input.AcceptedRevision,
 		Now:                         now,
 	}
+	// A continuation cannot move its response or turn state to another account.
+	// Keep its exhausted binding available for one quota probe instead of
+	// removing it from the candidate set and reporting a routing failure.
+	boundQuotaProbe := boundAccountKey != "" && containsCodexHTTPRequestAccountKey(snapshot.QuotaExhaustedAccountKeys, boundAccountKey)
+	if boundQuotaProbe {
+		dispatchInput.UnavailableAccountKeys = excludeCodexHTTPRequestAccountKeys(dispatchUnavailable, []codex.AccountKey{boundAccountKey})
+	}
 	dispatch, err := factory.buildDispatch(ctx, dispatchInput)
 	if err != nil {
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "route_selection", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
@@ -651,27 +659,37 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	quotaExhaustionProbe := containsCodexHTTPRequestAccountKey(snapshot.QuotaExhaustedAccountKeys, choice.AccountKey)
 	if policyDecision.Status == PolicyDecisionSelected {
 		available := excludeCodexHTTPRequestAccountKeys(policyDecision.Allowed, dispatchUnavailable)
-		if len(available) != 0 {
-			policyDecision.Allowed = available
-		} else if quotaExhaustionProbe {
+		if quotaExhaustionProbe {
 			policyDecision.Allowed = []codex.AccountKey{choice.AccountKey}
+		} else if len(available) != 0 {
+			policyDecision.Allowed = available
 		}
+	}
+	if boundAccountKey == "" && codexHTTPRequestAccountUnavailablePortable(protocol) {
+		dispatch.accountUnavailablePortable = true
 	}
 	if len(resetInventory.Accounts) > 1 {
 		resetPlan := dispatch
 		if boundAccountKey != "" {
 			resetInput := dispatchInput
+			resetInput.UnavailableAccountKeys = dispatchUnavailable
+			resetInput.ProbeUnavailableWhenAll = false
 			resetInput.Inventory = resetInventory
 			resetInput.AffinityAccountKey = ""
 			resetInput.AffinityEffectiveModel = ""
 			resetInput.BoundAccountKey = ""
 			resetPlan, err = factory.buildDispatch(ctx, resetInput)
 			if err != nil {
-				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+				var exhausted *CachedUsageLimitError
+				if !errors.As(err, &exhausted) {
+					return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+				}
+				// No reset route remains, but the bound attempt is still valid.
+				resetPlan = CodexFrozenDispatchPlan{}
 			}
 		}
 		dispatch = dispatch.withAccountUnavailableResetCandidates(resetPlan, choice)
-		if accountUnavailablePortable {
+		if accountUnavailablePortable && !quotaExhaustionProbe {
 			dispatch = dispatch.withAccountUnavailableFallbacks(resetPlan, choice)
 		}
 	}
@@ -729,6 +747,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "success", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 
+	result.portableQuotaRetry = codexHTTPRequestAccountUnavailablePortable(protocol)
 	result.Dispatch = dispatch
 	result.Frozen = frozen
 	result.leaseHandle = handle

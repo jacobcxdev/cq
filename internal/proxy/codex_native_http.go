@@ -209,113 +209,131 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 }
 
 func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, request *http.Request, compact bool, encoded []byte, claim *CodexRetainedHTTPRequestClaim) (bool, string) {
-	trace := codexInstalledHTTPTraceFromContext(request.Context())
-	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "planning", Outcome: "started"})
-	prepared, err := func() (CodexPreparedHTTPRequest, error) {
-		ctx, release := handler.requestPlanningContext(request.Context())
-		defer release()
-		input := CodexHTTPRequestPlanInput{Encoded: encoded, Headers: request.Header}
-		if claim != nil {
-			expected := claim.ExpectedBound
-			input.ExpectedBound = &expected
-			input.retainedPlanning = claim.planning
-		}
-		return handler.planner.Build(ctx, input)
-	}()
-	clearBytes(encoded)
-	if err != nil {
-		if writeCodexCapacityError(writer, err) {
+	defer clearBytes(encoded)
+	// Freeze the retry budget from the first plan so a changing inventory cannot
+	// keep one downstream request retrying indefinitely.
+	remainingQuotaRetries := -1
+	for {
+		trace := codexInstalledHTTPTraceFromContext(request.Context())
+		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "planning", Outcome: "started"})
+		prepared, err := func() (CodexPreparedHTTPRequest, error) {
+			ctx, release := handler.requestPlanningContext(request.Context())
+			defer release()
+			input := CodexHTTPRequestPlanInput{Encoded: encoded, Headers: request.Header}
+			if claim != nil {
+				expected := claim.ExpectedBound
+				input.ExpectedBound = &expected
+				input.retainedPlanning = claim.planning
+			}
+			return handler.planner.Build(ctx, input)
+		}()
+		if err != nil {
+			if writeCodexCapacityError(writer, err) {
+				return true, ""
+			}
+			status := http.StatusServiceUnavailable
+			errorType := "api_error"
+			message := "Codex native HTTP routing unavailable"
+			failure := CodexHTTPRequestPlanFailure{Stage: codexHTTPRequestPlanUnknown, Reason: CodexRequestFailureUnknown}
+			var planErr *CodexHTTPRequestPlanError
+			if errors.As(err, &planErr) {
+				failure.Stage = safeCodexHTTPRequestPlanErrorCode(planErr.Code)
+				failure.Reason = safeCodexRequestFailureReason(planErr.Reason)
+				if planErr.Code == CodexHTTPRequestPlanInspect {
+					status = http.StatusBadRequest
+					errorType = "invalid_request_error"
+					message = "invalid Codex Responses request"
+				}
+			}
+			noteCodexObservation(request.Context(), codexObservationFields{Decision: "plan_failed", Reason: string(failure.Reason)})
+			emitCodexTrace(request.Context(), CodexTraceEvent{
+				Phase: "planning", Stage: string(failure.Stage), Outcome: "error", Reason: string(failure.Reason), StatusCode: status,
+			})
+			if handler.reportPlanFailure != nil {
+				handler.reportPlanFailure(failure)
+			}
+			writeError(writer, status, errorType, message)
 			return true, ""
 		}
-		status := http.StatusServiceUnavailable
-		errorType := "api_error"
-		message := "Codex native HTTP routing unavailable"
-		failure := CodexHTTPRequestPlanFailure{Stage: codexHTTPRequestPlanUnknown, Reason: CodexRequestFailureUnknown}
-		var planErr *CodexHTTPRequestPlanError
-		if errors.As(err, &planErr) {
-			failure.Stage = safeCodexHTTPRequestPlanErrorCode(planErr.Code)
-			failure.Reason = safeCodexRequestFailureReason(planErr.Reason)
-			if planErr.Code == CodexHTTPRequestPlanInspect {
-				status = http.StatusBadRequest
-				errorType = "invalid_request_error"
-				message = "invalid Codex Responses request"
-			}
-		}
-		noteCodexObservation(request.Context(), codexObservationFields{Decision: "plan_failed", Reason: string(failure.Reason)})
-		emitCodexTrace(request.Context(), CodexTraceEvent{
-			Phase: "planning", Stage: string(failure.Stage), Outcome: "error", Reason: string(failure.Reason), StatusCode: status,
-		})
-		if handler.reportPlanFailure != nil {
-			handler.reportPlanFailure(failure)
-		}
-		writeError(writer, status, errorType, message)
-		return true, ""
-	}
 
-	model := ""
-	if accounts := prepared.Dispatch.Accounts(); len(accounts) > 0 {
-		model = accounts[0].Choice().EffectiveModel
-	}
-	emitCodexTrace(request.Context(), CodexTraceEvent{
-		Phase: "planning", Outcome: "success", Candidates: codexTraceDispatchCandidates(prepared.Dispatch),
-	})
-	template := handler.requestTemplate(request, compact)
-	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Outcome: "started"})
-	result, err := handler.session.Do(
-		request.Context(),
-		template,
-		prepared.Dispatch,
-		prepared.Frozen,
-		prepared.Lifecycle,
-	)
-	if err != nil {
-		if writeCodexCapacityError(writer, err) {
+		if remainingQuotaRetries < 0 {
+			remainingQuotaRetries = len(prepared.Dispatch.AccountUnavailableResetCandidates())
+		}
+		model := ""
+		if accounts := prepared.Dispatch.Accounts(); len(accounts) > 0 {
+			model = accounts[0].Choice().EffectiveModel
+		}
+		emitCodexTrace(request.Context(), CodexTraceEvent{
+			Phase: "planning", Outcome: "success", Candidates: codexTraceDispatchCandidates(prepared.Dispatch),
+		})
+		canReplanQuota := prepared.portableQuotaRetry && prepared.Lifecycle != nil && prepared.Lifecycle.EverAdmitted()
+		template := handler.requestTemplate(request, compact)
+		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Outcome: "started"})
+		result, err := handler.session.Do(
+			request.Context(),
+			template,
+			prepared.Dispatch,
+			prepared.Frozen,
+			prepared.Lifecycle,
+		)
+		if err != nil {
+			if writeCodexCapacityError(writer, err) {
+				return true, model
+			}
+			failure := classifyCodexNativeHTTPSessionFailure(err)
+			noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
+			event := CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway}
+			if failure.roundTrip != nil {
+				event.ErrorClass = string(failure.roundTrip.reason)
+			}
+			emitCodexTrace(request.Context(), event)
+			if handler.reportSessionFailure != nil {
+				handler.reportSessionFailure(failure)
+			}
+			writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream request failed")
 			return true, model
 		}
-		failure := classifyCodexNativeHTTPSessionFailure(err)
-		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
-		event := CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway}
-		if failure.roundTrip != nil {
-			event.ErrorClass = string(failure.roundTrip.reason)
+		if result.Response == nil || result.Response.Body == nil {
+			failure := codexNativeHTTPSessionFailure{stage: "response_validate", reason: "response_unavailable"}
+			noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
+			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway})
+			if handler.reportSessionFailure != nil {
+				handler.reportSessionFailure(failure)
+			}
+			writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream response unavailable")
+			return true, model
 		}
-		emitCodexTrace(request.Context(), event)
-		if handler.reportSessionFailure != nil {
-			handler.reportSessionFailure(failure)
-		}
-		writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream request failed")
-		return true, model
-	}
-	if result.Response == nil || result.Response.Body == nil {
-		failure := codexNativeHTTPSessionFailure{stage: "response_validate", reason: "response_unavailable"}
-		noteCodexObservation(request.Context(), codexObservationFields{Decision: "session_failed", Reason: failure.reason})
-		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Stage: failure.stage, Outcome: "error", Reason: failure.reason, StatusCode: http.StatusBadGateway})
-		if handler.reportSessionFailure != nil {
-			handler.reportSessionFailure(failure)
-		}
-		writeError(writer, http.StatusBadGateway, "api_error", "Codex upstream response unavailable")
-		return true, model
-	}
-	emitCodexTrace(request.Context(), CodexTraceEvent{
-		Phase: "upstream_response", Outcome: codexTraceHTTPOutcome(result.Response.StatusCode),
-		UpstreamStatus: result.Response.StatusCode, AccountHint: codexTraceAccountHint(result.Choice.AccountKey), Attempt: result.Attempt.Ordinal,
-	})
+		emitCodexTrace(request.Context(), CodexTraceEvent{
+			Phase: "upstream_response", Outcome: codexTraceHTTPOutcome(result.Response.StatusCode),
+			UpstreamStatus: result.Response.StatusCode, AccountHint: codexTraceAccountHint(result.Choice.AccountKey), Attempt: result.Attempt.Ordinal,
+		})
 
-	if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
-		defer closeCodexHTTPResponseBody(result.Response.Body)
-		relayErr := relayCodexHTTPResponse(writer, result.Response, false)
+		// The session has durably rejected this account before any response bytes
+		// reached the client. A full create can now acquire a replacement binding.
+		if result.quotaExhausted && canReplanQuota && claim == nil && remainingQuotaRetries > 0 && request.Context().Err() == nil {
+			closeCodexHTTPResponseBody(result.Response.Body)
+			remainingQuotaRetries--
+			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "failover", Outcome: "replan", Reason: "capacity_exhausted", Retry: true, Failover: true})
+			continue
+		}
+
+		if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
+			defer closeCodexHTTPResponseBody(result.Response.Body)
+			relayErr := relayCodexHTTPResponse(writer, result.Response, false)
+			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "relay", Outcome: codexTraceRelayOutcome(relayErr), UpstreamStatus: result.Response.StatusCode, Reason: codexTraceErrorReason(relayErr)})
+			trace.relayedResponse(false, true, relayErr)
+			return true, model
+		}
+
+		mode := codexHTTPResponseModeSSE
+		if compact {
+			mode = codexHTTPResponseModeCompact
+		}
+		relayErr := relayCodexAcceptedHTTPResponse(request.Context(), writer, result.Response, mode, result.Lifecycle)
 		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "relay", Outcome: codexTraceRelayOutcome(relayErr), UpstreamStatus: result.Response.StatusCode, Reason: codexTraceErrorReason(relayErr)})
-		trace.relayedResponse(false, true, relayErr)
+		trace.relayedResponse(true, false, relayErr)
 		return true, model
 	}
-
-	mode := codexHTTPResponseModeSSE
-	if compact {
-		mode = codexHTTPResponseModeCompact
-	}
-	relayErr := relayCodexAcceptedHTTPResponse(request.Context(), writer, result.Response, mode, result.Lifecycle)
-	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "relay", Outcome: codexTraceRelayOutcome(relayErr), UpstreamStatus: result.Response.StatusCode, Reason: codexTraceErrorReason(relayErr)})
-	trace.relayedResponse(true, false, relayErr)
-	return true, model
 }
 
 func (handler *CodexNativeHTTPHandler) requestPlanningContext(requestContext context.Context) (context.Context, func()) {

@@ -105,6 +105,7 @@ type normalTransportGateBackend struct {
 	httpAuthRecovered bool
 	httpAuthActive    bool
 	httpAuthStatus    int
+	httpTurnState     bool
 	wsConnections     int
 	failures          chan error
 	firstWSClosed     chan struct{}
@@ -253,6 +254,9 @@ func (backend *normalTransportGateBackend) serveHTTP(writer http.ResponseWriter,
 		}
 	default:
 		writer.Header().Set("Content-Type", "text/event-stream")
+		if backend.httpTurnState {
+			writer.Header().Set("X-Codex-Turn-State", "state-"+accountID)
+		}
 		encryptedState := ""
 		if normalTransportGateNonPortableWebSocketScenario(backend.scenario) {
 			encryptedState = `,"encrypted_content":"opaque-normal-transport-state"`
@@ -1493,6 +1497,83 @@ func TestNormalProxyTransportHTTPHardLimitMigratesBeforeLeak(t *testing.T) {
 		receipts[1].accountID != "validation-upstream-b" || receipts[1].status != http.StatusOK ||
 		receipts[0].payload != receipts[1].payload {
 		t.Fatalf("hard-limit provider receipts = %#v, want A/429 then byte-identical B/200", receipts)
+	}
+	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportHTTPAdmittedQuotaFailureRetriesWithinRequest(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
+	harness.backend.httpTurnState = true
+	metadata := CodexTurnMetadata{SessionID: "automatic-quota-session", ThreadID: "automatic-quota-thread", TurnID: "automatic-quota-turn", RequestKind: CodexRequestTurn}
+	encoded := normalTransportGateHTTPBody(t, metadata)
+	status, body := normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("seed = %d %q", status, body)
+	}
+	harness.backend.scenario = normalTransportGateHTTPHardLimit
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
+		t.Fatalf("same-turn quota recovery = %d %q, want automatic B/200", status, body)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("continuation after recovery = %d %q", status, body)
+	}
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 4 || receipts[0].accountID != "validation-upstream-a" || receipts[1].status != http.StatusTooManyRequests || receipts[2].accountID != "validation-upstream-b" || receipts[3].accountID != "validation-upstream-b" || receipts[1].payload != receipts[2].payload {
+		t.Fatalf("receipts = %#v, want A/200, A/429, identical B/200, B/200", receipts)
+	}
+	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportHTTPAdmittedQuotaRetryBounds(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		scenario     normalTransportGateScenario
+		continuation bool
+		wantAttempts int
+	}{
+		{"all exhausted", normalTransportGateHTTPAllHardLimit, false, 4},
+		{"soft limit", normalTransportGateHTTPSoftLimit, false, 2},
+		{"response ID continuation", normalTransportGateHTTPHardLimit, true, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
+			harness.backend.httpTurnState = true
+			metadata := CodexTurnMetadata{SessionID: "bounded-quota-session", ThreadID: "bounded-quota-thread", TurnID: "bounded-quota-turn", RequestKind: CodexRequestTurn}
+			encoded := normalTransportGateHTTPBody(t, metadata)
+			status, body := normalTransportGateHTTPCall(t, harness, encoded)
+			if status != http.StatusOK {
+				t.Fatalf("seed = %d %q", status, body)
+			}
+			harness.backend.scenario = test.scenario
+			if test.continuation {
+				encoded = normalTransportGateHTTPContinuationBody(t, metadata, "normal-transport-http")
+			}
+			status, body = normalTransportGateHTTPCall(t, harness, encoded)
+			if status != http.StatusTooManyRequests {
+				t.Fatalf("terminal status = %d %q, want429", status, body)
+			}
+			receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+			if len(receipts) != test.wantAttempts {
+				t.Fatalf("attempts = %d, want %d: %#v", len(receipts), test.wantAttempts, receipts)
+			}
+			harness.backend.assertNoFailure(t)
+		})
+	}
+}
+
+func TestNormalProxyTransportHTTPFreshQuotaExhaustionDoesNotReprobe(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPAllHardLimit)
+	harness.httpPlanner.DefaultAccountKey = ""
+	metadata := CodexTurnMetadata{SessionID: "fresh-quota-session", ThreadID: "fresh-quota-thread", TurnID: "fresh-quota-turn", RequestKind: CodexRequestTurn}
+	status, body := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, metadata))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status=%d %q, want429", status, body)
+	}
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 2 {
+		t.Fatalf("attempts=%d, want2: %#v", len(receipts), receipts)
 	}
 	harness.backend.assertNoFailure(t)
 }
