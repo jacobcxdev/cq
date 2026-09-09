@@ -724,6 +724,8 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 			desired.AccountHash = current.Record.AccountHash
 		}
 		desired.NonMigratable = false
+		desired.AdoptedPrewarm = false
+		desired.PrewarmAdoptionJournalGeneration = 0
 	}
 	if requiresAccountContinuity {
 		desired.NonMigratable = true

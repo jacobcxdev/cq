@@ -2245,6 +2245,89 @@ func TestCodexLeaseRuntimeAccountUnavailableRebindsAdmittedPortableRequest(t *te
 	}
 }
 
+func TestCodexLeaseRuntimeQuotaRetryRebindsStatefulAdmittedTurn(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _, _, adoption := prepareCodexPrewarmAdoptionTest(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	accounts := []codex.AccountKey{"account-raw", "account-b"}
+	handle, err := runtimeLease.adoptWebSocketPrewarmContext(context.Background(), accounts, adoption)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitWebSocketContext(context.Background(), CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: adoption.DownstreamSocketGeneration,
+		UpstreamGeneration:   adoption.UpstreamSocketGeneration,
+		ResponseID:           adoption.ResponseAnchor,
+		ResponseCreated:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitWebSocketContext(context.Background(), CodexWebSocketAdmissionEvidence{
+		DownstreamGeneration: adoption.DownstreamSocketGeneration,
+		UpstreamGeneration:   adoption.UpstreamSocketGeneration,
+		TurnState:            adoption.TurnState,
+		HasTurnState:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle, err = handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+
+	anchored := codexLeaseRuntimeTestPlan("turn-raw", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-raw", CandidateID: "candidate-anchored", Kind: CodexAttemptSlotDirect,
+	}})
+	anchored.Key = adoption.Key
+	anchored.Authority = adoption.Policy
+	anchored.Accounts = accounts
+	anchored.RequestedModel = adoption.Choice.RequestedModel
+	anchored.EffectiveModel = adoption.Choice.EffectiveModel
+	anchored.RequiredBuckets = adoption.Choice.RequiredBuckets
+	anchored.Evidence = CodexLeaseRequestEvidence{
+		PreviousResponseID: adoption.ResponseAnchor,
+		TurnState:          adoption.TurnState,
+		HasTurnState:       true,
+	}
+	handle, err = runtimeLease.BeginRequest(anchored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := codexLeaseRuntimeTestPlan("turn-raw", []CodexLeaseAttemptSlotPlan{{
+		AccountKey: "account-b", CandidateID: "candidate-retry", Kind: CodexAttemptSlotDirect,
+	}})
+	retry.Key = adoption.Key
+	retry.Authority = adoption.Policy
+	retry.Accounts = accounts
+	rebound, err := runtimeLease.BeginRequest(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebound.AccountKey() != "account-b" {
+		t.Fatalf("quota retry account = %q, want account-b", rebound.AccountKey())
+	}
+	if rebound.record.AdoptedPrewarm || rebound.record.PrewarmAdoptionJournalGeneration != 0 {
+		t.Fatalf("quota retry retained stale prewarm adoption: %#v", rebound.record)
+	}
+}
+
 func TestCodexLeaseRuntimeStreamingAccountUnavailableRequiresReconnect(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
