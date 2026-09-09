@@ -317,6 +317,18 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 			continue
 		}
 
+		if result.reserveProtected && result.Lifecycle.EverAdmitted() {
+			// Keep reserve exclusions through replanning, then clear the temporary
+			// cycle only once the final rejection must reach the client.
+			next, completeErr := result.Lifecycle.CompleteAccountUnavailableCycleContext(request.Context())
+			if completeErr != nil {
+				closeCodexHTTPResponseBody(result.Response.Body)
+				writeError(writer, http.StatusBadGateway, "api_error", "Codex account failover failed")
+				return true, model
+			}
+			result.Lifecycle = next
+		}
+
 		if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
 			defer closeCodexHTTPResponseBody(result.Response.Body)
 			relayErr := relayCodexHTTPResponse(writer, result.Response, false)

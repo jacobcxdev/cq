@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -392,7 +393,8 @@ type CodexHTTPRequestSessionResult struct {
 	Attempt   CandidateAttempt
 	Lifecycle CodexHTTPRequestLifecycle
 
-	quotaExhausted bool
+	quotaExhausted   bool
+	reserveProtected bool
 }
 
 // CodexHTTPAttemptSlotPlan is one raw-free bridge entry for the durable lease
@@ -577,6 +579,35 @@ accountsLoop:
 				discardCodexHTTPRequestResponse(ctx, response)
 				if dispatched || marked {
 					return session.finishIndeterminate(ctx, result, err)
+				}
+				var reserveLimit *codexReserveLimitError
+				if errors.As(err, &reserveLimit) {
+					nextAccountIndex, hasReplacement := codexHTTPRequestNextUnavailableAccount(accountIndex, ordinaryAccountCount, len(accounts), result.Lifecycle.EverAdmitted())
+					if hasReplacement || codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
+						replacementSlot := uint32(0)
+						if hasReplacement {
+							replacementSlot = codexHTTPRequestFirstAccountSlot(accountSlots[nextAccountIndex])
+						}
+						// Reserve rejection precedes dispatch and does not prove backend
+						// exhaustion. Preserve the temporary account-unavailable lifecycle.
+						next, unavailableErr := result.Lifecycle.RecordAccountUnavailableContext(ctx, replacementSlot)
+						if unavailableErr != nil {
+							return session.finishIndeterminate(ctx, result, errors.Join(err, unavailableErr))
+						}
+						result.Lifecycle = next
+						if hasReplacement {
+							emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "account", AccountHint: codexTraceAccountHint(accounts[nextAccountIndex].Choice().AccountKey), Reason: "reserve_protected", Retry: true, Failover: true})
+							continue accountsLoop
+						}
+						result.Response = &http.Response{
+							StatusCode: http.StatusTooManyRequests,
+							Header:     http.Header{"Content-Type": []string{"application/json"}},
+							Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`)),
+						}
+						result.quotaExhausted = true
+						result.reserveProtected = true
+						return result, nil
+					}
 				}
 				return session.abandonPrepared(ctx, result, err)
 			}

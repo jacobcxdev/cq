@@ -87,15 +87,8 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		}
 		return CodexFrozenDispatchPlan{}, err
 	}
-	if input.BoundAccountKey != "" && input.Capacity != nil {
-		for _, candidate := range candidates {
-			if candidate.Choice.AccountKey == input.BoundAccountKey && candidate.Compatible && candidate.Routable {
-				if reserveErr := reserveDispatchError(input.Capacity.Reserve, input.BoundAccountKey); reserveErr != nil {
-					return CodexFrozenDispatchPlan{}, reserveErr
-				}
-			}
-		}
-	}
+	// Preserve bound attempts so dispatch can reject a reserve locally and run
+	// the account-unavailable lifecycle before selecting a replacement.
 	for index := range candidates {
 		candidates[index].Value = input.AccountValues[candidates[index].Choice.AccountKey]
 	}
