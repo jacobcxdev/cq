@@ -24,13 +24,9 @@ func TestCodexReserveDispatchGuard(t *testing.T) {
 	}
 	ledger.Reserve = reserve
 	logical := frozenDispatchTestLogicalAccount("system", frozenDispatchCandidate("system", "candidate", "revision", codex.SourceSystem, false, time.Time{}))
-	_, planErr := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{logical}}, Capacity: ledger, Requirements: CodexRouteRequirements{RequestedModel: "gpt-5"}, BoundAccountKey: "system", DefaultAccountKey: "system", Now: now})
-	var planLimit *CachedUsageLimitError
-	if !errors.As(planErr, &planLimit) {
-		t.Fatalf("bound reserve plan error = %v", planErr)
-	}
-	if !errors.As(newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, planErr), &planLimit) {
-		t.Fatal("plan wrapper lost reserve limit")
+	plan, planErr := BuildCodexFrozenDispatchPlan(context.Background(), CodexFrozenDispatchInput{Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{logical}}, Capacity: ledger, Requirements: CodexRouteRequirements{RequestedModel: "gpt-5"}, BoundAccountKey: "system", DefaultAccountKey: "system", Now: now})
+	if planErr != nil || len(plan.Accounts()) != 1 {
+		t.Fatalf("bound reserve plan = %#v, %v, want guarded dispatch attempt", plan, planErr)
 	}
 	executor := &CodexAttemptExecutor{Reserve: reserve}
 	wsExecutor := &CodexWebSocketAttemptExecutor{Reserve: reserve}

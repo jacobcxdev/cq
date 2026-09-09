@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+// codexReserveLimitError marks a local reserve rejection, not backend exhaustion.
+type codexReserveLimitError struct {
+	*CachedUsageLimitError
+}
+
+func (limit *codexReserveLimitError) Unwrap() error { return limit.CachedUsageLimitError }
+
 func reserveDispatchError(reserve *CodexReserve, account codex.AccountKey) error {
 	if reserve != nil {
 		if blocked, reset := reserve.Blocked(account); blocked {
@@ -14,7 +21,7 @@ func reserveDispatchError(reserve *CodexReserve, account codex.AccountKey) error
 			if reset > 0 {
 				limit.ResetAt = time.Unix(reset, 0)
 			}
-			return limit
+			return &codexReserveLimitError{CachedUsageLimitError: limit}
 		}
 	}
 	return nil

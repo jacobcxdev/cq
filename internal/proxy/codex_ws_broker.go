@@ -727,6 +727,10 @@ func (broker *codexTerminatingWSBroker) stopIdleUpstreamKeepalive(active *codexW
 }
 
 func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, active *codexWSActiveUpstream) error {
+	return broker.serveFrameReserveAttempt(ctx, downstream, pending, active, -1)
+}
+
+func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, active *codexWSActiveUpstream, reserveRetries int) error {
 	if err := broker.stopIdleUpstreamKeepalive(active); err != nil {
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_idle", Outcome: "error", Reason: codexTraceErrorReason(err)})
 		closeCodexWSActiveUpstream(active)
@@ -800,6 +804,9 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 		return codexWSAbandonPrepared(ctx, prepared.Lifecycle, prepared.Dispatch.TerminalError())
 	}
 	resetAvailable := len(prepared.Dispatch.AccountUnavailableResetCandidates()) != 0
+	if reserveRetries < 0 {
+		reserveRetries = len(prepared.Dispatch.AccountUnavailableResetCandidates())
+	}
 	if idleErr := codexWSIdleUpstreamError(active); idleErr != nil {
 		closeCodexWSActiveUpstream(active)
 		if codexWSIdleUpstreamClosed(idleErr) && !pending.portable {
@@ -865,6 +872,46 @@ func (broker *codexTerminatingWSBroker) serveFrame(ctx context.Context, downstre
 			UpstreamStatus: dialStatus, Reason: codexTraceErrorReason(dial.err), Retry: accountIndex > 0,
 			Failover: accountIndex > 0, ErrorClass: codexTraceWrappedErrorClass(dial.wrapped),
 		})
+		var reserveLimit *codexReserveLimitError
+		if errors.As(dial.err, &reserveLimit) {
+			if !pending.portable {
+				if dial.lifecycle != nil {
+					return errors.Join(dial.err, dial.lifecycle.FinishRejected(dial.lifecycle.upstreamGeneration))
+				}
+				return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, dial.err)
+			}
+			if dial.lifecycle != nil {
+				prepared.leaseHandle = dial.lifecycle.handle
+			}
+			replacementSlot := uint32(0)
+			if accountIndex+1 < len(accounts) {
+				replacementSlot, err = codexWSReplacementSlot(prepared.leaseHandle, accounts[accountIndex+1].Choice().AccountKey)
+				if err != nil {
+					return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, err)
+				}
+			}
+			next, unavailableErr := prepared.leaseHandle.RecordAccountUnavailableContext(ctx, replacementSlot)
+			if unavailableErr != nil {
+				return errors.Join(dial.err, unavailableErr)
+			}
+			prepared.leaseHandle = next
+			closeCodexWSActiveUpstream(active)
+			if replacementSlot != 0 {
+				accountIndex++
+				emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "account", AccountHint: codexTraceAccountHint(accounts[accountIndex].Choice().AccountKey), Reason: "reserve_active", Retry: true, Failover: true})
+				continue
+			}
+			if resetAvailable && reserveRetries > 0 {
+				return broker.serveFrameReserveAttempt(ctx, downstream, pending, active, reserveRetries-1)
+			}
+			if prepared.leaseHandle.record.EverAdmitted {
+				if _, err := prepared.leaseHandle.CompleteAccountUnavailableCycleContext(ctx); err != nil {
+					return errors.Join(dial.err, err)
+				}
+			}
+			prepared.receipt.terminal(CodexTurnReceiptRejected)
+			return dial.err
+		}
 		if dial.lifecycle == nil {
 			if dial.err != nil {
 				return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, dial.err)

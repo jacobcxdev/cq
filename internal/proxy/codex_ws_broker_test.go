@@ -20,6 +20,161 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
+type codexWSReserveDialerStub struct {
+	*codexWSBrokerDialerStub
+	blocked    codex.AccountKey
+	allowFirst bool
+	checks     int
+}
+
+func (dialer *codexWSReserveDialerStub) reserveDispatchError(account codex.AccountKey) error {
+	dialer.checks++
+	if account == dialer.blocked && (!dialer.allowFirst || dialer.checks > 1) {
+		return &codexReserveLimitError{CachedUsageLimitError: &CachedUsageLimitError{}}
+	}
+	return nil
+}
+
+func TestCodexTerminatingWSBrokerReserveGuardsReusedAnchoredSocket(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator), slots: []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}}}
+	first := codexTerminatingWSFrame("turn-a", "")
+	second := codexTerminatingWSFrame("turn-b", `,"previous_response_id":"response-a"`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: first}, {messageType: websocket.TextMessage, payload: second}, {err: io.EOF}}}
+	upstream := newCodexWSBrokerSuccessorConn([]codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)},
+	})
+	dialer := &codexWSReserveDialerStub{codexWSBrokerDialerStub: &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}, blocked: "account-a", allowFirst: true}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if got := upstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{first}) {
+		t.Fatalf("protected socket writes = %q", got)
+	}
+	if got := downstream.writtenPayloads(); len(got) != 3 || !bytes.Contains(got[2], []byte("usage_limit_reached")) {
+		t.Fatalf("anchored reply = %q", got)
+	}
+}
+
+func TestCodexTerminatingWSBrokerReserveReroutesReusedPortableSocket(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator), slots: []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}, {AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect}}}
+	first := codexTerminatingWSFrame("turn-a", "")
+	second := codexTerminatingWSFrame("turn-b", "")
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: first}, {messageType: websocket.TextMessage, payload: second}, {err: io.EOF}}}
+	upstream := newCodexWSBrokerSuccessorConn([]codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)},
+	})
+	upstreamB := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-b"}}`)}, {messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)}}}
+	dialer := &codexWSReserveDialerStub{codexWSBrokerDialerStub: &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}, "account-b": {upstreamB}}}, blocked: "account-a", allowFirst: true}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if got := upstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{first}) {
+		t.Fatalf("protected socket writes = %q", got)
+	}
+	if got := upstreamB.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{second}) {
+		t.Fatalf("fallback writes = %q", got)
+	}
+	if got := downstream.writtenPayloads(); len(got) != 4 || bytes.Contains(bytes.Join(got, nil), []byte("usage_limit_reached")) {
+		t.Fatalf("anchored reply = %q", got)
+	}
+}
+
+func TestCodexTerminatingWSBrokerReserveDuringAnchoredDialIsRejected(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexWSBrokerContinuationRuntime(t, coordinator, "turn-a", "response-a"), slots: []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}}}
+	frame := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a"`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: frame}, {err: io.EOF}}}
+	dialer := &codexWSBrokerDialerStub{outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{"account-a": {{err: &codexReserveLimitError{CachedUsageLimitError: &CachedUsageLimitError{}}, skipDispatch: true}}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if got := downstream.writtenPayloads(); len(got) != 1 || !bytes.Contains(got[0], []byte("usage_limit_reached")) {
+		t.Fatalf("anchored reserve reply = %q", got)
+	}
+}
+
+func TestCodexTerminatingWSBrokerRotatesReserveBeforeDispatch(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{
+			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+		},
+	}
+	frame := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session-a","thread_id":"thread-a","turn_id":"turn-a","request_kind":"turn"}},"input":[]}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: frame}, {err: io.EOF}}}
+	completed := []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)
+	created := []byte(`{"type":"response.created","response":{"id":"response-b"}}`)
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: created}, {messageType: websocket.TextMessage, payload: completed}}}
+	dialer := &codexWSReserveDialerStub{codexWSBrokerDialerStub: &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-b": {upstream}}}, blocked: "account-a"}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(dialer.accounts, []codex.AccountKey{"account-b"}) {
+		t.Fatalf("dial accounts = %v", dialer.accounts)
+	}
+	if got := downstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{created, completed}) {
+		t.Fatalf("downstream writes = %q", got)
+	}
+	if got := upstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{frame}) {
+		t.Fatalf("upstream writes = %q", got)
+	}
+}
+
+func TestCodexTerminatingWSBrokerRotatesReserveDuringDial(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{
+			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+		},
+	}
+	frame := []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session-a","thread_id":"thread-a","turn_id":"turn-a","request_kind":"turn"}},"input":[]}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: frame}, {err: io.EOF}}}
+	completed := []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)
+	created := []byte(`{"type":"response.created","response":{"id":"response-b"}}`)
+	upstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: created}, {messageType: websocket.TextMessage, payload: completed}}}
+	dialer := &codexWSReserveDialerStub{codexWSBrokerDialerStub: &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-b": {upstream}}, outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{"account-a": {{err: &codexReserveLimitError{CachedUsageLimitError: &CachedUsageLimitError{}}, skipDispatch: true}}}}, blocked: ""}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(dialer.accounts, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("dial accounts = %v", dialer.accounts)
+	}
+	if got := downstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{created, completed}) {
+		t.Fatalf("downstream writes = %q", got)
+	}
+	if got := upstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{frame}) {
+		t.Fatalf("upstream writes = %q", got)
+	}
+}
+
 func TestCodexTerminatingWSBrokerRotatesPortableFrameBeforeAdmission(t *testing.T) {
 	t.Parallel()
 	tracePath := filepath.Join(t.TempDir(), "routes.jsonl")

@@ -28,6 +28,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -791,6 +792,7 @@ func (planner normalTransportGateCloseAfterPrecheckPlanner) Build(ctx context.Co
 }
 
 type normalTransportGateHarness struct {
+	reserve          *CodexReserve
 	backend          *normalTransportGateBackend
 	proxy            *httptest.Server
 	continuity       *CodexContinuityCoordinator
@@ -1247,6 +1249,12 @@ func newNormalTransportGateHarnessWithCaller(t *testing.T, scenario normalTransp
 	httpTransport := newCodexInstalledHTTPValidationRoundTripper(providerURL.Host)
 	t.Cleanup(httpTransport.transport.CloseIdleConnections)
 
+	reserve, err := OpenCodexReserve(fsutil.NewMemFS(), "/state/reserve.json", core.capacity, normalTransportReserveInventory{}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.capacity.Reserve = reserve
+
 	httpPlanner := &CodexHTTPRequestPlanFactory{
 		Inventory: credentialInventory, Capacity: core.capacity, Routes: core.continuity, Runtime: leaseRuntime,
 		DefaultAccountKey: defaultAccountKey,
@@ -1256,6 +1264,7 @@ func newNormalTransportGateHarnessWithCaller(t *testing.T, scenario normalTransp
 	}
 	httpHandler, err := NewCodexNativeHTTPHandler(httpPlanner, &CodexHTTPRequestSession{
 		Executor: &CodexAttemptExecutor{
+			Reserve:   reserve,
 			Inventory: credentialInventory,
 			Secrets:   exactSecrets,
 			Transport: &CodexTokenTransport{Inner: httpTransport},
@@ -1286,6 +1295,7 @@ func newNormalTransportGateHarnessWithCaller(t *testing.T, scenario normalTransp
 		webSocketPlans = normalTransportGateCloseAfterPrecheckPlanner{inner: webSocketPlanner, backend: backend}
 	}
 	webSocketExecutor := NewCodexWebSocketAttemptExecutor(credentialInventory, exactSecrets)
+	webSocketExecutor.Reserve = reserve
 	webSocketExecutor.Dialer.Proxy = nil
 	webSocketBroker, err := NewCodexTerminatingWebSocketHandler(webSocketPlans, webSocketExecutor, credentialRefresher, core.capacity, provider.URL)
 	if err != nil {
@@ -1328,6 +1338,7 @@ func newNormalTransportGateHarnessWithCaller(t *testing.T, scenario normalTransp
 		proxyServer, _ = newCodexRuntimeSupervisorAcceptanceServer(t, handler, localToken)
 	}
 	return &normalTransportGateHarness{
+		reserve:          reserve,
 		backend:          backend,
 		proxy:            proxyServer,
 		continuity:       core.continuity,
@@ -3374,4 +3385,77 @@ func normalTransportGateReceipts(receipts []normalTransportGateReceipt, transpor
 		}
 	}
 	return result
+}
+
+func TestNormalProxyTransportHTTPReserveRetriesWithinRequest(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
+	harness.backend.httpTurnState = true
+	metadata := CodexTurnMetadata{SessionID: "reserve-session", ThreadID: "reserve-thread", TurnID: "reserve-turn", RequestKind: CodexRequestTurn}
+	encoded := normalTransportGateHTTPBody(t, metadata)
+	status, body := normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("seed = %d %q", status, body)
+	}
+	now := time.Now()
+	harness.httpPlanner.Capacity.ObserveQuotaSnapshot(codexInstalledHTTPValidationAccountA, QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 2, ResetAtUnix: now.Add(time.Hour).Unix()}}}})
+	if _, err := harness.reserve.Control("set", "7d", 2); err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) {
+		t.Fatalf("reserve recovery = %d %q, want B/200", status, body)
+	}
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 2 || receipts[0].accountID != "validation-upstream-a" || receipts[1].accountID != "validation-upstream-b" || receipts[0].payload != receipts[1].payload {
+		t.Fatalf("receipts = %#v, want A/200 then identical B/200 without protected upstream attempt", receipts)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("continuation after reserve recovery = %d %q", status, body)
+	}
+	receipts = normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 3 || receipts[2].accountID != "validation-upstream-b" {
+		t.Fatalf("continuation receipts = %#v, want B", receipts)
+	}
+
+	harness.backend.assertNoFailure(t)
+}
+
+type normalTransportReserveInventory struct{}
+
+func (normalTransportReserveInventory) List(context.Context) (codex.Inventory, error) {
+	return codex.Inventory{Accounts: []codex.LogicalAccount{{Key: codexInstalledHTTPValidationAccountA, Active: true}}}, nil
+}
+
+func TestNormalProxyTransportHTTPReserveWithoutAlternativeCanBeDisabled(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
+	harness.backend.httpTurnState = true
+	harness.inventory.inventory.Accounts = harness.inventory.inventory.Accounts[:1]
+	harness.httpPlanner.DefaultAccountKey = codexInstalledHTTPValidationAccountA
+	metadata := CodexTurnMetadata{SessionID: "reserve-only-session", ThreadID: "reserve-only-thread", TurnID: "reserve-only-turn", RequestKind: CodexRequestTurn}
+	encoded := normalTransportGateHTTPBody(t, metadata)
+	status, body := normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("seed = %d %q", status, body)
+	}
+	now := time.Now()
+	harness.httpPlanner.Capacity.ObserveQuotaSnapshot(codexInstalledHTTPValidationAccountA, QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 2, ResetAtUnix: now.Add(time.Hour).Unix()}}}})
+	if _, err := harness.reserve.Control("set", "7d", 2); err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("reserve = %d %q, want429", status, body)
+	}
+	if receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http"); len(receipts) != 1 {
+		t.Fatalf("reserved request reached upstream: %#v", receipts)
+	}
+	if _, err := harness.reserve.Control("disable", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("disabled reserve = %d %q, want200", status, body)
+	}
+	harness.backend.assertNoFailure(t)
 }

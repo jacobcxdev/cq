@@ -1911,3 +1911,102 @@ func newCodexHTTPSessionFrozenRequest(t *testing.T, choice RouteChoice) (*CodexF
 	}
 	return frozen, body
 }
+
+func TestCodexHTTPRequestSessionReserveBeforeDispatchFailsOver(t *testing.T) {
+	firstChoice := codexHTTPSessionChoice("account-a")
+	plan := CodexFrozenDispatchPlan{status: CodexRoutePlanReady, accounts: []CodexFrozenDispatchAccount{
+		{choice: firstChoice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)}},
+		{choice: codexHTTPSessionChoice("account-b"), attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)}},
+	}}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, firstChoice)
+	var events []string
+	dispatcher := &codexHTTPSessionDispatcher{t: t, events: &events, wantBody: encoded, outcomes: []codexHTTPSessionOutcome{
+		{preDispatchErr: &codexReserveLimitError{CachedUsageLimitError: &CachedUsageLimitError{}}},
+		{response: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("accepted"))}},
+	}}
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	handle, err := runtimeLease.BeginRequest(codexLeaseRuntimeTestPlan("reserve-failover", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := NewCodexCapacityLedger(nil, 0)
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Capacity: ledger}).Do(context.Background(), template, plan, frozen, NewCodexHTTPRequestLifecycle(handle))
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if result.Response == nil || result.Response.StatusCode != http.StatusOK || result.Choice.AccountKey != "account-b" {
+		t.Fatalf("result = %#v", result)
+	}
+	defer result.Response.Body.Close()
+	if got := strings.Join(events, ","); got != "send:candidate-b" {
+		t.Fatalf("dispatch events = %s", got)
+	}
+	if got := ledger.Capacity("account-a", CapacityBucketBase); got.State == CapacityZero {
+		t.Fatalf("reserve persisted backend exhaustion: %#v", got)
+	}
+	lifecycle, err := result.Lifecycle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexHTTPRequestSessionReserveTerminalLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		admitted   bool
+		portable   bool
+		reserve    bool
+		wantEvents string
+		wantReplan bool
+	}{
+		{name: "new request", reserve: true, wantEvents: "exhaust:0", wantReplan: true},
+		{name: "portable continuation", admitted: true, portable: true, reserve: true, wantEvents: "exhaust:0", wantReplan: true},
+		{name: "nonportable continuation", admitted: true, reserve: true, wantEvents: "abandon"},
+		{name: "unrelated cached limit", portable: true, wantEvents: "abandon"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			choice := codexHTTPSessionChoice("account-a")
+			plan := CodexFrozenDispatchPlan{status: CodexRoutePlanReady, accountUnavailablePortable: test.portable, accounts: []CodexFrozenDispatchAccount{
+				{choice: choice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)}},
+			}}
+			frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)
+			var events []string
+			var dispatchErr error = &CachedUsageLimitError{}
+			if test.reserve {
+				dispatchErr = &codexReserveLimitError{CachedUsageLimitError: &CachedUsageLimitError{}}
+			}
+			dispatcher := &codexHTTPSessionDispatcher{t: t, events: &events, wantBody: encoded, outcomes: []codexHTTPSessionOutcome{{preDispatchErr: dispatchErr}}}
+			lifecycle := &codexHTTPSessionLifecycle{account: "account-a", admitted: test.admitted, events: &events}
+			template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := (&CodexHTTPRequestSession{Executor: dispatcher}).Do(context.Background(), template, plan, frozen, lifecycle)
+			if test.wantReplan {
+				if err != nil || !result.quotaExhausted || result.Response == nil || result.Response.StatusCode != http.StatusTooManyRequests {
+					t.Fatalf("terminal reserve response = %#v, error = %v", result, err)
+				}
+				result.Response.Body.Close()
+			} else {
+				var limit *CachedUsageLimitError
+				if !errors.As(err, &limit) || result.quotaExhausted {
+					t.Fatalf("terminal rejection = %#v, error = %v", result, err)
+				}
+			}
+			if got := strings.Join(events, ","); got != test.wantEvents {
+				t.Fatalf("lifecycle events = %s, want %s", got, test.wantEvents)
+			}
+		})
+	}
+}
