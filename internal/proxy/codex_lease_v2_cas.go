@@ -739,7 +739,8 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		result.LeaseGeneration = 1
 		result.CreatedAt = now
 	} else {
-		if old.AdoptedPrewarm != input.AdoptedPrewarm || old.PrewarmAdoptionJournalGeneration != input.PrewarmAdoptionJournalGeneration {
+		retiredPrewarmAdoption := bindingReset && old.AdoptedPrewarm && !input.AdoptedPrewarm && input.PrewarmAdoptionJournalGeneration == 0
+		if (old.AdoptedPrewarm != input.AdoptedPrewarm || old.PrewarmAdoptionJournalGeneration != input.PrewarmAdoptionJournalGeneration) && !retiredPrewarmAdoption {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: prewarm adoption marker changed", ErrCodexLeaseInvalidMutation)
 		}
 		if old.RecordGeneration == math.MaxUint64 {
