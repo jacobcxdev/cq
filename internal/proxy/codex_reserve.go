@@ -45,6 +45,12 @@ func (l *CodexCapacityLedger) observeWindowsLocked(fact CapacityFact) {
 	if l.windows[fact.AccountKey] == nil {
 		l.windows[fact.AccountKey] = make(map[quota.WindowName]codexWindowFact)
 	}
+	if l.unsettledWindows == nil {
+		l.unsettledWindows = make(map[codex.AccountKey]map[quota.WindowName]bool)
+	}
+	if l.unsettledWindows[fact.AccountKey] == nil {
+		l.unsettledWindows[fact.AccountKey] = make(map[quota.WindowName]bool)
+	}
 	for name, w := range fact.Windows {
 		name = canonicalReserveWindow(name)
 		remaining := windowRemaining(w)
@@ -57,6 +63,17 @@ func (l *CodexCapacityLedger) observeWindowsLocked(fact CapacityFact) {
 		}
 		if ok && (fact.ObservedAt.Before(old.fact.ObservedAt) || (fact.ObservedAt.Equal(old.fact.ObservedAt) && (fact.Source < old.fact.Source || (fact.Source == old.fact.Source && !capacityFactAdvances(old.fact, fact))))) {
 			continue
+		}
+		if ok {
+			oldRemaining := windowRemaining(old.window)
+			resetChanged := old.window.ResetAtUnix > 0 && w.ResetAtUnix > 0 && old.window.ResetAtUnix != w.ResetAtUnix
+			if remaining != oldRemaining || resetChanged {
+				delete(l.unsettledWindows[fact.AccountKey], name)
+			} else if fact.Source == CapacitySourceHTTPHeaders || fact.Source == CapacitySourceLiveRateLimits {
+				// An advancing response observation with unchanged usage does not prove
+				// that backend accounting has charged the protected request yet.
+				l.unsettledWindows[fact.AccountKey][name] = true
+			}
 		}
 		l.windows[fact.AccountKey][name] = codexWindowFact{window: cloneQuotaWindow(w), fact: fact}
 	}
@@ -81,6 +98,18 @@ func (l *CodexCapacityLedger) windowObservation(account codex.AccountKey, name q
 	defer l.mu.RUnlock()
 	entry, ok := l.windows[account][canonicalReserveWindow(name)]
 	return cloneQuotaWindow(entry.window), entry.fact.ObservedAt, ok
+}
+
+func (l *CodexCapacityLedger) windowUsageUnsettled(account codex.AccountKey, name quota.WindowName) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.unsettledWindows[account][canonicalReserveWindow(name)]
+}
+
+func (l *CodexCapacityLedger) clearWindowUsageUnsettled(account codex.AccountKey, name quota.WindowName) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.unsettledWindows[account], canonicalReserveWindow(name))
 }
 
 type codexReserveBypass struct {
@@ -268,6 +297,11 @@ func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email strin
 		status.Reason = "usage_stale"
 		return status
 	}
+	if r.ledger.windowUsageUnsettled(key, d.Window) {
+		status.Blocked = true
+		status.Reason = "usage_unsettled"
+		return status
+	}
 	status.Blocked = remaining <= d.Percent
 	if status.Blocked {
 		status.Reason = "reserve_reached"
@@ -324,6 +358,9 @@ func (r *CodexReserve) Control(action string, window quota.WindowName, percent f
 	}
 	if err := r.saveLocked(d); err != nil {
 		return status, err
+	}
+	if action == "set" {
+		r.ledger.clearWindowUsageUnsettled(d.LastSystemAccount, d.Window)
 	}
 	return r.statusLocked(), nil
 }
