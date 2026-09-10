@@ -1,0 +1,68 @@
+Measure and renew client credential-isolation evidence.
+
+Usage: cq proxy candidate client-safety refresh --state-dir STATE_DIR --validation-run-id VALIDATION_RUN_ID [OPTIONS]
+
+Unavailable in this specification: real qualification evidence backend is not defined.
+Valid syntax returns exit 4 without state access or transitions.
+
+Measure every registered sender, credential domain and transport. Issue a signed receipt
+only when no credential-bearing application bytes escaped the authorised runtime
+boundary.
+
+The old term client-bearer-barrier describes an internal credential boundary; client-
+safety names the operator purpose. A declared zero or a hash derived from identifiers is
+not measured evidence.
+
+The required target-artifact or measured-evidence backend lacks a complete independent
+contract. Until that contract and implementation exist, return
+candidate_evidence_unavailable (exit 4); the existing control-server substitute cannot
+qualify as success.
+
+Options:
+  --state-dir STATE_DIR
+      Candidate state directory created by prepare. Required; absolute, clean, current-
+      user-owned path. Never defaults to shared proxy state.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+  --validation-run-id VALIDATION_RUN_ID
+      Exact validation run identifier returned by candidate prepare or status. Required;
+      64 lowercase hexadecimal characters. An identifier, not a file hash; must match
+      the stored candidate.
+      Type: digest. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Exactly 64 lowercase hexadecimal characters.
+  --timeout TIMEOUT
+      Total deadline, including cleanup. Default: 150s. Allowed: 150s..5m inclusive; 30s
+      reserved for cleanup.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "150s".
+      Constraint: Go duration syntax; 150s <= value <= 5m; cleanup reserve 30s; deadline
+      cancellation must not leave an unrecorded mutation.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy candidate client-safety refresh --state-dir "$CANDIDATE" --validation-run-id "$VALIDATION_RUN"
+      Uses inputs prepared in the candidate workflow in the versioned annex notes.

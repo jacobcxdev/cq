@@ -1,0 +1,44 @@
+Inspect model registries and publish local model-cache updates.
+
+Usage: cq models <COMMAND> [OPTIONS]
+
+Inspect model registries and publish local model-cache updates.
+
+Choose a subcommand below. A bare group prints this help without reading configuration
+or changing state.
+
+Commands:
+  models
+      Inspect model registries and publish local model-cache updates.
+  list
+      List active models from local registry caches.
+  overlay
+      Add, remove or prune local model-registry additions.
+  refresh
+      Refresh model sources and publish client model caches.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq models --help
+      Show group help.

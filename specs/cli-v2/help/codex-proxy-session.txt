@@ -1,0 +1,46 @@
+Inspect or change the routing pool bound to a client session.
+
+Usage: cq codex proxy session <COMMAND> [OPTIONS]
+
+Inspect or change the routing pool bound to a client session.
+
+Choose a subcommand below. A bare group prints this help without reading configuration
+or changing state.
+
+Commands:
+  bind
+      Bind one exact session to a Codex pool.
+  digest
+      Return the keyed digest for a session selector.
+  list
+      List all session-to-pool bindings.
+  show
+      Show one session-to-pool binding.
+  unbind
+      Remove one exact session-to-pool binding.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy session --help
+      Show all immediate subcommands and usage.

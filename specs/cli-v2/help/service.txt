@@ -1,0 +1,50 @@
+Manage proxy and periodic token-refresh background services.
+
+Usage: cq service <COMMAND> [OPTIONS]
+
+Manage proxy and periodic token-refresh background services.
+
+Choose a subcommand below. A bare group prints this help without reading configuration
+or changing state.
+
+Commands:
+  service
+      Manage proxy and periodic token-refresh background services.
+  install
+      Install and start selected CQ services.
+  restart
+      Restart selected installed CQ services.
+  start
+      Start selected installed CQ services.
+  status
+      Inspect selected CQ service components.
+  stop
+      Stop and disable selected CQ services.
+  uninstall
+      Stop and remove selected CQ service registrations.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq service --help
+      Show all immediate subcommands and usage.

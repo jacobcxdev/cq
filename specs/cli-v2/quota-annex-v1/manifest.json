@@ -1,0 +1,185 @@
+{
+  "purpose": "Frozen source bytes stored as text, excluded from Go package discovery. Source paths in resource prose resolve to these .txt snapshots.",
+  "files": [
+    {
+      "source_path": "cmd/cq/proxy_inspect.go",
+      "path": "cmd/cq/proxy_inspect.go.txt",
+      "sha256": "b6ec1b7409bd3801f56a6c8f3ad37f538521989f7d0cbffdc35df66c2882bfc6"
+    },
+    {
+      "source_path": "internal/aggregate/aggregate.go",
+      "path": "internal/aggregate/aggregate.go.txt",
+      "sha256": "5979a8a0004dc8013d48039dc644b31b57b101ca74b7262677a382a5a60225ae"
+    },
+    {
+      "source_path": "internal/aggregate/aggregate_test.go",
+      "path": "internal/aggregate/aggregate_test.go.txt",
+      "sha256": "4439d4b73c3c687e3a9b191d07ca26c6703b8fce2e9e3ab61add03f604d7efb3"
+    },
+    {
+      "source_path": "internal/aggregate/gauge_test.go",
+      "path": "internal/aggregate/gauge_test.go.txt",
+      "sha256": "f375bd1abb1b0b3454b870e21a9e1e761723e0034979e89cb172c3daff03ef3f"
+    },
+    {
+      "source_path": "internal/aggregate/label.go",
+      "path": "internal/aggregate/label.go.txt",
+      "sha256": "d44734b984ae7add7322bb8fd35e7483e32597f6b920c612cc19ad1e0d215ba6"
+    },
+    {
+      "source_path": "internal/aggregate/phase_sweep_test.go",
+      "path": "internal/aggregate/phase_sweep_test.go.txt",
+      "sha256": "43f2948f17d378859b13b19a3b46f509b71a311d463f373fa0059616f7cbe364"
+    },
+    {
+      "source_path": "internal/aggregate/reset_schedule.go",
+      "path": "internal/aggregate/reset_schedule.go.txt",
+      "sha256": "49b1d19d82cc63d482a3be27cc60718a0b97affc2a323e6cdff65cbe663463d5"
+    },
+    {
+      "source_path": "internal/aggregate/reset_schedule_test.go",
+      "path": "internal/aggregate/reset_schedule_test.go.txt",
+      "sha256": "d5f803163853bc94b7776533372c79018490bb9a919c1c6fdfe6556e41b0540e"
+    },
+    {
+      "source_path": "internal/aggregate/sustain.go",
+      "path": "internal/aggregate/sustain.go.txt",
+      "sha256": "35dfb08544b7ba4f877aa146bc2e4fabbc80b295b755cd63a06af994d8e74919"
+    },
+    {
+      "source_path": "internal/aggregate/types.go",
+      "path": "internal/aggregate/types.go.txt",
+      "sha256": "ee75027fda1e474d4987793a1c772f8b50a08aed4e62fefb696259dba991a38f"
+    },
+    {
+      "source_path": "internal/app/report.go",
+      "path": "internal/app/report.go.txt",
+      "sha256": "b59f0b4ec2b0a02b7e83c015ee11452a190cf3b38513e0b48b4001e75dde43d3"
+    },
+    {
+      "source_path": "internal/app/runner.go",
+      "path": "internal/app/runner.go.txt",
+      "sha256": "a95984091044d3bf04fde6c92305622054c666d513618719b374fd88141eaf20"
+    },
+    {
+      "source_path": "internal/history/store.go",
+      "path": "internal/history/store.go.txt",
+      "sha256": "8feb32ab26db5e975e5b6bf85bb983ae4495fab56045450f4f4703cf9ff33e5f"
+    },
+    {
+      "source_path": "internal/history/store_test.go",
+      "path": "internal/history/store_test.go.txt",
+      "sha256": "78553f1a8478118bb3004fc2621222f3394933a8417807aca9eec83b8fcf3c84"
+    },
+    {
+      "source_path": "internal/output/json.go",
+      "path": "internal/output/json.go.txt",
+      "sha256": "c54ae33550e6c38971dd3cc6ba26a532d45c46bc0c5844ae7e12f7b681963fd8"
+    },
+    {
+      "source_path": "internal/output/json_test.go",
+      "path": "internal/output/json_test.go.txt",
+      "sha256": "b85581587503131b2927cfb88a0c6212bbc7bee90c5f9ce4bb409a79c0abae2c"
+    },
+    {
+      "source_path": "internal/output/tty_bar.go",
+      "path": "internal/output/tty_bar.go.txt",
+      "sha256": "ba706d08e9841578ed403cf65f17948eb670343bac7e574450ec07b98efe0d82"
+    },
+    {
+      "source_path": "internal/output/tty_build.go",
+      "path": "internal/output/tty_build.go.txt",
+      "sha256": "31d958923ee99dc9ea555698b22c85b6090c9586c519b13e4b9897ea7e0171c2"
+    },
+    {
+      "source_path": "internal/output/tty_build_test.go",
+      "path": "internal/output/tty_build_test.go.txt",
+      "sha256": "02e20710dfb4cb9a99f543495ccbb92955b44f0236b7519e1abeb69b6ab8b9a2"
+    },
+    {
+      "source_path": "internal/output/tty_format.go",
+      "path": "internal/output/tty_format.go.txt",
+      "sha256": "a79929fbac83ae3372abd40a83705a71a7972bea8b76ba2768737dc424d11358"
+    },
+    {
+      "source_path": "internal/output/tty_format_test.go",
+      "path": "internal/output/tty_format_test.go.txt",
+      "sha256": "ec8bec19ebc90d59984941cb028496b68acb8be13060a8485829828612fac7af"
+    },
+    {
+      "source_path": "internal/output/tty_gauge.go",
+      "path": "internal/output/tty_gauge.go.txt",
+      "sha256": "0763ac295dbf6e7a1a9bc40cb67e1d31ab44c55d975f27cf2f92d42dab622348"
+    },
+    {
+      "source_path": "internal/output/tty_model.go",
+      "path": "internal/output/tty_model.go.txt",
+      "sha256": "3b7e0c2e92687b2e8455a43f7ed29640bb7c4690ed393daadd465c4c1b0b0f5d"
+    },
+    {
+      "source_path": "internal/output/tty_renderer.go",
+      "path": "internal/output/tty_renderer.go.txt",
+      "sha256": "350dbbc74b5d4555090dbadaf145ab3dc66441109d017ca565ee57320acdc092"
+    },
+    {
+      "source_path": "internal/output/tty_renderer_test.go",
+      "path": "internal/output/tty_renderer_test.go.txt",
+      "sha256": "777e04eaa9f1f6707f959469331d04ac8e793075308ff8065d1deeedcec0ab22"
+    },
+    {
+      "source_path": "internal/output/tty_style.go",
+      "path": "internal/output/tty_style.go.txt",
+      "sha256": "6c68bdc1d3fb8b5dbbd69ca6836b722568d08b4c89ba237e90fda24ff0ab6bba"
+    },
+    {
+      "source_path": "internal/output/tty_style_test.go",
+      "path": "internal/output/tty_style_test.go.txt",
+      "sha256": "246dce03e7c0a593f298083008e4a41b991a4ca0a50c55bea3b9c223e73fab6e"
+    },
+    {
+      "source_path": "internal/proxy/proxy_snapshot.go",
+      "path": "internal/proxy/proxy_snapshot.go.txt",
+      "sha256": "166c99bedf0ab06174ca6b037639ab3c3d733b3f9bfb6950fa15071f0e391608"
+    },
+    {
+      "source_path": "internal/quota/aggregate.go",
+      "path": "internal/quota/aggregate.go.txt",
+      "sha256": "892b264b0d02b188fb0f6edb3f5af26142b95798194e1587088a5102876af3f5"
+    },
+    {
+      "source_path": "internal/quota/constants.go",
+      "path": "internal/quota/constants.go.txt",
+      "sha256": "99a6005e3a244e85b3435076d442bdd407aef776bf3541a9a37afd9ceef046af"
+    },
+    {
+      "source_path": "internal/quota/multiplier.go",
+      "path": "internal/quota/multiplier.go.txt",
+      "sha256": "c8704a8ec268401d73398bb303d330eb57f1679487921866c8fa177898d64b2e"
+    },
+    {
+      "source_path": "internal/quota/multiplier_test.go",
+      "path": "internal/quota/multiplier_test.go.txt",
+      "sha256": "13e8702b6a6c73fbcf85a9cb08ec540e6fee5d1da8422a697604c245f1633946"
+    },
+    {
+      "source_path": "internal/quota/result.go",
+      "path": "internal/quota/result.go.txt",
+      "sha256": "b759d5eefa4c12666a8f81d6d1e575457ba74a11933343aae65a5cac1ed76d22"
+    },
+    {
+      "source_path": "internal/quota/result_test.go",
+      "path": "internal/quota/result_test.go.txt",
+      "sha256": "73dc4c50d6587ddd9a04bd7cd4fc250a62d07763d411dc020e9225eacd453b04"
+    },
+    {
+      "source_path": "internal/quota/time.go",
+      "path": "internal/quota/time.go.txt",
+      "sha256": "7870ec3f7d50366cb9f06d301ed7d334a2ed9ac37a8de84a09f14576182e1211"
+    },
+    {
+      "source_path": "internal/quota/time_test.go",
+      "path": "internal/quota/time_test.go.txt",
+      "sha256": "af2833d4383f3afd3df60cd111dee4905bbfd296a3c85181dfbfed243e1f8260"
+    }
+  ]
+}

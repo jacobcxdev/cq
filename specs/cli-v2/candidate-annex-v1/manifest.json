@@ -1,0 +1,70 @@
+{
+  "purpose": "Frozen source bytes stored as text, excluded from Go package discovery. Source paths in resource prose resolve to these .txt snapshots.",
+  "files": [
+    {
+      "source_path": "cmd/cq/proxy_candidate.go",
+      "path": "cmd/cq/proxy_candidate.go.txt",
+      "sha256": "3a7a1cdd449c7dd3878244f7cc9e86bcd2dbcae2b04001bf4b365dad02500e24"
+    },
+    {
+      "source_path": "cmd/cq/proxy_candidate_release.go",
+      "path": "cmd/cq/proxy_candidate_release.go.txt",
+      "sha256": "fa3d43a8ed2774a6d3131980e6b68ce1f0feb9c32dd2b651a90c22e8ddcee861"
+    },
+    {
+      "source_path": "cmd/cq/proxy_candidate_runtime.go",
+      "path": "cmd/cq/proxy_candidate_runtime.go.txt",
+      "sha256": "218c48fec7e8e2aa1ae205fd9db0673bec7674d36fa790ff2e2e915ba679ab71"
+    },
+    {
+      "source_path": "cmd/cq/proxy_commands.go",
+      "path": "cmd/cq/proxy_commands.go.txt",
+      "sha256": "7b4fe15cdd693e4296a96bbad79e66e8eab529a7bfbf718933035f297a4234cd"
+    },
+    {
+      "source_path": "cmd/cq/proxy_endpoint_maintenance.go",
+      "path": "cmd/cq/proxy_endpoint_maintenance.go.txt",
+      "sha256": "eb7690334f423c2bb157158104a66262b7988a29623dc164a9ea864bde9ad812"
+    },
+    {
+      "source_path": "internal/provider/codex/credential_endpoint_maintenance.go",
+      "path": "internal/provider/codex/credential_endpoint_maintenance.go.txt",
+      "sha256": "2d6966202c3fef1bdb15e0c756cbfdae94df732d2804267d17a4f8bdf4327791"
+    },
+    {
+      "source_path": "internal/provider/codex/credential_endpoint_maintenance_journal.go",
+      "path": "internal/provider/codex/credential_endpoint_maintenance_journal.go.txt",
+      "sha256": "bfb59b4029e582b3264f7981793487aa49a4f48554bf5ec2a98f9b4a1b703e95"
+    },
+    {
+      "source_path": "internal/provider/codex/credential_endpoint_maintenance_transition_unix.go",
+      "path": "internal/provider/codex/credential_endpoint_maintenance_transition_unix.go.txt",
+      "sha256": "65e4a29ed146c0ae2ec458b06b753e1e6f2f279f14f8370af509d803a3161a7a"
+    },
+    {
+      "source_path": "internal/proxy/candidate_lifecycle.go",
+      "path": "internal/proxy/candidate_lifecycle.go.txt",
+      "sha256": "0242664bf9b1a89607f3c20177b800485fdab4b9ad209e62b4ebb09a6df7514c"
+    },
+    {
+      "source_path": "internal/proxy/canonical_jcs.go",
+      "path": "internal/proxy/canonical_jcs.go.txt",
+      "sha256": "a9f5d592bcede3918b9233aa96c804019219b001a92fcb97aac342425f48ec77"
+    },
+    {
+      "source_path": "internal/proxy/client_bearer_barrier.go",
+      "path": "internal/proxy/client_bearer_barrier.go.txt",
+      "sha256": "3f81dee6fdbf83fa50f839bb064a5838cc198351130059f225692f183fc095cb"
+    },
+    {
+      "source_path": "internal/proxy/operation_inspection.go",
+      "path": "internal/proxy/operation_inspection.go.txt",
+      "sha256": "77e3a70e955b4c3d8c5274d852fcaed27b2e0baa9f567c994fef5896dde39ca3"
+    },
+    {
+      "source_path": "internal/proxy/release_promotion.go",
+      "path": "internal/proxy/release_promotion.go.txt",
+      "sha256": "76691af411354f1f37535cacebf623bb95831abb361829399846e5f3f93ae104"
+    }
+  ]
+}

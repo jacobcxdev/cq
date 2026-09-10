@@ -1,0 +1,44 @@
+Show a retained shared proxy operation record.
+
+Usage: cq proxy operation status [OPERATION_ID] [OPTIONS]
+
+An operation is a durable coordinator record for a shared runtime transition. Without an
+ID, inspect the currently selected coordinator record; no record returns state=idle.
+
+This command never performs recovery. Result availability means a retained result
+exists, not that its underlying action succeeded.
+
+Arguments:
+  OPERATION_ID
+      Operation ID to inspect. Default: the currently selected coordinator record.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: If supplied, exactly 32 lowercase hexadecimal characters.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy operation status
+      Inspect the currently selected operation.
+  cq proxy operation status 0123456789abcdef0123456789abcdef
+      Inspect a specific retained operation.

@@ -1,0 +1,74 @@
+Add or replace one local model overlay and publish caches.
+
+Usage: cq models overlay add --provider PROVIDER --id ID [OPTIONS]
+
+An existing overlay with the same provider and exact ID is replaced. This command does
+not create an upstream model or prove upstream availability.
+
+Metadata selection follows ModelCloneSelection. The overlay retains its requested ID;
+JSON reports the selected source and selection mode.
+
+No overall command deadline is imposed. Individual request and phase deadlines are
+listed below; interactive prompts can wait until input or interruption.
+
+Proxy refresh has a fixed 5-second context deadline. Local registry source refresh has a
+fixed 30-second phase deadline, and its HTTP client has a fixed 30-second per-request
+timeout. The legacy health probe, when needed, has a fixed 2-second timeout. File
+publication and pruning have no separate deadline.
+
+Options:
+  --provider PROVIDER
+      Provider to modify: claude or codex. Required. Legacy value anthropic is accepted
+      as claude.
+      Type: enum. Required: true. Repeatable: false.
+      Default: null.
+      Choices: claude, codex.
+      Constraint: Reject other values; translate legacy anthropic to claude with
+      deprecation warning.
+  --id ID
+      Exact model ID to add or remove. Required; case-sensitive and non-empty; leading
+      or trailing whitespace is rejected.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty UTF-8 string without leading or trailing whitespace or
+      control characters.
+      Constraint: Do not normalise case.
+  --clone-from CLONE_FROM
+      Exact native model ID from the same provider to copy missing metadata from.
+      Omitted: infer a source deterministically by model-name similarity. An explicit
+      source absent from the validated native snapshot is an error.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty UTF-8 string without leading or trailing whitespace or
+      control characters.
+      Constraint: Do not normalise case.
+      Constraint: Explicit source must be native and match selected provider before
+      overlay write.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq models overlay add --provider codex --id "$NEW_MODEL" --clone-from "$SOURCE_MODEL"
+      Use the verified source model and desired new model ID prepared in the notes.
+  cq models overlay add --provider claude --id claude-sonnet-next
+      Infer metadata from available native Claude models.

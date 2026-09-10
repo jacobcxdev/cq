@@ -1,0 +1,45 @@
+Show the externally managed Gemini account.
+
+Usage: cq gemini account show [OPTIONS]
+
+Inspect whether the Antigravity-owned Gemini Keychain identity is configured. This is
+local inspection only; CQ does not authenticate, switch or remove Gemini accounts.
+
+Configured means the external credential entry exists, not that its token is valid or
+that quota is available. Email is null when not available from safe local identity
+metadata.
+
+Options:
+  --timeout DURATION
+      Limit total command work to this duration (default 30s; minimum 1s; maximum 10m).
+      Type: duration. Required: false. Repeatable: false.
+      Default: "30s".
+      Constraint: Go duration syntax; 1s <= value <= 10m
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq gemini account show
+      Inspect the single Antigravity-managed identity.
+  cq gemini account show --json
+      Inspect configuration without contacting Gemini.

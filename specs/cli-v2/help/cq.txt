@@ -1,0 +1,58 @@
+Check provider quotas and manage accounts, routing and services.
+
+Usage: cq [COMMAND] [OPTIONS]
+
+Without a command, check Claude, Codex and Gemini quotas.
+Use cq check codex to check Codex only.
+
+Commands:
+  auth
+      Refresh stored provider authentication credentials.
+  check
+      Report quota usage for selected providers.
+  claude
+      Manage Claude accounts and proxy routing pins.
+  codex
+      Manage Codex accounts, quota resets and provider-specific proxy controls.
+  completion
+      Print a shell completion script.
+  gemini
+      Inspect the externally managed Gemini account.
+  help
+      Show help for a command path.
+  models
+      Inspect model registries and publish local model-cache updates.
+  proxy
+      Run and inspect the shared proxy, state and lifecycle machinery.
+  service
+      Manage proxy and periodic token-refresh background services.
+  version
+      Show CQ build identity.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq
+  cq check codex --fresh
+  cq codex proxy --help
+  cq help service install

@@ -1,0 +1,64 @@
+Refresh eligible stored Claude and Codex OAuth credentials.
+
+Usage: cq auth refresh [PROVIDER...] [OPTIONS]
+
+Refresh credentials expiring within 30 minutes, including expired credentials with an
+eligible refresh token. Credentials with unknown expiry or more than 30 minutes
+remaining are skipped.
+
+Claude refresh may reconcile fresher anonymous Keychain credentials with identified
+accounts. Codex refresh applies only to CQ-managed candidates through the credential
+authority; system and external credentials remain read-only.
+
+In an interactive terminal, Claude accounts requiring login offer a per-account prompt:
+press Enter to open the browser, or type s to skip. JSON and non-terminal execution
+never open a browser; they report reauthentication required and direct you to cq claude
+account login.
+
+No overall command deadline is imposed. Individual request and phase deadlines are
+listed below; interactive prompts can wait until input or interruption.
+
+Authentication HTTP requests have a fixed 10-second timeout. Claude browser callback
+waiting has a fixed 5-minute timeout after the browser flow starts; the preceding
+terminal prompt has no deadline.
+
+Arguments:
+  PROVIDER
+      Providers whose eligible OAuth credentials to refresh: claude and codex. Omitted:
+      both, in that order. Gemini uses in-process Antigravity refresh during quota
+      checks and is not supported here.
+      Type: enum. Required: false. Repeatable: true.
+      Default: ["claude", "codex"].
+      Choices: claude, codex.
+      Constraint: Reject duplicate providers and any provider other than claude or
+      codex.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq auth refresh
+      Refresh eligible Claude and Codex credentials.
+  cq auth refresh codex --json
+      Refresh only eligible CQ-managed Codex credentials without interaction.
+  cq auth refresh claude
+      Refresh Claude credentials and offer terminal reauthentication when needed.

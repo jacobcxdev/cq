@@ -1,0 +1,60 @@
+Inspect shared proxy readiness evidence.
+
+Usage: cq proxy status [OPTIONS]
+
+Inspect configured service, process, listener, runtime and data-plane evidence without
+mutating state. This does not send model requests or create new validation evidence.
+Inspect provider routing policy and retained transport readiness through their dedicated
+commands.
+
+Human and JSON output describe exactly the same inspection. Use proxy health for the
+older, narrower HTTP liveness probe.
+
+Options:
+  --state-dir DIR
+      Inspect an isolated candidate state directory. Omit to inspect configured live
+      proxy state.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: When supplied: existing clean absolute non-root directory; no symlink
+      ancestors; never create it.
+  --strict
+      Return non-zero when inspected proxy is unhealthy, absent or indeterminate.
+      Default: false.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+  --timeout DURATION
+      Maximum elapsed time, including locks, requests and local verification. Default:
+      10s.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "10s".
+      Constraint: Positive Go duration, at most 10m; no bare number. Deadline expiry
+      never implies rollback succeeded.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy status
+      Inspect live proxy evidence.
+  cq proxy status --strict --json
+      Use readiness result as an automation gate without changing output scope.

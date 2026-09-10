@@ -1,0 +1,1033 @@
+[
+  {
+    "path": "check",
+    "visibility": "public",
+    "flags": [
+      "--json",
+      "-j",
+      "--refresh",
+      "-r"
+    ],
+    "positionals": [
+      "PROVIDER..."
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:43",
+    "notes": "Bare cq alias; enum claude,codex,gemini; global help/version also exist."
+  },
+  {
+    "path": "claude login",
+    "visibility": "public",
+    "flags": [
+      "--activate"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "claude accounts",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "claude switch",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [
+      "EMAIL"
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "claude remove",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [
+      "EMAIL"
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "codex login",
+    "visibility": "public",
+    "flags": [
+      "--activate"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "codex accounts",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "codex switch",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [
+      "EMAIL"
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "codex remove",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [
+      "EMAIL"
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "notes": ""
+  },
+  {
+    "path": "gemini accounts",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:83",
+    "notes": "Advertised but account-manager dispatch lacks Gemini support in reviewed checkout."
+  },
+  {
+    "path": "codex resets list",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [
+      "ACCOUNT-REFERENCE?"
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:64",
+    "notes": ""
+  },
+  {
+    "path": "codex resets recommend",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:64",
+    "notes": ""
+  },
+  {
+    "path": "codex resets use",
+    "visibility": "public",
+    "flags": [
+      "--credit",
+      "--yes"
+    ],
+    "positionals": [
+      "ACCOUNT-REFERENCE"
+    ],
+    "source": "v0.32.5:cmd/cq/main.go:64",
+    "notes": ""
+  },
+  {
+    "path": "refresh",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:88",
+    "notes": ""
+  },
+  {
+    "path": "agent install",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:91",
+    "notes": ""
+  },
+  {
+    "path": "agent uninstall",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/main.go:91",
+    "notes": ""
+  },
+  {
+    "path": "proxy install",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:184",
+    "notes": ""
+  },
+  {
+    "path": "proxy restart",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:184",
+    "notes": ""
+  },
+  {
+    "path": "proxy uninstall",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:184",
+    "notes": ""
+  },
+  {
+    "path": "proxy start",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--migrate-legacy-managed"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:590",
+    "notes": ""
+  },
+  {
+    "path": "proxy status",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json",
+      "--human",
+      "--strict",
+      "--instance-state-root",
+      "--timeout"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:271",
+    "notes": "Port frozen status and structured instance status are mutually different parsers; do not combine arbitrarily. Final optional positional duration aliases --timeout; cannot supply both."
+  },
+  {
+    "path": "proxy validate-http",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_http_validation_cli.go:45",
+    "notes": "Port required; 19280 forbidden."
+  },
+  {
+    "path": "proxy pin claude",
+    "visibility": "public",
+    "flags": [
+      "--clear"
+    ],
+    "positionals": [
+      "EMAIL-OR-ACCOUNT-UUID?"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy.go:350",
+    "notes": ""
+  },
+  {
+    "path": "proxy pin codex",
+    "visibility": "public",
+    "flags": [
+      "--clear"
+    ],
+    "positionals": [
+      "ACCOUNT-REFERENCE?"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy.go:350",
+    "notes": ""
+  },
+  {
+    "path": "proxy default codex",
+    "visibility": "public",
+    "flags": [
+      "--clear"
+    ],
+    "positionals": [
+      "ACCOUNT-REFERENCE?"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_codex_default.go:17",
+    "notes": ""
+  },
+  {
+    "path": "proxy prime status",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:290",
+    "notes": ""
+  },
+  {
+    "path": "proxy prime enable",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:290",
+    "notes": ""
+  },
+  {
+    "path": "proxy prime disable",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:290",
+    "notes": ""
+  },
+  {
+    "path": "proxy rescue enter",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_rescue.go:40",
+    "notes": ""
+  },
+  {
+    "path": "proxy rescue exit",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_rescue.go:40",
+    "notes": ""
+  },
+  {
+    "path": "proxy rescue status",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_rescue.go:40",
+    "notes": ""
+  },
+  {
+    "path": "proxy leases invalidate",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_leases.go:40",
+    "notes": ""
+  },
+  {
+    "path": "proxy trace",
+    "visibility": "public",
+    "flags": [
+      "--session",
+      "--trace",
+      "--since",
+      "--tail",
+      "--follow",
+      "--json",
+      "--payload"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_trace.go:151",
+    "notes": ""
+  },
+  {
+    "path": "proxy reserve set",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json",
+      "--window",
+      "--percent"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "notes": ""
+  },
+  {
+    "path": "proxy reserve disable",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "notes": ""
+  },
+  {
+    "path": "proxy reserve enable",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "notes": ""
+  },
+  {
+    "path": "proxy reserve clear",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "notes": ""
+  },
+  {
+    "path": "proxy reserve status",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "notes": ""
+  },
+  {
+    "path": "proxy reserve windows",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy initialise",
+    "visibility": "public",
+    "flags": [
+      "--state-root"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:85",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy apply",
+    "visibility": "public",
+    "flags": [
+      "--file",
+      "--state-root"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:85",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy status",
+    "visibility": "public",
+    "flags": [
+      "--state-root"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:85",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy pool set",
+    "visibility": "public",
+    "flags": [
+      "--account",
+      "--value",
+      "--port"
+    ],
+    "positionals": [
+      "NAME"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:285",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy pool rename",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [
+      "OLD_NAME",
+      "NEW_NAME"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:285",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy pool value",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [
+      "NAME",
+      "VALUE"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:285",
+    "notes": ""
+  },
+  {
+    "path": "proxy policy session bind",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--session-id",
+      "--session-id-stdin",
+      "--digest",
+      "--pool"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "notes": "Parser accepts generic flags then rejects incompatible action combinations; selector forms mutually exclusive."
+  },
+  {
+    "path": "proxy policy session show",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--session-id",
+      "--session-id-stdin",
+      "--digest"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "notes": "Parser accepts generic flags then rejects incompatible action combinations; selector forms mutually exclusive."
+  },
+  {
+    "path": "proxy policy session list",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "notes": "Parser accepts generic flags then rejects incompatible action combinations; selector forms mutually exclusive."
+  },
+  {
+    "path": "proxy policy session unbind",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--session-id",
+      "--session-id-stdin",
+      "--digest"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "notes": "Parser accepts generic flags then rejects incompatible action combinations; selector forms mutually exclusive."
+  },
+  {
+    "path": "proxy policy session digest",
+    "visibility": "public",
+    "flags": [
+      "--port",
+      "--session-id",
+      "--session-id-stdin",
+      "--digest"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "notes": "Parser accepts generic flags then rejects incompatible action combinations; selector forms mutually exclusive. Existing parser also accepts an already-hashed --digest and returns it, despite help omitting this form."
+  },
+  {
+    "path": "proxy endpoint inspect-legacy",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:60",
+    "notes": ""
+  },
+  {
+    "path": "proxy endpoint transition-legacy prepare",
+    "visibility": "public",
+    "flags": [
+      "--snapshot-file",
+      "--non-interactive",
+      "--confirm-stopped-and-drained"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "notes": ""
+  },
+  {
+    "path": "proxy endpoint transition-legacy resume",
+    "visibility": "public",
+    "flags": [
+      "--ticket-file",
+      "--non-interactive",
+      "--confirm-stopped-and-drained"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "notes": ""
+  },
+  {
+    "path": "proxy endpoint transition-legacy activate",
+    "visibility": "public",
+    "flags": [
+      "--ticket-file",
+      "--non-interactive",
+      "--confirm-stopped-and-drained"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "notes": ""
+  },
+  {
+    "path": "proxy endpoint transition-legacy finalise",
+    "visibility": "public",
+    "flags": [
+      "--ticket-file",
+      "--non-interactive",
+      "--confirm-candidate-healthy"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "notes": ""
+  },
+  {
+    "path": "proxy endpoint transition-legacy rollback",
+    "visibility": "public",
+    "flags": [
+      "--ticket-file",
+      "--non-interactive",
+      "--confirm-stopped-and-drained"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "notes": ""
+  },
+  {
+    "path": "proxy hook codex-stop",
+    "visibility": "machine-advertised",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_codex_hook.go:32",
+    "notes": "Machine hook consumes stdin JSON hook_event_name,session_id,turn_id; 16 MiB bound."
+  },
+  {
+    "path": "models list",
+    "visibility": "public",
+    "flags": [
+      "--provider",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/models.go:287",
+    "notes": ""
+  },
+  {
+    "path": "models refresh",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/models.go:1",
+    "notes": ""
+  },
+  {
+    "path": "models overlay add",
+    "visibility": "public",
+    "flags": [
+      "--provider",
+      "--id",
+      "--clone-from"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/models.go:398",
+    "notes": ""
+  },
+  {
+    "path": "models overlay remove",
+    "visibility": "public",
+    "flags": [
+      "--provider",
+      "--id"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/models.go:398",
+    "notes": ""
+  },
+  {
+    "path": "models overlay prune",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/models.go:1",
+    "notes": ""
+  },
+  {
+    "path": "operation status",
+    "visibility": "public",
+    "flags": [
+      "--operation-id",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:221",
+    "notes": "recover requires operation ID; status optional."
+  },
+  {
+    "path": "operation recover",
+    "visibility": "public",
+    "flags": [
+      "--operation-id",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:221",
+    "notes": "recover requires operation ID; status optional."
+  },
+  {
+    "path": "codex validate capture",
+    "visibility": "public",
+    "flags": [
+      "--input",
+      "--output",
+      "--content-encoding",
+      "--metadata"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/codex_validate.go:30",
+    "notes": ""
+  },
+  {
+    "path": "codex validate http",
+    "visibility": "public",
+    "flags": [
+      "--client-build",
+      "--state-dir"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/codex_validate.go:105",
+    "notes": ""
+  },
+  {
+    "path": "codex validate websocket",
+    "visibility": "public",
+    "flags": [
+      "--client-build",
+      "--client-executable",
+      "--state-dir"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/codex_validate.go:75",
+    "notes": ""
+  },
+  {
+    "path": "codex canary start",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/codex_canary.go:15",
+    "notes": ""
+  },
+  {
+    "path": "codex canary status",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/codex_canary.go:15",
+    "notes": ""
+  },
+  {
+    "path": "codex canary stop",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/codex_canary.go:15",
+    "notes": ""
+  },
+  {
+    "path": "proxy candidate prepare",
+    "visibility": "public",
+    "flags": [
+      "--client-build",
+      "--client-executable",
+      "--confirm-payload-capture",
+      "--confirm-read-only-credentials",
+      "--credential-manifest",
+      "--credential-mode",
+      "--instance-state-root",
+      "--json",
+      "--local-token-client-registry",
+      "--policy-snapshot",
+      "--port",
+      "--source-config",
+      "--target-release-bundle",
+      "--target-release-set"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:442",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate status",
+    "visibility": "public",
+    "flags": [
+      "--instance-state-root",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:525",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate start",
+    "visibility": "public",
+    "flags": [
+      "--instance-state-root",
+      "--json"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:547",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate stop",
+    "visibility": "public",
+    "flags": [
+      "--confirm-client-stopped",
+      "--instance-state-root",
+      "--json"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:547",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate client-bearer-barrier refresh",
+    "visibility": "public",
+    "flags": [
+      "--instance-state-root",
+      "--json",
+      "--validation-run"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:588",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate artifact switch",
+    "visibility": "public",
+    "flags": [
+      "--confirm-artifact-switch",
+      "--instance-state-root",
+      "--json",
+      "--release-set",
+      "--role",
+      "--validation-run"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:626",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate validate-release",
+    "visibility": "public",
+    "flags": [
+      "--client-build",
+      "--client-executable",
+      "--confirm-control-health",
+      "--floor-acceptance-receipt",
+      "--floor-acceptance-receipt-file",
+      "--floor-release-bundle",
+      "--instance-state-root",
+      "--json",
+      "--receipt-out",
+      "--target-release-bundle",
+      "--validation-run"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:685",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate remove",
+    "visibility": "public",
+    "flags": [
+      "--confirm-candidate-state-loss",
+      "--instance-state-root",
+      "--json"
+    ],
+    "positionals": [
+      "TIMEOUT"
+    ],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:736",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "proxy candidate receipt show",
+    "visibility": "public",
+    "flags": [
+      "--attempt-id",
+      "--instance-state-root",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:401",
+    "notes": "Timeout currently bare positional duration when present, not --timeout."
+  },
+  {
+    "path": "service install",
+    "visibility": "public-with-hidden-machine-options",
+    "flags": [
+      "--owner",
+      "--installer-lock-held",
+      "--service-executable"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "notes": "--owner explicit homebrew|winget|go; default manual; snapshot/restore require package owner and inherited installer lock on stdin; service-executable Homebrew only. Equals-only syntax for snapshot-file and service-executable."
+  },
+  {
+    "path": "service uninstall",
+    "visibility": "public-with-hidden-machine-options",
+    "flags": [
+      "--owner",
+      "--installer-lock-held",
+      "--service-executable"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "notes": "--owner explicit homebrew|winget|go; default manual; snapshot/restore require package owner and inherited installer lock on stdin; service-executable Homebrew only. Equals-only syntax for snapshot-file and service-executable."
+  },
+  {
+    "path": "service restart",
+    "visibility": "public-with-hidden-machine-options",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "notes": "--owner explicit homebrew|winget|go; default manual; snapshot/restore require package owner and inherited installer lock on stdin; service-executable Homebrew only. Equals-only syntax for snapshot-file and service-executable."
+  },
+  {
+    "path": "service status",
+    "visibility": "public-with-hidden-machine-options",
+    "flags": [
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "notes": "--owner explicit homebrew|winget|go; default manual; snapshot/restore require package owner and inherited installer lock on stdin; service-executable Homebrew only. Equals-only syntax for snapshot-file and service-executable."
+  },
+  {
+    "path": "service snapshot",
+    "visibility": "hidden-machine",
+    "flags": [
+      "--owner",
+      "--installer-lock-held",
+      "--snapshot-file"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "notes": "--owner explicit homebrew|winget|go; default manual; snapshot/restore require package owner and inherited installer lock on stdin; service-executable Homebrew only. Equals-only syntax for snapshot-file and service-executable."
+  },
+  {
+    "path": "service restore",
+    "visibility": "hidden-machine",
+    "flags": [
+      "--owner",
+      "--installer-lock-held",
+      "--snapshot-file"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "notes": "--owner explicit homebrew|winget|go; default manual; snapshot/restore require package owner and inherited installer lock on stdin; service-executable Homebrew only. Equals-only syntax for snapshot-file and service-executable."
+  },
+  {
+    "path": "proxy start [runtime-role mode]",
+    "visibility": "hidden-machine",
+    "flags": [
+      "--runtime-role",
+      "--runtime-schema",
+      "--runtime-manifest-digest",
+      "--proxy-instance",
+      "--runtime-instance",
+      "--listener-fd",
+      "--work-fd",
+      "--lifecycle-fd",
+      "--control-fd",
+      "--lifecycle-holder-digest",
+      "--secret-fd"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:internal/proxy/runtime_control.go:125",
+    "notes": "Fixed ordering; supervisor uses listener-fd; worker uses work-fd; mutually exclusive role descriptors. Exactly 20 argv elements."
+  },
+  {
+    "path": "proxy start [Linux validation child]",
+    "visibility": "hidden-machine",
+    "flags": [
+      "--port",
+      "--linux-validation-candidate-fd"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:617",
+    "notes": "Validation descriptor must equal 3."
+  },
+  {
+    "path": "proxy candidate __runtime",
+    "visibility": "hidden-machine",
+    "flags": [
+      "--instance",
+      "--validation-run",
+      "--generation",
+      "--port",
+      "--token-fd"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy_candidate_runtime.go:272",
+    "notes": "Fixed ordering; token FD3; generation >0; instance32 lowercase hex; validation-run64 lowercase hex; port excludes19280."
+  },
+  {
+    "path": "proxy __linux-acceptance-helper",
+    "visibility": "hidden-machine",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/linux_acceptance_helper_linux.go:11",
+    "notes": "Linux only; no args."
+  },
+  {
+    "path": "cq-install install",
+    "visibility": "separate-executable",
+    "flags": [
+      "--silent",
+      "--owner"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq-install/main.go:117",
+    "notes": "Bare cq-install defaults install; owner uses equals-only form, go default; winget only Windows release build; --help/-h only alone."
+  },
+  {
+    "path": "cq-install uninstall",
+    "visibility": "separate-executable",
+    "flags": [
+      "--silent",
+      "--owner"
+    ],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq-install/main.go:117",
+    "notes": "Bare cq-install defaults install; owner uses equals-only form, go default; winget only Windows release build; --help/-h only alone."
+  },
+  {
+    "path": "proxy pin",
+    "visibility": "public",
+    "flags": [],
+    "positionals": [],
+    "source": "v0.32.5:cmd/cq/proxy.go:347",
+    "notes": "Bare invocation reads/displays both Claude and Codex pins; real leaf behaviour as well as namespace."
+  }
+]

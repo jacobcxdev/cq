@@ -1,0 +1,20 @@
+{
+  "checkout_head": "dc976e6591d2b729185a80b974f55300dea255c2",
+  "checkout_branch": "jacobcxdev/fix/codex-reset-credits",
+  "released_version": "0.32.5",
+  "released_sha": "debcb2cb19b61fd0cb2983554299d0edaaa052c5",
+  "installed_binary": "/opt/homebrew/bin/cq",
+  "review_date": "2026-09-10",
+  "dirty_input_sha256": {
+    "cmd/cq/codex_registry_credentials_test.go": "61b6bce1479995bbb350afef4ad7f3c93c3ee5c8e3b8a7553f42a51ba455b236",
+    "cmd/cq/models.go": "ba59c64511a6cadc7ef687b53b706100ccd529ef672ddf2d4060b16e0d5bf04d",
+    "cmd/cq/models_test.go": "f8dda724bedd61980bb898b05a1e5876d0b78c1c01ef42966734da97a93a0987",
+    "internal/provider/codex/accounts.go": "cf12aab9c33a289c849a21722975bb1fb8c5a160eeeca47568d97b4c0cd87e42",
+    "internal/provider/codex/accounts_test.go": "b65dd2e6bdab5193bff23b351f52df0405123f50d845cc19fec30082869ccfc2",
+    "internal/provider/codex/reset_accounts.go": "d54c092eb267a5a84111e9fc3cc462a82784ab388b632e8e404fe5f77934b3d0",
+    "internal/provider/codex/reset_accounts_test.go": "505dba3de370366a9b8b9b2a414d5ac5ce121e86443bbd8eea9228406ec07758",
+    "internal/provider/codex/reset_credits.go": "640639898eb3486bf1a7e44fca1ae54461aabc997925a0bbe3fcff9ec59c898b",
+    "internal/provider/codex/reset_credits_test.go": "80d8297ca1cb8c0d49db9daa4b26df493c550da5a742ddabb279d9a2a4f73558",
+    "internal/provider/codex/system_activator.go": "8afa694739d5819ab056bbe8c6d4b42f1dc14fd7827ed6e635ac0e840e46c736"
+  }
+}

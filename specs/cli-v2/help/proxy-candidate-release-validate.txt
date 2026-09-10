@@ -1,0 +1,134 @@
+Verify candidate release evidence and write a validation receipt.
+
+Usage: cq proxy candidate release validate --state-dir STATE_DIR --target-release-bundle TARGET_RELEASE_BUNDLE --rollback-bundle ROLLBACK_BUNDLE --rollback-receipt ROLLBACK_RECEIPT --rollback-receipt-digest ROLLBACK_RECEIPT_DIGEST --client-build CLIENT_BUILD --client-executable CLIENT_EXECUTABLE --validation-run-id VALIDATION_RUN_ID --receipt-file RECEIPT_FILE --confirm-control-health [OPTIONS]
+
+Unavailable in this specification: real qualification evidence backend is not defined.
+Valid syntax returns exit 4 without state access or transitions.
+
+Check exact target artifacts, rollback acceptance, source ancestry, client identity,
+client isolation, stopped-work proof, control health and runtime confinement.
+
+Success permits the receipt to be reviewed for promotion; it does not install or deploy
+the release. File hashes and self-declared ancestry cannot substitute for the
+corresponding observations.
+
+The deadline is fixed at 16 minutes, including a 30-second cleanup reserve; there is no
+timeout option.
+
+The required live-proof and trust-authority backends are not specified by this CLI
+contract. Until their independent contracts and implementations exist, this command
+returns candidate_evidence_unavailable (exit 4) and emits no successful qualification or
+promotion receipt.
+
+Options:
+  --state-dir STATE_DIR
+      Candidate state directory created by prepare. Required; absolute, clean, current-
+      user-owned path. Never defaults to shared proxy state.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+  --target-release-bundle TARGET_RELEASE_BUNDLE
+      Exact target OperationalReleaseBundleV1 used by prepare, at most 16777216 bytes.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..16777216 bytes inclusive; no group or other
+      write permission.
+  --rollback-bundle ROLLBACK_BUNDLE
+      Accepted rollback OperationalReleaseBundleV1, purpose floor, at most 16777216
+      bytes. Its source commit must be a strict ancestor of target.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..16777216 bytes inclusive; no group or other
+      write permission.
+  --rollback-receipt ROLLBACK_RECEIPT
+      Original rollback acceptance receipt bytes, at most 65536 bytes; verified by the
+      acceptance-proof backend, never fabricated.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..65536 bytes inclusive; no group or other write
+      permission.
+  --rollback-receipt-digest ROLLBACK_RECEIPT_DIGEST
+      SHA-256 of UTF-8 bytes cq/release-import-floor/v1 followed by NUL followed by
+      exact rollback receipt bytes. Required; not an ordinary file SHA-256.
+      Type: digest. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Exactly 64 lowercase hexadecimal characters.
+  --client-build CLIENT_BUILD
+      Exact client version/build string supplied by executable provenance. Required;
+      must match the independently measured client evidence byte-for-byte. An arbitrary
+      operator label cannot satisfy validation.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty UTF-8 string; no NUL or control characters.
+      Constraint: Must match the client executable provenance and independently measured
+      evidence byte-for-byte; no case folding, trimming, aliasing or inferred version.
+      Constraint: During release validation must also match the string bound during
+      prepare.
+  --client-executable CLIENT_EXECUTABLE
+      Exact client executable whose bytes will be bound to validation; required,
+      absolute regular file, at most 536870912 bytes.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path to a regular executable file; no
+      symbolic link; stable identity between inspection and opening; no group or other
+      write permissions.
+      Constraint: File and trusted parent may be owned by current user or root; system-
+      owned executables are allowed.
+      Constraint: Size 1..536870912 bytes inclusive.
+  --validation-run-id VALIDATION_RUN_ID
+      Exact validation run identifier returned by candidate prepare or status. Required;
+      64 lowercase hexadecimal characters. An identifier, not a file hash; must match
+      the stored candidate.
+      Type: digest. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Exactly 64 lowercase hexadecimal characters.
+  --receipt-file RECEIPT_FILE
+      New absolute output file for CandidateReleasePromotionReceiptV1. Must not exist;
+      parent must be owner-controlled.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean output path; not /; leaf must not exist,
+      including as a symbolic link.
+      Constraint: Parent must already exist as a current-user-owned, owner-controlled
+      directory; validate and hold its identity through atomic creation.
+      Constraint: Create a new regular file with mode 0600; never overwrite or follow an
+      existing leaf.
+  --confirm-control-health
+      Assert the exact candidate passed control-health verification. Required; CQ also
+      verifies live identity and health itself.
+      Type: boolean. Required: true. Repeatable: false.
+      Default: false.
+      Constraint: Must be true.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy candidate release validate --state-dir "$CANDIDATE" --target-release-bundle "$INPUTS/target.json" --rollback-bundle "$INPUTS/floor.json" --rollback-receipt "$INPUTS/floor-receipt.bin" --rollback-receipt-digest "$ROLLBACK_DIGEST" --client-build "$CLIENT_BUILD" --client-executable "$CLIENT" --validation-run-id "$VALIDATION_RUN" --receipt-file "$INPUTS/promotion.json" --confirm-control-health
+      Uses inputs prepared in the candidate workflow in the versioned annex notes.

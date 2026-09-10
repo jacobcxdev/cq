@@ -1,0 +1,64 @@
+Create a sanitised fixture from a saved Codex request.
+
+Usage: cq codex proxy fixture create --input INPUT --output OUTPUT [OPTIONS]
+
+Reads a previously captured request body from disk. This command does not capture
+network traffic or validate an installed proxy.
+
+Stores hashes, metadata classifications and presence flags; never stores prompt text,
+tokens, raw session identifiers or encrypted state.
+
+Options:
+  --input INPUT
+      Saved request-body file; required. Maximum encoded size: 2 MiB.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Readable regular file; not stdin; nonempty path; at most 2097152
+      bytes.
+  --output OUTPUT
+      Destination fixture JSON file; required. Existing files are rejected.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Nonempty path; must not exist; must not alias the input; parent
+      created with mode 0700 when missing.
+  --content-encoding CONTENT_ENCODING
+      Body encoding. Default: auto, which recognises Zstandard magic bytes and otherwise
+      uses identity.
+      Type: enum. Required: false. Repeatable: false.
+      Default: "auto".
+      Choices: auto, identity, zstd.
+      Constraint: Exact enum; decoded size <= 8388608 bytes; zstd expansion <=128 times
+      encoded size.
+  --metadata-json METADATA_JSON
+      Literal JSON turn metadata; not a filename. Default: read metadata from the
+      request body.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: When supplied, parse one FixtureMetadata object; reject trailing JSON
+      and duplicate keys.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy fixture create --input request.json --output fixture.json --metadata-json '{"session_id":"s1","thread_id":"t1","turn_id":"u1","request_kind":"turn"}'
+      Convert the request file prepared in the fixture workflow.

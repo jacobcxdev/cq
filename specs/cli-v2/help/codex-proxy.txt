@@ -1,0 +1,66 @@
+Control Codex routing, quota protection and transport evidence.
+
+Usage: cq codex proxy <COMMAND> [OPTIONS]
+
+Control Codex routing, quota protection and transport evidence.
+
+Choose a subcommand below. A bare group prints this help without reading configuration
+or changing state.
+
+Commands:
+  canary
+      Manage a bounded Codex routing-observation run.
+  credential-endpoint
+      Maintain the Codex local credential-owner endpoint.
+  fallback
+      Inspect, set or clear the terminal fallback account for Codex routing.
+  fixture
+      Create sanitised test fixtures from saved Codex request bodies.
+  hook
+      Produce receipt annotations for native client lifecycle hooks.
+  lease
+      Invalidate reusable Codex routing affinities.
+  pin
+      Inspect, set or clear the Codex proxy account override.
+  policy
+      Export or replace the complete Codex routing-policy document.
+  pool
+      Define account pools and their relative capacity-preservation values.
+  prime
+      Inspect or toggle automatic Codex quota-window priming.
+  readiness
+      Inspect retained transport-readiness evidence for an exact client build.
+  reserve
+      Protect remaining quota on the current Codex system account.
+  session
+      Inspect or change the routing pool bound to a client session.
+  trace
+      Read or follow retained Codex request traces.
+  validate
+      Request HTTP checks or run WebSocket transport validation.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy --help
+      Show all immediate subcommands and usage.

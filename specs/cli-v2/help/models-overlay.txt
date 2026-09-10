@@ -1,0 +1,42 @@
+Add, remove or prune local model-registry additions.
+
+Usage: cq models overlay <COMMAND> [OPTIONS]
+
+Add, remove or prune local model-registry additions.
+
+Choose a subcommand below. A bare group prints this help without reading configuration
+or changing state.
+
+Commands:
+  add
+      Add or replace one local model overlay and publish caches.
+  prune
+      Remove overlays now supplied by native model sources.
+  remove
+      Remove one local model overlay and publish caches.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq models overlay --help
+      Show group help.

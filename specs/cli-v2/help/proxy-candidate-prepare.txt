@@ -1,0 +1,151 @@
+Prepare an isolated release candidate without starting it.
+
+Usage: cq proxy candidate prepare --state-dir STATE_DIR --port PORT --source-config SOURCE_CONFIG --target-release-bundle TARGET_RELEASE_BUNDLE --release-digest RELEASE_DIGEST --client-build CLIENT_BUILD --client-executable CLIENT_EXECUTABLE --client-registry CLIENT_REGISTRY [OPTIONS]
+
+Bind the input bytes, client identity, release digest and isolated port to a new
+candidate state directory. Preparation is local bookkeeping, not release validation.
+
+Credential and policy attestation files record operator-supplied bytes; they do not
+import credentials, configure a running proxy or prove read-only access.
+
+Options:
+  --state-dir STATE_DIR
+      New isolated candidate state directory. Required; absolute clean path below a
+      current-user-owned parent. Existing candidate state is a conflict; never defaults
+      to shared proxy state.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; parent owner-
+      controlled; no existing candidate state.
+  --port PORT
+      Loopback listener port reserved for this candidate. Required; 1..65535, excluding
+      shared default port 19280.
+      Type: integer. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Integer 1..65535; must not equal 19280; must not equal any active
+      shared or candidate listener.
+  --source-config SOURCE_CONFIG
+      Source configuration attestation file; required, at most 1048576 bytes. Its byte
+      hash is recorded; contents are not applied.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..1048576 bytes inclusive; no group or other write
+      permission.
+  --target-release-bundle TARGET_RELEASE_BUNDLE
+      Target signed OperationalReleaseBundleV1 file; required, purpose target, at most
+      16777216 bytes.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..16777216 bytes inclusive; no group or other
+      write permission.
+  --release-digest RELEASE_DIGEST
+      Target bundle digest field, not SHA-256 of the bundle file. Required; must equal
+      the verified target bundle digest.
+      Type: digest. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Exactly 64 lowercase hexadecimal characters.
+  --client-build CLIENT_BUILD
+      Exact client version/build string supplied by executable provenance. Required;
+      must match the independently measured client evidence byte-for-byte. An arbitrary
+      operator label cannot satisfy validation.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty UTF-8 string; no NUL or control characters.
+      Constraint: Must match the client executable provenance and independently measured
+      evidence byte-for-byte; no case folding, trimming, aliasing or inferred version.
+      Constraint: During release validation must also match the string bound during
+      prepare.
+  --client-executable CLIENT_EXECUTABLE
+      Exact client executable whose bytes will be bound to validation; required,
+      absolute regular file, at most 536870912 bytes.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path to a regular executable file; no
+      symbolic link; stable identity between inspection and opening; no group or other
+      write permissions.
+      Constraint: File and trusted parent may be owned by current user or root; system-
+      owned executables are allowed.
+      Constraint: Size 1..536870912 bytes inclusive.
+  --client-registry CLIENT_REGISTRY
+      ClientSenderRegistryV1 canonical JSON file; required, at most 65536 bytes.
+      Enumerates all request senders and transports participating in validation.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..65536 bytes inclusive; no group or other write
+      permission.
+  --credential-mode CREDENTIAL_MODE
+      Credential attestation mode. Default: none. read-only requires --credential-
+      manifest and --confirm-read-only-credentials; none forbids both.
+      Type: enum. Required: false. Repeatable: false.
+      Default: "none".
+      Choices: none, read-only.
+  --credential-manifest CREDENTIAL_MANIFEST
+      Credential manifest attestation bytes; at most 1048576 bytes. Required only with
+      --credential-mode read-only; never imports or refreshes credentials.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..1048576 bytes inclusive; no group or other write
+      permission.
+  --confirm-read-only-credentials
+      Assert that the attested credentials are restricted to read-only access. Required
+      with read-only mode; forbidden with none. This assertion does not authorise
+      credential refresh.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Explicit false equals omission.
+  --policy-snapshot POLICY_SNAPSHOT
+      Optional policy attestation bytes, at most 1048576 bytes. Omission records no
+      policy digest; contents are not applied.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+      Constraint: Regular file; size 1..1048576 bytes inclusive; no group or other write
+      permission.
+  --confirm-payload-capture
+      Explicitly authorise capture of request payloads during this candidate workflow.
+      Default: false; omission prohibits capture. Preparation itself captures nothing.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Explicit false equals omission.
+  --timeout TIMEOUT
+      Total deadline, including cleanup. Default: 150s. Allowed: 150s..5m inclusive; 30s
+      reserved for cleanup.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "150s".
+      Constraint: Go duration syntax; 150s <= value <= 5m; cleanup reserve 30s; deadline
+      cancellation must not leave an unrecorded mutation.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy candidate prepare --state-dir "$CANDIDATE" --port 29280 --source-config "$INPUTS/source-config.bin" --target-release-bundle "$INPUTS/target.json" --release-digest "$RELEASE_DIGEST" --client-build "$CLIENT_BUILD" --client-executable "$CLIENT" --client-registry "$INPUTS/client-registry.json"
+      Uses inputs prepared in the candidate workflow in the versioned annex notes.

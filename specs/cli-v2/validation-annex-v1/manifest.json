@@ -1,0 +1,90 @@
+{
+  "purpose": "Frozen source bytes stored as text, excluded from Go package discovery. Source paths in resource prose resolve to these .txt snapshots.",
+  "files": [
+    {
+      "source_path": "codex_canary.go",
+      "path": "codex_canary.go.txt",
+      "sha256": "f1385d6b70d38646dbd177e6cdb9cb2ca7962c724c1435235039cd77a3cb0e97"
+    },
+    {
+      "source_path": "codex_canary_promotion.go",
+      "path": "codex_canary_promotion.go.txt",
+      "sha256": "f87ab024582d3b995f50b0686fe73141f47eb4cc6324ceeeaecdd181533f7c07"
+    },
+    {
+      "source_path": "codex_canary_stop.go",
+      "path": "codex_canary_stop.go.txt",
+      "sha256": "8ea5bea5972216d835bd3aa7254e21c922e2fa1c215a2a7c7373be44ef18ef51"
+    },
+    {
+      "source_path": "codex_fixture.go",
+      "path": "codex_fixture.go.txt",
+      "sha256": "4ffa6720deae205b8e3f52d9d3788bcc54c5288feefd94d646b4a6c5e618aa8d"
+    },
+    {
+      "source_path": "codex_installed_acceptance_harness.go",
+      "path": "codex_installed_acceptance_harness.go.txt",
+      "sha256": "db7211e8865283c937fb1da2df47c5fd908723fd1d2851729d7d7498443d8d03"
+    },
+    {
+      "source_path": "codex_installed_http_route_audit.go",
+      "path": "codex_installed_http_route_audit.go.txt",
+      "sha256": "faf8a24e1ea745ca73cf353410193be75d43aa773f6e19968414f6f9e5a439ef"
+    },
+    {
+      "source_path": "codex_installed_http_validation.go",
+      "path": "codex_installed_http_validation.go.txt",
+      "sha256": "1428599cd957fb04965b3266b53e4df7db6bd24ddcde8d936dbfea3fde7d056b"
+    },
+    {
+      "source_path": "codex_installed_process_attestation.go",
+      "path": "codex_installed_process_attestation.go.txt",
+      "sha256": "7f6eef7a83910d788c8514eecfefad575bb07d847e47280ec269c434db81d8d6"
+    },
+    {
+      "source_path": "codex_installed_ws_validation.go",
+      "path": "codex_installed_ws_validation.go.txt",
+      "sha256": "54e362875370eef322c8af51494fd025ea0d790f0130a71465b3400f77d0587b"
+    },
+    {
+      "source_path": "codex_protocol.go",
+      "path": "codex_protocol.go.txt",
+      "sha256": "3bb49c29a9592dff660b2426c08d1ece58ba4fce9dbccfdbdbcfa5d68c9e14a1"
+    },
+    {
+      "source_path": "codex_readiness.go",
+      "path": "codex_readiness.go.txt",
+      "sha256": "1180ec79bec53b3a95c176314d8187f509bcddc1147879c78b300f4fa72355e1"
+    },
+    {
+      "source_path": "codex_turn_metadata.go",
+      "path": "codex_turn_metadata.go.txt",
+      "sha256": "8355edcfb93773a8f312d7bdddb561713765b82bd96af5541cccb8888a1f820e"
+    },
+    {
+      "source_path": "codex_zstd.go",
+      "path": "codex_zstd.go.txt",
+      "sha256": "57e4b27119f09cc0d828cad11103d401d2b453008abf2d522979afa2f2f8f109"
+    },
+    {
+      "source_path": "diag.go",
+      "path": "diag.go.txt",
+      "sha256": "3ed298d894f04f4fe089d3fe3d5f57399611875932fef6dfb4cd592eafbf1e1f"
+    },
+    {
+      "source_path": "operation_inspection.go",
+      "path": "operation_inspection.go.txt",
+      "sha256": "77e3a70e955b4c3d8c5274d852fcaed27b2e0baa9f567c994fef5896dde39ca3"
+    },
+    {
+      "source_path": "runtime_control.go",
+      "path": "runtime_control.go.txt",
+      "sha256": "d9af666098bd3d49e1f5e7a24046c32487fe5da2498bcae0a5c4153047d012d4"
+    },
+    {
+      "source_path": "runtime_supervisor.go",
+      "path": "runtime_supervisor.go.txt",
+      "sha256": "30f47d18264822d15d267811c166867b9fd14df63d5dc6153db6ffe09102e182"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+Show the complete Codex routing-policy document.
+
+Usage: cq codex proxy policy show [OPTIONS]
+
+Without --state-dir, use authenticated live control. With an explicit existing state
+root, operate offline; no live process is contacted.
+
+The public document remains schema_version 1, independent of the CLI envelope
+schema_version 2. Account members are opaque AccountKeys, not email references. See
+RoutingPolicyDocument in routing notes.
+
+Options:
+  --state-dir STATE_DIR
+      Read or update policy offline at this existing state root instead of contacting
+      the running proxy. Omission selects authenticated live control.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Clean absolute non-root directory.
+      Constraint: Mutually exclusive with --port.
+      Constraint: Do not create state; initialise it with cq proxy state initialise
+      first.
+  --port PORT
+      Connect to the authenticated loopback proxy on this port (1–65535). If omitted,
+      use the existing proxy configuration port, or 19280 when that field is unset.
+      Type: integer. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: configured port, otherwise 19280
+      Constraint: Integer 1–65535.
+      Constraint: No configuration file is created to resolve omission.
+  --timeout TIMEOUT
+      Maximum elapsed time for this command, including local preparation and control
+      requests; default 10s.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "10s".
+      Constraint: Positive Go duration.
+      Constraint: Expiry returns exit 7; a timed-out mutation may already have
+      committed, so inspect state before retrying.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy policy show
+      Read live policy.

@@ -1,0 +1,91 @@
+Consume one Codex banked reset credit.
+
+Usage: cq codex reset use ACCOUNT [OPTIONS]
+
+Use the same visible logical-account inventory as codex account list. Resolve exact
+opaque keys before unique case-insensitive email or existing CQ alias matches.
+
+Read and consume through existing credential ownership: try eligible candidates for the
+same logical identity; only authentication failures permit another candidate or eligible
+CQ-owned refresh. Never rotate accounts, refresh externally owned credentials, switch
+native auth or broaden routing authority.
+
+Use one credit for exactly one account. Omit --credit to resume the one unresolved
+attempt, otherwise choose the eligible available credit with the earliest expiry;
+credits without expiry sort last, ties sort by credit ID. Multiple unresolved attempts
+require an explicit credit ID.
+
+Preview account, credit, current shared windows and recommendation on stderr. Prompt
+"Use reset credit {credit.id} for {account.display_name}? [y/N]"; only y or yes, case-
+insensitive, confirms. Blank or negative response cancels. --json and non-terminal stdin
+require --yes.
+
+A banked reset restores shared-window usage percentages without moving natural reset
+timestamps. Consumption never buys credits. Repeated or uncertain requests reuse the
+persisted idempotency key for that account and credit; never select another credit to
+recover an uncertain result.
+
+Arguments:
+  ACCOUNT
+      Select one account by its exact opaque account key, unique email, or existing CQ
+      alias. Exact keys take precedence; emails and aliases match case-insensitively
+      after trimming. Ambiguous or unstable identities are rejected.
+      Type: account-reference. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty if supplied.
+      Constraint: Resolve against one current provider inventory; never choose the first
+      ambiguous match.
+
+Options:
+  --credit CREDIT_ID
+      Consume this exact credit ID. Omit to resume the single unresolved attempt or
+      choose the eligible credit with earliest expiry; no-expiry credits sort last and
+      ties use bytewise credit ID order.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty, no surrounding whitespace.
+      Constraint: Must belong to selected account.
+      Constraint: Must be supported codex_rate_limits and eligible, or be the exact
+      unresolved replay credit.
+  --yes
+      Confirm the displayed destructive operation without a terminal prompt (default
+      false). Required with --json or non-terminal stdin.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Only this operation is authorised; no future operation inherits
+      consent.
+  --timeout DURATION
+      Limit total command work to this duration (default 120s; minimum 1s; maximum 10m).
+      A timeout never authorises a second reset consumption. Time spent waiting for
+      terminal confirmation is excluded.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "120s".
+      Constraint: Go duration syntax; 1s <= value <= 10m
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex reset use user@example.com
+      Preview and confirm the next eligible reset.
+  cq codex reset use user@example.com --credit "$CREDIT_ID" --yes --json
+      Consume or safely replay the exact inventoried credit; prepare CREDIT_ID as described in notes.

@@ -1,0 +1,3791 @@
+[
+  {
+    "legacy_path": "check",
+    "source": "v0.32.5:cmd/cq/main.go:43",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "-j",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--refresh",
+        "target": "--fresh",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "-r",
+        "target": "--fresh",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "PROVIDER...",
+        "target": "providers",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Bare cq maps to check with zero provider positionals; canonical, never deprecated. --refresh/-r renamed --fresh; using old option emits option deprecation once."
+    ],
+    "canonical_path": "check",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "fresh": {
+        "default": false,
+        "required": false,
+        "omission_help": "Fetch fresh quota data instead of initially reading the quota cache. Default: false."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 30s."
+      }
+    }
+  },
+  {
+    "legacy_path": "claude login",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--activate",
+        "target": "--activate",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "claude account login",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "activate": {
+        "default": false,
+        "required": false,
+        "omission_help": "Make this account the native client default after successful login (default false). Existing clients may need reconnection."
+      },
+      "timeout": {
+        "default": "10m",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 10m; minimum 1s; maximum 30m)."
+      }
+    }
+  },
+  {
+    "legacy_path": "claude accounts",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "claude account list",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "claude switch",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [
+      {
+        "legacy": "EMAIL",
+        "target": "account",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "claude account activate",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "claude remove",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [
+      {
+        "legacy": "EMAIL",
+        "target": "account",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "claude account remove",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "yes": {
+        "default": false,
+        "required": false,
+        "omission_help": "Confirm the displayed destructive operation without a terminal prompt (default false). Required with --json or non-terminal stdin."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption. Time spent waiting for terminal confirmation is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex login",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--activate",
+        "target": "--activate",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex account login",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "activate": {
+        "default": false,
+        "required": false,
+        "omission_help": "Make this account the native client default after successful login (default false). Existing clients may need reconnection."
+      },
+      "timeout": {
+        "default": "10m",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 10m; minimum 1s; maximum 30m)."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex accounts",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex account list",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex switch",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [
+      {
+        "legacy": "EMAIL",
+        "target": "account",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex account activate",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex remove",
+    "source": "v0.32.5:cmd/cq/main.go:198",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [
+      {
+        "legacy": "EMAIL",
+        "target": "account",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex account remove",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "yes": {
+        "default": false,
+        "required": false,
+        "omission_help": "Confirm the displayed destructive operation without a terminal prompt (default false). Required with --json or non-terminal stdin."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption. Time spent waiting for terminal confirmation is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "gemini accounts",
+    "source": "v0.32.5:cmd/cq/main.go:83",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "gemini account show",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 30s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex resets list",
+    "source": "v0.32.5:cmd/cq/main.go:64",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [
+      {
+        "legacy": "ACCOUNT-REFERENCE?",
+        "target": "account",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex reset list",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 60s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex resets recommend",
+    "source": "v0.32.5:cmd/cq/main.go:64",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex reset recommend",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "120s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 120s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex resets use",
+    "source": "v0.32.5:cmd/cq/main.go:64",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--credit",
+        "target": "--credit",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--yes",
+        "target": "--yes",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "ACCOUNT-REFERENCE",
+        "target": "account",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex reset use",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "credit": {
+        "default": null,
+        "required": false,
+        "omission_help": "Consume this exact credit ID. Omit to resume the single unresolved attempt or choose the eligible credit with earliest expiry; no-expiry credits sort last and ties use bytewise credit ID order."
+      },
+      "yes": {
+        "default": false,
+        "required": false,
+        "omission_help": "Confirm the displayed destructive operation without a terminal prompt (default false). Required with --json or non-terminal stdin."
+      },
+      "timeout": {
+        "default": "120s",
+        "required": false,
+        "omission_help": "Limit total command work to this duration (default 120s; minimum 1s; maximum 10m). A timeout never authorises a second reset consumption. Time spent waiting for terminal confirmation is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "refresh",
+    "source": "v0.32.5:cmd/cq/main.go:88",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "No provider positionals means Claude and Codex token refresh, exactly the canonical omission rule."
+    ],
+    "canonical_path": "auth refresh",
+    "deprecation": true,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "agent install",
+    "source": "v0.32.5:cmd/cq/main.go:91",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "service install",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    },
+    "injected_options": {
+      "component": "token-refresh"
+    }
+  },
+  {
+    "legacy_path": "agent uninstall",
+    "source": "v0.32.5:cmd/cq/main.go:91",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "service uninstall",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    },
+    "injected_options": {
+      "component": "token-refresh"
+    }
+  },
+  {
+    "legacy_path": "proxy install",
+    "source": "v0.32.5:cmd/cq/proxy.go:184",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "service install",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    },
+    "injected_options": {
+      "component": "proxy"
+    }
+  },
+  {
+    "legacy_path": "proxy restart",
+    "source": "v0.32.5:cmd/cq/proxy.go:184",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "service restart",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    },
+    "injected_options": {
+      "component": "proxy"
+    }
+  },
+  {
+    "legacy_path": "proxy uninstall",
+    "source": "v0.32.5:cmd/cq/proxy.go:184",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "service uninstall",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    },
+    "injected_options": {
+      "component": "proxy"
+    }
+  },
+  {
+    "legacy_path": "proxy start",
+    "source": "v0.32.5:cmd/cq/proxy.go:590",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--migrate-legacy-managed",
+        "target": "--migrate-legacy-managed",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy serve",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Loopback listen port, 1\u201365535. Omit to use proxy.json port, or 19280 if absent."
+      },
+      "migrate-legacy-managed": {
+        "default": false,
+        "required": false,
+        "omission_help": "Add missing routing identity metadata to legacy CQ-managed credentials before serving. Default: false."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy status",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:271",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [
+      {
+        "when": "--port supplied",
+        "target": "proxy health",
+        "rule": "Forward --port and canonical global renderer plus --timeout; reject status-only options.",
+        "canonical_option_defaults": {
+          "port": {
+            "default": null,
+            "required": false,
+            "omission_help": "Loopback port, 1\u201365535. Omit to use configured port or 19280 without creating config."
+          },
+          "timeout": {
+            "default": "5s",
+            "required": false,
+            "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 5s."
+          }
+        }
+      },
+      {
+        "when": "--port absent",
+        "target": "proxy status",
+        "rule": "Bare status intentionally changes from old HTTP liveness to full readiness inspection; JSON no longer changes scope.",
+        "canonical_option_defaults": {
+          "state-dir": {
+            "default": null,
+            "required": false,
+            "omission_help": "Inspect an isolated candidate state directory. Omit to inspect configured live proxy state."
+          },
+          "strict": {
+            "default": false,
+            "required": false,
+            "omission_help": "Return non-zero when inspected proxy is unhealthy, absent or indeterminate. Default: false."
+          },
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 10s."
+          }
+        }
+      }
+    ],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port on proxy health",
+        "rule": "Select proxy health variant. Cannot combine --strict, --state-dir/--instance-state-root or --human; these do not exist on health. --json and --timeout remain valid."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--human",
+        "target": null,
+        "rule": "Select human renderer; reject combination with --json=true. Omission already selects human rendering."
+      },
+      {
+        "legacy": "--strict",
+        "target": "--strict",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--timeout",
+        "target": "--timeout",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": "--timeout",
+        "rule": "Move optional final duration to --timeout. Reject if explicit --timeout also supplied. Omission uses canonical10s status default or5s health default."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy status",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": false,
+        "omission_help": "Inspect an isolated candidate state directory. Omit to inspect configured live proxy state."
+      },
+      "strict": {
+        "default": false,
+        "required": false,
+        "omission_help": "Return non-zero when inspected proxy is unhealthy, absent or indeterminate. Default: false."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy validate-http",
+    "source": "v0.32.5:cmd/cq/proxy_http_validation_cli.go:45",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy validate http",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": true,
+        "omission_help": "Installed candidate loopback port; required. The live port 19280 is forbidden."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Maximum elapsed operation time, including preparation, requests and cleanup. Default: 30s. Range: 1s..5m. Interactive confirmation time is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy pin claude",
+    "source": "v0.32.5:cmd/cq/proxy.go:350",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [
+      {
+        "when": "No selector and --clear omitted or false",
+        "target": "claude proxy pin show",
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "--clear true and no selector",
+        "target": "claude proxy pin clear",
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "Exactly one selector and --clear omitted or false",
+        "target": "claude proxy pin set",
+        "positionals": {
+          "account": "legacy selector"
+        },
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "--clear true with selector",
+        "error": {
+          "code": "invalid_argument",
+          "exit": 2,
+          "message": "--clear cannot be combined with an account."
+        }
+      }
+    ],
+    "flag_mappings": [
+      {
+        "legacy": "--clear",
+        "target": "command token clear",
+        "rule": "Boolean control selecting variants above; default false."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "EMAIL-OR-ACCOUNT-UUID?",
+        "target": "account on set variant",
+        "rule": "Preserve selector text; canonical account-reference resolution applies, including ambiguous-reference rejection. Absence selects show."
+      }
+    ],
+    "semantics": [
+      "Public v2 output and errors; aliases preserve spelling, not old output schema."
+    ],
+    "canonical_path": null,
+    "deprecation": true
+  },
+  {
+    "legacy_path": "proxy pin codex",
+    "source": "v0.32.5:cmd/cq/proxy.go:350",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [
+      {
+        "when": "No selector and --clear omitted or false",
+        "target": "codex proxy pin show",
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "--clear true and no selector",
+        "target": "codex proxy pin clear",
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "Exactly one selector and --clear omitted or false",
+        "target": "codex proxy pin set",
+        "positionals": {
+          "account": "legacy selector"
+        },
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "--clear true with selector",
+        "error": {
+          "code": "invalid_argument",
+          "exit": 2,
+          "message": "--clear cannot be combined with an account."
+        }
+      }
+    ],
+    "flag_mappings": [
+      {
+        "legacy": "--clear",
+        "target": "command token clear",
+        "rule": "Boolean control selecting variants above; default false."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "ACCOUNT-REFERENCE?",
+        "target": "account on set variant",
+        "rule": "Preserve selector text; canonical account-reference resolution applies, including ambiguous-reference rejection. Absence selects show."
+      }
+    ],
+    "semantics": [
+      "Public v2 output and errors; aliases preserve spelling, not old output schema."
+    ],
+    "canonical_path": null,
+    "deprecation": true
+  },
+  {
+    "legacy_path": "proxy default codex",
+    "source": "v0.32.5:cmd/cq/proxy_codex_default.go:17",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [
+      {
+        "when": "No selector and --clear omitted or false",
+        "target": "codex proxy fallback show",
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "--clear true and no selector",
+        "target": "codex proxy fallback clear",
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "Exactly one selector and --clear omitted or false",
+        "target": "codex proxy fallback set",
+        "positionals": {
+          "account": "legacy selector"
+        },
+        "canonical_option_defaults": {
+          "timeout": {
+            "default": "10s",
+            "required": false,
+            "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+          }
+        }
+      },
+      {
+        "when": "--clear true with selector",
+        "error": {
+          "code": "invalid_argument",
+          "exit": 2,
+          "message": "--clear cannot be combined with an account."
+        }
+      }
+    ],
+    "flag_mappings": [
+      {
+        "legacy": "--clear",
+        "target": "command token clear",
+        "rule": "Boolean control selecting variants above; default false."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "ACCOUNT-REFERENCE?",
+        "target": "account on set variant",
+        "rule": "Preserve selector text; canonical account-reference resolution applies, including ambiguous-reference rejection. Absence selects show."
+      }
+    ],
+    "semantics": [
+      "Public v2 output and errors; aliases preserve spelling, not old output schema."
+    ],
+    "canonical_path": null,
+    "deprecation": true
+  },
+  {
+    "legacy_path": "proxy prime status",
+    "source": "v0.32.5:cmd/cq/proxy.go:290",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy prime status",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy prime enable",
+    "source": "v0.32.5:cmd/cq/proxy.go:290",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy prime enable",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy prime disable",
+    "source": "v0.32.5:cmd/cq/proxy.go:290",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy prime disable",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy rescue enter",
+    "source": "v0.32.5:cmd/cq/proxy_rescue.go:40",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy rescue enter",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Loopback control port. Default: the configured rescue bootstrap port, or 19280 when its value is zero."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Maximum elapsed operation time, including preparation, requests and cleanup. Default: 30s. Range: 1s..5m. Interactive confirmation time is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy rescue exit",
+    "source": "v0.32.5:cmd/cq/proxy_rescue.go:40",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy rescue exit",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Loopback control port. Default: the configured rescue bootstrap port, or 19280 when its value is zero."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Maximum elapsed operation time, including preparation, requests and cleanup. Default: 30s. Range: 1s..5m. Interactive confirmation time is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy rescue status",
+    "source": "v0.32.5:cmd/cq/proxy_rescue.go:40",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy rescue status",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Loopback control port. Default: the configured rescue bootstrap port, or 19280 when its value is zero."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Maximum elapsed operation time, including preparation, requests and cleanup. Default: 30s. Range: 1s..5m. Interactive confirmation time is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy leases invalidate",
+    "source": "v0.32.5:cmd/cq/proxy_leases.go:40",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy lease invalidate",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy trace",
+    "source": "v0.32.5:cmd/cq/proxy_trace.go:151",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--session",
+        "target": "--session",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--trace",
+        "target": "--trace",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--since",
+        "target": "--since",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--tail",
+        "target": "--tail",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--follow",
+        "target": "--follow",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--payload",
+        "target": "--payload",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy trace",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "session": {
+        "default": null,
+        "required": false,
+        "omission_help": "Match a raw session ID or codex://threads/ID against privacy-safe session/thread keys. Omission matches all sessions."
+      },
+      "trace": {
+        "default": null,
+        "required": false,
+        "omission_help": "Match this exact trace ID. Omission matches all trace IDs."
+      },
+      "since": {
+        "default": null,
+        "required": false,
+        "omission_help": "Include records at or after command-start time minus this positive duration. Omission imposes no lower time bound."
+      },
+      "tail": {
+        "default": 200,
+        "required": false,
+        "omission_help": "Return the newest N matching retained records before following; default 200. Use 0 for all matching retained records."
+      },
+      "follow": {
+        "default": false,
+        "required": false,
+        "omission_help": "Continue reading new records and rotated logs until interrupted. No proxy connection is opened."
+      },
+      "payload": {
+        "default": false,
+        "required": false,
+        "omission_help": "Read the existing opt-in payload log instead of causal route events. This may display recorded user content; it does not enable capture."
+      },
+      "timeout": {
+        "default": null,
+        "required": false,
+        "omission_help": "Optional maximum elapsed reading/following time; omission has no command deadline. Expiry returns exit 7."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy reserve set",
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--window",
+        "target": "--window",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--percent",
+        "target": "--percent",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy reserve set",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "window": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact window selector returned by cq codex proxy reserve windows; for example 7d. No inferred provider or window default."
+      },
+      "percent": {
+        "default": null,
+        "required": true,
+        "omission_help": "Protect this percentage of the full window quota. The system account is blocked at or below this remaining percentage; 2 means keep the final 2 percentage points, not 2% of current remaining quota."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy reserve disable",
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy reserve disable",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy reserve enable",
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy reserve enable",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy reserve clear",
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy reserve clear",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy reserve status",
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy reserve status",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy reserve windows",
+    "source": "v0.32.5:cmd/cq/proxy_reserve.go:35",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy reserve windows",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy initialise",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:85",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy state initialise",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Absolute directory to own as shared proxy runtime-control state."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 30s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy apply",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:85",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--file",
+        "target": "--file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy policy apply",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "file": {
+        "default": null,
+        "required": true,
+        "omission_help": "UTF-8 JSON RoutingPolicyDocument to apply. Relative paths resolve against the working directory. This is a complete replacement document, not a patch."
+      },
+      "state-dir": {
+        "default": null,
+        "required": false,
+        "omission_help": "Read or update policy offline at this existing state root instead of contacting the running proxy. Omission selects authenticated live control."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy status",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:85",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy policy show",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": false,
+        "omission_help": "Read or update policy offline at this existing state root instead of contacting the running proxy. Omission selects authenticated live control."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy pool set",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:285",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--account",
+        "target": "--account",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--value",
+        "target": "--value",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "NAME",
+        "target": "name",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy pool set",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "account": {
+        "default": null,
+        "required": true,
+        "omission_help": "Unique Codex account email, CQ alias, or opaque AccountKey from cq codex account list. The reference resolves once; only AccountKey is stored. Repeat --account for each member; membership is replaced, not appended."
+      },
+      "value": {
+        "default": null,
+        "required": false,
+        "omission_help": "Relative capacity-preservation value, 0\u20134294967295. Higher values preserve this pool by preferring lower-value viable accounts for ordinary unbound work. If omitted, preserve an existing pool value or use 0 for a new pool."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy pool rename",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:285",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "OLD_NAME",
+        "target": "old-name",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      },
+      {
+        "legacy": "NEW_NAME",
+        "target": "new-name",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy pool rename",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy pool value",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:285",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "NAME",
+        "target": "name",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      },
+      {
+        "legacy": "VALUE",
+        "target": "value",
+        "rule": "Preserve value and order; canonical type and validation apply."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy pool value",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy session bind",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id",
+        "target": "--session-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id-stdin",
+        "target": "--session-id-stdin",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--digest",
+        "target": "--digest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--pool",
+        "target": "--pool",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy session bind",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "pool": {
+        "default": null,
+        "required": true,
+        "omission_help": "Case-insensitive pool name; preserve configured display casing."
+      },
+      "session-id": {
+        "default": null,
+        "required": false,
+        "omission_help": "Exact raw session identifier. Use exactly one session selector; prefer --session-id-stdin to avoid placing the identifier in shell history."
+      },
+      "session-id-stdin": {
+        "default": false,
+        "required": false,
+        "omission_help": "Read the exact UTF-8 session identifier from stdin, 1\u20134096 bytes. No newline is removed; use printf rather than echo."
+      },
+      "digest": {
+        "default": null,
+        "required": false,
+        "omission_help": "Existing full keyed session digest; exactly 64 lowercase hexadecimal characters. Obtain it with cq codex proxy session digest."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy session show",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id",
+        "target": "--session-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id-stdin",
+        "target": "--session-id-stdin",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--digest",
+        "target": "--digest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy session show",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "session-id": {
+        "default": null,
+        "required": false,
+        "omission_help": "Exact raw session identifier. Use exactly one session selector; prefer --session-id-stdin to avoid placing the identifier in shell history."
+      },
+      "session-id-stdin": {
+        "default": false,
+        "required": false,
+        "omission_help": "Read the exact UTF-8 session identifier from stdin, 1\u20134096 bytes. No newline is removed; use printf rather than echo."
+      },
+      "digest": {
+        "default": null,
+        "required": false,
+        "omission_help": "Existing full keyed session digest; exactly 64 lowercase hexadecimal characters. Obtain it with cq codex proxy session digest."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy session list",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy session list",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy session unbind",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id",
+        "target": "--session-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id-stdin",
+        "target": "--session-id-stdin",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--digest",
+        "target": "--digest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy session unbind",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "session-id": {
+        "default": null,
+        "required": false,
+        "omission_help": "Exact raw session identifier. Use exactly one session selector; prefer --session-id-stdin to avoid placing the identifier in shell history."
+      },
+      "session-id-stdin": {
+        "default": false,
+        "required": false,
+        "omission_help": "Read the exact UTF-8 session identifier from stdin, 1\u20134096 bytes. No newline is removed; use printf rather than echo."
+      },
+      "digest": {
+        "default": null,
+        "required": false,
+        "omission_help": "Existing full keyed session digest; exactly 64 lowercase hexadecimal characters. Obtain it with cq codex proxy session digest."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy policy session digest",
+    "source": "v0.32.5:cmd/cq/proxy_policy.go:421",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id",
+        "target": "--session-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--session-id-stdin",
+        "target": "--session-id-stdin",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--digest",
+        "target": "--digest",
+        "rule": "Preserve already-hashed selector; mutually exclusive with raw session selector forms. Canonical digest command validation applies."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy session digest",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "session-id": {
+        "default": null,
+        "required": false,
+        "omission_help": "Exact raw session identifier. Use exactly one session selector; prefer --session-id-stdin to avoid placing the identifier in shell history."
+      },
+      "session-id-stdin": {
+        "default": false,
+        "required": false,
+        "omission_help": "Read the exact UTF-8 session identifier from stdin, 1\u20134096 bytes. No newline is removed; use printf rather than echo."
+      },
+      "digest": {
+        "default": null,
+        "required": false,
+        "omission_help": "Existing full keyed session digest; exactly 64 lowercase hexadecimal characters. Obtain it with cq codex proxy session digest."
+      },
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy endpoint inspect-legacy",
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:60",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy credential-endpoint legacy inspect",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 1s..5m inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy endpoint transition-legacy prepare",
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--snapshot-file",
+        "target": "--snapshot-file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--non-interactive",
+        "target": "--non-interactive",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-stopped-and-drained",
+        "target": "--confirm-stopped-and-drained",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy credential-endpoint legacy prepare",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "snapshot-file": {
+        "default": null,
+        "required": true,
+        "omission_help": "LegacyEndpointSnapshotV1 extracted from inspect JSON; required, at most 16384 bytes."
+      },
+      "confirm-stopped-and-drained": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert the proxy and every credential endpoint participant remain stopped and all work drained. Required throughout this operation."
+      },
+      "non-interactive": {
+        "default": false,
+        "required": false,
+        "omission_help": "Skip the typed confirmation after the mandatory semantic confirmation flag. Default: false. JSON mode implies true; stdin without a TTY requires true."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 1s..5m inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy endpoint transition-legacy resume",
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--ticket-file",
+        "target": "--ticket-file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--non-interactive",
+        "target": "--non-interactive",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-stopped-and-drained",
+        "target": "--confirm-stopped-and-drained",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy credential-endpoint legacy resume",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "ticket-file": {
+        "default": null,
+        "required": true,
+        "omission_help": "LegacyEndpointTicketV1 extracted from prepare JSON; required, at most 16384 bytes. Preserve unchanged for resume or rollback."
+      },
+      "confirm-stopped-and-drained": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert the proxy and every credential endpoint participant remain stopped and all work drained. Required throughout this operation."
+      },
+      "non-interactive": {
+        "default": false,
+        "required": false,
+        "omission_help": "Skip the typed confirmation after the mandatory semantic confirmation flag. Default: false. JSON mode implies true; stdin without a TTY requires true."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 1s..5m inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy endpoint transition-legacy activate",
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--ticket-file",
+        "target": "--ticket-file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--non-interactive",
+        "target": "--non-interactive",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-stopped-and-drained",
+        "target": "--confirm-stopped-and-drained",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy credential-endpoint legacy activate",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "ticket-file": {
+        "default": null,
+        "required": true,
+        "omission_help": "LegacyEndpointTicketV1 extracted from prepare JSON; required, at most 16384 bytes. Preserve unchanged for resume or rollback."
+      },
+      "confirm-stopped-and-drained": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert the proxy and every credential endpoint participant remain stopped and all work drained. Required throughout this operation."
+      },
+      "non-interactive": {
+        "default": false,
+        "required": false,
+        "omission_help": "Skip the typed confirmation after the mandatory semantic confirmation flag. Default: false. JSON mode implies true; stdin without a TTY requires true."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 1s..5m inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy endpoint transition-legacy finalise",
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--ticket-file",
+        "target": "--ticket-file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--non-interactive",
+        "target": "--non-interactive",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-candidate-healthy",
+        "target": "--confirm-candidate-healthy",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy credential-endpoint legacy finalise",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "ticket-file": {
+        "default": null,
+        "required": true,
+        "omission_help": "LegacyEndpointTicketV1 extracted from prepare JSON; required, at most 16384 bytes. Preserve unchanged for resume or rollback."
+      },
+      "confirm-candidate-healthy": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert the exact replacement credential owner passed live health verification. Required; runtime verifier must also confirm."
+      },
+      "non-interactive": {
+        "default": false,
+        "required": false,
+        "omission_help": "Skip the typed confirmation after the mandatory semantic confirmation flag. Default: false. JSON mode implies true; stdin without a TTY requires true."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 1s..5m inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy endpoint transition-legacy rollback",
+    "source": "v0.32.5:cmd/cq/proxy_endpoint_maintenance.go:179",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--ticket-file",
+        "target": "--ticket-file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--non-interactive",
+        "target": "--non-interactive",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-stopped-and-drained",
+        "target": "--confirm-stopped-and-drained",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy credential-endpoint legacy rollback",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "ticket-file": {
+        "default": null,
+        "required": true,
+        "omission_help": "LegacyEndpointTicketV1 extracted from prepare JSON; required, at most 16384 bytes. Preserve unchanged for resume or rollback."
+      },
+      "confirm-stopped-and-drained": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert the proxy and every credential endpoint participant remain stopped and all work drained. Required throughout this operation."
+      },
+      "non-interactive": {
+        "default": false,
+        "required": false,
+        "omission_help": "Skip the typed confirmation after the mandatory semantic confirmation flag. Default: false. JSON mode implies true; stdin without a TTY requires true."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 1s..5m inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy hook codex-stop",
+    "source": "v0.32.5:cmd/cq/proxy_codex_hook.go:32",
+    "visibility": "machine-advertised",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Without any global options, preserve frozen v0.32.5 hook stdin/stdout/error ABI and emit deprecated_alias on stderr only.",
+      "With any recognised global option, dispatch to canonical codex proxy hook stop using canonical parser, help/version behaviour, output and exit contracts; --json=true selects the v2 envelope. No local options accepted. False globals use canonical execution with human/native hook rendering.",
+      "Never interpret command-line options as stdin event data."
+    ],
+    "canonical_path": "codex proxy hook stop",
+    "deprecation": true,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "models list",
+    "source": "v0.32.5:cmd/cq/models.go:287",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--provider",
+        "target": "--provider",
+        "rule": "Map exact legacy value anthropic to claude; codex remains codex. Canonical claude also accepted. Reject every other value; no silent provider default on required provider options."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "models list",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "provider": {
+        "default": null,
+        "required": false,
+        "omission_help": "Filter by claude or codex. Omitted: list both providers. Legacy anthropic means claude."
+      }
+    }
+  },
+  {
+    "legacy_path": "models refresh",
+    "source": "v0.32.5:cmd/cq/models.go:1",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "models refresh",
+    "deprecation": false,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "models overlay add",
+    "source": "v0.32.5:cmd/cq/models.go:398",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--provider",
+        "target": "--provider",
+        "rule": "Map exact legacy value anthropic to claude; codex remains codex. Canonical claude also accepted. Reject every other value; no silent provider default on required provider options."
+      },
+      {
+        "legacy": "--id",
+        "target": "--id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--clone-from",
+        "target": "--clone-from",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "models overlay add",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "provider": {
+        "default": null,
+        "required": true,
+        "omission_help": "Provider to modify: claude or codex. Required. Legacy value anthropic is accepted as claude."
+      },
+      "id": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact model ID to add or remove. Required; case-sensitive and non-empty; leading or trailing whitespace is rejected."
+      },
+      "clone-from": {
+        "default": null,
+        "required": false,
+        "omission_help": "Exact native model ID from the same provider to copy missing metadata from. Omitted: infer a source deterministically by model-name similarity. An explicit source absent from the validated native snapshot is an error."
+      }
+    }
+  },
+  {
+    "legacy_path": "models overlay remove",
+    "source": "v0.32.5:cmd/cq/models.go:398",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--provider",
+        "target": "--provider",
+        "rule": "Map exact legacy value anthropic to claude; codex remains codex. Canonical claude also accepted. Reject every other value; no silent provider default on required provider options."
+      },
+      {
+        "legacy": "--id",
+        "target": "--id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "models overlay remove",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "provider": {
+        "default": null,
+        "required": true,
+        "omission_help": "Provider to modify: claude or codex. Required. Legacy value anthropic is accepted as claude."
+      },
+      "id": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact model ID to add or remove. Required; case-sensitive and non-empty; leading or trailing whitespace is rejected."
+      }
+    }
+  },
+  {
+    "legacy_path": "models overlay prune",
+    "source": "v0.32.5:cmd/cq/models.go:1",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "Formerly ignored arbitrary tail arguments now fail exit2 before state access."
+    ],
+    "canonical_path": "models overlay prune",
+    "deprecation": false,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "operation status",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:221",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--operation-id",
+        "target": "positional operation-id",
+        "rule": "Move value to optional canonical operation-id positional. Omission lists active/retained operation status according to canonical contract."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy operation status",
+    "deprecation": true,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "operation recover",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:221",
+    "visibility": "public",
+    "disposition": "retired",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--operation-id",
+        "target": null,
+        "rule": "Accepted for parsing only; --json selects v2 structured error, all other values never trigger execution."
+      },
+      {
+        "legacy": "--json",
+        "target": null,
+        "rule": "Accepted for parsing only; --json selects v2 structured error, all other values never trigger execution."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Validate legacy syntax without state access; emit the specified error; perform no mutation.",
+      "Require --operation-id with 32 lowercase hex characters before returning retirement error; malformed or missing ID exits2."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "error": {
+      "code": "operation_recovery_unavailable",
+      "exit": 4,
+      "message": "Active operation recovery is unavailable; use cq proxy operation status OPERATION_ID to inspect retained state."
+    }
+  },
+  {
+    "legacy_path": "codex validate capture",
+    "source": "v0.32.5:cmd/cq/codex_validate.go:30",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--input",
+        "target": "--input",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--output",
+        "target": "--output",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--content-encoding",
+        "target": "--content-encoding",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--metadata",
+        "target": "--metadata-json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy fixture create",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "input": {
+        "default": null,
+        "required": true,
+        "omission_help": "Saved request-body file; required. Maximum encoded size: 2 MiB."
+      },
+      "output": {
+        "default": null,
+        "required": true,
+        "omission_help": "Destination fixture JSON file; required. Existing files are rejected."
+      },
+      "content-encoding": {
+        "default": "auto",
+        "required": false,
+        "omission_help": "Body encoding. Default: auto, which recognises Zstandard magic bytes and otherwise uses identity."
+      },
+      "metadata-json": {
+        "default": null,
+        "required": false,
+        "omission_help": "Literal JSON turn metadata; not a filename. Default: read metadata from the request body."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex validate http",
+    "source": "v0.32.5:cmd/cq/codex_validate.go:105",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--client-build",
+        "target": "--client-build",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--state-dir",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy readiness show",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "client-build": {
+        "default": null,
+        "required": true,
+        "omission_help": "Expected Codex client version; required. Must match the recorded or exercised client version byte for byte; arbitrary build labels are not accepted."
+      },
+      "state-dir": {
+        "default": null,
+        "required": false,
+        "omission_help": "Read or write readiness evidence in this absolute directory. Default: the resolved CQ proxy state directory."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex validate websocket",
+    "source": "v0.32.5:cmd/cq/codex_validate.go:75",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--client-build",
+        "target": "--client-build",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--client-executable",
+        "target": "--client-executable",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--state-dir",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy validate websocket",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "client-build": {
+        "default": null,
+        "required": true,
+        "omission_help": "Expected Codex client version; required. Must match the recorded or exercised client version byte for byte; arbitrary build labels are not accepted."
+      },
+      "client-executable": {
+        "default": null,
+        "required": false,
+        "omission_help": "Codex executable to exercise. Default: search ChatGPT.app, Codex.app, then PATH, in that order."
+      },
+      "state-dir": {
+        "default": null,
+        "required": false,
+        "omission_help": "Read or write readiness evidence in this absolute directory. Default: the resolved CQ proxy state directory."
+      },
+      "timeout": {
+        "default": "5m",
+        "required": false,
+        "omission_help": "Maximum elapsed operation time, including preparation, requests and cleanup. Default: 5m. Range: 30s..30m. Reserve the final 5s within this budget for cleanup; interactive confirmation time is excluded."
+      }
+    }
+  },
+  {
+    "legacy_path": "codex canary start",
+    "source": "v0.32.5:cmd/cq/codex_canary.go:15",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy canary start",
+    "deprecation": true,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "codex canary status",
+    "source": "v0.32.5:cmd/cq/codex_canary.go:15",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy canary status",
+    "deprecation": true,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "codex canary stop",
+    "source": "v0.32.5:cmd/cq/codex_canary.go:15",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy canary stop",
+    "deprecation": true,
+    "canonical_option_defaults": {}
+  },
+  {
+    "legacy_path": "proxy candidate prepare",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:442",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--client-build",
+        "target": "--client-build",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--client-executable",
+        "target": "--client-executable",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-payload-capture",
+        "target": "--confirm-payload-capture",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-read-only-credentials",
+        "target": "--confirm-read-only-credentials",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--credential-manifest",
+        "target": "--credential-manifest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--credential-mode",
+        "target": "--credential-mode",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--local-token-client-registry",
+        "target": "--client-registry",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--policy-snapshot",
+        "target": "--policy-snapshot",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--source-config",
+        "target": "--source-config",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--target-release-bundle",
+        "target": "--target-release-bundle",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--target-release-set",
+        "target": "--release-digest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": "--timeout",
+        "rule": "Move duration to --timeout; if explicit --timeout also supplied, reject duplicate exit2. Alias may omit old duration and use canonical default."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate prepare",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "New isolated candidate state directory. Required; absolute clean path below a current-user-owned parent. Existing candidate state is a conflict; never defaults to shared proxy state."
+      },
+      "port": {
+        "default": null,
+        "required": true,
+        "omission_help": "Loopback listener port reserved for this candidate. Required; 1..65535, excluding shared default port 19280."
+      },
+      "source-config": {
+        "default": null,
+        "required": true,
+        "omission_help": "Source configuration attestation file; required, at most 1048576 bytes. Its byte hash is recorded; contents are not applied."
+      },
+      "target-release-bundle": {
+        "default": null,
+        "required": true,
+        "omission_help": "Target signed OperationalReleaseBundleV1 file; required, purpose target, at most 16777216 bytes."
+      },
+      "release-digest": {
+        "default": null,
+        "required": true,
+        "omission_help": "Target bundle digest field, not SHA-256 of the bundle file. Required; must equal the verified target bundle digest."
+      },
+      "client-build": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact client version/build string supplied by executable provenance. Required; must match the independently measured client evidence byte-for-byte. An arbitrary operator label cannot satisfy validation."
+      },
+      "client-executable": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact client executable whose bytes will be bound to validation; required, absolute regular file, at most 536870912 bytes."
+      },
+      "client-registry": {
+        "default": null,
+        "required": true,
+        "omission_help": "ClientSenderRegistryV1 canonical JSON file; required, at most 65536 bytes. Enumerates all request senders and transports participating in validation."
+      },
+      "credential-mode": {
+        "default": "none",
+        "required": false,
+        "omission_help": "Credential attestation mode. Default: none. read-only requires --credential-manifest and --confirm-read-only-credentials; none forbids both."
+      },
+      "credential-manifest": {
+        "default": null,
+        "required": false,
+        "omission_help": "Credential manifest attestation bytes; at most 1048576 bytes. Required only with --credential-mode read-only; never imports or refreshes credentials."
+      },
+      "confirm-read-only-credentials": {
+        "default": false,
+        "required": false,
+        "omission_help": "Assert that the attested credentials are restricted to read-only access. Required with read-only mode; forbidden with none. This assertion does not authorise credential refresh."
+      },
+      "policy-snapshot": {
+        "default": null,
+        "required": false,
+        "omission_help": "Optional policy attestation bytes, at most 1048576 bytes. Omission records no policy digest; contents are not applied."
+      },
+      "confirm-payload-capture": {
+        "default": false,
+        "required": false,
+        "omission_help": "Explicitly authorise capture of request payloads during this candidate workflow. Default: false; omission prohibits capture. Preparation itself captures nothing."
+      },
+      "timeout": {
+        "default": "150s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 150s. Allowed: 150s..5m inclusive; 30s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate status",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:525",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate status",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 10s. Allowed: 1s..30s inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate start",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:547",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": "--timeout",
+        "rule": "Move duration to --timeout; if explicit --timeout also supplied, reject duplicate exit2. Alias may omit old duration and use canonical default."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate start",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "timeout": {
+        "default": "30s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 30s. Allowed: 30s..90s inclusive; 15s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate stop",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:547",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--confirm-client-stopped",
+        "target": "--confirm-client-stopped",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": null,
+        "rule": "Optional legacy final duration: accept only a duration equal to30s, consume without forwarding. Any other duration exits2 with message \"This operation uses a fixed 30s deadline; omit the legacy duration or supply 30s.\" Canonical fixed30s deadline includes15s cleanup reserve."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "No public --timeout for this operation; legacy final30s duration accepted only as a consumed compatibility spelling. Omission uses fixed30s deadline."
+    ],
+    "canonical_path": "proxy candidate stop",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "confirm-client-stopped": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert that every client using this candidate has stopped and no request remains active. Required; must be true."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate client-bearer-barrier refresh",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:588",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--validation-run",
+        "target": "--validation-run-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": "--timeout",
+        "rule": "Move duration to --timeout; if explicit --timeout also supplied, reject duplicate exit2. Alias may omit old duration and use canonical default."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate client-safety refresh",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "validation-run-id": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact validation run identifier returned by candidate prepare or status. Required; 64 lowercase hexadecimal characters. An identifier, not a file hash; must match the stored candidate."
+      },
+      "timeout": {
+        "default": "150s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 150s. Allowed: 150s..5m inclusive; 30s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate artifact switch",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:626",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--confirm-artifact-switch",
+        "target": "--confirm-artifact-switch",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--release-set",
+        "target": "--release-digest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--role",
+        "target": null,
+        "rule": "Require exact value runtime-bundle; consume option without forwarding. Other values rejected exit2 before access."
+      },
+      {
+        "legacy": "--validation-run",
+        "target": "--validation-run-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": "--timeout",
+        "rule": "Move duration to --timeout; if explicit --timeout also supplied, reject duplicate exit2. Alias may omit old duration and use canonical default."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate release activate",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "release-digest": {
+        "default": null,
+        "required": true,
+        "omission_help": "Verified target release digest returned by prepare; required and must match the prepared target."
+      },
+      "validation-run-id": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact validation run identifier returned by candidate prepare or status. Required; 64 lowercase hexadecimal characters. An identifier, not a file hash; must match the stored candidate."
+      },
+      "confirm-artifact-switch": {
+        "default": false,
+        "required": true,
+        "omission_help": "Authorise replacement of this candidate runtime with the selected release. Required; must be true."
+      },
+      "timeout": {
+        "default": "90s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 90s. Allowed: 90s..2m inclusive; 30s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate validate-release",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:685",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--client-build",
+        "target": "--client-build",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--client-executable",
+        "target": "--client-executable",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--confirm-control-health",
+        "target": "--confirm-control-health",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--floor-acceptance-receipt",
+        "target": "--rollback-receipt-digest",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--floor-acceptance-receipt-file",
+        "target": "--rollback-receipt",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--floor-release-bundle",
+        "target": "--rollback-bundle",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--receipt-out",
+        "target": "--receipt-file",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--target-release-bundle",
+        "target": "--target-release-bundle",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--validation-run",
+        "target": "--validation-run-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate release validate",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "target-release-bundle": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact target OperationalReleaseBundleV1 used by prepare, at most 16777216 bytes."
+      },
+      "rollback-bundle": {
+        "default": null,
+        "required": true,
+        "omission_help": "Accepted rollback OperationalReleaseBundleV1, purpose floor, at most 16777216 bytes. Its source commit must be a strict ancestor of target."
+      },
+      "rollback-receipt": {
+        "default": null,
+        "required": true,
+        "omission_help": "Original rollback acceptance receipt bytes, at most 65536 bytes; verified by the acceptance-proof backend, never fabricated."
+      },
+      "rollback-receipt-digest": {
+        "default": null,
+        "required": true,
+        "omission_help": "SHA-256 of UTF-8 bytes cq/release-import-floor/v1 followed by NUL followed by exact rollback receipt bytes. Required; not an ordinary file SHA-256."
+      },
+      "client-build": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact client version/build string supplied by executable provenance. Required; must match the independently measured client evidence byte-for-byte. An arbitrary operator label cannot satisfy validation."
+      },
+      "client-executable": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact client executable whose bytes will be bound to validation; required, absolute regular file, at most 536870912 bytes."
+      },
+      "validation-run-id": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact validation run identifier returned by candidate prepare or status. Required; 64 lowercase hexadecimal characters. An identifier, not a file hash; must match the stored candidate."
+      },
+      "receipt-file": {
+        "default": null,
+        "required": true,
+        "omission_help": "New absolute output file for CandidateReleasePromotionReceiptV1. Must not exist; parent must be owner-controlled."
+      },
+      "confirm-control-health": {
+        "default": false,
+        "required": true,
+        "omission_help": "Assert the exact candidate passed control-health verification. Required; CQ also verifies live identity and health itself."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate remove",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:736",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--confirm-candidate-state-loss",
+        "target": "--confirm-candidate-state-loss",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [
+      {
+        "legacy": "TIMEOUT",
+        "target": null,
+        "rule": "Optional legacy final duration: accept only a duration equal to30s, consume without forwarding. Any other duration exits2 with message \"This operation uses a fixed 30s deadline; omit the legacy duration or supply 30s.\" Canonical fixed30s deadline includes15s cleanup reserve."
+      }
+    ],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes.",
+      "No public --timeout for this operation; legacy final30s duration accepted only as a consumed compatibility spelling. Omission uses fixed30s deadline."
+    ],
+    "canonical_path": "proxy candidate remove",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "confirm-candidate-state-loss": {
+        "default": false,
+        "required": true,
+        "omission_help": "Authorise permanent deletion of this candidate directory, keys and retained receipts. Required; must be true."
+      }
+    }
+  },
+  {
+    "legacy_path": "proxy candidate receipt show",
+    "source": "v0.32.5:cmd/cq/proxy_commands.go:401",
+    "visibility": "public",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--attempt-id",
+        "target": "--attempt-id",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--instance-state-root",
+        "target": "--state-dir",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "proxy candidate receipt show",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "state-dir": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate state directory created by prepare. Required; absolute, clean, current-user-owned path. Never defaults to shared proxy state."
+      },
+      "attempt-id": {
+        "default": null,
+        "required": true,
+        "omission_help": "Exact attempt identifier returned by candidate validation; required, 32 lowercase hexadecimal characters. No latest-attempt fallback."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Total deadline, including cleanup. Default: 10s. Allowed: 1s..30s inclusive; 0s reserved for cleanup."
+      }
+    }
+  },
+  {
+    "legacy_path": "service install",
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "visibility": "public-with-hidden-machine-options",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Presence selects frozen package-hook parser before public parsing. Preserve old ABI and outputs; reject mixing --component or --timeout with package-hook options."
+      },
+      {
+        "legacy": "--installer-lock-held",
+        "target": "--installer-lock-held",
+        "rule": "Presence selects frozen package-hook parser before public parsing. Preserve old ABI and outputs; reject mixing --component or --timeout with package-hook options."
+      },
+      {
+        "legacy": "--service-executable",
+        "target": "--service-executable",
+        "rule": "Presence selects frozen package-hook parser before public parsing. Preserve old ABI and outputs; reject mixing --component or --timeout with package-hook options."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "service install",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    }
+  },
+  {
+    "legacy_path": "service uninstall",
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "visibility": "public-with-hidden-machine-options",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Presence selects frozen package-hook parser before public parsing. Preserve old ABI and outputs; reject mixing --component or --timeout with package-hook options."
+      },
+      {
+        "legacy": "--installer-lock-held",
+        "target": "--installer-lock-held",
+        "rule": "Presence selects frozen package-hook parser before public parsing. Preserve old ABI and outputs; reject mixing --component or --timeout with package-hook options."
+      },
+      {
+        "legacy": "--service-executable",
+        "target": "--service-executable",
+        "rule": "Presence selects frozen package-hook parser before public parsing. Preserve old ABI and outputs; reject mixing --component or --timeout with package-hook options."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "service uninstall",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    }
+  },
+  {
+    "legacy_path": "service restart",
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "visibility": "public-with-hidden-machine-options",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "service restart",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "timeout": {
+        "default": "60s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 60s."
+      }
+    }
+  },
+  {
+    "legacy_path": "service status",
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "visibility": "public-with-hidden-machine-options",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "service status",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "component": {
+        "default": "all",
+        "required": false,
+        "omission_help": "Service component: all, proxy, or token-refresh. Default: all."
+      },
+      "strict": {
+        "default": false,
+        "required": false,
+        "omission_help": "Return non-zero if selected components are not installed, not running, or unhealthy. Default: false."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time, including locks, requests and local verification. Default: 10s."
+      }
+    }
+  },
+  {
+    "legacy_path": "service snapshot",
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "visibility": "hidden-machine",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--installer-lock-held",
+        "target": "--installer-lock-held",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--snapshot-file",
+        "target": "--snapshot-file",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "service restore",
+    "source": "v0.32.5:cmd/cq/service_command.go:111",
+    "visibility": "hidden-machine",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--installer-lock-held",
+        "target": "--installer-lock-held",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--snapshot-file",
+        "target": "--snapshot-file",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "proxy start [runtime-role mode]",
+    "source": "v0.32.5:internal/proxy/runtime_control.go:125",
+    "visibility": "hidden-machine",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--runtime-role",
+        "target": "--runtime-role",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--runtime-schema",
+        "target": "--runtime-schema",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--runtime-manifest-digest",
+        "target": "--runtime-manifest-digest",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--proxy-instance",
+        "target": "--proxy-instance",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--runtime-instance",
+        "target": "--runtime-instance",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--listener-fd",
+        "target": "--listener-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--work-fd",
+        "target": "--work-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--lifecycle-fd",
+        "target": "--lifecycle-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--control-fd",
+        "target": "--control-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--lifecycle-holder-digest",
+        "target": "--lifecycle-holder-digest",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--secret-fd",
+        "target": "--secret-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "proxy start [Linux validation child]",
+    "source": "v0.32.5:cmd/cq/proxy.go:617",
+    "visibility": "hidden-machine",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--linux-validation-candidate-fd",
+        "target": "--linux-validation-candidate-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "proxy candidate __runtime",
+    "source": "v0.32.5:cmd/cq/proxy_candidate_runtime.go:272",
+    "visibility": "hidden-machine",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--instance",
+        "target": "--instance",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--validation-run",
+        "target": "--validation-run",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--generation",
+        "target": "--generation",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--token-fd",
+        "target": "--token-fd",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "proxy __linux-acceptance-helper",
+    "source": "v0.32.5:cmd/cq/linux_acceptance_helper_linux.go:11",
+    "visibility": "hidden-machine",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "cq-install install",
+    "source": "v0.32.5:cmd/cq-install/main.go:117",
+    "visibility": "separate-executable",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--silent",
+        "target": "--silent",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "cq-install uninstall",
+    "source": "v0.32.5:cmd/cq-install/main.go:117",
+    "visibility": "separate-executable",
+    "disposition": "frozen_machine_abi",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--silent",
+        "target": "--silent",
+        "rule": "Preserve exact ABI; no rename or new default."
+      },
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Preserve exact ABI; no rename or new default."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Preserve exact legacy grammar, ordering, values, defaults, effects, output and exit codes from the frozen machine ABI annex. No v2 parser or output conversion."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "abi_contract": "internal-abi.md"
+  },
+  {
+    "legacy_path": "proxy pin",
+    "source": "v0.32.5:cmd/cq/proxy.go:347",
+    "visibility": "public",
+    "disposition": "retired",
+    "variants": [],
+    "flag_mappings": [],
+    "positional_mappings": [],
+    "semantics": [
+      "Validate legacy syntax without state access; emit the specified error; perform no mutation."
+    ],
+    "canonical_path": null,
+    "deprecation": false,
+    "error": {
+      "code": "provider_required",
+      "exit": 2,
+      "message": "Specify a provider: use cq claude proxy pin show or cq codex proxy pin show."
+    }
+  }
+]

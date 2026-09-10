@@ -1,0 +1,2737 @@
+{
+  "schema_version": 1,
+  "purpose": "Implementation ownership coverage, not proof of implemented behaviour.",
+  "tasks": [
+    {
+      "id": "T00",
+      "title": "Select and prove the implementation baseline",
+      "document": "01-foundation.md",
+      "depends_on": []
+    },
+    {
+      "id": "T01",
+      "title": "Fence frozen machine protocols",
+      "document": "01-foundation.md",
+      "depends_on": [
+        "T00"
+      ]
+    },
+    {
+      "id": "T02",
+      "title": "Generate the command catalogue, help and utility output",
+      "document": "01-foundation.md",
+      "depends_on": [
+        "T00"
+      ]
+    },
+    {
+      "id": "T03",
+      "title": "Implement pure parsing and all compatibility translations",
+      "document": "01-foundation.md",
+      "depends_on": [
+        "T01",
+        "T02"
+      ]
+    },
+    {
+      "id": "T04",
+      "title": "Implement output, consent, operation budgets and contract fixtures",
+      "document": "01-foundation.md",
+      "depends_on": [
+        "T03"
+      ]
+    },
+    {
+      "id": "T05",
+      "title": "Unify lazy environment and client path resolution",
+      "document": "01-foundation.md",
+      "depends_on": [
+        "T04"
+      ]
+    },
+    {
+      "id": "T06",
+      "title": "Adapt quota reporting without changing quota arithmetic",
+      "document": "01-foundation.md",
+      "depends_on": [
+        "T05"
+      ]
+    },
+    {
+      "id": "T07",
+      "title": "Expose read-only account inventory and stable references",
+      "document": "02-accounts-models.md",
+      "depends_on": [
+        "T05"
+      ]
+    },
+    {
+      "id": "T08",
+      "title": "Adapt login, activation and removal transactions",
+      "document": "02-accounts-models.md",
+      "depends_on": [
+        "T07"
+      ]
+    },
+    {
+      "id": "T09",
+      "title": "Adapt reset inventory and advisory scheduling",
+      "document": "02-accounts-models.md",
+      "depends_on": [
+        "T07"
+      ]
+    },
+    {
+      "id": "T10",
+      "title": "Preserve explicit, idempotent reset consumption",
+      "document": "02-accounts-models.md",
+      "depends_on": [
+        "T09"
+      ]
+    },
+    {
+      "id": "T11",
+      "title": "Adapt model catalogue and overlay publication",
+      "document": "02-accounts-models.md",
+      "depends_on": [
+        "T05"
+      ]
+    },
+    {
+      "id": "T12",
+      "title": "Adapt explicit provider credential refresh",
+      "document": "02-accounts-models.md",
+      "depends_on": [
+        "T05",
+        "T07"
+      ]
+    },
+    {
+      "id": "T13",
+      "title": "Separate routing selections from account activation",
+      "document": "03-routing.md",
+      "depends_on": [
+        "T05",
+        "T07"
+      ]
+    },
+    {
+      "id": "T14",
+      "title": "Expose Codex system-account reserve precisely",
+      "document": "03-routing.md",
+      "depends_on": [
+        "T05",
+        "T07"
+      ]
+    },
+    {
+      "id": "T15",
+      "title": "Adapt policy, pools and session bindings",
+      "document": "03-routing.md",
+      "depends_on": [
+        "T05",
+        "T07"
+      ]
+    },
+    {
+      "id": "T16",
+      "title": "Adapt lease invalidation and trace streaming",
+      "document": "03-routing.md",
+      "depends_on": [
+        "T05"
+      ]
+    },
+    {
+      "id": "T17",
+      "title": "Adapt shared proxy runtime, inspection and state creation",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T01",
+        "T05"
+      ]
+    },
+    {
+      "id": "T18",
+      "title": "Implement selected-component service semantics",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T01",
+        "T05",
+        "T17"
+      ]
+    },
+    {
+      "id": "T19",
+      "title": "Implement macOS service enable and disable",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T18"
+      ]
+    },
+    {
+      "id": "T20",
+      "title": "Implement Linux service and timer enablement",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T18"
+      ]
+    },
+    {
+      "id": "T21",
+      "title": "Implement Windows selected task enablement",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T18"
+      ]
+    },
+    {
+      "id": "T22",
+      "title": "Adapt supported candidate state and fence unavailable transitions",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T01",
+        "T05"
+      ]
+    },
+    {
+      "id": "T23",
+      "title": "Adapt legacy credential-endpoint maintenance",
+      "document": "04-runtime-services.md",
+      "depends_on": [
+        "T01",
+        "T05"
+      ]
+    },
+    {
+      "id": "T24",
+      "title": "Adapt fixture, readiness and transport validation",
+      "document": "05-validation-rescue.md",
+      "depends_on": [
+        "T01",
+        "T05",
+        "T17",
+        "T18"
+      ]
+    },
+    {
+      "id": "T25",
+      "title": "Adapt canary lifecycle and preserve Stop hook protocol",
+      "document": "05-validation-rescue.md",
+      "depends_on": [
+        "T01",
+        "T05",
+        "T15",
+        "T24"
+      ]
+    },
+    {
+      "id": "T26",
+      "title": "Adapt rescue controls and read-only operation inspection",
+      "document": "05-validation-rescue.md",
+      "depends_on": [
+        "T01",
+        "T05",
+        "T17"
+      ]
+    },
+    {
+      "id": "T27",
+      "title": "Assemble the complete CLI and migrate repository consumers",
+      "document": "06-cutover-delivery.md",
+      "depends_on": [
+        "T01",
+        "T02",
+        "T03",
+        "T04",
+        "T05",
+        "T06",
+        "T07",
+        "T08",
+        "T09",
+        "T10",
+        "T11",
+        "T12",
+        "T13",
+        "T14",
+        "T15",
+        "T16",
+        "T17",
+        "T18",
+        "T19",
+        "T20",
+        "T21",
+        "T22",
+        "T23",
+        "T24",
+        "T25",
+        "T26"
+      ]
+    },
+    {
+      "id": "T28",
+      "title": "Prepare release evidence and gate authorised rollout",
+      "document": "06-cutover-delivery.md",
+      "depends_on": [
+        "T27",
+        "T19",
+        "T20",
+        "T21"
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "path": "auth refresh",
+      "owner": "T12",
+      "options": [],
+      "positionals": [
+        "providers"
+      ],
+      "acceptance_case_count": 10,
+      "availability": true,
+      "contract": "commands.json#auth.refresh"
+    },
+    {
+      "path": "check",
+      "owner": "T06",
+      "options": [
+        "fresh",
+        "timeout"
+      ],
+      "positionals": [
+        "providers"
+      ],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#check"
+    },
+    {
+      "path": "claude account activate",
+      "owner": "T08",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#claude.account.activate"
+    },
+    {
+      "path": "claude account list",
+      "owner": "T07",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#claude.account.list"
+    },
+    {
+      "path": "claude account login",
+      "owner": "T08",
+      "options": [
+        "activate",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 7,
+      "availability": true,
+      "contract": "commands.json#claude.account.login"
+    },
+    {
+      "path": "claude account remove",
+      "owner": "T08",
+      "options": [
+        "yes",
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 7,
+      "availability": true,
+      "contract": "commands.json#claude.account.remove"
+    },
+    {
+      "path": "claude proxy pin clear",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 3,
+      "availability": true,
+      "contract": "commands.json#claude.proxy.pin.clear"
+    },
+    {
+      "path": "claude proxy pin set",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#claude.proxy.pin.set"
+    },
+    {
+      "path": "claude proxy pin show",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 3,
+      "availability": true,
+      "contract": "commands.json#claude.proxy.pin.show"
+    },
+    {
+      "path": "codex account activate",
+      "owner": "T08",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.account.activate"
+    },
+    {
+      "path": "codex account list",
+      "owner": "T07",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.account.list"
+    },
+    {
+      "path": "codex account login",
+      "owner": "T08",
+      "options": [
+        "activate",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 7,
+      "availability": true,
+      "contract": "commands.json#codex.account.login"
+    },
+    {
+      "path": "codex account remove",
+      "owner": "T08",
+      "options": [
+        "yes",
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 7,
+      "availability": true,
+      "contract": "commands.json#codex.account.remove"
+    },
+    {
+      "path": "codex proxy canary start",
+      "owner": "T25",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.canary.start"
+    },
+    {
+      "path": "codex proxy canary status",
+      "owner": "T25",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.canary.status"
+    },
+    {
+      "path": "codex proxy canary stop",
+      "owner": "T25",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.canary.stop"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy activate",
+      "owner": "T23",
+      "options": [
+        "ticket-file",
+        "confirm-stopped-and-drained",
+        "non-interactive",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.credential-endpoint.legacy.activate"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy finalise",
+      "owner": "T23",
+      "options": [
+        "ticket-file",
+        "confirm-candidate-healthy",
+        "non-interactive",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.credential-endpoint.legacy.finalise"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy inspect",
+      "owner": "T23",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.credential-endpoint.legacy.inspect"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy prepare",
+      "owner": "T23",
+      "options": [
+        "snapshot-file",
+        "confirm-stopped-and-drained",
+        "non-interactive",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.credential-endpoint.legacy.prepare"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy resume",
+      "owner": "T23",
+      "options": [
+        "ticket-file",
+        "confirm-stopped-and-drained",
+        "non-interactive",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.credential-endpoint.legacy.resume"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy rollback",
+      "owner": "T23",
+      "options": [
+        "ticket-file",
+        "confirm-stopped-and-drained",
+        "non-interactive",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.credential-endpoint.legacy.rollback"
+    },
+    {
+      "path": "codex proxy fallback clear",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.fallback.clear"
+    },
+    {
+      "path": "codex proxy fallback set",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.fallback.set"
+    },
+    {
+      "path": "codex proxy fallback show",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.fallback.show"
+    },
+    {
+      "path": "codex proxy fixture create",
+      "owner": "T24",
+      "options": [
+        "input",
+        "output",
+        "content-encoding",
+        "metadata-json"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.fixture.create"
+    },
+    {
+      "path": "codex proxy hook stop",
+      "owner": "T25",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.hook.stop"
+    },
+    {
+      "path": "codex proxy lease invalidate",
+      "owner": "T16",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.lease.invalidate"
+    },
+    {
+      "path": "codex proxy pin clear",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.pin.clear"
+    },
+    {
+      "path": "codex proxy pin set",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.pin.set"
+    },
+    {
+      "path": "codex proxy pin show",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.pin.show"
+    },
+    {
+      "path": "codex proxy policy apply",
+      "owner": "T15",
+      "options": [
+        "file",
+        "state-dir",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.policy.apply"
+    },
+    {
+      "path": "codex proxy policy show",
+      "owner": "T15",
+      "options": [
+        "state-dir",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.policy.show"
+    },
+    {
+      "path": "codex proxy pool rename",
+      "owner": "T15",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [
+        "old-name",
+        "new-name"
+      ],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.pool.rename"
+    },
+    {
+      "path": "codex proxy pool set",
+      "owner": "T15",
+      "options": [
+        "account",
+        "value",
+        "port",
+        "timeout"
+      ],
+      "positionals": [
+        "name"
+      ],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.pool.set"
+    },
+    {
+      "path": "codex proxy pool value",
+      "owner": "T15",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [
+        "name",
+        "value"
+      ],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.pool.value"
+    },
+    {
+      "path": "codex proxy prime disable",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.prime.disable"
+    },
+    {
+      "path": "codex proxy prime enable",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.prime.enable"
+    },
+    {
+      "path": "codex proxy prime status",
+      "owner": "T13",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.prime.status"
+    },
+    {
+      "path": "codex proxy readiness show",
+      "owner": "T24",
+      "options": [
+        "client-build",
+        "state-dir"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.readiness.show"
+    },
+    {
+      "path": "codex proxy reserve clear",
+      "owner": "T14",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.reserve.clear"
+    },
+    {
+      "path": "codex proxy reserve disable",
+      "owner": "T14",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.reserve.disable"
+    },
+    {
+      "path": "codex proxy reserve enable",
+      "owner": "T14",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.reserve.enable"
+    },
+    {
+      "path": "codex proxy reserve set",
+      "owner": "T14",
+      "options": [
+        "window",
+        "percent",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.reserve.set"
+    },
+    {
+      "path": "codex proxy reserve status",
+      "owner": "T14",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.reserve.status"
+    },
+    {
+      "path": "codex proxy reserve windows",
+      "owner": "T14",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.reserve.windows"
+    },
+    {
+      "path": "codex proxy session bind",
+      "owner": "T15",
+      "options": [
+        "pool",
+        "session-id",
+        "session-id-stdin",
+        "digest",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.session.bind"
+    },
+    {
+      "path": "codex proxy session digest",
+      "owner": "T15",
+      "options": [
+        "session-id",
+        "session-id-stdin",
+        "digest",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.session.digest"
+    },
+    {
+      "path": "codex proxy session list",
+      "owner": "T15",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.session.list"
+    },
+    {
+      "path": "codex proxy session show",
+      "owner": "T15",
+      "options": [
+        "session-id",
+        "session-id-stdin",
+        "digest",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.session.show"
+    },
+    {
+      "path": "codex proxy session unbind",
+      "owner": "T15",
+      "options": [
+        "session-id",
+        "session-id-stdin",
+        "digest",
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.session.unbind"
+    },
+    {
+      "path": "codex proxy trace",
+      "owner": "T16",
+      "options": [
+        "session",
+        "trace",
+        "since",
+        "tail",
+        "follow",
+        "payload",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.trace"
+    },
+    {
+      "path": "codex proxy validate http",
+      "owner": "T24",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.validate.http"
+    },
+    {
+      "path": "codex proxy validate websocket",
+      "owner": "T24",
+      "options": [
+        "client-build",
+        "client-executable",
+        "state-dir",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.validate.websocket"
+    },
+    {
+      "path": "codex reset list",
+      "owner": "T09",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.reset.list"
+    },
+    {
+      "path": "codex reset recommend",
+      "owner": "T09",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#codex.reset.recommend"
+    },
+    {
+      "path": "codex reset use",
+      "owner": "T10",
+      "options": [
+        "credit",
+        "yes",
+        "timeout"
+      ],
+      "positionals": [
+        "account"
+      ],
+      "acceptance_case_count": 9,
+      "availability": true,
+      "contract": "commands.json#codex.reset.use"
+    },
+    {
+      "path": "completion",
+      "owner": "T02",
+      "options": [],
+      "positionals": [
+        "shell"
+      ],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#completion"
+    },
+    {
+      "path": "gemini account show",
+      "owner": "T07",
+      "options": [
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#gemini.account.show"
+    },
+    {
+      "path": "help",
+      "owner": "T02",
+      "options": [],
+      "positionals": [
+        "command-path"
+      ],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#help"
+    },
+    {
+      "path": "models list",
+      "owner": "T11",
+      "options": [
+        "provider"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#models.list"
+    },
+    {
+      "path": "models overlay add",
+      "owner": "T11",
+      "options": [
+        "provider",
+        "id",
+        "clone-from"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#models.overlay.add"
+    },
+    {
+      "path": "models overlay prune",
+      "owner": "T11",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#models.overlay.prune"
+    },
+    {
+      "path": "models overlay remove",
+      "owner": "T11",
+      "options": [
+        "provider",
+        "id"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#models.overlay.remove"
+    },
+    {
+      "path": "models refresh",
+      "owner": "T11",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#models.refresh"
+    },
+    {
+      "path": "proxy candidate client-safety refresh",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "validation-run-id",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": false,
+      "contract": "commands.json#proxy.candidate.client-safety.refresh"
+    },
+    {
+      "path": "proxy candidate prepare",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "port",
+        "source-config",
+        "target-release-bundle",
+        "release-digest",
+        "client-build",
+        "client-executable",
+        "client-registry",
+        "credential-mode",
+        "credential-manifest",
+        "confirm-read-only-credentials",
+        "policy-snapshot",
+        "confirm-payload-capture",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 8,
+      "availability": true,
+      "contract": "commands.json#proxy.candidate.prepare"
+    },
+    {
+      "path": "proxy candidate receipt show",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "attempt-id",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#proxy.candidate.receipt.show"
+    },
+    {
+      "path": "proxy candidate release activate",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "release-digest",
+        "validation-run-id",
+        "confirm-artifact-switch",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": false,
+      "contract": "commands.json#proxy.candidate.release.activate"
+    },
+    {
+      "path": "proxy candidate release validate",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "target-release-bundle",
+        "rollback-bundle",
+        "rollback-receipt",
+        "rollback-receipt-digest",
+        "client-build",
+        "client-executable",
+        "validation-run-id",
+        "receipt-file",
+        "confirm-control-health"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": false,
+      "contract": "commands.json#proxy.candidate.release.validate"
+    },
+    {
+      "path": "proxy candidate remove",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "confirm-candidate-state-loss"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 7,
+      "availability": true,
+      "contract": "commands.json#proxy.candidate.remove"
+    },
+    {
+      "path": "proxy candidate start",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 4,
+      "availability": false,
+      "contract": "commands.json#proxy.candidate.start"
+    },
+    {
+      "path": "proxy candidate status",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#proxy.candidate.status"
+    },
+    {
+      "path": "proxy candidate stop",
+      "owner": "T22",
+      "options": [
+        "state-dir",
+        "confirm-client-stopped"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#proxy.candidate.stop"
+    },
+    {
+      "path": "proxy health",
+      "owner": "T17",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#proxy.health"
+    },
+    {
+      "path": "proxy operation status",
+      "owner": "T26",
+      "options": [],
+      "positionals": [
+        "operation-id"
+      ],
+      "acceptance_case_count": 8,
+      "availability": true,
+      "contract": "commands.json#proxy.operation.status"
+    },
+    {
+      "path": "proxy rescue enter",
+      "owner": "T26",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#proxy.rescue.enter"
+    },
+    {
+      "path": "proxy rescue exit",
+      "owner": "T26",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#proxy.rescue.exit"
+    },
+    {
+      "path": "proxy rescue status",
+      "owner": "T26",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#proxy.rescue.status"
+    },
+    {
+      "path": "proxy serve",
+      "owner": "T17",
+      "options": [
+        "port",
+        "migrate-legacy-managed"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 3,
+      "availability": true,
+      "contract": "commands.json#proxy.serve"
+    },
+    {
+      "path": "proxy state initialise",
+      "owner": "T17",
+      "options": [
+        "state-dir",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 2,
+      "availability": true,
+      "contract": "commands.json#proxy.state.initialise"
+    },
+    {
+      "path": "proxy status",
+      "owner": "T17",
+      "options": [
+        "state-dir",
+        "strict",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 3,
+      "availability": true,
+      "contract": "commands.json#proxy.status"
+    },
+    {
+      "path": "service install",
+      "owner": "T18",
+      "options": [
+        "component",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#service.install"
+    },
+    {
+      "path": "service restart",
+      "owner": "T18",
+      "options": [
+        "component",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 6,
+      "availability": true,
+      "contract": "commands.json#service.restart"
+    },
+    {
+      "path": "service start",
+      "owner": "T18",
+      "options": [
+        "component",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#service.start"
+    },
+    {
+      "path": "service status",
+      "owner": "T18",
+      "options": [
+        "component",
+        "strict",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#service.status"
+    },
+    {
+      "path": "service stop",
+      "owner": "T18",
+      "options": [
+        "component",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#service.stop"
+    },
+    {
+      "path": "service uninstall",
+      "owner": "T18",
+      "options": [
+        "component",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#service.uninstall"
+    },
+    {
+      "path": "version",
+      "owner": "T02",
+      "options": [],
+      "positionals": [],
+      "acceptance_case_count": 1,
+      "availability": true,
+      "contract": "commands.json#version"
+    }
+  ],
+  "groups": [
+    {
+      "path": "auth",
+      "owner": "T02"
+    },
+    {
+      "path": "claude",
+      "owner": "T02"
+    },
+    {
+      "path": "claude account",
+      "owner": "T02"
+    },
+    {
+      "path": "claude proxy",
+      "owner": "T02"
+    },
+    {
+      "path": "claude proxy pin",
+      "owner": "T02"
+    },
+    {
+      "path": "codex",
+      "owner": "T02"
+    },
+    {
+      "path": "codex account",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy canary",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy credential-endpoint",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy credential-endpoint legacy",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy fallback",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy fixture",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy hook",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy lease",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy pin",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy policy",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy pool",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy prime",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy readiness",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy reserve",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy session",
+      "owner": "T02"
+    },
+    {
+      "path": "codex proxy validate",
+      "owner": "T02"
+    },
+    {
+      "path": "codex reset",
+      "owner": "T02"
+    },
+    {
+      "path": "gemini",
+      "owner": "T02"
+    },
+    {
+      "path": "gemini account",
+      "owner": "T02"
+    },
+    {
+      "path": "models",
+      "owner": "T02"
+    },
+    {
+      "path": "models overlay",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy candidate",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy candidate client-safety",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy candidate receipt",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy candidate release",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy operation",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy rescue",
+      "owner": "T02"
+    },
+    {
+      "path": "proxy state",
+      "owner": "T02"
+    },
+    {
+      "path": "service",
+      "owner": "T02"
+    }
+  ],
+  "global_options": [
+    {
+      "name": "help",
+      "owners": [
+        "T02",
+        "T03",
+        "T04"
+      ]
+    },
+    {
+      "name": "json",
+      "owners": [
+        "T02",
+        "T03",
+        "T04"
+      ]
+    },
+    {
+      "name": "version",
+      "owners": [
+        "T02",
+        "T03",
+        "T04"
+      ]
+    }
+  ],
+  "legacy": [
+    {
+      "legacy_path": "check",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "check"
+      ],
+      "semantic_owners": [
+        "T06"
+      ]
+    },
+    {
+      "legacy_path": "claude login",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "claude account login"
+      ],
+      "semantic_owners": [
+        "T08"
+      ]
+    },
+    {
+      "legacy_path": "claude accounts",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "claude account list"
+      ],
+      "semantic_owners": [
+        "T07"
+      ]
+    },
+    {
+      "legacy_path": "claude switch",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "claude account activate"
+      ],
+      "semantic_owners": [
+        "T08"
+      ]
+    },
+    {
+      "legacy_path": "claude remove",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "claude account remove"
+      ],
+      "semantic_owners": [
+        "T08"
+      ]
+    },
+    {
+      "legacy_path": "codex login",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex account login"
+      ],
+      "semantic_owners": [
+        "T08"
+      ]
+    },
+    {
+      "legacy_path": "codex accounts",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex account list"
+      ],
+      "semantic_owners": [
+        "T07"
+      ]
+    },
+    {
+      "legacy_path": "codex switch",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex account activate"
+      ],
+      "semantic_owners": [
+        "T08"
+      ]
+    },
+    {
+      "legacy_path": "codex remove",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex account remove"
+      ],
+      "semantic_owners": [
+        "T08"
+      ]
+    },
+    {
+      "legacy_path": "gemini accounts",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "gemini account show"
+      ],
+      "semantic_owners": [
+        "T07"
+      ]
+    },
+    {
+      "legacy_path": "codex resets list",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex reset list"
+      ],
+      "semantic_owners": [
+        "T09"
+      ]
+    },
+    {
+      "legacy_path": "codex resets recommend",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex reset recommend"
+      ],
+      "semantic_owners": [
+        "T09"
+      ]
+    },
+    {
+      "legacy_path": "codex resets use",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex reset use"
+      ],
+      "semantic_owners": [
+        "T10"
+      ]
+    },
+    {
+      "legacy_path": "refresh",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "auth refresh"
+      ],
+      "semantic_owners": [
+        "T12"
+      ]
+    },
+    {
+      "legacy_path": "agent install",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "service install"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "agent uninstall",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "service uninstall"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "proxy install",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "service install"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "proxy restart",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "service restart"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "proxy uninstall",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "service uninstall"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "proxy start",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "proxy serve"
+      ],
+      "semantic_owners": [
+        "T17"
+      ]
+    },
+    {
+      "legacy_path": "proxy status",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy health",
+        "proxy status"
+      ],
+      "semantic_owners": [
+        "T17"
+      ]
+    },
+    {
+      "legacy_path": "proxy validate-http",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy validate http"
+      ],
+      "semantic_owners": [
+        "T24"
+      ]
+    },
+    {
+      "legacy_path": "proxy pin claude",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "claude proxy pin clear",
+        "claude proxy pin set",
+        "claude proxy pin show"
+      ],
+      "semantic_owners": [
+        "T13"
+      ]
+    },
+    {
+      "legacy_path": "proxy pin codex",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy pin clear",
+        "codex proxy pin set",
+        "codex proxy pin show"
+      ],
+      "semantic_owners": [
+        "T13"
+      ]
+    },
+    {
+      "legacy_path": "proxy default codex",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy fallback clear",
+        "codex proxy fallback set",
+        "codex proxy fallback show"
+      ],
+      "semantic_owners": [
+        "T13"
+      ]
+    },
+    {
+      "legacy_path": "proxy prime status",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy prime status"
+      ],
+      "semantic_owners": [
+        "T13"
+      ]
+    },
+    {
+      "legacy_path": "proxy prime enable",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy prime enable"
+      ],
+      "semantic_owners": [
+        "T13"
+      ]
+    },
+    {
+      "legacy_path": "proxy prime disable",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy prime disable"
+      ],
+      "semantic_owners": [
+        "T13"
+      ]
+    },
+    {
+      "legacy_path": "proxy rescue enter",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy rescue enter"
+      ],
+      "semantic_owners": [
+        "T26"
+      ]
+    },
+    {
+      "legacy_path": "proxy rescue exit",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy rescue exit"
+      ],
+      "semantic_owners": [
+        "T26"
+      ]
+    },
+    {
+      "legacy_path": "proxy rescue status",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy rescue status"
+      ],
+      "semantic_owners": [
+        "T26"
+      ]
+    },
+    {
+      "legacy_path": "proxy leases invalidate",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy lease invalidate"
+      ],
+      "semantic_owners": [
+        "T16"
+      ]
+    },
+    {
+      "legacy_path": "proxy trace",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy trace"
+      ],
+      "semantic_owners": [
+        "T16"
+      ]
+    },
+    {
+      "legacy_path": "proxy reserve set",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy reserve set"
+      ],
+      "semantic_owners": [
+        "T14"
+      ]
+    },
+    {
+      "legacy_path": "proxy reserve disable",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy reserve disable"
+      ],
+      "semantic_owners": [
+        "T14"
+      ]
+    },
+    {
+      "legacy_path": "proxy reserve enable",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy reserve enable"
+      ],
+      "semantic_owners": [
+        "T14"
+      ]
+    },
+    {
+      "legacy_path": "proxy reserve clear",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy reserve clear"
+      ],
+      "semantic_owners": [
+        "T14"
+      ]
+    },
+    {
+      "legacy_path": "proxy reserve status",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy reserve status"
+      ],
+      "semantic_owners": [
+        "T14"
+      ]
+    },
+    {
+      "legacy_path": "proxy reserve windows",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy reserve windows"
+      ],
+      "semantic_owners": [
+        "T14"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy initialise",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "proxy state initialise"
+      ],
+      "semantic_owners": [
+        "T17"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy apply",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy policy apply"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy status",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy policy show"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy pool set",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy pool set"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy pool rename",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy pool rename"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy pool value",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy pool value"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy session bind",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy session bind"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy session show",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy session show"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy session list",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy session list"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy session unbind",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy session unbind"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy policy session digest",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy session digest"
+      ],
+      "semantic_owners": [
+        "T15"
+      ]
+    },
+    {
+      "legacy_path": "proxy endpoint inspect-legacy",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy credential-endpoint legacy inspect"
+      ],
+      "semantic_owners": [
+        "T23"
+      ]
+    },
+    {
+      "legacy_path": "proxy endpoint transition-legacy prepare",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy credential-endpoint legacy prepare"
+      ],
+      "semantic_owners": [
+        "T23"
+      ]
+    },
+    {
+      "legacy_path": "proxy endpoint transition-legacy resume",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy credential-endpoint legacy resume"
+      ],
+      "semantic_owners": [
+        "T23"
+      ]
+    },
+    {
+      "legacy_path": "proxy endpoint transition-legacy activate",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy credential-endpoint legacy activate"
+      ],
+      "semantic_owners": [
+        "T23"
+      ]
+    },
+    {
+      "legacy_path": "proxy endpoint transition-legacy finalise",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy credential-endpoint legacy finalise"
+      ],
+      "semantic_owners": [
+        "T23"
+      ]
+    },
+    {
+      "legacy_path": "proxy endpoint transition-legacy rollback",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy credential-endpoint legacy rollback"
+      ],
+      "semantic_owners": [
+        "T23"
+      ]
+    },
+    {
+      "legacy_path": "proxy hook codex-stop",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy hook stop"
+      ],
+      "semantic_owners": [
+        "T25"
+      ]
+    },
+    {
+      "legacy_path": "models list",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "models list"
+      ],
+      "semantic_owners": [
+        "T11"
+      ]
+    },
+    {
+      "legacy_path": "models refresh",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "models refresh"
+      ],
+      "semantic_owners": [
+        "T11"
+      ]
+    },
+    {
+      "legacy_path": "models overlay add",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "models overlay add"
+      ],
+      "semantic_owners": [
+        "T11"
+      ]
+    },
+    {
+      "legacy_path": "models overlay remove",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "models overlay remove"
+      ],
+      "semantic_owners": [
+        "T11"
+      ]
+    },
+    {
+      "legacy_path": "models overlay prune",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "models overlay prune"
+      ],
+      "semantic_owners": [
+        "T11"
+      ]
+    },
+    {
+      "legacy_path": "operation status",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "proxy operation status"
+      ],
+      "semantic_owners": [
+        "T26"
+      ]
+    },
+    {
+      "legacy_path": "operation recover",
+      "owner": "T03",
+      "disposition": "retired",
+      "targets": [],
+      "semantic_owners": [
+        "T03"
+      ]
+    },
+    {
+      "legacy_path": "codex validate capture",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy fixture create"
+      ],
+      "semantic_owners": [
+        "T24"
+      ]
+    },
+    {
+      "legacy_path": "codex validate http",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy readiness show"
+      ],
+      "semantic_owners": [
+        "T24"
+      ]
+    },
+    {
+      "legacy_path": "codex validate websocket",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy validate websocket"
+      ],
+      "semantic_owners": [
+        "T24"
+      ]
+    },
+    {
+      "legacy_path": "codex canary start",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy canary start"
+      ],
+      "semantic_owners": [
+        "T25"
+      ]
+    },
+    {
+      "legacy_path": "codex canary status",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy canary status"
+      ],
+      "semantic_owners": [
+        "T25"
+      ]
+    },
+    {
+      "legacy_path": "codex canary stop",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy canary stop"
+      ],
+      "semantic_owners": [
+        "T25"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate prepare",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy candidate prepare"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate status",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy candidate status"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate start",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy candidate start"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate stop",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy candidate stop"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate client-bearer-barrier refresh",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "proxy candidate client-safety refresh"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate artifact switch",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "proxy candidate release activate"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate validate-release",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "proxy candidate release validate"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate remove",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy candidate remove"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate receipt show",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "proxy candidate receipt show"
+      ],
+      "semantic_owners": [
+        "T22"
+      ]
+    },
+    {
+      "legacy_path": "service install",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "service install"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "service uninstall",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "service uninstall"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "service restart",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "service restart"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "service status",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "service status"
+      ],
+      "semantic_owners": [
+        "T18"
+      ]
+    },
+    {
+      "legacy_path": "service snapshot",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "service restore",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "proxy start [runtime-role mode]",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "proxy start [Linux validation child]",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "proxy candidate __runtime",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "proxy __linux-acceptance-helper",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "cq-install install",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "cq-install uninstall",
+      "owner": "T03",
+      "disposition": "frozen_machine_abi",
+      "targets": [],
+      "semantic_owners": [
+        "T01"
+      ]
+    },
+    {
+      "legacy_path": "proxy pin",
+      "owner": "T03",
+      "disposition": "retired",
+      "targets": [],
+      "semantic_owners": [
+        "T03"
+      ]
+    }
+  ],
+  "resource_documents": [
+    {
+      "path": "README.md",
+      "owners": [
+        "T02",
+        "T03",
+        "T04",
+        "T27",
+        "T28"
+      ]
+    },
+    {
+      "path": "environment.md",
+      "owners": [
+        "T05",
+        "T18",
+        "T19",
+        "T20",
+        "T21"
+      ]
+    },
+    {
+      "path": "naming.md",
+      "owners": [
+        "T02",
+        "T03",
+        "T27"
+      ]
+    },
+    {
+      "path": "resources/root.md",
+      "owners": [
+        "T02",
+        "T04",
+        "T06",
+        "T17",
+        "T18",
+        "T26"
+      ]
+    },
+    {
+      "path": "resources/accounts.md",
+      "owners": [
+        "T07",
+        "T08",
+        "T09",
+        "T10"
+      ]
+    },
+    {
+      "path": "resources/models.md",
+      "owners": [
+        "T05",
+        "T11",
+        "T12"
+      ]
+    },
+    {
+      "path": "resources/routing.md",
+      "owners": [
+        "T13",
+        "T14",
+        "T15",
+        "T16",
+        "T17",
+        "T25"
+      ]
+    },
+    {
+      "path": "resources/candidate.md",
+      "owners": [
+        "T22",
+        "T23"
+      ]
+    },
+    {
+      "path": "resources/validation.md",
+      "owners": [
+        "T24",
+        "T25"
+      ]
+    },
+    {
+      "path": "internal-abi.md",
+      "owners": [
+        "T01",
+        "T27"
+      ]
+    },
+    {
+      "path": "migration.md",
+      "owners": [
+        "T03",
+        "T27"
+      ]
+    },
+    {
+      "path": "migration.json",
+      "owners": [
+        "T03",
+        "T27"
+      ]
+    },
+    {
+      "path": "source-baseline.json",
+      "owners": [
+        "T00"
+      ]
+    },
+    {
+      "path": "source-inventory.json",
+      "owners": [
+        "T00",
+        "T27"
+      ]
+    },
+    {
+      "path": "source-differences.md",
+      "owners": [
+        "T00",
+        "T05",
+        "T07",
+        "T08",
+        "T09",
+        "T10",
+        "T11",
+        "T12"
+      ]
+    },
+    {
+      "path": "acceptance.md",
+      "owners": [
+        "T02",
+        "T03",
+        "T04",
+        "T06",
+        "T07",
+        "T08",
+        "T09",
+        "T10",
+        "T11",
+        "T12",
+        "T13",
+        "T14",
+        "T15",
+        "T16",
+        "T17",
+        "T18",
+        "T22",
+        "T23",
+        "T24",
+        "T25",
+        "T26",
+        "T27",
+        "T28"
+      ]
+    }
+  ]
+}

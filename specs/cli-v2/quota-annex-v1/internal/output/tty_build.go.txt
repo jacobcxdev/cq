@@ -1,0 +1,553 @@
+package output
+
+import (
+	"fmt"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/provider"
+	"github.com/jacobcxdev/cq/internal/quota"
+)
+
+var icons = map[provider.ID]string{
+	provider.Claude: "\u273B", // ✻
+	provider.Codex:  "\uF120", //
+	provider.Gemini: "\uF51B", //
+}
+
+// BuildTTYModel converts a Report into a structured TTYModel ready for rendering.
+// It is a pure function — no I/O. The returned model contains pre-styled strings.
+// Sections are built first, then separators are sized to the widest rendered line.
+func BuildTTYModel(report app.Report, now time.Time) TTYModel {
+	nowEpoch := now.Unix()
+	labelWidth := ttyLabelWidth(report)
+
+	model := TTYModel{
+		Sections: make([]TTYSection, 0, len(report.Providers)),
+	}
+
+	// Track which sections are provider-first (get separator) vs continuation (no separator).
+	var providerFirstIdx []int
+	for _, pr := range report.Providers {
+		section := TTYSection{}
+		isFirst := true
+
+		for _, result := range pr.Results {
+			header, rows := buildResultBlock(result, pr.ID, nowEpoch, labelWidth)
+			if section.Header == "" {
+				section.Header = header
+				section.WindowRows = rows
+			} else {
+				if isFirst {
+					providerFirstIdx = append(providerFirstIdx, len(model.Sections))
+					isFirst = false
+				}
+				model.Sections = append(model.Sections, section)
+				section = TTYSection{
+					Header:     header,
+					WindowRows: rows,
+				}
+			}
+		}
+
+		if pr.Aggregate != nil {
+			section.AggHeader = buildAggHeader(pr.Aggregate, labelWidth)
+			section.AggRows = buildAggRows(pr.Aggregate.Windows)
+		}
+		if pr.ProxyEligibility != nil && pr.ProxyEligibility.ExcludedCount > 0 {
+			section.ProxyHeader = buildProxyEligibilityHeader(pr.ID, pr.ProxyEligibility, labelWidth)
+			if pr.ProxyEligibility.Aggregate != nil {
+				section.ProxyRows = buildAggRows(pr.ProxyEligibility.Aggregate.Windows)
+			}
+		}
+		for i := range pr.ProxyPools {
+			pool := &pr.ProxyPools[i]
+			block := TTYProxyBlock{Header: buildProxyPoolHeader(pr.ID, pool, labelWidth)}
+			if pool.Aggregate != nil {
+				block.Rows = buildAggRows(pool.Aggregate.Windows)
+			}
+			section.ProxyPools = append(section.ProxyPools, block)
+		}
+
+		if isFirst {
+			providerFirstIdx = append(providerFirstIdx, len(model.Sections))
+		}
+		model.Sections = append(model.Sections, section)
+	}
+
+	// Measure actual max width across all rendered content.
+	sepWidth := measuredSepWidth(model)
+
+	// Insert separators only on provider-first sections.
+	firstSet := make(map[int]bool, len(providerFirstIdx))
+	for _, idx := range providerFirstIdx {
+		firstSet[idx] = true
+	}
+	for i := range model.Sections {
+		if firstSet[i] {
+			model.Sections[i].Separator = buildSeparator(sepWidth)
+		}
+		if model.Sections[i].AggHeader != "" || model.Sections[i].ProxyHeader != "" || len(model.Sections[i].ProxyPools) > 0 {
+			model.Sections[i].ThinSep = buildThinSeparator(sepWidth)
+		}
+	}
+	if len(model.Sections) > 0 {
+		model.ClosingSeparator = buildSeparator(sepWidth)
+	}
+
+	return model
+}
+
+func ttyLabelWidth(report app.Report) int {
+	width := 7
+	for _, providerReport := range report.Providers {
+		if len(providerReport.Results) != 0 || providerReport.Aggregate != nil {
+			width = max(width, lipgloss.Width(providerDisplayName(providerReport.ID)))
+		}
+		if providerReport.ProxyEligibility != nil && providerReport.ProxyEligibility.ExcludedCount > 0 {
+			width = max(width, lipgloss.Width("Proxy"))
+		}
+		for _, pool := range providerReport.ProxyPools {
+			width = max(width, lipgloss.Width(pool.Name))
+		}
+	}
+	return width
+}
+
+func padTTYLabel(label string, width int) string {
+	return strings.Repeat(" ", max(0, width-lipgloss.Width(label))) + label
+}
+
+// buildResultBlock builds the header and window rows for a single quota.Result.
+func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth int) (string, []TTYWindowRow) {
+	displayName := providerDisplayName(id)
+	icon := providerIcon(id)
+
+	if !r.IsUsable() {
+		errMsg := "error"
+		if r.Error != nil && r.Error.Message != "" {
+			errMsg = r.Error.Message
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
+		} else if r.Error != nil && r.Error.Code != "" {
+			errMsg = strings.ReplaceAll(r.Error.Code, "_", " ")
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
+		}
+
+		header := fmt.Sprintf("  %s  %s",
+			boldRedStyle.Render(icon),
+			boldStyle.Render(padTTYLabel(displayName, labelWidth)),
+		)
+		label := r.Plan
+		if label == "" {
+			label = r.Tier
+		}
+		if label != "" && label != "null" {
+			if r.RateLimitTier != "" {
+				if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
+					label += fmt.Sprintf(" %dx", m)
+				}
+			}
+			header += " " + boldDimItalicStyle.Render(label)
+		}
+		if r.Email != "" {
+			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
+		}
+		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(errMsg)
+		return header, nil
+	}
+
+	minPct := r.MinRemainingPct()
+	iconStyle := pctStyle(minPct)
+	if r.Status == quota.StatusExhausted {
+		iconStyle = redStyle
+	}
+
+	header := fmt.Sprintf("  %s  %s",
+		iconStyle.Render(icon),
+		boldStyle.Render(padTTYLabel(displayName, labelWidth)),
+	)
+
+	label := r.Plan
+	if label == "" {
+		label = r.Tier
+	}
+	if label != "" && label != "null" {
+		if r.RateLimitTier != "" {
+			if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
+				label += fmt.Sprintf(" %dx", m)
+			}
+		}
+		header += " " + boldDimItalicStyle.Render(label)
+	}
+
+	if r.Email != "" {
+		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
+	}
+
+	if r.CacheAge > 0 && r.Error != nil {
+		errMsg := "error"
+		if r.Error.Message != "" {
+			errMsg = r.Error.Message
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
+		} else if r.Error.Code != "" {
+			errMsg = strings.ReplaceAll(r.Error.Code, "_", " ")
+			if r.Error.HTTPStatus > 0 {
+				errMsg = fmt.Sprintf("%s %d", errMsg, r.Error.HTTPStatus)
+			}
+		}
+		header += " " + brightBlackStyle.Render("\u00b7") + " " +
+			boldRedStyle.Render(errMsg) + " " +
+			dimStyle.Render(fmt.Sprintf("\u2014 using cache from %s ago", fmtDuration(r.CacheAge)))
+	}
+
+	isExhausted := r.Status == quota.StatusExhausted
+	var barForce lipgloss.Style
+	if isExhausted {
+		barForce = redStyle
+	}
+
+	keys := orderedWindowKeys(r.Windows)
+	rows := make([]TTYWindowRow, 0, len(keys))
+	currentBucket := ""
+	for _, winName := range keys {
+		bucket := quota.WindowBucket(winName)
+		if bucket == "" {
+			currentBucket = ""
+		} else if bucket != currentBucket {
+			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(bucket)})
+			currentBucket = bucket
+		}
+
+		w := r.Windows[winName]
+		periodS := periodSeconds(winName)
+		if w.ResetAtUnix <= 0 && periodS > 0 && !isExhausted {
+			w.ResetAtUnix = quota.DefaultResetEpoch(periodS, nowEpoch)
+		}
+
+		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
+
+		var pace int
+		hasPace := false
+		if periodS > 0 && w.ResetAtUnix > 0 {
+			pace = calcPace(periodS, w.ResetAtUnix, nowEpoch)
+			hasPace = true
+		}
+		pacePtr := -1
+		if hasPace {
+			pacePtr = pace
+		}
+		row.Bar = renderBar(w.RemainingPct, barForce, pacePtr)
+
+		pc := pctStyle(w.RemainingPct)
+		if isExhausted {
+			pc = dimStyle
+		}
+		row.Pct = pc.Render(fmt.Sprintf("\U000F0A9F %3d%%", w.RemainingPct))
+
+		if w.ResetAtUnix > 0 {
+			rel := fmtDuration(w.ResetAtUnix - nowEpoch)
+			rc := resetStyle(w.RemainingPct, w.ResetAtUnix, nowEpoch, periodS)
+			if isExhausted && w.RemainingPct > 0 {
+				rc = dimStyle
+			}
+			row.Reset = rc.Render(fmt.Sprintf("\U000F0996 %7s", rel))
+		} else {
+			row.Reset = dimStyle.Render(fmt.Sprintf("\U000F0996 %7s", "\u2014"))
+		}
+
+		if hasPace {
+			diff := w.RemainingPct - pace
+			dc := diffStyle(diff)
+			if isExhausted {
+				dc = dimStyle
+			}
+			row.PaceDiff = dc.Render(fmt.Sprintf("\U000F04C5 %+7d", diff))
+
+			burn := ""
+			if periodS > 0 && w.ResetAtUnix > 0 {
+				if b, ok := calcBurndown(periodS, w.ResetAtUnix, nowEpoch, w.RemainingPct); ok {
+					burn = fmtDuration(b)
+				}
+			}
+			if burn != "" {
+				row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %7s", burn))
+			} else {
+				row.Burndown = dc.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
+			}
+		} else {
+			row.PaceDiff = dimStyle.Render(fmt.Sprintf("\U000F04C5 %7s", "\u2014"))
+			row.Burndown = dimStyle.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
+		}
+
+		rows = append(rows, row)
+	}
+
+	return header, rows
+}
+
+// buildAggHeader builds the aggregate header line.
+func buildAggHeader(agg *app.AggregateReport, labelWidth int) string {
+	minPct := 100
+	for _, a := range agg.Windows {
+		if a.RemainingPct < minPct {
+			minPct = a.RemainingPct
+		}
+	}
+	iconStyle := pctStyle(minPct)
+	label := "\u0192(n)"
+	if agg.Summary.Label != "" {
+		label = agg.Summary.Label
+	}
+	header := fmt.Sprintf("  %s  %s %s",
+		iconStyle.Render(providerIcon(agg.ProviderID)),
+		boldStyle.Render(padTTYLabel(providerDisplayName(agg.ProviderID), labelWidth)),
+		boldDimItalicStyle.Render(label),
+	)
+	return header
+}
+
+func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibilityReport, labelWidth int) string {
+	return buildProxyHeader(id, "Proxy", eligibility, labelWidth)
+}
+
+func buildProxyPoolHeader(id provider.ID, pool *app.ProxyPoolReport, labelWidth int) string {
+	return buildProxyHeader(id, pool.Name, &pool.ProxyEligibilityReport, labelWidth)
+}
+
+func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligibilityReport, labelWidth int) string {
+	iconStyle := boldStyle
+	if eligibility.Aggregate != nil {
+		minPct := 100
+		for _, window := range eligibility.Aggregate.Windows {
+			if window.RemainingPct < minPct {
+				minPct = window.RemainingPct
+			}
+		}
+		iconStyle = pctStyle(minPct)
+	}
+	header := fmt.Sprintf("  %s  %s",
+		iconStyle.Render(providerIcon(id)),
+		boldStyle.Render(padTTYLabel(label, labelWidth)),
+	)
+	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
+		header += " " + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
+	}
+	return header
+}
+
+// buildAggRows builds window rows for aggregate data.
+func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindowRow {
+	orderedKeys := orderedAggWindowKeys(windows)
+	rows := make([]TTYWindowRow, 0, len(orderedKeys))
+	currentBucket := ""
+	for _, winName := range orderedKeys {
+		bucket := quota.WindowBucket(winName)
+		if bucket == "" {
+			currentBucket = ""
+		} else if bucket != currentBucket {
+			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(bucket)})
+			currentBucket = bucket
+		}
+
+		a := windows[winName]
+		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
+
+		var barForce lipgloss.Style
+		if a.RemainingPct <= 0 {
+			barForce = redStyle
+		}
+		row.Bar = renderBar(a.RemainingPct, barForce, a.ExpectedPct)
+
+		pc := pctStyle(a.RemainingPct)
+		if a.RemainingPct <= 0 {
+			pc = dimStyle
+		}
+		row.Pct = pc.Render(fmt.Sprintf("\U000F0A9F %3d%%", a.RemainingPct))
+
+		// Sustainability gauge (replaces reset time slot). GaugeOverride only
+		// controls the warning glyph; GaugePos still selects the natural gauge
+		// styling and downstream overburn/on-pace/underburn layout.
+		isDim := a.RemainingPct <= 0
+		sc := gaugeStyle(a.GaugePos)
+		if isDim {
+			sc = dimStyle
+		}
+		gaugeIcon := "\U000F029A"
+		if a.GaugeOverride == "imminent_block" && !isDim {
+			gaugeIcon = "\U0000F071"
+			sc = boldRedStyle
+		}
+		gauge := renderSustainGauge(a.GaugePos, isDim)
+		if !isDim && a.PaceDiff <= -15 {
+			gauge = renderSustainGaugeWithStyle(a.GaugePos, isDim, sc, true)
+		}
+		row.Reset = sc.Render(gaugeIcon) + " " + gauge
+
+		gc := gaugeStyle(a.GaugePos)
+		if a.RemainingPct <= 0 {
+			gc = dimStyle
+		}
+		switch {
+		case a.GaugePos >= 0 && a.GaugePos < 3:
+			gapDuration := "—"
+			gapStart := "—"
+			if a.GapStartS > 0 || a.GapDurationS > 0 {
+				gapDuration = fmtDuration(a.GapDurationS)
+				gapStart = fmtDuration(a.GapStartS)
+			}
+			row.PaceDiff = gc.Render(fmt.Sprintf("\uEE8E %7s", gapDuration))
+			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", gapStart))
+		case a.GaugePos >= 4:
+			row.PaceDiff = gc.Render(fmt.Sprintf("\uEFC7 %7s", fmt.Sprintf("%d%%", a.WastedPct)))
+			if a.WasteDeadlineS > 0 {
+				row.Burndown = gc.Render(fmt.Sprintf("\U000F1557 %7s", fmtDuration(a.WasteDeadlineS)))
+			} else {
+				row.Burndown = gc.Render(fmt.Sprintf("\U000F1557 %7s", "\u2014"))
+			}
+		default:
+			row.PaceDiff = gc.Render(fmt.Sprintf("\U000F012C %7s", "\u2014"))
+			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
+		}
+
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// buildSeparator returns a thick em-dash separator line.
+func buildSeparator(width int) string {
+	return dimStyle.Render(strings.Repeat("\u2014", width))
+}
+
+// buildThinSeparator returns a thin separator line indented by 2 spaces.
+func buildThinSeparator(width int) string {
+	return "  " + dimStyle.Render(strings.Repeat("-", max(0, width-2)))
+}
+
+// measuredSepWidth returns the widest visible line across all sections.
+func measuredSepWidth(model TTYModel) int {
+	maxW := 0
+	for _, sec := range model.Sections {
+		if w := visibleWidth(sec.Header); w > maxW {
+			maxW = w
+		}
+		for _, row := range sec.WindowRows {
+			if w := rowVisibleWidth(row); w > maxW {
+				maxW = w
+			}
+		}
+		if w := visibleWidth(sec.AggHeader); w > maxW {
+			maxW = w
+		}
+		for _, row := range sec.AggRows {
+			if w := rowVisibleWidth(row); w > maxW {
+				maxW = w
+			}
+		}
+		if w := visibleWidth(sec.ProxyHeader); w > maxW {
+			maxW = w
+		}
+		for _, row := range sec.ProxyRows {
+			if w := rowVisibleWidth(row); w > maxW {
+				maxW = w
+			}
+		}
+		for _, pool := range sec.ProxyPools {
+			if w := visibleWidth(pool.Header); w > maxW {
+				maxW = w
+			}
+			for _, row := range pool.Rows {
+				if w := rowVisibleWidth(row); w > maxW {
+					maxW = w
+				}
+			}
+		}
+	}
+	return maxW
+}
+
+// rowVisibleWidth returns the visible character width of a rendered window row.
+// Mirrors the concatenation in writeWindowRow.
+func rowVisibleWidth(row TTYWindowRow) int {
+	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
+		return visibleWidth(row.Label)
+	}
+	return visibleWidth(row.Label) + visibleWidth(row.Bar) +
+		2 + visibleWidth(row.Pct) +
+		2 + visibleWidth(row.Reset) +
+		2 + visibleWidth(row.PaceDiff) +
+		2 + visibleWidth(row.Burndown)
+}
+
+// visibleWidth returns terminal-cell width after ANSI styling is removed.
+func visibleWidth(s string) int {
+	return lipgloss.Width(s)
+}
+
+// headerVisibleWidth calculates the visible character width of a header line.
+func headerVisibleWidth(r quota.Result, id provider.ID) int {
+	// "  <icon>  <7-char name>" = 2 + icon(1) + 2 + len(displayName padded to 7) = 12 base
+	w := 12
+	label := r.Plan
+	if label == "" {
+		label = r.Tier
+	}
+	if label != "" && label != "null" {
+		w += 1 + lipgloss.Width(label)
+		if r.RateLimitTier != "" {
+			if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
+				w += lipgloss.Width(fmt.Sprintf(" %dx", m))
+			}
+		}
+	}
+	if r.Email != "" {
+		w += 3 + lipgloss.Width(r.Email) // " · <email>"
+	}
+	return w
+}
+
+// providerDisplayName returns the capitalised display name for a provider ID.
+func providerDisplayName(id provider.ID) string {
+	name := string(id)
+	if len(name) == 0 {
+		return ""
+	}
+	r, size := utf8.DecodeRuneInString(name)
+	return string(unicode.ToUpper(r)) + name[size:]
+}
+
+// providerIcon returns the icon for a provider ID, defaulting to a bullet.
+func providerIcon(id provider.ID) string {
+	if icon, ok := icons[id]; ok {
+		return icon
+	}
+	return "\u25CF" // ●
+}
+
+// orderedWindowKeys returns window names in canonical display order, filtered
+// to only those present in the given map.
+func orderedWindowKeys(windows map[quota.WindowName]quota.Window) []quota.WindowName {
+	keys := make([]quota.WindowName, 0, len(windows))
+	for k := range windows {
+		keys = append(keys, k)
+	}
+	return quota.OrderedWindowNames(keys)
+}
+
+func orderedAggWindowKeys(windows map[quota.WindowName]quota.AggregateResult) []quota.WindowName {
+	keys := make([]quota.WindowName, 0, len(windows))
+	for k := range windows {
+		keys = append(keys, k)
+	}
+	return quota.OrderedWindowNames(keys)
+}

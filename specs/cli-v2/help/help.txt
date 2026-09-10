@@ -1,0 +1,45 @@
+Show help for a command path.
+
+Usage: cq help [COMMAND...] [OPTIONS]
+
+Show canonical help for the supplied command path. Omit path to show root help. This is
+equivalent to appending --help to that path.
+
+Only command words are accepted after help; option values belong to the documented
+command, not this help request.
+
+Arguments:
+  COMMAND
+      Zero or more canonical command words, or a recognised legacy command path.
+      Type: string. Required: false. Repeatable: true.
+      Default: [].
+      Constraint: Resolve exact full group/leaf path; unknown child fails before state
+      access.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq help codex proxy reserve set
+      Show exact reserve-setting syntax.
+  cq help
+      Show root help.
