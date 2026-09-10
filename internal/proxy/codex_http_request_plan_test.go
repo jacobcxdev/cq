@@ -1634,6 +1634,57 @@ func TestCodexHTTPRequestPlanFactoryRoutesFreshAuthenticatedCallerWithinSessionP
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryRotatesSoftAffinityIntoNewSessionPool(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "account-b"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("account-a", frozenDispatchCandidate("account-a", "candidate-a", "revision-a", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-b", frozenDispatchCandidate("account-b", "candidate-b", "revision-b", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("account-c", frozenDispatchCandidate("account-c", "candidate-c", "revision-c", codex.SourceSystem, false, now.Add(time.Hour))),
+		}}},
+		Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+			JournalGeneration:       1,
+			AffinityPresent:         true,
+			AffinityAccountKey:      "account-c",
+			AffinityEffectiveModel:  "gpt-5.6-sol",
+			AffinityCacheAdmittedAt: now.Add(-time.Minute),
+		}},
+		Runtime:           runtime,
+		DefaultAccountKey: "account-a",
+		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now:               func() time.Time { return now },
+	}
+	key := []byte("01234567890123456789012345678901")
+	factory.SessionPolicy = NewSessionPolicyResolver(key, routingPolicyV2ForTest(RoutingPolicyV1{
+		SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV1{{Name: "pool-b", Members: []codex.AccountKey{"account-b"}}},
+		SessionBindings: []SessionBindingV1{{SessionDigest: keyedSessionDigest(key, []byte("session")), Pool: "pool-b"}},
+	}))
+	factory.DispatchPermits = &sessionPolicyPermitRecorder{}
+	caller := RuntimeCallerAuthorityV1{
+		Domain: NormalCallerCodex, SubjectID: "account-a", ConsumptionDigest: strings.Repeat("a", 64),
+	}
+	ctx := withRuntimeCallerAuthority(context.Background(), caller)
+	ctx = withRuntimeCallerIdentity(ctx, "account-a\x00candidate-a\x00revision-a")
+
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	accounts := prepared.Dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
+		t.Fatalf("dispatch = %#v, want account-b", accounts)
+	}
+	if runtime.calls != 1 || runtime.plan.RequiresAccountContinuity {
+		t.Fatalf("portable pool dispatch = calls %d required %t", runtime.calls, runtime.plan.RequiresAccountContinuity)
+	}
+}
+
 func TestCodexNativeHTTPExhaustedSessionPoolReturns429(t *testing.T) {
 	t.Parallel()
 
