@@ -95,6 +95,61 @@ func TestCodexRoutingCapacityRefresherPublishesUsageAndHonoursInterval(t *testin
 	}
 }
 
+func TestCodexRoutingCapacityRefresherLiftsHardFenceAfterReset(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(7 * 24 * time.Hour)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, 5*time.Minute)
+	stream := ledger.NewObservationStream()
+	if !ledger.Observe(stream.Stamp(CapacityFact{
+		AccountKey: "reset", Bucket: CapacityBucketBase, RemainingPct: 0,
+		Source: CapacitySourceHardLimit, ResetAt: resetAt, Confidence: CapacityConfidenceAuthoritative,
+	})) {
+		t.Fatal("hard limit was not observed")
+	}
+
+	now = now.Add(time.Second)
+	exact := 100.0
+	reader := &codexRoutingUsageReaderStub{
+		results: map[codex.AccountKey]codex.UsageObservation{
+			"reset": {Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+				quota.Window7Day: {RemainingPct: 100, RemainingPctExact: &exact, ResetAtUnix: resetAt.Unix()},
+			}}},
+		},
+		errors: make(map[codex.AccountKey]error), panics: make(map[codex.AccountKey]bool), calls: make(map[codex.AccountKey]int),
+	}
+	refresher := &CodexRoutingCapacityRefresher{Usage: reader, Capacity: ledger, Now: func() time.Time { return now }}
+	if !refresher.Refresh(context.Background(), []codex.AccountKey{"reset"}) {
+		t.Fatal("reset usage was not published")
+	}
+	if view := ledger.Capacity("reset", CapacityBucketBase); view.State != CapacityPositive || view.RemainingPct != 100 || view.Source != CapacitySourceLiveUsage {
+		t.Fatalf("capacity after reset = %+v, want authoritative positive 100%%", view)
+	}
+}
+
+func TestCodexLiveUsageStartedBeforeHardLimitDoesNotLiftFence(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(7 * 24 * time.Hour)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, 5*time.Minute)
+	usageStream := ledger.NewObservationStream()
+	hardStream := ledger.NewObservationStream()
+	if !ledger.Observe(hardStream.Stamp(CapacityFact{
+		AccountKey: "account", Bucket: CapacityBucketBase, RemainingPct: 0,
+		Source: CapacitySourceHardLimit, ResetAt: resetAt, Confidence: CapacityConfidenceAuthoritative,
+	})) {
+		t.Fatal("hard limit was not observed")
+	}
+	exact := 100.0
+	ledger.ObserveLivePositiveQuotaSnapshot(usageStream, "account", QuotaSnapshot{
+		FetchedAt: now,
+		Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 100, RemainingPctExact: &exact, ResetAtUnix: resetAt.Unix()},
+		}},
+	})
+	if view := ledger.Capacity("account", CapacityBucketBase); view.State != CapacityZero || view.Source != CapacitySourceHardLimit {
+		t.Fatalf("capacity = %+v, want newer hard fence", view)
+	}
+}
+
 func TestCodexRoutingCapacityRefresherContainsFailureAndPanic(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	reader := &codexRoutingUsageReaderStub{
