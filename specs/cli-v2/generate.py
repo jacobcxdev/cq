@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import sys
 import textwrap
 
@@ -115,6 +116,312 @@ def render():
     files['acceptance.md']='\n'.join(acceptance).rstrip()+'\n'
     return files
 
+def go_quote(value):
+    return json.dumps(value, ensure_ascii=False)
+
+def go_string_slice(values):
+    values = values or []
+    return '[]string{' + ', '.join(go_quote(str(value).lower() if isinstance(value, bool) else str(value)) for value in values) + '}'
+
+def parameter_go(p):
+    default = p['default']
+    if default is None:
+        defaults = 'nil'
+    elif isinstance(default, list):
+        defaults = go_string_slice(default)
+    else:
+        defaults = go_string_slice([default])
+    return '\n'.join([
+        '\t\t\t{',
+        '\t\t\t\tName: ' + go_quote(p['name']) + ',',
+        '\t\t\t\tType: ' + go_quote(p['type']) + ',',
+        '\t\t\t\tShort: ' + go_quote(p.get('short') or '') + ',',
+        '\t\t\t\tChoices: ' + go_string_slice(p.get('choices')) + ',',
+        '\t\t\t\tDefault: ' + defaults + ',',
+        '\t\t\t\tRequired: ' + str(p['required']).lower() + ',',
+        '\t\t\t\tRepeatable: ' + str(p['repeatable']).lower() + ',',
+        '\t\t\t},',
+    ])
+
+def command_go(c):
+    lines = [
+        '\t{',
+        '\t\tPath: ' + go_quote(c['path']) + ',',
+        '\t\tKind: ' + go_quote(c['kind']) + ',',
+        '\t\tOptions: []ParameterSpec{',
+    ]
+    lines.extend(parameter_go(p) for p in c['options'])
+    lines += ['\t\t},', '\t\tPositionals: []ParameterSpec{']
+    lines.extend(parameter_go(p) for p in c['positionals'])
+    lines += ['\t\t},', '\t},']
+    return '\n'.join(lines)
+
+def shell_lines(values):
+    return ' '.join(shlex.quote(value) for value in values)
+
+def children_by_path():
+    paths = [''] + [c['path'] for c in COMMANDS]
+    children = {}
+    for path in paths:
+        prefix = path.split()
+        children[path] = sorted({
+            c['path'].split()[len(prefix)]
+            for c in COMMANDS
+            if c['path'].split()[:len(prefix)] == prefix and len(c['path'].split()) == len(prefix) + 1
+        })
+    return children
+
+def shell_case_function(name, rows):
+    lines = [name + '() {', '  case "$1" in']
+    for key, values in rows:
+        lines += ['    ' + shlex.quote(key) + ') printf \'%s\\n\' ' + shell_lines(values) + ' ;;']
+    lines += ['  esac', '}']
+    return '\n'.join(lines)
+
+def shell_metadata():
+    children = children_by_path()
+    kinds = [('', ['group'])] + [(c['path'], [c['kind']]) for c in COMMANDS]
+    child_rows = [(path, words) for path, words in children.items() if words]
+    option_rows = []
+    enum_rows = []
+    takes_rows = []
+    repeatable_rows = []
+    canonical_rows = []
+    path_rows = []
+    for p in GLOBALS:
+        long = '--' + p['name']
+        for spelling in [long] + (['-' + p['short']] if p.get('short') else []):
+            canonical_rows.append(('|' + spelling, [long]))
+    for c in COMMANDS:
+        all_options = c['options'] + GLOBALS
+        spellings = []
+        for p in all_options:
+            long = '--' + p['name']
+            spellings.append(long)
+            if p.get('short'):
+                spellings.append('-' + p['short'])
+            for spelling in [long] + (['-' + p['short']] if p.get('short') else []):
+                canonical_rows.append((c['path'] + '|' + spelling, [long]))
+                if p['type'] != 'boolean':
+                    takes_rows.append((c['path'] + '|' + spelling, ['1']))
+                if p['repeatable']:
+                    repeatable_rows.append((c['path'] + '|' + spelling, ['1']))
+                if p.get('choices'):
+                    enum_rows.append((c['path'] + '|option|' + spelling, p['choices']))
+                if p['type'] == 'path':
+                    path_rows.append((c['path'] + '|option|' + spelling, ['1']))
+        option_rows.append((c['path'], spellings))
+        for index, p in enumerate(c['positionals']):
+            if p.get('choices'):
+                enum_rows.append((c['path'] + '|positional|' + str(index), p['choices']))
+                if p['repeatable']:
+                    enum_rows.append((c['path'] + '|positional|repeatable', p['choices']))
+            if p['type'] == 'path':
+                path_rows.append((c['path'] + '|positional|' + str(index), ['1']))
+                if p['repeatable']:
+                    path_rows.append((c['path'] + '|positional|repeatable', ['1']))
+    root_options = []
+    for p in GLOBALS:
+        root_options.append('--' + p['name'])
+        if p.get('short'):
+            root_options.append('-' + p['short'])
+    option_rows.insert(0, ('', root_options))
+    return kinds, child_rows, option_rows, enum_rows, takes_rows, repeatable_rows, canonical_rows, path_rows
+
+def bash_completion():
+    kinds, children, options, enums, takes, repeatable, canonical, paths = shell_metadata()
+    helpers = [
+        shell_case_function('_cq_kind', kinds),
+        shell_case_function('_cq_children', children),
+        shell_case_function('_cq_options', options),
+        shell_case_function('_cq_choices', enums),
+        shell_case_function('_cq_takes_value', takes),
+        shell_case_function('_cq_repeatable', repeatable),
+        shell_case_function('_cq_canonical_option', canonical),
+        shell_case_function('_cq_path_value', paths),
+    ]
+    body = r'''_cq_complete() {
+  local cur="${COMP_WORDS[COMP_CWORD]}" path="" word candidate expect="" canonical="" used=$'\n'
+  local after_options=0 positional=0 i
+  for ((i=1; i<COMP_CWORD; i++)); do
+    word="${COMP_WORDS[i]}"
+    if [[ -n "$expect" ]]; then expect=""; continue; fi
+    if [[ "$word" == -- && "$after_options" -eq 0 ]]; then after_options=1; continue; fi
+    if [[ "$(_cq_kind "$path")" != command ]]; then
+      candidate="${path:+$path }$word"
+      if [[ -n "$(_cq_kind "$candidate")" ]]; then path="$candidate"; continue; fi
+    fi
+    if [[ "$after_options" -eq 0 && "$word" == -* ]]; then
+      canonical="$(_cq_canonical_option "$path|${word%%=*}")"
+      [[ -n "$canonical" ]] && used+="$canonical"$'\n'
+      if [[ "$word" != *=* && "$(_cq_takes_value "$path|${word%%=*}")" == 1 ]]; then expect="${word%%=*}"; fi
+      continue
+    fi
+    ((positional++))
+  done
+  local candidates="" mode="words"
+  if [[ -n "$expect" ]]; then
+    candidates="$(_cq_choices "$path|option|$expect")"
+    [[ "$(_cq_path_value "$path|option|$expect")" == 1 ]] && mode="files"
+  elif [[ "$(_cq_kind "$path")" != command ]]; then
+    candidates="$(_cq_children "$path")"
+  else
+    candidates="$(_cq_choices "$path|positional|$positional")"
+    [[ "$(_cq_path_value "$path|positional|$positional")" == 1 ]] && mode="files"
+    if [[ -z "$candidates" ]]; then candidates="$(_cq_choices "$path|positional|repeatable")"; fi
+    if [[ "$(_cq_path_value "$path|positional|repeatable")" == 1 ]]; then mode="files"; fi
+  fi
+  if [[ "$after_options" -eq 0 && -z "$expect" ]]; then
+    while IFS= read -r candidate; do
+      [[ -z "$candidate" ]] && continue
+      canonical="$(_cq_canonical_option "$path|$candidate")"
+      if [[ "$(_cq_repeatable "$path|$candidate")" == 1 || "$used" != *$'\n'"$canonical"$'\n'* ]]; then
+        candidates+="${candidates:+$'\n'}$candidate"
+      fi
+    done <<< "$(_cq_options "$path")"
+  fi
+  if [[ "$mode" == files ]]; then
+    COMPREPLY=( $(compgen -f -- "$cur") )
+  else
+    COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+  fi
+}
+complete -F _cq_complete cq
+'''
+    return '# bash completion for cq; generated from specs/cli-v2/commands.json\n' + '\n\n'.join(helpers) + '\n\n' + body
+
+def zsh_completion():
+    kinds, children, options, enums, takes, repeatable, canonical, paths = shell_metadata()
+    helpers = [
+        shell_case_function('_cq_kind', kinds),
+        shell_case_function('_cq_children', children),
+        shell_case_function('_cq_options', options),
+        shell_case_function('_cq_choices', enums),
+        shell_case_function('_cq_takes_value', takes),
+        shell_case_function('_cq_repeatable', repeatable),
+        shell_case_function('_cq_canonical_option', canonical),
+        shell_case_function('_cq_path_value', paths),
+    ]
+    body = r'''_cq() {
+  local cur="${words[CURRENT]}" path="" word candidate expect="" canonical="" used=$'\n'
+  local after_options=0 positional=0 i candidates mode="words"
+  for ((i=2; i<CURRENT; i++)); do
+    word="${words[i]}"
+    if [[ -n "$expect" ]]; then expect=""; continue; fi
+    if [[ "$word" == -- && "$after_options" -eq 0 ]]; then after_options=1; continue; fi
+    if [[ "$(_cq_kind "$path")" != command ]]; then
+      candidate="${path:+$path }$word"
+      if [[ -n "$(_cq_kind "$candidate")" ]]; then path="$candidate"; continue; fi
+    fi
+    if [[ "$after_options" -eq 0 && "$word" == -* ]]; then
+      canonical="$(_cq_canonical_option "$path|${word%%=*}")"
+      [[ -n "$canonical" ]] && used+="$canonical"$'\n'
+      if [[ "$word" != *=* && "$(_cq_takes_value "$path|${word%%=*}")" == 1 ]]; then expect="${word%%=*}"; fi
+      continue
+    fi
+    ((positional++))
+  done
+  if [[ -n "$expect" ]]; then
+    candidates="$(_cq_choices "$path|option|$expect")"
+    [[ "$(_cq_path_value "$path|option|$expect")" == 1 ]] && mode="files"
+  elif [[ "$(_cq_kind "$path")" != command ]]; then
+    candidates="$(_cq_children "$path")"
+  else
+    candidates="$(_cq_choices "$path|positional|$positional")"
+    [[ "$(_cq_path_value "$path|positional|$positional")" == 1 ]] && mode="files"
+    if [[ -z "$candidates" ]]; then candidates="$(_cq_choices "$path|positional|repeatable")"; fi
+    if [[ "$(_cq_path_value "$path|positional|repeatable")" == 1 ]]; then mode="files"; fi
+  fi
+  if [[ "$after_options" -eq 0 && -z "$expect" ]]; then
+    for candidate in "${(@f)$(_cq_options "$path")}"; do
+      canonical="$(_cq_canonical_option "$path|$candidate")"
+      if [[ "$(_cq_repeatable "$path|$candidate")" == 1 || "$used" != *$'\n'"$canonical"$'\n'* ]]; then
+        candidates+="${candidates:+$'\n'}$candidate"
+      fi
+    done
+  fi
+  if [[ "$mode" == files ]]; then
+    _files
+  else
+    compadd -Q -- "${(@f)candidates}"
+  fi
+}
+compdef _cq cq
+'''
+    return '#compdef cq\n# zsh completion for cq; generated from specs/cli-v2/commands.json\n' + '\n\n'.join(helpers) + '\n\n' + body
+
+def fish_completion():
+    children = children_by_path()
+    lines = [
+        '# fish completion for cq; generated from specs/cli-v2/commands.json',
+        'complete -c cq -e',
+        'function __cq_path_is',
+        '    set -l tokens (commandline -opc)',
+        '    set -e tokens[1]',
+        '    test (string join " " -- $tokens) = (string join " " -- $argv)',
+        'end',
+        'function __cq_has_path',
+        '    set -l tokens (commandline -opc)',
+        '    set -e tokens[1]',
+        '    test (count $tokens) -ge (count $argv); or return 1',
+        '    for index in (seq (count $argv))',
+        '        test "$tokens[$index]" = "$argv[$index]"; or return 1',
+        '    end',
+        'end',
+        'function __cq_options_open',
+        '    not contains -- -- (commandline -opc)',
+        'end',
+    ]
+    for path, words in children.items():
+        condition = '__cq_path_is' + ((' ' + shell_lines(path.split())) if path else '')
+        for word in words:
+            lines.append('complete -c cq -f -n ' + shlex.quote(condition) + ' -a ' + shlex.quote(word))
+    for c in COMMANDS:
+        condition = '__cq_has_path ' + shell_lines(c['path'].split()) + '; and __cq_options_open'
+        for p in c['options'] + GLOBALS:
+            option_condition = condition
+            if not p['repeatable']:
+                seen = '__fish_seen_argument -l ' + shlex.quote(p['name'])
+                if p.get('short'):
+                    seen += ' -s ' + shlex.quote(p['short'])
+                option_condition += '; and not ' + seen
+            command = ['complete', '-c', 'cq', '-f', '-n', shlex.quote(option_condition), '-l', p['name']]
+            if p.get('short'):
+                command += ['-s', p['short']]
+            if p['type'] != 'boolean':
+                command.append('-r')
+            if p.get('choices'):
+                command += ['-a', shlex.quote(' '.join(p['choices']))]
+            if p['type'] == 'path':
+                command = [part for part in command if part != '-f']
+            lines.append(' '.join(command))
+        for p in c['positionals']:
+            if p.get('choices'):
+                condition = '__cq_has_path ' + shell_lines(c['path'].split())
+                lines.append('complete -c cq -f -n ' + shlex.quote(condition) + ' -a ' + shlex.quote(' '.join(p['choices'])))
+    return '\n'.join(lines) + '\n'
+
+def go_source():
+    completion = {'bash': bash_completion(), 'zsh': zsh_completion(), 'fish': fish_completion()}
+    lines = ['// Code generated by specs/cli-v2/generate.py; DO NOT EDIT.', '', 'package cli', '', 'var globalOptions = []ParameterSpec{']
+    lines.extend(parameter_go(p).replace('\t\t\t', '\t', 1).replace('\t\t\t\t', '\t\t', 1) for p in GLOBALS)
+    lines += ['}', '', 'var catalogue = []CommandSpec{']
+    lines.extend(command_go(c) for c in COMMANDS)
+    lines += ['}', '', 'var helpByPath = map[string]string{']
+    lines.append('\t"": ' + go_quote((BASE / 'help/cq.txt').read_text()) + ',')
+    for c in COMMANDS:
+        help_file = BASE / ('help/' + c['path'].replace(' ', '-') + '.txt')
+        lines.append('\t' + go_quote(c['path']) + ': ' + go_quote(help_file.read_text()) + ',')
+    lines += ['}', '', 'var completionByShell = map[string]string{']
+    for shell in ('bash', 'zsh', 'fish'):
+        lines.append('\t' + go_quote(shell) + ': ' + go_quote(completion[shell]) + ',')
+    lines += ['}', '']
+    raw = '\n'.join(lines).encode()
+    formatted = subprocess.run(['gofmt'], input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if formatted.returncode != 0:
+        raise RuntimeError('gofmt failed: ' + formatted.stderr.decode(errors='replace'))
+    return formatted.stdout.decode()
+
 def validate():
     errors=[]
     required=['id','path','summary','description','terms','positionals','options','preconditions','effects','output','errors','examples','aliases','tests','sources','kind']
@@ -215,6 +522,7 @@ def validate():
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true',help='Validate catalogue and compare generated files without writing.')
+    parser.add_argument('--go-output',type=Path,help='Generate immutable Go catalogue, help and completion literals at this path.')
     args=parser.parse_args()
     errors,examples=validate()
     for relative,content in render().items():
@@ -223,6 +531,15 @@ def main():
             if not dest.exists() or dest.read_text()!=content:errors.append(relative+': generated content differs')
         else:
             dest.parent.mkdir(parents=True,exist_ok=True);dest.write_text(content)
+    if args.go_output:
+        content = go_source()
+        dest = args.go_output
+        if args.check:
+            if not dest.exists() or dest.read_text() != content:
+                errors.append(str(dest) + ': generated Go content differs')
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content)
     if errors:
         print('\n'.join(errors),file=sys.stderr);return 1
     print(f"Validated {len(COMMANDS)} command/group entries, {examples} examples and {len(COMMANDS)+1} exact help pages.")
