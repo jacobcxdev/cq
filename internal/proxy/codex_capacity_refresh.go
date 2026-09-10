@@ -89,13 +89,14 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 	type result struct {
 		account     codex.AccountKey
 		observation codex.UsageObservation
+		stream      *CodexCapacityObservationStream
 		err         error
 		panicked    bool
 	}
 	results := make(chan result, len(eligible))
 	for _, account := range eligible {
 		go func() {
-			outcome := result{account: account}
+			outcome := result{account: account, stream: r.Capacity.NewObservationStream()}
 			defer func() {
 				if recover() != nil {
 					outcome.observation = codex.UsageObservation{}
@@ -125,10 +126,12 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 			retryAt = completedAt.Add(interval)
 		}
 		if valid {
-			r.Capacity.ObserveQuotaSnapshot(outcome.account, QuotaSnapshot{
+			snapshot := QuotaSnapshot{
 				Result:    outcome.observation.Result,
 				FetchedAt: now,
-			})
+			}
+			r.Capacity.ObserveQuotaSnapshot(outcome.account, snapshot)
+			r.Capacity.ObserveLivePositiveQuotaSnapshot(outcome.stream, outcome.account, snapshot)
 			published = true
 		}
 		r.mu.Lock()
