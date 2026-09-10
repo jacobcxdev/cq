@@ -242,6 +242,7 @@ def bash_completion():
     ]
     body = r'''_cq_complete() {
   local cur="${COMP_WORDS[COMP_CWORD]}" path="" word candidate expect="" canonical="" used=$'\n'
+  local inline_option="" inline_prefix=""
   local after_options=0 positional=0 i
   for ((i=1; i<COMP_CWORD; i++)); do
     word="${COMP_WORDS[i]}"
@@ -260,6 +261,14 @@ def bash_completion():
     ((positional++))
   done
   local candidates="" mode="words"
+  if [[ "$after_options" -eq 0 && "$cur" == --*=* ]]; then
+    inline_option="${cur%%=*}"
+    if [[ "$(_cq_takes_value "$path|$inline_option")" == 1 ]]; then
+      inline_prefix="$inline_option="
+      cur="${cur#*=}"
+      expect="$inline_option"
+    fi
+  fi
   if [[ -n "$expect" ]]; then
     candidates="$(_cq_choices "$path|option|$expect")"
     [[ "$(_cq_path_value "$path|option|$expect")" == 1 ]] && mode="files"
@@ -280,10 +289,15 @@ def bash_completion():
       fi
     done <<< "$(_cq_options "$path")"
   fi
+  COMPREPLY=()
   if [[ "$mode" == files ]]; then
-    COMPREPLY=( $(compgen -f -- "$cur") )
+    while IFS= read -r candidate; do
+      COMPREPLY+=("$inline_prefix$candidate")
+    done < <(compgen -f -- "$cur")
   else
-    COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+    while IFS= read -r candidate; do
+      COMPREPLY+=("$inline_prefix$candidate")
+    done < <(compgen -W "$candidates" -- "$cur")
   fi
 }
 complete -F _cq_complete cq
@@ -304,6 +318,7 @@ def zsh_completion():
     ]
     body = r'''_cq() {
   local cur="${words[CURRENT]}" path="" word candidate expect="" canonical="" used=$'\n'
+  local inline_option="" inline_prefix=""
   local after_options=0 positional=0 i candidates mode="words"
   for ((i=2; i<CURRENT; i++)); do
     word="${words[i]}"
@@ -321,6 +336,14 @@ def zsh_completion():
     fi
     ((positional++))
   done
+  if [[ "$after_options" -eq 0 && "$cur" == --*=* ]]; then
+    inline_option="${cur%%=*}"
+    if [[ "$(_cq_takes_value "$path|$inline_option")" == 1 ]]; then
+      inline_prefix="$inline_option="
+      cur="${cur#*=}"
+      expect="$inline_option"
+    fi
+  fi
   if [[ -n "$expect" ]]; then
     candidates="$(_cq_choices "$path|option|$expect")"
     [[ "$(_cq_path_value "$path|option|$expect")" == 1 ]] && mode="files"
@@ -336,14 +359,25 @@ def zsh_completion():
     for candidate in "${(@f)$(_cq_options "$path")}"; do
       canonical="$(_cq_canonical_option "$path|$candidate")"
       if [[ "$(_cq_repeatable "$path|$candidate")" == 1 || "$used" != *$'\n'"$canonical"$'\n'* ]]; then
-        candidates+="${candidates:+$'\n'}$candidate"
+        if [[ -n "$candidates" ]]; then candidates+=$'\n'; fi
+        candidates+="$candidate"
       fi
     done
   fi
   if [[ "$mode" == files ]]; then
-    _files
+    if [[ -n "$inline_prefix" ]]; then
+      local -a path_candidates prefixed_paths
+      path_candidates=("${cur}"*(N))
+      for candidate in "${path_candidates[@]}"; do prefixed_paths+=("$inline_prefix$candidate"); done
+      compadd -Q -f -- "${prefixed_paths[@]}"
+    else
+      _files
+    fi
   else
-    compadd -Q -- "${(@f)candidates}"
+    local -a candidate_array
+    candidate_array=("${(@f)candidates}")
+    if [[ -n "$inline_prefix" ]]; then candidate_array=("${(@)candidate_array/#/$inline_prefix}"); fi
+    compadd -Q -- "${candidate_array[@]}"
   fi
 }
 compdef _cq cq
@@ -355,14 +389,40 @@ def fish_completion():
     lines = [
         '# fish completion for cq; generated from specs/cli-v2/commands.json',
         'complete -c cq -e',
-        'function __cq_path_is',
+        'function __cq_command_words',
         '    set -l tokens (commandline -opc)',
         '    set -e tokens[1]',
-        '    test (string join " " -- $tokens) = (string join " " -- $argv)',
+        '    set -l result',
+        '    set -l options_open 1',
+        '    for token in $tokens',
+        '        if test $options_open -eq 1; and test "$token" = --',
+        '            set options_open 0',
+        '            continue',
+        '        end',
+        '        if test $options_open -eq 1',
+        '            switch $token',
+        "                case -h -j -v --help --json --version '-h=*' '-j=*' '-v=*' '--help=*' '--json=*' '--version=*'",
+        '                    continue',
+        '            end',
+        '        end',
+        '        set -a result $token',
+        '    end',
+        "    printf '%s\\n' $result",
+        'end',
+        'function __cq_path_is',
+        '    set -l tokens (__cq_command_words)',
+        '    set -l actual ""',
+        '    set -l expected ""',
+        '    if test (count $tokens) -gt 0',
+        '        set actual (string join " " -- $tokens)',
+        '    end',
+        '    if test (count $argv) -gt 0',
+        '        set expected (string join " " -- $argv)',
+        '    end',
+        '    test "$actual" = "$expected"',
         'end',
         'function __cq_has_path',
-        '    set -l tokens (commandline -opc)',
-        '    set -e tokens[1]',
+        '    set -l tokens (__cq_command_words)',
         '    test (count $tokens) -ge (count $argv); or return 1',
         '    for index in (seq (count $argv))',
         '        test "$tokens[$index]" = "$argv[$index]"; or return 1',
@@ -372,6 +432,9 @@ def fish_completion():
         '    not contains -- -- (commandline -opc)',
         'end',
     ]
+    for p in GLOBALS:
+        condition = '__cq_path_is; and __cq_options_open; and not __fish_seen_argument -l ' + shlex.quote(p['name']) + ' -s ' + shlex.quote(p['short'])
+        lines.append('complete -c cq -f -n ' + shlex.quote(condition) + ' -l ' + shlex.quote(p['name']) + ' -s ' + shlex.quote(p['short']))
     for path, words in children.items():
         condition = '__cq_path_is' + ((' ' + shell_lines(path.split())) if path else '')
         for word in words:

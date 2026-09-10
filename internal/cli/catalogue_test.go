@@ -192,7 +192,7 @@ func TestCLIV2CompletionSyntax(t *testing.T) {
 		case "zsh":
 			sourceArgs = []string{"-fc", `autoload -Uz compinit; compinit -D; source "$1"`, "cq-completion-test", file}
 		case "fish":
-			sourceArgs = []string{"-c", `source $argv[1]`, file}
+			sourceArgs = []string{"-N", "-c", `source $argv[1]`, file}
 		}
 		command = exec.Command(path, sourceArgs...)
 		if output, err := command.CombinedOutput(); err != nil {
@@ -207,8 +207,12 @@ func TestCLIV2CompletionBehaviour(t *testing.T) {
 		t.Fatalf("bash unavailable; native completion gate required: %v", err)
 	}
 	script, _ := Completion("bash")
-	file := filepath.Join(t.TempDir(), "cq.bash")
+	directory := t.TempDir()
+	file := filepath.Join(directory, "cq.bash")
 	if err := os.WriteFile(file, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "Équipe bleue.json"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	probe := `source "$1"
@@ -216,10 +220,15 @@ COMP_WORDS=(cq check claude c); COMP_CWORD=3; _cq_complete
 printf 'repeatable-enum:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(cq codex proxy pool set --account first --a); COMP_CWORD=7; _cq_complete
 printf 'repeatable-option:%s\n' "${COMPREPLY[*]}"
-COMP_WORDS=(cq codex proxy pool set -- 'Équipe bleue' --); COMP_CWORD=8; _cq_complete
+COMP_WORDS=(cq codex proxy pool set -- 'Équipe bleue' -- ''); COMP_CWORD=8; _cq_complete
 printf 'after-stop:%s\n' "${COMPREPLY[*]}"
+COMP_WORDS=(cq codex proxy fixture create '--content-encoding=zs'); COMP_CWORD=5; _cq_complete
+printf 'inline-enum:<%s>\n' "${COMPREPLY[@]}"
+COMP_WORDS=(cq codex proxy fixture create '--input=Éq'); COMP_CWORD=5; _cq_complete
+printf 'inline-path:<%s>\n' "${COMPREPLY[@]}"
 `
 	command := exec.Command(bash, "-c", probe, "cq-completion-test", file)
+	command.Dir = directory
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash completion probe: %v\n%s", err, output)
@@ -232,7 +241,101 @@ printf 'after-stop:%s\n' "${COMPREPLY[*]}"
 	if !strings.Contains(got, "repeatable-option:--account") {
 		t.Errorf("repeatable option absent:\n%s", got)
 	}
-	if strings.Contains(strings.Split(got, "after-stop:")[1], "--") {
+	afterStop := strings.Split(strings.Split(got, "after-stop:")[1], "\n")[0]
+	if strings.Contains(afterStop, "--") {
 		t.Errorf("option suggested after --:\n%s", got)
+	}
+	if !strings.Contains(got, "inline-enum:<--content-encoding=zstd>") {
+		t.Errorf("inline enum omitted its option prefix:\n%s", got)
+	}
+	if !strings.Contains(got, "inline-path:<--input=Équipe bleue.json>") {
+		t.Errorf("inline path split or omitted its option prefix:\n%s", got)
+	}
+}
+
+func TestCLIV2ZshInlineCompletionBehaviour(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Fatalf("zsh unavailable; native completion gate required: %v", err)
+	}
+	script, _ := Completion("zsh")
+	directory := t.TempDir()
+	file := filepath.Join(directory, "cq.zsh")
+	if err := os.WriteFile(file, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "Équipe bleue.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := `function compdef { : }
+source "$1"
+function compadd { print -rl -- "$@" }
+words=(cq codex proxy fixture create '--content-encoding=zs')
+CURRENT=6
+_cq
+words=(cq codex proxy fixture create '--input=Éq')
+CURRENT=6
+_cq
+`
+	command := exec.Command(zsh, "-fc", probe, "cq-completion-test", file)
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("zsh inline completion probe: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "--content-encoding=zstd") {
+		t.Fatalf("zsh inline enum omitted its option prefix:\n%s", output)
+	}
+	if !strings.Contains(string(output), "--input=Équipe bleue.json") {
+		t.Fatalf("zsh inline path split or omitted its option prefix:\n%s", output)
+	}
+}
+
+func TestCLIV2FishCompletionContext(t *testing.T) {
+	fish, err := exec.LookPath("fish")
+	if err != nil {
+		t.Fatalf("fish unavailable; native completion gate required: %v", err)
+	}
+	script, _ := Completion("fish")
+	file := filepath.Join(t.TempDir(), "cq.fish")
+	if err := os.WriteFile(file, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := `source $argv[1]
+echo root
+complete -C 'cq '
+echo root-option
+complete -C 'cq --j'
+echo root-global
+complete -C 'cq -j co'
+echo interspersed-global
+complete -C 'cq codex --json pr'
+echo nested-global
+complete -C 'cq codex --json=false proxy re'
+`
+	command := exec.Command(fish, "-N", "-c", probe, file)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fish completion probe: %v\n%s", err, output)
+	}
+	got := string(output)
+	sections := []struct {
+		start string
+		end   string
+		want  string
+	}{{"root\n", "root-option\n", "codex\n"}, {"root-option\n", "root-global\n", "--json\n"}, {"root-global\n", "interspersed-global\n", "codex\n"}, {"interspersed-global\n", "nested-global\n", "proxy\n"}, {"nested-global\n", "", "reserve\n"}}
+	for _, section := range sections {
+		part := strings.SplitN(got, section.start, 2)
+		if len(part) != 2 {
+			t.Errorf("fish completion output lacks section %q:\n%s", section.start, got)
+			continue
+		}
+		content := part[1]
+		if section.end != "" {
+			content = strings.SplitN(content, section.end, 2)[0]
+		}
+		if !strings.Contains(content, section.want) {
+			t.Errorf("fish completion section %q lacks %q:\n%s", section.start, section.want, got)
+		}
 	}
 }
