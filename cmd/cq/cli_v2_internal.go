@@ -19,6 +19,11 @@ func isMachineABI(argv []string) bool {
 		return false
 	}
 	if argv[0] == "service" {
+		for _, arg := range argv[2:] {
+			if arg == "--service-executable=" {
+				return false
+			}
+		}
 		switch argv[1] {
 		case "install", "uninstall":
 			// Bare install/uninstall are public v2 commands. Package-only options

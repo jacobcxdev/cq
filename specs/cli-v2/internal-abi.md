@@ -4,7 +4,7 @@ These interfaces preserve the v0.32.5 ABI. They are not subject to the new publi
 
 ## Package lifecycle hooks: `cq service`
 
-Permitted forms:
+Package-hook argument forms, subject to the dispatch rule below:
 
 ```
 cq service install [--owner OWNER] [--service-executable=PATH] [--installer-lock-held]
@@ -13,12 +13,14 @@ cq service snapshot --owner OWNER --snapshot-file=PATH --installer-lock-held
 cq service restore --owner OWNER --snapshot-file=PATH --installer-lock-held
 ```
 
+For install/uninstall, bare `cq service install` and `cq service uninstall` use the canonical v2 public parser, output and exit contracts. A machine-ABI invocation must contain at least one package-only marker: `--owner`, `--service-executable` or `--installer-lock-held`, in its exact permitted form, and the entire invocation must pass the package-hook grammar below. Marker presence alone does not grant machine dispatch or mutation authority. Invalid package options, empty explicit values and combinations with public `--component` or `--timeout` must be rejected without mutation; they must not fall through to a permissive legacy alias. Omitting `--owner` retains the legacy `manual` default only when another valid package-only marker establishes package context and all that marker's owner constraints are satisfied. This default does not make the bare forms machine entrypoints. Snapshot/restore remain hidden machine actions and require their explicit owner, snapshot path and inherited lock marker.
+
 `install`, `uninstall`, `snapshot`, and `restore` are literal action names. `snapshot` saves the operating-system service definitions and enabled/running state before a package transaction. `restore` reinstates and verifies that exact saved state after a failed transaction. These two actions are hidden, not new user backup commands.
 
 | Option | Exact ABI |
 |---|---|
 | `--owner OWNER`, `--owner=OWNER` | Optional on install/uninstall; required on snapshot/restore because they require inherited package locking. Explicit choices are `homebrew`, `winget`, `go`. Omission selects internal owner `manual`; explicit `manual` is rejected. Identifies the package authority allowed to claim or mutate the installation. No repeated owner. |
-| `--service-executable=PATH` | Optional, default empty, install/uninstall only with owner `homebrew`. Equals form only. Clean absolute path, exactly equal to `filepath.Clean(PATH)`. The stable executable and currently running executable must resolve to the same file. Supplies Homebrew's stable link instead of its version-specific executable path. No repeated nonempty value. |
+| `--service-executable=PATH` | Optional; omission defaults to empty. When supplied, the value must be nonempty and is valid on install/uninstall only with owner `homebrew`. Equals form only. Clean absolute path, exactly equal to `filepath.Clean(PATH)`. The stable executable and currently running executable must resolve to the same file. Supplies Homebrew's stable link instead of its version-specific executable path. No repeated nonempty value. |
 | `--snapshot-file=PATH` | Required snapshot/restore only. Equals form only. Clean absolute path. Secure snapshot file; maximum 3 MiB. No repeated nonempty value. |
 | `--installer-lock-held` | Boolean marker, no value form, default false. Requires explicit non-manual package owner and package action. Required snapshot/restore. The caller must supply the already-held installer mutation lock through stdin; CQ validates the inherited descriptor, and rejects a marker without valid lock authority. This does not mean “skip locking”. |
 
