@@ -531,6 +531,11 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 	}
+	if policyDecision.Status == PolicyDecisionSelected && affinityAccountKey != "" &&
+		!containsCodexHTTPRequestAccountKey(policyDecision.Allowed, affinityAccountKey) {
+		affinityAccountKey = ""
+		affinityEffectiveModel = ""
+	}
 	authenticatedBoundContinuation := authenticatedCodexCaller &&
 		snapshot.Classification == CodexRestoredLaneCurrent &&
 		snapshot.BoundAccountKey != "" && snapshot.BoundIdentity.Authoritative && snapshot.BoundRecordGeneration != 0
