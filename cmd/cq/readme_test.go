@@ -98,6 +98,11 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 }
 
 var commandDispatcherCoverageOnly = []commandDispatcherCoverage{
+	{commandDispatcherKey{"cli_v2_internal.go", "dispatchMachineABI", "argv[0]"}, []string{"service"}},
+	{commandDispatcherKey{"cli_v2_internal.go", "dispatchMachineABI", "argv[1]"}, []string{"start"}},
+	{commandDispatcherKey{"cli_v2_internal.go", "isMachineABI", "argv[0]"}, []string{"proxy", "service"}},
+	{commandDispatcherKey{"cli_v2_internal.go", "isMachineABI", "argv[1]"}, []string{"hook", "install", "restore", "snapshot", "start", "uninstall"}},
+	{commandDispatcherKey{"cli_v2_internal.go", "isMachineABI", "argv[2]"}, []string{"codex-stop"}},
 	{commandDispatcherKey{"help.go", "interceptedZeroArgumentUsage", "args[1]"}, []string{"overlay", "prime"}},
 	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[1]"}, []string{"canary", "endpoint", "resets", "validate"}},
 	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[2]"}, []string{"list", "recommend", "use"}},

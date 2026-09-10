@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -306,4 +308,80 @@ func (action *fakeInstallerAction) Install(context.Context) error {
 func (action *fakeInstallerAction) Uninstall(context.Context) error {
 	action.uninstalls++
 	return action.err
+}
+
+// This shared corpus catches accidental adoption of public globals, reordered
+// action restrictions, output envelopes, or a broader package-owner policy.
+func TestCLIV2InternalInstallerCorpus(t *testing.T) {
+	data, err := os.ReadFile("../cq/testdata/cli-v2/internal-abi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name        string   `json:"name"`
+		Executable  string   `json:"executable"`
+		Argv        []string `json:"argv"`
+		AllowWinGet bool     `json:"allow_winget"`
+		Stdout      string   `json:"stdout"`
+		Stderr      string   `json:"stderr"`
+		Exit        int      `json:"exit"`
+		Effects     []string `json:"effects"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	matched := 0
+	for _, c := range cases {
+		if c.Executable != "cq-install" {
+			continue
+		}
+		matched++
+		t.Run(c.Name, func(t *testing.T) {
+			action := &fakeInstallerAction{}
+			var output bytes.Buffer
+			deps := commandDependencies{
+				ResolveVersion: func() (string, error) {
+					if len(c.Effects) == 0 {
+						t.Fatal("rejection/help accessed release version")
+					}
+					return "0.32.5", nil
+				},
+				Build: func(_ context.Context, owner installstate.Owner, version string) (installerAction, error) {
+					if len(c.Effects) == 0 {
+						t.Fatal("rejection/help accessed installer")
+					}
+					wantOwner := installstate.OwnerGo
+					if c.AllowWinGet {
+						wantOwner = installstate.OwnerWinGet
+					}
+					if owner != wantOwner || version != "0.32.5" {
+						t.Fatalf("build owner=%s version=%s", owner, version)
+					}
+					return action, nil
+				},
+				Output: &output, AllowWinGet: c.AllowWinGet,
+			}
+			err := runInstaller(context.Background(), c.Argv, deps)
+			code, stderr := 0, ""
+			if err != nil {
+				code, stderr = 1, "cq-install: "+err.Error()+"\n"
+			}
+			if code != c.Exit || output.String() != c.Stdout || stderr != c.Stderr {
+				t.Fatalf("exit=%d stdout=%q stderr=%q; want %d %q %q", code, output.String(), stderr, c.Exit, c.Stdout, c.Stderr)
+			}
+			effects := []string{}
+			for i := 0; i < action.installs; i++ {
+				effects = append(effects, "install")
+			}
+			for i := 0; i < action.uninstalls; i++ {
+				effects = append(effects, "uninstall")
+			}
+			if !reflect.DeepEqual(effects, c.Effects) {
+				t.Fatalf("effects=%v, want %v", effects, c.Effects)
+			}
+		})
+	}
+	if matched == 0 {
+		t.Fatal("empty installer corpus")
+	}
 }
