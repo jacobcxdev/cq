@@ -637,12 +637,20 @@ func appendExternalCandidate(inventory *Inventory, sourceName string, candidate 
 	if index < 0 {
 		key := generationAccountKey(candidate.Identity, SourceExternal, sourceName+":"+candidate.Ref.RecordID)
 		inventory.Accounts = append(inventory.Accounts, LogicalAccount{
-			Key: key, Identity: candidate.Identity, Unstable: true,
+			Key: key, Identity: candidate.Identity, Unstable: !completeStrongIdentity(candidate.Identity),
 		})
 		index = len(inventory.Accounts) - 1
 	}
 	logical := &inventory.Accounts[index]
 	enrichIdentity(&logical.Identity, account)
+	if logical.Unstable && completeStrongIdentity(candidate.Identity) {
+		logical.Key = generationAccountKey(candidate.Identity, SourceExternal, sourceName+":"+candidate.Ref.RecordID)
+		logical.Unstable = false
+		for i := range logical.Candidates {
+			logical.Candidates[i].Ref.AccountKey = logical.Key
+			logical.Candidates[i].Credential.AccountKey = logical.Key
+		}
+	}
 	candidateID := CandidateID(SourceExternal.String() + ":" + shortHash(sourceName+":"+candidate.Ref.RecordID))
 	ref := CandidateRef{AccountKey: logical.Key, CandidateID: candidateID}
 	externalRef := candidate.Ref
