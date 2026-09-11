@@ -655,7 +655,7 @@ jobs:
             exit 0
           fi
           branch="cq-$version"
-          existing="$(gh pr list --repo microsoft/winget-pkgs --head "jacobcxdev:$branch" --state open --json url --jq '.[0].url // ""')"
+          existing="$(gh pr list --repo microsoft/winget-pkgs --head "$branch" --state open --json headRepositoryOwner,url --jq '[.[] | select(.headRepositoryOwner.login == "jacobcxdev")][0].url // ""')"
           if [[ -n "$existing" ]]; then
             echo "$existing"
             exit 0
