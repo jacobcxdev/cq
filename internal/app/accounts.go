@@ -221,7 +221,7 @@ func RunSwitch(id provider.ID, email string, client httputil.Doer) error {
 			return err
 		}
 		defer control.Close()
-		mgr = &codexprov.Accounts{FS: fsutil.OSFileSystem{}, Admin: control}
+		mgr = &codexprov.Accounts{FS: fsutil.OSFileSystem{}, Admin: control, Inventory: control}
 	}
 	if mgr == nil {
 		return fmt.Errorf("account switching not supported for %s", id)

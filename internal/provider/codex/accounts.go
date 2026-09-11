@@ -167,7 +167,15 @@ func (a *Accounts) Switch(ctx context.Context, identifier string) (provider.Acco
 }
 
 func (a *Accounts) switchThroughCoordinator(ctx context.Context, identifier string) (provider.Account, error) {
-	logical, err := matchingLogicalAccount(DiscoverInventory(a.FS), identifier)
+	inventory := DiscoverInventory(a.FS)
+	if a.Inventory != nil {
+		var err error
+		inventory, err = a.Inventory.List(ctx)
+		if err != nil {
+			return provider.Account{}, err
+		}
+	}
+	logical, err := matchingLogicalAccount(inventory, identifier)
 	if err != nil {
 		return provider.Account{}, err
 	}

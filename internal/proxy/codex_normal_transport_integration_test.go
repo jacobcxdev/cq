@@ -1115,10 +1115,9 @@ func normalTransportGateAccessExpiryFixture(t *testing.T) (codex.Inventory, code
 	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 1 {
 		t.Fatalf("parsed CodexBar inventory = %#v, want one account and candidate", inventory)
 	}
-	// Installed CodexBar accounts have already been associated with a stable
-	// logical account by the account catalogue. Preserve that independent
-	// routing fact while keeping candidate metadata sourced from the parser.
-	inventory.Accounts[0].Unstable = false
+	if inventory.Accounts[0].Unstable {
+		t.Fatal("strong CodexBar identity is unstable")
+	}
 	account := inventory.Accounts[0]
 	candidate := account.Candidates[0]
 	material := codex.CredentialMaterial{

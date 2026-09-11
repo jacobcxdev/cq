@@ -304,6 +304,41 @@ func TestAccountsSwitchThroughCoordinatorActivatesExactManagedCandidate(t *testi
 	}
 }
 
+func TestAccountsSwitchUsesSharedInventory(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	credential := testLoginCredential()
+	credential.Tokens.IDToken = fakeCodexJWT("target@test.com", "acct-1", "user-1", "plus")
+	ref, revision, err := coordinator.SaveLogin(context.Background(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inventory := Inventory{Accounts: []LogicalAccount{{
+		Key:      ref.AccountKey,
+		Identity: AccountIdentity{Email: "target@test.com", AccountID: "acct-1", UserID: "user-1", PlanType: "plus"},
+		Routable: true,
+		Candidates: []CredentialCandidate{{
+			Ref: ref, Revision: revision, Source: SourceManaged, Routable: true,
+		}},
+	}}}
+	mgr := &Accounts{
+		FS:        newFakeFS(),
+		Admin:     coordinator,
+		Inventory: staticCredentialInventory{inventory: inventory},
+	}
+	account, err := mgr.Switch(context.Background(), "target@test.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !account.Active || account.Email != "target@test.com" {
+		t.Fatalf("account = %+v", account)
+	}
+	active, ok := parseAccountFile(fs, "/fake/home/.codex/auth.json")
+	if !ok || active.AccessToken != credential.Tokens.AccessToken {
+		t.Fatal("shared-inventory candidate was not activated")
+	}
+}
+
 func TestAccountsRemoveThroughCoordinatorDeactivatesExactActiveAccount(t *testing.T) {
 	coordinator, fs := testCoordinator(t)
 	credential := testLoginCredential()
