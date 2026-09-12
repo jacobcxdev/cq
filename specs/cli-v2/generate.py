@@ -265,6 +265,8 @@ def bash_completion():
     inline_option="${cur%%=*}"
     if [[ "$(_cq_takes_value "$path|$inline_option")" == 1 ]]; then
       inline_prefix="$inline_option="
+      # Readline retains the option prefix when '=' is a word break.
+      [[ "$COMP_WORDBREAKS" == *=* ]] && inline_prefix=""
       cur="${cur#*=}"
       expect="$inline_option"
     fi
@@ -292,7 +294,8 @@ def bash_completion():
   COMPREPLY=()
   if [[ "$mode" == files ]]; then
     while IFS= read -r candidate; do
-      COMPREPLY+=("$inline_prefix$candidate")
+      printf -v candidate '%q' "$inline_prefix$candidate"
+      COMPREPLY+=("$candidate")
     done < <(compgen -f -- "$cur")
   else
     while IFS= read -r candidate; do
@@ -369,7 +372,7 @@ def zsh_completion():
       local -a path_candidates prefixed_paths
       path_candidates=("${cur}"*(N))
       for candidate in "${path_candidates[@]}"; do prefixed_paths+=("$inline_prefix$candidate"); done
-      compadd -Q -f -- "${prefixed_paths[@]}"
+      compadd -f -- "${prefixed_paths[@]}"
     else
       _files
     fi

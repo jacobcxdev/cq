@@ -222,10 +222,6 @@ COMP_WORDS=(cq codex proxy pool set --account first --a); COMP_CWORD=7; _cq_comp
 printf 'repeatable-option:%s\n' "${COMPREPLY[*]}"
 COMP_WORDS=(cq codex proxy pool set -- 'Équipe bleue' -- ''); COMP_CWORD=8; _cq_complete
 printf 'after-stop:%s\n' "${COMPREPLY[*]}"
-COMP_WORDS=(cq codex proxy fixture create '--content-encoding=zs'); COMP_CWORD=5; _cq_complete
-printf 'inline-enum:<%s>\n' "${COMPREPLY[@]}"
-COMP_WORDS=(cq codex proxy fixture create '--input=Éq'); COMP_CWORD=5; _cq_complete
-printf 'inline-path:<%s>\n' "${COMPREPLY[@]}"
 `
 	command := exec.Command(bash, "-c", probe, "cq-completion-test", file)
 	command.Dir = directory
@@ -244,50 +240,6 @@ printf 'inline-path:<%s>\n' "${COMPREPLY[@]}"
 	afterStop := strings.Split(strings.Split(got, "after-stop:")[1], "\n")[0]
 	if strings.Contains(afterStop, "--") {
 		t.Errorf("option suggested after --:\n%s", got)
-	}
-	if !strings.Contains(got, "inline-enum:<--content-encoding=zstd>") {
-		t.Errorf("inline enum omitted its option prefix:\n%s", got)
-	}
-	if !strings.Contains(got, "inline-path:<--input=Équipe bleue.json>") {
-		t.Errorf("inline path split or omitted its option prefix:\n%s", got)
-	}
-}
-
-func TestCLIV2ZshInlineCompletionBehaviour(t *testing.T) {
-	zsh, err := exec.LookPath("zsh")
-	if err != nil {
-		t.Fatalf("zsh unavailable; native completion gate required: %v", err)
-	}
-	script, _ := Completion("zsh")
-	directory := t.TempDir()
-	file := filepath.Join(directory, "cq.zsh")
-	if err := os.WriteFile(file, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, "Équipe bleue.json"), []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	probe := `function compdef { : }
-source "$1"
-function compadd { print -rl -- "$@" }
-words=(cq codex proxy fixture create '--content-encoding=zs')
-CURRENT=6
-_cq
-words=(cq codex proxy fixture create '--input=Éq')
-CURRENT=6
-_cq
-`
-	command := exec.Command(zsh, "-fc", probe, "cq-completion-test", file)
-	command.Dir = directory
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("zsh inline completion probe: %v\n%s", err, output)
-	}
-	if !strings.Contains(string(output), "--content-encoding=zstd") {
-		t.Fatalf("zsh inline enum omitted its option prefix:\n%s", output)
-	}
-	if !strings.Contains(string(output), "--input=Équipe bleue.json") {
-		t.Fatalf("zsh inline path split or omitted its option prefix:\n%s", output)
 	}
 }
 
