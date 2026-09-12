@@ -197,8 +197,14 @@ func (s *CodexPrimerStore) ClaimDormant(account codex.AccountKey, target CodexPr
 			continue
 		}
 		switch record.State {
-		case PrimerStateClaimed, PrimerStateAdmitted, PrimerStateAmbiguous, PrimerStateVerifying, PrimerStateVerified:
+		case PrimerStateClaimed, PrimerStateAdmitted, PrimerStateAmbiguous, PrimerStateVerifying:
 			return false, nil
+		case PrimerStateVerified:
+			// A confirmed sliding window can follow an early quota reset. The
+			// verified previous epoch must not suppress priming that new window.
+			if !target.ResetAt.After(record.ResetAt) {
+				return false, nil
+			}
 		case PrimerStateRejected:
 			priorAttempts = max(priorAttempts, record.Attempts)
 		}
