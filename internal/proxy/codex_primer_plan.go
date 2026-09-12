@@ -54,6 +54,11 @@ func planCodexPrimerTargetsWithPolicy(descriptors []codex.WindowDescriptor, over
 	}
 	byEpoch := make(map[int64][]codex.WindowDescriptor)
 	for _, descriptor := range descriptors {
+		// Reserve is a separate, hidden model activated by the backend's
+		// luna_reserve banner after ordinary quota exhaustion, not proactively.
+		if descriptor.ScopeKind == codex.WindowScopeModelFamily && descriptor.Scope == "gpt-reserve" {
+			continue
+		}
 		if descriptor.ResetAt.IsZero() {
 			continue
 		}
