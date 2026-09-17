@@ -163,6 +163,7 @@ func knownCodexWSEventType(value string) bool {
 		"codex.rate_limits",
 		"codex.response.metadata",
 		"keepalive",
+		"response.compaction.compacting",
 		"response.completed",
 		"response.content_part.added",
 		"response.content_part.done",

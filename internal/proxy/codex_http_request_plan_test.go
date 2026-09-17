@@ -2823,7 +2823,7 @@ func TestCodexHTTPRequestPlanFactoryProbesQuotaExhaustedBoundAccount(t *testing.
 				t.Fatal(err)
 			}
 			defer prepared.Frozen.Release()
-			if prepared.portableQuotaRetry != (!test.previous && !test.turnState) {
+			if prepared.portableQuotaRetry != !test.previous {
 				t.Fatalf("portable quota retry = %t", prepared.portableQuotaRetry)
 			}
 			if len(permits.requests) != 1 || !slices.Equal(permits.requests[0].AllowedAccounts, []codex.AccountKey{"account-a"}) {

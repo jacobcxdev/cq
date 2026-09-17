@@ -258,6 +258,9 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 
 		if remainingQuotaRetries < 0 {
 			remainingQuotaRetries = len(prepared.Dispatch.AccountUnavailableResetCandidates())
+			if prepared.Dispatch.quotaRecoveryRetry {
+				remainingQuotaRetries++
+			}
 		}
 		model := ""
 		if accounts := prepared.Dispatch.Accounts(); len(accounts) > 0 {
@@ -266,7 +269,7 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 		emitCodexTrace(request.Context(), CodexTraceEvent{
 			Phase: "planning", Outcome: "success", Candidates: codexTraceDispatchCandidates(prepared.Dispatch),
 		})
-		canReplanQuota := prepared.portableQuotaRetry && prepared.Lifecycle != nil && prepared.Lifecycle.EverAdmitted()
+		canReplanQuota := prepared.portableQuotaRetry && prepared.Lifecycle != nil && (prepared.Lifecycle.EverAdmitted() || prepared.Dispatch.quotaRecoveryRetry)
 		template := handler.requestTemplate(request, compact)
 		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "session", Outcome: "started"})
 		result, err := handler.session.Do(
@@ -308,11 +311,18 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 			UpstreamStatus: result.Response.StatusCode, AccountHint: codexTraceAccountHint(result.Choice.AccountKey), Attempt: result.Attempt.Ordinal,
 		})
 
+		// A local reserve decision must not discard account-bound turn state.
+		if result.reserveProtected && request.Header.Get("X-Codex-Turn-State") != "" {
+			canReplanQuota = false
+		}
+
 		// The session has durably rejected this account before any response bytes
 		// reached the client. A full create can now acquire a replacement binding.
 		if result.quotaExhausted && canReplanQuota && claim == nil && remainingQuotaRetries > 0 && request.Context().Err() == nil {
 			closeCodexHTTPResponseBody(result.Response.Body)
 			remainingQuotaRetries--
+			request = request.Clone(request.Context())
+			request.Header.Del("X-Codex-Turn-State")
 			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "failover", Outcome: "replan", Reason: "capacity_exhausted", Retry: true, Failover: true})
 			continue
 		}

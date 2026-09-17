@@ -783,9 +783,10 @@ accountsLoop:
 				}
 				return result, errors.Join(plan.TerminalError(), finishErr)
 			}
+			canRecordUnavailable := codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) || (hardRejected && plan.quotaRecoveryRetry)
 			var next CodexHTTPRequestLifecycle
 			var finishErr error
-			if (authRejected || hardRejected) && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
+			if (authRejected || hardRejected) && canRecordUnavailable {
 				next, finishErr = codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
 			} else {
 				next, finishErr = result.Lifecycle.FinishRejected()
@@ -796,7 +797,7 @@ accountsLoop:
 				return result, finishErr
 			}
 			result.Lifecycle = next
-			result.quotaExhausted = hardRejected && codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle)
+			result.quotaExhausted = hardRejected && canRecordUnavailable
 			return result, nil
 		}
 	}
