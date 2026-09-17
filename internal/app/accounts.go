@@ -20,6 +20,7 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 var (
@@ -353,10 +354,12 @@ func PrintCodexAccounts(accounts []provider.Account) {
 	}
 }
 
+var resolveActiveCredentialHome = userdirs.UserHomeDir
+
 // GetActiveCredentials reads the active Claude access token and email from the
 // credentials file. Returns empty strings on any error.
 func GetActiveCredentials() (token, email string) {
-	home, err := os.UserHomeDir()
+	home, err := resolveActiveCredentialHome()
 	if err != nil {
 		return "", ""
 	}

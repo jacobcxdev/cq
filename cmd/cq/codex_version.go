@@ -2,15 +2,14 @@ package main
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // fallbackCodexClientVersion is the pinned value used when no other source
@@ -75,13 +74,10 @@ func (r codexVersionResolver) Resolve() string {
 func defaultCodexClientVersion() string {
 	fsys := fsutil.OSFileSystem{}
 	cachePath := ""
-	if home, err := fsys.UserHomeDir(); err == nil {
-		codexHome := os.Getenv("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(home, ".codex")
-		}
-		cachePath = filepath.Join(codexHome, "models_cache.json")
+	if paths, err := userdirs.DefaultClientPaths("codex"); err == nil {
+		cachePath = paths.CodexVersion
 	}
+
 	return codexVersionResolver{
 		FS:                fsys,
 		CachePath:         cachePath,
@@ -104,15 +100,11 @@ func defaultCodexRoutingClientBuild() string {
 
 func cachedCodexClientVersion() string {
 	fsys := fsutil.OSFileSystem{}
-	home, err := fsys.UserHomeDir()
+	paths, err := userdirs.DefaultClientPaths("codex")
 	if err != nil {
 		return ""
 	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
-	return modelregistry.DiscoverCodexClientVersion(fsys, filepath.Join(codexHome, "models_cache.json"))
+	return modelregistry.DiscoverCodexClientVersion(fsys, paths.CodexVersion)
 }
 
 // probeCodexBinaryVersion runs `codex --version` with a short timeout and

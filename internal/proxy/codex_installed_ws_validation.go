@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
@@ -27,7 +28,7 @@ type codexInstalledWebSocketValidationDependencies struct {
 // or restarts configured proxy service.
 func RunCodexInstalledWebSocketValidation(ctx context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
 	if strings.TrimSpace(markerDir) == "" {
-		paths, err := ResolveDefaultPaths()
+		paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 		if err != nil {
 			return CodexReadinessMarker{}, err
 		}

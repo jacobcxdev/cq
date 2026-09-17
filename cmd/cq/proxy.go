@@ -1438,7 +1438,7 @@ func loadProxyStatusPort(opts proxyCommandOptions) (int, error) {
 	if opts.Port != 0 {
 		return opts.Port, nil
 	}
-	paths, err := proxy.ResolveDefaultPaths()
+	paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot)
 	if err != nil {
 		return 0, err
 	}

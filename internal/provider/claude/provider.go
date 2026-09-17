@@ -15,6 +15,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // Provider implements provider.Provider for Claude.
@@ -84,10 +85,12 @@ func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, erro
 	return out, nil
 }
 
+var resolveActiveCredentialHome = userdirs.UserHomeDir
+
 // activeCredentialEmail reads the active Claude account's email from the
 // credentials file. Returns empty string on any error.
 func activeCredentialEmail() string {
-	home, err := os.UserHomeDir()
+	home, err := resolveActiveCredentialHome()
 	if err != nil {
 		return ""
 	}

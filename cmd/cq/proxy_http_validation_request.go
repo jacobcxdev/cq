@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
@@ -441,7 +442,7 @@ func isLowerHexSHA256(value string) bool {
 }
 
 func defaultInstalledHTTPValidationRequestStore() (installedHTTPValidationRequestStore, error) {
-	paths, err := proxy.ResolveDefaultPaths()
+	paths, err := proxy.ResolveDefaultPaths(userdirs.RuntimeRoot)
 	if err != nil {
 		return installedHTTPValidationRequestStore{}, err
 	}

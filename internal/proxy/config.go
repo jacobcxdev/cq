@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -53,18 +54,18 @@ type DefaultPaths struct {
 }
 
 func PathsForRoots(roots userdirs.Roots) DefaultPaths {
-	return DefaultPaths{
-		ConfigFile:      filepath.Join(roots.Config, "proxy.json"),
-		RescueBootstrap: filepath.Join(roots.State, proxyRescueBootstrapName),
-		StateDir:        roots.State,
-		CacheDir:        roots.Cache,
-		RuntimeDir:      roots.Runtime,
-		LogsDir:         roots.Logs,
+	paths := DefaultPaths{StateDir: roots.State, CacheDir: roots.Cache, RuntimeDir: roots.Runtime, LogsDir: roots.Logs}
+	if roots.Config != "" {
+		paths.ConfigFile = filepath.Join(roots.Config, "proxy.json")
 	}
+	if roots.State != "" {
+		paths.RescueBootstrap = filepath.Join(roots.State, proxyRescueBootstrapName)
+	}
+	return paths
 }
 
-func ResolveDefaultPaths() (DefaultPaths, error) {
-	roots, err := userdirs.Default()
+func ResolveDefaultPaths(wanted ...userdirs.Root) (DefaultPaths, error) {
+	roots, err := userdirs.Default(wanted...)
 	if err != nil {
 		return DefaultPaths{}, fmt.Errorf("resolve CQ proxy paths: %w", err)
 	}
@@ -223,12 +224,19 @@ func (c *Config) validate() error {
 	if c.LocalToken == "" {
 		return fmt.Errorf("local_token is required")
 	}
-	if _, err := url.Parse(c.ClaudeUpstream); err != nil {
-		return fmt.Errorf("invalid claude_upstream URL: %w", err)
+	for _, upstream := range []struct{ name, value string }{{"claude_upstream", c.ClaudeUpstream}, {"codex_upstream", c.CodexUpstream}} {
+		u, err := url.Parse(upstream.value)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Opaque != "" {
+			return fmt.Errorf("invalid %s URL: must use HTTP or HTTPS with a host", upstream.name)
+		}
+		if port := u.Port(); port != "" {
+			n, err := strconv.Atoi(port)
+			if err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("invalid %s URL: port must be between 1 and 65535", upstream.name)
+			}
+		}
 	}
-	if _, err := url.Parse(c.CodexUpstream); err != nil {
-		return fmt.Errorf("invalid codex_upstream URL: %w", err)
-	}
+
 	switch c.HeadroomMode {
 	case "", "token", "cache":
 		// valid
@@ -245,13 +253,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
 	}
 	if c.CodexContinuityStateDir != "" {
-		if !fsutil.IsCleanAbsoluteNonRootPath(c.CodexContinuityStateDir) {
-			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.CodexContinuityStateDir) || strings.IndexByte(c.CodexContinuityStateDir, 0) >= 0 {
+			return fmt.Errorf("invalid codex_continuity_state_dir: must be a clean absolute non-root path")
 		}
 	}
 	if c.ProxyResilienceStateDir != "" {
-		if !fsutil.IsCleanAbsoluteNonRootPath(c.ProxyResilienceStateDir) {
-			return fmt.Errorf("invalid proxy_resilience_state_dir %q: must be a clean absolute non-root path", c.ProxyResilienceStateDir)
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.ProxyResilienceStateDir) || strings.IndexByte(c.ProxyResilienceStateDir, 0) >= 0 {
+			return fmt.Errorf("invalid proxy_resilience_state_dir: must be a clean absolute non-root path")
 		}
 	}
 	seenRoutingAccounts := make(map[codex.AccountKey]bool, len(c.CodexRoutingAccountKeys))
@@ -274,7 +282,7 @@ func (c *Config) validate() error {
 
 // LoadConfig reads proxy config from disk, generating defaults on first run.
 func LoadConfig() (*Config, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +295,7 @@ func LoadConfig() (*Config, error) {
 
 // LoadExistingConfig reads proxy config without creating state when absent.
 func LoadExistingConfig() (*Config, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +305,7 @@ func LoadExistingConfig() (*Config, error) {
 // LoadProxyRescueBootstrapConfig reads only authority needed to keep rescue
 // control available when normal proxy configuration cannot be loaded.
 func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +427,7 @@ func SaveConfig(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("proxy config is nil")
 	}
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return err
 	}

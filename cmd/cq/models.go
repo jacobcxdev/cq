@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -23,6 +22,7 @@ import (
 type modelsDeps struct {
 	FS       fsutil.FileSystem
 	HomeDir  string
+	CWD      string
 	Roots    userdirs.Roots
 	Env      func(string) string
 	Stdout   io.Writer
@@ -33,17 +33,17 @@ type modelsDeps struct {
 }
 
 func runModelsCommand(args []string) error {
-	roots, err := userdirs.Default()
+	roots, err := userdirs.Default(userdirs.ConfigRoot)
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	home, err := os.UserHomeDir()
+	cwd, err := userdirs.WorkingDirectory()
 	if err != nil {
-		return fmt.Errorf("resolve home dir: %w", err)
+		return err
 	}
 	deps := modelsDeps{
 		FS:      fsutil.OSFileSystem{},
-		HomeDir: home,
+		CWD:     cwd,
 		Roots:   roots,
 		Env:     os.Getenv,
 		Stdout:  os.Stdout,
@@ -131,11 +131,7 @@ func attemptProxyRegistryRefresh(ctx context.Context, client httputil.Doer, port
 }
 
 func runModelsRefresh(roots userdirs.Roots) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home dir: %w", err)
-	}
-	deps := normaliseModelsDeps(modelsDeps{HomeDir: home, Roots: roots, Env: os.Getenv})
+	deps := normaliseModelsDeps(modelsDeps{Roots: roots, Env: os.Getenv})
 	if err := runRegistryRefresh(registryRefreshStrategy{
 		TryProxy:     defaultTryProxyRegistryRefresh,
 		LocalRefresh: func() error { return defaultLocalRegistryRefresh(roots) },
@@ -310,7 +306,7 @@ func runModelsList(args []string, deps modelsDeps) error {
 	if err != nil {
 		return err
 	}
-	natives, err := loadCachedNativeEntries(deps)
+	natives, err := loadCachedNativeEntries(deps, providerFilter)
 	if err != nil {
 		return err
 	}
@@ -510,36 +506,30 @@ func saveModelsOverlayFile(deps modelsDeps, overlays modelregistry.OverlayFile) 
 	return modelregistry.SaveOverlays(deps.FS, path, overlays)
 }
 
-func codexModelCachePath(deps modelsDeps) string {
-	codexHome := deps.Env("CODEX_HOME")
-	if codexHome == "" && deps.HomeDir != "" {
-		codexHome = filepath.Join(deps.HomeDir, ".codex")
-	}
-	if codexHome == "" {
-		return ""
-	}
-	return filepath.Join(codexHome, "models_cache.json")
+func modelClientPaths(deps modelsDeps, provider string) (userdirs.ClientPaths, error) {
+	return userdirs.ClientPathsWith(provider, deps.CWD, deps.HomeDir, deps.Env, deps.FS.UserHomeDir)
 }
-
-func claudeModelCachePath(deps modelsDeps) string {
-	claudeHome := deps.Env("CLAUDE_CONFIG_DIR")
-	if claudeHome == "" && deps.HomeDir != "" {
-		claudeHome = filepath.Join(deps.HomeDir, ".claude")
-	}
-	if claudeHome == "" {
-		return ""
-	}
-	return filepath.Join(claudeHome, "cache", "model-capabilities.json")
+func codexModelCachePath(deps modelsDeps) (string, error) {
+	paths, err := modelClientPaths(deps, "codex")
+	return paths.CodexModels, err
+}
+func claudeModelCachePath(deps modelsDeps) (string, error) {
+	paths, err := modelClientPaths(deps, "claude")
+	return paths.ClaudeCapabilities, err
 }
 
 // loadCachedNativeEntries reads the Codex models_cache.json and Claude Code
 // model-capabilities.json files published by the registry refresh and returns
 // their entries. Missing cache files are not an error; they just yield no
 // entries for that provider. Malformed caches surface as errors.
-func loadCachedNativeEntries(deps modelsDeps) ([]modelregistry.Entry, error) {
+func loadCachedNativeEntries(deps modelsDeps, providers ...modelregistry.Provider) ([]modelregistry.Entry, error) {
 	var all []modelregistry.Entry
 
-	if path := codexModelCachePath(deps); path != "" {
+	if len(providers) == 0 || providers[0] == "" || providers[0] == modelregistry.ProviderCodex {
+		path, err := codexModelCachePath(deps)
+		if err != nil {
+			return nil, err
+		}
 		codex, err := modelregistry.LoadCodexEntriesFromCache(deps.FS, path)
 		if err != nil {
 			return nil, err
@@ -547,7 +537,11 @@ func loadCachedNativeEntries(deps modelsDeps) ([]modelregistry.Entry, error) {
 		all = append(all, codex...)
 	}
 
-	if path := claudeModelCachePath(deps); path != "" {
+	if len(providers) == 0 || providers[0] == "" || providers[0] == modelregistry.ProviderAnthropic {
+		path, err := claudeModelCachePath(deps)
+		if err != nil {
+			return nil, err
+		}
 		claude, err := modelregistry.LoadClaudeEntriesFromCapabilities(deps.FS, path)
 		if err != nil {
 			return nil, err

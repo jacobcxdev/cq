@@ -11,7 +11,7 @@ import (
 )
 
 func DefaultEpochPath(fs fsutil.FileSystem, getenv func(string) string) (string, error) {
-	roots, err := userdirs.Default()
+	roots, err := userdirs.Default(userdirs.StateRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve Windows compatibility root: %w", err)
 	}

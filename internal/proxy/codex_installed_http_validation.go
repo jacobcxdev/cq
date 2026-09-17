@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func newCodexInstalledHTTPValidationToken() (string, error) {
@@ -45,7 +46,7 @@ func RunCodexInstalledHTTPValidation(
 	clientBuild string,
 	guard CodexInstalledHTTPValidationGuard,
 ) (returnErr error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 	if err != nil {
 		return err
 	}
@@ -83,7 +84,7 @@ func RunCodexInstalledHTTPValidationRuntime(
 	if serve == nil {
 		return codexInstalledHTTPValidationStageError("runtime serve")
 	}
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 	if err != nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func RunCodexInstalledHTTPValidationRuntime(
 // InvalidateDefaultCodexHTTPReadinessMarker removes any marker that could
 // have raced ahead of a failed explicit installed-validation request.
 func InvalidateDefaultCodexHTTPReadinessMarker() error {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 	if err != nil {
 		return err
 	}
@@ -306,8 +307,10 @@ func codexInstalledHTTPValidationStageError(stage string) error {
 	return fmt.Errorf("%w: %s", errCodexInstalledListenerAcceptance, stage)
 }
 
+var resolveProtectedCredentialHome = userdirs.UserHomeDir
+
 func defaultCodexInstalledHTTPProtectedPaths(markerDir string) ([]codexInstalledProtectedPath, error) {
-	home, err := os.UserHomeDir()
+	home, err := resolveProtectedCredentialHome()
 	if err != nil || !filepath.IsAbs(home) || !filepath.IsAbs(markerDir) {
 		return nil, errCodexInstalledListenerAcceptance
 	}

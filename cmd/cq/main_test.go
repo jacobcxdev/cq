@@ -8,7 +8,6 @@ import (
 	"go/token"
 	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
-	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -30,6 +28,11 @@ func TestCacheTTL(t *testing.T) {
 		want  time.Duration
 	}{
 		{"empty string", "", 30 * time.Second},
+		{"plus", "+30", 30 * time.Second},
+		{"plus nondefault", "+31", 31 * time.Second},
+		{"whitespace", " 30", 30 * time.Second},
+		{"suffix", "30s", 30 * time.Second},
+		{"overflow", "9999999999999999999999999", 30 * time.Second},
 		{"valid 60", "60", 60 * time.Second},
 		{"valid 0", "0", 0},
 		{"negative clamped to 0", "-5", 0},
@@ -72,78 +75,6 @@ func TestAccountManager(t *testing.T) {
 	t.Run("Gemini returns nil", func(t *testing.T) {
 		if got := app.AccountManager(provider.Gemini, nil); got != nil {
 			t.Errorf("AccountManager(Gemini) = %v, want nil", got)
-		}
-	})
-}
-
-// --- GetActiveCredentials ---
-
-func TestGetActiveCredentials(t *testing.T) {
-	writeCredentials := func(t *testing.T, dir string, token, email string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		creds := keyring.ClaudeCredentials{
-			ClaudeAiOauth: &keyring.ClaudeOAuth{
-				AccessToken: token,
-				Email:       email,
-			},
-		}
-		data, err := json.MarshalIndent(creds, "", "  ")
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		path := filepath.Join(dir, ".claude", ".credentials.json")
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-
-	t.Run("valid credentials file returns token and email", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		writeCredentials(t, dir, "mytoken123", "user@example.com")
-
-		tok, email := app.GetActiveCredentials()
-		if tok != "mytoken123" {
-			t.Errorf("token = %q, want mytoken123", tok)
-		}
-		if email != "user@example.com" {
-			t.Errorf("email = %q, want user@example.com", email)
-		}
-	})
-
-	t.Run("missing file returns empty strings", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-
-		tok, email := app.GetActiveCredentials()
-		if tok != "" {
-			t.Errorf("token = %q, want empty", tok)
-		}
-		if email != "" {
-			t.Errorf("email = %q, want empty", email)
-		}
-	})
-
-	t.Run("invalid JSON returns empty strings", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		path := filepath.Join(dir, ".claude", ".credentials.json")
-		if err := os.WriteFile(path, []byte("not valid json {{{"), 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-
-		tok, email := app.GetActiveCredentials()
-		if tok != "" {
-			t.Errorf("token = %q, want empty", tok)
-		}
-		if email != "" {
-			t.Errorf("email = %q, want empty", email)
 		}
 	})
 }

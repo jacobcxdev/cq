@@ -10,39 +10,44 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func (resolver Resolver) Resolve() (Roots, error) {
-	if resolver.RoamingAppData == nil || resolver.LocalAppData == nil {
-		return Roots{}, fmt.Errorf("resolve CQ user directories: incomplete resolver")
+func (resolver Resolver) Resolve(wanted ...Root) (Roots, error) {
+	var roots Roots
+	if selected(wanted, ConfigRoot) {
+		if resolver.RoamingAppData == nil {
+			return Roots{}, rootUnavailable()
+		}
+		base, err := resolver.RoamingAppData()
+		if err != nil {
+			return Roots{}, rootUnavailable()
+		}
+		if err := validateWindowsLocalAbsolutePath("Windows roaming data", base); err != nil {
+			return Roots{}, rootUnavailable()
+		}
+		roots.Config = filepath.Join(base, "cq")
 	}
-
-	configBase, err := resolver.RoamingAppData()
-	if err != nil {
-		return Roots{}, fmt.Errorf("resolve Windows roaming data: %w", err)
-	}
-	if err := validateWindowsLocalAbsolutePath("Windows roaming data", configBase); err != nil {
-		return Roots{}, err
-	}
-
-	localBase, err := resolver.LocalAppData()
-	if err != nil {
-		return Roots{}, fmt.Errorf("resolve Windows local data: %w", err)
-	}
-	if err := validateWindowsLocalAbsolutePath("Windows local data", localBase); err != nil {
-		return Roots{}, err
-	}
-
-	config := filepath.Join(configBase, "cq")
-	local := filepath.Join(localBase, "cq")
-	roots := Roots{
-		Config:  config,
-		State:   filepath.Join(local, "state"),
-		Cache:   filepath.Join(local, "cache"),
-		Runtime: filepath.Join(local, "runtime"),
-		Logs:    filepath.Join(local, "logs"),
-	}
-	for _, root := range []string{roots.Config, roots.State, roots.Cache, roots.Runtime, roots.Logs} {
-		if !filepath.IsAbs(root) {
-			return Roots{}, fmt.Errorf("CQ root is not absolute: %q", root)
+	if selected(wanted, StateRoot) || selected(wanted, CacheRoot) || selected(wanted, RuntimeRoot) || selected(wanted, LogsRoot) {
+		if resolver.LocalAppData == nil {
+			return Roots{}, rootUnavailable()
+		}
+		base, err := resolver.LocalAppData()
+		if err != nil {
+			return Roots{}, rootUnavailable()
+		}
+		if err := validateWindowsLocalAbsolutePath("Windows local data", base); err != nil {
+			return Roots{}, rootUnavailable()
+		}
+		base = filepath.Join(base, "cq")
+		if selected(wanted, StateRoot) {
+			roots.State = filepath.Join(base, "state")
+		}
+		if selected(wanted, CacheRoot) {
+			roots.Cache = filepath.Join(base, "cache")
+		}
+		if selected(wanted, RuntimeRoot) {
+			roots.Runtime = filepath.Join(base, "runtime")
+		}
+		if selected(wanted, LogsRoot) {
+			roots.Logs = filepath.Join(base, "logs")
 		}
 	}
 	return roots, nil
@@ -84,13 +89,22 @@ func WindowsAppDataAnchors() (AppDataAnchors, error) {
 	return currentUserAppDataAnchors()
 }
 
-func Default() (Roots, error) {
+func Default(wanted ...Root) (Roots, error) {
 	anchors, err := WindowsAppDataAnchors()
 	if err != nil {
-		return Roots{}, err
+		return Roots{}, rootUnavailable()
 	}
 	return (Resolver{
 		RoamingAppData: func() (string, error) { return anchors.RoamingAppData, nil },
 		LocalAppData:   func() (string, error) { return anchors.LocalAppData, nil },
-	}).Resolve()
+	}).Resolve(wanted...)
+}
+
+// UserHomeDir uses the same authenticated subject as CQ app-data roots.
+func UserHomeDir() (string, error) {
+	anchors, err := WindowsAppDataAnchors()
+	if err != nil {
+		return "", rootUnavailable()
+	}
+	return anchors.UserProfile, nil
 }

@@ -28,7 +28,7 @@ type proxyEndpointMaintenanceDependencies struct {
 
 func defaultProxyEndpointMaintenanceDependencies() proxyEndpointMaintenanceDependencies {
 	return proxyEndpointMaintenanceDependencies{
-		resolveRoots: userdirs.Default, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, stdinIsTTY: isStdinTerminal,
+		resolveRoots: func() (userdirs.Roots, error) { return userdirs.Default() }, stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr, stdinIsTTY: isStdinTerminal,
 	}
 }
 

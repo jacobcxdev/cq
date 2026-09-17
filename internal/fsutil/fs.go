@@ -3,6 +3,8 @@ package fsutil
 import (
 	"io"
 	"os"
+
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // FileSystem abstracts OS file operations for testability.
@@ -255,7 +257,7 @@ func (OSFileSystem) WriteFile(n string, d []byte, p os.FileMode) error { return 
 func (OSFileSystem) Rename(o, n string) error                          { return os.Rename(o, n) }
 func (OSFileSystem) Remove(name string) error                          { return os.Remove(name) }
 func (OSFileSystem) MkdirAll(p string, perm os.FileMode) error         { return os.MkdirAll(p, perm) }
-func (OSFileSystem) UserHomeDir() (string, error)                      { return os.UserHomeDir() }
+func (OSFileSystem) UserHomeDir() (string, error)                      { return userdirs.UserHomeDir() }
 func (OSFileSystem) ReadDir(name string) ([]os.DirEntry, error)        { return os.ReadDir(name) }
 func (OSFileSystem) Chmod(name string, mode os.FileMode) error         { return os.Chmod(name, mode) }
 func (OSFileSystem) SyncFile(name string) error {

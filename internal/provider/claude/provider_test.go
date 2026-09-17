@@ -16,6 +16,9 @@ import (
 
 func setClaudeTestHome(t *testing.T, dir string) {
 	t.Helper()
+	old := resolveActiveCredentialHome
+	t.Cleanup(func() { resolveActiveCredentialHome = old })
+	resolveActiveCredentialHome = func() (string, error) { return dir, nil }
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
 }

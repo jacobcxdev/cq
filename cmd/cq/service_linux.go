@@ -139,14 +139,11 @@ func defaultLinuxSystemdPlatform(stableExecutable ...string) (*systemdServicePla
 }
 
 func linuxSystemdUserDirectory() (string, error) {
-	if base := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(base) {
-		return filepath.Join(base, "systemd", "user"), nil
-	}
-	home, err := os.UserHomeDir()
+	roots, err := userdirs.Default(userdirs.ConfigRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".config", "systemd", "user"), nil
+	return filepath.Join(filepath.Dir(roots.Config), "systemd", "user"), nil
 }
 
 func resolveLinuxExecutable() (string, error) {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"golang.org/x/sys/unix"
 )
 
@@ -41,18 +42,11 @@ func captureCodexInstalledLinuxService(uid int, executable codexInstalledExecuta
 }
 
 func codexInstalledLinuxSystemdUnitPath() (string, error) {
-	configHome := os.Getenv("XDG_CONFIG_HOME")
-	if configHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil || !filepath.IsAbs(home) || filepath.Clean(home) != home {
-			return "", errCodexInstalledProcessAttestation
-		}
-		configHome = filepath.Join(home, ".config")
-	}
-	if !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
+	roots, err := userdirs.Default(userdirs.ConfigRoot)
+	if err != nil {
 		return "", errCodexInstalledProcessAttestation
 	}
-	return filepath.Join(configHome, "systemd", "user", codexInstalledLinuxProxyUnit), nil
+	return filepath.Join(filepath.Dir(roots.Config), "systemd", "user", codexInstalledLinuxProxyUnit), nil
 }
 
 func renderCodexInstalledLinuxProxyUnit(executable string) ([]byte, error) {

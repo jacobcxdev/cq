@@ -143,7 +143,7 @@ func OpenDefaultRecoveringCredentialControlWithLegacyMaintenanceVerifierAndRecov
 }
 
 func newDefaultCredentialCoordinator(fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialCoordinator, string, error) {
-	roots, err := userdirs.Default()
+	roots, err := userdirs.Default(userdirs.StateRoot)
 	if err != nil {
 		return nil, "", err
 	}

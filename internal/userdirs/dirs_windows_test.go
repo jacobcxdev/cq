@@ -3,6 +3,7 @@
 package userdirs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,73 +40,61 @@ func TestResolveWindowsFailsWithoutAbsoluteAppData(t *testing.T) {
 		name   string
 		config func() (string, error)
 		cache  func() (string, error)
-		want   string
 	}{
 		{
 			name:   "config error",
 			config: func() (string, error) { return "", os.ErrPermission },
 			cache:  func() (string, error) { return `C:\Local`, nil },
-			want:   "resolve Windows roaming data",
 		},
 		{
 			name:   "relative config",
 			config: func() (string, error) { return `relative`, nil },
 			cache:  func() (string, error) { return `C:\Local`, nil },
-			want:   "Windows roaming data is not a clean absolute local drive path",
 		},
 		{
 			name:   "cache error",
 			config: func() (string, error) { return `C:\Roaming`, nil },
 			cache:  func() (string, error) { return "", os.ErrPermission },
-			want:   "resolve Windows local data",
 		},
 		{
 			name:   "relative cache",
 			config: func() (string, error) { return `C:\Roaming`, nil },
 			cache:  func() (string, error) { return `relative`, nil },
-			want:   "Windows local data is not a clean absolute local drive path",
 		},
 		{
 			name:   "UNC config",
 			config: func() (string, error) { return `\\server\share\Roaming`, nil },
 			cache:  func() (string, error) { return `C:\Local`, nil },
-			want:   "Windows roaming data is not a clean absolute local drive path",
 		},
 		{
 			name:   "UNC cache",
 			config: func() (string, error) { return `C:\Roaming`, nil },
 			cache:  func() (string, error) { return `\\server\share\Local`, nil },
-			want:   "Windows local data is not a clean absolute local drive path",
 		},
 		{
 			name:   "drive-relative config",
 			config: func() (string, error) { return `C:Roaming`, nil },
 			cache:  func() (string, error) { return `C:\Local`, nil },
-			want:   "Windows roaming data is not a clean absolute local drive path",
 		},
 		{
 			name:   "extended config",
 			config: func() (string, error) { return `\\?\C:\Roaming`, nil },
 			cache:  func() (string, error) { return `C:\Local`, nil },
-			want:   "Windows roaming data is not a clean absolute local drive path",
 		},
 		{
 			name:   "device cache",
 			config: func() (string, error) { return `C:\Roaming`, nil },
 			cache:  func() (string, error) { return `\\.\C:\Local`, nil },
-			want:   "Windows local data is not a clean absolute local drive path",
 		},
 		{
 			name:   "alternate-data-stream config",
 			config: func() (string, error) { return `C:\Roaming:stream`, nil },
 			cache:  func() (string, error) { return `C:\Local`, nil },
-			want:   "Windows roaming data is not a clean absolute local drive path",
 		},
 		{
 			name:   "non-clean cache",
 			config: func() (string, error) { return `C:\Roaming`, nil },
 			cache:  func() (string, error) { return `C:\Local\..\Elsewhere`, nil },
-			want:   "Windows local data is not a clean absolute local drive path",
 		},
 	}
 
@@ -115,8 +104,9 @@ func TestResolveWindowsFailsWithoutAbsoluteAppData(t *testing.T) {
 				RoamingAppData: test.config,
 				LocalAppData:   test.cache,
 			}).Resolve()
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want %q", err, test.want)
+			var diagnostic *EnvironmentError
+			if !errors.As(err, &diagnostic) || diagnostic.Code != "environment_root_unavailable" || diagnostic.ExitCode != 4 || diagnostic.Error() != "Cannot resolve the user storage root." {
+				t.Fatalf("error = %v", err)
 			}
 		})
 	}
@@ -175,5 +165,27 @@ func TestDefaultIgnoresSpoofedApplicationDataEnvironment(t *testing.T) {
 	}
 	if want := filepath.Join(anchors.UserProfile, "cq-native-token-probe"); expanded != want {
 		t.Fatalf("token expansion = %q, want %q", expanded, want)
+	}
+}
+
+func TestWindowsUserDirsSelectedAnchorIsLazy(t *testing.T) {
+	for _, root := range []Root{ConfigRoot, StateRoot, CacheRoot, RuntimeRoot, LogsRoot} {
+		calls := 0
+		r := Resolver{Getenv: func(string) string { t.Fatal("read poisoned shell env"); return "" }, UserHomeDir: func() (string, error) { t.Fatal("read shell home"); return "", nil }, RoamingAppData: func() (string, error) {
+			if root != ConfigRoot {
+				t.Fatal("unused roaming anchor")
+			}
+			calls++
+			return `C:\Subject\Roaming`, nil
+		}, LocalAppData: func() (string, error) {
+			if root == ConfigRoot {
+				t.Fatal("unused local anchor")
+			}
+			calls++
+			return `C:\Subject\Local`, nil
+		}}
+		if _, err := r.Resolve(root); err != nil || calls != 1 {
+			t.Fatalf("error %v calls %d", err, calls)
+		}
 	}
 }

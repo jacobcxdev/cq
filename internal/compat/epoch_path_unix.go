@@ -3,21 +3,20 @@
 package compat
 
 import (
-	"fmt"
 	"path/filepath"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func DefaultEpochPath(fs fsutil.FileSystem, getenv func(string) string) (string, error) {
-	if getenv != nil {
-		if dir := getenv("XDG_CONFIG_HOME"); dir != "" && filepath.IsAbs(dir) {
-			return filepath.Join(dir, "cq", "state", "compatibility_epoch"), nil
-		}
+	resolver := userdirs.Resolver{Getenv: getenv}
+	if fs != nil {
+		resolver.UserHomeDir = fs.UserHomeDir
 	}
-	home, err := fs.UserHomeDir()
+	roots, err := resolver.Resolve(userdirs.StateRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".config", "cq", "state", "compatibility_epoch"), nil
+	return filepath.Join(roots.State, "compatibility_epoch"), nil
 }

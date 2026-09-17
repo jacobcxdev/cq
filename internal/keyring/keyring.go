@@ -8,8 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	gokeyring "github.com/zalando/go-keyring"
 )
+
+// resolveCredentialHome preserves authenticated native ownership; tests inject isolated homes.
+var resolveCredentialHome = userdirs.UserHomeDir
 
 // ServicePrefix is the keyring service prefix for cq-managed accounts.
 const ServicePrefix = "cq-claude-"
@@ -385,7 +389,7 @@ func accountKey(a *ClaudeOAuth) string {
 }
 
 func discoverCredentialsFile(seen map[string]bool) []ClaudeOAuth {
-	home, err := os.UserHomeDir()
+	home, err := resolveCredentialHome()
 	if err != nil {
 		return nil
 	}
@@ -573,7 +577,7 @@ func RemoveActiveClaudeCredentialsByEmail(email string) error {
 // BackfillCredentialsFile updates the active credentials file with profile data
 // (email, UUID, plan, tier) without overwriting the tokens.
 func BackfillCredentialsFile(acct *ClaudeOAuth) {
-	home, err := os.UserHomeDir()
+	home, err := resolveCredentialHome()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cq: backfill creds: home dir: %v\n", err)
 		return
@@ -640,7 +644,7 @@ var (
 func PersistRefreshedToken(acct *ClaudeOAuth) {
 	cqAccount := *acct
 
-	home, err := os.UserHomeDir()
+	home, err := resolveCredentialHome()
 	if err == nil {
 		path := filepath.Join(home, ".claude", ".credentials.json")
 		data, err := os.ReadFile(path)
@@ -730,7 +734,7 @@ func mergeRefreshedAccount(stored, acct *ClaudeOAuth) ClaudeOAuth {
 // ActiveClaudeEmail returns the email of the currently active Claude account
 // from ~/.claude/.credentials.json. Returns "" if unavailable.
 func ActiveClaudeEmail() string {
-	home, err := os.UserHomeDir()
+	home, err := resolveCredentialHome()
 	if err != nil {
 		return ""
 	}
@@ -747,7 +751,7 @@ func ActiveClaudeEmail() string {
 
 // WriteCredentialsFile atomically writes credentials to ~/.claude/.credentials.json.
 func WriteCredentialsFile(creds *ClaudeCredentials) error {
-	home, err := os.UserHomeDir()
+	home, err := resolveCredentialHome()
 	if err != nil {
 		return err
 	}

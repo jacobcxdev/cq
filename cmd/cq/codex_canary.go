@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
@@ -26,7 +27,7 @@ func runCodexCanary(args []string) error {
 	}
 
 	fsys := fsutil.OSFileSystem{}
-	paths, err := proxy.ResolveDefaultPaths()
+	paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return err
 	}

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
@@ -130,7 +131,7 @@ func CodexCanaryPath(stateDir string) string {
 }
 
 func DefaultCodexCanaryPath() (string, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 	if err != nil {
 		return "", err
 	}

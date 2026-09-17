@@ -10,6 +10,9 @@ import (
 
 func setKeyringTestHome(t *testing.T, dir string) {
 	t.Helper()
+	old := resolveCredentialHome
+	t.Cleanup(func() { resolveCredentialHome = old })
+	resolveCredentialHome = func() (string, error) { return dir, nil }
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
 }

@@ -6,7 +6,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
-var resolveCQManifestRoots = userdirs.Default
+var resolveCQManifestRoots = func() (userdirs.Roots, error) { return userdirs.Default(userdirs.CacheRoot) }
 
 func defaultCQManifestPath() (string, error) {
 	roots, err := resolveCQManifestRoots()

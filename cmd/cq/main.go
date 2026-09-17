@@ -442,7 +442,7 @@ func invalidateProviderCache(id provider.ID) {
 }
 
 func runCheck(cli *CLI) error {
-	roots, err := userdirs.Default()
+	roots, err := userdirs.Default(userdirs.CacheRoot)
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}

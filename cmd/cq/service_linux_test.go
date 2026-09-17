@@ -262,3 +262,20 @@ func TestLinuxProxyRuntimeInspectorFailsClosedWithoutConfiguredPort(t *testing.T
 		t.Fatalf("runtime status = %#v", status)
 	}
 }
+
+func TestLinuxServiceUserDirsRejectInvalidAndCleanAbsoluteBases(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "unused-invalid")
+	for _, value := range []string{"relative", " ", "~/config"} {
+		t.Setenv("XDG_CONFIG_HOME", value)
+		if _, err := linuxSystemdUserDirectory(); err == nil {
+			t.Fatal("invalid XDG accepted")
+		}
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir+"/nested/..")
+	got, err := linuxSystemdUserDirectory()
+	if err != nil || got != filepath.Join(dir, "systemd", "user") {
+		t.Fatalf("directory %q error %v", got, err)
+	}
+}

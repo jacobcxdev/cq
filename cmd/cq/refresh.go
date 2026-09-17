@@ -34,7 +34,7 @@ var (
 	storeCQAccountFn          = keyring.StoreCQAccount
 	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
 	isStdinTerminalFn         = isStdinTerminal
-	resolveRefreshRootsFn     = userdirs.Default
+	resolveRefreshRootsFn     = func() (userdirs.Roots, error) { return userdirs.Default() }
 )
 
 func runRefreshCommand(args []string) error {

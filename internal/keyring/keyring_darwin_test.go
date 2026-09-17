@@ -174,6 +174,7 @@ func anonCredBlob(t *testing.T, accessToken, refreshToken string) string {
 // for the anonymous-entry re-adoption gap.
 //
 // Scenario:
+//
 //  1. "Claude Code-credentials" holds two entries in the same service slot:
 //     - slot[0]: an identified entry for user@example.com (has Email set)
 //     - slot[1]: an anonymous entry (no Email, no UUID) whose RefreshToken
@@ -404,6 +405,7 @@ func TestRemovePlatformKeychainLeavesNoSurvivingEntry(t *testing.T) {
 // never reaches slot[1]. The identified entry survives and remains re-adoptable.
 //
 // Scenario:
+//
 //  1. "Claude Code-credentials" holds two blobs in order:
 //     - slot[0]: anonymous blob (no Email, no UUID) whose RefreshToken matches
 //     the target account's refresh token. Claude Code wrote this blob after a
@@ -430,7 +432,7 @@ func TestAnonymousEntryBeforeIdentifiedBlocksRemoval(t *testing.T) {
 	binDir := t.TempDir()
 	stateDir := t.TempDir()
 	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
+	setKeyringTestHome(t, homeDir)
 
 	const (
 		targetEmail  = "user@example.com"

@@ -139,6 +139,7 @@ func firstClaudeAccessTokenFromAccounts(accounts []keyring.ClaudeOAuth) func() (
 type registryPipelineOptions struct {
 	FS                   fsutil.FileSystem
 	HomeDir              string
+	CWD                  string
 	Roots                userdirs.Roots
 	ClaudeUpstream       string
 	CodexUpstream        string
@@ -165,6 +166,7 @@ func cachedRegistryEntries(opts registryPipelineOptions) []modelregistry.Entry {
 	deps := modelsDeps{
 		FS:      opts.FS,
 		HomeDir: opts.HomeDir,
+		CWD:     opts.CWD,
 		Roots:   opts.Roots,
 		Env:     opts.Env,
 		Stderr:  opts.Stderr,
@@ -205,6 +207,31 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		opts.Stderr = io.Discard
 	}
 
+	if opts.CWD == "" {
+		var err error
+		opts.CWD, err = userdirs.WorkingDirectory()
+		if err != nil {
+			return nil, err
+		}
+	}
+	claudePaths, err := userdirs.ResolveClientPaths("claude", opts.CWD, opts.HomeDir, opts.Env)
+	if err != nil {
+		return nil, err
+	}
+	codexPaths, err := userdirs.ResolveClientPaths("codex", opts.CWD, opts.HomeDir, opts.Env)
+	if err != nil {
+		return nil, err
+	}
+	// Seed and publisher share the captured absolute locations.
+	opts.Env = func(name string) string {
+		switch name {
+		case "CODEX_HOME":
+			return filepath.Dir(codexPaths.CodexModels)
+		case "CLAUDE_CONFIG_DIR":
+			return filepath.Dir(filepath.Dir(claudePaths.ClaudeCapabilities))
+		}
+		return ""
+	}
 	seedEntries := cachedRegistryEntries(opts)
 	seedSnap := modelregistry.Snapshot{Entries: seedEntries}
 	catalog := modelregistry.NewCatalog(seedSnap)
@@ -250,15 +277,12 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 			fmt.Fprintf(opts.Stderr, "cq: registry: publish Claude Code options: %v\n", err)
 		}
 		if snapshotHasProvider(snap, modelregistry.ProviderAnthropic) {
-			if err := modelregistry.PublishClaudeCapabilities(opts.FS, filepath.Join(opts.HomeDir, ".claude", "cache", "model-capabilities.json"), snap, now); err != nil {
+			if err := modelregistry.PublishClaudeCapabilities(opts.FS, claudePaths.ClaudeCapabilities, snap, now); err != nil {
 				fmt.Fprintf(opts.Stderr, "cq: registry: publish Claude capabilities: %v\n", err)
 			}
 		}
-		codexHome := opts.Env("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(opts.HomeDir, ".codex")
-		}
-		if err := modelregistry.PublishCodexCache(opts.FS, filepath.Join(codexHome, "models_cache.json"), snap, now, opts.CodexClientVersion); err != nil {
+
+		if err := modelregistry.PublishCodexCache(opts.FS, codexPaths.CodexModels, snap, now, opts.CodexClientVersion); err != nil {
 			fmt.Fprintf(opts.Stderr, "cq: registry: publish Codex cache: %v\n", err)
 		}
 	}

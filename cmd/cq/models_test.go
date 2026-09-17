@@ -44,10 +44,10 @@ func TestModelsDependenciesSeparateCQAndProviderRoots(t *testing.T) {
 	if got := modelregistry.OverlayPath(deps.Roots); got != "/cq/config/models.json" {
 		t.Fatalf("CQ overlay = %q, want /cq/config/models.json", got)
 	}
-	if got := codexModelCachePath(deps); got != "/home/test/.codex/models_cache.json" {
+	if got, _ := codexModelCachePath(deps); got != "/home/test/.codex/models_cache.json" {
 		t.Fatalf("Codex cache = %q, want /home/test/.codex/models_cache.json", got)
 	}
-	if got := claudeModelCachePath(deps); got != "/home/test/.claude/cache/model-capabilities.json" {
+	if got, _ := claudeModelCachePath(deps); got != "/home/test/.claude/cache/model-capabilities.json" {
 		t.Fatalf("Claude cache = %q, want /home/test/.claude/cache/model-capabilities.json", got)
 	}
 }
