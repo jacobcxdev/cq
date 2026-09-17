@@ -179,7 +179,7 @@ func (p *parser) resolve(tokens []argvToken) (string, []argvToken, bool) {
 	path := ""
 	help := false
 	for i, t := range tokens {
-		if t.text == "help" && !t.literal && !help {
+		if t.text == "help" && !help {
 			help = true
 			continue
 		}
@@ -199,7 +199,8 @@ func (p *parser) resolve(tokens []argvToken) (string, []argvToken, bool) {
 				return "check", tokens[i:], help
 			}
 			p.in.Path = path
-			p.issue(t.position, "unknown_option", unknownOption(t.text, path), false)
+			name, _, _ := splitOption(t.text)
+			p.issue(t.position, "unknown_option", unknownOption(name, path), false)
 			return path, nil, help
 		}
 		p.in.Path = path
@@ -255,6 +256,9 @@ func (p *parser) scan(spec CommandSpec, tokens []argvToken) {
 			}
 			if p.in.Path == "codex proxy reserve set" && option.Name == "window" && utf8.ValidString(value) {
 				value = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "_", "-")
+			}
+			if p.rawPath == "codex validate capture" && option.Name == "content-encoding" && value == "" {
+				value = "auto"
 			}
 			if p.rawPath == "codex validate capture" && option.Name == "metadata-json" {
 				value = normaliseLegacyMetadata(value)

@@ -8,18 +8,22 @@ import (
 	"testing"
 )
 
+type compatibilityCase struct {
+	Name          string              `json:"name"`
+	Legacy        []string            `json:"legacy"`
+	Canonical     []string            `json:"canonical"`
+	Reject        bool                `json:"reject"`
+	Code          string              `json:"code"`
+	Exit          int                 `json:"exit"`
+	Path          string              `json:"path"`
+	Options       map[string][]string `json:"options"`
+	Arguments     map[string][]string `json:"arguments"`
+	AbsentOptions []string            `json:"absent_options"`
+}
 type compatibilityRow struct {
-	LegacyPath  string `json:"legacy_path"`
-	Disposition string `json:"disposition"`
-	Cases       []struct {
-		Name      string   `json:"name"`
-		Legacy    []string `json:"legacy"`
-		Canonical []string `json:"canonical"`
-		Reject    bool     `json:"reject"`
-		Code      string   `json:"code"`
-		Exit      int      `json:"exit"`
-		Path      string   `json:"path"`
-	} `json:"cases"`
+	LegacyPath  string              `json:"legacy_path"`
+	Disposition string              `json:"disposition"`
+	Cases       []compatibilityCase `json:"cases"`
 }
 
 func TestCLIV2AliasCompatibility(t *testing.T) {
@@ -65,6 +69,14 @@ func TestCLIV2AliasCompatibility(t *testing.T) {
 				if err != nil || e != nil {
 					t.Fatalf("alias %q: %#v; canonical %q: %#v", c.Legacy, err, c.Canonical, e)
 				}
+				if c.Path != "" {
+					assertParseCase(t, parseCase{Args: c.Legacy, Path: c.Path, Options: c.Options, Arguments: c.Arguments})
+				}
+				for _, name := range c.AbsentOptions {
+					if _, ok := actual.Options[name]; ok {
+						t.Errorf("consumed option %s forwarded", name)
+					}
+				}
 				warnings := actual.Warnings
 				actual.Warnings = nil
 				want.Warnings = nil
@@ -82,7 +94,15 @@ func TestCLIV2AliasCompatibility(t *testing.T) {
 	}
 }
 func TestCLIV2AliasGroupHelp(t *testing.T) {
-	for old, target := range compatibilityGroups {
+	var groups map[string]string
+	data, err := os.ReadFile("testdata/compatibility-help.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &groups); err != nil {
+		t.Fatal(err)
+	}
+	for old, target := range groups {
 		for _, a := range [][]string{append(strings.Fields(old), "--help"), append([]string{"help"}, strings.Fields(old)...), append([]string{strings.Fields(old)[0], "help"}, strings.Fields(old)[1:]...)} {
 			t.Run(strings.Join(a, " "), func(t *testing.T) {
 				in, e := Parse(a)
@@ -106,7 +126,7 @@ func TestCLIV2AliasGroupHelp(t *testing.T) {
 			t.Fatalf("provider help: %#v %#v", in, e)
 		}
 		got, ok := Help(in.Path)
-		if !ok || got != compatibilityPinHelp {
+		if !ok || got != "Usage: cq <provider> proxy pin <command>\n\nChoose a provider explicitly:\n  cq claude proxy pin --help\n  cq codex proxy pin --help\n" {
 			t.Fatal("provider guidance help")
 		}
 	}

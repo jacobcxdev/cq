@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -71,8 +73,16 @@ func TestCLIV2ValueFixtureMetadataByteLimit(t *testing.T) {
 func TestCLIV2ValueLegacyMetadata(t *testing.T) {
 	legacy := `{"request_kind":"compaction","session_id":"s","thread_id":"t","turn_id":"u","compaction":{"phase":"mid_turn"}}`
 	in, e := Parse([]string{"codex", "validate", "capture", "--input=x", "--output=y", "--metadata=" + legacy})
-	if e != nil || !validFixtureMetadata(in.Options["metadata-json"][0]) {
+	if e != nil {
 		t.Fatalf("legacy metadata: %#v %#v", in, e)
+	}
+	var got map[string]string
+	if err := json.Unmarshal([]byte(in.Options["metadata-json"][0]), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"request_kind": "compaction", "session_id": "s", "thread_id": "t", "turn_id": "u", "compaction": "mid_turn"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("metadata changed: %#v; want %#v", got, want)
 	}
 	_, e = Parse([]string{"codex", "proxy", "fixture", "create", "--input=x", "--output=y", "--metadata-json=" + legacy})
 	if e == nil || e.Diagnostic.Code != "fixture_input_invalid" {
@@ -89,5 +99,14 @@ func TestCLIV2ValueNormalisationCannotRepairUTF8(t *testing.T) {
 	_, e := Parse([]string{"codex", "proxy", "reserve", "set", "--window=" + string([]byte{255}), "--percent=2"})
 	if e == nil || e.Diagnostic.Code != "routing_invalid_argument" {
 		t.Fatalf("normalisation repaired invalid UTF-8: %#v", e)
+	}
+}
+
+func TestCLIV2AliasEmptyEncoding(t *testing.T) {
+	for _, suffix := range [][]string{{"--content-encoding="}, {"--content-encoding", ""}} {
+		a := append([]string{"codex", "validate", "capture", "--input=x", "--output=y"}, suffix...)
+		assertParseCase(t, parseCase{Args: a, Path: "codex proxy fixture create", Options: map[string][]string{"content-encoding": {"auto"}}, Supplied: map[string]bool{"content-encoding": true}})
+		a = append([]string{"codex", "proxy", "fixture", "create", "--input=x", "--output=y"}, suffix...)
+		assertParseCase(t, parseCase{Args: a, Path: "codex proxy fixture create", Code: "fixture_input_invalid", Exit: 2})
 	}
 }

@@ -99,6 +99,9 @@ func TestCLIV2ConstraintCoverage(t *testing.T) {
 			if expected[c.ID] != c.Clause {
 				t.Fatalf("stale/unknown clause %s", c.Clause)
 			}
+			if c.ID == "codex.proxy.trace/options/session/1" && (c.Classification != "mixed" || c.Owner != "T16") {
+				t.Error("trace selector syntax is parser-owned; privacy-key derivation must remain assigned to T16")
+			}
 			switch c.Classification {
 			case "parser":
 				if len(c.Cases) == 0 || c.Owner != "" {

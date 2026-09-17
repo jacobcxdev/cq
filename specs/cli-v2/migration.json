@@ -2543,7 +2543,7 @@
       {
         "legacy": "--content-encoding",
         "target": "--content-encoding",
-        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+        "rule": "Map an explicit empty legacy value to auto; otherwise pass value unchanged and apply canonical validation. Canonical explicit empty remains invalid."
       },
       {
         "legacy": "--metadata",
