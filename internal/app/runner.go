@@ -65,14 +65,16 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	wg.Wait()
 
 	var burnRates history.BurnRates
+	var estimates history.RateEstimates
 	if r.History != nil {
 		var err error
-		burnRates, err = r.History.UpdateAndGetBurnRates(ctx, providerFetched(fetched), now.Unix())
+		burnRates, estimates, err = r.History.UpdateAndGetEstimates(ctx, providerFetched(fetched), now.Unix())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: history update failed: %v\n", err)
 		}
 	}
 
+	attachRecentBurnRates(fetched, estimates)
 	return buildReport(now, req.Providers, fetched, burnRates), nil
 }
 
@@ -232,4 +234,28 @@ func (r *Runner) backfillFromCache(ctx context.Context, id provider.ID, results 
 		}
 	}
 	return out
+}
+
+// Copy provider-owned slices/maps before adding report-only forecasts. Proxy
+// subset aggregates then receive the same rates as account and total views.
+func attachRecentBurnRates(results map[provider.ID][]quota.Result, estimates history.RateEstimates) {
+	for id, fetched := range results {
+		copied := append([]quota.Result(nil), fetched...)
+		for i, result := range copied {
+			windows := make(map[quota.WindowName]quota.Window, len(result.Windows))
+			account := result.AccountID
+			if account == "" {
+				account = result.Email
+			}
+			for name, window := range result.Windows {
+				estimate, _ := estimates.Get(history.BurnRateKey{ProviderID: string(id), AccountKey: account, Window: string(name)})
+				window.RecentBurnRate = estimate.RecentRatePctPerS
+				windows[name] = window
+			}
+			if result.Windows != nil {
+				copied[i].Windows = windows
+			}
+		}
+		results[id] = copied
+	}
 }

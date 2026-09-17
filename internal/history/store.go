@@ -1,7 +1,8 @@
 // Package history persists per-(account, window) exponentially weighted
 // moving averages of the observed burn rate (percentage-points consumed per
 // second). These rates drive the phase-invariant gauge severity math in
-// internal/aggregate — see computeGaugeInfo for the consumer.
+// internal/aggregate — see computeGaugeInfo for the consumer. A separate,
+// shorter recent rate drives exhaustion forecasts; see recent.go.
 //
 // The store uses a delta-based EWMA: each call computes the wall-clock
 // difference between the previous remaining percentage (with reset-unwrap)
@@ -63,11 +64,13 @@ func (b BurnRates) Get(k BurnRateKey) (float64, bool) {
 	return r, ok
 }
 
-// RateEstimate includes confidence metadata used by reset recommendations.
+// RateEstimate includes reset recommendation metadata and a recent ETA rate.
+// RecentRatePctPerS is only set for a matching, fresh observation after warmup.
 type RateEstimate struct {
-	RatePctPerS  float64
-	Samples      int
-	LastSeenUnix int64
+	RatePctPerS       float64
+	Samples           int
+	LastSeenUnix      int64
+	RecentRatePctPerS *float64
 }
 
 // RateEstimates is the rich read-side snapshot for burn-rate consumers.
@@ -97,12 +100,13 @@ type AccountState struct {
 // WindowState captures the EWMA plus the minimum metadata needed to compute
 // the next delta sample.
 type WindowState struct {
-	EWMARatePctPerS       float64  `json:"ewma_rate_pct_per_s"`
-	LastSeenUnix          int64    `json:"last_seen_unix"`
-	LastRemainingPct      int      `json:"last_remaining_pct"`
-	LastRemainingPctExact *float64 `json:"last_remaining_pct_exact,omitempty"`
-	LastResetAtUnix       int64    `json:"last_reset_at_unix"`
-	Samples               int      `json:"samples"`
+	EWMARatePctPerS       float64          `json:"ewma_rate_pct_per_s"`
+	LastSeenUnix          int64            `json:"last_seen_unix"`
+	LastRemainingPct      int              `json:"last_remaining_pct"`
+	LastRemainingPctExact *float64         `json:"last_remaining_pct_exact,omitempty"`
+	LastResetAtUnix       int64            `json:"last_reset_at_unix"`
+	Samples               int              `json:"samples"`
+	Recent                *recentBurnState `json:"recent,omitempty"`
 }
 
 // Store persists EWMA burn state using fsutil.FileSystem for dependency
@@ -249,6 +253,7 @@ func (s *Store) UpdateAndGetEstimates(
 						LastRemainingPctExact: cloneExact(w.RemainingPctExact),
 						LastResetAtUnix:       w.ResetAtUnix,
 						Samples:               1,
+						Recent:                newRecentBurnState(w, nowEpoch),
 					}
 					continue
 				}
@@ -260,6 +265,7 @@ func (s *Store) UpdateAndGetEstimates(
 					// a zero-delta would produce a divide-by-zero below.
 					continue
 				}
+				updateRecentBurn(prev, w, nowEpoch)
 				period := int64(quota.PeriodFor(winName).Seconds())
 				if period > 0 && dt > period {
 					// A gap longer than the window cannot distinguish suspended or
@@ -270,6 +276,7 @@ func (s *Store) UpdateAndGetEstimates(
 						LastRemainingPctExact: cloneExact(w.RemainingPctExact),
 						LastResetAtUnix:       w.ResetAtUnix,
 						Samples:               1,
+						Recent:                newRecentBurnState(w, nowEpoch),
 					}
 					continue
 				}
@@ -352,6 +359,32 @@ func (s *Store) UpdateAndGetEstimates(
 		}
 	}
 
+	// Only attach recent rates to matching, sufficiently fresh input snapshots.
+	// Cached reads may reuse a forecast but never advance its observations.
+	for providerID, results := range providerResults {
+		for _, result := range results {
+			if !result.IsUsable() || result.Error != nil || result.CacheAge > recentFreshSeconds {
+				continue
+			}
+			accountKey := result.AccountID
+			if accountKey == "" {
+				accountKey = result.Email
+			}
+			account := state.Accounts[providerID+"\x00"+accountKey]
+			if account == nil {
+				continue
+			}
+			for name, window := range result.Windows {
+				key := BurnRateKey{ProviderID: providerID, AccountKey: accountKey, Window: string(name)}
+				estimate, ok := estimates[key]
+				if !ok {
+					continue
+				}
+				estimate.RecentRatePctPerS = recentBurnRate(account.Windows[string(name)], window, nowEpoch)
+				estimates[key] = estimate
+			}
+		}
+	}
 	return rates, estimates, saveErr
 }
 

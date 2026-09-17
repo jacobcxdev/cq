@@ -671,3 +671,21 @@ func TestComputeGatesDynamic5hWithMatching7dBucket(t *testing.T) {
 		t.Errorf("5h:gpt-5.3-codex-spark remaining_pct = %d, want 40", spark.RemainingPct)
 	}
 }
+
+func TestBurndownWeightsSelectedRatePerAccount(t *testing.T) {
+	fast, slow := 0.01, 0.001
+	results := []quota.Result{
+		{Status: quota.StatusOK, RateLimitTier: "codex_pro_20x", Windows: map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: 50, ResetAtUnix: 10000, RecentBurnRate: &fast},
+		}},
+		{Status: quota.StatusOK, RateLimitTier: "codex_pro_5x", Windows: map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: 50, ResetAtUnix: 10000, RecentBurnRate: &slow},
+		}},
+	}
+	windows, _ := Compute(results, 1000, "codex", nil)
+	// Capacity = 1250; demand = 20*0.01 + 5*(50/9000).
+	// Select per-account rates before weighting, never average account ETAs.
+	if got := windows[quota.Window5Hour].Burndown; got != 5488 {
+		t.Fatalf("burndown = %d, want 5488", got)
+	}
+}

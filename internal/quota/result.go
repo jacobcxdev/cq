@@ -10,6 +10,9 @@ type Window struct {
 	RemainingPct      int      `json:"remaining_pct"`
 	RemainingPctExact *float64 `json:"remaining_pct_exact,omitempty"`
 	ResetAtUnix       int64    `json:"reset_at_unix,omitempty"`
+	// RecentBurnRate is report-only, in percentage points per second. Nil means
+	// insufficient recent history; a non-nil zero means observed idle usage.
+	RecentBurnRate *float64 `json:"-"`
 }
 
 type Result struct {
