@@ -3,6 +3,7 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -564,4 +565,31 @@ func TestParseKeychainEntry(t *testing.T) {
 			t.Errorf("expected nil for empty accessToken, got %+v", got)
 		}
 	})
+}
+
+func TestInspectClaudePlatformKeychainUsesOnlyReadCommands(t *testing.T) {
+	dir := t.TempDir()
+	// A private executable replaces security; the real Keychain is never opened.
+	script := `#!/bin/sh
+if [ "$1" != "find-generic-password" ]; then exit 70; fi
+if [ "$3" = "Claude Code-credentials-10" ]; then
+ printf '%s\n' '{"claudeAiOauth":{"accessToken":"private-test-token","accountUUID":"id"}}'
+ exit 0
+fi
+exit 44
+`
+	if err := os.WriteFile(filepath.Join(dir, "security"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	rows, err := inspectPlatformKeychainAccounts(context.Background())
+	if err != nil || len(rows) != 1 || rows[0].account.AccountUUID != "id" {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "security"), []byte("#!/bin/sh\nexit 36\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectPlatformKeychainAccounts(context.Background()); err == nil {
+		t.Fatal("denied access treated as missing item")
+	}
 }

@@ -1,12 +1,17 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 // fakeCodexJWT builds a Codex-style JWT with the given claims.
@@ -442,5 +447,182 @@ func TestDiscoverAccountsMalformedClaimsDoNotCollapseAtEmptyRecordKey(t *testing
 		if acct.RecordKey != "" {
 			t.Fatalf("accts[%d].RecordKey = %q, want empty", i, acct.RecordKey)
 		}
+	}
+}
+
+type inspectionReadOnlyFS struct {
+	*fsutil.MemFS
+	t *testing.T
+}
+
+func (f inspectionReadOnlyFS) WriteFile(string, []byte, os.FileMode) error {
+	f.t.Fatal("inventory wrote file")
+	return errors.New("write forbidden")
+}
+func (f inspectionReadOnlyFS) MkdirAll(string, os.FileMode) error {
+	f.t.Fatal("inventory created directory")
+	return errors.New("write forbidden")
+}
+func (f inspectionReadOnlyFS) Rename(string, string) error {
+	f.t.Fatal("inventory renamed file")
+	return errors.New("write forbidden")
+}
+func (f inspectionReadOnlyFS) Remove(string) error {
+	f.t.Fatal("inventory removed file")
+	return errors.New("write forbidden")
+}
+
+func TestDiscoverAccountsInspectionReadsCompleteInventoryWithoutWrites(t *testing.T) {
+	fs := fsutil.NewMemFS()
+	if err := fs.MkdirAll("/home/test/.codex", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const path = "/home/test/.codex/auth.json"
+	const expiry = int64(1700000000)
+	data := codexAuthJSONWithCQExpiry(fakeCodexJWTWithExpiry("", "", "", "", expiry), "id", fakeCodexJWT("same@example.com", "id", "user", "pro"), 1900000000000)
+	if err := fs.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Accounts{FS: inspectionReadOnlyFS{fs, t}, StateDir: "/cq/state", ExternalSources: []ExternalCredentialSource{}}
+	inventory, err := accounts.Inspect(context.Background())
+	if err != nil || len(inventory.Accounts) != 1 {
+		t.Fatalf("accounts=%d err=%v", len(inventory.Accounts), err)
+	}
+	row := inventory.Accounts[0]
+	if !row.Active || !row.Unstable || len(row.Candidates) != 1 || row.Candidates[0].Source != SourceSystem {
+		t.Fatal("source/default/unstable authority lost")
+	}
+	if !row.Candidates[0].AccessExpiresAt.Equal(time.Unix(expiry, 0)) {
+		t.Fatal("CQ metadata overrode authoritative access-token JWT expiry")
+	}
+	if row.Candidates[0].Credential.AccessToken != "" {
+		t.Fatal("inspection exposed credential material")
+	}
+	if _, err := accounts.InspectAliases(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := fs.ReadFile(path)
+	if err != nil || !bytes.Equal(data, after) {
+		t.Fatal("inventory mutated native credentials")
+	}
+}
+
+func TestDiscoverAccountsInspectionDoesNotBootstrap(t *testing.T) {
+	fs := fsutil.NewMemFS()
+	accounts := &Accounts{FS: inspectionReadOnlyFS{fs, t}, StateDir: "/cq/state", ExternalSources: []ExternalCredentialSource{}}
+	inventory, err := accounts.Inspect(context.Background())
+	if err != nil || len(inventory.Accounts) != 0 {
+		t.Fatalf("inventory=%v error=%v", inventory, err)
+	}
+	if _, err := accounts.InspectAliases(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.Stat("/home/test/.codex"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("inventory bootstrapped native directory")
+	}
+}
+
+func TestDiscoverAccountsInspectionRejectsIncompleteInventory(t *testing.T) {
+	for _, kind := range []string{"malformed", "external unavailable", "blocked candidate"} {
+		t.Run(kind, func(t *testing.T) {
+			fs := fsutil.NewMemFS()
+			accounts := &Accounts{FS: inspectionReadOnlyFS{fs, t}, StateDir: "/cq/state", ExternalSources: []ExternalCredentialSource{}}
+			switch kind {
+			case "malformed":
+				if err := fs.MkdirAll("/home/test/.codex", 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := fs.WriteFile("/home/test/.codex/auth.json", []byte(`{"tokens":`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "external unavailable":
+				accounts.Inventory = staticCredentialInventory{inventory: Inventory{ExternalSources: []ExternalSourceStatus{{Name: "declared", ErrorCode: "unavailable"}}}}
+			case "blocked candidate":
+				accounts.Inventory = staticCredentialInventory{inventory: Inventory{Accounts: []LogicalAccount{{Key: "key", Candidates: []CredentialCandidate{{DispatchBlocked: true}}}}}}
+			}
+			_, err := accounts.Inspect(context.Background())
+			if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
+				t.Fatalf("error=%v wanted unavailable", err)
+			}
+		})
+	}
+}
+
+func TestDiscoverAccountsInspectionLeavesAuthoritySnapshotUntouched(t *testing.T) {
+	original := Inventory{Accounts: []LogicalAccount{{Key: "key", Candidates: []CredentialCandidate{{Credential: CodexAccount{AccessToken: "secret"}}}}}}
+	accounts := &Accounts{Inventory: staticCredentialInventory{inventory: original}}
+	result, err := accounts.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Accounts[0].Candidates[0].Credential.AccessToken != "" || original.Accounts[0].Candidates[0].Credential.AccessToken != "secret" {
+		t.Fatal("inspection either leaked material or mutated retained authority")
+	}
+}
+
+type journalReadFailureFS struct {
+	inspectionReadOnlyFS
+	fail   bool
+	cancel context.CancelFunc
+}
+
+func (f journalReadFailureFS) ReadFile(path string) ([]byte, error) {
+	if path == "/cq/state/codex_removal.json" {
+		if f.cancel != nil {
+			f.cancel()
+		}
+		if f.fail {
+			return nil, errors.New("private journal read details")
+		}
+	}
+	return f.inspectionReadOnlyFS.ReadFile(path)
+}
+
+func TestDiscoverAccountsInspectionRemovalJournal(t *testing.T) {
+	for _, kind := range []string{"absent parent", "absent file", "pending", "malformed", "unreadable", "cancelled"} {
+		t.Run(kind, func(t *testing.T) {
+			fs := fsutil.NewMemFS()
+			if kind != "absent parent" {
+				if err := fs.MkdirAll("/cq/state", 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "pending" || kind == "malformed" {
+				data := []byte(`{"version":1,"operation_id":"operation","account_key":"key","candidates":[]}`)
+				if kind == "malformed" {
+					data = []byte(`{"version":`)
+				}
+				if err := fs.WriteFile("/cq/state/codex_removal.json", data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reader := journalReadFailureFS{inspectionReadOnlyFS: inspectionReadOnlyFS{fs, t}, fail: kind == "unreadable"}
+			if kind == "cancelled" {
+				reader.cancel = cancel
+			}
+			accounts := &Accounts{FS: reader, StateDir: "/cq/state", ExternalSources: []ExternalCredentialSource{}}
+			_, err := accounts.Inspect(ctx)
+			switch kind {
+			case "absent parent", "absent file":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "cancelled":
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("err=%v", err)
+				}
+			default:
+				if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
+					t.Fatalf("err=%v wanted unavailable", err)
+				}
+			}
+			if kind == "absent parent" {
+				if _, err := fs.Stat("/cq/state"); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("journal inspection bootstrapped state")
+				}
+			}
+		})
 	}
 }

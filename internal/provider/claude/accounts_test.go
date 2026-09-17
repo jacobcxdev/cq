@@ -331,3 +331,11 @@ func TestAccountsSwitchFailsWhenRefreshAndProfileBothFail(t *testing.T) {
 		t.Fatalf("calls = (write=%d update=%d store=%d), want (0,0,0)", wrote, updated, stored)
 	}
 }
+
+func TestDiscoverAccountsInspectionCancellationSkipsKeyring(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&Accounts{}).Inspect(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+}

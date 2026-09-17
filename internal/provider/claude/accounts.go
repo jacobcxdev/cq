@@ -138,3 +138,9 @@ func (a *Accounts) Remove(_ context.Context, identifier string) error {
 	}
 	return nil
 }
+
+// Inspect reads complete local metadata without the legacy discovery merging
+// policy, refresh, persistence, or network access.
+func (a *Accounts) Inspect(ctx context.Context) ([]keyring.ClaudeAccountInspection, error) {
+	return keyring.InspectClaudeAccounts(ctx)
+}

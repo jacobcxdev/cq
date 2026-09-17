@@ -29,3 +29,7 @@ func updateKeychainEntryContext(ctx context.Context, service string, creds *Clau
 func RemovePlatformClaudeKeychainAccountsByEmail(email string) error {
 	return nil
 }
+
+func inspectPlatformKeychainAccounts(ctx context.Context) ([]claudeInspectionSource, error) {
+	return nil, ctx.Err()
+}

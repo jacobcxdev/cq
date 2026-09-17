@@ -406,3 +406,20 @@ func assertResultError(t *testing.T, result quota.Result, code string, status in
 		t.Fatalf("error = %#v, want code/status %q/%d", result.Error, code, status)
 	}
 }
+
+func TestDiscoverAccountsCancellationSkipsCredentials(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p := &Provider{credentials: panickingCredentialReader{}}
+	if _, err := p.DiscoverAccounts(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestDiscoverAccountsDenialRemainsUnavailable(t *testing.T) {
+	p := &Provider{credentials: staticCredentialReader{err: errors.New("private backend details")}}
+	rows, err := p.DiscoverAccounts(context.Background())
+	if !errors.Is(err, errCredentialRead) || len(rows) != 0 || strings.Contains(err.Error(), "private") {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+}

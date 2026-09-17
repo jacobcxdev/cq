@@ -354,3 +354,19 @@ func cloneReferenceTestInventory(inventory Inventory) Inventory {
 	clone.ExternalSources = append([]ExternalSourceStatus(nil), inventory.ExternalSources...)
 	return clone
 }
+
+func TestRegistryAccountAliasInspectionSortedDistinct(t *testing.T) {
+	fs := newFakeFS()
+	registry := Registry{FS: fs, Home: "/fake/home"}
+	fs.files[registry.path()] = []byte(`{"accounts":[{"account_key":"key","alias":"z"},{"account_key":"key","alias":"a"},{"account_key":"key","alias":"A"},{"account_key":"key","alias":"a"},{"account_key":"other","alias":"other"}]}`)
+	index, err := registry.AccountAliasIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := index.Aliases("key"); !reflect.DeepEqual(got, []string{"A", "a", "z"}) {
+		t.Fatalf("aliases=%v", got)
+	}
+	if got := index.Aliases("missing"); got == nil || len(got) != 0 {
+		t.Fatalf("missing aliases=%v", got)
+	}
+}

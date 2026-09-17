@@ -109,10 +109,12 @@ func parseAccountFile(fs fsutil.FileSystem, path string) (CodexAccount, bool) {
 
 // Accounts implements provider.AccountManager for Codex.
 type Accounts struct {
-	FS        fsutil.FileSystem
-	Admin     CredentialAdmin
-	Inventory CredentialInventory
-	Now       func() time.Time
+	FS              fsutil.FileSystem
+	Admin           CredentialAdmin
+	Inventory       CredentialInventory
+	Now             func() time.Time
+	ExternalSources []ExternalCredentialSource
+	StateDir        string // Resolved CQ state authority for read-only inspection.
 }
 
 func (a *Accounts) ProviderID() provider.ID { return provider.Codex }
@@ -254,6 +256,97 @@ func atomicWrite(fs fsutil.FileSystem, path string, data []byte) error {
 	if err := fs.Rename(tmp, path); err != nil {
 		fs.Remove(tmp)
 		return err
+	}
+	return nil
+}
+
+// Inspect preserves the complete read-only identity/source inventory. It never
+// opens a coordinator, recovers pending work, adopts credentials, or bootstraps
+// storage. Callers supply the resolved StateDir unless Inventory is injected.
+// Nil ExternalSources selects the declared default CodexBar source.
+func (a *Accounts) Inspect(ctx context.Context) (Inventory, error) {
+	if err := ctx.Err(); err != nil {
+		return Inventory{}, err
+	}
+	var inventory Inventory
+	var err error
+	if a.Inventory != nil {
+		inventory, err = a.Inventory.List(ctx)
+	} else {
+		if err := a.inspectRemovalJournal(ctx); err != nil {
+			return Inventory{}, err
+		}
+		home, homeErr := a.FS.UserHomeDir()
+		if homeErr != nil {
+			return Inventory{}, homeErr
+		}
+		sources := a.ExternalSources
+		if sources == nil {
+			sources = []ExternalCredentialSource{NewCodexBarSource(DefaultCodexBarRoot(home))}
+		}
+		inventory, err = discoverAuthoritativeInventoryWithSources(ctx, a.FS, sources...)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Inventory{}, ctxErr
+	}
+	if err != nil {
+		return Inventory{}, ErrCredentialAuthorityUnavailable
+	}
+	for _, source := range inventory.ExternalSources {
+		if source.ErrorCode != "" && !source.OptionalAbsent {
+			return Inventory{}, ErrCredentialAuthorityUnavailable
+		}
+	}
+	for _, account := range inventory.Accounts {
+		for _, candidate := range account.Candidates {
+			if candidate.DispatchBlocked {
+				return Inventory{}, ErrCredentialAuthorityUnavailable
+			}
+		}
+	}
+	// Sanitisation must not mutate an injected authority's retained snapshot.
+	inventory.Accounts = append([]LogicalAccount(nil), inventory.Accounts...)
+	for i := range inventory.Accounts {
+		inventory.Accounts[i].Candidates = append([]CredentialCandidate(nil), inventory.Accounts[i].Candidates...)
+	}
+	return sanitiseCredentialInventory(inventory), nil
+}
+
+// InspectAliases reads metadata only; it creates no registry or directories.
+func (a *Accounts) InspectAliases(ctx context.Context) (AccountAliasIndex, error) {
+	if err := ctx.Err(); err != nil {
+		return AccountAliasIndex{}, err
+	}
+	home, err := a.FS.UserHomeDir()
+	if err != nil {
+		return AccountAliasIndex{}, err
+	}
+	aliases, err := (Registry{FS: a.FS, Home: home}).AccountAliasIndex()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return AccountAliasIndex{}, ctxErr
+	}
+	return aliases, err
+}
+
+// inspectRemovalJournal observes pending removal without opening a credential
+// owner or recovering anything. Inspection remains a non-transactional snapshot.
+func (a *Accounts) inspectRemovalJournal(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if a.StateDir == "" {
+		return ErrCredentialAuthorityUnavailable
+	}
+	fs, ok := a.FS.(fsutil.DurableFileSystem)
+	if !ok {
+		return ErrCredentialAuthorityUnavailable
+	}
+	_, pending, err := (RemovalJournal{FS: fs, StateDir: a.StateDir}).Load()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil || pending {
+		return ErrCredentialAuthorityUnavailable
 	}
 	return nil
 }

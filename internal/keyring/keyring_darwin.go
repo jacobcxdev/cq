@@ -5,6 +5,7 @@ package keyring
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -184,4 +185,16 @@ slotLoop:
 		}
 	}
 	return nil
+}
+
+// Inspection distinguishes absent items (security exit 44) from denied access.
+func inspectPlatformKeychainAccounts(ctx context.Context) ([]claudeInspectionSource, error) {
+	return inspectClaudePlatformServices(ctx, func(ctx context.Context, service string) ([]byte, error) {
+		data, err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", service, "-w").Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
+			return nil, os.ErrNotExist
+		}
+		return data, err
+	})
 }
