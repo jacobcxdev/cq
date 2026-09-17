@@ -90,7 +90,12 @@ func WindowsAppDataAnchors() (AppDataAnchors, error) {
 }
 
 func Default(wanted ...Root) (Roots, error) {
-	anchors, err := WindowsAppDataAnchors()
+	selection := windowsFolderSelection{
+		profile: len(wanted) == 0,
+		roaming: selected(wanted, ConfigRoot),
+		local:   selected(wanted, StateRoot) || selected(wanted, CacheRoot) || selected(wanted, RuntimeRoot) || selected(wanted, LogsRoot),
+	}
+	anchors, err := resolveCurrentWindowsFolders(selection)
 	if err != nil {
 		return Roots{}, rootUnavailable()
 	}
@@ -102,7 +107,7 @@ func Default(wanted ...Root) (Roots, error) {
 
 // UserHomeDir uses the same authenticated subject as CQ app-data roots.
 func UserHomeDir() (string, error) {
-	anchors, err := WindowsAppDataAnchors()
+	anchors, err := resolveCurrentWindowsFolders(windowsFolderSelection{profile: true})
 	if err != nil {
 		return "", rootUnavailable()
 	}

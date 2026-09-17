@@ -114,7 +114,8 @@ func TestResolveWindowsFailsWithoutAbsoluteAppData(t *testing.T) {
 
 func TestResolveWindowsRejectsIncompleteResolver(t *testing.T) {
 	_, err := (Resolver{}).Resolve()
-	if err == nil || !strings.Contains(err.Error(), "incomplete resolver") {
+	var diagnostic *EnvironmentError
+	if !errors.As(err, &diagnostic) || diagnostic.Code != "environment_root_unavailable" || diagnostic.ExitCode != 4 || diagnostic.Error() != "Cannot resolve the user storage root." {
 		t.Fatalf("error = %v", err)
 	}
 }

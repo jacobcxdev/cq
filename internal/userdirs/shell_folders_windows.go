@@ -46,11 +46,35 @@ type userEnvironmentExpander func(value string) (string, error)
 type expandEnvironmentProc func(token windows.Token, source, destination *uint16, size uint32) (bool, error)
 type userProfileProc func(token windows.Token, destination *uint16, size *uint32) (bool, error)
 
+// windowsFolderSelection selects reads within one authenticated subject boundary.
+type windowsFolderSelection struct {
+	profile bool
+	roaming bool
+	local   bool
+}
+
+func requestedWindowsFolders(wanted []windowsFolderSelection) windowsFolderSelection {
+	if len(wanted) == 0 {
+		return windowsFolderSelection{profile: true, roaming: true, local: true}
+	}
+	return wanted[0]
+}
+
+var resolveCurrentWindowsFolders = currentUserWindowsFolders
+
 func currentUserAppDataAnchors() (AppDataAnchors, error) {
+	return currentUserWindowsFolders(requestedWindowsFolders(nil))
+}
+
+func currentUserWindowsFolders(wanted windowsFolderSelection) (AppDataAnchors, error) {
 	return currentUserAppDataAnchorsWith(
 		openCurrentUserToken,
 		openCurrentUserShellFolders,
-		ResolveWindowsAppDataForSubject,
+		func(token windows.Token, folders WindowsUserShellFolders) (AppDataAnchors, error) {
+			return resolveWindowsAppDataAnchorsWith(token, folders, tokenUserSID,
+				callExpandEnvironmentStringsForUser, callGetUserProfileDirectory, wanted)
+		},
+		wanted,
 	)
 }
 
@@ -58,20 +82,28 @@ func currentUserAppDataAnchorsWith(
 	openToken tokenOpener,
 	openShellFolders shellFoldersOpener,
 	resolve appDataAnchorsResolver,
+	wanted ...windowsFolderSelection,
 ) (AppDataAnchors, error) {
 	token, closeToken, err := openToken()
 	if err != nil {
 		return AppDataAnchors{}, fmt.Errorf("open current process token: %w", err)
 	}
-	shellFolders, closeShellFolders, err := openShellFolders(token)
-	if err != nil {
-		err = fmt.Errorf("open current-user shell folders: %w", err)
-		err = joinCloseError(err, "current process token", closeToken)
-		return AppDataAnchors{}, err
+	selection := requestedWindowsFolders(wanted)
+	var shellFolders WindowsUserShellFolders
+	var closeShellFolders func() error
+	if selection.roaming || selection.local {
+		shellFolders, closeShellFolders, err = openShellFolders(token)
+		if err != nil {
+			err = fmt.Errorf("open current-user shell folders: %w", err)
+			err = joinCloseError(err, "current process token", closeToken)
+			return AppDataAnchors{}, err
+		}
 	}
 
 	anchors, err := resolve(token, shellFolders)
-	err = joinCloseError(err, "current-user shell folders", closeShellFolders)
+	if selection.roaming || selection.local {
+		err = joinCloseError(err, "current-user shell folders", closeShellFolders)
+	}
 	err = joinCloseError(err, "current process token", closeToken)
 	if err != nil {
 		return AppDataAnchors{}, err
@@ -159,28 +191,38 @@ func resolveWindowsAppDataAnchorsWith(
 	readTokenSID tokenUserSIDReader,
 	expand expandEnvironmentProc,
 	profile userProfileProc,
+	wanted ...windowsFolderSelection,
 ) (AppDataAnchors, error) {
-	if shellFolders == nil {
+	selection := requestedWindowsFolders(wanted)
+	if (selection.roaming || selection.local) && shellFolders == nil {
 		return AppDataAnchors{}, fmt.Errorf("Windows User Shell Folders capability is nil")
 	}
 	tokenSID, err := readTokenSID(token)
 	if err != nil {
 		return AppDataAnchors{}, fmt.Errorf("read Windows token user: %w", err)
 	}
-	subjectSID, err := shellFolders.SubjectUserSID()
-	if err != nil {
-		return AppDataAnchors{}, fmt.Errorf("read User Shell Folders subject: %w", err)
-	}
-	if tokenSID == nil || !tokenSID.IsValid() || subjectSID == nil || !subjectSID.IsValid() {
+	if tokenSID == nil || !tokenSID.IsValid() {
 		return AppDataAnchors{}, fmt.Errorf("Windows token or User Shell Folders subject SID is invalid")
 	}
-	if !windows.EqualSid(tokenSID, subjectSID) {
-		return AppDataAnchors{}, fmt.Errorf("Windows token and User Shell Folders subject differ")
+	if selection.roaming || selection.local {
+		subjectSID, err := shellFolders.SubjectUserSID()
+		if err != nil {
+			return AppDataAnchors{}, fmt.Errorf("read User Shell Folders subject: %w", err)
+		}
+		if subjectSID == nil || !subjectSID.IsValid() {
+			return AppDataAnchors{}, fmt.Errorf("Windows token or User Shell Folders subject SID is invalid")
+		}
+		if !windows.EqualSid(tokenSID, subjectSID) {
+			return AppDataAnchors{}, fmt.Errorf("Windows token and User Shell Folders subject differ")
+		}
 	}
 
-	userProfile, err := userProfileWith(token, profile)
-	if err != nil {
-		return AppDataAnchors{}, fmt.Errorf("resolve Windows user profile: %w", err)
+	userProfile := ""
+	if selection.profile {
+		userProfile, err = userProfileWith(token, profile)
+		if err != nil {
+			return AppDataAnchors{}, fmt.Errorf("resolve Windows user profile: %w", err)
+		}
 	}
 	return windowsAppDataAnchorsWith(
 		func(name string) ([]byte, uint32, error) {
@@ -190,6 +232,7 @@ func resolveWindowsAppDataAnchorsWith(
 			return expandUserEnvironmentWith(token, value, expand)
 		},
 		userProfile,
+		selection,
 	)
 }
 
@@ -444,17 +487,28 @@ func windowsAppDataAnchorsWith(
 	read shellFolderReader,
 	expand userEnvironmentExpander,
 	userProfile string,
+	wanted ...windowsFolderSelection,
 ) (AppDataAnchors, error) {
-	if err := validateWindowsPath("UserProfile", userProfile); err != nil {
-		return AppDataAnchors{}, fmt.Errorf("resolve Windows user profile: %w", err)
+	selection := requestedWindowsFolders(wanted)
+	var anchors AppDataAnchors
+	var err error
+	if selection.profile {
+		if err := validateWindowsPath("UserProfile", userProfile); err != nil {
+			return AppDataAnchors{}, fmt.Errorf("resolve Windows user profile: %w", err)
+		}
+		anchors.UserProfile = userProfile
 	}
-	roaming, err := appDataPathWith(roamingAppDataValue, read, expand)
-	if err != nil {
-		return AppDataAnchors{}, fmt.Errorf("resolve Windows roaming data: %w", err)
+	if selection.roaming {
+		anchors.RoamingAppData, err = appDataPathWith(roamingAppDataValue, read, expand)
+		if err != nil {
+			return AppDataAnchors{}, fmt.Errorf("resolve Windows roaming data: %w", err)
+		}
 	}
-	local, err := appDataPathWith(localAppDataValue, read, expand)
-	if err != nil {
-		return AppDataAnchors{}, fmt.Errorf("resolve Windows local data: %w", err)
+	if selection.local {
+		anchors.LocalAppData, err = appDataPathWith(localAppDataValue, read, expand)
+		if err != nil {
+			return AppDataAnchors{}, fmt.Errorf("resolve Windows local data: %w", err)
+		}
 	}
-	return AppDataAnchors{RoamingAppData: roaming, LocalAppData: local, UserProfile: userProfile}, nil
+	return anchors, nil
 }
