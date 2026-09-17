@@ -2,8 +2,13 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// Only this private cause identifies our timer. A parent's cause is arbitrary
+// caller data and must never be interpreted as its cancellation error kind.
+var budgetDeadlineCause = errors.New("budget deadline expired")
 
 type budgetTimer interface{ Stop() bool }
 type budgetClock interface {
@@ -101,10 +106,10 @@ func (b *Budget) deadline(remaining time.Duration) (context.Context, context.Can
 	wrapped := deadlineContext{Context: ctx, deadline: deadline}
 	duration := deadline.Sub(b.started)
 	if duration <= 0 {
-		cancel(context.DeadlineExceeded)
+		cancel(budgetDeadlineCause)
 		return wrapped, cancel, nil
 	}
-	timer := b.clock.AfterFunc(duration, func() { cancel(context.DeadlineExceeded) })
+	timer := b.clock.AfterFunc(duration, func() { cancel(budgetDeadlineCause) })
 	return wrapped, cancel, timer
 }
 
@@ -116,7 +121,7 @@ type deadlineContext struct {
 func (c deadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
 
 // Hide the underlying cancellation implementation from context's fast path:
-// its Err is Canceled with a DeadlineExceeded cause, while our public Err must
+// its Err is Canceled with our private expiry cause, while our public Err must
 // be DeadlineExceeded. Derived request contexts must use this public contract.
 // WithoutCancel hides only context's private cancellation key, retaining all
 // caller values. AfterFunc provides cancellation without a waiting goroutine.
@@ -127,11 +132,12 @@ func (c deadlineContext) AfterFunc(fn func()) func() bool {
 	return context.AfterFunc(c.Context, fn)
 }
 func (c deadlineContext) Err() error {
-	if c.Context.Err() == nil {
+	err := c.Context.Err()
+	if err == nil {
 		return nil
 	}
-	if context.Cause(c.Context) == context.DeadlineExceeded {
+	if context.Cause(c.Context) == budgetDeadlineCause {
 		return context.DeadlineExceeded
 	}
-	return context.Canceled
+	return err
 }

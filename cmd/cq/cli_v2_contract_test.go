@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -101,15 +102,8 @@ func runV2Case(t *testing.T, c v2Case) {
 		session := &cli.Session{In: fixture.In, Out: &stdout, Err: &stderr, Interactive: fixture.Interactive}
 		exit := cli.Run(context.Background(), c.Args, session, fixture.Lookup)
 		for _, secret := range fixture.Secrets {
-			if secret != "" && (strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret)) {
+			if v2OutputsContainSecret(stdout.Bytes(), stderr.Bytes(), secret) {
 				t.Fatal("fixture secret leaked to output")
-			}
-			var decoded any
-			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
-				t.Fatal(err)
-			}
-			if secret != "" && v2ContainsSecret(decoded, secret) {
-				t.Fatal("fixture secret leaked in encoded JSON")
 			}
 		}
 		// Check sentinels before any assertion can quote captured output.
@@ -132,6 +126,33 @@ func runV2Case(t *testing.T, c v2Case) {
 			}
 		}
 	})
+}
+
+var v2JSONEscapes = regexp.MustCompile(`(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))+`)
+
+func v2OutputsContainSecret(stdout, stderr []byte, secret string) bool {
+	if secret == "" {
+		return false
+	}
+	for _, stream := range [][]byte{stdout, stderr} {
+		if bytes.Contains(stream, []byte(secret)) {
+			return true
+		}
+		// Decode escapes within either stream, including plain stderr diagnostic
+		// lines that are not complete JSON values. Group adjacent escapes so
+		// UTF-16 surrogate pairs are decoded together by encoding/json.
+		decoded := v2JSONEscapes.ReplaceAllStringFunc(string(stream), func(escaped string) string {
+			var value string
+			if err := json.Unmarshal([]byte(`"`+escaped+`"`), &value); err != nil {
+				return escaped
+			}
+			return value
+		})
+		if strings.Contains(decoded, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateV2Envelope(stdout []byte, c v2Case) error {
@@ -255,26 +276,6 @@ func v2JSONSubset(got, want any, path string) error {
 	return nil
 }
 
-func v2ContainsSecret(value any, secret string) bool {
-	switch v := value.(type) {
-	case string:
-		return strings.Contains(v, secret)
-	case []any:
-		for _, child := range v {
-			if v2ContainsSecret(child, secret) {
-				return true
-			}
-		}
-	case map[string]any:
-		for key, child := range v {
-			if strings.Contains(key, secret) || v2ContainsSecret(child, secret) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func TestCLIV2RejectsMutationTail(t *testing.T) {
 	runV2Case(t, v2Case{Name: "unknown tail before access", Scenario: "no-access", Args: []string{"codex", "account", "remove", "alice@example.com", "--dry-run", "--json"}, Exit: 2, Code: "unknown_option", Command: "codex account remove", WantJSON: `null`, Forbid: []string{"lookup", "credentials", "network", "filesystem-write", "service", "consume"}})
 }
@@ -306,11 +307,25 @@ func TestCLIV2OutputHarnessRejectsInvalidEvidence(t *testing.T) {
 	if err := v2JSONSubset([]any{"a", "b"}, []any{"a"}, "data.rows"); err == nil {
 		t.Fatal("extra array row ignored")
 	}
-	var encoded any
-	if err := json.Unmarshal([]byte(`{"nested":[{"secret":"fixture\u002dsecret"}]}`), &encoded); err != nil {
-		t.Fatal(err)
-	}
-	if !v2ContainsSecret(encoded, "fixture-secret") {
+	if !v2OutputsContainSecret([]byte(`{"nested":[{"secret":"fixture\u002dsecret"}]}`), nil, "fixture-secret") {
 		t.Fatal("escaped fixture secret missed")
+	}
+}
+
+func TestCLIV2OutputHarnessSecretEscapes(t *testing.T) {
+	clean := []byte(`{"schema_version":2,"command":"check","ok":true,"data":null,"errors":[],"warnings":[]}` + "\n")
+	for _, stderr := range []string{`cq: warning: fixture\u002dsecret` + "\n", `{"message":"fixture\u002dsecret"}`, `fixture-secret`} {
+		if !v2OutputsContainSecret(clean, []byte(stderr), "fixture-secret") {
+			t.Errorf("stderr secret was not rejected before diagnostic quoting: %q", stderr)
+		}
+	}
+	if v2OutputsContainSecret(clean, []byte("cq: warning: unrelated message\n"), "fixture-secret") {
+		t.Fatal("clean output rejected")
+	}
+	if !v2OutputsContainSecret(clean, []byte(`cq: fixture\u002d\ud83d\ude00`), "fixture-😀") {
+		t.Fatal("adjacent escapes and surrogate pair missed")
+	}
+	if v2OutputsContainSecret(clean, []byte(`cq: malformed escape \uXYZW`), "fixture-secret") {
+		t.Fatal("malformed unrelated escape rejected")
 	}
 }

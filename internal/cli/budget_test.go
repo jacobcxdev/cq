@@ -196,3 +196,39 @@ func TestCLIV2BudgetDerivedRequestContext(t *testing.T) {
 		t.Fatalf("request cause: %v", context.Cause(request))
 	}
 }
+
+func TestCLIV2BudgetParentErrorKind(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		parent func() (context.Context, func())
+		want   error
+	}{
+		{"deadline with custom cause", func() (context.Context, func()) {
+			parent, cancel := context.WithDeadlineCause(context.Background(), time.Now().Add(-time.Second), errors.New("custom deadline cause"))
+			t.Cleanup(cancel)
+			return parent, func() {}
+		}, context.DeadlineExceeded},
+		{"cancel with deadline cause", func() (context.Context, func()) {
+			parent, cancel := context.WithCancelCause(context.Background())
+			t.Cleanup(func() { cancel(nil) })
+			return parent, func() { cancel(context.DeadlineExceeded) }
+		}, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, trigger := tc.parent()
+			budget := BeginBudget(parent, time.Minute, 5*time.Second)
+			defer budget.Close()
+			workRequest, cancelWork := context.WithCancel(budget.Work())
+			defer cancelWork()
+			cleanupRequest, cancelCleanup := context.WithCancel(budget.Cleanup())
+			defer cancelCleanup()
+			trigger()
+			for name, ctx := range map[string]context.Context{"work": budget.Work(), "cleanup": budget.Cleanup(), "work request": workRequest, "cleanup request": cleanupRequest} {
+				<-ctx.Done()
+				if ctx.Err() != tc.want {
+					t.Errorf("%s Err=%v want parent Err=%v (cause %v)", name, ctx.Err(), tc.want, context.Cause(parent))
+				}
+			}
+		})
+	}
+}
