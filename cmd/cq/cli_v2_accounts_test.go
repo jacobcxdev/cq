@@ -296,3 +296,32 @@ func TestCLIV2AccountInspectionBoundsUninterruptibleReader(t *testing.T) {
 		t.Fatal("reader did not finish after release")
 	}
 }
+
+func TestCLIV2AccountInspectionMergedClaudeReference(t *testing.T) {
+	// This is the domain result covered by the three-source refreshed-identity
+	// bridge regression in keyring. Its sole logical identity must stay selectable.
+	result := handleV2AccountInspectionWithDependencies(context.Background(), cli.Invocation{
+		Path: "claude account list", Options: map[string][]string{"timeout": {"1s"}},
+	}, nil, v2AccountDependencies{Claude: func(context.Context) ([]keyring.ClaudeAccountInspection, error) {
+		return []keyring.ClaudeAccountInspection{{
+			Account: keyring.ClaudeOAuth{AccountUUID: "a", Email: "user@example.com", SubscriptionType: "fresh-plan", RateLimitTier: "fresh-tier"},
+			Sources: []string{"cq_managed", "native_client", "platform_keychain"}, Active: true,
+		}}, nil
+	}})
+	var data struct {
+		Accounts []AccountSummary `json:"accounts"`
+	}
+	if err := json.Unmarshal(result.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || len(data.Accounts) != 1 {
+		t.Fatalf("exit=%d rows=%d", result.ExitCode, len(data.Accounts))
+	}
+	row := data.Accounts[0]
+	if row.AccountReference == nil || *row.AccountReference != "user@example.com" || !row.Stable || !row.Active {
+		t.Fatal("unique merged Claude identity lost its valid selector")
+	}
+	if row.Label == nil || *row.Label != "fresh-plan" || row.RateLimitTier == nil || *row.RateLimitTier != "fresh-tier" || len(row.Sources) != 3 {
+		t.Fatal("fresh metadata or merged provenance lost in CLI projection")
+	}
+}

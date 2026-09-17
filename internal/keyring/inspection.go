@@ -133,6 +133,12 @@ func inspectClaudeAccounts(ctx context.Context, readers claudeInspectionReaders)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Consolidate UUID-identified records before attributing anonymous tokens.
+	// A refreshed CQ record can bridge stale native credentials and an anonymous
+	// platform entry; source arrival order must not turn that one UUID into rows.
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].account.AccountUUID != "" && sources[j].account.AccountUUID == ""
+	})
 	rows := []ClaudeAccountInspection{}
 	for _, source := range sources {
 		if err := ctx.Err(); err != nil {
@@ -147,6 +153,17 @@ func inspectClaudeAccounts(ctx context.Context, readers claudeInspectionReaders)
 			same := a.AccountUUID != "" && a.AccountUUID == b.AccountUUID ||
 				a.RefreshToken != "" && a.RefreshToken == b.RefreshToken ||
 				a.AccessToken != "" && a.AccessToken == b.AccessToken
+			if !same && a.AccountUUID != "" && b.AccountUUID == "" {
+				// Freshness consolidation may have replaced the token that proves
+				// this anonymous source belongs to the same identified account.
+				for _, known := range sources {
+					c := known.account
+					if c.AccountUUID == a.AccountUUID && ((c.AccessToken != "" && c.AccessToken == b.AccessToken) || (c.RefreshToken != "" && c.RefreshToken == b.RefreshToken)) {
+						same = true
+						break
+					}
+				}
+			}
 			if same && (a.AccountUUID == "" || b.AccountUUID == "") {
 				// An anonymous token shared by distinct UUIDs is not identity evidence.
 				ids := map[string]bool{}

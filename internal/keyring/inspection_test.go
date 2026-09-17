@@ -84,8 +84,10 @@ func TestInspectClaudeAccountsRetainsAmbiguousAnonymousIdentity(t *testing.T) {
 	if err != nil || len(rows) != 3 {
 		t.Fatalf("rows=%d err=%v; ambiguous native identity must remain separate", len(rows), err)
 	}
-	if rows[0].Account.AccountUUID != "" || !rows[0].Active || rows[1].Active || rows[2].Active {
-		t.Fatal("ambiguous token affinity invented native default identity")
+	for _, row := range rows {
+		if row.Active != (row.Account.AccountUUID == "") {
+			t.Fatal("ambiguous token affinity invented native default identity")
+		}
 	}
 }
 
@@ -191,6 +193,45 @@ func TestInspectClaudeAccountsPropagatesCancellationDuringRead(t *testing.T) {
 			})
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("error=%v wanted cancellation", err)
+			}
+		})
+	}
+}
+
+func TestInspectClaudeAccountsMergedRefreshedIdentityBridge(t *testing.T) {
+	for _, test := range []struct {
+		name, platformToken        string
+		platformExpiry, wantExpiry int64
+	}{
+		{"refreshed platform", "new", 300, 300},
+		{"stale platform", "old", 150, 200},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := inspectClaudeAccounts(context.Background(), claudeInspectionReaders{
+				home: "/isolated", manifest: "/manifest",
+				readFile: func(path string) ([]byte, error) {
+					if path == "/manifest" {
+						return []byte(`[{"uuid":"a","email":"user@example.com"}]`), nil
+					}
+					return []byte(`{"claudeAiOauth":{"accessToken":"old","expiresAt":100,"accountUUID":"a","email":"user@example.com","subscriptionType":"old-plan"}}`), nil
+				},
+				platform: func(context.Context) ([]claudeInspectionSource, error) {
+					return []claudeInspectionSource{{account: ClaudeOAuth{AccessToken: test.platformToken, ExpiresAt: test.platformExpiry}, source: "platform_keychain"}}, nil
+				},
+				get: func(string, string) (string, error) {
+					return `{"accessToken":"new","expiresAt":200,"accountUUID":"a","email":"user@example.com","subscriptionType":"fresh-plan","rateLimitTier":"fresh-tier"}`, nil
+				},
+			})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("rows=%d err=%v; one known UUID must have one inventory row", len(rows), err)
+			}
+			row := rows[0]
+			if !row.Active || !reflect.DeepEqual(row.Sources, []string{"cq_managed", "native_client", "platform_keychain"}) {
+				t.Fatal("merged native-default or source authority lost")
+			}
+			a := row.Account
+			if a.AccountUUID != "a" || a.Email != "user@example.com" || a.AccessToken != "new" || a.ExpiresAt != test.wantExpiry || a.SubscriptionType != "fresh-plan" || a.RateLimitTier != "fresh-tier" {
+				t.Fatal("merged identity did not retain freshest token and identified metadata")
 			}
 		})
 	}
