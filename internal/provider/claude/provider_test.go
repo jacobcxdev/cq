@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/keyring"
+	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -577,5 +579,96 @@ func TestFetchAccountUsageRefreshFailsFallsBackToCurrentToken(t *testing.T) {
 	}
 	if result.MinRemainingPct() != 80 {
 		t.Fatalf("remaining = %d, want 80", result.MinRemainingPct())
+	}
+}
+
+func TestFetchObservedCompletedAccountBeforeSibling(t *testing.T) {
+	setClaudeTestHome(t, t.TempDir())
+	old := discoverClaudeAccounts
+	defer func() { discoverClaudeAccounts = old }()
+	discoverClaudeAccounts = func() []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{AccountUUID: "done", Email: "done@example.test", AccessToken: "done", SubscriptionType: "max"}, {AccountUUID: "blocked", AccessToken: "fake", SubscriptionType: "max"}}
+	}
+	entered := make(chan struct{}, 2)
+	p := New(doerFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Authorization") == "Bearer done" {
+			body := `{}`
+			if req.URL.Path == "/api/oauth/usage" {
+				body = `{"five_hour":{"utilization":25.0}}`
+			}
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		entered <- struct{}{}
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}))
+	p.discover = func(context.Context) []keyring.ClaudeOAuth { return discoverClaudeAccounts() }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots := make(chan []quota.Result, 2)
+	ctx = provider.WithObservation(ctx, provider.Observation{Results: func(rows []quota.Result) { snapshots <- rows }, Warning: func(code, message string) {
+		if strings.Contains(message, "fake") {
+			t.Error("unsafe warning")
+		}
+	}})
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = p.Fetch(ctx, time.Now()) }()
+	first := <-snapshots
+	if len(first) != 1 || first[0].AccountID != "done" || !first[0].IsUsable() {
+		t.Fatalf("first completed account = %+v", first)
+	}
+	<-entered
+	cancel()
+	<-done
+	// Completing the other account never changes the already-published snapshot.
+	if len(first) != 1 || first[0].AccountID != "done" || !first[0].IsUsable() {
+		t.Fatal("snapshot mutated")
+	}
+}
+func TestFetchObservedInnerPanicDiagnosticsAreSafe(t *testing.T) {
+	p := New(doerFunc(func(*http.Request) (*http.Response, error) { panic("secret-upstream-body") }))
+	var mu sync.Mutex
+	var warnings []string
+	ctx := provider.WithObservation(context.Background(), provider.Observation{Warning: func(code, message string) { mu.Lock(); defer mu.Unlock(); warnings = append(warnings, code+message) }})
+	result := p.fetchAccount(ctx, keyring.ClaudeOAuth{AccessToken: "fake", SubscriptionType: "max"}, time.Now())
+	if result.IsUsable() {
+		t.Fatal("panic unexpectedly usable")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(warnings) != 2 {
+		t.Fatalf("warning count=%d", len(warnings))
+	}
+	for _, warning := range warnings {
+		if strings.Contains(warning, "secret-upstream-body") {
+			t.Fatal("secret leaked")
+		}
+	}
+}
+
+func TestFetchObservedActiveFlagUsesCompletedMetadata(t *testing.T) {
+	home := t.TempDir()
+	setClaudeTestHome(t, home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := New(doerFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{}`
+		if req.URL.Path == "/api/oauth/usage" {
+			if err := os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte(`{"claudeAiOauth":{"email":"done@example.test"}}`), 0o600); err != nil {
+				t.Error(err)
+			}
+			body = `{"five_hour":{"utilization":25.0}}`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	p.discover = func(context.Context) []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{AccessToken: "fake", Email: "done@example.test", SubscriptionType: "max"}}
+	}
+	var snapshot []quota.Result
+	ctx := provider.WithObservation(context.Background(), provider.Observation{Results: func(rows []quota.Result) { snapshot = rows }})
+	rows, err := p.Fetch(ctx, time.Now())
+	if err != nil || len(rows) != 1 || !rows[0].Active || len(snapshot) != 1 || !snapshot[0].Active {
+		t.Fatalf("completed active metadata lost: rows=%+v snapshot=%+v err=%v", rows, snapshot, err)
 	}
 }

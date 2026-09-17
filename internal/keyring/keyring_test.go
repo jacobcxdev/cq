@@ -1,8 +1,11 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -1473,4 +1476,78 @@ func TestHash8(t *testing.T) {
 			t.Errorf("len(Hash8(\"\")) = %d, want 8", len(h))
 		}
 	})
+}
+
+func TestKeyringObservedDiagnosticsAreSafe(t *testing.T) {
+	home := t.TempDir()
+	setKeyringTestHome(t, home)
+	var warnings []string
+	ctx := WithDiagnostics(context.Background(), func(code, message string) { warnings = append(warnings, code+":"+message) })
+	path := filepath.Join(home, "private-manifest")
+	if err := os.WriteFile(path, []byte("credential-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadManifestContext(ctx, path); got != nil {
+		t.Fatal("corrupt manifest accepted")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte("credential-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	BackfillCredentialsFileContext(ctx, &ClaudeOAuth{})
+	// A file used as a directory forces a real optional persistence failure.
+	if err := saveManifestContext(ctx, filepath.Join(path, "manifest"), nil); err == nil {
+		t.Fatal("expected directory failure")
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("warning count=%d", len(warnings))
+	}
+	for _, warning := range warnings {
+		if strings.Contains(warning, "credential-secret") || strings.Contains(warning, home) {
+			t.Fatal("private diagnostic value leaked")
+		}
+	}
+	if !strings.HasPrefix(warnings[0], "manifest_decode_failed:") || !strings.HasPrefix(warnings[1], "credential_decode_failed:") || !strings.HasPrefix(warnings[2], "manifest_directory_failed:") {
+		t.Fatal(warnings)
+	}
+}
+func TestKeyringCancelledContextStopsBeforeAccess(t *testing.T) {
+	old := resolveCredentialHome
+	defer func() { resolveCredentialHome = old }()
+	resolveCredentialHome = func() (string, error) {
+		t.Error("cancelled operation resolved home")
+		return "", errors.New("forbidden")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if rows := DiscoverClaudeAccountsContext(ctx); len(rows) != 0 {
+		t.Fatal("cancelled discovery returned rows")
+	}
+	BackfillCredentialsFileContext(ctx, &ClaudeOAuth{})
+	PersistRefreshedTokenContext(ctx, &ClaudeOAuth{AccountUUID: "not-real"})
+	if err := StoreCQAccountContext(ctx, &ClaudeOAuth{AccountUUID: "not-real"}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if err := WriteCredentialsFileContext(ctx, &ClaudeCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if err := updateKeychainEntryContext(ctx, "not-real", &ClaudeCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+func TestKeyringCancellationAfterHomePreventsPersistence(t *testing.T) {
+	home := t.TempDir()
+	old := resolveCredentialHome
+	defer func() { resolveCredentialHome = old }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolveCredentialHome = func() (string, error) { cancel(); return home, nil }
+	if err := WriteCredentialsFileContext(ctx, &ClaudeCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Fatal("credential directory created after cancellation")
+	}
 }

@@ -19,7 +19,7 @@
     {
       "source_path": "internal/aggregate/gauge_test.go",
       "path": "internal/aggregate/gauge_test.go.txt",
-      "sha256": "f375bd1abb1b0b3454b870e21a9e1e761723e0034979e89cb172c3daff03ef3f"
+      "sha256": "e8813684042126a36d0a4a628f9944a814a14c8666aa0cf4f20ea6a62bd3a153"
     },
     {
       "source_path": "internal/aggregate/label.go",
@@ -29,7 +29,7 @@
     {
       "source_path": "internal/aggregate/phase_sweep_test.go",
       "path": "internal/aggregate/phase_sweep_test.go.txt",
-      "sha256": "43f2948f17d378859b13b19a3b46f509b71a311d463f373fa0059616f7cbe364"
+      "sha256": "c9fb21fca5a5ad3ef30db245c57c9c5332021cae4bbdbb5c91b645700de19aef"
     },
     {
       "source_path": "internal/aggregate/reset_schedule.go",
@@ -44,7 +44,7 @@
     {
       "source_path": "internal/aggregate/sustain.go",
       "path": "internal/aggregate/sustain.go.txt",
-      "sha256": "35dfb08544b7ba4f877aa146bc2e4fabbc80b295b755cd63a06af994d8e74919"
+      "sha256": "8201c2170f86e7651333685c64cb442432351c73da3d0c328def760e3232bf3a"
     },
     {
       "source_path": "internal/aggregate/types.go",

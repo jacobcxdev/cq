@@ -100,29 +100,47 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 	}
 
 	results := make([]quota.Result, len(inventory.Accounts))
-	var wg sync.WaitGroup
+	type completedAccount struct {
+		index  int
+		result quota.Result
+	}
+	completed := make(chan completedAccount, len(inventory.Accounts))
 	for i, logical := range inventory.Accounts {
-		wg.Add(1)
 		go func(i int, logical LogicalAccount) {
-			defer wg.Done()
+			var result quota.Result
 			defer func() {
 				if rv := recover(); rv != nil {
-					fmt.Fprintf(os.Stderr, "cq: panic in codex provider: %v\n%s\n", rv, debug.Stack())
-					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
+					message := "Quota provider failed."
+					if !provider.ObserveWarning(ctx, "codex_fetch_panic", "Codex quota fetch failed.") {
+						message = fmt.Sprintf("%v", rv)
+						fmt.Fprintf(os.Stderr, "cq: panic in codex provider: %v\n%s\n", rv, debug.Stack())
+					}
+					result = quota.ErrorResult("panic", message, 0)
 				}
+				result.Active = logical.Active
+				completed <- completedAccount{i, result}
 			}()
-			results[i] = p.fetchLogicalAccount(ctx, logical, inventoryReader, secrets, broker, now)
-			results[i].Active = logical.Active
+			result = p.fetchLogicalAccount(ctx, logical, inventoryReader, secrets, broker, now)
 		}(i, logical)
 	}
-	wg.Wait()
-	if inventoryDegraded {
-		for i, result := range results {
-			if result.Error == nil || (result.Error.Code != "auth_expired" && result.Error.Code != "no_token") {
-				continue
-			}
-			results[i] = credentialInventoryDegradedResult(inventory.Accounts[i].Identity, inventory.Accounts[i].Active)
+	seen := make([]bool, len(inventory.Accounts))
+	for range inventory.Accounts {
+		row := <-completed
+		if inventoryDegraded && row.result.Error != nil && (row.result.Error.Code == "auth_expired" || row.result.Error.Code == "no_token") {
+			row.result = credentialInventoryDegradedResult(inventory.Accounts[row.index].Identity, inventory.Accounts[row.index].Active)
 		}
+		results[row.index], seen[row.index] = row.result, true
+		if provider.Observed(ctx) {
+			partial := make([]quota.Result, 0, len(results))
+			for i, result := range results {
+				if seen[i] {
+					partial = append(partial, result)
+				}
+			}
+			provider.ObserveResults(ctx, partial)
+		}
+	}
+	if inventoryDegraded {
 		results = p.appendMissingDegradedInventoryResults(inventory, results)
 	}
 

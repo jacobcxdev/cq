@@ -209,3 +209,59 @@ func TestCacheDeleteEmptyID(t *testing.T) {
 		}
 	}
 }
+
+// Cancelling at a filesystem boundary must prevent later persistent stages.
+type cancellingCacheFS struct {
+	*fsutil.MemFS
+	cancel                 context.CancelFunc
+	stage                  string
+	writes, renames, reads int
+}
+
+func (f *cancellingCacheFS) Stat(path string) (os.FileInfo, error) {
+	info, err := f.MemFS.Stat(path)
+	if f.stage == "stat" {
+		f.cancel()
+	}
+	return info, err
+}
+func (f *cancellingCacheFS) ReadFile(path string) ([]byte, error) {
+	f.reads++
+	return f.MemFS.ReadFile(path)
+}
+func (f *cancellingCacheFS) WriteFile(path string, data []byte, mode os.FileMode) error {
+	f.writes++
+	err := f.MemFS.WriteFile(path, data, mode)
+	if f.stage == "write" {
+		f.cancel()
+	}
+	return err
+}
+func (f *cancellingCacheFS) Rename(a, b string) error { f.renames++; return f.MemFS.Rename(a, b) }
+func TestCacheCancellationBoundaries(t *testing.T) {
+	for _, stage := range []string{"before", "stat", "write"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fs := &cancellingCacheFS{MemFS: fsutil.NewMemFS(), cancel: cancel, stage: stage}
+			c, _ := New(fs, "/cache", time.Hour)
+			if err := fs.MemFS.WriteFile("/cache/codex.json", []byte(`[{"status":"ok"}]`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if stage == "before" {
+				cancel()
+			}
+			if stage == "stat" {
+				_, _, err := c.Get(ctx, "codex")
+				if !errors.Is(err, context.Canceled) || fs.reads != 0 {
+					t.Fatal("read continued after cancellation")
+				}
+				return
+			}
+			err := c.Put(ctx, "codex", []quota.Result{{Status: quota.StatusOK}})
+			if !errors.Is(err, context.Canceled) || fs.renames != 0 || (stage == "before" && fs.writes != 0) {
+				t.Fatal("write continued after cancellation")
+			}
+		})
+	}
+}

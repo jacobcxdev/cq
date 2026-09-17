@@ -48,3 +48,65 @@ type AccountManager interface {
 type Services struct {
 	Usage Provider
 }
+
+// Observation receives safe diagnostics and completed quota rows for a bounded
+// interactive check. Callbacks must be concurrency-safe. Fetch retains ownership
+// of its workers; cancelling the observer never closes resources under them.
+type Observation struct {
+	Results func([]quota.Result)
+	Warning func(code, message string)
+}
+type observationKey struct{}
+
+func WithObservation(ctx context.Context, observation Observation) context.Context {
+	return context.WithValue(ctx, observationKey{}, observation)
+}
+func Observed(ctx context.Context) bool {
+	_, ok := ctx.Value(observationKey{}).(Observation)
+	return ok
+}
+func WithResultObserver(ctx context.Context, results func([]quota.Result)) context.Context {
+	observation, _ := ctx.Value(observationKey{}).(Observation)
+	observation.Results = results
+	return WithObservation(ctx, observation)
+}
+func ObserveResults(ctx context.Context, results []quota.Result) {
+	observation, _ := ctx.Value(observationKey{}).(Observation)
+	if observation.Results != nil {
+		observation.Results(CloneResults(results))
+	}
+}
+
+// ObserveWarning returns true when a structured observer owns diagnostics.
+// Callers must supply fixed safe text, never upstream errors or panic values.
+func ObserveWarning(ctx context.Context, code, message string) bool {
+	observation, ok := ctx.Value(observationKey{}).(Observation)
+	if ok && observation.Warning != nil {
+		observation.Warning(code, message)
+	}
+	return ok
+}
+
+// CloneResults freezes a completed snapshot, including mutable window maps and
+// optional pointers, before handing it to another goroutine.
+func CloneResults(results []quota.Result) []quota.Result {
+	out := make([]quota.Result, len(results))
+	for i, row := range results {
+		out[i] = row
+		if row.Error != nil {
+			value := *row.Error
+			out[i].Error = &value
+		}
+		if row.Windows != nil {
+			out[i].Windows = make(map[quota.WindowName]quota.Window, len(row.Windows))
+			for name, window := range row.Windows {
+				if window.RemainingPctExact != nil {
+					value := *window.RemainingPctExact
+					window.RemainingPctExact = &value
+				}
+				out[i].Windows[name] = window
+			}
+		}
+	}
+	return out
+}

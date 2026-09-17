@@ -3,6 +3,7 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,9 @@ import (
 
 // discoverPlatformKeychain discovers existing Claude Code keychain entries on macOS.
 func discoverPlatformKeychain(seen map[string]bool) []ClaudeOAuth {
+	return discoverPlatformKeychainContext(context.Background(), seen)
+}
+func discoverPlatformKeychainContext(ctx context.Context, seen map[string]bool) []ClaudeOAuth {
 	var accounts []ClaudeOAuth
 
 	services := []string{"Claude Code-credentials"}
@@ -20,7 +24,7 @@ func discoverPlatformKeychain(seen map[string]bool) []ClaudeOAuth {
 	}
 
 	for _, service := range services {
-		out, err := exec.Command("security", "find-generic-password",
+		out, err := exec.CommandContext(ctx, "security", "find-generic-password",
 			"-s", service, "-w").Output()
 		if err != nil {
 			if service != "Claude Code-credentials" {
@@ -60,6 +64,12 @@ func parseKeychainEntry(raw string) *ClaudeOAuth {
 // UpdateKeychainEntry updates a macOS keychain entry with plaintext JSON,
 // matching Claude Code's `security add-generic-password -w` writes.
 func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
+	return updateKeychainEntryContext(context.Background(), service, creds)
+}
+func updateKeychainEntryContext(ctx context.Context, service string, creds *ClaudeCredentials) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	data, err := json.Marshal(creds)
 	if err != nil {
 		return err
@@ -68,7 +78,7 @@ func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 	if user == "" {
 		user = "unknown"
 	}
-	return exec.Command("security", "add-generic-password",
+	return exec.CommandContext(ctx, "security", "add-generic-password",
 		"-U", "-s", service, "-a", user, "-w", string(data)).Run()
 }
 

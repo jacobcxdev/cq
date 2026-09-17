@@ -73,3 +73,17 @@ The released source already contains candidate `__runtime`, runtime-role descrip
 ## Handoff boundary
 
 T07 owns read-only account inspection and opaque account references. T08 owns login, activation and removal transactions. T09 owns reset list/recommend data and advisory outcomes. T10 owns consented, idempotent reset use. T11 owns model-list and overlay publication outcomes. T12 owns explicit provider refresh. The preserved diffs are evidence for those tasks only; their source changes must be reimplemented against the canonical command, resource and acceptance contracts rather than applied wholesale.
+
+## T06 frozen arithmetic correction — 2026-09-17
+
+The original annex predated released commit `e17bdd3a66168410d7f8bf470a259b8b280ac8d5` (`fix: included depleted pool pace (#143)`), already present in the implementation release. During T06, the user clarified the gauge's intended question: “can I push harder, or do I need to hold back because I'm at risk of running out before one of my windows reset?”, with Pro 20x/Plus capacity weighting. The user-authorised correction preserves that released behaviour and refreshes only the three affected snapshots from that exact commit's bytes; runtime arithmetic and unrelated snapshots remain unchanged.
+
+Depleted ungated accounts contribute capacity and observed burn to cumulative gauge supply/demand. They cannot accept new traffic and are excluded from active drain allocation. The old annex excluded depleted accounts from supply/demand too, incorrectly displaying underburn after substantial pool exhaustion. Existing weekly/short-window gating remains intact.
+
+| Snapshot source | Previous SHA-256 | Corrected SHA-256 |
+| --- | --- | --- |
+| `internal/aggregate/gauge_test.go` | `f375bd1abb1b0b3454b870e21a9e1e761723e0034979e89cb172c3daff03ef3f` | `e8813684042126a36d0a4a628f9944a814a14c8666aa0cf4f20ea6a62bd3a153` |
+| `internal/aggregate/phase_sweep_test.go` | `43f2948f17d378859b13b19a3b46f509b71a311d463f373fa0059616f7cbe364` | `c9fb21fca5a5ad3ef30db245c57c9c5332021cae4bbdbb5c91b645700de19aef` |
+| `internal/aggregate/sustain.go` | `35dfb08544b7ba4f877aa146bc2e4fabbc80b295b755cd63a06af994d8e74919` | `8201c2170f86e7651333685c64cb442432351c73da3d0c328def760e3232bf3a` |
+
+For two 20x weekly accounts at 86% and 93% and a third depleted account, all resetting in 504000 seconds of a 604800-second period: depleted Pro 20x produces capacity 60, remaining 60%, pace -23pp, gauge 0, gap start 154949s and gap duration 349051s. Depleted Plus (1x) produces capacity 41, remaining 87%, pace +4pp, gauge 4 and no gap. The healthy pair alone is gauge 5. These are executed adapter/released regression results, not estimates from the old annex. The old annex would exclude the depleted row from its gauge ratio; its equivalence to the healthy-pair gauge is a source-derived inference. T06 tests pin exact numeric report projection and preserve existing reset/gating regressions.

@@ -20,7 +20,8 @@ import (
 
 // Provider implements provider.Provider for Claude.
 type Provider struct {
-	client *Client
+	client   *Client
+	discover func(context.Context) []keyring.ClaudeOAuth
 }
 
 // New creates a Provider that uses the given HTTP client for API calls.
@@ -30,32 +31,66 @@ func New(httpClient httputil.Doer) *Provider {
 
 // Fetch discovers all Claude accounts and fetches quota for each in parallel.
 func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, error) {
-	accounts := discoverClaudeAccounts()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	accounts := p.discoverForCheck(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(accounts) == 0 {
 		return []quota.Result{quota.ErrorResult("not_configured", "not configured", 0)}, nil
 	}
 
 	results := make([]quota.Result, len(accounts))
-	var wg sync.WaitGroup
+	type completedAccount struct {
+		index  int
+		result quota.Result
+	}
+	completed := make(chan completedAccount, len(accounts))
+	activeEmail := ""
 	for i, acct := range accounts {
-		wg.Add(1)
 		go func(i int, acct keyring.ClaudeOAuth) {
-			defer wg.Done()
+			var result quota.Result
 			defer func() {
 				if rv := recover(); rv != nil {
-					fmt.Fprintf(os.Stderr, "cq: panic in claude provider: %v\n%s\n", rv, debug.Stack())
-					results[i] = quota.ErrorResult("panic", fmt.Sprintf("%v", rv), 0)
+					message := "Quota provider failed."
+					if !provider.ObserveWarning(ctx, "claude_fetch_panic", "Claude quota fetch failed.") {
+						message = fmt.Sprintf("%v", rv)
+						fmt.Fprintf(os.Stderr, "cq: panic in claude provider: %v\n%s\n", rv, debug.Stack())
+					}
+					result = quota.ErrorResult("panic", message, 0)
 				}
+				completed <- completedAccount{i, result}
 			}()
-			results[i] = p.fetchAccount(ctx, acct, now)
+			result = p.fetchAccount(ctx, acct, now)
 		}(i, acct)
 	}
-	wg.Wait()
+	seen := make([]bool, len(accounts))
+	for range accounts {
+		row := <-completed
+		results[row.index], seen[row.index] = row.result, true
+		if provider.Observed(ctx) {
+			if ctx.Err() == nil {
+				activeEmail = activeCredentialEmail()
+			}
+			partial := make([]quota.Result, 0, len(accounts))
+			for i, result := range results {
+				if seen[i] {
+					result.Active = activeEmail != "" && result.Email == activeEmail
+					partial = append(partial, result)
+				}
+			}
+			provider.ObserveResults(ctx, dedup(partial))
+		}
+	}
 
 	deduped := dedup(results)
 
-	// Mark the active account (the one from the credentials file).
-	activeEmail := activeCredentialEmail()
+	// Mark the active account after completed metadata backfill.
+	if ctx.Err() == nil {
+		activeEmail = activeCredentialEmail()
+	}
 	for i := range deduped {
 		if activeEmail != "" && deduped[i].Email == activeEmail {
 			deduped[i].Active = true
@@ -68,8 +103,11 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 // DiscoverAccounts returns all locally known Claude accounts without making
 // network calls. It implements provider.Discoverer so cached runs can keep
 // expired accounts visible.
-func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
-	accts := discoverClaudeAccounts()
+func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, error) {
+	accts := p.discoverForCheck(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	activeEmail := activeCredentialEmail()
 	out := make([]provider.Account, len(accts))
 	for i, acct := range accts {
@@ -119,6 +157,9 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		return r
 	}
 
+	if ctx.Err() != nil {
+		return errorWithIdentity("fetch_error", "Quota request cancelled.", 0)
+	}
 	token := acct.AccessToken
 	if token == "" {
 		return errorWithIdentity("no_token", "no token", 0)
@@ -144,7 +185,13 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 			if rr.RefreshToken != "" {
 				acct.RefreshToken = rr.RefreshToken
 			}
-			persistRefreshedToken(&acct)
+			if ctx.Err() == nil {
+				if provider.Observed(ctx) {
+					keyring.PersistRefreshedTokenContext(credentialObservationContext(ctx), &acct)
+				} else {
+					persistRefreshedToken(&acct)
+				}
+			}
 		}
 	}
 
@@ -161,13 +208,17 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		defer wg.Done()
 		defer func() {
 			if rv := recover(); rv != nil {
-				fmt.Fprintf(os.Stderr, "cq: panic in claude profile fetch: %v\n%s\n", rv, debug.Stack())
+				if !provider.ObserveWarning(ctx, "claude_profile_panic", "Claude profile fetch failed.") {
+					fmt.Fprintf(os.Stderr, "cq: panic in claude profile fetch: %v\n%s\n", rv, debug.Stack())
+				}
 			}
 		}()
 		var err error
 		prof, err = p.client.FetchProfile(ctx, token)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cq: claude profile: %v\n", err)
+			if !provider.ObserveWarning(ctx, "claude_profile_failed", "Claude profile fetch failed.") {
+				fmt.Fprintf(os.Stderr, "cq: claude profile: %v\n", err)
+			}
 		}
 	}()
 
@@ -179,13 +230,17 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 			defer wg.Done()
 			defer func() {
 				if rv := recover(); rv != nil {
-					fmt.Fprintf(os.Stderr, "cq: panic in claude usage fetch: %v\n%s\n", rv, debug.Stack())
+					if !provider.ObserveWarning(ctx, "claude_usage_panic", "Claude usage fetch failed.") {
+						fmt.Fprintf(os.Stderr, "cq: panic in claude usage fetch: %v\n%s\n", rv, debug.Stack())
+					}
 					usageErr = fmt.Errorf("panic: %v", rv)
 				}
 			}()
 			usageBody, usageCode, _, usageDiag, usageErr = p.client.FetchUsage(ctx, token)
 			if usageErr != nil {
-				fmt.Fprintf(os.Stderr, "cq: claude usage: %v\n", usageErr)
+				if !provider.ObserveWarning(ctx, "claude_usage_failed", "Claude usage fetch failed.") {
+					fmt.Fprintf(os.Stderr, "cq: claude usage: %v\n", usageErr)
+				}
 			}
 		}()
 	}
@@ -204,7 +259,7 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 	// Backfill all credential stores with profile data for future
 	// discovery and deduplication — even if usage failed, so that
 	// stale plan/tier metadata is corrected.
-	if prof.Email != "" || prof.AccountUUID != "" {
+	if ctx.Err() == nil && (prof.Email != "" || prof.AccountUUID != "") {
 		updated := acct
 		if prof.Email != "" {
 			updated.Email = prof.Email
@@ -218,8 +273,21 @@ func (p *Provider) fetchAccount(ctx context.Context, acct keyring.ClaudeOAuth, n
 		if rlt != "" {
 			updated.RateLimitTier = rlt
 		}
-		if err := backfillCredentialsFile(&updated); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: backfill credentials: %v\n", err)
+		backfill := backfillCredentialsFile
+		if provider.Observed(ctx) {
+			backfill = func(acct *keyring.ClaudeOAuth) error {
+				observed := credentialObservationContext(ctx)
+				keyring.BackfillCredentialsFileContext(observed, acct)
+				if acct.AccountUUID != "" {
+					return keyring.StoreCQAccountContext(observed, acct)
+				}
+				return nil
+			}
+		}
+		if err := backfill(&updated); err != nil {
+			if !provider.ObserveWarning(ctx, "claude_backfill_failed", "Claude credential metadata backfill failed.") {
+				fmt.Fprintf(os.Stderr, "cq: backfill credentials: %v\n", err)
+			}
 		}
 	}
 
@@ -320,4 +388,20 @@ func (p *Provider) FetchAccountUsage(ctx context.Context, acct keyring.ClaudeOAu
 	}
 
 	return parseUsage(body, acct.SubscriptionType, acct.RateLimitTier, acct.Email, acct.AccountUUID), 0, nil
+}
+
+func credentialObservationContext(ctx context.Context) context.Context {
+	return keyring.WithDiagnostics(ctx, func(code, message string) { provider.ObserveWarning(ctx, code, message) })
+}
+func (p *Provider) discoverForCheck(ctx context.Context) []keyring.ClaudeOAuth {
+	if ctx.Err() != nil {
+		return nil
+	}
+	if p.discover != nil {
+		return p.discover(ctx)
+	}
+	if provider.Observed(ctx) {
+		return keyring.DiscoverClaudeAccountsContext(credentialObservationContext(ctx))
+	}
+	return discoverClaudeAccounts()
 }

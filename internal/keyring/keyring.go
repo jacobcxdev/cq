@@ -1,6 +1,7 @@
 package keyring
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -52,20 +53,29 @@ type TokenAccount struct {
 // 1. ~/.claude/.credentials.json (active account)
 // 2. Platform keychain (macOS: "Claude Code-credentials*", all: cq-claude-* via go-keyring)
 func DiscoverClaudeAccounts() []ClaudeOAuth {
+	return DiscoverClaudeAccountsContext(context.Background())
+}
+func DiscoverClaudeAccountsContext(ctx context.Context) []ClaudeOAuth {
+	if ctx.Err() != nil {
+		return nil
+	}
 	var accounts []ClaudeOAuth
 
 	// De-dup within each source only. Cross-source de-dup would let a stale
 	// credentials-file record suppress a fresher cq-keyring record before we
 	// can compare them by freshness.
-	accounts = append(accounts, discoverCredentialsFile(make(map[string]bool))...)
+	accounts = append(accounts, discoverCredentialsFileContext(ctx, make(map[string]bool))...)
 
 	// Platform-specific keychain discovery (macOS: security CLI for backward compat).
 	// Claude Code refreshes the keychain token but not the credentials file,
 	// and the keychain entry often lacks email/UUID metadata.
-	accounts = append(accounts, discoverPlatformKeychain(make(map[string]bool))...)
+	if ctx.Err() != nil {
+		return nil
+	}
+	accounts = append(accounts, discoverPlatformKeychainContext(ctx, make(map[string]bool))...)
 
 	// cq-managed accounts via go-keyring (cross-platform)
-	accounts = append(accounts, discoverCQKeyring(make(map[string]bool))...)
+	accounts = append(accounts, discoverCQKeyringContext(ctx, make(map[string]bool))...)
 
 	// Merge identified accounts from different sources by freshness, keyed by
 	// AccountUUID then Email. This prevents a stale credentials-file record
@@ -389,11 +399,20 @@ func accountKey(a *ClaudeOAuth) string {
 }
 
 func discoverCredentialsFile(seen map[string]bool) []ClaudeOAuth {
+	return discoverCredentialsFileContext(context.Background(), seen)
+}
+func discoverCredentialsFileContext(ctx context.Context, seen map[string]bool) []ClaudeOAuth {
+	if ctx.Err() != nil {
+		return nil
+	}
 	home, err := resolveCredentialHome()
 	if err != nil {
 		return nil
 	}
 	path := filepath.Join(home, ".claude", ".credentials.json")
+	if ctx.Err() != nil {
+		return nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -414,15 +433,24 @@ func discoverCredentialsFile(seen map[string]bool) []ClaudeOAuth {
 }
 
 func discoverCQKeyring(seen map[string]bool) []ClaudeOAuth {
+	return discoverCQKeyringContext(context.Background(), seen)
+}
+func discoverCQKeyringContext(ctx context.Context, seen map[string]bool) []ClaudeOAuth {
+	if ctx.Err() != nil {
+		return nil
+	}
 	// cq-managed accounts are stored with known service names.
 	// We track them in a manifest file since go-keyring doesn't support enumeration.
 	manifestPath, err := defaultCQManifestPath()
 	if err != nil {
 		return nil
 	}
-	manifest := loadManifest(manifestPath)
+	manifest := loadManifestContext(ctx, manifestPath)
 	var accounts []ClaudeOAuth
 	for _, entry := range manifest {
+		if ctx.Err() != nil {
+			return accounts
+		}
 		service := ServicePrefix + Hash8(entry.UUID)
 		raw, err := gokeyring.Get(service, entry.UUID)
 		if err != nil {
@@ -448,36 +476,55 @@ type manifestEntry struct {
 }
 
 func loadManifest(path string) []manifestEntry {
+	return loadManifestContext(context.Background(), path)
+}
+func loadManifestContext(ctx context.Context, path string) []manifestEntry {
+	if ctx.Err() != nil {
+		return nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
 	var entries []manifestEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: loadManifest: unmarshal %s: %v\n", path, err)
+		credentialDiagnostic(ctx, "manifest_decode_failed", "Claude credential manifest could not be decoded.", "cq: loadManifest: unmarshal %s: %v\n", path, err)
 		return nil
 	}
 	return entries
 }
 
 func saveManifest(path string, entries []manifestEntry) error {
+	return saveManifestContext(context.Background(), path, entries)
+}
+func saveManifestContext(ctx context.Context, path string, entries []manifestEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: saveManifest: mkdir: %v\n", err)
+		credentialDiagnostic(ctx, "manifest_directory_failed", "Claude credential manifest directory could not be created.", "cq: saveManifest: mkdir: %v\n", err)
 		return fmt.Errorf("saveManifest: mkdir: %w", err)
 	}
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: saveManifest: marshal: %v\n", err)
+		credentialDiagnostic(ctx, "manifest_encode_failed", "Claude credential manifest could not be encoded.", "cq: saveManifest: marshal: %v\n", err)
 		return fmt.Errorf("saveManifest: marshal: %w", err)
 	}
 	tmp := path + ".tmp"
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: saveManifest: write: %v\n", err)
+		credentialDiagnostic(ctx, "manifest_write_failed", "Claude credential manifest could not be written.", "cq: saveManifest: write: %v\n", err)
 		return fmt.Errorf("saveManifest: write: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		os.Remove(tmp)
+		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
-		fmt.Fprintf(os.Stderr, "cq: saveManifest: rename: %v\n", err)
+		credentialDiagnostic(ctx, "manifest_replace_failed", "Claude credential manifest could not be replaced.", "cq: saveManifest: rename: %v\n", err)
 		return fmt.Errorf("saveManifest: rename: %w", err)
 	}
 	return nil
@@ -485,6 +532,12 @@ func saveManifest(path string, entries []manifestEntry) error {
 
 // StoreCQAccount stores credentials in the cross-platform keyring and updates the manifest.
 func StoreCQAccount(acct *ClaudeOAuth) error {
+	return StoreCQAccountContext(context.Background(), acct)
+}
+func StoreCQAccountContext(ctx context.Context, acct *ClaudeOAuth) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if acct.AccountUUID == "" {
 		return fmt.Errorf("account UUID required for keyring storage")
 	}
@@ -497,17 +550,26 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := gokeyring.Set(service, acct.AccountUUID, string(data)); err != nil {
 		// SecItemAdd fails with errSecDuplicateItem (exit status 45) when the
 		// item already exists. Delete and retry once.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		_ = gokeyring.Delete(service, acct.AccountUUID)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := gokeyring.Set(service, acct.AccountUUID, string(data)); err != nil {
 			return err
 		}
 	}
 
 	// Update manifest
-	entries := loadManifest(manifestPath)
+	entries := loadManifestContext(ctx, manifestPath)
 	found := false
 	for i, e := range entries {
 		if e.UUID == acct.AccountUUID {
@@ -519,7 +581,7 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	if !found {
 		entries = append(entries, manifestEntry{UUID: acct.AccountUUID, Email: acct.Email})
 	}
-	if err := saveManifest(manifestPath, entries); err != nil {
+	if err := saveManifestContext(ctx, manifestPath, entries); err != nil {
 		return fmt.Errorf("save manifest: %w", err)
 	}
 	return nil
@@ -577,19 +639,28 @@ func RemoveActiveClaudeCredentialsByEmail(email string) error {
 // BackfillCredentialsFile updates the active credentials file with profile data
 // (email, UUID, plan, tier) without overwriting the tokens.
 func BackfillCredentialsFile(acct *ClaudeOAuth) {
+	BackfillCredentialsFileContext(context.Background(), acct)
+}
+func BackfillCredentialsFileContext(ctx context.Context, acct *ClaudeOAuth) {
+	if ctx.Err() != nil {
+		return
+	}
 	home, err := resolveCredentialHome()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: backfill creds: home dir: %v\n", err)
+		credentialDiagnostic(ctx, "credential_home_failed", "Claude credential storage could not be resolved.", "cq: backfill creds: home dir: %v\n", err)
 		return
 	}
 	path := filepath.Join(home, ".claude", ".credentials.json")
+	if ctx.Err() != nil {
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return // file missing is normal (e.g. no credentials file on disk)
 	}
 	var creds ClaudeCredentials
 	if err := json.Unmarshal(data, &creds); err != nil || creds.ClaudeAiOauth == nil {
-		fmt.Fprintf(os.Stderr, "cq: backfill creds: parse credentials file\n")
+		credentialDiagnostic(ctx, "credential_decode_failed", "Claude credential metadata could not be decoded.", "cq: backfill creds: parse credentials file\n")
 		return
 	}
 	// Only update if this is the same account.
@@ -621,16 +692,23 @@ func BackfillCredentialsFile(acct *ClaudeOAuth) {
 	creds.ClaudeAiOauth = &updated
 	serialised, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cq: backfill creds: marshal: %v\n", err)
+		credentialDiagnostic(ctx, "credential_encode_failed", "Claude credential metadata could not be encoded.", "cq: backfill creds: marshal: %v\n", err)
 		return
 	}
 	tmp := path + ".tmp"
+	if err := ctx.Err(); err != nil {
+		return
+	}
 	if err := os.WriteFile(tmp, serialised, 0o600); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: write credentials tmp: %v\n", err)
+		credentialDiagnostic(ctx, "credential_write_failed", "Claude credential metadata could not be written.", "cq: write credentials tmp: %v\n", err)
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		os.Remove(tmp)
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: rename credentials: %v\n", err)
+		credentialDiagnostic(ctx, "credential_replace_failed", "Claude credential metadata could not be replaced.", "cq: rename credentials: %v\n", err)
 		os.Remove(tmp)
 	}
 }
@@ -642,11 +720,30 @@ var (
 
 // PersistRefreshedToken updates stored Claude credentials after a successful refresh.
 func PersistRefreshedToken(acct *ClaudeOAuth) {
+	PersistRefreshedTokenContext(context.Background(), acct)
+}
+func PersistRefreshedTokenContext(ctx context.Context, acct *ClaudeOAuth) {
+	if ctx.Err() != nil {
+		return
+	}
 	cqAccount := *acct
+	writeCredentials := WriteCredentialsFile
+	updateKeychain := updateKeychainEntryForRefresh
+	storeAccount := storeCQAccountForRefresh
+	if _, observed := ctx.Value(diagnosticsKey{}).(func(string, string)); observed {
+		writeCredentials = func(creds *ClaudeCredentials) error { return WriteCredentialsFileContext(ctx, creds) }
+		updateKeychain = func(service string, creds *ClaudeCredentials) error {
+			return updateKeychainEntryContext(ctx, service, creds)
+		}
+		storeAccount = func(acct *ClaudeOAuth) error { return StoreCQAccountContext(ctx, acct) }
+	}
 
 	home, err := resolveCredentialHome()
 	if err == nil {
 		path := filepath.Join(home, ".claude", ".credentials.json")
+		if ctx.Err() != nil {
+			return
+		}
 		data, err := os.ReadFile(path)
 		if err == nil {
 			var creds ClaudeCredentials
@@ -655,10 +752,13 @@ func PersistRefreshedToken(acct *ClaudeOAuth) {
 				updated := mergeRefreshedAccount(stored, acct)
 				creds.ClaudeAiOauth = &updated
 				cqAccount = updated
-				if err := WriteCredentialsFile(&creds); err != nil {
-					fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: write creds: %v\n", err)
-				} else if err := updateKeychainEntryForRefresh("Claude Code-credentials", &creds); err != nil {
-					fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: update keychain: %v\n", err)
+				if ctx.Err() != nil {
+					return
+				}
+				if err := writeCredentials(&creds); err != nil {
+					credentialDiagnostic(ctx, "credential_refresh_write_failed", "Refreshed Claude credentials could not be written.", "cq: PersistRefreshedToken: write creds: %v\n", err)
+				} else if err := updateKeychain("Claude Code-credentials", &creds); err != nil {
+					credentialDiagnostic(ctx, "credential_refresh_keychain_failed", "Refreshed Claude credentials could not be stored in the keychain.", "cq: PersistRefreshedToken: update keychain: %v\n", err)
 				}
 			}
 		}
@@ -671,8 +771,11 @@ func PersistRefreshedToken(acct *ClaudeOAuth) {
 		cqAccount.Email = acct.Email
 	}
 	if cqAccount.AccountUUID != "" {
-		if err := storeCQAccountForRefresh(&cqAccount); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: PersistRefreshedToken: store cq account: %v\n", err)
+		if ctx.Err() != nil {
+			return
+		}
+		if err := storeAccount(&cqAccount); err != nil {
+			credentialDiagnostic(ctx, "credential_refresh_store_failed", "Refreshed Claude credentials could not be stored by CQ.", "cq: PersistRefreshedToken: store cq account: %v\n", err)
 		}
 	}
 }
@@ -751,15 +854,27 @@ func ActiveClaudeEmail() string {
 
 // WriteCredentialsFile atomically writes credentials to ~/.claude/.credentials.json.
 func WriteCredentialsFile(creds *ClaudeCredentials) error {
+	return WriteCredentialsFileContext(context.Background(), creds)
+}
+func WriteCredentialsFileContext(ctx context.Context, creds *ClaudeCredentials) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	home, err := resolveCredentialHome()
 	if err != nil {
 		return err
 	}
 	dir := filepath.Join(home, ".claude")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create credential dir: %w", err)
 	}
 	// Enforce permissions even if directory pre-exists with wrong mode.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("chmod credential dir: %w", err)
 	}
@@ -769,7 +884,14 @@ func WriteCredentialsFile(creds *ClaudeCredentials) error {
 		return err
 	}
 	tmp := path + ".tmp"
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -777,4 +899,20 @@ func WriteCredentialsFile(creds *ClaudeCredentials) error {
 		return err
 	}
 	return nil
+}
+
+type diagnosticsKey struct{}
+
+// WithDiagnostics scopes safe best-effort credential diagnostics to one check.
+func WithDiagnostics(ctx context.Context, warning func(string, string)) context.Context {
+	return context.WithValue(ctx, diagnosticsKey{}, warning)
+}
+func credentialDiagnostic(ctx context.Context, code, message, legacy string, args ...any) {
+	if warning, ok := ctx.Value(diagnosticsKey{}).(func(string, string)); ok {
+		if warning != nil && ctx.Err() == nil {
+			warning(code, message)
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, legacy, args...)
 }

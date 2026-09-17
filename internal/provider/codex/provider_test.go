@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/jacobcxdev/cq/internal/provider"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1247,5 +1249,43 @@ func TestFetch401RefreshesAndRetriesWhenHomeDirLookupFails(t *testing.T) {
 	}
 	if refreshCalls.Load() != 1 {
 		t.Fatalf("refreshCalls = %d, want 1", refreshCalls.Load())
+	}
+}
+
+type observedQuotaSecrets struct{}
+
+func (observedQuotaSecrets) ResolveExact(_ context.Context, planned PlannedCandidate) (CredentialMaterial, error) {
+	return testCredentialMaterial(planned.Identity, "fake-token"), nil
+}
+func TestFetchObservedCompletedAccountBeforeSibling(t *testing.T) {
+	now := time.Now()
+	var accounts []LogicalAccount
+	for _, id := range []string{"done", "blocked"} {
+		accounts = append(accounts, LogicalAccount{Key: AccountKey(id), Identity: AccountIdentity{AccountID: id, UserID: "user"}, Routable: true, Candidates: []CredentialCandidate{{Ref: CandidateRef{AccountKey: AccountKey(id), CandidateID: "external"}, Revision: "revision", Source: SourceExternal, AccessExpiresAt: now.Add(time.Hour), Routable: true}}})
+	}
+	entered := make(chan struct{})
+	p := &Provider{fs: newFakeFS(), inventory: staticCredentialInventory{inventory: Inventory{Accounts: accounts}}, secrets: observedQuotaSecrets{}, client: providerDoerFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("ChatGPT-Account-ID") == "blocked" {
+			close(entered)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(happyUsageBody)), Header: http.Header{}}, nil
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots := make(chan []quota.Result, 2)
+	ctx = provider.WithObservation(ctx, provider.Observation{Results: func(rows []quota.Result) { snapshots <- rows }})
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = p.Fetch(ctx, now) }()
+	first := <-snapshots
+	if len(first) != 1 || !first[0].IsUsable() || first[0].AccountID != "done" {
+		t.Fatalf("first completed account = %+v", first)
+	}
+	<-entered
+	cancel()
+	<-done
+	if len(first) != 1 || !first[0].IsUsable() {
+		t.Fatal("completed snapshot changed")
 	}
 }

@@ -3,7 +3,9 @@ package history
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -621,5 +623,61 @@ func TestRateEstimatesNilSafe(t *testing.T) {
 	var estimates RateEstimates
 	if _, ok := estimates.Get(BurnRateKey{ProviderID: "test", AccountKey: "x", Window: "5h"}); ok {
 		t.Error("nil RateEstimates.Get should return ok=false")
+	}
+}
+
+type cancellingHistoryFS struct {
+	*fsutil.MemFS
+	cancel                 context.CancelFunc
+	stage                  string
+	reads, writes, renames int
+}
+
+func (f *cancellingHistoryFS) ReadFile(path string) ([]byte, error) {
+	f.reads++
+	data, err := f.MemFS.ReadFile(path)
+	if f.stage == "read" {
+		f.cancel()
+	}
+	return data, err
+}
+func (f *cancellingHistoryFS) WriteFile(path string, data []byte, mode os.FileMode) error {
+	f.writes++
+	err := f.MemFS.WriteFile(path, data, mode)
+	if f.stage == "write" {
+		f.cancel()
+	}
+	return err
+}
+func (f *cancellingHistoryFS) Rename(a, b string) error { f.renames++; return f.MemFS.Rename(a, b) }
+func TestHistoryCancellationBoundaries(t *testing.T) {
+	for _, stage := range []string{"before", "read", "write"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fs := &cancellingHistoryFS{MemFS: fsutil.NewMemFS(), cancel: cancel, stage: stage}
+			store, err := New(fs, "/history")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage == "before" {
+				cancel()
+			}
+			_, err = store.UpdateAndGetBurnRates(ctx, nil, 1)
+			if !errors.Is(err, context.Canceled) || fs.renames != 0 || (stage != "write" && fs.writes != 0) || (stage == "before" && fs.reads != 0) {
+				t.Fatalf("stages reads=%d writes=%d renames=%d err=%v", fs.reads, fs.writes, fs.renames, err)
+			}
+		})
+	}
+}
+func TestHistoryObservedCorruptionWarning(t *testing.T) {
+	store, fs := newTestStore(t)
+	if err := fs.WriteFile(store.path, []byte("private-corrupt-body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warnings []string
+	_, err := store.UpdateAndGetBurnRatesObserved(context.Background(), nil, 1, func(code, message string) { warnings = append(warnings, code+":"+message) })
+	if err != nil || len(warnings) != 1 || !strings.HasPrefix(warnings[0], "history_decode_failed:") || strings.Contains(warnings[0], "private-corrupt-body") {
+		t.Fatalf("warnings=%v err=%v", warnings, err)
 	}
 }
