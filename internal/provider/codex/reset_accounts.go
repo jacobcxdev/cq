@@ -8,12 +8,19 @@ import (
 )
 
 type ResetAccount struct {
-	AccountKey AccountKey `json:"-"`
-	AccountID  string     `json:"account_id,omitempty"`
-	Email      string     `json:"email,omitempty"`
-	PlanType   string     `json:"plan_type,omitempty"`
-	Active     bool       `json:"active"`
+	Unselectable bool       `json:"-"`
+	AccountKey   AccountKey `json:"-"`
+	AccountID    string     `json:"account_id,omitempty"`
+	Email        string     `json:"email,omitempty"`
+	PlanType     string     `json:"plan_type,omitempty"`
+	Active       bool       `json:"active"`
 
+	candidates  []resetAccountCandidate
+	planned     PlannedCandidate
+	refreshable bool
+}
+
+type resetAccountCandidate struct {
 	planned     PlannedCandidate
 	refreshable bool
 }
@@ -41,14 +48,21 @@ func ProjectVisibleAccounts(inventory Inventory, now time.Time) []ResetAccount {
 			continue
 		}
 		candidate := candidates[0]
+		_, referenceErr := ResolveAccountReference(inventory, AccountAliasIndex{}, string(logical.Key))
+		plans := make([]resetAccountCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			plans = append(plans, resetAccountCandidate{PlanCandidate(logical, c), c.Source == SourceManaged && c.RefreshEligible})
+		}
 		accounts = append(accounts, ResetAccount{
-			AccountKey:  logical.Key,
-			AccountID:   logical.Identity.AccountID,
-			Email:       logical.Identity.Email,
-			PlanType:    logical.Identity.PlanType,
-			Active:      logical.Active,
-			planned:     PlanCandidate(logical, candidate),
-			refreshable: candidate.Source == SourceManaged && candidate.RefreshEligible,
+			candidates:   plans,
+			Unselectable: referenceErr != nil,
+			AccountKey:   logical.Key,
+			AccountID:    logical.Identity.AccountID,
+			Email:        logical.Identity.Email,
+			PlanType:     logical.Identity.PlanType,
+			Active:       logical.Active,
+			planned:      PlanCandidate(logical, candidate),
+			refreshable:  candidate.Source == SourceManaged && candidate.RefreshEligible,
 		})
 	}
 	return accounts
@@ -94,19 +108,44 @@ func (s ResetAccountSnapshot) ResolveReference(reference string) (ResetAccount, 
 }
 
 func (b *ResetBackend) ListCredits(ctx context.Context, account ResetAccount) (ResetCreditInventory, error) {
-	material, account, err := b.resolve(ctx, account)
-	if err != nil {
-		return ResetCreditInventory{}, err
+	plans := append([]resetAccountCandidate(nil), account.candidates...)
+	if len(plans) == 0 {
+		plans = []resetAccountCandidate{{account.planned, account.refreshable}}
 	}
-	inventory, err := b.Credits.List(ctx, material)
-	if err == nil || !resetAuthenticationFailure(err) || !account.refreshable {
-		return inventory, err
+	var inventory ResetCreditInventory
+	var lastErr error
+	// Preserve the resolved identity and try existing generations before refresh.
+	for index, candidate := range plans {
+		selected := account
+		selected.planned = candidate.planned
+		selected.refreshable = candidate.refreshable
+		material, resolved, err := b.resolve(ctx, selected)
+		if err != nil {
+			return ResetCreditInventory{}, err
+		}
+		plans[index].planned = resolved.planned
+		inventory, lastErr = b.Credits.List(ctx, material)
+		if !resetAuthenticationFailure(lastErr) {
+			return inventory, lastErr
+		}
 	}
-	material, _, err = b.refreshAndResolve(ctx, account)
-	if err != nil {
-		return ResetCreditInventory{}, err
+	for _, candidate := range plans {
+		if !candidate.refreshable {
+			continue
+		}
+		selected := account
+		selected.planned = candidate.planned
+		selected.refreshable = true
+		material, _, err := b.refreshAndResolve(ctx, selected)
+		if err != nil {
+			return ResetCreditInventory{}, err
+		}
+		inventory, lastErr = b.Credits.List(ctx, material)
+		if !resetAuthenticationFailure(lastErr) {
+			return inventory, lastErr
+		}
 	}
-	return b.Credits.List(ctx, material)
+	return inventory, lastErr
 }
 
 func (b *ResetBackend) Consume(ctx context.Context, account ResetAccount, creditID, requestID string) (ConsumeResetResult, error) {

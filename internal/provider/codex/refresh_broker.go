@@ -147,6 +147,27 @@ func (c *CredentialCoordinator) refreshOnce(ctx context.Context, ref CandidateRe
 	if err := c.finishPendingRemovalLocked(ctx); err != nil {
 		return RefreshResult{}, err
 	}
+	return c.refreshLocked(ctx, ref, expected)
+}
+
+// RefreshCanonical never joins legacy recovery flights. The coordinator mutex
+// serialises the same candidate, and the revision is checked under that lock.
+func (c *CredentialCoordinator) RefreshCanonical(ctx context.Context, ref CandidateRef, expected Revision) (RefreshResult, error) {
+	if err := c.lockMutation(ctx); err != nil {
+		return RefreshResult{}, err
+	}
+	defer c.mu.Unlock()
+	if _, pending, err := c.Journal.Load(); err != nil {
+		return RefreshResult{}, err
+	} else if pending {
+		return RefreshResult{}, ErrStaleRevision
+	}
+	return c.refreshLocked(ctx, ref, expected)
+}
+func (c *CredentialCoordinator) refreshLocked(ctx context.Context, ref CandidateRef, expected Revision) (RefreshResult, error) {
+	if err := ctx.Err(); err != nil {
+		return RefreshResult{}, err
+	}
 	record, err := c.loadRef(ref)
 	if err != nil {
 		return RefreshResult{}, err
@@ -386,4 +407,10 @@ type definitiveRefreshError interface{ RefreshDefinitive() bool }
 func isDefinitiveRefreshError(err error) bool {
 	var definitive definitiveRefreshError
 	return errors.As(err, &definitive) && definitive.RefreshDefinitive()
+}
+
+// OpenDefaultCanonicalCredentialRefreshControl admits an owner without replaying
+// unrelated credential recovery; refresh still uses the owned OAuth exchange.
+func OpenDefaultCanonicalCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer) (*CredentialControl, error) {
+	return openDefaultCredentialRefreshControl(ctx, fs, client, OpenDefaultCanonicalCredentialControl)
 }

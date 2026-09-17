@@ -86,8 +86,8 @@ type ResetCreditClient struct {
 
 type rawResetCredit struct {
 	ID          string  `json:"id"`
-	ResetType   string  `json:"reset_type"`
-	Status      string  `json:"status"`
+	ResetType   *string `json:"reset_type"`
+	Status      *string `json:"status"`
 	GrantedAt   string  `json:"granted_at"`
 	ExpiresAt   *string `json:"expires_at"`
 	Title       *string `json:"title"`
@@ -95,8 +95,8 @@ type rawResetCredit struct {
 }
 
 type rawResetCreditInventory struct {
-	Credits        *[]rawResetCredit `json:"credits"`
-	AvailableCount *int64            `json:"available_count"`
+	Credits        *[]json.RawMessage `json:"credits"`
+	AvailableCount *int64             `json:"available_count"`
 }
 
 func (c ResetCreditClient) List(ctx context.Context, material CredentialMaterial) (ResetCreditInventory, error) {
@@ -135,8 +135,21 @@ func (c ResetCreditClient) List(ctx context.Context, material CredentialMaterial
 		AvailableCount: int(*raw.AvailableCount),
 	}
 	rawAvailable := 0
-	for index, entry := range *raw.Credits {
-		if entry.Status == string(ResetCreditAvailable) {
+	for index, data := range *raw.Credits {
+		var entry rawResetCredit
+		var status struct {
+			Status *string `json:"status"`
+		}
+		_ = json.Unmarshal(data, &status)
+		malformed := len(bytes.TrimSpace(data)) == 0 || bytes.TrimSpace(data)[0] != '{' || json.Unmarshal(data, &entry) != nil
+		if malformed {
+			if status.Status != nil && *status.Status == string(ResetCreditAvailable) {
+				rawAvailable++
+			}
+			inventory.EntryErrors = append(inventory.EntryErrors, ResetCreditEntryError{Index: index, Code: "invalid_entry"})
+			continue
+		}
+		if entry.Status != nil && *entry.Status == string(ResetCreditAvailable) {
 			rawAvailable++
 		}
 		credit, code := parseResetCredit(entry)
@@ -260,6 +273,15 @@ func parseResetCredit(raw rawResetCredit) (ResetCredit, string) {
 	if raw.ID == "" || strings.TrimSpace(raw.ID) != raw.ID {
 		return ResetCredit{}, "invalid_id"
 	}
+	if raw.ResetType == nil {
+		return ResetCredit{}, "missing_reset_type"
+	}
+	if raw.Status == nil {
+		return ResetCredit{}, "missing_status"
+	}
+	if strings.TrimSpace(*raw.ResetType) == "" || strings.TrimSpace(*raw.Status) == "" {
+		return ResetCredit{}, "invalid_entry"
+	}
 	grantedAt, err := time.Parse(time.RFC3339, raw.GrantedAt)
 	if err != nil {
 		return ResetCredit{}, "invalid_granted_at"
@@ -273,7 +295,7 @@ func parseResetCredit(raw rawResetCredit) (ResetCredit, string) {
 		expiresAt = &parsed
 	}
 	credit := ResetCredit{
-		ID: raw.ID, ResetType: ResetType(raw.ResetType), Status: ResetCreditStatus(raw.Status),
+		ID: raw.ID, ResetType: ResetType(*raw.ResetType), Status: ResetCreditStatus(*raw.Status),
 		GrantedAt: grantedAt, ExpiresAt: expiresAt,
 	}
 	if raw.Title != nil {

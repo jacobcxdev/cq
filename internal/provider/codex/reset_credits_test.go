@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -324,5 +325,40 @@ func TestResetCreditClientPreservesCancellation(t *testing.T) {
 	}
 	if called {
 		t.Fatal("HTTP called after cancellation")
+	}
+}
+
+func TestResetCreditClientListRequiredPresence(t *testing.T) {
+	for _, tc := range []struct{ name, fields, code string }{
+		{"missing type", `"status":"available",`, "missing_reset_type"},
+		{"null type", `"reset_type":null,"status":"available",`, "missing_reset_type"},
+		{"missing status", `"reset_type":"codex_rate_limits",`, "missing_status"},
+		{"null status", `"reset_type":"codex_rate_limits","status":null,`, "missing_status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			count := 0
+			if strings.Contains(tc.fields, `"status":"available"`) {
+				count = 1
+			}
+			body := fmt.Sprintf(`{"credits":[{"id":"bad",%s"granted_at":"2026-08-30T08:00:00Z"}],"available_count":%d}`, tc.fields, count)
+			client := ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) { return resetJSONResponse(200, body), nil })}
+			inventory, err := client.List(context.Background(), resetMaterial())
+			if err == nil || len(inventory.EntryErrors) != 1 || inventory.EntryErrors[0].Code != tc.code {
+				t.Fatalf("inventory=%+v error=%v; want explicit %s", inventory, err, tc.code)
+			}
+		})
+	}
+}
+
+func TestResetCreditClientListMalformedSibling(t *testing.T) {
+	for _, bad := range []string{`42`, `null`, `{"id":"bad","reset_type":42}`, `[]`} {
+		t.Run(bad, func(t *testing.T) {
+			body := `{"credits":[{"id":"valid","reset_type":"future","status":"future","granted_at":"2026-09-01T00:00:00Z"},` + bad + `],"available_count":0}`
+			client := ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) { return resetJSONResponse(200, body), nil })}
+			result, err := client.List(context.Background(), resetMaterial())
+			if err == nil || len(result.Credits) != 1 || result.Credits[0].ID != "valid" || len(result.EntryErrors) != 1 || result.EntryErrors[0].Code != "invalid_entry" {
+				t.Fatalf("lost valid sibling or error: %+v %v", result, err)
+			}
+		})
 	}
 }

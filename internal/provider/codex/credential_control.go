@@ -1014,8 +1014,8 @@ type MutationOutcomeUnknown struct{ Err error }
 
 func (e *MutationOutcomeUnknown) Error() string { return "credential mutation outcome is unknown" }
 func (e *MutationOutcomeUnknown) Unwrap() error { return e.Err }
-func OpenDefaultCanonicalCredentialControl(ctx context.Context, fs fsutil.DurableFileSystem) (*CredentialControl, error) {
-	coordinator, path, err := newDefaultCredentialCoordinator(fs)
+func OpenDefaultCanonicalCredentialControl(ctx context.Context, fs fsutil.DurableFileSystem, exchanges ...RefreshExchange) (*CredentialControl, error) {
+	coordinator, path, err := newDefaultCredentialCoordinator(fs, exchanges...)
 	if err != nil {
 		return nil, err
 	}
@@ -1025,4 +1025,53 @@ func OpenDefaultCanonicalCredentialControl(ctx context.Context, fs fsutil.Durabl
 		}
 		return capability.AssertOwner()
 	})
+}
+
+type RefreshV2Args struct {
+	RequestID CredentialRPCRequestID
+	Deadline  time.Time
+	Ref       CandidateRef
+	Revision  Revision
+}
+type RefreshV2Reply struct {
+	Result  RefreshResult
+	Failure MutationFailure
+}
+
+func (a *CanonicalCredentialAdmin) Refresh(ctx context.Context, ref CandidateRef, revision Revision) (RefreshResult, error) {
+	if err := ctx.Err(); err != nil {
+		return RefreshResult{}, err
+	}
+	c := a.control
+	if c.owner {
+		operation, err := c.beginCredentialOwnerOperation()
+		if err != nil {
+			return RefreshResult{}, err
+		}
+		defer operation.Release()
+		return c.coordinator.RefreshCanonical(ctx, ref, revision)
+	}
+	id, err := newCredentialRPCRequestID()
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	deadline, _ := ctx.Deadline()
+	reply := new(RefreshV2Reply)
+	if err := c.callCanonicalMutation(ctx, "CredentialRPC.RefreshV2", id, RefreshV2Args{id, deadline, ref, revision}, reply); err != nil {
+		return RefreshResult{}, err
+	}
+	return reply.Result, reply.Failure.err()
+}
+func (r *credentialRPC) RefreshV2(args RefreshV2Args, reply *RefreshV2Reply) error {
+	ctx, done := r.beginMutationRequest(args.RequestID, args.Deadline)
+	defer done()
+	operation, err := r.beginCoordinatorOperation()
+	if err != nil {
+		reply.Failure = mutationFailure(err)
+		return nil
+	}
+	defer operation.Release()
+	reply.Result, err = r.Coordinator.RefreshCanonical(ctx, args.Ref, args.Revision)
+	reply.Failure = mutationFailure(err)
+	return nil
 }

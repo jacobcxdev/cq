@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/aggregate"
@@ -51,10 +50,14 @@ type CodexResetPublicError struct {
 }
 
 type CodexResetAccountCredits struct {
-	AccountID string                  `json:"account_id,omitempty"`
-	Email     string                  `json:"email,omitempty"`
-	Credits   []codexprov.ResetCredit `json:"credits"`
-	Error     *CodexResetPublicError  `json:"error,omitempty"`
+	Unselectable bool                           `json:"-"`
+	AccountKey   codexprov.AccountKey           `json:"-"`
+	Inventory    codexprov.ResetCreditInventory `json:"-"`
+	ReadError    error                          `json:"-"`
+	AccountID    string                         `json:"account_id,omitempty"`
+	Email        string                         `json:"email,omitempty"`
+	Credits      []codexprov.ResetCredit        `json:"credits"`
+	Error        *CodexResetPublicError         `json:"error,omitempty"`
 }
 
 type CodexResetListResult struct {
@@ -129,6 +132,7 @@ func (a *CodexResetApp) List(ctx context.Context, reference string) (CodexResetL
 	result := CodexResetListResult{Accounts: make([]CodexResetAccountCredits, len(accounts))}
 	for index, account := range accounts {
 		row := CodexResetAccountCredits{
+			Unselectable: account.Unselectable, AccountKey: account.AccountKey, Inventory: reads[index].inventory, ReadError: reads[index].err,
 			AccountID: account.AccountID, Email: account.Email,
 			Credits: append([]codexprov.ResetCredit{}, reads[index].inventory.Credits...),
 		}
@@ -137,7 +141,7 @@ func (a *CodexResetApp) List(ctx context.Context, reference string) (CodexResetL
 		}
 		result.Accounts[index] = row
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
 func (a *CodexResetApp) Recommend(ctx context.Context) (aggregate.ResetSchedule, error) {
@@ -154,7 +158,10 @@ func (a *CodexResetApp) recommend(ctx context.Context, updateHistory bool) (aggr
 
 	var estimates history.RateEstimates
 	if updateHistory && usageErr == nil && a.History != nil {
-		_, estimates, _ = callResetHistory(ctx, a.History, usage, now)
+		estimates, _ = observeReset(ctx, func() (history.RateEstimates, error) {
+			_, result, err := callResetHistory(ctx, a.History, usage, now)
+			return result, err
+		})
 	}
 
 	input := aggregate.ResetScheduleInput{Now: now}
@@ -163,8 +170,12 @@ func (a *CodexResetApp) recommend(ctx context.Context, updateHistory bool) (aggr
 		blockers = append(blockers, aggregate.ResetScheduleBlocker{Code: "usage_unavailable"})
 	}
 	for index, account := range snapshot.Accounts {
+		if account.Unselectable {
+			blockers = append(blockers, resetScheduleBlocker(account, "inventory_invalid"))
+			continue
+		}
 		if creditReads[index].err != nil {
-			blockers = append(blockers, resetScheduleBlocker(account, resetReadErrorCode(creditReads[index].err)))
+			blockers = append(blockers, resetScheduleBlocker(account, resetScheduleReadErrorCode(creditReads[index].err)))
 			continue
 		}
 		usageResult, matchCode := matchResetUsage(account, usage)
@@ -174,7 +185,7 @@ func (a *CodexResetApp) recommend(ctx context.Context, updateHistory bool) (aggr
 			}
 			continue
 		}
-		accountInput, ok := resetScheduleAccountInput(account, usageResult, creditReads[index].inventory.Credits, estimates)
+		accountInput, ok := resetScheduleAccountInput(now, account, usageResult, creditReads[index].inventory.Credits, estimates)
 		if !ok {
 			blockers = append(blockers, resetScheduleBlocker(account, "usage_windows_invalid"))
 			continue
@@ -182,12 +193,15 @@ func (a *CodexResetApp) recommend(ctx context.Context, updateHistory bool) (aggr
 		input.Accounts = append(input.Accounts, accountInput)
 	}
 
-	schedule := aggregate.RecommendResetSchedule(input)
+	schedule, scheduleErr := observeReset(ctx, func() (aggregate.ResetSchedule, error) { return aggregate.RecommendResetSchedule(input), nil })
+	if scheduleErr != nil {
+		schedule = aggregate.ResetSchedule{GeneratedAt: now, Horizon: now.Add(7 * 24 * time.Hour), Confidence: aggregate.ResetConfidenceLow}
+		blockers = append(blockers, aggregate.ResetScheduleBlocker{Code: "usage_unavailable"})
+	}
 	if len(blockers) > 0 || !schedule.Complete {
 		schedule.Blockers = append(schedule.Blockers, blockers...)
 		sortResetScheduleBlockers(schedule.Blockers)
 		schedule.Complete = false
-		schedule.Exact = false
 		for index := range schedule.Items {
 			if schedule.Items[index].Status == aggregate.ResetScheduled || schedule.Items[index].Status == aggregate.ResetDueNow {
 				schedule.Items[index].Status = aggregate.ResetDeferred
@@ -345,7 +359,7 @@ func (a *CodexResetApp) snapshot(ctx context.Context) (codexprov.ResetAccountSna
 	if a == nil || a.Backend == nil {
 		return codexprov.ResetAccountSnapshot{}, errors.New("Codex reset backend unavailable")
 	}
-	return a.Backend.Snapshot(ctx)
+	return observeReset(ctx, func() (codexprov.ResetAccountSnapshot, error) { return a.Backend.Snapshot(ctx) })
 }
 
 func (a *CodexResetApp) now() time.Time {
@@ -355,57 +369,121 @@ func (a *CodexResetApp) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (a *CodexResetApp) readCredits(ctx context.Context, accounts []codexprov.ResetAccount) []codexResetCreditRead {
-	reads := make([]codexResetCreditRead, len(accounts))
-	var wait sync.WaitGroup
-	for index := range accounts {
-		wait.Add(1)
-		go func(index int) {
-			defer wait.Done()
-			defer func() {
-				if recover() != nil {
-					reads[index].err = errors.New("credit inventory panic")
-				}
-			}()
-			reads[index].inventory, reads[index].err = a.Backend.ListCredits(ctx, accounts[index])
-		}(index)
+// observeReset gives each external operation sole ownership of its result. A
+// buffered handoff lets a cancelled caller leave without racing late completion.
+func observeReset[T any](ctx context.Context, call func() (T, error)) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, err
 	}
-	wait.Wait()
-	return reads
-}
-
-func (a *CodexResetApp) readRecommendationInputs(ctx context.Context, accounts []codexprov.ResetAccount, now time.Time) ([]quota.Result, error, []codexResetCreditRead) {
-	reads := make([]codexResetCreditRead, len(accounts))
-	var usage []quota.Result
-	var usageErr error
-	var wait sync.WaitGroup
-	wait.Add(1)
+	type result struct {
+		value T
+		err   error
+	}
+	done := make(chan result, 1)
 	go func() {
-		defer wait.Done()
+		r := result{}
 		defer func() {
 			if recover() != nil {
-				usageErr = errors.New("usage fetch panic")
+				r.err = errors.New("reset dependency panic")
 			}
+			done <- r
 		}()
-		if a.Usage == nil {
-			usageErr = errors.New("Codex usage unavailable")
-			return
-		}
-		usage, usageErr = callResetUsage(ctx, a.Usage, now)
+		r.value, r.err = call()
 	}()
-	for index := range accounts {
-		wait.Add(1)
-		go func(index int) {
-			defer wait.Done()
+	select {
+	case r := <-done:
+		return r.value, r.err
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	}
+}
+
+func (a *CodexResetApp) readCredits(ctx context.Context, accounts []codexprov.ResetAccount) []codexResetCreditRead {
+	_, _, reads := a.readInputs(ctx, accounts, time.Time{}, false)
+	return reads
+}
+func (a *CodexResetApp) readRecommendationInputs(ctx context.Context, accounts []codexprov.ResetAccount, now time.Time) ([]quota.Result, error, []codexResetCreditRead) {
+	return a.readInputs(ctx, accounts, now, true)
+}
+func (a *CodexResetApp) readInputs(ctx context.Context, accounts []codexprov.ResetAccount, now time.Time, withUsage bool) ([]quota.Result, error, []codexResetCreditRead) {
+	type observation struct {
+		index  int
+		credit codexResetCreditRead
+		usage  []quota.Result
+		err    error
+	}
+	count := len(accounts)
+	if withUsage {
+		count++
+	}
+	done := make(chan observation, count)
+	reads := make([]codexResetCreditRead, len(accounts))
+	received := make([]bool, len(accounts))
+	var usage []quota.Result
+	var usageErr error
+	usageReceived := !withUsage
+	launch := func(index int) {
+		go func() {
+			r := observation{index: index}
 			defer func() {
 				if recover() != nil {
-					reads[index].err = errors.New("credit inventory panic")
+					r.err = errors.New("reset dependency panic")
+					r.credit.err = r.err
 				}
+				done <- r
 			}()
-			reads[index].inventory, reads[index].err = a.Backend.ListCredits(ctx, accounts[index])
-		}(index)
+			if err := ctx.Err(); err != nil {
+				r.err = err
+				r.credit.err = err
+				return
+			}
+			if index < 0 {
+				r.usage, r.err = callResetUsage(ctx, a.Usage, now)
+			} else {
+				r.credit.inventory, r.credit.err = a.Backend.ListCredits(ctx, accounts[index])
+			}
+		}()
 	}
-	wait.Wait()
+	for i := range accounts {
+		launch(i)
+	}
+	if withUsage {
+		launch(-1)
+	}
+	accept := func(r observation) {
+		if r.index < 0 {
+			usage, usageErr, usageReceived = r.usage, r.err, true
+		} else {
+			reads[r.index] = r.credit
+			received[r.index] = true
+		}
+	}
+	for count > 0 {
+		select {
+		case r := <-done:
+			accept(r)
+			count--
+		case <-ctx.Done():
+			// Keep every completed observation already handed off before cancellation.
+			for {
+				select {
+				case r := <-done:
+					accept(r)
+				default:
+					for i := range reads {
+						if !received[i] {
+							reads[i].err = ctx.Err()
+						}
+					}
+					if !usageReceived {
+						usageErr = ctx.Err()
+					}
+					return usage, usageErr, reads
+				}
+			}
+		}
+	}
 	return usage, usageErr, reads
 }
 
@@ -434,7 +512,7 @@ func matchResetUsage(account codexprov.ResetAccount, results []quota.Result) (qu
 	return matches[0], ""
 }
 
-func resetScheduleAccountInput(account codexprov.ResetAccount, result quota.Result, credits []codexprov.ResetCredit, estimates history.RateEstimates) (aggregate.ResetScheduleAccountInput, bool) {
+func resetScheduleAccountInput(now time.Time, account codexprov.ResetAccount, result quota.Result, credits []codexprov.ResetCredit, estimates history.RateEstimates) (aggregate.ResetScheduleAccountInput, bool) {
 	input := aggregate.ResetScheduleAccountInput{
 		Key: string(account.AccountKey), Email: account.Email, AccountID: account.AccountID,
 		Multiplier: quota.ExtractMultiplier(result.RateLimitTier),
@@ -465,7 +543,7 @@ func resetScheduleAccountInput(account codexprov.ResetAccount, result quota.Resu
 		input.Windows[name] = mapped
 	}
 	for _, credit := range credits {
-		if credit.Status != codexprov.ResetCreditAvailable {
+		if credit.Status != codexprov.ResetCreditAvailable || credit.ExpiresAt != nil && !credit.ExpiresAt.After(now) {
 			continue
 		}
 		input.Credits = append(input.Credits, aggregate.ResetScheduleCreditInput{
@@ -477,7 +555,7 @@ func resetScheduleAccountInput(account codexprov.ResetAccount, result quota.Resu
 }
 
 func resetScheduleBlocker(account codexprov.ResetAccount, code string) aggregate.ResetScheduleBlocker {
-	return aggregate.ResetScheduleBlocker{Code: code, AccountEmail: account.Email, AccountID: account.AccountID}
+	return aggregate.ResetScheduleBlocker{AccountReference: string(account.AccountKey), Code: code, AccountEmail: account.Email, AccountID: account.AccountID}
 }
 
 func sortResetScheduleBlockers(blockers []aggregate.ResetScheduleBlocker) {
@@ -502,6 +580,13 @@ func sharedResetQuotaWindows(windows map[quota.WindowName]quota.Window) map[quot
 	return shared
 }
 
+func resetScheduleReadErrorCode(err error) string {
+	var invalid *codexprov.ResetCreditInventoryError
+	if errors.As(err, &invalid) {
+		return "inventory_invalid"
+	}
+	return resetReadErrorCode(err)
+}
 func resetReadErrorCode(err error) string {
 	var statusErr *codexprov.ResetHTTPError
 	if errors.As(err, &statusErr) && (statusErr.Status == http.StatusUnauthorized || statusErr.Status == http.StatusForbidden) {

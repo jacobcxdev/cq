@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -297,4 +298,136 @@ func TestResetCandidateRefreshEligibilityRequiresOwnedReadyLineage(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestResetBackendListCandidateFallback(t *testing.T) {
+	for _, status := range []int{401, 403, 429, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			inventory := resetAccountInventory()
+			logical := &inventory.Accounts[0]
+			second := logical.Candidates[0]
+			second.Ref.CandidateID = "candidate-second"
+			second.Revision = "second"
+			second.Source = SourceManaged
+			second.RefreshEligible = true
+			logical.Candidates = append(logical.Candidates, second)
+			resolver := &recordingResetResolver{material: resetResolvedMaterial("acct-a", "user-a")}
+			refresh := &recordingResetRefresh{}
+			calls := 0
+			backend := ResetBackend{Inventory: &staticResetInventory{inventory: inventory}, Resolver: resolver, Refresh: refresh, Now: func() time.Time { return time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC) }, Credits: ResetCreditClient{HTTP: resetDoerFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Header.Get("ChatGPT-Account-Id") != "acct-a" {
+					t.Error("identity changed")
+				}
+				if calls == 1 {
+					return resetJSONResponse(status, `{}`), nil
+				}
+				return resetJSONResponse(200, `{"credits":[],"available_count":0}`), nil
+			})}}
+			snapshot, err := backend.Snapshot(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = backend.ListCredits(context.Background(), snapshot.Accounts[0])
+			want := 1
+			if status == 401 || status == 403 {
+				want = 2
+				if err != nil {
+					t.Errorf("existing credential should succeed: %v", err)
+				}
+			}
+			if calls != want || refresh.calls != 0 {
+				t.Fatalf("HTTP=%d refresh=%d, want HTTP=%d refresh=0", calls, refresh.calls, want)
+			}
+		})
+	}
+}
+
+func TestResetBackendListRefreshesAfterAllCandidates(t *testing.T) {
+	inventory := resetAccountInventory()
+	logical := &inventory.Accounts[0]
+	second := logical.Candidates[0]
+	second.Ref.CandidateID = "managed-second"
+	second.Revision = "managed-old"
+	second.Source = SourceManaged
+	second.RefreshEligible = true
+	logical.Candidates = append(logical.Candidates, second)
+	resolver := &recordingResetResolver{material: resetResolvedMaterial("acct-a", "user-a")}
+	refresh := &recordingResetRefresh{result: RefreshResult{Ref: second.Ref, Revision: "managed-new"}}
+	calls := 0
+	backend := ResetBackend{Inventory: &staticResetInventory{inventory: inventory}, Resolver: resolver, Refresh: refresh, Now: func() time.Time { return time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC) }, Credits: ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls < 3 {
+			return resetJSONResponse(401, `{}`), nil
+		}
+		return resetJSONResponse(200, `{"credits":[],"available_count":0}`), nil
+	})}}
+	snapshot, _ := backend.Snapshot(context.Background())
+	_, err := backend.ListCredits(context.Background(), snapshot.Accounts[0])
+	if err != nil || calls != 3 || refresh.calls != 1 || len(resolver.plans) != 3 || resolver.plans[1].Ref.CandidateID != "managed-second" || resolver.plans[2].Revision != "managed-new" {
+		t.Fatalf("calls=%d refresh=%d plans=%+v err=%v", calls, refresh.calls, resolver.plans, err)
+	}
+}
+
+func TestProjectVisibleAccountsMarksUnselectableReferences(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprint(duplicate), func(t *testing.T) {
+			inventory := resetAccountInventory()
+			if duplicate {
+				inventory.Accounts = append(inventory.Accounts, inventory.Accounts[0])
+			} else {
+				inventory.Accounts[0].Unstable = true
+			}
+			rows := ProjectVisibleAccounts(inventory, time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
+			if len(rows) == 0 || !rows[0].Unselectable {
+				t.Fatalf("unselectable identity advertised as selector: %+v", rows)
+			}
+		})
+	}
+}
+
+type resetResolverFunc func(context.Context, PlannedCandidate) (CredentialMaterial, error)
+
+func (f resetResolverFunc) ResolveExact(ctx context.Context, p PlannedCandidate) (CredentialMaterial, error) {
+	return f(ctx, p)
+}
+func TestResetBackendListRefreshRetainsReplannedRevision(t *testing.T) {
+	inventory := resetAccountInventory()
+	logical := &inventory.Accounts[1]
+	logical.Routable = true
+	logical.Candidates[0].Routable = true
+	backendInventory := &staticResetInventory{inventory: inventory}
+	refresh := &recordingResetRefresh{result: RefreshResult{Ref: logical.Candidates[0].Ref, Revision: "after-refresh"}}
+	oldPlan := ProjectVisibleAccounts(inventory, time.Now())[1]
+	logical.Candidates[0].Revision = "replanned"
+	calls := 0
+	resolver := resetResolverFunc(func(_ context.Context, plan PlannedCandidate) (CredentialMaterial, error) {
+		if plan.Revision == "revision-b" {
+			return CredentialMaterial{}, ErrStaleRevision
+		}
+		return resetResolvedMaterial("acct-b", "user-b"), nil
+	})
+	backend := ResetBackend{Inventory: backendInventory, Resolver: resolver, Refresh: refresh, Credits: ResetCreditClient{HTTP: resetDoerFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return resetJSONResponse(401, `{}`), nil
+		}
+		return resetJSONResponse(200, `{"credits":[],"available_count":0}`), nil
+	})}}
+	// Broker receives the refreshed snapshot revision, never the stale caller plan.
+	expected := Revision("")
+	backend.Refresh = resetRefreshFunc(func(ctx context.Context, ref CandidateRef, rev Revision) (RefreshResult, error) {
+		expected = rev
+		return refresh.Refresh(ctx, ref, rev)
+	})
+	_, err := backend.ListCredits(context.Background(), oldPlan)
+	if err != nil || expected != "replanned" {
+		t.Fatalf("refresh revision=%q error=%v", expected, err)
+	}
+}
+
+type resetRefreshFunc func(context.Context, CandidateRef, Revision) (RefreshResult, error)
+
+func (f resetRefreshFunc) Refresh(ctx context.Context, ref CandidateRef, rev Revision) (RefreshResult, error) {
+	return f(ctx, ref, rev)
 }

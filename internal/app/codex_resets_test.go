@@ -421,3 +421,40 @@ func TestCodexResetExecuteNoOpRemovesAttemptWithoutRefetch(t *testing.T) {
 		t.Fatalf("result=%+v err=%v remove=%d fetches=%d/%d", result, err, attempts.removeCalls, usage.calls, beforeFetches)
 	}
 }
+
+type deadlineResetBackend struct {
+	recordingResetBackend
+	release   chan struct{}
+	completed chan struct{}
+}
+
+func (b *deadlineResetBackend) ListCredits(ctx context.Context, a codexprov.ResetAccount) (codexprov.ResetCreditInventory, error) {
+	if a.AccountKey == "account-b" {
+		<-b.release
+	}
+	if a.AccountKey == "account-a" {
+		close(b.completed)
+	}
+	return codexprov.ResetCreditInventory{Credits: []codexprov.ResetCredit{{ID: string(a.AccountKey)}}}, nil
+}
+func TestResetListTotalDeadlineRetainsCompletedRows(t *testing.T) {
+	b := &deadlineResetBackend{recordingResetBackend: recordingResetBackend{snapshot: resetAppSnapshot()}, release: make(chan struct{}), completed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan CodexResetListResult, 1)
+	go func() { r, _ := (&CodexResetApp{Backend: b}).List(ctx, ""); done <- r }()
+	<-b.completed
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case result := <-done:
+		if len(result.Accounts) != 3 || len(result.Accounts[0].Credits) != 1 || result.Accounts[1].Error == nil {
+			t.Fatalf("lost completed result or missing blocked row: %+v", result)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(b.release)
+		<-done
+		t.Fatal("List waited for uncooperative dependency beyond total deadline")
+	}
+	close(b.release)
+}
