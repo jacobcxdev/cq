@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sort"
 	"time"
 
@@ -213,6 +214,10 @@ func v2CheckStatus(parent, ctx context.Context, report app.Report, stale bool) c
 			code := ""
 			if row.Error != nil {
 				code = row.Error.Code
+				if row.Error.HTTPStatus == http.StatusUnauthorized {
+					authentication = true
+					continue
+				}
 			}
 			switch code {
 			case "no_token", "auth_expired":

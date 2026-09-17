@@ -672,3 +672,24 @@ func TestFetchObservedActiveFlagUsesCompletedMetadata(t *testing.T) {
 		t.Fatalf("completed active metadata lost: rows=%+v snapshot=%+v err=%v", rows, snapshot, err)
 	}
 }
+
+func TestFetchObservedUsageUnauthorizedPreservesDomainEvidence(t *testing.T) {
+	setClaudeTestHome(t, t.TempDir())
+	p := New(doerFunc(func(req *http.Request) (*http.Response, error) {
+		status, body := http.StatusOK, `{}`
+		if req.URL.Path == "/api/oauth/usage" {
+			status, body = http.StatusUnauthorized, `{"private":"upstream-secret"}`
+		} else if req.URL.Path != "/api/oauth/profile" {
+			t.Errorf("unexpected endpoint %s", req.URL.Path)
+		}
+		return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	p.discover = func(context.Context) []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{AccessToken: "fake", SubscriptionType: "max", AccountUUID: "fake-id"}}
+	}
+	ctx := provider.WithObservation(context.Background(), provider.Observation{})
+	rows, err := p.Fetch(ctx, time.Now())
+	if err != nil || len(rows) != 1 || rows[0].Error == nil || rows[0].Error.Code != "api_error" || rows[0].Error.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("actual Fetch401 mapping changed: rows=%+v err=%v", rows, err)
+	}
+}

@@ -259,6 +259,11 @@ func recoverCachePanic(ctx context.Context, err *error) {
 
 func (r *Runner) cacheGet(ctx context.Context, id provider.ID) (rows []quota.Result, ok bool, err error) {
 	defer recoverCachePanic(ctx, &err)
+	if c, ok := r.Cache.(interface {
+		GetObserved(context.Context, string) ([]quota.Result, bool, error)
+	}); provider.Observed(ctx) && ok {
+		return c.GetObserved(ctx, string(id))
+	}
 	return r.Cache.Get(ctx, string(id))
 }
 

@@ -5,18 +5,26 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/jacobcxdev/cq/internal/aggregate"
-	"github.com/jacobcxdev/cq/internal/app"
-	"github.com/jacobcxdev/cq/internal/cli"
-	"github.com/jacobcxdev/cq/internal/history"
-	"github.com/jacobcxdev/cq/internal/output"
-	"github.com/jacobcxdev/cq/internal/provider"
-	"github.com/jacobcxdev/cq/internal/quota"
+	"io"
+	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/aggregate"
+	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/cache"
+	"github.com/jacobcxdev/cq/internal/cli"
+	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/history"
+	"github.com/jacobcxdev/cq/internal/keyring"
+	"github.com/jacobcxdev/cq/internal/output"
+	"github.com/jacobcxdev/cq/internal/provider"
+	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 type v2QuotaClock struct{}
@@ -564,6 +572,107 @@ func TestCLIV2CheckFrozenDepletedPoolCapacity(t *testing.T) {
 				t.Fatalf("capacity=%d weekly=%+v; want capacity=%d weekly=%+v", got.Summary.TotalMulti, got.Windows["7d"], wantCapacity, want)
 			}
 			t.Logf("capacity=%d weekly=%+v", got.Summary.TotalMulti, got.Windows["7d"])
+		})
+	}
+}
+
+type v2QuotaHTTP func(*http.Request) (*http.Response, error)
+
+func (f v2QuotaHTTP) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestCLIV2CheckRealClaudeUnauthorized(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "authentication", true: "authentication before operation"}[mixed], func(t *testing.T) {
+			claude := claudeprov.New(v2QuotaHTTP(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != "/api/oauth/usage" {
+					t.Errorf("unexpected endpoint %s", req.URL.Path)
+				}
+				return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"private":"upstream-secret"}`))}, nil
+			}))
+			runner := quotaTestRunner(nil)
+			runner.Services[provider.Claude] = provider.Services{Usage: v2QuotaProvider(func(ctx context.Context, now time.Time) ([]quota.Result, error) {
+				row, _, err := claude.FetchAccountUsage(ctx, keyring.ClaudeOAuth{AccessToken: "fake", SubscriptionType: "max"}, now)
+				return []quota.Result{row}, err
+			})}
+			args := []string{"check", "claude", "--json"}
+			if mixed {
+				runner.Services[provider.Codex] = provider.Services{Usage: v2QuotaProvider(func(context.Context, time.Time) ([]quota.Result, error) {
+					return []quota.Result{quota.ErrorResult("fetch_error", "private-operation", 0)}, nil
+				})}
+				args = []string{"check", "codex", "claude", "--json"}
+			}
+			exit, text, diagnostics := quotaTestRun(t, context.Background(), args, v2CheckPrepared{Runner: runner})
+			if exit != 5 || !strings.Contains(text, `"check_authentication"`) {
+				t.Fatalf("actual Claude401: exit=%d want5: %s", exit, text)
+			}
+			report := quotaTestReport(t, text)
+			row := report.Providers[len(report.Providers)-1].Results[0]
+			if row.Error.Code != "api_error" || row.Error.HTTPStatus != 401 {
+				t.Fatalf("domain evidence changed: %+v", row.Error)
+			}
+			if strings.Contains(text+diagnostics, "upstream-secret") || strings.Contains(text+diagnostics, "private-operation") {
+				t.Fatal("raw failure leaked")
+			}
+		})
+	}
+}
+
+type v2QuotaCacheReadFS struct {
+	*fsutil.MemFS
+	stage string
+}
+
+func (f *v2QuotaCacheReadFS) Stat(path string) (os.FileInfo, error) {
+	if f.stage == "stat" {
+		return nil, &os.PathError{Op: "stat", Path: "private-cache-path", Err: os.ErrPermission}
+	}
+	return f.MemFS.Stat(path)
+}
+func (f *v2QuotaCacheReadFS) ReadFile(path string) ([]byte, error) {
+	if f.stage == "read" {
+		return nil, &os.PathError{Op: "read", Path: "private-cache-path", Err: os.ErrPermission}
+	}
+	if f.stage == "read-io" {
+		return nil, errors.New("private-IO-failure")
+	}
+	if f.stage == "disappeared" {
+		return nil, os.ErrNotExist
+	}
+	return f.MemFS.ReadFile(path)
+}
+func TestCLIV2CheckRealCacheReadWarnings(t *testing.T) {
+	for _, stage := range []string{"stat", "read", "read-io", "decode", "missing", "disappeared", "expired"} {
+		t.Run(stage, func(t *testing.T) {
+			fs := &v2QuotaCacheReadFS{MemFS: fsutil.NewMemFS(), stage: stage}
+			ttl := time.Hour
+			if stage == "expired" {
+				ttl = -time.Second
+			}
+			c, err := cache.New(fs, "/cache", ttl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage != "missing" {
+				if err := fs.MemFS.WriteFile("/cache/codex.json", []byte("private-malformed-cache-body"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, ok, err := c.Get(context.Background(), "codex"); ok || err != nil {
+				t.Fatalf("legacy cache miss changed: ok=%v err=%v", ok, err)
+			}
+			runner := quotaTestRunner(map[provider.ID][]quota.Result{provider.Codex: {{Status: quota.StatusOK, AccountID: "fresh"}}})
+			runner.Cache = c
+			exit, text, diagnostics := quotaTestRun(t, context.Background(), []string{"check", "codex", "--json"}, v2CheckPrepared{Runner: runner})
+			if exit != 0 || quotaTestReport(t, text).Providers[0].Results[0].AccountID != "fresh" {
+				t.Fatalf("optional cache failure lost successful fetch: exit=%d", exit)
+			}
+			wantWarning := stage == "stat" || stage == "read" || stage == "read-io" || stage == "decode"
+			if strings.Contains(text, `"cache_get_failed"`) != wantWarning {
+				t.Fatalf("stage=%s wantWarning=%v output=%s", stage, wantWarning, text)
+			}
+			if strings.Contains(text+diagnostics, "private-") {
+				t.Fatal("raw cache path/body leaked")
+			}
 		})
 	}
 }

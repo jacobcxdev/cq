@@ -35,6 +35,16 @@ func New(fs FileSystem, dir string, ttl time.Duration) (*Cache, error) {
 
 // Get returns cached results if present and not expired.
 func (c *Cache) Get(ctx context.Context, id string) ([]quota.Result, bool, error) {
+	return c.get(ctx, id, false)
+}
+
+// GetObserved exposes optional read failures to structured callers. Missing or
+// expired entries remain ordinary misses; Get retains legacy silent fallback.
+func (c *Cache) GetObserved(ctx context.Context, id string) ([]quota.Result, bool, error) {
+	return c.get(ctx, id, true)
+}
+
+func (c *Cache) get(ctx context.Context, id string, reportFailures bool) ([]quota.Result, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -48,6 +58,9 @@ func (c *Cache) Get(ctx context.Context, id string) ([]quota.Result, bool, error
 	path := filepath.Join(c.dir, base+".json")
 	info, err := c.fs.Stat(path)
 	if err != nil {
+		if reportFailures && !isNotExist(err) {
+			return nil, false, err
+		}
 		return nil, false, nil
 	}
 	if c.nowFunc().Sub(info.ModTime()) > c.ttl {
@@ -58,10 +71,16 @@ func (c *Cache) Get(ctx context.Context, id string) ([]quota.Result, bool, error
 	}
 	data, err := c.fs.ReadFile(path)
 	if err != nil {
+		if reportFailures && !isNotExist(err) {
+			return nil, false, err
+		}
 		return nil, false, nil
 	}
 	var results []quota.Result
 	if err := json.Unmarshal(data, &results); err != nil {
+		if reportFailures {
+			return nil, false, err
+		}
 		return nil, false, nil
 	}
 	return results, true, nil
