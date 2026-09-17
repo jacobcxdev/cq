@@ -98,6 +98,12 @@ if lsof -nP -iTCP:19280 -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 owns_state=1
 
+if ! launchctl print "gui/$UID" >/dev/null 2>&1; then
+  echo "Homebrew lifecycle validation requires an available gui/$UID launchd domain" >&2
+  exit 69
+fi
+echo "Homebrew lifecycle launchd domain gui/$UID is available"
+
 go build -o "$probe_executable" ./.github/scripts/native-transport-probe.go
 "$probe_executable" serve --address-file "$address_file" &
 upstream_pid=$!
@@ -176,7 +182,20 @@ assert_installed() {
   return 1
 }
 
-HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"
+if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
+  launchctl print-disabled "gui/$UID" >&2 || true
+  for path in "$proxy_plist" "$refresh_plist"; do
+    if [[ -f "$path" ]]; then
+      /usr/bin/stat -f '%Sp %Su:%Sg %N' "$path" >&2 || true
+      /usr/bin/plutil -lint "$path" >&2 || true
+    else
+      echo "LaunchAgent absent after installer rollback: $path" >&2
+    fi
+  done
+  /usr/bin/log show --last 2m --style compact \
+    --predicate 'process == "launchd" AND eventMessage CONTAINS "dev.jacobcx.cq"' >&2 || true
+  exit 1
+fi
 assert_installed "$previous_version"
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"
