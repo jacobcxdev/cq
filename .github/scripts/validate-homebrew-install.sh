@@ -42,14 +42,16 @@ cleanup() {
   result=$?
   trap - EXIT
   set +e
-  if [[ -x "$installed_cq" ]]; then
-    "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq" >/dev/null 2>&1
+  if [[ "$owns_state" -eq 1 ]]; then
+    if [[ -x "$installed_cq" ]]; then
+      "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq" >/dev/null 2>&1
+    fi
+    HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force cq >/dev/null 2>&1
+    for label in "$proxy_label" "$refresh_label"; do
+      launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
+    done
+    HOMEBREW_NO_AUTO_UPDATE=1 brew untap "$validation_tap" >/dev/null 2>&1
   fi
-  HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force cq >/dev/null 2>&1
-  for label in "$proxy_label" "$refresh_label"; do
-    launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
-  done
-  HOMEBREW_NO_AUTO_UPDATE=1 brew untap "$validation_tap" >/dev/null 2>&1
   if [[ "$upstream_pid" =~ ^[1-9][0-9]*$ ]]; then
     kill "$upstream_pid" >/dev/null 2>&1
     wait "$upstream_pid" >/dev/null 2>&1
@@ -96,6 +98,12 @@ if lsof -nP -iTCP:19280 -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 owns_state=1
 
+if ! launchctl print "gui/$UID" >/dev/null 2>&1; then
+  echo "Homebrew lifecycle validation requires an available gui/$UID launchd domain" >&2
+  exit 69
+fi
+echo "Homebrew lifecycle launchd domain gui/$UID is available"
+
 go build -o "$probe_executable" ./.github/scripts/native-transport-probe.go
 "$probe_executable" serve --address-file "$address_file" &
 upstream_pid=$!
@@ -129,7 +137,7 @@ preflight = <<~'BLOCK'
   end
 
 BLOCK
-text.sub!(/^  postflight do$/, preflight + "  postflight do") or abort "missing postflight hook"
+text.sub!(/^  postflight(?:_steps)? do$/) { |hook| preflight + hook } or abort "missing postflight hook"
 File.write(destination, text)
 RUBY
 }
@@ -142,7 +150,7 @@ rewrite_cask "$previous_cask" "$previous_archive" "$validation_cask"
 
 assert_installed() {
   local expected_version=$1
-  [[ "$($installed_cq --version)" == "v$expected_version" ]]
+  [[ "$($installed_cq --version)" == "$expected_version" ]]
   if xattr -p com.apple.quarantine "$installed_cq" >/dev/null 2>&1; then
     echo "Homebrew Cask left cq quarantined" >&2
     return 1
@@ -174,7 +182,20 @@ assert_installed() {
   return 1
 }
 
-HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"
+if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
+  launchctl print-disabled "gui/$UID" >&2 || true
+  for path in "$proxy_plist" "$refresh_plist"; do
+    if [[ -f "$path" ]]; then
+      /usr/bin/stat -f '%Sp %Su:%Sg %N' "$path" >&2 || true
+      /usr/bin/plutil -lint "$path" >&2 || true
+    else
+      echo "LaunchAgent absent after installer rollback: $path" >&2
+    fi
+  done
+  /usr/bin/log show --last 2m --style compact \
+    --predicate 'process == "launchd" AND eventMessage CONTAINS "dev.jacobcx.cq"' >&2 || true
+  exit 1
+fi
 assert_installed "$previous_version"
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"
