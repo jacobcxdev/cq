@@ -28,7 +28,7 @@ type Outcome struct {
 	Errors   []Diagnostic
 	Warnings []Diagnostic
 	Human    string
-	Streamed bool
+	Streamed bool // stdout ownership consumed by terminal write or failed stream write
 }
 
 type Session struct {
@@ -36,6 +36,7 @@ type Session struct {
 	Out         io.Writer
 	Err         io.Writer
 	Interactive bool
+	BuildInfo   BuildInfo
 }
 
 type Handler func(context.Context, Invocation, *Session) Outcome

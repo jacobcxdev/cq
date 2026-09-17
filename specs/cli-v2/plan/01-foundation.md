@@ -260,7 +260,7 @@ T03 parser acceptance is recorded in `internal/cli/testdata/parser-cases.json`, 
 
 **Files:** Create `internal/cli/run.go`, `internal/cli/json.go`, `internal/cli/budget.go`, `internal/cli/consent.go` and corresponding `internal/cli/_test.go` files. Create `cmd/cq/cli_v2_contract_test.go`. Define family fixture registration in that test helper; real production composition remains T27.
 
-**Interfaces:** Produces Run, WriteJSON, EncodeData, BeginBudget/Budget and Confirm with exact coordinator signatures, plus runV2Case and v2Case test contract. Existing family engines remain dependency injected. BuildInfo feeds VersionOutcome; lookup is not consulted for pure presentation.
+**Interfaces:** Produces Run, WriteJSON, EncodeData, BeginBudget/Budget and Confirm with exact coordinator signatures, plus runV2Case and v2Case test contract. Existing family engines remain dependency injected. The additive Session.BuildInfo field feeds VersionOutcome; lookup is not consulted for pure presentation. HumanValue formats dynamic scalar values before template interpolation without escaping structural template newlines. Shared interface and fixture registration details are fixed in plan.md.
 
 **Normative command ownership:**
 
