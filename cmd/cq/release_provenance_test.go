@@ -442,7 +442,7 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	}
 }
 
-func TestGitHubWorkflowsRunOnlyWhenDispatched(t *testing.T) {
+func TestNativeValidationAndReleaseRequireDispatch(t *testing.T) {
 	for _, path := range []string{
 		"../../.github/workflows/ci.yml",
 		"../../.github/workflows/release.yml",

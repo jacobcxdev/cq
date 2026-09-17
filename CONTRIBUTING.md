@@ -43,6 +43,10 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 ## CI Gates
 
+Every pull request into `main` runs the required **Build, vet and race tests** check on Linux ARM64, using the Go version declared in `go.mod`. Superseded runs are cancelled. The branch must be up to date with `main` before merging.
+
+Packaging, installed-client and native platform validation remain available through the manual **CI** workflow. Release publication remains manual through **Release**.
+
 All checks must pass before merge:
 
 ```bash
