@@ -220,6 +220,12 @@ func (s *Store) UpdateAndGetEstimates(
 	return s.updateAndGetEstimates(ctx, providerResults, nowEpoch, nil)
 }
 
+// UpdateAndGetEstimatesObserved preserves confidence metadata while routing
+// optional history diagnostics through the caller's safe warning sink.
+func (s *Store) UpdateAndGetEstimatesObserved(ctx context.Context, providerResults map[string][]quota.Result, nowEpoch int64, warning func(string, string)) (BurnRates, RateEstimates, error) {
+	return s.updateAndGetEstimates(ctx, providerResults, nowEpoch, warning)
+}
+
 // UpdateAndGetBurnRatesObserved reports optional persistence diagnostics through
 // a safe caller-owned sink, without changing history arithmetic or file format.
 func (s *Store) UpdateAndGetBurnRatesObserved(ctx context.Context, providerResults map[string][]quota.Result, nowEpoch int64, warning func(string, string)) (BurnRates, error) {

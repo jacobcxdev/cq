@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/aggregate"
@@ -14,6 +15,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -170,10 +172,18 @@ func (i v2ResetInventory) List(ctx context.Context) (codexprov.Inventory, error)
 func newV2ResetDependencies(ctx context.Context, recommend bool) (v2ResetDependencies, error) {
 	fs := fsutil.OSFileSystem{}
 	client := httputil.NewClient(10*time.Second, version)
+	return newV2ResetDependenciesWithClient(ctx, recommend, fs, client)
+}
+
+func newV2ResetDependenciesWithClient(ctx context.Context, recommend bool, fs fsutil.DurableFileSystem, client httputil.Doer) (v2ResetDependencies, error) {
 	control, err := codexprov.OpenDefaultCanonicalCredentialRefreshControl(ctx, fs, client)
 	if err != nil {
 		return v2ResetDependencies{}, err
 	}
+	return newV2ResetDependenciesWithControl(recommend, fs, client, control)
+}
+
+func newV2ResetDependenciesWithControl(recommend bool, fs fsutil.DurableFileSystem, client httputil.Doer, control *codexprov.CredentialControl) (v2ResetDependencies, error) {
 	deps := v2ResetDependencies{close: control.Close}
 	store, err := codexprov.NewManagedStore(fs)
 	if err != nil {
@@ -193,14 +203,45 @@ func newV2ResetDependencies(ctx context.Context, recommend bool) (v2ResetDepende
 			return deps, err
 		}
 		deps.app.History = store
-		deps.app.Usage = codexprov.New(client)
+		deps.app.Usage, err = codexprov.NewWithCredentialAuthority(client, backend.Inventory, control, control.CanonicalAdmin())
+		if err != nil {
+			return deps, err
+		}
 	}
 	return deps, nil
 }
-func handleV2ResetInspectionWithApp(parent context.Context, inv cli.Invocation, _ *cli.Session, a *app.CodexResetApp) cli.Outcome {
+func handleV2ResetInspectionWithApp(parent context.Context, inv cli.Invocation, _ *cli.Session, a *app.CodexResetApp) (outcome cli.Outcome) {
 	timeout, _ := time.ParseDuration(inv.Options["timeout"][0])
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	// Workers retain this observer after the command returns. Detachment discards
+	// late diagnostics while keeping provider/history legacy stderr paths disabled.
+	var mu sync.Mutex
+	var warnings []cli.Diagnostic
+	detached := false
+	ctx = provider.WithObservation(ctx, provider.Observation{Warning: func(code, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !detached && ctx.Err() == nil {
+			warnings = append(warnings, cli.Diagnostic{Code: code, Message: message})
+		}
+	}})
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		detached = true
+		sort.Slice(warnings, func(i, j int) bool {
+			if warnings[i].Code != warnings[j].Code {
+				return warnings[i].Code < warnings[j].Code
+			}
+			return warnings[i].Message < warnings[j].Message
+		})
+		for i, warning := range warnings {
+			if i == 0 || warning.Code != warnings[i-1].Code || warning.Message != warnings[i-1].Message {
+				outcome.Warnings = append(outcome.Warnings, warning)
+			}
+		}
+	}()
 	if inv.Path == "codex reset recommend" {
 		schedule, err := a.Recommend(ctx)
 		dto := v2ResetSchedule(schedule)

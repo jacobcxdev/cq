@@ -352,6 +352,11 @@ func callResetHistory(
 			err = errors.New("reset history panic")
 		}
 	}()
+	if observed, ok := historyStore.(interface {
+		UpdateAndGetEstimatesObserved(context.Context, map[string][]quota.Result, int64, func(string, string)) (history.BurnRates, history.RateEstimates, error)
+	}); provider.Observed(ctx) && ok {
+		return observed.UpdateAndGetEstimatesObserved(ctx, map[string][]quota.Result{string(provider.Codex): usage}, now.Unix(), func(code, message string) { provider.ObserveWarning(ctx, code, message) })
+	}
 	return historyStore.UpdateAndGetEstimates(ctx, map[string][]quota.Result{string(provider.Codex): usage}, now.Unix())
 }
 

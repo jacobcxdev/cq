@@ -51,6 +51,15 @@ func New(client httputil.Doer) *Provider {
 	return &Provider{client: client, fs: fsutil.OSFileSystem{}}
 }
 
+// NewWithCredentialAuthority uses only the caller's credential authority. It
+// never opens a separate owner or falls back to legacy refresh.
+func NewWithCredentialAuthority(client httputil.Doer, inventory CredentialInventory, secrets ExactSecretResolver, refresh CredentialRefreshBroker) (*Provider, error) {
+	if client == nil || inventory == nil || secrets == nil || refresh == nil {
+		return nil, ErrCredentialAuthorityUnavailable
+	}
+	return &Provider{client: client, inventory: inventory, secrets: secrets, refreshBroker: refresh}, nil
+}
+
 // Fetch discovers all Codex accounts and fetches quota for each in parallel.
 func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, error) {
 	broker := p.refreshBroker

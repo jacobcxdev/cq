@@ -681,3 +681,43 @@ func TestHistoryObservedCorruptionWarning(t *testing.T) {
 		t.Fatalf("warnings=%v err=%v", warnings, err)
 	}
 }
+
+func TestHistoryObservedEstimatesPreserveConfidenceAndFormat(t *testing.T) {
+	legacy, legacyFS := newTestStore(t)
+	observed, observedFS := newTestStore(t)
+	key := BurnRateKey{ProviderID: "codex", AccountKey: "account", Window: "5h"}
+	for i, remaining := range []int{90, 80, 70, 95} {
+		rows := map[string][]quota.Result{"codex": {makeResult("account", map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: remaining, ResetAtUnix: 18000}})}}
+		epoch := int64(1000 + i*60)
+		_, want, err := legacy.UpdateAndGetEstimates(context.Background(), rows, epoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rates, got, err := observed.UpdateAndGetEstimatesObserved(context.Background(), rows, epoch, func(code, message string) { t.Errorf("unexpected warning %s", code) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		estimate, ok := got.Get(key)
+		expected, expectedOK := want.Get(key)
+		if ok != expectedOK || estimate != expected {
+			t.Fatalf("metadata lost: got=%+v want=%+v", estimate, expected)
+		}
+		if i > 0 {
+			rate, ok := rates.Get(key)
+			if !ok || rate != estimate.RatePctPerS || estimate.Samples < 2 || estimate.LastSeenUnix != epoch {
+				t.Fatalf("missing confidence: %+v", estimate)
+			}
+		}
+		a, err := legacyFS.ReadFile(filepath.Join(testDir, stateFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := observedFS.ReadFile(filepath.Join(testDir, stateFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a) != string(b) {
+			t.Fatal("observed history changed persistent format or arithmetic")
+		}
+	}
+}
