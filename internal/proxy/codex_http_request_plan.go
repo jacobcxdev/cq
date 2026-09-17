@@ -752,7 +752,13 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	}
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "success", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 
-	result.portableQuotaRetry = codexHTTPRequestAccountUnavailablePortable(protocol)
+	// A full create can be retried after a definitive quota rejection by
+	// discarding the rejected account's turn-state header. Response-ID deltas
+	// still require their original account.
+	result.portableQuotaRetry = protocol.PreviousResponseID == "" && !protocol.HasPreviousResponseID
+	// After ordinary accounts reject, allow one fresh plan to probe an account
+	// excluded by an earlier request. A recovery probe cannot renew this budget.
+	dispatch.quotaRecoveryRetry = len(snapshot.QuotaExhaustedAccountKeys) > 0 && !quotaExhaustionProbe
 	result.Dispatch = dispatch
 	result.Frozen = frozen
 	result.leaseHandle = handle

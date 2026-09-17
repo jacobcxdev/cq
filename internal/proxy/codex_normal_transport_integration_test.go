@@ -94,28 +94,30 @@ type normalTransportGateReceipt struct {
 	candidate  string
 	status     int
 	payload    string
+	turnState  string
 	connection int
 }
 
 type normalTransportGateBackend struct {
 	scenario normalTransportGateScenario
 
-	mu                sync.Mutex
-	receipts          []normalTransportGateReceipt
-	authorizations    []string
-	httpAuthRecovered bool
-	httpAuthActive    bool
-	httpAuthStatus    int
-	httpTurnState     bool
-	wsConnections     int
-	failures          chan error
-	firstWSClosed     chan struct{}
-	firstWSCloseOnce  sync.Once
-	closeFirstWS      chan struct{}
-	closeFirstWSOnce  sync.Once
-	wsAuthChainDone   bool
-	wsHandshakeBody   []byte
-	wsHandshakeCoding string
+	mu                    sync.Mutex
+	receipts              []normalTransportGateReceipt
+	authorizations        []string
+	httpAuthRecovered     bool
+	httpAuthActive        bool
+	httpAuthStatus        int
+	httpTurnState         bool
+	httpHardLimitAccounts map[string]bool
+	wsConnections         int
+	failures              chan error
+	firstWSClosed         chan struct{}
+	firstWSCloseOnce      sync.Once
+	closeFirstWS          chan struct{}
+	closeFirstWSOnce      sync.Once
+	wsAuthChainDone       bool
+	wsHandshakeBody       []byte
+	wsHandshakeCoding     string
 }
 
 func (backend *normalTransportGateBackend) recordAuthorization(authorization string) {
@@ -231,11 +233,15 @@ func (backend *normalTransportGateBackend) serveHTTP(writer http.ResponseWriter,
 	case normalTransportGateHTTPAllHardLimit:
 		status = http.StatusTooManyRequests
 	}
+	if backend.httpHardLimitAccounts[accountID] {
+		status = http.StatusTooManyRequests
+	}
 	backend.record(normalTransportGateReceipt{
 		transport: "http",
 		accountID: accountID,
 		status:    status,
 		payload:   string(payload),
+		turnState: request.Header.Get("X-Codex-Turn-State"),
 	})
 
 	writer.Header().Set("Content-Type", "application/json")
@@ -1512,28 +1518,39 @@ func TestNormalProxyTransportHTTPHardLimitMigratesBeforeLeak(t *testing.T) {
 }
 
 func TestNormalProxyTransportHTTPAdmittedQuotaFailureRetriesWithinRequest(t *testing.T) {
-	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
-	harness.backend.httpTurnState = true
-	metadata := CodexTurnMetadata{SessionID: "automatic-quota-session", ThreadID: "automatic-quota-thread", TurnID: "automatic-quota-turn", RequestKind: CodexRequestTurn}
-	encoded := normalTransportGateHTTPBody(t, metadata)
-	status, body := normalTransportGateHTTPCall(t, harness, encoded)
-	if status != http.StatusOK {
-		t.Fatalf("seed = %d %q", status, body)
+	for _, turnState := range []string{"", "state-validation-upstream-a"} {
+		t.Run("turn-state="+turnState, func(t *testing.T) {
+			harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
+			harness.backend.httpTurnState = true
+			metadata := CodexTurnMetadata{SessionID: "automatic-quota-session", ThreadID: "automatic-quota-thread", TurnID: "automatic-quota-turn", RequestKind: CodexRequestTurn}
+			encoded := normalTransportGateHTTPBody(t, metadata)
+			status, body := normalTransportGateHTTPCall(t, harness, encoded)
+			if status != http.StatusOK {
+				t.Fatalf("seed = %d %q", status, body)
+			}
+			harness.backend.scenario = normalTransportGateHTTPHardLimit
+			status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {turnState}})
+			if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
+				t.Fatalf("same-turn quota recovery = %d %q, want automatic B/200", status, body)
+			}
+			nextState := ""
+			if turnState != "" {
+				nextState = "state-validation-upstream-b"
+			}
+			status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {nextState}})
+			if status != http.StatusOK {
+				t.Fatalf("continuation after recovery = %d %q", status, body)
+			}
+			receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+			if len(receipts) != 4 || receipts[0].accountID != "validation-upstream-a" || receipts[1].status != http.StatusTooManyRequests || receipts[2].accountID != "validation-upstream-b" || receipts[3].accountID != "validation-upstream-b" || receipts[1].payload != receipts[2].payload {
+				t.Fatalf("receipts = %#v, want A/200, A/429, identical B/200, B/200", receipts)
+			}
+			if receipts[1].turnState != turnState || receipts[2].turnState != "" {
+				t.Fatalf("retry turn state = %q -> %q, want %q -> empty", receipts[1].turnState, receipts[2].turnState, turnState)
+			}
+			harness.backend.assertNoFailure(t)
+		})
 	}
-	harness.backend.scenario = normalTransportGateHTTPHardLimit
-	status, body = normalTransportGateHTTPCall(t, harness, encoded)
-	if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
-		t.Fatalf("same-turn quota recovery = %d %q, want automatic B/200", status, body)
-	}
-	status, body = normalTransportGateHTTPCall(t, harness, encoded)
-	if status != http.StatusOK {
-		t.Fatalf("continuation after recovery = %d %q", status, body)
-	}
-	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
-	if len(receipts) != 4 || receipts[0].accountID != "validation-upstream-a" || receipts[1].status != http.StatusTooManyRequests || receipts[2].accountID != "validation-upstream-b" || receipts[3].accountID != "validation-upstream-b" || receipts[1].payload != receipts[2].payload {
-		t.Fatalf("receipts = %#v, want A/200, A/429, identical B/200, B/200", receipts)
-	}
-	harness.backend.assertNoFailure(t)
 }
 
 func TestNormalProxyTransportHTTPAdmittedQuotaRetryBounds(t *testing.T) {
@@ -1560,7 +1577,7 @@ func TestNormalProxyTransportHTTPAdmittedQuotaRetryBounds(t *testing.T) {
 			if test.continuation {
 				encoded = normalTransportGateHTTPContinuationBody(t, metadata, "normal-transport-http")
 			}
-			status, body = normalTransportGateHTTPCall(t, harness, encoded)
+			status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {"state-validation-upstream-a"}})
 			if status != http.StatusTooManyRequests {
 				t.Fatalf("terminal status = %d %q, want429", status, body)
 			}
@@ -3200,13 +3217,18 @@ func normalTransportGateHTTPContinuationBody(t *testing.T, metadata CodexTurnMet
 	return body
 }
 
-func normalTransportGateHTTPCall(t *testing.T, harness *normalTransportGateHarness, body []byte) (int, []byte) {
+func normalTransportGateHTTPCall(t *testing.T, harness *normalTransportGateHarness, body []byte, headers ...http.Header) (int, []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, harness.proxy.URL+legacyCodexResponsesPath, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, header := range headers {
+		for key, values := range header {
+			request.Header[key] = append([]string(nil), values...)
+		}
 	}
 	request.Header.Set("Authorization", "Bearer "+harness.callerToken)
 	request.Header.Set("Content-Type", "application/json")
@@ -3455,6 +3477,30 @@ func TestNormalProxyTransportHTTPReserveWithoutAlternativeCanBeDisabled(t *testi
 	status, body = normalTransportGateHTTPCall(t, harness, encoded)
 	if status != http.StatusOK {
 		t.Fatalf("disabled reserve = %d %q, want200", status, body)
+	}
+	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportHTTPReservePreservesTurnState(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
+	harness.backend.httpTurnState = true
+	metadata := CodexTurnMetadata{SessionID: "reserve-state-session", ThreadID: "reserve-state-thread", TurnID: "reserve-state-turn", RequestKind: CodexRequestTurn}
+	encoded := normalTransportGateHTTPBody(t, metadata)
+	status, body := normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("seed = %d %q", status, body)
+	}
+	now := time.Now()
+	harness.httpPlanner.Capacity.ObserveQuotaSnapshot(codexInstalledHTTPValidationAccountA, QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 2, ResetAtUnix: now.Add(time.Hour).Unix()}}}})
+	if _, err := harness.reserve.Control("set", "7d", 2); err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {"state-validation-upstream-a"}})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("stateful reserve = %d %q, want 429 without changing accounts", status, body)
+	}
+	if receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http"); len(receipts) != 1 {
+		t.Fatalf("reserve rejection dispatched to another account: %#v", receipts)
 	}
 	harness.backend.assertNoFailure(t)
 }
