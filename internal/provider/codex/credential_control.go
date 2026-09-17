@@ -816,6 +816,7 @@ type RemoveManagedV2Args struct {
 	Revisions   RevisionSet
 	Force       bool
 	OperationID string
+	Native      *SystemSnapshot
 }
 type RemoveManagedV2Reply struct {
 	ManagedDeleted                                       int
@@ -905,9 +906,9 @@ func (a *CanonicalCredentialAdmin) ActivateAccount(ctx context.Context, selectio
 	return result, reply.Failure.err()
 }
 func (a *CanonicalCredentialAdmin) RemoveManaged(ctx context.Context, key AccountKey, revisions RevisionSet, force bool) (RemovalResult, error) {
-	return a.RemoveSelected(ctx, key, revisions, "")
+	return a.RemoveSelected(ctx, key, revisions, "", nil)
 }
-func (a *CanonicalCredentialAdmin) RemoveSelected(ctx context.Context, key AccountKey, revisions RevisionSet, operationID string) (RemovalResult, error) {
+func (a *CanonicalCredentialAdmin) RemoveSelected(ctx context.Context, key AccountKey, revisions RevisionSet, operationID string, native *SystemSnapshot) (RemovalResult, error) {
 	c := a.control
 	if c.owner {
 		operation, err := c.beginCredentialOwnerOperation()
@@ -915,7 +916,7 @@ func (a *CanonicalCredentialAdmin) RemoveSelected(ctx context.Context, key Accou
 			return RemovalResult{}, err
 		}
 		defer operation.Release()
-		return c.coordinator.RemoveSelected(ctx, key, revisions, operationID)
+		return c.coordinator.RemoveSelected(ctx, key, revisions, operationID, native)
 	}
 	id, err := newCredentialRPCRequestID()
 	if err != nil {
@@ -923,7 +924,7 @@ func (a *CanonicalCredentialAdmin) RemoveSelected(ctx context.Context, key Accou
 	}
 	deadline, _ := ctx.Deadline()
 	reply := new(RemoveManagedV2Reply)
-	if err := c.callCanonicalMutation(ctx, "CredentialRPC.RemoveManagedV2", id, RemoveManagedV2Args{RequestID: id, Deadline: deadline, AccountKey: key, Revisions: revisions, Force: false, OperationID: operationID}, reply); err != nil {
+	if err := c.callCanonicalMutation(ctx, "CredentialRPC.RemoveManagedV2", id, RemoveManagedV2Args{RequestID: id, Deadline: deadline, AccountKey: key, Revisions: revisions, Force: false, OperationID: operationID, Native: native}, reply); err != nil {
 		return RemovalResult{}, err
 	}
 	result := RemovalResult{ManagedDeleted: reply.ManagedDeleted, SystemDeactivated: reply.SystemDeactivated, PendingRecovery: reply.PendingRecovery}
@@ -975,7 +976,7 @@ func (r *credentialRPC) RemoveManagedV2(args RemoveManagedV2Args, reply *RemoveM
 		return nil
 	}
 	defer operation.Release()
-	result, err := r.Coordinator.RemoveSelected(ctx, args.AccountKey, args.Revisions, args.OperationID)
+	result, err := r.Coordinator.RemoveSelected(ctx, args.AccountKey, args.Revisions, args.OperationID, args.Native)
 	reply.ManagedDeleted, reply.SystemDeactivated, reply.ProjectionFailed, reply.PendingRecovery, reply.Failure = result.ManagedDeleted, result.SystemDeactivated, result.ProjectionError != nil, result.PendingRecovery, mutationFailure(err)
 	return nil
 }

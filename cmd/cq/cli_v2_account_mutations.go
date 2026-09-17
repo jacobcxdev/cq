@@ -343,6 +343,10 @@ func defaultV2AccountMutationDependencies(removing bool, diagnostic io.Writer) v
 			if err != nil {
 				return v2AccountSelection{}, err
 			}
+			native, err := v2CodexNativeSnapshot(inventory)
+			if err != nil {
+				return v2AccountSelection{}, err
+			}
 			for i, logical := range inventory.Accounts {
 				if logical.Key == key {
 					operationID := ""
@@ -352,7 +356,7 @@ func defaultV2AccountMutationDependencies(removing bool, diagnostic io.Writer) v
 						}
 						operationID = pending.OperationID
 					}
-					return v2SelectCodexMutation(logical, v2CodexAccounts(inventory, aliases)[i], operationID, func(ctx context.Context) (*codexprov.CredentialControl, error) {
+					return v2SelectCodexMutation(logical, v2CodexAccounts(inventory, aliases)[i], operationID, native, func(ctx context.Context) (*codexprov.CredentialControl, error) {
 						return codexprov.OpenDefaultCanonicalCredentialControl(ctx, fsutil.OSFileSystem{})
 					}), nil
 				}
@@ -395,7 +399,7 @@ func v2SelectClaudeMutation(selected keyring.ClaudeAccountInspection, accounts *
 	}
 	return selection
 }
-func v2SelectCodexMutation(logical codexprov.LogicalAccount, row AccountSummary, operationID string, open func(context.Context) (*codexprov.CredentialControl, error)) v2AccountSelection {
+func v2SelectCodexMutation(logical codexprov.LogicalAccount, row AccountSummary, operationID string, native codexprov.SystemSnapshot, open func(context.Context) (*codexprov.CredentialControl, error)) v2AccountSelection {
 	selected := codexprov.ActivationSelection{AccountKey: logical.Key, WasActive: logical.Active}
 	revisions := codexprov.RevisionSet{}
 	selection := v2AccountSelection{Account: row, Activatable: logical.Active, Removable: operationID != "", Retained: []string{}}
@@ -432,7 +436,7 @@ func v2SelectCodexMutation(logical codexprov.LogicalAccount, row AccountSummary,
 			return v2AccountRemoval{}, err
 		}
 		defer control.Close()
-		result, err := control.CanonicalAdmin().RemoveSelected(ctx, logical.Key, revisions, operationID)
+		result, err := control.CanonicalAdmin().RemoveSelected(ctx, logical.Key, revisions, operationID, &native)
 		return v2AccountRemoval{Changed: result.ManagedDeleted > 0 || result.SystemDeactivated || err == nil && operationID != "", ActiveRemoved: result.SystemDeactivated, Pending: result.PendingRecovery}, errors.Join(err, result.ProjectionError)
 	}
 	return selection
@@ -450,4 +454,20 @@ func v2LoginAliases(ctx context.Context, result *app.AccountLoginResult, account
 	}
 	result.Aliases = aliases.Aliases(codexprov.AccountKey(result.Reference))
 	return nil
+}
+
+func v2CodexNativeSnapshot(inventory codexprov.Inventory) (codexprov.SystemSnapshot, error) {
+	native := codexprov.SystemSnapshot{}
+	for _, account := range inventory.Accounts {
+		for _, candidate := range account.Candidates {
+			if candidate.Source != codexprov.SourceSystem {
+				continue
+			}
+			if native.Present || account.Identity.RecordKey == "" || candidate.Revision == "" {
+				return codexprov.SystemSnapshot{}, v2MutationDiagnostic("account_unstable")
+			}
+			native = codexprov.SystemSnapshot{Present: true, AccountKey: codexprov.AccountKey(account.Identity.RecordKey), Revision: candidate.Revision}
+		}
+	}
+	return native, nil
 }

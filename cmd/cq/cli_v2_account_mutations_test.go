@@ -14,13 +14,17 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-type v2MutationAdmin struct{ fixture *v2Fixture }
+type v2MutationAdmin struct {
+	fixture         *v2Fixture
+	active, unknown bool
+}
 
 func (a *v2MutationAdmin) SaveLogin(context.Context, codexprov.LoginCredential) (codexprov.CandidateRef, codexprov.Revision, error) {
 	a.fixture.Call("save")
@@ -28,6 +32,9 @@ func (a *v2MutationAdmin) SaveLogin(context.Context, codexprov.LoginCredential) 
 }
 func (a *v2MutationAdmin) Activate(context.Context, codexprov.CandidateRef, codexprov.Revision) (codexprov.ActivationResult, error) {
 	a.fixture.Call("activate")
+	if a.unknown {
+		return codexprov.ActivationResult{}, &codexprov.MutationOutcomeUnknown{Err: context.DeadlineExceeded}
+	}
 	return codexprov.ActivationResult{}, errors.New("credential-secret")
 }
 func (a *v2MutationAdmin) Adopt(context.Context, codexprov.SystemSnapshot) (codexprov.CandidateRef, codexprov.Revision, error) {
@@ -278,7 +285,7 @@ func TestCLIV2AccountMutationOutputFailureNeverReplays(t *testing.T) {
 }
 
 func (a *v2MutationAdmin) List(ctx context.Context) (codexprov.Inventory, error) {
-	return codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{Key: "exact-key", Identity: codexprov.AccountIdentity{AccountID: "account", UserID: "user", Email: "user@example.com"}, Candidates: []codexprov.CredentialCandidate{{Source: codexprov.SourceManaged}}}}}, ctx.Err()
+	return codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{Key: "exact-key", Active: a.active, Identity: codexprov.AccountIdentity{AccountID: "account", UserID: "user", Email: "user@example.com"}, Candidates: []codexprov.CredentialCandidate{{Source: codexprov.SourceManaged}}}}}, ctx.Err()
 }
 
 func TestCLIV2AccountMutationLoginUnknownFactsRemainNull(t *testing.T) {
@@ -360,5 +367,150 @@ func TestCLIV2AccountMutationAuthorityUnavailable(t *testing.T) {
 	result := v2MutationError(codexprov.ErrCredentialAuthorityUnavailable, "account_io_failed")
 	if result.ExitCode != 4 || result.Errors[0].Code != "account_inventory_unavailable" {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestCLIV2AccountMutationUnknownActivationAlreadyActive(t *testing.T) {
+	f := &v2Fixture{}
+	outcome := handleV2AccountMutationWithDependencies(context.Background(), mutationInvocation("codex account login", "--activate"), &cli.Session{}, v2AccountMutationDependencies{Login: func(ctx context.Context, _ provider.ID, activate bool) (app.AccountLoginResult, error) {
+		return app.LoginCodex(ctx, nil, activate, func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error) {
+			return &auth.CodexTokenResponse{AccessToken: "secret"}, &auth.CodexClaims{AccountID: "account", UserID: "user"}, nil
+		}, &v2MutationAdmin{fixture: f, active: true, unknown: true})
+	}})
+	if outcome.ExitCode != 7 || outcome.Errors[0].Code != "account_timeout" || !bytes.Contains(outcome.Data, []byte(`"active":true`)) || !bytes.Contains(outcome.Data, []byte(`"activated":null`)) || !bytes.Contains(outcome.Data, []byte(`"credentials_saved":true`)) {
+		t.Fatalf("unknown active login=%s errors=%v", outcome.Data, outcome.Errors)
+	}
+	if f.calls["save"] != 1 || f.calls["activate"] != 1 {
+		t.Fatal("login mutation replayed")
+	}
+}
+
+type v2ConsentReadFunc func([]byte) (int, error)
+
+func (f v2ConsentReadFunc) Read(p []byte) (int, error) { return f(p) }
+func TestCLIV2AccountMutationRealCodexRemovalFence(t *testing.T) {
+	for _, mode := range []string{"inactive-became-active", "native-revision-changed", "vanished", "success", "active-success"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			fs := fsutil.NewMemFS()
+			store, err := codexprov.NewManagedStore(fs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coordinator, err := codexprov.NewCredentialCoordinator(store, "/state")
+			if err != nil {
+				t.Fatal(err)
+			}
+			idToken := fakeRefreshCodexJWT("user@example.com", "account", "user", time.Now().Add(time.Hour))
+			ref, revision, err := coordinator.SaveLoginCanonical(ctx, codexprov.LoginCredential{Tokens: auth.CodexTokenResponse{AccessToken: "access", IDToken: idToken}, Claims: auth.CodexClaims{AccountID: "account", UserID: "user", Email: "user@example.com"}, CreatedAt: time.Now()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			systemPath := filepath.Join(store.Home, ".codex", "auth.json")
+			managedPath := filepath.Join(store.Home, ".codex", "accounts", string(ref.CandidateID)+".auth.json")
+			raw := codexRefreshAuthJSON("native", "refresh", idToken, "account")
+			if mode == "native-revision-changed" || mode == "active-success" {
+				if _, err := coordinator.Activate(ctx, ref, revision); err != nil {
+					t.Fatal(err)
+				}
+				raw, err = fs.ReadFile(systemPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			inventory, err := coordinator.List(ctx)
+			if err != nil || len(inventory.Accounts) != 1 {
+				t.Fatalf("inventory=%d error=%v", len(inventory.Accounts), err)
+			}
+			if _, err := codexprov.ResolveAccountReference(inventory, codexprov.AccountAliasIndex{}, string(inventory.Accounts[0].Key)); err != nil {
+				t.Fatalf("test selection key=%s identity=%+v: %v", inventory.Accounts[0].Key, inventory.Accounts[0].Identity, err)
+			}
+			native, err := v2CodexNativeSnapshot(inventory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory, err := os.MkdirTemp("/tmp", "cq-t08-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(directory)
+			directory, err = filepath.EvalSymlinks(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected := v2SelectCodexMutation(inventory.Accounts[0], v2CodexAccounts(inventory, codexprov.AccountAliasIndex{})[0], "", native, func(ctx context.Context) (*codexprov.CredentialControl, error) {
+				control, err := codexprov.OpenCredentialControlPrepared(ctx, filepath.Join(directory, "control.sock"), coordinator, func(_ context.Context, _ *codexprov.CredentialCoordinator, cap codexprov.CredentialOwnerCapability) error {
+					return cap.AssertOwner()
+				})
+				if err != nil {
+					t.Fatalf("test owner open: %v", err)
+				}
+				return control, err
+			})
+			changed := false
+			before := map[string][]byte{}
+			reader := strings.NewReader("yes\n")
+			consent := v2ConsentReadFunc(func(p []byte) (int, error) {
+				if !changed {
+					changed = true
+					var err error
+					switch mode {
+					case "inactive-became-active":
+						err = fs.WriteFile(systemPath, raw, 0o600)
+					case "native-revision-changed":
+						err = fs.WriteFile(systemPath, append(append([]byte{}, raw...), ' '), 0o600)
+					case "vanished":
+						err = fs.Remove(managedPath)
+					}
+					if err != nil {
+						return 0, err
+					}
+					for _, path := range []string{managedPath, systemPath, filepath.Join(store.Home, ".codex", "accounts", "registry.json")} {
+						data, err := fs.ReadFile(path)
+						if err != nil && !errors.Is(err, os.ErrNotExist) {
+							return 0, err
+						}
+						before[path] = data
+					}
+				}
+				return reader.Read(p)
+			})
+			var preview bytes.Buffer
+			outcome := handleV2AccountMutationWithDependencies(ctx, mutationInvocation("codex account remove", string(inventory.Accounts[0].Key)), &cli.Session{In: consent, Err: &preview, Interactive: true}, v2AccountMutationDependencies{Select: func(context.Context, provider.ID, string) (v2AccountSelection, error) { return selected, nil }})
+			want := 6
+			code := "account_unstable"
+			if mode == "vanished" {
+				want = 3
+				code = "account_not_found"
+			}
+			if mode == "success" || mode == "active-success" {
+				want = 0
+			}
+			if outcome.ExitCode != want || want != 0 && (len(outcome.Errors) == 0 || outcome.Errors[0].Code != code) {
+				t.Fatalf("mode=%s outcome=%+v", mode, outcome)
+			}
+			if mode == "inactive-became-active" && !strings.Contains(preview.String(), "will be removed: false") {
+				t.Fatal("wrong consent fixture")
+			}
+			if mode == "inactive-became-active" || mode == "native-revision-changed" {
+				if _, err := fs.ReadFile(systemPath); err != nil {
+					t.Fatal("native state deleted despite stale consent")
+				}
+			}
+			if want != 0 {
+				for path, data := range before {
+					current, err := fs.ReadFile(path)
+					if err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(current, data) || (current == nil) != (data == nil) {
+						t.Fatal("rejected removal wrote credential/catalogue state")
+					}
+				}
+			}
+			if _, pending, err := coordinator.Journal.Load(); err != nil || pending {
+				t.Fatal("rejected removal left journal")
+			}
+		})
 	}
 }

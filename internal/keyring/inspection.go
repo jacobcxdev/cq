@@ -72,10 +72,22 @@ func inspectClaudeAccounts(ctx context.Context, readers claudeInspectionReaders)
 	}
 	if err == nil {
 		var credentials ClaudeCredentials
-		if json.Unmarshal(data, &credentials) != nil || credentials.ClaudeAiOauth == nil || credentials.ClaudeAiOauth.AccessToken == "" {
+		if json.Unmarshal(data, &credentials) != nil {
 			return nil, errClaudeInventory
 		}
-		sources = append(sources, claudeInspectionSource{account: *credentials.ClaudeAiOauth, source: "native_client", active: true})
+		if credentials.ClaudeAiOauth == nil {
+			// Both legacy and canonical removal persist the empty native object.
+			// Explicit null credentials, unknown fields and malformed sources are not absence.
+			var object map[string]json.RawMessage
+			if json.Unmarshal(data, &object) != nil || object == nil || len(object) != 0 {
+				return nil, errClaudeInventory
+			}
+		} else {
+			if credentials.ClaudeAiOauth.AccessToken == "" {
+				return nil, errClaudeInventory
+			}
+			sources = append(sources, claudeInspectionSource{account: *credentials.ClaudeAiOauth, source: "native_client", active: true})
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

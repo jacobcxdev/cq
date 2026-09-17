@@ -42,7 +42,7 @@ type CredentialRefreshBroker interface {
 type CredentialCoordinator struct {
 	Store            *ManagedStore
 	StateDir         string
-	Activator        *FileSystemActivator
+	Activator        SystemActivator
 	Registry         AccountCatalogue
 	Journal          RemovalJournal
 	RefreshExchange  RefreshExchange
@@ -595,9 +595,9 @@ func (c *CredentialCoordinator) RemoveManaged(ctx context.Context, accountKey Ac
 		return RemovalResult{}, err
 	}
 	defer c.mu.Unlock()
-	return c.removeManagedLocked(ctx, accountKey, revisions, force)
+	return c.removeManagedLocked(ctx, accountKey, revisions, force, nil)
 }
-func (c *CredentialCoordinator) removeManagedLocked(ctx context.Context, accountKey AccountKey, revisions RevisionSet, force bool) (RemovalResult, error) {
+func (c *CredentialCoordinator) removeManagedLocked(ctx context.Context, accountKey AccountKey, revisions RevisionSet, force bool, native *SystemSnapshot) (RemovalResult, error) {
 	if pending, ok, err := c.Journal.Load(); err != nil {
 		return RemovalResult{}, err
 	} else if ok {
@@ -623,12 +623,14 @@ func (c *CredentialCoordinator) removeManagedLocked(ctx context.Context, account
 	}
 	targetActive := false
 	targetFound := false
+	var targetNativeKey AccountKey
 	expectedRevisions := make(RevisionSet)
 	registryKeys := map[string]bool{string(accountKey): true}
 	for _, logical := range DiscoverInventory(c.Store.FS).Accounts {
 		if logical.Key == accountKey {
 			targetFound = true
 			targetActive = logical.Active
+			targetNativeKey = AccountKey(logical.Identity.RecordKey)
 			for _, candidate := range logical.Candidates {
 				if candidate.Source == SourceManaged {
 					expectedRevisions[candidate.Ref.CandidateID] = candidate.Revision
@@ -641,7 +643,22 @@ func (c *CredentialCoordinator) removeManagedLocked(ctx context.Context, account
 		}
 	}
 	if !targetFound {
+		if native != nil {
+			return RemovalResult{}, &AccountReferenceError{Code: AccountReferenceMissing}
+		}
 		return RemovalResult{}, errors.New("Codex account no longer exists")
+	}
+	if native != nil {
+		if native.Present && (native.AccountKey == "" || native.Revision == "") || !native.Present && (native.AccountKey != "" || native.Revision != "") {
+			return RemovalResult{}, ErrStaleRevision
+		}
+		active, err := c.Activator.Active(ctx)
+		if err != nil {
+			return RemovalResult{}, err
+		}
+		if active != *native {
+			return RemovalResult{}, ErrStaleRevision
+		}
 	}
 	if len(expectedRevisions) != len(revisions) {
 		return RemovalResult{}, ErrStaleRevision
@@ -655,15 +672,22 @@ func (c *CredentialCoordinator) removeManagedLocked(ctx context.Context, account
 		plan.RegistryKeys = append(plan.RegistryKeys, key)
 	}
 	sort.Strings(plan.RegistryKeys)
-	if targetActive {
+	if targetActive || native != nil {
 		active, err := c.Activator.Active(ctx)
 		if err != nil {
 			return RemovalResult{}, err
 		}
-		if !active.Present {
+		if native != nil && active != *native {
 			return RemovalResult{}, ErrStaleRevision
 		}
-		plan.ExpectedSystemRevision = active.Revision
+		if targetActive {
+			if !active.Present || targetNativeKey == "" || active.AccountKey != targetNativeKey {
+				return RemovalResult{}, ErrStaleRevision
+			}
+			plan.ExpectedSystemRevision = active.Revision
+		} else if native != nil && active.Present && active.AccountKey == targetNativeKey {
+			return RemovalResult{}, ErrStaleRevision
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return RemovalResult{}, err
@@ -731,11 +755,12 @@ func (c *CredentialCoordinator) resumeRemoval(ctx context.Context, plan RemovalP
 		if err != nil {
 			return result, err
 		}
-		if active.Present && active.Revision != plan.ExpectedSystemRevision {
+		expectedNativeKey, valid := removalPlanNativeKey(plan)
+		if active.Present && (!valid || active.AccountKey != expectedNativeKey || active.Revision != plan.ExpectedSystemRevision) {
 			return result, ErrStaleRevision
 		}
 		if active.Present {
-			deactivated, err := c.Activator.Deactivate(ctx, active.AccountKey, active.Revision)
+			deactivated, err := c.Activator.Deactivate(ctx, expectedNativeKey, plan.ExpectedSystemRevision)
 			if err != nil {
 				return result, err
 			}
@@ -926,7 +951,7 @@ func (c *CredentialCoordinator) ActivateAccount(ctx context.Context, selected Ac
 
 // RemoveSelected fences recovery to the operation shown before consent. A
 // different pending operation is never recovered as a side effect of removal.
-func (c *CredentialCoordinator) RemoveSelected(ctx context.Context, key AccountKey, revisions RevisionSet, operationID string) (RemovalResult, error) {
+func (c *CredentialCoordinator) RemoveSelected(ctx context.Context, key AccountKey, revisions RevisionSet, operationID string, native *SystemSnapshot) (RemovalResult, error) {
 	if err := c.lockMutation(ctx); err != nil {
 		return RemovalResult{}, err
 	}
@@ -944,7 +969,10 @@ func (c *CredentialCoordinator) RemoveSelected(ctx context.Context, key AccountK
 	if operationID != "" {
 		return RemovalResult{}, ErrStaleRevision
 	}
-	return c.removeManagedLocked(ctx, key, revisions, false)
+	if native == nil {
+		return RemovalResult{}, ErrStaleRevision
+	}
+	return c.removeManagedLocked(ctx, key, revisions, false, native)
 }
 
 func (c *CredentialCoordinator) SaveLoginCanonical(ctx context.Context, credential LoginCredential) (CandidateRef, Revision, error) {
@@ -958,4 +986,31 @@ func (c *CredentialCoordinator) SaveLoginCanonical(ctx context.Context, credenti
 		return CandidateRef{}, "", ErrStaleRevision
 	}
 	return c.saveLoginLocked(ctx, credential)
+}
+
+// RegistryKeys is produced only from the logical key and its native RecordKey.
+// Old native-key plans may omit it; unknown/mixed key sets cannot authorise a deletion.
+func removalPlanNativeKey(plan RemovalPlan) (AccountKey, bool) {
+	if len(plan.RegistryKeys) == 0 {
+		return plan.AccountKey, plan.AccountKey != ""
+	}
+	containsLogical := false
+	var native AccountKey
+	for _, key := range plan.RegistryKeys {
+		if key == string(plan.AccountKey) {
+			containsLogical = true
+			continue
+		}
+		if key == "" || native != "" && native != AccountKey(key) {
+			return "", false
+		}
+		native = AccountKey(key)
+	}
+	if !containsLogical {
+		return "", false
+	}
+	if native == "" {
+		native = plan.AccountKey
+	}
+	return native, native != ""
 }

@@ -443,9 +443,6 @@ func LoginCodex(ctx context.Context, client httputil.Doer, activate bool, login 
 						seen[source] = true
 					}
 				}
-				if !result.ActivationKnown && row.Active {
-					result.Activated, result.ActivationKnown = true, true
-				}
 				return
 			}
 		}

@@ -236,3 +236,20 @@ func TestInspectClaudeAccountsMergedRefreshedIdentityBridge(t *testing.T) {
 		})
 	}
 }
+
+func TestInspectClaudeClearedNativeState(t *testing.T) {
+	for _, raw := range []string{"{}", " { } ", "null", "[]", `{"claudeAiOauth":null}`, `{"claudeAiOauth":{}}`, `{"other":true}`, "{"} {
+		t.Run(raw, func(t *testing.T) {
+			rows, err := inspectClaudeAccounts(context.Background(), claudeInspectionReaders{home: "/isolated", manifest: "/manifest", readFile: func(path string) ([]byte, error) {
+				if path == "/manifest" {
+					return nil, os.ErrNotExist
+				}
+				return []byte(raw), nil
+			}, platform: func(context.Context) ([]claudeInspectionSource, error) { return nil, nil }, get: func(string, string) (string, error) { t.Fatal("undeclared keyring read"); return "", nil }})
+			empty := raw == "{}" || raw == " { } "
+			if empty && (err != nil || len(rows) != 0) || !empty && err == nil {
+				t.Fatalf("empty=%t rows=%d error=%v", empty, len(rows), err)
+			}
+		})
+	}
+}

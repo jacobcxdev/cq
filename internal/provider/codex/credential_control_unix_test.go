@@ -754,7 +754,7 @@ func TestRemovalCanonicalOpenerDoesNotRecoverBeforeConsent(t *testing.T) {
 	if _, present, _ := coordinator.Journal.Load(); !present {
 		t.Fatal("login recovered another operation")
 	}
-	if _, err := control.CanonicalAdmin().RemoveSelected(context.Background(), plan.AccountKey, nil, plan.OperationID); err != nil {
+	if _, err := control.CanonicalAdmin().RemoveSelected(context.Background(), plan.AccountKey, nil, plan.OperationID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, present, _ := coordinator.Journal.Load(); present {
@@ -817,5 +817,58 @@ func TestSaveLoginV2UnavailableClassification(t *testing.T) {
 	err := mutationFailure(ErrCredentialAuthorityUnavailable).err()
 	if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
 		t.Fatal("authority classification lost over RPC")
+	}
+}
+
+func TestRemoveSelectedV2NativeFenceAndMissing(t *testing.T) {
+	for _, mode := range []string{"vanished", "became-active", "omitted-native"} {
+		t.Run(mode, func(t *testing.T) {
+			c, fs := testCoordinator(t)
+			ctx := context.Background()
+			credential := testLoginCredential()
+			credential.Tokens.IDToken = fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
+			ref, revision, err := c.SaveLogin(ctx, credential)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installManagedDirectoryEntry(fs, c.candidatePath(ref.CandidateID))
+			native := &SystemSnapshot{}
+			if mode == "vanished" {
+				delete(fs.files, c.candidatePath(ref.CandidateID))
+				delete(fs.modes, c.candidatePath(ref.CandidateID))
+			}
+			if mode == "became-active" {
+				fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("native", "acct-1", credential.Tokens.IDToken)
+				fs.modes["/fake/home/.codex/auth.json"] = 0o600
+			}
+			if mode == "omitted-native" {
+				native = nil
+			}
+			serverConn, clientConn := net.Pipe()
+			server := rpc.NewServer()
+			owner := &CredentialControl{owner: true, coordinator: c}
+			if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: c, Control: owner}); err != nil {
+				t.Fatal(err)
+			}
+			go server.ServeConn(serverConn)
+			defer serverConn.Close()
+			client := &CredentialControl{client: rpc.NewClient(clientConn)}
+			defer client.Close()
+			result, err := client.CanonicalAdmin().RemoveSelected(ctx, ref.AccountKey, RevisionSet{ref.CandidateID: revision}, "", native)
+			if mode == "vanished" {
+				var missing *AccountReferenceError
+				if !errors.As(err, &missing) || missing.Code != AccountReferenceMissing {
+					t.Fatalf("missing RPC classification=%T %v", err, err)
+				}
+			} else if !errors.Is(err, ErrStaleRevision) {
+				t.Fatalf("native fence=%v", err)
+			}
+			if result.ManagedDeleted != 0 || result.SystemDeactivated || result.PendingRecovery {
+				t.Fatalf("unexpected writes=%+v", result)
+			}
+			if _, pending, _ := c.Journal.Load(); pending {
+				t.Fatal("rejected RPC wrote journal")
+			}
+		})
 	}
 }

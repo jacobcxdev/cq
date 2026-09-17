@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1083,7 +1084,7 @@ func TestAccountMutationsCancelledWhileAuthorityLocked(t *testing.T) {
 			case "activate":
 				_, err = c.ActivateAccount(ctx, ActivationSelection{AccountKey: "key"})
 			case "remove":
-				_, err = c.RemoveSelected(ctx, "key", nil, "")
+				_, err = c.RemoveSelected(ctx, "key", nil, "", nil)
 			}
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("err=%v", err)
@@ -1117,7 +1118,7 @@ func TestRemovalSelectedRecoveryIdentity(t *testing.T) {
 			if mode == "other-operation" {
 				operation = "replaced"
 			}
-			result, err := c.RemoveSelected(ctx, key, nil, operation)
+			result, err := c.RemoveSelected(ctx, key, nil, operation, nil)
 			if mode == "same" {
 				if err != nil || result.PendingRecovery {
 					t.Fatalf("result=%+v err=%v", result, err)
@@ -1201,5 +1202,147 @@ func TestActivateSelectedAlreadyActiveRevalidatesRevision(t *testing.T) {
 	}
 	if before != fs.renameCount {
 		t.Fatal("stale no-op implicitly activated old account")
+	}
+}
+
+type removalRaceActivator struct {
+	SystemActivator
+	observe       func(context.Context) (SystemSnapshot, error)
+	deactivations int
+}
+
+func (a *removalRaceActivator) Active(ctx context.Context) (SystemSnapshot, error) {
+	return a.observe(ctx)
+}
+func (a *removalRaceActivator) Deactivate(ctx context.Context, key AccountKey, revision Revision) (DeactivationResult, error) {
+	a.deactivations++
+	return a.SystemActivator.Deactivate(ctx, key, revision)
+}
+func TestRemoveSelectedFencesConsentedNativeState(t *testing.T) {
+	for _, mode := range []string{"inactive-became-active", "system-revision-changed", "inventory-snapshot-replaced", "missing-expectation"} {
+		t.Run(mode, func(t *testing.T) {
+			c, fs := testCoordinator(t)
+			ctx := context.Background()
+			systemPath := "/fake/home/.codex/auth.json"
+			credential := testLoginCredential()
+			credential.Tokens.IDToken = fakeCodexJWT("active@test.com", "acct-1", "user-1", "plus")
+			ref, revision, err := c.SaveLogin(ctx, credential)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installManagedDirectoryEntry(fs, c.candidatePath(ref.CandidateID))
+			key := ref.AccountKey
+			revisions := RevisionSet{ref.CandidateID: revision}
+			native := SystemSnapshot{}
+			raw := codexAuthJSON("system-secret", "acct-1", credential.Tokens.IDToken)
+			if mode != "inactive-became-active" && mode != "missing-expectation" {
+				fs.files[systemPath] = raw
+				fs.modes[systemPath] = 0o600
+				delete(fs.files, c.candidatePath(ref.CandidateID))
+				delete(fs.modes, c.candidatePath(ref.CandidateID))
+				revisions = nil
+				inventory := DiscoverInventory(fs)
+				if len(inventory.Accounts) != 1 {
+					t.Fatal("system fixture missing")
+				}
+				key = inventory.Accounts[0].Key
+				native, err = c.Activator.Active(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			expected := &native
+			switch mode {
+			case "inactive-became-active":
+				fs.files[systemPath] = raw
+				fs.modes[systemPath] = 0o600
+			case "system-revision-changed":
+				fs.files[systemPath] = append(append([]byte{}, raw...), ' ')
+			case "missing-expectation":
+				expected = nil
+			case "inventory-snapshot-replaced":
+				base := c.Activator
+				calls := 0
+				c.Activator = &removalRaceActivator{SystemActivator: base, observe: func(ctx context.Context) (SystemSnapshot, error) {
+					calls++
+					if calls == 2 {
+						fs.files[systemPath] = codexAuthJSON("replacement-secret", "acct-other", fakeCodexJWT("other@test.com", "acct-other", "user-other", "plus"))
+					}
+					return base.Active(ctx)
+				}}
+			}
+			before := make(map[string][]byte)
+			for path, data := range fs.files {
+				before[path] = append([]byte{}, data...)
+			}
+			result, err := c.RemoveSelected(ctx, key, revisions, "", expected)
+			if !errors.Is(err, ErrStaleRevision) || result.ManagedDeleted != 0 || result.SystemDeactivated || result.PendingRecovery {
+				t.Fatalf("unconsented removal=%+v error=%v", result, err)
+			}
+			if _, pending, _ := c.Journal.Load(); pending {
+				t.Fatal("native mismatch created removal journal")
+			}
+			// The injected native client replacement is allowed; every other byte must remain.
+			if mode == "inventory-snapshot-replaced" {
+				before[systemPath] = fs.files[systemPath]
+			}
+			if !reflect.DeepEqual(before, fs.files) {
+				t.Fatal("native mismatch mutated credential state")
+			}
+		})
+	}
+}
+func TestRemoveSelectedRejectsReplacementAfterJournal(t *testing.T) {
+	for _, mode := range []string{"replacement", "mixed-registry-keys", "missing-native-key", "missing-logical-key"} {
+		t.Run(mode, func(t *testing.T) {
+			c, _ := testCoordinator(t)
+			ctx := context.Background()
+			plan := RemovalPlan{Version: 1, OperationID: "pending", AccountKey: "logical-key", ExpectedSystemRevision: "same-revision", RegistryKeys: []string{"logical-key", "original-native-key"}}
+			nativeKey := AccountKey("original-native-key")
+			switch mode {
+			case "replacement":
+				nativeKey = "replacement-native-key"
+			case "mixed-registry-keys":
+				plan.RegistryKeys = append(plan.RegistryKeys, "unknown-alias")
+			case "missing-native-key":
+				plan.RegistryKeys = nil
+			case "missing-logical-key":
+				plan.RegistryKeys = []string{"original-native-key"}
+			}
+			if err := c.Journal.Save(plan); err != nil {
+				t.Fatal(err)
+			}
+			race := &removalRaceActivator{SystemActivator: c.Activator, observe: func(context.Context) (SystemSnapshot, error) {
+				return SystemSnapshot{Present: true, AccountKey: nativeKey, Revision: "same-revision"}, nil
+			}}
+			c.Activator = race
+			result, err := c.RemoveSelected(ctx, plan.AccountKey, nil, plan.OperationID, nil)
+			if !errors.Is(err, ErrStaleRevision) || !result.PendingRecovery || race.deactivations != 0 {
+				t.Fatalf("replacement deactivation=%d result=%+v error=%v", race.deactivations, result, err)
+			}
+		})
+	}
+}
+func TestRemoveSelectedVanishedReturnsTypedMissing(t *testing.T) {
+	c, fs := testCoordinator(t)
+	ctx := context.Background()
+	ref, revision, err := c.SaveLogin(ctx, testLoginCredential())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installManagedDirectoryEntry(fs, c.candidatePath(ref.CandidateID))
+	delete(fs.files, c.candidatePath(ref.CandidateID))
+	delete(fs.modes, c.candidatePath(ref.CandidateID))
+	before := make(map[string][]byte)
+	for path, data := range fs.files {
+		before[path] = append([]byte{}, data...)
+	}
+	result, err := c.RemoveSelected(ctx, ref.AccountKey, RevisionSet{ref.CandidateID: revision}, "", &SystemSnapshot{})
+	var missing *AccountReferenceError
+	if !errors.As(err, &missing) || missing.Code != AccountReferenceMissing || result.ManagedDeleted != 0 || result.PendingRecovery {
+		t.Fatalf("missing removal=%+v error=%T %v", result, err, err)
+	}
+	if !reflect.DeepEqual(before, fs.files) {
+		t.Fatal("vanished removal wrote state")
 	}
 }
