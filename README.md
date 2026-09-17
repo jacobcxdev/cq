@@ -74,7 +74,9 @@ cq operation --help
 
 Successful quota rows are cached by provider. Default TTL is 30 seconds; `--refresh` bypasses it. If one account has a transient fetch failure and a matching usable cached row exists, cq shows stale quota with original error context instead of hiding that account. Auth errors are never written as fresh cache data.
 
-cq also keeps per-account/window EWMA burn history for trend display and a secondary imminent-block gauge override. Pace, burndown, and the main gauge derive from the current quota window and remain available without history. Cache and history failures degrade to uncached/cold-start behaviour.
+cq also keeps per-account/window burn history. Exhaustion ETA uses the **shorter of the recent-rate and whole-window-average estimates**: fast burns shorten it, while idle periods cannot extend it beyond the whole-window baseline. Recent rates use a 30-minute EWMA half-life, at least five minutes between samples, and a 15-minute observation warmup. Exact percentages are used when available. Resets, upward adjustments, precision changes, and observation gaps over two hours restart warmup; stale or mismatched snapshots fall back to the whole-window average. Matching cached reads can reuse a forecast for up to 15 minutes without advancing history.
+
+Account, aggregate, and proxy-pool ETAs select the same rate per account before weighting capacity and consumption. Budget pace and the main gauge retain their existing window-based calculations; the secondary imminent-block warning retains its separate EWMA. Cache and history failures degrade to uncached/cold-start behaviour.
 
 ### TTY report
 

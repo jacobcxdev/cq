@@ -62,35 +62,6 @@ func TestCalcPace(t *testing.T) {
 	}
 }
 
-func TestCalcBurndown(t *testing.T) {
-	tests := []struct {
-		name      string
-		periodS   int64
-		resetEpoch int64
-		nowEpoch  int64
-		pct       int
-		wantS     int64
-		wantOK    bool
-	}{
-		{"zero_pct", 18000, 18100, 9100, 0, 0, true},
-		{"no_elapsed", 18000, 18100, 100, 50, 0, false},
-		{"half_used_half_elapsed", 18000, 18100, 9100, 50, 9000, true},
-		{"nothing_used", 18000, 18100, 9100, 100, 0, false},
-		{"pct_above_100", 18000, 18100, 9100, 150, 0, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := calcBurndown(tt.periodS, tt.resetEpoch, tt.nowEpoch, tt.pct)
-			if ok != tt.wantOK {
-				t.Errorf("calcBurndown ok = %v, want %v", ok, tt.wantOK)
-			}
-			if got != tt.wantS {
-				t.Errorf("calcBurndown = %d, want %d", got, tt.wantS)
-			}
-		})
-	}
-}
-
 func TestPeriodSeconds(t *testing.T) {
 	tests := []struct {
 		name string

@@ -59,9 +59,9 @@ type captureHistory struct {
 	results map[string][]quota.Result
 }
 
-func (h *captureHistory) UpdateAndGetBurnRates(_ context.Context, results map[string][]quota.Result, _ int64) (history.BurnRates, error) {
+func (h *captureHistory) UpdateAndGetEstimates(_ context.Context, results map[string][]quota.Result, _ int64) (history.BurnRates, history.RateEstimates, error) {
 	h.results = results
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (c *mockCache) Get(_ context.Context, id string) ([]quota.Result, bool, error) {
