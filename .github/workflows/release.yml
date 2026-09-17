@@ -681,7 +681,7 @@ jobs:
           fi
           git -C "$checkout" -c user.name=jacobcxdev -c user.email=41898282+jacobcxdev@users.noreply.github.com \
             commit -m "New version: jacobcxdev.cq version $version"
-          git -C "$checkout" push --force-with-lease origin "$branch"
+          git -C "$checkout" push origin "$branch"
           gh pr create \
             --repo microsoft/winget-pkgs \
             --base master \
