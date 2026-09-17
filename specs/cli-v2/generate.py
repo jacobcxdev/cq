@@ -136,6 +136,7 @@ def parameter_go(p):
         '\t\t\t\tName: ' + go_quote(p['name']) + ',',
         '\t\t\t\tType: ' + go_quote(p['type']) + ',',
         '\t\t\t\tShort: ' + go_quote(p.get('short') or '') + ',',
+        '\t\t\t\tMetavar: ' + go_quote(p.get('metavar') or '') + ',',
         '\t\t\t\tChoices: ' + go_string_slice(p.get('choices')) + ',',
         '\t\t\t\tDefault: ' + defaults + ',',
         '\t\t\t\tRequired: ' + str(p['required']).lower() + ',',

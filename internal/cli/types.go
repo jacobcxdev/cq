@@ -45,6 +45,7 @@ type ParameterSpec struct {
 	Name       string
 	Type       string
 	Short      string
+	Metavar    string
 	Choices    []string
 	Default    []string
 	Required   bool

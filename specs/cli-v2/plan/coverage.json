@@ -2733,5 +2733,13 @@
         "T28"
       ]
     }
-  ]
+  ],
+  "parser_acceptance": {
+    "owner": "T03",
+    "clauses": "internal/cli/testdata/parser-coverage.json",
+    "cases": "internal/cli/testdata/parser-cases.json",
+    "migration": "internal/cli/testdata/compatibility.json",
+    "verification": "go test -race -count=1 ./internal/cli -run TestCLIV2ConstraintCoverage",
+    "scope": "Executable argv checks and exact semantic-owner deferrals; not evidence that later family adapters are implemented."
+  }
 }

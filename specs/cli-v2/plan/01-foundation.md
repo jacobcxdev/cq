@@ -252,6 +252,8 @@ go vet ./internal/cli
 
 Interface amendment fixed here: add `LegacySelector string` to Invocation in types.go, empty normally and `claude_uuid` only for the explicitly translated old Claude pin selector. This is the sole legacy-only semantic annotation; T13 consumes it. Both coordinator and this task must remain consistent.
 
+T03 parser acceptance is recorded in `internal/cli/testdata/parser-cases.json`, `compatibility.json` and `parser-coverage.json`. The coverage test compares all current catalogue clauses verbatim, executes each referenced parser fixture and checks each deferred semantic owner against `coverage.json`; unknown or unclassified clauses fail. Mixed lexical/state clauses retain both responsibilities. Required confirmation booleans remain semantic exit-6 preconditions, while unavailable candidate commands stop after syntax validation. The retired recovery route returns its mandated exit 4 through `ParseError`, including help. Compatibility-only pin guidance does not extend the executable catalogue. Unchanged legacy paths with consumed duration positionals do not acquire an invented deprecation warning; actual old options and changed paths retain the exact migration warnings.
+
 ## T04 — Implement output, consent, operation budgets and contract fixtures
 
 **Dependencies:** T03.

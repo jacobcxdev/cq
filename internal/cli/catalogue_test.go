@@ -27,6 +27,7 @@ func TestCLIV2GeneratedCatalogue(t *testing.T) {
 		Name       string `json:"name"`
 		Type       string `json:"type"`
 		Short      string `json:"short"`
+		Metavar    string `json:"metavar"`
 		Choices    []string
 		Default    any
 		Required   bool
@@ -65,7 +66,7 @@ func TestCLIV2GeneratedCatalogue(t *testing.T) {
 		default:
 			defaults = []string{fmt.Sprint(value)}
 		}
-		return ParameterSpec{Name: raw.Name, Type: raw.Type, Short: raw.Short, Choices: choices, Default: defaults, Required: raw.Required, Repeatable: raw.Repeatable}
+		return ParameterSpec{Name: raw.Name, Type: raw.Type, Short: raw.Short, Metavar: raw.Metavar, Choices: choices, Default: defaults, Required: raw.Required, Repeatable: raw.Repeatable}
 	}
 	convertParameters := func(raw []rawParameter) []ParameterSpec {
 		result := make([]ParameterSpec, 0, len(raw))
