@@ -718,8 +718,8 @@
       ],
       "output": {
         "fields": {
-          "account": "AccountSummary",
-          "activated": "boolean: whether native client default was selected",
+          "account": "AccountSummary or null only when post-save account observation failed",
+          "activated": "boolean or null: whether native client default was selected; null only for an indeterminate attempted activation",
           "credentials_saved": "boolean: true once durable save completed"
         },
         "human": "Logged in to Claude as {account.display_name}.\nNative client default: {activated}.\n"
@@ -754,6 +754,12 @@
           "exit": 8,
           "condition": "Credentials were saved but requested activation failed.",
           "message": "Credentials were saved, but native client activation failed."
+        },
+        {
+          "code": "account_login_postcheck_partial",
+          "exit": 8,
+          "condition": "Credentials were saved but the final account-state observation or metadata postcheck failed.",
+          "message": "Credentials were saved, but account state could not be verified."
         }
       ],
       "examples": [
@@ -780,7 +786,10 @@
         "Default login leaves active credentials unchanged.",
         "--activate=false does not activate.",
         "OAuth callback invalid input does not consume the valid callback attempt.",
-        "Partial activation error includes credentials_saved=true and exit 8."
+        "Partial activation error includes credentials_saved=true and exit 8.",
+        "Default relogin preserves the native default and reports its observed active identity without activation.",
+        "Post-save observation failure preserves credentials_saved=true with account=null; known explicit activation result remains available.",
+        "An indeterminate dispatched activation reports activated=null, never retries the mutation, and retains timeout or interruption exit precedence."
       ],
       "sources": [
         "v0.32.5:cmd/cq/main.go:196",
@@ -1708,8 +1717,8 @@
       ],
       "output": {
         "fields": {
-          "account": "AccountSummary",
-          "activated": "boolean: whether native client default was selected",
+          "account": "AccountSummary or null only when post-save account observation failed",
+          "activated": "boolean or null: whether native client default was selected; null only for an indeterminate attempted activation",
           "credentials_saved": "boolean: true once durable save completed"
         },
         "human": "Logged in to Codex as {account.display_name}.\nNative client default: {activated}.\n"
@@ -1744,6 +1753,12 @@
           "exit": 8,
           "condition": "Credentials were saved but requested activation failed.",
           "message": "Credentials were saved, but native client activation failed."
+        },
+        {
+          "code": "account_login_postcheck_partial",
+          "exit": 8,
+          "condition": "Credentials were saved but the final account-state observation or metadata postcheck failed.",
+          "message": "Credentials were saved, but account state could not be verified."
         }
       ],
       "examples": [
@@ -1770,7 +1785,10 @@
         "Default login leaves active credentials unchanged.",
         "--activate=false does not activate.",
         "OAuth callback invalid input does not consume the valid callback attempt.",
-        "Partial activation error includes credentials_saved=true and exit 8."
+        "Partial activation error includes credentials_saved=true and exit 8.",
+        "Default relogin preserves the native default and reports its observed active identity without activation.",
+        "Post-save observation failure preserves credentials_saved=true with account=null; known explicit activation result remains available.",
+        "An indeterminate dispatched activation reports activated=null, never retries the mutation, and retains timeout or interruption exit precedence."
       ],
       "sources": [
         "v0.32.5:cmd/cq/main.go:196",

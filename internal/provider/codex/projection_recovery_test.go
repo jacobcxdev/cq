@@ -625,3 +625,22 @@ func readRegistryDocument(t *testing.T, fs *durableFakeFS) map[string]any {
 	}
 	return doc
 }
+
+func TestSaveLoginRetainsDurableReceiptOnProjectionFailure(t *testing.T) {
+	coordinator, fs := testCoordinator(t)
+	coordinator.Registry = &projectionCatalogueStub{upsertErr: errors.New("private persistence details")}
+	ref, revision, err := coordinator.SaveLogin(context.Background(), projectionCredential("saved@test.com", "acct-saved", "user-saved", "plus", time.Now()))
+	if err == nil {
+		t.Fatal("expected projection failure")
+	}
+	if len(managedCredentialPaths(fs)) != 1 {
+		t.Fatal("fixture did not persist credentials")
+	}
+	if ref.AccountKey == "" || ref.CandidateID == "" || revision == "" {
+		t.Fatal("durable save lost its exact receipt after projection failure")
+	}
+	record, loadErr := coordinator.loadRef(ref)
+	if loadErr != nil || record.Metadata.Revision != revision {
+		t.Fatal("receipt does not identify saved credentials")
+	}
+}

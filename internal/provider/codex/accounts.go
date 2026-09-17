@@ -350,3 +350,46 @@ func (a *Accounts) inspectRemovalJournal(ctx context.Context) error {
 	}
 	return nil
 }
+
+// InspectRemoval preserves general inspection's read-only contract while making
+// an interrupted removal selectable by its exact persisted opaque key.
+func (a *Accounts) InspectRemoval(ctx context.Context) (Inventory, *RemovalPlan, error) {
+	if err := ctx.Err(); err != nil {
+		return Inventory{}, nil, err
+	}
+	fs, ok := a.FS.(fsutil.DurableFileSystem)
+	if !ok || a.StateDir == "" {
+		return Inventory{}, nil, ErrCredentialAuthorityUnavailable
+	}
+	plan, pending, err := (RemovalJournal{FS: fs, StateDir: a.StateDir}).Load()
+	if err != nil {
+		return Inventory{}, nil, err
+	}
+	if !pending {
+		inventory, err := a.Inspect(ctx)
+		return inventory, nil, err
+	}
+	home, err := a.FS.UserHomeDir()
+	if err != nil {
+		return Inventory{}, nil, err
+	}
+	sources := a.ExternalSources
+	if sources == nil {
+		sources = []ExternalCredentialSource{NewCodexBarSource(DefaultCodexBarRoot(home))}
+	}
+	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, a.FS, sources...)
+	if err != nil {
+		return Inventory{}, nil, err
+	}
+	found := false
+	for _, row := range inventory.Accounts {
+		found = found || row.Key == plan.AccountKey
+	}
+	if !found {
+		inventory.Accounts = append(inventory.Accounts, LogicalAccount{Key: plan.AccountKey})
+	}
+	if err := ctx.Err(); err != nil {
+		return Inventory{}, nil, err
+	}
+	return sanitiseCredentialInventory(inventory), &plan, nil
+}

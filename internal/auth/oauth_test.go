@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // testDoer rewrites request URLs to point at a local httptest.Server,
@@ -563,5 +566,81 @@ func TestOAuthAcceptedCallbackCanonicalBound(t *testing.T) {
 	}
 	if _, err := ParseOAuthAcceptedCallbackQuery("code="+strings.Repeat("x", 513)+"&state="+state, state); err == nil {
 		t.Fatal("accepted code byte 513")
+	}
+}
+
+func TestCanonicalOAuthCancellationClosesCallbackConnections(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var conn net.Conn
+			var address string
+
+			active := make(chan struct{}, 1)
+			state := func(_ net.Conn, state http.ConnState) {
+				if state == http.StateActive {
+					select {
+					case active <- struct{}{}:
+					default:
+					}
+				}
+			}
+			browser := func(_ context.Context, authURL string) error {
+				parsed, err := url.Parse(authURL)
+				if err != nil {
+					return err
+				}
+				callback, err := url.Parse(parsed.Query().Get("redirect_uri"))
+				if err != nil {
+					return err
+				}
+				address = "127.0.0.1:" + callback.Port()
+				conn, err = net.DialTimeout("tcp", address, time.Second)
+				if err != nil {
+					return err
+				}
+				if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+					return err
+				}
+				// A complete header and incomplete body keep the callback request active.
+				if _, err := fmt.Fprintf(conn, "POST %s?state=invalid HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nx", callback.Path); err != nil {
+					return err
+				}
+				select {
+				case <-active:
+				case <-time.After(time.Second):
+					return errors.New("callback never became active")
+				}
+				cancel()
+				return nil
+			}
+
+			var err error
+			if provider == "claude" {
+				_, _, err = loginWithBrowser(ctx, nil, browser, state)
+			} else {
+				_, _, err = codexLoginWithBrowser(ctx, nil, browser, state)
+			}
+			if conn != nil {
+				defer conn.Close()
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("login cancellation=%v", err)
+			}
+			if conn == nil {
+				t.Fatal("callback connection missing")
+			}
+			conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			_, err = io.Copy(io.Discard, conn)
+			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+				t.Fatal("cancelled OAuth retained active callback connection")
+			}
+			listener, err := net.Listen("tcp", address)
+			if err != nil {
+				t.Fatalf("callback listener retained: %v", err)
+			}
+			listener.Close()
+		})
 	}
 }

@@ -1551,3 +1551,76 @@ func TestKeyringCancellationAfterHomePreventsPersistence(t *testing.T) {
 		t.Fatal("credential directory created after cancellation")
 	}
 }
+
+func TestRemovalExactClaudeRetainsPartialAndProtectsIdentity(t *testing.T) {
+	for _, mode := range []string{"success", "delete-fails", "manifest-fails", "native-replaced", "uuid-collision", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			account := ClaudeOAuth{AccountUUID: "uuid", Email: "Mixed@example.com", AccessToken: "secret"}
+			native, _ := json.Marshal(ClaudeCredentials{ClaudeAiOauth: &account})
+			raw, _ := json.Marshal(account)
+			manifest, _ := json.Marshal([]manifestEntry{{UUID: "uuid", Email: " mixed@EXAMPLE.com "}})
+			deleted, written := 0, 0
+			reads := 0
+			ops := claudeRemovalIO{
+				inspect: func(context.Context) ([]ClaudeAccountInspection, error) {
+					return []ClaudeAccountInspection{{Account: account}}, nil
+				},
+				manifest: func() (string, error) { return "/manifest", nil }, home: func() (string, error) { return "/isolated", nil },
+				read: func(path string) ([]byte, error) {
+					if path == "/manifest" {
+						return manifest, nil
+					}
+					reads++
+					if mode == "native-replaced" && reads > 1 {
+						other := ClaudeOAuth{AccountUUID: "other", Email: account.Email}
+						return json.Marshal(ClaudeCredentials{ClaudeAiOauth: &other})
+					}
+					return native, nil
+				},
+				get: func(string, string) (string, error) {
+					if mode == "uuid-collision" {
+						other := account
+						other.AccountUUID = "other"
+						data, _ := json.Marshal(other)
+						return string(data), nil
+					}
+					return string(raw), nil
+				},
+				delete: func(string, string) error {
+					if mode == "delete-fails" {
+						return errors.New("private-keychain-failure")
+					}
+					deleted++
+					return nil
+				},
+				saveManifest: func(context.Context, string, []manifestEntry) error {
+					if mode == "manifest-fails" {
+						return errors.New("private-manifest-failure")
+					}
+					return nil
+				},
+				write: func(context.Context, *ClaudeCredentials) error { written++; return nil }, platform: func(context.Context, []ClaudeOAuth) (bool, error) { return false, nil },
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "cancelled" {
+				cancel()
+			}
+			result, err := removeClaudeAccountContext(ctx, account, ops)
+			switch mode {
+			case "success":
+				if err != nil || !result.Changed || !result.ActiveRemoved || deleted != 1 || written != 1 {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+			case "manifest-fails", "native-replaced":
+				if err == nil || !result.Changed || result.ActiveRemoved || written != 0 {
+					t.Fatal("partial result lost or replacement removed")
+				}
+			default:
+				if err == nil || result.Changed || deleted != 0 || written != 0 {
+					t.Fatalf("unexpected mutation result=%+v err=%v", result, err)
+				}
+			}
+		})
+	}
+}

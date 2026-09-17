@@ -339,3 +339,110 @@ func TestDiscoverAccountsInspectionCancellationSkipsKeyring(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func mutationAccounts(t *testing.T) (*Accounts, *keyring.ClaudeAccountInspection, *[]string) {
+	t.Helper()
+	row := &keyring.ClaudeAccountInspection{Account: keyring.ClaudeOAuth{AccountUUID: "uuid", Email: " Mixed@Example.com ", AccessToken: "secret"}, Sources: []string{"cq_managed"}}
+	calls := new([]string)
+	ops := &AccountMutationOperations{
+		Inspect: func(ctx context.Context) ([]keyring.ClaudeAccountInspection, error) {
+			return []keyring.ClaudeAccountInspection{*row}, ctx.Err()
+		},
+		Store: func(ctx context.Context, a *keyring.ClaudeOAuth) error {
+			*calls = append(*calls, "store")
+			return ctx.Err()
+		},
+		Write: func(ctx context.Context, c *keyring.ClaudeCredentials) error {
+			*calls = append(*calls, "write")
+			return ctx.Err()
+		},
+		Update: func(ctx context.Context, _ string, c *keyring.ClaudeCredentials) error {
+			*calls = append(*calls, "update")
+			return ctx.Err()
+		},
+		Remove: func(ctx context.Context, a keyring.ClaudeOAuth) (keyring.ClaudeRemovalResult, error) {
+			*calls = append(*calls, "remove")
+			return keyring.ClaudeRemovalResult{Changed: true}, ctx.Err()
+		},
+	}
+	return &Accounts{Mutations: ops}, row, calls
+}
+func TestActivateSelectedClaudeIdentityAndPartial(t *testing.T) {
+	for _, mode := range []string{"success", "already-active", "changed-uuid", "duplicate", "missing", "write-failure", "keychain-failure", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			accounts, row, calls := mutationAccounts(t)
+			expected := *row
+			switch mode {
+			case "already-active":
+				row.Active = true
+				expected.Active = true
+			case "changed-uuid":
+				row.Account.AccountUUID = "other"
+			case "duplicate":
+				accounts.Mutations.Inspect = func(context.Context) ([]keyring.ClaudeAccountInspection, error) {
+					other := *row
+					other.Account.AccountUUID = "other"
+					return []keyring.ClaudeAccountInspection{*row, other}, nil
+				}
+			case "missing":
+				accounts.Mutations.Inspect = func(context.Context) ([]keyring.ClaudeAccountInspection, error) { return nil, nil }
+			case "write-failure":
+				accounts.Mutations.Write = func(context.Context, *keyring.ClaudeCredentials) error { return errors.New("private details") }
+			case "keychain-failure":
+				accounts.Mutations.Update = func(context.Context, string, *keyring.ClaudeCredentials) error { return errors.New("private details") }
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "cancelled" {
+				cancel()
+			}
+			result, err := accounts.ActivateSelected(ctx, expected)
+			switch mode {
+			case "success":
+				if err != nil || !result.Changed || !result.Active || len(*calls) != 3 {
+					t.Fatalf("result=%+v err=%v calls=%v", result, err, *calls)
+				}
+			case "already-active":
+				if err != nil || result.Changed || !result.Active || len(*calls) != 0 {
+					t.Fatal("active assertion wrote credentials")
+				}
+			case "keychain-failure":
+				if err == nil || !result.Changed || !result.Active {
+					t.Fatal("lost native write evidence")
+				}
+			default:
+				if err == nil || result.Changed || len(*calls) != 0 {
+					t.Fatalf("unexpected writes/result err=%v calls=%v", err, *calls)
+				}
+			}
+		})
+	}
+}
+func TestRemovalSelectedClaudeUniqueCaseInsensitiveIdentity(t *testing.T) {
+	accounts, row, calls := mutationAccounts(t)
+	selected, err := ResolveAccountReference([]keyring.ClaudeAccountInspection{*row}, " mixed@example.COM ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := accounts.RemoveSelected(context.Background(), selected.Account)
+	if err != nil || !result.Changed || len(*calls) != 1 {
+		t.Fatal("unique trimmed email did not remove exact identity")
+	}
+	row.Account.AccountUUID = "replacement"
+	if _, err := accounts.RemoveSelected(context.Background(), selected.Account); err == nil || len(*calls) != 1 {
+		t.Fatal("same-email replacement removed")
+	}
+}
+func TestSaveLoginClaudeDefaultDoesNotActivate(t *testing.T) {
+	accounts, row, calls := mutationAccounts(t)
+	saved, err := accounts.SaveLogin(context.Background(), row.Account)
+	if err != nil || !saved || len(*calls) != 1 || (*calls)[0] != "store" {
+		t.Fatal("save changed native credentials")
+	}
+	accounts.Mutations.Store = func(context.Context, *keyring.ClaudeOAuth) error {
+		return &keyring.ClaudeStoreError{Err: errors.New("manifest failure")}
+	}
+	if saved, err := accounts.SaveLogin(context.Background(), row.Account); !saved || err == nil {
+		t.Fatal("manifest failure lost keyring persistence")
+	}
+}

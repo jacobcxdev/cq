@@ -2,8 +2,10 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -13,7 +15,8 @@ import (
 
 // Accounts implements provider.AccountManager for Claude.
 type Accounts struct {
-	HTTP httputil.Doer
+	HTTP      httputil.Doer
+	Mutations *AccountMutationOperations
 }
 
 var (
@@ -142,5 +145,170 @@ func (a *Accounts) Remove(_ context.Context, identifier string) error {
 // Inspect reads complete local metadata without the legacy discovery merging
 // policy, refresh, persistence, or network access.
 func (a *Accounts) Inspect(ctx context.Context) ([]keyring.ClaudeAccountInspection, error) {
+	if a.Mutations != nil && a.Mutations.Inspect != nil {
+		return a.Mutations.Inspect(ctx)
+	}
 	return keyring.InspectClaudeAccounts(ctx)
+}
+
+// AccountMutationOperations are the narrow native-store seams used by explicit
+// account transactions. Nil uses the platform implementation.
+type AccountMutationOperations struct {
+	Inspect func(context.Context) ([]keyring.ClaudeAccountInspection, error)
+	Store   func(context.Context, *keyring.ClaudeOAuth) error
+	Write   func(context.Context, *keyring.ClaudeCredentials) error
+	Update  func(context.Context, string, *keyring.ClaudeCredentials) error
+	Remove  func(context.Context, keyring.ClaudeOAuth) (keyring.ClaudeRemovalResult, error)
+}
+
+func (a *Accounts) mutationOperations() AccountMutationOperations {
+	if a.Mutations != nil {
+		return *a.Mutations
+	}
+	return AccountMutationOperations{Inspect: keyring.InspectClaudeAccounts, Store: keyring.StoreCQAccountContext, Write: keyring.WriteCredentialsFileContext, Update: keyring.UpdateKeychainEntryContext, Remove: keyring.RemoveClaudeAccountContext}
+}
+
+type AccountReferenceError struct{ Code string }
+
+func (e *AccountReferenceError) Error() string { return "Claude account reference " + e.Code }
+func ResolveAccountReference(rows []keyring.ClaudeAccountInspection, reference string) (keyring.ClaudeAccountInspection, error) {
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return keyring.ClaudeAccountInspection{}, &AccountReferenceError{Code: "empty"}
+	}
+	var selected keyring.ClaudeAccountInspection
+	count := 0
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.Account.Email), reference) {
+			selected = row
+			count++
+		}
+	}
+	if count == 0 {
+		return selected, &AccountReferenceError{Code: "missing"}
+	}
+	if count != 1 {
+		return selected, &AccountReferenceError{Code: "ambiguous"}
+	}
+	return selected, nil
+}
+func (a *Accounts) revalidate(ctx context.Context, expected keyring.ClaudeOAuth) (keyring.ClaudeAccountInspection, error) {
+	rows, err := a.mutationOperations().Inspect(ctx)
+	if err != nil {
+		return keyring.ClaudeAccountInspection{}, err
+	}
+	selected, err := ResolveAccountReference(rows, expected.Email)
+	if err != nil {
+		return selected, err
+	}
+	if !keyring.SameClaudeIdentity(selected.Account, expected) {
+		return selected, keyring.ErrClaudeIdentityChanged
+	}
+	return selected, nil
+}
+
+type AccountActivationResult struct {
+	Account         keyring.ClaudeOAuth
+	Changed, Active bool
+}
+
+func (a *Accounts) ActivateSelected(ctx context.Context, expected keyring.ClaudeAccountInspection) (AccountActivationResult, error) {
+	result := AccountActivationResult{Account: expected.Account}
+	selected, err := a.revalidate(ctx, expected.Account)
+	if err != nil {
+		return result, err
+	}
+	if expected.Active {
+		if !selected.Active {
+			return result, keyring.ErrClaudeIdentityChanged
+		}
+		result.Active = true
+		return result, nil
+	}
+	managed := false
+	for _, source := range selected.Sources {
+		managed = managed || source == "cq_managed"
+	}
+	if !managed {
+		return result, &AccountReferenceError{Code: "not_activatable"}
+	}
+	account := selected.Account
+	ops := a.mutationOperations()
+	ctx = keyring.WithDiagnostics(ctx, nil)
+	refreshFailed := false
+	if a.HTTP != nil && account.RefreshToken != "" && account.ExpiresAt > 0 && account.ExpiresAt < time.Now().UnixMilli() {
+		refreshed, err := RefreshToken(ctx, a.HTTP, account.RefreshToken, account.Scopes)
+		if err != nil {
+			refreshFailed = true
+		} else {
+			account.AccessToken = refreshed.AccessToken
+			account.ExpiresAt = time.Now().UnixMilli() + refreshed.ExpiresIn*1000
+			if refreshed.RefreshToken != "" {
+				account.RefreshToken = refreshed.RefreshToken
+			}
+			if err := ops.Store(ctx, &account); err != nil {
+				return result, err
+			}
+		}
+	}
+	if a.HTTP != nil {
+		profile, err := (&Client{http: a.HTTP}).FetchProfile(ctx, account.AccessToken)
+		if err != nil && refreshFailed {
+			return result, err
+		}
+		if err == nil {
+			if profile.Plan != "" {
+				account.SubscriptionType = profile.Plan
+			}
+			if profile.RateLimitTier != "" {
+				account.RateLimitTier = profile.RateLimitTier
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	// Revalidate after network work; a same-email replacement is not the selected identity.
+	if _, err := a.revalidate(ctx, expected.Account); err != nil {
+		return result, err
+	}
+	credentials := &keyring.ClaudeCredentials{ClaudeAiOauth: &account}
+	if err := ops.Write(ctx, credentials); err != nil {
+		return result, err
+	}
+	result.Account, result.Changed, result.Active = account, true, true
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if err := ops.Update(ctx, "Claude Code-credentials", credentials); err != nil {
+		return result, err
+	}
+	if account.AccountUUID != "" {
+		if err := ops.Store(ctx, &account); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+func (a *Accounts) RemoveSelected(ctx context.Context, expected keyring.ClaudeOAuth) (keyring.ClaudeRemovalResult, error) {
+	if _, err := a.revalidate(ctx, expected); err != nil {
+		return keyring.ClaudeRemovalResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return keyring.ClaudeRemovalResult{}, err
+	}
+	return a.mutationOperations().Remove(keyring.WithDiagnostics(ctx, nil), expected)
+}
+
+// SaveLogin stores an authenticated identity without changing the native default.
+func (a *Accounts) SaveLogin(ctx context.Context, account keyring.ClaudeOAuth) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if account.AccountUUID == "" || account.AccessToken == "" {
+		return false, errors.New("authenticated account identity missing")
+	}
+	err := a.mutationOperations().Store(keyring.WithDiagnostics(ctx, nil), &account)
+	var committed *keyring.ClaudeStoreError
+	return err == nil || errors.As(err, &committed), err
 }

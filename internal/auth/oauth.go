@@ -146,6 +146,21 @@ type Profile struct {
 // Login performs the OAuth PKCE flow: starts a local server,
 // opens the browser, and returns tokens + profile on success.
 func Login(ctx context.Context, client httputil.Doer) (*TokenResponse, *Profile, error) {
+	return LoginWithBrowser(ctx, client, func(ctx context.Context, url string) error {
+		fmt.Println("Opening browser to sign in…")
+		if err := openBrowser(url); err != nil {
+			fmt.Printf("Open this URL to sign in:\n  %s\n", url)
+		}
+		return nil
+	})
+}
+
+// LoginWithBrowser delegates presentation to the caller; OAuth callback and
+// exchange semantics are identical to Login.
+func LoginWithBrowser(ctx context.Context, client httputil.Doer, browser func(context.Context, string) error) (*TokenResponse, *Profile, error) {
+	return loginWithBrowser(ctx, client, browser, nil)
+}
+func loginWithBrowser(ctx context.Context, client httputil.Doer, browser func(context.Context, string) error, connectionState func(net.Conn, http.ConnState)) (*TokenResponse, *Profile, error) {
 	verifier, challenge, err := generatePKCE()
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate PKCE: %w", err)
@@ -196,6 +211,7 @@ func Login(ctx context.Context, client httputil.Doer) (*TokenResponse, *Profile,
 
 	server := &http.Server{
 		Handler:           mux,
+		ConnState:         connectionState,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -209,16 +225,17 @@ func Login(ctx context.Context, client httputil.Doer) (*TokenResponse, *Profile,
 		}
 	}()
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+		}
 	}()
 
 	autoURL := buildAuthorizeURL(challenge, state, port)
 
-	fmt.Println("Opening browser to sign in\u2026")
-	if err := openBrowser(autoURL); err != nil {
-		fmt.Printf("Open this URL to sign in:\n  %s\n", autoURL)
+	if err := browser(ctx, autoURL); err != nil {
+		return nil, nil, err
 	}
 
 	// Wait for callback

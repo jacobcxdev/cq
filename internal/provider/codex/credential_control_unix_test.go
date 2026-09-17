@@ -685,3 +685,137 @@ func shortControlPath(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "control.sock")
 }
+
+func TestSaveLoginV2PreservesCommittedReceiptOverRPC(t *testing.T) {
+	c, fs := testCoordinator(t)
+	c.Registry = &projectionCatalogueStub{upsertErr: errors.New("private-secret-error")}
+	serverConn, clientConn := net.Pipe()
+	server := rpc.NewServer()
+	owner := &CredentialControl{owner: true, coordinator: c}
+	if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: c, Control: owner}); err != nil {
+		t.Fatal(err)
+	}
+	go server.ServeConn(serverConn)
+	defer serverConn.Close()
+	client := &CredentialControl{client: rpc.NewClient(clientConn)}
+	defer client.Close()
+	ref, revision, err := client.CanonicalAdmin().SaveLogin(context.Background(), projectionCredential("rpc@test.com", "acct-rpc", "user-rpc", "plus", time.Now()))
+	if err == nil || ref.AccountKey == "" || revision == "" || len(managedCredentialPaths(fs)) != 1 {
+		t.Fatalf("saved receipt lost: ref=%+v revision=%q err=%v", ref, revision, err)
+	}
+	if err.Error() == "private-secret-error" {
+		t.Fatal("wire leaked internal error")
+	}
+}
+func TestRemovalV2CancellationBeforeRegistration(t *testing.T) {
+	c, fs := testCoordinator(t)
+	owner := &CredentialControl{owner: true, coordinator: c}
+	server := &credentialRPC{Coordinator: c, Control: owner}
+	id, _ := newCredentialRPCRequestID()
+	if err := server.CancelRequest(CancelCredentialRPCArgs{RequestID: id}, &struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	reply := SaveLoginV2Reply{}
+	if err := server.SaveLoginV2(SaveLoginV2Args{RequestID: id, Credential: testLoginCredential()}, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Failure != "cancelled" || len(managedCredentialPaths(fs)) != 0 {
+		t.Fatalf("reply=%+v", reply)
+	}
+}
+
+func TestRemovalCanonicalOpenerDoesNotRecoverBeforeConsent(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Dir(shortControlPath(t)))
+	fs := newDurableFakeFS()
+	coordinator, path, err := newDefaultCredentialCoordinator(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := RemovalPlan{Version: 1, OperationID: "awaiting-consent", AccountKey: "pending-key", Candidates: []RemovalCandidate{{CandidateID: "already-gone", Revision: "r"}}}
+	if err := coordinator.Journal.Save(plan); err != nil {
+		t.Fatal(err)
+	}
+	// Ensure endpoint has an isolated real parent; all credentials remain fake.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	control, err := OpenDefaultCanonicalCredentialControl(context.Background(), fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	retained, present, err := coordinator.Journal.Load()
+	if err != nil || !present || retained.OperationID != plan.OperationID {
+		t.Fatal("canonical admission recovered unconfirmed removal")
+	}
+	if _, _, err := control.CanonicalAdmin().SaveLogin(context.Background(), testLoginCredential()); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("login did not reject pending removal: %v", err)
+	}
+	if _, present, _ := coordinator.Journal.Load(); !present {
+		t.Fatal("login recovered another operation")
+	}
+	if _, err := control.CanonicalAdmin().RemoveSelected(context.Background(), plan.AccountKey, nil, plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, present, _ := coordinator.Journal.Load(); present {
+		t.Fatal("authorised exact recovery remained pending")
+	}
+}
+
+type unresponsiveMutationRPC struct{ release chan struct{} }
+
+func (s *unresponsiveMutationRPC) ActivateAccountV2(ActivateAccountV2Args, *ActivateAccountV2Reply) error {
+	<-s.release
+	return nil
+}
+func (s *unresponsiveMutationRPC) CancelRequest(CancelCredentialRPCArgs, *struct{}) error { return nil }
+func TestActivateV2TimeoutRetainsUnknownOutcome(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	server := rpc.NewServer()
+	pending := &unresponsiveMutationRPC{release: make(chan struct{})}
+	if err := server.RegisterName("CredentialRPC", pending); err != nil {
+		t.Fatal(err)
+	}
+	go server.ServeConn(serverConn)
+	defer serverConn.Close()
+	defer close(pending.release)
+	client := &CredentialControl{client: rpc.NewClient(clientConn)}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := client.CanonicalAdmin().ActivateAccount(ctx, ActivationSelection{AccountKey: "key"})
+	var unknown *MutationOutcomeUnknown
+	if !errors.As(err, &unknown) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dispatched timeout fabricated definite failure: %T %v", err, err)
+	}
+}
+
+type legacyOnlyMutationRPC struct{ calls int }
+
+func (s *legacyOnlyMutationRPC) SaveLogin(SaveLoginRPCArgs, *SaveLoginRPCReply) error {
+	s.calls++
+	return nil
+}
+func TestSaveLoginV2RejectsOldServerWithoutFallback(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	server := rpc.NewServer()
+	legacy := &legacyOnlyMutationRPC{}
+	if err := server.RegisterName("CredentialRPC", legacy); err != nil {
+		t.Fatal(err)
+	}
+	go server.ServeConn(serverConn)
+	defer serverConn.Close()
+	client := &CredentialControl{client: rpc.NewClient(clientConn)}
+	defer client.Close()
+	_, _, err := client.CanonicalAdmin().SaveLogin(context.Background(), testLoginCredential())
+	var unknown *MutationOutcomeUnknown
+	if err == nil || errors.As(err, &unknown) || legacy.calls != 0 {
+		t.Fatalf("old server fallback or uncertain rejection: %v", err)
+	}
+}
+func TestSaveLoginV2UnavailableClassification(t *testing.T) {
+	err := mutationFailure(ErrCredentialAuthorityUnavailable).err()
+	if !errors.Is(err, ErrCredentialAuthorityUnavailable) {
+		t.Fatal("authority classification lost over RPC")
+	}
+}

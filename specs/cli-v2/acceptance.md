@@ -63,6 +63,9 @@ These are implementation requirements, not claims that the current binary passes
 - [ ] --activate=false does not activate.
 - [ ] OAuth callback invalid input does not consume the valid callback attempt.
 - [ ] Partial activation error includes credentials_saved=true and exit 8.
+- [ ] Default relogin preserves the native default and reports its observed active identity without activation.
+- [ ] Post-save observation failure preserves credentials_saved=true with account=null; known explicit activation result remains available.
+- [ ] An indeterminate dispatched activation reports activated=null, never retries the mutation, and retains timeout or interruption exit precedence.
 
 ## `cq claude account remove`
 
@@ -137,6 +140,9 @@ These are implementation requirements, not claims that the current binary passes
 - [ ] --activate=false does not activate.
 - [ ] OAuth callback invalid input does not consume the valid callback attempt.
 - [ ] Partial activation error includes credentials_saved=true and exit 8.
+- [ ] Default relogin preserves the native default and reports its observed active identity without activation.
+- [ ] Post-save observation failure preserves credentials_saved=true with account=null; known explicit activation result remains available.
+- [ ] An indeterminate dispatched activation reports activated=null, never retries the mutation, and retains timeout or interruption exit precedence.
 
 ## `cq codex account remove`
 

@@ -593,3 +593,46 @@ exit 44
 		t.Fatal("denied access treated as missing item")
 	}
 }
+
+func TestRemovalExactPlatformPinsAccountLabelAndAffinity(t *testing.T) {
+	account := ClaudeOAuth{AccountUUID: "uuid", Email: "user@example.com", AccessToken: "fresh"}
+	older := account
+	older.AccessToken = "older"
+	anonymous := ClaudeOAuth{AccessToken: "older"}
+	other := ClaudeOAuth{AccountUUID: "other", Email: account.Email, AccessToken: "different"}
+	entries := map[string]*ClaudeOAuth{"Claude Code-credentials": &anonymous, "Claude Code-credentials-2": &other}
+	deleted := []string{}
+	changed, err := removePlatformClaudeAccountWith(context.Background(), []ClaudeOAuth{account, older}, func(ctx context.Context, args ...string) ([]byte, error) {
+		service := ""
+		label := ""
+		password := false
+		for i, arg := range args {
+			if arg == "-s" {
+				service = args[i+1]
+			}
+			if arg == "-a" {
+				label = args[i+1]
+			}
+			password = password || arg == "-w"
+		}
+		row := entries[service]
+		if row == nil {
+			return nil, os.ErrNotExist
+		}
+		if args[0] == "delete-generic-password" {
+			if label != "exact-os-user" {
+				t.Fatal("unqualified platform delete")
+			}
+			deleted = append(deleted, service)
+			delete(entries, service)
+			return nil, nil
+		}
+		if password {
+			return json.Marshal(ClaudeCredentials{ClaudeAiOauth: row})
+		}
+		return []byte(`    "acct"<blob>="exact-os-user"`), nil
+	})
+	if err != nil || !changed || len(deleted) != 1 || entries["Claude Code-credentials-2"] == nil {
+		t.Fatalf("changed=%t err=%v deleted=%v", changed, err, deleted)
+	}
+}

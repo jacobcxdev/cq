@@ -40,6 +40,19 @@ type CodexTokenResponse struct {
 // It starts a local server on port 1455, opens the browser, and returns
 // tokens + decoded claims on success.
 func CodexLogin(ctx context.Context, client httputil.Doer) (*CodexTokenResponse, *CodexClaims, error) {
+	return CodexLoginWithBrowser(ctx, client, func(ctx context.Context, url string) error {
+		fmt.Printf("Starting local login server on http://localhost:%d.\n", codexPort)
+		fmt.Println("If your browser did not open, navigate to this URL to authenticate:")
+		fmt.Println()
+		_ = openBrowser(url)
+		fmt.Printf("  %s\n\n", url)
+		return nil
+	})
+}
+func CodexLoginWithBrowser(ctx context.Context, client httputil.Doer, browser func(context.Context, string) error) (*CodexTokenResponse, *CodexClaims, error) {
+	return codexLoginWithBrowser(ctx, client, browser, nil)
+}
+func codexLoginWithBrowser(ctx context.Context, client httputil.Doer, browser func(context.Context, string) error, connectionState func(net.Conn, http.ConnState)) (*CodexTokenResponse, *CodexClaims, error) {
 	verifier, challenge, err := generatePKCE()
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate PKCE: %w", err)
@@ -93,6 +106,7 @@ func CodexLogin(ctx context.Context, client httputil.Doer) (*CodexTokenResponse,
 
 	server := &http.Server{
 		Handler:           mux,
+		ConnState:         connectionState,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -106,20 +120,18 @@ func CodexLogin(ctx context.Context, client httputil.Doer) (*CodexTokenResponse,
 		}
 	}()
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+		}
 	}()
 
 	authURL := buildCodexAuthorizeURL(challenge, state, port)
 
-	fmt.Printf("Starting local login server on http://localhost:%d.\n", port)
-	fmt.Println("If your browser did not open, navigate to this URL to authenticate:")
-	fmt.Println()
-	if err := openBrowser(authURL); err != nil {
-		// Browser failed to open — URL is already printed below
+	if err := browser(ctx, authURL); err != nil {
+		return nil, nil, err
 	}
-	fmt.Printf("  %s\n\n", authURL)
 
 	var code string
 	select {

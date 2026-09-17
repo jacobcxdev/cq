@@ -33,3 +33,7 @@ func RemovePlatformClaudeKeychainAccountsByEmail(email string) error {
 func inspectPlatformKeychainAccounts(ctx context.Context) ([]claudeInspectionSource, error) {
 	return nil, ctx.Err()
 }
+
+func removePlatformClaudeAccountContext(ctx context.Context, evidence []ClaudeOAuth) (bool, error) {
+	return false, ctx.Err()
+}

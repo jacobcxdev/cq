@@ -275,8 +275,13 @@ func sanitiseCredentialInventory(inventory Inventory) Inventory {
 }
 
 func (c *CredentialCoordinator) SaveLogin(ctx context.Context, credential LoginCredential) (CandidateRef, Revision, error) {
-	c.mu.Lock()
+	if err := c.lockMutation(ctx); err != nil {
+		return CandidateRef{}, "", err
+	}
 	defer c.mu.Unlock()
+	return c.saveLoginLocked(ctx, credential)
+}
+func (c *CredentialCoordinator) saveLoginLocked(ctx context.Context, credential LoginCredential) (CandidateRef, Revision, error) {
 	if err := c.finishPendingRemovalLocked(ctx); err != nil {
 		return CandidateRef{}, "", err
 	}
@@ -310,20 +315,26 @@ func (c *CredentialCoordinator) SaveLogin(ctx context.Context, credential LoginC
 		existing.Metadata.LineageID = LineageID(lineageID)
 		existing.Metadata.RefreshOwnership = RefreshCQOwnedNeverExported
 		existing.Metadata.OperationState = OperationReady
+		if err := ctx.Err(); err != nil {
+			return CandidateRef{}, "", err
+		}
 		if err := c.Store.Commit(&existing, expected); err != nil {
 			return CandidateRef{}, "", err
 		}
 		if err := c.projectManagedRecordLocked(existing); err != nil {
-			return CandidateRef{}, "", err
+			return recordRef(existing), existing.Metadata.Revision, err
 		}
 		return recordRef(existing), existing.Metadata.Revision, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return CandidateRef{}, "", err
 	}
 	record, err := c.Store.saveNewForAccount(credential, accountKey, ProvenanceCQOAuth, RefreshCQOwnedNeverExported)
 	if err != nil {
 		return CandidateRef{}, "", err
 	}
 	if err := c.projectManagedRecordLocked(record); err != nil {
-		return CandidateRef{}, "", err
+		return recordRef(record), record.Metadata.Revision, err
 	}
 	return recordRef(record), record.Metadata.Revision, nil
 }
@@ -515,9 +526,29 @@ func (c *CredentialCoordinator) adoptLocked(snapshot SystemSnapshot) (CandidateR
 }
 
 func (c *CredentialCoordinator) Activate(ctx context.Context, ref CandidateRef, revision Revision) (ActivationResult, error) {
-	c.mu.Lock()
+	if err := c.lockMutation(ctx); err != nil {
+		return ActivationResult{}, err
+	}
 	defer c.mu.Unlock()
+	return c.activateLocked(ctx, ref, revision)
+}
+
+func (c *CredentialCoordinator) activateLocked(ctx context.Context, ref CandidateRef, revision Revision) (ActivationResult, error) {
 	if err := c.finishPendingRemovalLocked(ctx); err != nil {
+		return ActivationResult{}, err
+	}
+	record, err := c.loadRef(ref)
+	if err != nil {
+		return ActivationResult{}, err
+	}
+	if record.Metadata.Revision != revision {
+		return ActivationResult{}, ErrStaleRevision
+	}
+	account, ok := parseAccountDataFromRecord(record)
+	if !ok || account.AccessToken == "" || account.ExpiresAt > 0 && account.ExpiresAt <= c.Now().UnixMilli() {
+		return ActivationResult{}, ErrAccountNotActivatable
+	}
+	if err := ctx.Err(); err != nil {
 		return ActivationResult{}, err
 	}
 	if active, err := c.Activator.Active(ctx); err != nil {
@@ -526,13 +557,6 @@ func (c *CredentialCoordinator) Activate(ctx context.Context, ref CandidateRef, 
 		if _, _, err := c.adoptLocked(active); err != nil {
 			return ActivationResult{}, err
 		}
-	}
-	record, err := c.loadRef(ref)
-	if err != nil {
-		return ActivationResult{}, err
-	}
-	if record.Metadata.Revision != revision {
-		return ActivationResult{}, ErrStaleRevision
 	}
 	originalRevision := record.Metadata.Revision
 	if record.Metadata.Version == 1 {
@@ -543,7 +567,7 @@ func (c *CredentialCoordinator) Activate(ctx context.Context, ref CandidateRef, 
 		}
 		revision = record.Metadata.Revision
 	}
-	account, ok := parseAccountDataFromRecord(record)
+	account, ok = parseAccountDataFromRecord(record)
 	if !ok {
 		return ActivationResult{}, errors.New("activation record identity invalid")
 	}
@@ -567,8 +591,13 @@ func (c *CredentialCoordinator) Activate(ctx context.Context, ref CandidateRef, 
 }
 
 func (c *CredentialCoordinator) RemoveManaged(ctx context.Context, accountKey AccountKey, revisions RevisionSet, force bool) (RemovalResult, error) {
-	c.mu.Lock()
+	if err := c.lockMutation(ctx); err != nil {
+		return RemovalResult{}, err
+	}
 	defer c.mu.Unlock()
+	return c.removeManagedLocked(ctx, accountKey, revisions, force)
+}
+func (c *CredentialCoordinator) removeManagedLocked(ctx context.Context, accountKey AccountKey, revisions RevisionSet, force bool) (RemovalResult, error) {
 	if pending, ok, err := c.Journal.Load(); err != nil {
 		return RemovalResult{}, err
 	} else if ok {
@@ -636,6 +665,9 @@ func (c *CredentialCoordinator) RemoveManaged(ctx context.Context, accountKey Ac
 		}
 		plan.ExpectedSystemRevision = active.Revision
 	}
+	if err := ctx.Err(); err != nil {
+		return RemovalResult{}, err
+	}
 	if err := c.Journal.Save(plan); err != nil {
 		return RemovalResult{}, err
 	}
@@ -664,6 +696,9 @@ func (c *CredentialCoordinator) RecoverRemoval(ctx context.Context) (RemovalResu
 func (c *CredentialCoordinator) resumeRemoval(ctx context.Context, plan RemovalPlan) (RemovalResult, error) {
 	result := RemovalResult{PendingRecovery: true}
 	for _, candidate := range plan.Candidates {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		path := c.candidatePath(candidate.CandidateID)
 		record, err := c.Store.Load(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -716,6 +751,9 @@ func (c *CredentialCoordinator) resumeRemoval(ctx context.Context, plan RemovalP
 	}
 	if len(registryKeys) == 0 {
 		registryKeys[string(plan.AccountKey)] = true
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	if err := c.Registry.RemoveAccounts(registryKeys); err != nil {
 		return result, err
@@ -804,4 +842,120 @@ func credentialRevisionForPath(fs interface{ ReadFile(string) ([]byte, error) },
 		return "", err
 	}
 	return credentialRevision(data), nil
+}
+
+// ActivationSelection carries only the exact identity/revision selected by a
+// caller. WasActive authorises a no-op assertion, never a later activation.
+type ActivationSelection struct {
+	AccountKey     AccountKey
+	Ref            CandidateRef
+	Revision       Revision
+	WasActive      bool
+	ActiveRevision Revision
+}
+type AccountActivationResult struct {
+	ActivationResult
+	Changed bool
+}
+
+var ErrAccountNotActivatable = errors.New("account has no eligible managed activation candidate")
+
+func (c *CredentialCoordinator) lockMutation(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if c.mu.TryLock() {
+			if err := ctx.Err(); err != nil {
+				c.mu.Unlock()
+				return err
+			}
+			return nil
+		}
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+func (c *CredentialCoordinator) ActivateAccount(ctx context.Context, selected ActivationSelection) (AccountActivationResult, error) {
+	if err := c.lockMutation(ctx); err != nil {
+		return AccountActivationResult{}, err
+	}
+	defer c.mu.Unlock()
+	if _, pending, err := c.Journal.Load(); err != nil {
+		return AccountActivationResult{}, err
+	} else if pending {
+		return AccountActivationResult{}, ErrStaleRevision
+	}
+	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)
+	if err != nil {
+		return AccountActivationResult{}, err
+	}
+	key, err := ResolveAccountReference(inventory, AccountAliasIndex{}, string(selected.AccountKey))
+	if err != nil {
+		return AccountActivationResult{}, err
+	}
+	if key != selected.AccountKey {
+		return AccountActivationResult{}, ErrStaleRevision
+	}
+	if selected.WasActive {
+		for _, logical := range inventory.Accounts {
+			if logical.Key == key && logical.Active {
+				active, err := c.Activator.Active(ctx)
+				if err != nil {
+					return AccountActivationResult{}, err
+				}
+				if !active.Present || selected.ActiveRevision == "" || active.Revision != selected.ActiveRevision {
+					return AccountActivationResult{}, ErrStaleRevision
+				}
+				return AccountActivationResult{ActivationResult: ActivationResult{SystemCommitted: true}}, nil
+			}
+		}
+		return AccountActivationResult{}, ErrStaleRevision
+	}
+	if selected.Ref.AccountKey != key {
+		return AccountActivationResult{}, ErrStaleRevision
+	}
+	result, err := c.activateLocked(ctx, selected.Ref, selected.Revision)
+	return AccountActivationResult{ActivationResult: result, Changed: result.SystemCommitted}, err
+}
+
+// RemoveSelected fences recovery to the operation shown before consent. A
+// different pending operation is never recovered as a side effect of removal.
+func (c *CredentialCoordinator) RemoveSelected(ctx context.Context, key AccountKey, revisions RevisionSet, operationID string) (RemovalResult, error) {
+	if err := c.lockMutation(ctx); err != nil {
+		return RemovalResult{}, err
+	}
+	defer c.mu.Unlock()
+	pending, present, err := c.Journal.Load()
+	if err != nil {
+		return RemovalResult{}, err
+	}
+	if present {
+		if pending.AccountKey != key || operationID == "" || pending.OperationID != operationID {
+			return RemovalResult{}, ErrStaleRevision
+		}
+		return c.resumeRemoval(ctx, pending)
+	}
+	if operationID != "" {
+		return RemovalResult{}, ErrStaleRevision
+	}
+	return c.removeManagedLocked(ctx, key, revisions, false)
+}
+
+func (c *CredentialCoordinator) SaveLoginCanonical(ctx context.Context, credential LoginCredential) (CandidateRef, Revision, error) {
+	if err := c.lockMutation(ctx); err != nil {
+		return CandidateRef{}, "", err
+	}
+	defer c.mu.Unlock()
+	if _, pending, err := c.Journal.Load(); err != nil {
+		return CandidateRef{}, "", err
+	} else if pending {
+		return CandidateRef{}, "", ErrStaleRevision
+	}
+	return c.saveLoginLocked(ctx, credential)
 }

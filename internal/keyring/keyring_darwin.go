@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -197,4 +198,66 @@ func inspectPlatformKeychainAccounts(ctx context.Context) ([]claudeInspectionSou
 		}
 		return data, err
 	})
+}
+
+var claudeKeychainAccountLabel = regexp.MustCompile(`"acct"<blob>="([^"\r\n]*)"`)
+
+func removePlatformClaudeAccountContext(ctx context.Context, evidence []ClaudeOAuth) (bool, error) {
+	return removePlatformClaudeAccountWith(ctx, evidence, func(ctx context.Context, args ...string) ([]byte, error) {
+		data, err := exec.CommandContext(ctx, "security", args...).Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
+			return nil, os.ErrNotExist
+		}
+		return data, err
+	})
+}
+func removePlatformClaudeAccountWith(ctx context.Context, evidence []ClaudeOAuth, run func(context.Context, ...string) ([]byte, error)) (bool, error) {
+	changed := false
+	for _, service := range claudePlatformServices() {
+		for {
+			if err := ctx.Err(); err != nil {
+				return changed, err
+			}
+			data, err := run(ctx, "find-generic-password", "-s", service, "-w")
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return changed, err
+			}
+			account := parseKeychainEntry(strings.TrimSpace(string(data)))
+			if account == nil {
+				return changed, errors.New("Claude keychain entry unavailable")
+			}
+			if !matchesClaudeEvidence(*account, evidence) {
+				break
+			}
+			metadata, err := run(ctx, "find-generic-password", "-s", service)
+			if err != nil {
+				return changed, err
+			}
+			match := claudeKeychainAccountLabel.FindSubmatch(metadata)
+			if len(match) != 2 {
+				return changed, errors.New("Claude keychain identity unavailable")
+			}
+			// Pin the account label and revalidate material, then delete that exact item.
+			data, err = run(ctx, "find-generic-password", "-s", service, "-a", string(match[1]), "-w")
+			if err != nil {
+				return changed, err
+			}
+			account = parseKeychainEntry(strings.TrimSpace(string(data)))
+			if account == nil || !matchesClaudeEvidence(*account, evidence) {
+				return changed, ErrClaudeIdentityChanged
+			}
+			if err := ctx.Err(); err != nil {
+				return changed, err
+			}
+			if _, err = run(ctx, "delete-generic-password", "-s", service, "-a", string(match[1])); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+	}
+	return changed, nil
 }

@@ -55,6 +55,8 @@ All fields below are mandatory in their containing resource unless explicitly nu
 
 The command object's output.fields describes envelope `data`, not extra envelope keys. Partial inspection failures retain the typed data plus `ok=false` and errors. Pre-validation failures use data=null. A successful cancelled prompt is `ok=true`, removed=false or outcome=cancelled, exit 0. No raw access/refresh/ID token, password, auth header, credential JSON, native credential path, idempotency secret or project credential appears anywhere.
 
+Login results distinguish explicit `activated` from the nested account's observed `active` state. For the two login commands only, a failed post-save observation returns `account=null` and retains `credentials_saved=true`; it does not fabricate an inactive account. `account_login_postcheck_partial` (exit 8) means `Credentials were saved, but account state could not be verified.` Requested activation failure retains `account_login_partial` precedence and may also report the postcheck diagnostic. An attempted activation with no authoritative terminal reply returns `activated=null`; a negative snapshot does not prove an in-flight mutation will never commit. Timeout and interruption retain exits 7 and 130 with known saved data. Human login output renders a null account display name as `Unknown account` and null activated as `unknown`. Successful results retain the existing non-null types. No output failure or indeterminate reply authorises mutation replay.
+
 ### AccountSummary
 
 | Field | Type and exact meaning |

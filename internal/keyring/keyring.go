@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -582,7 +584,7 @@ func StoreCQAccountContext(ctx context.Context, acct *ClaudeOAuth) error {
 		entries = append(entries, manifestEntry{UUID: acct.AccountUUID, Email: acct.Email})
 	}
 	if err := saveManifestContext(ctx, manifestPath, entries); err != nil {
-		return fmt.Errorf("save manifest: %w", err)
+		return &ClaudeStoreError{Err: err}
 	}
 	return nil
 }
@@ -915,4 +917,176 @@ func credentialDiagnostic(ctx context.Context, code, message, legacy string, arg
 		return
 	}
 	fmt.Fprintf(os.Stderr, legacy, args...)
+}
+
+// ClaudeRemovalResult reports writes that completed before an error.
+type ClaudeRemovalResult struct{ Changed, ActiveRemoved bool }
+
+var ErrClaudeIdentityChanged = errors.New("Claude account identity changed")
+
+// SameClaudeIdentity accepts a stable UUID or exact token affinity for legacy
+// anonymous sources. Email alone never authorises deleting a different UUID.
+func SameClaudeIdentity(a, b ClaudeOAuth) bool {
+	if a.AccountUUID != "" && b.AccountUUID != "" {
+		return a.AccountUUID == b.AccountUUID
+	}
+	return a.RefreshToken != "" && a.RefreshToken == b.RefreshToken || a.AccessToken != "" && a.AccessToken == b.AccessToken
+}
+
+// RemoveClaudeAccountContext revalidates the exact selected identity, then
+// removes matching platform, CQ and native sources without choosing a default.
+func RemoveClaudeAccountContext(ctx context.Context, expected ClaudeOAuth) (ClaudeRemovalResult, error) {
+	return removeClaudeAccountContext(ctx, expected, claudeRemovalIO{
+		inspect: InspectClaudeAccounts, manifest: defaultCQManifestPath, home: resolveCredentialHome,
+		read: os.ReadFile, get: gokeyring.Get, delete: gokeyring.Delete,
+		saveManifest: saveManifestContext, write: WriteCredentialsFileContext, platform: removePlatformClaudeAccountContext,
+	})
+}
+
+type claudeRemovalIO struct {
+	inspect      func(context.Context) ([]ClaudeAccountInspection, error)
+	manifest     func() (string, error)
+	home         func() (string, error)
+	read         func(string) ([]byte, error)
+	get          func(string, string) (string, error)
+	delete       func(string, string) error
+	saveManifest func(context.Context, string, []manifestEntry) error
+	write        func(context.Context, *ClaudeCredentials) error
+	platform     func(context.Context, []ClaudeOAuth) (bool, error)
+}
+
+func removeClaudeAccountContext(ctx context.Context, expected ClaudeOAuth, ops claudeRemovalIO) (ClaudeRemovalResult, error) {
+	result := ClaudeRemovalResult{}
+	evidence := []ClaudeOAuth{expected}
+	rows, err := ops.inspect(ctx)
+	if err != nil {
+		return result, err
+	}
+	count := 0
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.Account.Email), strings.TrimSpace(expected.Email)) {
+			count++
+			if !SameClaudeIdentity(row.Account, expected) {
+				return result, ErrClaudeIdentityChanged
+			}
+		}
+	}
+	if count != 1 {
+		return result, ErrClaudeIdentityChanged
+	}
+	path, err := ops.manifest()
+	if err != nil {
+		return result, err
+	}
+	data, err := ops.read(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return result, err
+	}
+	var entries []manifestEntry
+	if err == nil && json.Unmarshal(data, &entries) != nil {
+		return result, errors.New("Claude manifest unavailable")
+	}
+	retained := make([]manifestEntry, 0, len(entries))
+	var selected []manifestEntry
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if entry.UUID == "" || entry.UUID != expected.AccountUUID && !strings.EqualFold(strings.TrimSpace(entry.Email), strings.TrimSpace(expected.Email)) {
+			retained = append(retained, entry)
+			continue
+		}
+		raw, err := ops.get(ServicePrefix+Hash8(entry.UUID), entry.UUID)
+		if err != nil {
+			return result, err
+		}
+		var credentials ClaudeOAuth
+		if json.Unmarshal([]byte(raw), &credentials) != nil || !SameClaudeIdentity(credentials, expected) {
+			return result, ErrClaudeIdentityChanged
+		}
+		selected = append(selected, entry)
+		evidence = append(evidence, credentials)
+	}
+	home, err := ops.home()
+	if err != nil {
+		return result, err
+	}
+	native, err := ops.read(filepath.Join(home, ".claude", ".credentials.json"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return result, err
+	}
+	var current ClaudeCredentials
+	if err == nil && json.Unmarshal(native, &current) != nil {
+		return result, errors.New("Claude credentials unavailable")
+	}
+	active := current.ClaudeAiOauth != nil && SameClaudeIdentity(*current.ClaudeAiOauth, expected)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if active {
+		evidence = append(evidence, *current.ClaudeAiOauth)
+	}
+	changed, err := ops.platform(ctx, evidence)
+	result.Changed = changed
+	if err != nil {
+		return result, err
+	}
+	for _, entry := range selected {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if err := ops.delete(ServicePrefix+Hash8(entry.UUID), entry.UUID); err != nil && !errors.Is(err, gokeyring.ErrNotFound) {
+			return result, err
+		}
+		result.Changed = true
+	}
+	if len(selected) > 0 {
+		if err := ops.saveManifest(ctx, path, retained); err != nil {
+			return result, err
+		}
+	}
+	if active {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		// Re-read immediately before the native write; another client may have
+		// selected a different account while platform cleanup was in progress.
+		latest, err := ops.read(filepath.Join(home, ".claude", ".credentials.json"))
+		if err != nil {
+			return result, err
+		}
+		var credentials ClaudeCredentials
+		if json.Unmarshal(latest, &credentials) != nil || credentials.ClaudeAiOauth == nil || !SameClaudeIdentity(*credentials.ClaudeAiOauth, expected) {
+			return result, ErrClaudeIdentityChanged
+		}
+		if err := ops.write(ctx, &ClaudeCredentials{}); err != nil {
+			return result, err
+		}
+		result.Changed, result.ActiveRemoved = true, true
+	}
+	return result, nil
+}
+
+// UpdateKeychainEntryContext is the context-aware variant for explicit account
+// mutations. It does not print diagnostics or credential material.
+func UpdateKeychainEntryContext(ctx context.Context, service string, creds *ClaudeCredentials) error {
+	return updateKeychainEntryContext(ctx, service, creds)
+}
+
+// ClaudeStoreError retains durable keyring persistence when manifest publication
+// fails. Callers must not imply the credential write was rolled back.
+type ClaudeStoreError struct{ Err error }
+
+func (e *ClaudeStoreError) Error() string {
+	return "Claude credentials saved; manifest publication failed"
+}
+func (e *ClaudeStoreError) Unwrap() error { return e.Err }
+
+func matchesClaudeEvidence(account ClaudeOAuth, evidence []ClaudeOAuth) bool {
+	for _, known := range evidence {
+		if SameClaudeIdentity(account, known) {
+			return true
+		}
+	}
+	return false
 }

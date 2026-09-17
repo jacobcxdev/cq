@@ -373,3 +373,168 @@ func GetActiveCredentials() (token, email string) {
 	}
 	return creds.ClaudeAiOauth.AccessToken, creds.ClaudeAiOauth.Email
 }
+
+// AccountLoginResult retains committed stages even when a later stage fails.
+// It contains no credential material and is safe for command adapters.
+type AccountLoginResult struct {
+	Account          provider.Account
+	Reference        string
+	CredentialsSaved bool
+	Activated        bool
+	AccountObserved  bool
+	ActivationKnown  bool
+	Sources          []string
+	Aliases          []string
+}
+
+var ErrAccountAuthentication = errors.New("browser authentication failed")
+var ErrAccountActivation = errors.New("native account activation failed")
+var ErrAccountLoginPostcheck = errors.New("account state could not be verified")
+
+type CodexLoginFlow func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error)
+type ClaudeLoginFlow func(context.Context, httputil.Doer) (*auth.TokenResponse, *auth.Profile, error)
+
+// LoginCodex saves first and selects the native default only on explicit request.
+func LoginCodex(ctx context.Context, client httputil.Doer, activate bool, login CodexLoginFlow, admin codexprov.CredentialAdmin) (result AccountLoginResult, resultErr error) {
+	result.ActivationKnown = true
+	tokens, claims, err := login(ctx, client)
+	if err != nil {
+		return result, errors.Join(ErrAccountAuthentication, err)
+	}
+	if tokens == nil || claims == nil || claims.AccountID == "" || claims.UserID == "" {
+		return result, ErrAccountAuthentication
+	}
+	result.Account = provider.Account{AccountID: claims.AccountID, Email: claims.Email, Label: claims.PlanType}
+	defer func() {
+		if !result.CredentialsSaved {
+			return
+		}
+		inventory, ok := admin.(codexprov.CredentialInventory)
+		if !ok {
+			resultErr = errors.Join(resultErr, ErrAccountLoginPostcheck)
+			return
+		}
+		snapshot, err := inventory.List(ctx)
+		if err != nil {
+			resultErr = errors.Join(resultErr, ErrAccountLoginPostcheck, err)
+			return
+		}
+		key, err := codexprov.ResolveAccountReference(snapshot, codexprov.AccountAliasIndex{}, result.Reference)
+		if err != nil {
+			resultErr = errors.Join(resultErr, ErrAccountLoginPostcheck)
+			return
+		}
+		for _, row := range snapshot.Accounts {
+			if row.Key == key && row.Identity.AccountID == claims.AccountID && row.Identity.UserID == claims.UserID {
+				result.Account.Active = row.Active
+				result.AccountObserved = true
+				result.Sources = []string{}
+				seen := map[string]bool{}
+				for _, candidate := range row.Candidates {
+					source := "external"
+					if candidate.Source == codexprov.SourceManaged {
+						source = "cq_managed"
+					}
+					if candidate.Source == codexprov.SourceSystem {
+						source = "native_client"
+					}
+					if !seen[source] {
+						result.Sources = append(result.Sources, source)
+						seen[source] = true
+					}
+				}
+				if !result.ActivationKnown && row.Active {
+					result.Activated, result.ActivationKnown = true, true
+				}
+				return
+			}
+		}
+		resultErr = errors.Join(resultErr, ErrAccountLoginPostcheck)
+	}()
+
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	ref, revision, err := admin.SaveLogin(ctx, codexprov.LoginCredential{Tokens: *tokens, Claims: *claims, CreatedAt: time.Now().UTC()})
+	result.Reference = string(ref.AccountKey)
+	result.CredentialsSaved = ref.AccountKey != "" && ref.CandidateID != "" && revision != ""
+	if err != nil {
+		return result, err
+	}
+	if !result.CredentialsSaved {
+		return result, errors.New("credential save receipt missing")
+	}
+	if !activate {
+		return result, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	activated, err := admin.Activate(ctx, ref, revision)
+	var unknown *codexprov.MutationOutcomeUnknown
+	result.ActivationKnown = !errors.As(err, &unknown)
+	result.Activated = activated.SystemCommitted
+	result.Account.Active = result.Activated
+	if err != nil || activated.ProjectionError != nil {
+		return result, errors.Join(ErrAccountActivation, err, activated.ProjectionError)
+	}
+	return result, nil
+}
+
+func LoginClaude(ctx context.Context, client httputil.Doer, activate bool, login ClaudeLoginFlow, accounts *claudeprov.Accounts) (result AccountLoginResult, resultErr error) {
+	result.ActivationKnown = true
+	tokens, profile, err := login(ctx, client)
+	if err != nil {
+		return result, errors.Join(ErrAccountAuthentication, err)
+	}
+	if tokens == nil || profile == nil || profile.AccountUUID == "" {
+		return result, ErrAccountAuthentication
+	}
+	expires := tokens.ExpiresIn
+	if expires <= 0 {
+		expires = auth.DefaultExpiresInSec
+	}
+	account := keyring.ClaudeOAuth{AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, ExpiresAt: time.Now().UnixMilli() + expires*1000, Scopes: strings.Fields(tokens.Scope), Email: profile.Email, AccountUUID: profile.AccountUUID, SubscriptionType: profile.Plan, RateLimitTier: profile.RateLimitTier, Profile: profile.RawJSON, TokenAccount: &keyring.TokenAccount{UUID: profile.AccountUUID, EmailAddress: profile.Email, OrganizationUUID: profile.OrgUUID}}
+	result.Account = provider.Account{AccountID: account.AccountUUID, Email: account.Email, Label: account.SubscriptionType, RateLimitTier: account.RateLimitTier}
+	result.Reference = strings.TrimSpace(account.Email)
+	defer func() {
+		if !result.CredentialsSaved {
+			return
+		}
+		rows, err := accounts.Inspect(ctx)
+		if err != nil {
+			resultErr = errors.Join(resultErr, ErrAccountLoginPostcheck, err)
+			return
+		}
+		count := 0
+		for _, row := range rows {
+			if row.Account.AccountUUID == account.AccountUUID {
+				count++
+				result.Account.Active = row.Active
+				result.Sources = append([]string{}, row.Sources...)
+			}
+		}
+		if count != 1 {
+			resultErr = errors.Join(resultErr, ErrAccountLoginPostcheck)
+			return
+		}
+		result.AccountObserved = true
+		if _, err := claudeprov.ResolveAccountReference(rows, account.Email); err != nil {
+			result.Reference = ""
+		}
+	}()
+
+	result.CredentialsSaved, err = accounts.SaveLogin(ctx, account)
+	if err != nil || !activate {
+		return result, err
+	}
+	// Explicit activation after login refreshes the native credential projection,
+	// even when its stable identity was already selected before authentication.
+	activated, err := accounts.ActivateSelected(ctx, keyring.ClaudeAccountInspection{Account: account, Sources: []string{"cq_managed"}})
+	result.Activated = activated.Active
+	result.Account.Active = result.Activated
+	if err != nil {
+		return result, errors.Join(ErrAccountActivation, err)
+	}
+	return result, nil
+}

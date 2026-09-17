@@ -676,8 +676,8 @@ Constraint: Go duration syntax; 1s <= value <= 30m
 
 Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
 
-- `account`: AccountSummary
-- `activated`: boolean: whether native client default was selected
+- `account`: AccountSummary or null only when post-save account observation failed
+- `activated`: boolean or null: whether native client default was selected; null only for an indeterminate attempted activation
 - `credentials_saved`: boolean: true once durable save completed
 
 Human output template:
@@ -697,6 +697,7 @@ Native client default: {activated}.
 | account_io_failed | 1 | Credential or registry persistence fails. | Account state could not be saved. |
 | account_auth_failed | 5 | OAuth rejected, expired or cancelled by provider. | Browser authentication failed. |
 | account_login_partial | 8 | Credentials were saved but requested activation failed. | Credentials were saved, but native client activation failed. |
+| account_login_postcheck_partial | 8 | Credentials were saved but the final account-state observation or metadata postcheck failed. | Credentials were saved, but account state could not be verified. |
 
 ### Examples
 
@@ -1655,8 +1656,8 @@ Constraint: Go duration syntax; 1s <= value <= 30m
 
 Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
 
-- `account`: AccountSummary
-- `activated`: boolean: whether native client default was selected
+- `account`: AccountSummary or null only when post-save account observation failed
+- `activated`: boolean or null: whether native client default was selected; null only for an indeterminate attempted activation
 - `credentials_saved`: boolean: true once durable save completed
 
 Human output template:
@@ -1676,6 +1677,7 @@ Native client default: {activated}.
 | account_io_failed | 1 | Credential or registry persistence fails. | Account state could not be saved. |
 | account_auth_failed | 5 | OAuth rejected, expired or cancelled by provider. | Browser authentication failed. |
 | account_login_partial | 8 | Credentials were saved but requested activation failed. | Credentials were saved, but native client activation failed. |
+| account_login_postcheck_partial | 8 | Credentials were saved but the final account-state observation or metadata postcheck failed. | Credentials were saved, but account state could not be verified. |
 
 ### Examples
 

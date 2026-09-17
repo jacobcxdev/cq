@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/rpc"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -732,4 +733,295 @@ func (r *credentialRPC) RemoveManaged(args RemoveRPCArgs, reply *RemoveRPCReply)
 		reply.ProjectionError = result.ProjectionError.Error()
 	}
 	return err
+}
+
+// CanonicalCredentialAdmin uses explicit V2 methods. An older broker rejects
+// these names before mutation; callers must not fall back to legacy RPCs.
+type CanonicalCredentialAdmin struct{ control *CredentialControl }
+
+func (c *CredentialControl) CanonicalAdmin() *CanonicalCredentialAdmin {
+	return &CanonicalCredentialAdmin{control: c}
+}
+
+type MutationFailure string
+
+func mutationFailure(err error) MutationFailure {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, ErrCredentialAuthorityUnavailable), errors.Is(err, ErrCredentialControlDisabled), errors.Is(err, ErrCredentialOwnerRevoked):
+		return "unavailable"
+	case errors.Is(err, ErrStaleRevision):
+		return "stale"
+	case errors.Is(err, ErrAccountNotActivatable):
+		return "not_activatable"
+	}
+	var reference *AccountReferenceError
+	if errors.As(err, &reference) {
+		return MutationFailure("reference_" + string(reference.Code))
+	}
+	return "io"
+}
+func (f MutationFailure) err() error {
+	switch f {
+	case "":
+		return nil
+	case "cancelled":
+		return context.Canceled
+	case "deadline":
+		return context.DeadlineExceeded
+	case "unavailable":
+		return ErrCredentialAuthorityUnavailable
+	case "stale":
+		return ErrStaleRevision
+	case "not_activatable":
+		return ErrAccountNotActivatable
+	case "reference_missing":
+		return &AccountReferenceError{Code: AccountReferenceMissing}
+	case "reference_ambiguous":
+		return &AccountReferenceError{Code: AccountReferenceAmbiguous}
+	case "reference_unstable":
+		return &AccountReferenceError{Code: AccountReferenceUnstable}
+	}
+	return errors.New("credential mutation failed")
+}
+
+type SaveLoginV2Args struct {
+	RequestID  CredentialRPCRequestID
+	Deadline   time.Time
+	Credential LoginCredential
+}
+type SaveLoginV2Reply struct {
+	Ref      CandidateRef
+	Revision Revision
+	Failure  MutationFailure
+}
+type ActivateAccountV2Args struct {
+	RequestID CredentialRPCRequestID
+	Deadline  time.Time
+	Selection ActivationSelection
+}
+type ActivateAccountV2Reply struct {
+	SystemCommitted, Changed, ProjectionFailed bool
+	Failure                                    MutationFailure
+}
+type RemoveManagedV2Args struct {
+	RequestID   CredentialRPCRequestID
+	Deadline    time.Time
+	AccountKey  AccountKey
+	Revisions   RevisionSet
+	Force       bool
+	OperationID string
+}
+type RemoveManagedV2Reply struct {
+	ManagedDeleted                                       int
+	SystemDeactivated, ProjectionFailed, PendingRecovery bool
+	Failure                                              MutationFailure
+}
+
+func (c *CredentialControl) callCanonicalMutation(ctx context.Context, method string, requestID CredentialRPCRequestID, args, reply any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan *rpc.Call, 1)
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- &rpc.Call{Error: errors.New("credential RPC failed")}
+			}
+		}()
+		c.client.Go(method, args, reply, done)
+	}()
+	select {
+	case completed := <-done:
+		if completed.Error != nil {
+			var serverError rpc.ServerError
+			if errors.As(completed.Error, &serverError) && strings.HasPrefix(string(serverError), "rpc: can't find method ") {
+				return errors.New("canonical credential operation unavailable")
+			}
+			return &MutationOutcomeUnknown{Err: credentialRPCError(completed.Error)}
+		}
+		return nil
+	case <-ctx.Done():
+		go func() { defer func() { _ = recover() }(); c.cancelRPCRequest(requestID) }()
+		return &MutationOutcomeUnknown{Err: ctx.Err()}
+	}
+}
+func (a *CanonicalCredentialAdmin) SaveLogin(ctx context.Context, credential LoginCredential) (CandidateRef, Revision, error) {
+	c := a.control
+	if c.owner {
+		operation, err := c.beginCredentialOwnerOperation()
+		if err != nil {
+			return CandidateRef{}, "", err
+		}
+		defer operation.Release()
+		return c.coordinator.SaveLoginCanonical(ctx, credential)
+	}
+	id, err := newCredentialRPCRequestID()
+	if err != nil {
+		return CandidateRef{}, "", err
+	}
+	deadline, _ := ctx.Deadline()
+	reply := new(SaveLoginV2Reply)
+	if err := c.callCanonicalMutation(ctx, "CredentialRPC.SaveLoginV2", id, SaveLoginV2Args{id, deadline, credential}, reply); err != nil {
+		return CandidateRef{}, "", err
+	}
+	return reply.Ref, reply.Revision, reply.Failure.err()
+}
+func (a *CanonicalCredentialAdmin) Adopt(context.Context, SystemSnapshot) (CandidateRef, Revision, error) {
+	return CandidateRef{}, "", errors.New("canonical login does not adopt credentials")
+}
+func (a *CanonicalCredentialAdmin) Activate(ctx context.Context, ref CandidateRef, revision Revision) (ActivationResult, error) {
+	result, err := a.ActivateAccount(ctx, ActivationSelection{AccountKey: ref.AccountKey, Ref: ref, Revision: revision})
+	return result.ActivationResult, err
+}
+func (a *CanonicalCredentialAdmin) ActivateAccount(ctx context.Context, selection ActivationSelection) (AccountActivationResult, error) {
+	c := a.control
+	if c.owner {
+		operation, err := c.beginCredentialOwnerOperation()
+		if err != nil {
+			return AccountActivationResult{}, err
+		}
+		defer operation.Release()
+		return c.coordinator.ActivateAccount(ctx, selection)
+	}
+	id, err := newCredentialRPCRequestID()
+	if err != nil {
+		return AccountActivationResult{}, err
+	}
+	deadline, _ := ctx.Deadline()
+	reply := new(ActivateAccountV2Reply)
+	if err := c.callCanonicalMutation(ctx, "CredentialRPC.ActivateAccountV2", id, ActivateAccountV2Args{id, deadline, selection}, reply); err != nil {
+		return AccountActivationResult{}, err
+	}
+	result := AccountActivationResult{ActivationResult: ActivationResult{SystemCommitted: reply.SystemCommitted}, Changed: reply.Changed}
+	if reply.ProjectionFailed {
+		result.ProjectionError = errors.New("account metadata projection failed")
+	}
+	return result, reply.Failure.err()
+}
+func (a *CanonicalCredentialAdmin) RemoveManaged(ctx context.Context, key AccountKey, revisions RevisionSet, force bool) (RemovalResult, error) {
+	return a.RemoveSelected(ctx, key, revisions, "")
+}
+func (a *CanonicalCredentialAdmin) RemoveSelected(ctx context.Context, key AccountKey, revisions RevisionSet, operationID string) (RemovalResult, error) {
+	c := a.control
+	if c.owner {
+		operation, err := c.beginCredentialOwnerOperation()
+		if err != nil {
+			return RemovalResult{}, err
+		}
+		defer operation.Release()
+		return c.coordinator.RemoveSelected(ctx, key, revisions, operationID)
+	}
+	id, err := newCredentialRPCRequestID()
+	if err != nil {
+		return RemovalResult{}, err
+	}
+	deadline, _ := ctx.Deadline()
+	reply := new(RemoveManagedV2Reply)
+	if err := c.callCanonicalMutation(ctx, "CredentialRPC.RemoveManagedV2", id, RemoveManagedV2Args{RequestID: id, Deadline: deadline, AccountKey: key, Revisions: revisions, Force: false, OperationID: operationID}, reply); err != nil {
+		return RemovalResult{}, err
+	}
+	result := RemovalResult{ManagedDeleted: reply.ManagedDeleted, SystemDeactivated: reply.SystemDeactivated, PendingRecovery: reply.PendingRecovery}
+	if reply.ProjectionFailed {
+		result.ProjectionError = errors.New("account metadata projection failed")
+	}
+	return result, reply.Failure.err()
+}
+func (r *credentialRPC) beginMutationRequest(id CredentialRPCRequestID, deadline time.Time) (context.Context, func()) {
+	ctx, done := r.beginRequest(id)
+	if deadline.IsZero() {
+		return ctx, done
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	return ctx, func() { cancel(); done() }
+}
+func (r *credentialRPC) SaveLoginV2(args SaveLoginV2Args, reply *SaveLoginV2Reply) error {
+	ctx, done := r.beginMutationRequest(args.RequestID, args.Deadline)
+	defer done()
+	operation, err := r.beginCoordinatorOperation()
+	if err != nil {
+		reply.Failure = mutationFailure(err)
+		return nil
+	}
+	defer operation.Release()
+	reply.Ref, reply.Revision, err = r.Coordinator.SaveLoginCanonical(ctx, args.Credential)
+	reply.Failure = mutationFailure(err)
+	return nil
+}
+func (r *credentialRPC) ActivateAccountV2(args ActivateAccountV2Args, reply *ActivateAccountV2Reply) error {
+	ctx, done := r.beginMutationRequest(args.RequestID, args.Deadline)
+	defer done()
+	operation, err := r.beginCoordinatorOperation()
+	if err != nil {
+		reply.Failure = mutationFailure(err)
+		return nil
+	}
+	defer operation.Release()
+	result, err := r.Coordinator.ActivateAccount(ctx, args.Selection)
+	reply.SystemCommitted, reply.Changed, reply.ProjectionFailed, reply.Failure = result.SystemCommitted, result.Changed, result.ProjectionError != nil, mutationFailure(err)
+	return nil
+}
+func (r *credentialRPC) RemoveManagedV2(args RemoveManagedV2Args, reply *RemoveManagedV2Reply) error {
+	ctx, done := r.beginMutationRequest(args.RequestID, args.Deadline)
+	defer done()
+	operation, err := r.beginCoordinatorOperation()
+	if err != nil {
+		reply.Failure = mutationFailure(err)
+		return nil
+	}
+	defer operation.Release()
+	result, err := r.Coordinator.RemoveSelected(ctx, args.AccountKey, args.Revisions, args.OperationID)
+	reply.ManagedDeleted, reply.SystemDeactivated, reply.ProjectionFailed, reply.PendingRecovery, reply.Failure = result.ManagedDeleted, result.SystemDeactivated, result.ProjectionError != nil, result.PendingRecovery, mutationFailure(err)
+	return nil
+}
+
+func (a *CanonicalCredentialAdmin) List(ctx context.Context) (Inventory, error) {
+	if err := ctx.Err(); err != nil {
+		return Inventory{}, err
+	}
+	type observation struct {
+		inventory Inventory
+		err       error
+	}
+	done := make(chan observation, 1)
+	go func() {
+		result := observation{}
+		defer func() {
+			if recover() != nil {
+				result.err = ErrCredentialAuthorityUnavailable
+			}
+			done <- result
+		}()
+		result.inventory, result.err = a.control.List(ctx)
+	}()
+	select {
+	case result := <-done:
+		return result.inventory, result.err
+	case <-ctx.Done():
+		return Inventory{}, ctx.Err()
+	}
+}
+
+// MutationOutcomeUnknown means a dispatched mutation has no terminal reply.
+// Retrying or treating missing write evidence as rollback would be unsafe.
+type MutationOutcomeUnknown struct{ Err error }
+
+func (e *MutationOutcomeUnknown) Error() string { return "credential mutation outcome is unknown" }
+func (e *MutationOutcomeUnknown) Unwrap() error { return e.Err }
+func OpenDefaultCanonicalCredentialControl(ctx context.Context, fs fsutil.DurableFileSystem) (*CredentialControl, error) {
+	coordinator, path, err := newDefaultCredentialCoordinator(fs)
+	if err != nil {
+		return nil, err
+	}
+	return OpenCredentialControlPrepared(ctx, path, coordinator, func(ctx context.Context, _ *CredentialCoordinator, capability CredentialOwnerCapability) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return capability.AssertOwner()
+	})
 }
