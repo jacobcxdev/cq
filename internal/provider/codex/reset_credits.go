@@ -168,6 +168,14 @@ func (c ResetCreditClient) List(ctx context.Context, material CredentialMaterial
 	return inventory, nil
 }
 
+// WithResetConsumeDispatch installs a command-local gate immediately before HTTP
+// dispatch. Dispatch can have an effect even when no response is received.
+func WithResetConsumeDispatch(ctx context.Context, dispatch func() error) context.Context {
+	return context.WithValue(ctx, resetConsumeDispatchKey{}, dispatch)
+}
+
+type resetConsumeDispatchKey struct{}
+
 func (c ResetCreditClient) Consume(ctx context.Context, material CredentialMaterial, creditID, redeemRequestID string) (ConsumeResetResult, error) {
 	if err := validateResetClient(c, material); err != nil {
 		return ConsumeResetResult{}, err
@@ -195,6 +203,14 @@ func (c ResetCreditClient) Consume(ctx context.Context, material CredentialMater
 	addResetCreditHeaders(req, material)
 	req.Header.Set("Content-Type", "application/json")
 
+	if err := requestCtx.Err(); err != nil {
+		return ConsumeResetResult{}, err
+	}
+	if dispatch, ok := ctx.Value(resetConsumeDispatchKey{}).(func() error); ok {
+		if err := dispatch(); err != nil {
+			return ConsumeResetResult{}, err
+		}
+	}
 	body, err := c.do(req)
 	if err != nil {
 		return ConsumeResetResult{}, err

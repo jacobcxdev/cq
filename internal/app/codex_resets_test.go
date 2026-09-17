@@ -458,3 +458,34 @@ func TestResetListTotalDeadlineRetainsCompletedRows(t *testing.T) {
 	}
 	close(b.release)
 }
+
+func TestCodexResetUseRejectsInvalidSharedWindows(t *testing.T) {
+	for _, mode := range []string{"missing", "nan", "range", "timestamp", "timestamp-overflow"} {
+		t.Run(mode, func(t *testing.T) {
+			a, backend, usage, attempts := completeResetApp(time.Now())
+			windows := usage.results[0].Windows
+			window := windows[quota.Window5Hour]
+			switch mode {
+			case "missing":
+				delete(windows, quota.Window5Hour)
+			case "nan":
+				value := math.NaN()
+				window.RemainingPctExact = &value
+				windows[quota.Window5Hour] = window
+			case "range":
+				window.RemainingPct = 101
+				windows[quota.Window5Hour] = window
+			case "timestamp-overflow":
+				window.ResetAtUnix = math.MaxInt64
+				windows[quota.Window5Hour] = window
+			case "timestamp":
+				window.ResetAtUnix = 0
+				windows[quota.Window5Hour] = window
+			}
+			_, err := a.PrepareUse(context.Background(), "a@example.com", "")
+			if err == nil || backend.consumeCalls != 0 || attempts.ensureCalls != 0 {
+				t.Fatalf("invalid preview accepted: %v", err)
+			}
+		})
+	}
+}

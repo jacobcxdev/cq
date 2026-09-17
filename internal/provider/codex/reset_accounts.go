@@ -20,6 +20,14 @@ type ResetAccount struct {
 	refreshable bool
 }
 
+// SameIdentity revalidates the preview's logical identity, including the user
+// bound to the selected credential. A new generation may retain this identity.
+func (a ResetAccount) SameIdentity(other ResetAccount) bool {
+	return a.AccountKey == other.AccountKey && a.AccountID == other.AccountID &&
+		a.planned.Identity.AccountID == other.planned.Identity.AccountID &&
+		a.planned.Identity.UserID == other.planned.Identity.UserID
+}
+
 type resetAccountCandidate struct {
 	planned     PlannedCandidate
 	refreshable bool
@@ -149,19 +157,43 @@ func (b *ResetBackend) ListCredits(ctx context.Context, account ResetAccount) (R
 }
 
 func (b *ResetBackend) Consume(ctx context.Context, account ResetAccount, creditID, requestID string) (ConsumeResetResult, error) {
-	material, account, err := b.resolve(ctx, account)
-	if err != nil {
-		return ConsumeResetResult{}, err
+	plans := append([]resetAccountCandidate(nil), account.candidates...)
+	if len(plans) == 0 {
+		plans = []resetAccountCandidate{{account.planned, account.refreshable}}
 	}
-	result, err := b.Credits.Consume(ctx, material, creditID, requestID)
-	if err == nil || !resetAuthenticationFailure(err) || !account.refreshable {
-		return result, err
+	var result ConsumeResetResult
+	var lastErr error
+	// Only an explicit authentication rejection permits another candidate. Every
+	// request stays on this logical identity and retains the original request ID.
+	for index, candidate := range plans {
+		selected := account
+		selected.planned, selected.refreshable = candidate.planned, candidate.refreshable
+		material, resolved, err := b.resolve(ctx, selected)
+		if err != nil {
+			return ConsumeResetResult{}, err
+		}
+		plans[index].planned = resolved.planned
+		result, lastErr = b.Credits.Consume(ctx, material, creditID, requestID)
+		if !resetAuthenticationFailure(lastErr) {
+			return result, lastErr
+		}
 	}
-	material, _, err = b.refreshAndResolve(ctx, account)
-	if err != nil {
-		return ConsumeResetResult{}, err
+	for _, candidate := range plans {
+		if !candidate.refreshable {
+			continue
+		}
+		selected := account
+		selected.planned, selected.refreshable = candidate.planned, true
+		material, _, err := b.refreshAndResolve(ctx, selected)
+		if err != nil {
+			return ConsumeResetResult{}, err
+		}
+		result, lastErr = b.Credits.Consume(ctx, material, creditID, requestID)
+		if !resetAuthenticationFailure(lastErr) {
+			return result, lastErr
+		}
 	}
-	return b.Credits.Consume(ctx, material, creditID, requestID)
+	return result, lastErr
 }
 
 func (b *ResetBackend) resolve(ctx context.Context, account ResetAccount) (CredentialMaterial, ResetAccount, error) {

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -430,4 +431,70 @@ type resetRefreshFunc func(context.Context, CandidateRef, Revision) (RefreshResu
 
 func (f resetRefreshFunc) Refresh(ctx context.Context, ref CandidateRef, rev Revision) (RefreshResult, error) {
 	return f(ctx, ref, rev)
+}
+
+func TestResetBackendConsumeCandidateFallback(t *testing.T) {
+	for _, status := range []int{401, 403, 429, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			inventory := resetAccountInventory()
+			logical := &inventory.Accounts[0]
+			second := logical.Candidates[0]
+			second.Ref.CandidateID = "candidate-second"
+			second.Revision = "second"
+			second.Source = SourceManaged
+			second.RefreshEligible = true
+			logical.Candidates = append(logical.Candidates, second)
+			resolver := &recordingResetResolver{material: resetResolvedMaterial("acct-a", "user-a")}
+			refresh := &recordingResetRefresh{}
+			calls := 0
+			backend := ResetBackend{Inventory: &staticResetInventory{inventory: inventory}, Resolver: resolver, Refresh: refresh, Now: func() time.Time { return time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC) }, Credits: ResetCreditClient{HTTP: resetDoerFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				var body struct {
+					CreditID  string `json:"credit_id"`
+					RequestID string `json:"redeem_request_id"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.CreditID != "original-credit" || body.RequestID != "original-request" {
+					t.Errorf("request identity changed: %+v %v", body, err)
+				}
+				if req.Header.Get("ChatGPT-Account-Id") != "acct-a" {
+					t.Error("identity changed")
+				}
+				if calls == 1 {
+					return resetJSONResponse(status, `{}`), nil
+				}
+				return resetJSONResponse(200, `{"code":"reset","windows_reset":2,"additive_field":true}`), nil
+			})}}
+			snapshot, err := backend.Snapshot(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = backend.Consume(context.Background(), snapshot.Accounts[0], "original-credit", "original-request")
+			want := 1
+			if status == 401 || status == 403 {
+				want = 2
+				if err != nil {
+					t.Errorf("existing credential should succeed: %v", err)
+				}
+			}
+			if calls != want || refresh.calls != 0 {
+				t.Fatalf("HTTP=%d refresh=%d, want HTTP=%d refresh=0", calls, refresh.calls, want)
+			}
+		})
+	}
+}
+
+func TestResetUseRevalidatesStrongIdentity(t *testing.T) {
+	inventory := resetAccountInventory()
+	original := ProjectVisibleAccounts(inventory, time.Now())[0]
+	inventory.Accounts[0].Identity.UserID = "different-user"
+	changed := ProjectVisibleAccounts(inventory, time.Now())[0]
+	if original.SameIdentity(changed) {
+		t.Fatal("changed credential user accepted")
+	}
+	inventory.Accounts[0].Identity.UserID = "user-a"
+	inventory.Accounts[0].Candidates[0].Revision = "next-generation"
+	changed = ProjectVisibleAccounts(inventory, time.Now())[0]
+	if !original.SameIdentity(changed) {
+		t.Fatal("same identity generation rejected")
+	}
 }

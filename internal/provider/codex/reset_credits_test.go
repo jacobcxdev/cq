@@ -362,3 +362,39 @@ func TestResetCreditClientListMalformedSibling(t *testing.T) {
 		})
 	}
 }
+
+func TestResetConsumeDispatchGateAndDeadline(t *testing.T) {
+	for _, mode := range []string{"denied", "cancelled", "allowed"} {
+		t.Run(mode, func(t *testing.T) {
+			calls, dispatches := 0, 0
+			client := ResetCreditClient{HTTP: resetDoerFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				deadline, ok := req.Context().Deadline()
+				if !ok || time.Until(deadline) > 10*time.Second {
+					t.Error("consume lost request deadline")
+				}
+				return resetJSONResponse(200, `{"code":"reset","windows_reset":2,"new_field":true}`), nil
+			})}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx = WithResetConsumeDispatch(ctx, func() error {
+				dispatches++
+				if mode == "denied" {
+					return context.Canceled
+				}
+				return nil
+			})
+			if mode == "cancelled" {
+				cancel()
+			}
+			_, err := client.Consume(ctx, CredentialMaterial{AccessToken: "synthetic", AccountID: "account"}, "credit", "same-key")
+			if mode == "allowed" {
+				if err != nil || calls != 1 || dispatches != 1 {
+					t.Fatalf("calls=%d dispatches=%d err=%v", calls, dispatches, err)
+				}
+			} else if err == nil || calls != 0 {
+				t.Fatalf("sent despite denied dispatch: %d %v", calls, err)
+			}
+		})
+	}
+}

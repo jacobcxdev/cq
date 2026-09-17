@@ -33,9 +33,10 @@ type ResetAttempt struct {
 }
 
 type ResetAttemptStore struct {
-	FS  fsutil.DurableFileSystem
-	Dir string
-	mu  sync.Mutex
+	createOnEnsure bool
+	FS             fsutil.DurableFileSystem
+	Dir            string
+	mu             sync.Mutex
 }
 
 type ResetCreditSelection struct {
@@ -57,33 +58,49 @@ func ResetIdempotencyKey(account AccountKey, creditID string) string {
 	return "cq-reset-v1-" + digest
 }
 
-func NewResetAttemptStore(fs fsutil.DurableFileSystem, cacheRoot string) (*ResetAttemptStore, error) {
+// OpenResetAttemptStore reads attempt state without creating directories.
+func OpenResetAttemptStore(fs fsutil.DurableFileSystem, cacheRoot string) (*ResetAttemptStore, error) {
 	if fs == nil || strings.TrimSpace(cacheRoot) == "" {
 		return nil, errors.New("reset attempt storage unavailable")
 	}
 	if _, ok := fs.(fsutil.ExclusiveFileCreator); !ok {
 		return nil, errors.New("exclusive reset attempt creation unavailable")
 	}
-	dir := filepath.Join(cacheRoot, resetAttemptDirName)
-	if _, inspectable := fs.(fsutil.SecurePathInspector); inspectable {
-		if _, durable := fs.(fsutil.DurableDirectoryOpener); !durable {
-			return nil, fsutil.ErrSecureCapabilityUnavailable
+	return &ResetAttemptStore{FS: fs, Dir: filepath.Join(cacheRoot, resetAttemptDirName), createOnEnsure: true}, nil
+}
+
+// NewResetAttemptStore retains eager creation for existing callers.
+func NewResetAttemptStore(fs fsutil.DurableFileSystem, cacheRoot string) (*ResetAttemptStore, error) {
+	store, err := OpenResetAttemptStore(fs, cacheRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.ensureDirectory(); err != nil {
+		return nil, err
+	}
+	store.createOnEnsure = false
+	return store, nil
+}
+func (s *ResetAttemptStore) ensureDirectory() error {
+	if _, inspectable := s.FS.(fsutil.SecurePathInspector); inspectable {
+		if _, durable := s.FS.(fsutil.DurableDirectoryOpener); !durable {
+			return fsutil.ErrSecureCapabilityUnavailable
 		}
-		if err := fsutil.EnsureSecureDirectory(fs, dir); err != nil {
-			return nil, fmt.Errorf("create reset attempt directory: %w", err)
+		if err := fsutil.EnsureSecureDirectory(s.FS, s.Dir); err != nil {
+			return fmt.Errorf("create reset attempt directory: %w", err)
 		}
 	} else {
-		if err := fs.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("create reset attempt directory: %w", err)
+		if err := s.FS.MkdirAll(s.Dir, 0o700); err != nil {
+			return fmt.Errorf("create reset attempt directory: %w", err)
 		}
-		if err := fs.Chmod(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("secure reset attempt directory: %w", err)
+		if err := s.FS.Chmod(s.Dir, 0o700); err != nil {
+			return fmt.Errorf("secure reset attempt directory: %w", err)
 		}
-		if err := fs.SyncDir(filepath.Dir(dir)); err != nil {
-			return nil, fmt.Errorf("sync reset attempt directory parent: %w", err)
+		if err := s.FS.SyncDir(filepath.Dir(s.Dir)); err != nil {
+			return fmt.Errorf("sync reset attempt directory parent: %w", err)
 		}
 	}
-	return &ResetAttemptStore{FS: fs, Dir: dir}, nil
+	return nil
 }
 
 func (s *ResetAttemptStore) Pending(account AccountKey) ([]ResetAttempt, error) {
@@ -93,6 +110,22 @@ func (s *ResetAttemptStore) Pending(account AccountKey) ([]ResetAttempt, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.validateDirectory(); err != nil {
+		if s.createOnEnsure && errors.Is(err, os.ErrNotExist) {
+			// Check the first existing ancestor without writing. A symlink, unsafe
+			// owner or inaccessible ancestor is not an empty attempt inventory.
+			if _, ok := s.FS.(fsutil.SecurePathInspector); ok {
+				for parent := filepath.Dir(s.Dir); ; parent = filepath.Dir(parent) {
+					err := fsutil.ValidateOwnerControlledDirectory(s.FS, parent)
+					if err == nil {
+						break
+					}
+					if !errors.Is(err, os.ErrNotExist) || filepath.Dir(parent) == parent {
+						return nil, err
+					}
+				}
+			}
+			return []ResetAttempt{}, nil
+		}
 		return nil, err
 	}
 	entries, err := s.FS.ReadDir(s.Dir)
@@ -131,6 +164,11 @@ func (s *ResetAttemptStore) Ensure(account AccountKey, creditID string, startedA
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.createOnEnsure {
+		if err := s.ensureDirectory(); err != nil {
+			return ResetAttempt{}, err
+		}
+	}
 	if err := s.validateDirectory(); err != nil {
 		return ResetAttempt{}, err
 	}
@@ -311,6 +349,9 @@ func SelectResetCredit(now time.Time, credits []ResetCredit, pending []ResetAtte
 		}
 		return orderedPending[i].CreditID < orderedPending[j].CreditID
 	})
+	if len(orderedPending) > 1 && explicitID == "" {
+		return ResetCreditSelection{}, &ResetCreditSelectionError{Code: "pending_attempt_ambiguous"}
+	}
 	if len(orderedPending) > 0 {
 		selected := orderedPending[0]
 		if explicitID != "" {
@@ -355,9 +396,6 @@ func SelectResetCredit(now time.Time, credits []ResetCredit, pending []ResetAtte
 		}
 		if leftExpiry != nil && !leftExpiry.Equal(*rightExpiry) {
 			return leftExpiry.Before(*rightExpiry)
-		}
-		if !eligible[i].GrantedAt.Equal(eligible[j].GrantedAt) {
-			return eligible[i].GrantedAt.Before(eligible[j].GrantedAt)
 		}
 		return eligible[i].ID < eligible[j].ID
 	})

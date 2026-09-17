@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/aggregate"
@@ -36,12 +38,16 @@ type CodexResetAttempts interface {
 	Remove(codexprov.AccountKey, string) error
 }
 
+type CodexResetCache interface {
+	Delete(context.Context, string) error
+}
+
 type CodexResetApp struct {
 	Backend  CodexResetBackend
 	Usage    CodexResetUsage
 	History  CodexResetHistory
 	Attempts CodexResetAttempts
-	Cache    Cache
+	Cache    CodexResetCache
 	Clock    Clock
 }
 
@@ -65,6 +71,7 @@ type CodexResetListResult struct {
 }
 
 type CodexResetUsePlan struct {
+	AccountKey     codexprov.AccountKey              `json:"-"`
 	AccountID      string                            `json:"account_id,omitempty"`
 	Email          string                            `json:"email,omitempty"`
 	Credit         codexprov.ResetCredit             `json:"credit"`
@@ -84,6 +91,8 @@ type CodexResetWarning struct {
 }
 
 type CodexResetUseResult struct {
+	AccountKey     codexprov.AccountKey                        `json:"-"`
+	Unresolved     bool                                        `json:"-"`
 	AccountID      string                                      `json:"account_id,omitempty"`
 	Email          string                                      `json:"email,omitempty"`
 	CreditID       string                                      `json:"credit_id"`
@@ -216,7 +225,7 @@ func (a *CodexResetApp) recommend(ctx context.Context, updateHistory bool) (aggr
 
 func (a *CodexResetApp) PrepareUse(ctx context.Context, reference, explicitCreditID string) (CodexResetUsePlan, error) {
 	if a.Attempts == nil {
-		return CodexResetUsePlan{}, resetAppError("consume_failed", errors.New("reset attempt storage unavailable"))
+		return CodexResetUsePlan{}, resetAppError("attempt_unavailable", errors.New("reset attempt storage unavailable"))
 	}
 	snapshot, err := a.snapshot(ctx)
 	if err != nil {
@@ -226,104 +235,167 @@ func (a *CodexResetApp) PrepareUse(ctx context.Context, reference, explicitCredi
 	if err != nil {
 		return CodexResetUsePlan{}, resetAppError("account_reference_invalid", err)
 	}
-	inventory, err := a.Backend.ListCredits(ctx, account)
+	inventory, err := observeReset(ctx, func() (codexprov.ResetCreditInventory, error) { return a.Backend.ListCredits(ctx, account) })
 	if err != nil {
 		return CodexResetUsePlan{}, resetAppError(resetReadErrorCode(err), err)
 	}
-	pending, err := a.Attempts.Pending(account.AccountKey)
+	pending, err := observeReset(ctx, func() ([]codexprov.ResetAttempt, error) { return a.Attempts.Pending(account.AccountKey) })
 	if err != nil {
-		return CodexResetUsePlan{}, resetAppError("consume_indeterminate", err)
+		return CodexResetUsePlan{}, resetAppError("attempt_unavailable", err)
 	}
 	selection, err := codexprov.SelectResetCredit(a.now(), inventory.Credits, pending, explicitCreditID)
 	if err != nil {
 		return CodexResetUsePlan{}, resetAppError(resetSelectionErrorCode(a.now(), inventory.Credits, explicitCreditID, err), err)
 	}
-	usage, err := callResetUsage(ctx, a.Usage, a.now())
+	usage, err := observeReset(ctx, func() ([]quota.Result, error) { return callResetUsage(ctx, a.Usage, a.now()) })
 	if err != nil {
 		return CodexResetUsePlan{}, resetAppError("credits_unavailable", err)
 	}
 	usageResult, matchCode := matchResetUsage(account, usage)
-	if matchCode != "" {
-		return CodexResetUsePlan{}, resetAppError("credits_unavailable", errors.New(matchCode))
+	if matchCode != "" || !validResetWindows(usageResult.Windows) {
+		return CodexResetUsePlan{}, resetAppError("credits_unavailable", errors.New("fresh shared windows unavailable"))
 	}
 	recommendation, _ := a.recommend(ctx, false)
-	return CodexResetUsePlan{
-		AccountID: account.AccountID, Email: account.Email, Credit: selection.Credit,
-		CurrentWindows: sharedResetQuotaWindows(usageResult.Windows), Recommendation: &recommendation,
-		account: account, selection: selection,
-	}, nil
+	if err := ctx.Err(); err != nil {
+		return CodexResetUsePlan{}, err
+	}
+	return CodexResetUsePlan{AccountKey: account.AccountKey, AccountID: account.AccountID, Email: account.Email, Credit: selection.Credit, CurrentWindows: sharedResetQuotaWindows(usageResult.Windows), Recommendation: &recommendation, account: account, selection: selection}, nil
 }
 
 func (a *CodexResetApp) ExecuteUse(ctx context.Context, plan CodexResetUsePlan) (CodexResetUseResult, error) {
+	result := CodexResetUseResult{AccountKey: plan.account.AccountKey, AccountID: plan.AccountID, Email: plan.Email, CreditID: plan.Credit.ID, Outcome: "cancelled"}
 	if a.Attempts == nil || plan.account.AccountKey == "" || plan.Credit.ID == "" {
-		return CodexResetUseResult{}, resetAppError("consume_failed", errors.New("invalid reset use plan"))
+		return result, resetAppError("attempt_unavailable", errors.New("invalid reset use plan"))
 	}
 	snapshot, err := a.snapshot(ctx)
 	if err != nil {
-		return CodexResetUseResult{}, resetAppError("credential_unavailable", err)
+		return result, resetAppError("credential_unavailable", err)
 	}
 	account, err := snapshot.ResolveReference(string(plan.account.AccountKey))
-	if err != nil || account.AccountKey != plan.account.AccountKey {
-		return CodexResetUseResult{}, resetAppError("account_reference_invalid", err)
-	}
-	inventory, err := a.Backend.ListCredits(ctx, account)
 	if err != nil {
-		return CodexResetUseResult{}, resetAppError(resetReadErrorCode(err), err)
+		return result, resetAppError("account_reference_invalid", err)
 	}
-	pending, err := a.Attempts.Pending(account.AccountKey)
+	if !account.SameIdentity(plan.account) {
+		return result, resetAppError("account_reference_invalid", &codexprov.AccountReferenceError{Code: codexprov.AccountReferenceUnstable})
+	}
+	inventory, err := observeReset(ctx, func() (codexprov.ResetCreditInventory, error) { return a.Backend.ListCredits(ctx, account) })
 	if err != nil {
-		return CodexResetUseResult{}, resetAppError("consume_indeterminate", err)
+		return result, resetAppError(resetReadErrorCode(err), err)
+	}
+	pending, err := observeReset(ctx, func() ([]codexprov.ResetAttempt, error) { return a.Attempts.Pending(account.AccountKey) })
+	if err != nil {
+		return result, resetAppError("attempt_unavailable", err)
 	}
 	selection, err := codexprov.SelectResetCredit(a.now(), inventory.Credits, pending, plan.Credit.ID)
 	if err != nil {
-		return CodexResetUseResult{}, resetAppError(resetSelectionErrorCode(a.now(), inventory.Credits, plan.Credit.ID, err), err)
+		return result, resetAppError(resetSelectionErrorCode(a.now(), inventory.Credits, plan.Credit.ID, err), err)
 	}
-	if selection.Credit.ID != plan.Credit.ID {
-		return CodexResetUseResult{}, resetAppError("credit_not_found", errors.New("reset credit selection changed"))
-	}
-	attempt, err := a.Attempts.Ensure(account.AccountKey, selection.Credit.ID, a.now())
+	attempt, err := observeReset(ctx, func() (codexprov.ResetAttempt, error) {
+		return a.Attempts.Ensure(account.AccountKey, selection.Credit.ID, a.now())
+	})
 	if err != nil {
-		return CodexResetUseResult{}, resetAppError("consume_failed", err)
+		return result, resetAppError("attempt_unavailable", err)
 	}
-	consumed, err := callResetConsume(ctx, a.Backend, account, selection.Credit.ID, attempt.IdempotencyKey)
+	if attempt.AccountKey != account.AccountKey || attempt.CreditID != plan.Credit.ID || attempt.IdempotencyKey != codexprov.ResetIdempotencyKey(account.AccountKey, plan.Credit.ID) {
+		return result, resetAppError("attempt_unavailable", errors.New("reset attempt identity mismatch"))
+	}
+	consumed, dispatched, err := callResetConsume(ctx, a.Backend, account, selection.Credit.ID, attempt.IdempotencyKey)
 	if err != nil {
-		reference := account.Email
-		if reference == "" {
-			reference = account.AccountID
+		if dispatched && classifyResetConsumeError(err) == "consume_indeterminate" {
+			result.Outcome = "indeterminate"
+			result.Unresolved = true
 		}
-		return CodexResetUseResult{}, resetAppError(classifyResetConsumeError(err), fmt.Errorf("retry with cq codex resets use %s --credit %s: %w", reference, selection.Credit.ID, err))
+		code := classifyResetConsumeError(err)
+		if !dispatched {
+			code = "credential_unavailable"
+		}
+		return result, resetAppError(code, fmt.Errorf("retry with cq codex resets use %s --credit %s: %w", account.AccountKey, selection.Credit.ID, err))
 	}
-	result := CodexResetUseResult{
-		AccountID: account.AccountID, Email: account.Email, CreditID: selection.Credit.ID,
-		Outcome: consumed.Outcome, WindowsReset: consumed.WindowsReset,
-	}
+	result.Outcome, result.WindowsReset = consumed.Outcome, consumed.WindowsReset
 	switch consumed.Outcome {
 	case codexprov.ConsumeReset, codexprov.ConsumeAlreadyRedeemed:
-		a.finishResetAttempt(&result, account, selection.Credit.ID)
+		a.finishResetAttempt(ctx, &result, account, selection.Credit.ID)
 		a.refreshAfterReset(ctx, &result, account, plan.CurrentWindows)
-		return result, nil
 	case codexprov.ConsumeNothingToReset, codexprov.ConsumeNoCredit:
-		a.finishResetAttempt(&result, account, selection.Credit.ID)
-		return result, nil
+		a.finishResetAttempt(ctx, &result, account, selection.Credit.ID)
 	default:
-		return CodexResetUseResult{}, resetAppError("consume_indeterminate", errors.New("unknown reset consume outcome"))
+		result.Outcome, result.WindowsReset, result.Unresolved = "indeterminate", 0, true
+		return result, resetAppError("consume_indeterminate", errors.New("unknown reset consume outcome"))
 	}
+	return result, nil
 }
 
-func callResetConsume(
-	ctx context.Context,
-	backend CodexResetBackend,
-	account codexprov.ResetAccount,
-	creditID string,
-	idempotencyKey string,
-) (result codexprov.ConsumeResetResult, err error) {
-	defer func() {
-		if recover() != nil {
-			result = codexprov.ConsumeResetResult{}
-			err = errors.New("reset consume panic")
+func callResetConsume(ctx context.Context, backend CodexResetBackend, account codexprov.ResetAccount, creditID, idempotencyKey string) (codexprov.ConsumeResetResult, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return codexprov.ConsumeResetResult{}, false, err
+	}
+	var mu sync.Mutex
+	var value codexprov.ConsumeResetResult
+	var callErr error
+	started, completed, closed := false, false, false
+	_, tracked := backend.(*codexprov.ResetBackend)
+	requestCtx := codexprov.WithResetConsumeDispatch(ctx, func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return err
 		}
+		if closed {
+			return context.Canceled
+		}
+		started = true
+		return nil
+	})
+	done := make(chan struct{})
+	go func() {
+		r := codexprov.ConsumeResetResult{}
+		var err error
+		defer func() {
+			if recover() != nil {
+				err = errors.New("reset consume panic")
+			}
+			mu.Lock()
+			value, callErr, completed = r, err, true
+			mu.Unlock()
+			close(done)
+		}()
+		mu.Lock()
+		if closed || ctx.Err() != nil {
+			mu.Unlock()
+			err = ctx.Err()
+			return
+		}
+		if !tracked {
+			started = true
+		}
+		mu.Unlock()
+		r, err = backend.Consume(requestCtx, account, creditID, idempotencyKey)
 	}()
-	return backend.Consume(ctx, account, creditID, idempotencyKey)
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	closed = true
+	if completed {
+		return value, started, callErr
+	}
+	return codexprov.ConsumeResetResult{}, started, ctx.Err()
+}
+
+func validResetWindows(windows map[quota.WindowName]quota.Window) bool {
+	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+		window, ok := windows[name]
+		remaining := float64(window.RemainingPct)
+		if window.RemainingPctExact != nil {
+			remaining = *window.RemainingPctExact
+		}
+		if !ok || window.ResetAtUnix <= 0 || time.Unix(window.ResetAtUnix, 0).Year() > 9999 || math.IsNaN(remaining) || math.IsInf(remaining, 0) || remaining < 0 || remaining > 100 {
+			return false
+		}
+	}
+	return true
 }
 
 func callResetUsage(ctx context.Context, usage CodexResetUsage, now time.Time) (results []quota.Result, err error) {
@@ -602,8 +674,16 @@ func resetReadErrorCode(err error) string {
 
 func resetSelectionErrorCode(now time.Time, credits []codexprov.ResetCredit, explicitID string, err error) string {
 	var selectionErr *codexprov.ResetCreditSelectionError
-	if errors.As(err, &selectionErr) && selectionErr.Code == "pending_attempt_conflict" {
-		return "consume_indeterminate"
+	if errors.As(err, &selectionErr) {
+		if selectionErr.Code == "pending_attempt_ambiguous" {
+			return "pending_ambiguous"
+		}
+		if selectionErr.Code == "pending_attempt_conflict" {
+			return "credit_ineligible"
+		}
+		if selectionErr.Code == "no_available_credit" {
+			return "credit_ineligible"
+		}
 	}
 	if explicitID != "" {
 		for _, credit := range credits {
@@ -616,6 +696,7 @@ func resetSelectionErrorCode(now time.Time, credits []codexprov.ResetCredit, exp
 			if credit.ExpiresAt != nil && !credit.ExpiresAt.After(now) {
 				return "credit_expired"
 			}
+			return "credit_ineligible"
 		}
 	}
 	return "credit_not_found"
@@ -629,15 +710,15 @@ func classifyResetConsumeError(err error) string {
 	return "consume_indeterminate"
 }
 
-func (a *CodexResetApp) finishResetAttempt(result *CodexResetUseResult, account codexprov.ResetAccount, creditID string) {
-	if err := a.Attempts.Remove(account.AccountKey, creditID); err != nil {
+func (a *CodexResetApp) finishResetAttempt(ctx context.Context, result *CodexResetUseResult, account codexprov.ResetAccount, creditID string) {
+	if _, err := observeReset(ctx, func() (struct{}, error) { return struct{}{}, a.Attempts.Remove(account.AccountKey, creditID) }); err != nil {
 		result.Warnings = append(result.Warnings, CodexResetWarning{Code: "attempt_cleanup_failed"})
 	}
 }
 
 func (a *CodexResetApp) refreshAfterReset(ctx context.Context, result *CodexResetUseResult, account codexprov.ResetAccount, before map[quota.WindowName]quota.Window) {
 	if a.Cache != nil {
-		if err := a.Cache.Delete(ctx, string(provider.Codex)); err != nil {
+		if _, err := observeReset(ctx, func() (struct{}, error) { return struct{}{}, a.Cache.Delete(ctx, string(provider.Codex)) }); err != nil {
 			result.Warnings = append(result.Warnings, CodexResetWarning{Code: "cache_invalidate_failed"})
 		}
 	}
@@ -646,13 +727,13 @@ func (a *CodexResetApp) refreshAfterReset(ctx context.Context, result *CodexRese
 		return
 	}
 	now := a.now()
-	usage, err := callResetUsage(ctx, a.Usage, now)
+	usage, err := observeReset(ctx, func() ([]quota.Result, error) { return callResetUsage(ctx, a.Usage, now) })
 	if err != nil {
 		result.Warnings = append(result.Warnings, CodexResetWarning{Code: "usage_refetch_failed"})
 		return
 	}
 	afterResult, matchCode := matchResetUsage(account, usage)
-	if matchCode != "" {
+	if matchCode != "" || !validResetWindows(afterResult.Windows) {
 		result.Warnings = append(result.Warnings, CodexResetWarning{Code: "usage_match_failed"})
 	} else {
 		after := sharedResetQuotaWindows(afterResult.Windows)
@@ -668,7 +749,10 @@ func (a *CodexResetApp) refreshAfterReset(ctx context.Context, result *CodexRese
 		}
 	}
 	if a.History != nil {
-		if _, _, err := callResetHistory(ctx, a.History, usage, now); err != nil {
+		if _, err := observeReset(ctx, func() (struct{}, error) {
+			_, _, err := callResetHistory(ctx, a.History, usage, now)
+			return struct{}{}, err
+		}); err != nil {
 			result.Warnings = append(result.Warnings, CodexResetWarning{Code: "history_update_failed"})
 		}
 	}
