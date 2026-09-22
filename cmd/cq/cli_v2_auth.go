@@ -513,9 +513,18 @@ func refreshClaudeOutcomes(ctx context.Context, deps v2AuthDependencies, now tim
 		put(id, row)
 	}
 	// A later browser result may resolve an earlier account's authentication error.
+	// Interruption belongs to the invocation even when a retained store failure
+	// occupies the account's single display error.
+	interrupted := false
+	for _, diagnostic := range w.errors {
+		interrupted = interrupted || diagnostic.Code == "auth_interrupted"
+	}
 	w.errors = nil
+	if interrupted {
+		w.errors = append(w.errors, authDiagnostic("auth_interrupted", ""))
+	}
 	for _, row := range w.result.Accounts {
-		if row.ErrorCode != nil {
+		if row.ErrorCode != nil && *row.ErrorCode != "auth_interrupted" {
 			w.errors = append(w.errors, cli.Diagnostic{Code: *row.ErrorCode, Message: *row.Message})
 		}
 	}

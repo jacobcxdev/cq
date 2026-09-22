@@ -624,3 +624,47 @@ func TestCLIV2AuthReauthenticationResolvesMergedAuthenticationFailure(t *testing
 		t.Fatalf("authentication error not resolved: exit=%d data=%s errors=%v", out.ExitCode, out.Data, out.Errors)
 	}
 }
+
+func TestCLIV2AuthReauthenticationRetainsStoreAndInterruption(t *testing.T) {
+	deps := authTestDependencies(t)
+	deps.DiscoverClaude = func(context.Context) []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{
+			{AccountUUID: "a", Email: "a@test.invalid", ExpiresAt: 1},
+			{AccountUUID: "b", Email: "b@test.invalid", ExpiresAt: deps.Now().Add(time.Hour).UnixMilli()},
+			{AccountUUID: "c", Email: "c@test.invalid", ExpiresAt: 1},
+		}
+	}
+	calls := 0
+	deps.Login = func(context.Context) (authReauthResult, error) {
+		calls++
+		result := authReauthResult{AccountUUID: "b", Email: "b@test.invalid"}
+		if calls == 1 {
+			result.CredentialsChanged = true
+			return result, errAuthCredentialStore
+		}
+		return result, context.Canceled
+	}
+	ctx := context.Background()
+	out := handleV2AuthWithDependencies(ctx, cli.Invocation{Path: "auth refresh", Arguments: map[string][]string{"providers": {"claude"}}}, &cli.Session{In: strings.NewReader("\n\n"), Err: io.Discard, Interactive: true}, deps)
+	var data struct {
+		Providers    []AuthRefreshProviderResult `json:"providers"`
+		ChangedCount int                         `json:"changed_count"`
+	}
+	if err := json.Unmarshal(out.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != nil || calls != 2 || out.ExitCode != 130 || data.ChangedCount != 1 || data.Providers[0].ChangedCount != 1 || data.Providers[0].Failed != 1 {
+		t.Fatalf("calls=%d exit=%d data=%s errors=%v", calls, out.ExitCode, out.Data, out.Errors)
+	}
+	row := data.Providers[0].Accounts[1]
+	if row.Status != "failed" || !row.CredentialsChanged || row.ErrorCode == nil || *row.ErrorCode != "auth_store_failed" {
+		t.Fatalf("lost committed store failure: %+v", row)
+	}
+	codes := map[string]bool{}
+	for _, diagnostic := range out.Errors {
+		codes[diagnostic.Code] = true
+	}
+	if !codes["auth_store_failed"] || !codes["auth_interrupted"] {
+		t.Fatalf("lost invocation failure: %v", out.Errors)
+	}
+}
