@@ -537,56 +537,7 @@ func StoreCQAccount(acct *ClaudeOAuth) error {
 	return StoreCQAccountContext(context.Background(), acct)
 }
 func StoreCQAccountContext(ctx context.Context, acct *ClaudeOAuth) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if acct.AccountUUID == "" {
-		return fmt.Errorf("account UUID required for keyring storage")
-	}
-	manifestPath, err := defaultCQManifestPath()
-	if err != nil {
-		return fmt.Errorf("resolve manifest path: %w", err)
-	}
-	service := ServicePrefix + Hash8(acct.AccountUUID)
-	data, err := json.Marshal(acct)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := gokeyring.Set(service, acct.AccountUUID, string(data)); err != nil {
-		// SecItemAdd fails with errSecDuplicateItem (exit status 45) when the
-		// item already exists. Delete and retry once.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		_ = gokeyring.Delete(service, acct.AccountUUID)
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := gokeyring.Set(service, acct.AccountUUID, string(data)); err != nil {
-			return err
-		}
-	}
-
-	// Update manifest
-	entries := loadManifestContext(ctx, manifestPath)
-	found := false
-	for i, e := range entries {
-		if e.UUID == acct.AccountUUID {
-			entries[i].Email = acct.Email
-			found = true
-			break
-		}
-	}
-	if !found {
-		entries = append(entries, manifestEntry{UUID: acct.AccountUUID, Email: acct.Email})
-	}
-	if err := saveManifestContext(ctx, manifestPath, entries); err != nil {
-		return &ClaudeStoreError{Err: err}
-	}
-	return nil
+	return StoreCQAccountResultContext(ctx, acct).Err
 }
 
 // RemoveCQClaudeAccountsByEmail deletes cq-managed Claude account state for all
@@ -725,61 +676,38 @@ func PersistRefreshedToken(acct *ClaudeOAuth) {
 	PersistRefreshedTokenContext(context.Background(), acct)
 }
 func PersistRefreshedTokenContext(ctx context.Context, acct *ClaudeOAuth) {
-	if ctx.Err() != nil {
-		return
-	}
-	cqAccount := *acct
 	writeCredentials := WriteCredentialsFile
 	updateKeychain := updateKeychainEntryForRefresh
 	storeAccount := storeCQAccountForRefresh
 	if _, observed := ctx.Value(diagnosticsKey{}).(func(string, string)); observed {
-		writeCredentials = func(creds *ClaudeCredentials) error { return WriteCredentialsFileContext(ctx, creds) }
-		updateKeychain = func(service string, creds *ClaudeCredentials) error {
-			return updateKeychainEntryContext(ctx, service, creds)
-		}
-		storeAccount = func(acct *ClaudeOAuth) error { return StoreCQAccountContext(ctx, acct) }
+		writeCredentials = func(c *ClaudeCredentials) error { return WriteCredentialsFileContext(ctx, c) }
+		updateKeychain = func(s string, c *ClaudeCredentials) error { return updateKeychainEntryContext(ctx, s, c) }
+		storeAccount = func(a *ClaudeOAuth) error { return StoreCQAccountContext(ctx, a) }
 	}
-
-	home, err := resolveCredentialHome()
-	if err == nil {
-		path := filepath.Join(home, ".claude", ".credentials.json")
-		if ctx.Err() != nil {
-			return
-		}
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var creds ClaudeCredentials
-			if json.Unmarshal(data, &creds) == nil && canUpdateStoredAccount(creds.ClaudeAiOauth, acct) {
-				stored := creds.ClaudeAiOauth
-				updated := mergeRefreshedAccount(stored, acct)
-				creds.ClaudeAiOauth = &updated
-				cqAccount = updated
-				if ctx.Err() != nil {
-					return
-				}
-				if err := writeCredentials(&creds); err != nil {
-					credentialDiagnostic(ctx, "credential_refresh_write_failed", "Refreshed Claude credentials could not be written.", "cq: PersistRefreshedToken: write creds: %v\n", err)
-				} else if err := updateKeychain("Claude Code-credentials", &creds); err != nil {
-					credentialDiagnostic(ctx, "credential_refresh_keychain_failed", "Refreshed Claude credentials could not be stored in the keychain.", "cq: PersistRefreshedToken: update keychain: %v\n", err)
-				}
+	_ = persistRefreshedTokenResult(ctx, acct, refreshPersistenceOperations{
+		write: func(c *ClaudeCredentials) error {
+			err := writeCredentials(c)
+			if err != nil {
+				credentialDiagnostic(ctx, "credential_refresh_write_failed", "Refreshed Claude credentials could not be written.", "cq: PersistRefreshedToken: write creds: %v\n", err)
 			}
-		}
-	}
-
-	if cqAccount.AccountUUID == "" {
-		cqAccount.AccountUUID = acct.AccountUUID
-	}
-	if cqAccount.Email == "" {
-		cqAccount.Email = acct.Email
-	}
-	if cqAccount.AccountUUID != "" {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := storeAccount(&cqAccount); err != nil {
-			credentialDiagnostic(ctx, "credential_refresh_store_failed", "Refreshed Claude credentials could not be stored by CQ.", "cq: PersistRefreshedToken: store cq account: %v\n", err)
-		}
-	}
+			return err
+		},
+		update: func(s string, c *ClaudeCredentials) error {
+			err := updateKeychain(s, c)
+			if err != nil {
+				credentialDiagnostic(ctx, "credential_refresh_keychain_failed", "Refreshed Claude credentials could not be stored in the keychain.", "cq: PersistRefreshedToken: update keychain: %v\n", err)
+			}
+			return err
+		},
+		store: func(a *ClaudeOAuth) CredentialWriteResult {
+			err := storeAccount(a)
+			if err != nil {
+				credentialDiagnostic(ctx, "credential_refresh_store_failed", "Refreshed Claude credentials could not be stored by CQ.", "cq: PersistRefreshedToken: store cq account: %v\n", err)
+			}
+			var committed *ClaudeStoreError
+			return CredentialWriteResult{Changed: err == nil || errors.As(err, &committed), Err: err}
+		},
+	})
 }
 
 func canUpdateStoredAccount(stored, acct *ClaudeOAuth) bool {

@@ -760,6 +760,10 @@ func mutationFailure(err error) MutationFailure {
 	case errors.Is(err, ErrAccountNotActivatable):
 		return "not_activatable"
 	}
+	var persistence *RefreshPersistenceError
+	if errors.As(err, &persistence) {
+		return "refresh_store"
+	}
 	var reference *AccountReferenceError
 	if errors.As(err, &reference) {
 		return MutationFailure("reference_" + string(reference.Code))
@@ -780,6 +784,8 @@ func (f MutationFailure) err() error {
 		return ErrStaleRevision
 	case "not_activatable":
 		return ErrAccountNotActivatable
+	case "refresh_store":
+		return &RefreshPersistenceError{Err: errors.New("credential persistence failed")}
 	case "reference_missing":
 		return &AccountReferenceError{Code: AccountReferenceMissing}
 	case "reference_ambiguous":

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
-	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -51,112 +50,40 @@ func runRefresh() error {
 	if _, err := resolveRefreshRootsFn(); err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	accounts := discoverClaudeAccountsFn()
-	httpClient := newHTTPClientFn(10*time.Second, version)
+	client := newHTTPClientFn(10*time.Second, version)
 	ctx := context.Background()
-	now := time.Now().UnixMilli()
-
-	var claudeChanged bool
-	var needsReauth []keyring.ClaudeOAuth
-	if len(accounts) > 0 {
-		// Sync fresh anonymous keychain tokens into stale identified entries.
-		// After Claude Code rotates tokens, mergeAnonymousFresh can't match
-		// them (token affinity fails). We resolve the anonymous entry's email
-		// via the profile API and sync its tokens into the matching account.
-		accounts, claudeChanged = syncAnonymousToIdentifiedWithChange(ctx, httpClient, accounts, now)
-
-		threshold := now + refreshMarginMs
-		for _, acct := range accounts {
-			if acct.RefreshToken == "" && acct.ExpiresAt > 0 && acct.ExpiresAt < now {
-				if acct.Email == "" && acct.AccountUUID == "" {
-					continue
-				}
-				needsReauth = append(needsReauth, acct)
-				continue
-			}
-			if acct.RefreshToken == "" {
-				continue
-			}
-			if acct.ExpiresAt == 0 || acct.ExpiresAt > threshold {
-				continue // unknown expiry or token still fresh
-			}
-
-			label := acctLabel(acct)
-
-			rr, err := claudeprov.RefreshToken(ctx, httpClient, acct.RefreshToken, acct.Scopes)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "cq: refresh %s: %v\n", label, err)
-				needsReauth = append(needsReauth, acct)
-				continue
-			}
-
-			acct.AccessToken = rr.AccessToken
-			acct.ExpiresAt = now + rr.ExpiresIn*1000
-			if rr.RefreshToken != "" {
-				acct.RefreshToken = rr.RefreshToken
-			}
-
-			persistRefreshedTokenFn(&acct)
-			if acct.AccountUUID != "" {
-				if err := storeCQAccountFn(&acct); err != nil {
-					fmt.Fprintf(os.Stderr, "cq: store %s: %v\n", label, err)
-				}
-			}
-
-			claudeChanged = true
-			fmt.Fprintf(os.Stderr, "cq: refreshed %s\n", label)
-		}
-	}
-
-	if claudeChanged {
+	now := time.Now()
+	work := refreshClaudeOutcomes(ctx, v2AuthDependencies{
+		HTTP: client, DiscoverClaude: func(context.Context) []keyring.ClaudeOAuth { return discoverClaudeAccountsFn() },
+		PersistClaude: func(ctx context.Context, a *keyring.ClaudeOAuth) (bool, error) {
+			r := keyring.PersistRefreshedTokenResultContext(ctx, a)
+			return r.Changed, r.Err
+		},
+		Login: func(ctx context.Context) (authReauthResult, error) {
+			return refreshClaudeLogin(ctx, client, auth.Login, persistV2Claude, time.Now)
+		},
+	}, now, false, &cli.Session{In: os.Stdin, Out: os.Stdout, Err: os.Stderr, Interactive: isStdinTerminalFn()})
+	finishAuthProvider(&work)
+	if work.result.CredentialsChanged {
 		invalidateProviderCacheFn(provider.Claude)
 	}
-	codexChanged, err := refreshCodexAccountsFn(ctx, httpClient, now)
+	for _, row := range work.result.Accounts {
+		if row.Status == "refreshed" {
+			fmt.Fprintf(os.Stderr, "cq: refreshed %s\n", row.AccountLabel)
+		}
+	}
+	changed, err := refreshCodexAccountsFn(ctx, client, now.UnixMilli())
+	if changed {
+		invalidateProviderCacheFn(provider.Codex)
+	}
 	if err != nil {
 		return err
 	}
-	if codexChanged {
-		invalidateProviderCacheFn(provider.Codex)
+	if work.result.ReauthRequired > 0 {
+		return fmt.Errorf("%d account(s) need interactive reauth (run `cq refresh` in a terminal)", work.result.ReauthRequired)
 	}
-
-	if len(accounts) == 0 {
-		return nil
-	}
-
-	if len(needsReauth) == 0 {
-		return nil
-	}
-
-	if !isStdinTerminalFn() {
-		return fmt.Errorf("%d account(s) need interactive reauth (run `cq refresh` in a terminal)", len(needsReauth))
-	}
-
-	fmt.Fprintf(os.Stderr, "\n%d account(s) need to sign in again:\n", len(needsReauth))
-	scanner := bufio.NewScanner(os.Stdin)
-	var failed int
-	for _, acct := range needsReauth {
-		label := acctLabel(acct)
-		fmt.Fprintf(os.Stderr, "\n  Sign in as: %s\n", label)
-		fmt.Fprintf(os.Stderr, "  Press Enter to open browser (or 's' to skip): ")
-
-		if !scanner.Scan() {
-			break
-		}
-		if strings.TrimSpace(scanner.Text()) == "s" {
-			fmt.Fprintf(os.Stderr, "  skipped\n")
-			failed++
-			continue
-		}
-
-		if err := app.RunLogin(ctx, httpClient, false); err != nil {
-			fmt.Fprintf(os.Stderr, "  login failed: %v\n", err)
-			failed++
-			continue
-		}
-	}
-
-	if failed > 0 {
-		return fmt.Errorf("%d account(s) still need reauth", failed)
+	if len(work.errors) > 0 {
+		return errors.New(work.errors[0].Message)
 	}
 	return nil
 }
@@ -177,33 +104,9 @@ type codexRefreshAuthority interface {
 }
 
 func refreshManagedCodexAuthority(ctx context.Context, authority codexRefreshAuthority, now time.Time) (bool, error) {
-	if authority == nil {
-		return false, codexprov.ErrCredentialAuthorityUnavailable
-	}
-	inventory, err := authority.List(ctx)
-	if err != nil {
-		return false, codexRefreshAuthorityError(err)
-	}
-	for _, source := range inventory.ExternalSources {
-		if source.ErrorCode != "" && !source.OptionalAbsent {
-			return false, codexprov.ErrCredentialInventoryDegraded
-		}
-	}
-
-	threshold := now.Add(time.Duration(refreshMarginMs) * time.Millisecond)
-	changed := false
-	for _, logical := range inventory.Accounts {
-		for _, candidate := range codexprov.ResolveCandidate(logical, "", now) {
-			if candidate.Source != codexprov.SourceManaged || candidate.AccessExpiresAt.IsZero() || candidate.AccessExpiresAt.After(threshold) {
-				continue
-			}
-			if _, err := authority.Refresh(ctx, candidate.Ref, candidate.Revision); err != nil {
-				continue
-			}
-			changed = true
-		}
-	}
-	return changed, nil
+	work := refreshManagedCodexOutcomes(ctx, authority, now)
+	finishAuthProvider(&work)
+	return work.result.CredentialsChanged, work.err
 }
 
 func codexRefreshAuthorityError(err error) error {
@@ -232,8 +135,22 @@ func syncAnonymousToIdentified(ctx context.Context, client httputil.Doer, accoun
 // syncAnonymousToIdentified that also reports whether any stored account was
 // updated with fresher anonymous tokens.
 func syncAnonymousToIdentifiedWithChange(ctx context.Context, client httputil.Doer, accounts []keyring.ClaudeOAuth, nowMs int64) ([]keyring.ClaudeOAuth, bool) {
+	changed := false
+	updated := syncAnonymousCredentials(ctx, client, accounts, nowMs, func(acct *keyring.ClaudeOAuth) {
+		persistRefreshedTokenFn(acct)
+		if acct.AccountUUID != "" {
+			if err := storeCQAccountFn(acct); err != nil {
+				fmt.Fprintf(os.Stderr, "cq: store %s: %v\n", acctLabel(*acct), err)
+			}
+		}
+		changed = true
+	})
+	return updated, changed
+}
+
+func syncAnonymousCredentials(ctx context.Context, client httputil.Doer, accounts []keyring.ClaudeOAuth, nowMs int64, persist func(*keyring.ClaudeOAuth)) []keyring.ClaudeOAuth {
 	if len(accounts) == 0 {
-		return accounts, false
+		return accounts
 	}
 
 	updated := append([]keyring.ClaudeOAuth(nil), accounts...)
@@ -247,6 +164,9 @@ func syncAnonymousToIdentifiedWithChange(ctx context.Context, client httputil.Do
 	changed := false
 	remove := make(map[int]struct{})
 	for i, acct := range updated {
+		if ctx.Err() != nil {
+			break
+		}
 		if acct.Email != "" || acct.AccessToken == "" || acct.ExpiresAt <= nowMs {
 			continue
 		}
@@ -273,17 +193,12 @@ func syncAnonymousToIdentifiedWithChange(ctx context.Context, client httputil.Do
 			repaired.Scopes = acct.Scopes
 		}
 		updated[idx] = repaired
-		persistRefreshedTokenFn(&updated[idx])
-		if updated[idx].AccountUUID != "" {
-			if err := storeCQAccountFn(&updated[idx]); err != nil {
-				fmt.Fprintf(os.Stderr, "cq: store %s: %v\n", acctLabel(updated[idx]), err)
-			}
-		}
+		persist(&updated[idx])
 		remove[i] = struct{}{}
 		changed = true
 	}
 	if !changed {
-		return updated, false
+		return updated
 	}
 
 	result := make([]keyring.ClaudeOAuth, 0, len(updated)-len(remove))
@@ -293,7 +208,7 @@ func syncAnonymousToIdentifiedWithChange(ctx context.Context, client httputil.Do
 		}
 		result = append(result, acct)
 	}
-	return result, true
+	return result
 }
 
 // resolveProfileEmail calls the Claude profile API to determine the email

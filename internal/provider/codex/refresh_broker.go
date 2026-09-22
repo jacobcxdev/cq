@@ -16,9 +16,10 @@ import (
 type RefreshExchange func(context.Context, string) (*auth.CodexTokenResponse, error)
 
 type RefreshResult struct {
-	Ref      CandidateRef
-	Revision Revision
-	Material CredentialMaterial
+	CredentialsChanged bool
+	Ref                CandidateRef
+	Revision           Revision
+	Material           CredentialMaterial
 }
 
 // CredentialReferenceRefresher refreshes credentials without exposing material
@@ -309,19 +310,21 @@ func (c *CredentialCoordinator) retryRetainedLocked(ctx context.Context, record 
 		}
 		if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
 			c.restoreRotationUncertain(&record, retained.operationID)
-			return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
+			var commit *CommitError
+			changed := errors.As(err, &commit) && commit.Committed
+			return RefreshResult{CredentialsChanged: changed}, true, &RefreshPersistenceError{Err: err}
 		}
 		retained.materialCommitted = true
 		c.retainRefresh(record.Metadata.CandidateID, retained)
 	}
 	if err := c.completeRefreshMutation(retained.operationID, retained.commitDigest); err != nil {
-		return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
+		return RefreshResult{CredentialsChanged: retained.materialCommitted}, true, &RefreshPersistenceError{Err: err}
 	}
 	c.clearRetained(record.Metadata.CandidateID)
 	if retained.resultErr != nil {
 		return RefreshResult{}, true, retained.resultErr
 	}
-	return RefreshResult{Ref: recordRef(record), Revision: record.Metadata.Revision, Material: record.Credential}, true, nil
+	return RefreshResult{CredentialsChanged: retained.materialCommitted, Ref: recordRef(record), Revision: record.Metadata.Revision, Material: record.Credential}, true, nil
 }
 
 func (c *CredentialCoordinator) persistRefreshAttempt(retained retainedRefresh) error {
