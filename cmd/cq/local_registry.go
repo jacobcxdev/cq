@@ -20,15 +20,17 @@ import (
 // caches. It is built from real OS resources and is the one-shot equivalent
 // of the in-proxy registry pipeline.
 type localRegistry struct {
-	Catalog   *modelregistry.Catalog
-	Refresher *modelregistry.Refresher
-	Publish   func()
-	Close     func() error
+	Catalog       *modelregistry.Catalog
+	Refresher     *modelregistry.Refresher
+	Publish       func()
+	PublishReport func(modelregistry.Snapshot) []modelregistry.PublicationTarget
+	Close         func() error
 }
 
 type localRegistryDependencies struct {
 	FS                  fsutil.FileSystem
 	HomeDir             string
+	CWD                 string
 	Roots               userdirs.Roots
 	HTTPClient          httputil.Doer
 	CodexClientVersion  string
@@ -81,6 +83,7 @@ func buildLocalRegistryFromAuthority(cfg *proxy.Config, deps localRegistryDepend
 	pipeline, err := newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
 		FS:                 deps.FS,
 		HomeDir:            deps.HomeDir,
+		CWD:                deps.CWD,
 		Roots:              deps.Roots,
 		ClaudeUpstream:     cfg.ClaudeUpstream,
 		CodexUpstream:      cfg.CodexUpstream,
@@ -98,9 +101,10 @@ func buildLocalRegistryFromAuthority(cfg *proxy.Config, deps localRegistryDepend
 		closeRegistry = func() error { return nil }
 	}
 	return &localRegistry{
-		Catalog:   pipeline.Catalog,
-		Refresher: pipeline.Refresher,
-		Publish:   pipeline.Publish,
-		Close:     closeRegistry,
+		Catalog:       pipeline.Catalog,
+		Refresher:     pipeline.Refresher,
+		Publish:       pipeline.Publish,
+		PublishReport: pipeline.PublishReport,
+		Close:         closeRegistry,
 	}, nil
 }

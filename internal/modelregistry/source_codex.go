@@ -24,7 +24,25 @@ type codexModelInfo struct {
 	ContextWindow    int    `json:"context_window"`
 	MaxContextWindow int    `json:"max_context_window"`
 	Priority         int    `json:"priority"`
+	PriorityKnown    bool   `json:"-"`
 	Visibility       string `json:"visibility"`
+}
+
+// UnmarshalJSON retains whether zero is an observed rank rather than unknown.
+func (m *codexModelInfo) UnmarshalJSON(data []byte) error {
+	type plain codexModelInfo
+	value := struct {
+		*plain
+		Priority *int `json:"priority"`
+	}{plain: (*plain)(m)}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Priority != nil {
+		m.Priority = *value.Priority
+		m.PriorityKnown = true
+	}
+	return nil
 }
 
 // CodexSource fetches the Codex model catalogue from the upstream API.
@@ -119,6 +137,7 @@ func (s *CodexSource) Fetch(ctx context.Context) (SourceResult, error) {
 			ContextWindow:    info.ContextWindow,
 			MaxContextWindow: info.MaxContextWindow,
 			Priority:         info.Priority,
+			PriorityKnown:    info.PriorityKnown,
 			Visibility:       info.Visibility,
 			Source:           SourceNative,
 		}

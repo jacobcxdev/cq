@@ -440,3 +440,25 @@ func codexRegistryExpiryClass(expiresAt, now time.Time) int {
 	}
 	return 2
 }
+
+// Canonical model commands use the non-recovering refresh facade. Supervised
+// proxy maintenance retains its existing adapter and recovery policy.
+type canonicalCodexRegistryControlAdapter struct{ control *codexprov.CredentialControl }
+
+func newCanonicalCodexRegistryControlAdapter(c *codexprov.CredentialControl) codexRegistryCredentialAuthority {
+	return canonicalCodexRegistryControlAdapter{control: c}
+}
+func (a canonicalCodexRegistryControlAdapter) List(ctx context.Context) (codexprov.Inventory, error) {
+	inventory, err := a.control.CanonicalAdmin().List(ctx)
+	if err == nil && codexRegistryInventoryDegraded(inventory) {
+		err = errCodexRegistryCredentialInventoryDegraded
+	}
+	return inventory, err
+}
+func (a canonicalCodexRegistryControlAdapter) ResolveExact(ctx context.Context, p codexprov.PlannedCandidate) (codexprov.CredentialMaterial, error) {
+	return a.control.ResolveExact(ctx, p)
+}
+func (a canonicalCodexRegistryControlAdapter) RefreshManagedReference(ctx context.Context, ref codexprov.CandidateRef, revision codexprov.Revision) (codexprov.CandidateRef, codexprov.Revision, error) {
+	result, err := a.control.CanonicalAdmin().Refresh(ctx, ref, revision)
+	return result.Ref, result.Revision, err
+}

@@ -521,12 +521,31 @@ func (s *Server) handleRegistryRefresh(w http.ResponseWriter, r *http.Request) {
 	diag, err := s.Refresher.Refresh(r.Context())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cq: registry refresh: %v\n", err)
-		writeError(w, http.StatusInternalServerError, "api_error", "registry refresh failed")
-		return
+		if diag.Publication == nil {
+			writeError(w, http.StatusInternalServerError, "api_error", "registry refresh failed")
+			return
+		}
 	}
 	resp := map[string]any{
-		"ok":     true,
+		"ok":     err == nil,
 		"counts": diag.Counts,
+	}
+	if diag.Publication != nil {
+		var conflict *modelregistry.ConflictError
+		var store *modelregistry.OverlayError
+		if errors.As(err, &conflict) {
+			resp["error_code"] = "models_conflict"
+			resp["conflict"] = conflict
+		}
+		if errors.As(err, &store) {
+			resp["error_code"] = "models_store_failed"
+		}
+		resp["publication"] = diag.Publication
+		prunable := []modelregistry.ModelIdentity{}
+		for _, entry := range diag.Prunable {
+			prunable = append(prunable, modelregistry.ModelIdentity{Provider: modelregistry.PublicProvider(entry.Provider), ID: entry.ID})
+		}
+		resp["prunable"] = prunable
 	}
 	if se := refreshSourceErrors(diag); se != nil {
 		resp["source_errors"] = se
@@ -535,6 +554,9 @@ func (s *Server) handleRegistryRefresh(w http.ResponseWriter, r *http.Request) {
 		resp["malformed"] = mc
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 

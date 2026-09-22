@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -21,6 +24,7 @@ type registryPipeline struct {
 	Catalog           *modelregistry.Catalog
 	Refresher         *modelregistry.Refresher
 	Publish           func()
+	PublishReport     func(modelregistry.Snapshot) []modelregistry.PublicationTarget
 	StartReconciler   func(context.Context)
 	claudeCodePath    string
 	publishMu         sync.Mutex
@@ -233,7 +237,12 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		return ""
 	}
 	seedEntries := cachedRegistryEntries(opts)
-	seedSnap := modelregistry.Snapshot{Entries: seedEntries}
+	seedSnap := modelregistry.Snapshot{Entries: seedEntries, CodexRawByID: map[string]json.RawMessage{}}
+	for _, entry := range seedEntries {
+		if entry.Provider == modelregistry.ProviderCodex && entry.Source == modelregistry.SourceNative && entry.Raw != nil {
+			seedSnap.CodexRawByID[entry.ID] = entry.Raw
+		}
+	}
 	catalog := modelregistry.NewCatalog(seedSnap)
 	refresher := &modelregistry.Refresher{
 		Catalog: catalog,
@@ -267,25 +276,51 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		Refresher:      refresher,
 		claudeCodePath: filepath.Join(opts.HomeDir, ".claude.json"),
 	}
-	p.Publish = func() {
+	publishSnapshot := func(snap modelregistry.Snapshot, optionalClients bool) []modelregistry.PublicationTarget {
 		p.publishMu.Lock()
 		defer p.publishMu.Unlock()
-
-		snap := catalog.Snapshot()
 		now := time.Now()
-		if err := modelregistry.PublishClaudeCodeOptions(opts.FS, p.claudeCodePath, snap); err != nil {
-			fmt.Fprintf(opts.Stderr, "cq: registry: publish Claude Code options: %v\n", err)
-		}
-		if snapshotHasProvider(snap, modelregistry.ProviderAnthropic) {
-			if err := modelregistry.PublishClaudeCapabilities(opts.FS, claudePaths.ClaudeCapabilities, snap, now); err != nil {
-				fmt.Fprintf(opts.Stderr, "cq: registry: publish Claude capabilities: %v\n", err)
+		targets := []modelregistry.PublicationTarget{}
+		publish := func(name, path string, optional bool, write func() error) {
+			result := modelregistry.PublicationTarget{Target: name, Path: path, Status: "written", Reason: "published"}
+			var err error
+			if optional && optionalClients {
+				_, err = opts.FS.Stat(path)
+				if errors.Is(err, os.ErrNotExist) {
+					result.Status = "skipped"
+					result.Reason = "optional_client_absent"
+					targets = append(targets, result)
+					return
+				}
 			}
+			if err == nil {
+				err = write()
+			}
+			if err != nil {
+				result.Status = "failed"
+				result.Reason = "write_failed"
+				code, message := "models_publication_failed", "Model cache publication failed."
+				result.ErrorCode = &code
+				result.Message = &message
+				fmt.Fprintf(opts.Stderr, "cq: registry: publish %s: %v\n", name, err)
+			}
+			targets = append(targets, result)
 		}
-
-		if err := modelregistry.PublishCodexCache(opts.FS, codexPaths.CodexModels, snap, now, opts.CodexClientVersion); err != nil {
-			fmt.Fprintf(opts.Stderr, "cq: registry: publish Codex cache: %v\n", err)
+		publish("codex_cache", codexPaths.CodexModels, false, func() error {
+			return modelregistry.PublishCodexCache(opts.FS, codexPaths.CodexModels, snap, now, opts.CodexClientVersion)
+		})
+		if optionalClients || snapshotHasProvider(snap, modelregistry.ProviderAnthropic) {
+			publish("claude_capabilities", claudePaths.ClaudeCapabilities, true, func() error {
+				return modelregistry.PublishClaudeCapabilities(opts.FS, claudePaths.ClaudeCapabilities, snap, now)
+			})
 		}
+		publish("claude_picker", p.claudeCodePath, true, func() error { return modelregistry.PublishClaudeCodeOptions(opts.FS, p.claudeCodePath, snap) })
+		return targets
 	}
+	p.PublishReport = func(snap modelregistry.Snapshot) []modelregistry.PublicationTarget {
+		return publishSnapshot(snap, true)
+	}
+	p.Publish = func() { publishSnapshot(catalog.Snapshot(), false) }
 	p.StartReconciler = func(ctx context.Context) {
 		p.reconcilerStartMu.Lock()
 		defer p.reconcilerStartMu.Unlock()

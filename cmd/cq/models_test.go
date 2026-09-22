@@ -196,7 +196,7 @@ func TestRunModels_OverlayPruneUsesInjectedNatives(t *testing.T) {
 	}
 }
 
-func TestRunModels_ListPreservesOverlaySourceWhenProjectedIntoCodexCache(t *testing.T) {
+func TestRunModels_ListNativeCacheWinsOverlayCollision(t *testing.T) {
 	fsys, stdout, _, deps := testModelsDeps()
 	_ = fsys.WriteFile("/home/test/.codex/models_cache.json", []byte(`{
 "client_version":"0.124.0",
@@ -216,10 +216,10 @@ func TestRunModels_ListPreservesOverlaySourceWhenProjectedIntoCodexCache(t *test
 		t.Fatalf("unmarshal list: %v", err)
 	}
 	if len(listed) != 1 {
-		t.Fatalf("listed = %+v, want one overlay entry", listed)
+		t.Fatalf("listed = %+v, want one native entry", listed)
 	}
-	if listed[0].Provider != modelregistry.ProviderCodex || listed[0].ID != "gpt-5.5" || listed[0].Source != modelregistry.SourceOverlay {
-		t.Fatalf("listed[0] = %+v, want codex gpt-5.5 overlay", listed[0])
+	if listed[0].Provider != modelregistry.ProviderCodex || listed[0].ID != "gpt-5.5" || listed[0].Source != modelregistry.SourceNative {
+		t.Fatalf("listed[0] = %+v, want codex gpt-5.5 native", listed[0])
 	}
 }
 

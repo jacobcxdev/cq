@@ -17,10 +17,11 @@ type codexModelsResponseOut struct {
 
 // codexCacheEnvelope is the on-disk format of models_cache.json.
 type codexCacheEnvelope struct {
-	FetchedAt     string            `json:"fetched_at"`
-	Etag          *string           `json:"etag,omitempty"`
-	ClientVersion string            `json:"client_version,omitempty"`
-	Models        []json.RawMessage `json:"models"`
+	CQNative      *cacheNativeProvenance `json:"cq_native,omitempty"`
+	FetchedAt     string                 `json:"fetched_at"`
+	Etag          *string                `json:"etag,omitempty"`
+	ClientVersion string                 `json:"client_version,omitempty"`
+	Models        []json.RawMessage      `json:"models"`
 }
 
 // codexFallbackContextWindow is used for overlay entries that declare no
@@ -135,33 +136,33 @@ func synthesiseCodexEntry(e Entry) json.RawMessage {
 	}
 
 	obj := map[string]any{
-		"slug":                          e.ID,
-		"display_name":                  label,
-		"description":                   e.Description,
-		"context_window":                cw,
-		"max_context_window":            cw,
+		"slug":                             e.ID,
+		"display_name":                     label,
+		"description":                      e.Description,
+		"context_window":                   cw,
+		"max_context_window":               cw,
 		"effective_context_window_percent": 100,
-		"shell_type":                    "default",
-		"visibility":                    visibility,
-		"supported_in_api":              true,
-		"priority":                      priority,
-		"base_instructions":             "",
-		"supported_reasoning_levels":    []string{},
-		"supports_reasoning_summaries":  false,
-		"default_reasoning_summary":     false,
-		"support_verbosity":             false,
-		"default_verbosity":             false,
-		"apply_patch_tool_type":         "default",
-		"web_search_tool_type":          "default",
-		"truncation_policy":             truncationPolicy,
-		"supports_parallel_tool_calls":  false,
-		"supports_image_detail_original": false,
-		"experimental_supported_tools":  []string{},
-		"input_modalities":              []string{"text"},
-		"supports_search_tool":          false,
-		"additional_speed_tiers":        []string{},
-		"availability_nux":              nil,
-		"upgrade":                       nil,
+		"shell_type":                       "default",
+		"visibility":                       visibility,
+		"supported_in_api":                 true,
+		"priority":                         priority,
+		"base_instructions":                "",
+		"supported_reasoning_levels":       []string{},
+		"supports_reasoning_summaries":     false,
+		"default_reasoning_summary":        false,
+		"support_verbosity":                false,
+		"default_verbosity":                false,
+		"apply_patch_tool_type":            "default",
+		"web_search_tool_type":             "default",
+		"truncation_policy":                truncationPolicy,
+		"supports_parallel_tool_calls":     false,
+		"supports_image_detail_original":   false,
+		"experimental_supported_tools":     []string{},
+		"input_modalities":                 []string{"text"},
+		"supports_search_tool":             false,
+		"additional_speed_tiers":           []string{},
+		"availability_nux":                 nil,
+		"upgrade":                          nil,
 	}
 
 	result, _ := json.Marshal(obj)
@@ -191,6 +192,7 @@ func PublishCodexCache(fsys fsutil.FileSystem, path string, snap Snapshot, now t
 	// Build the models list from the snapshot.
 	resp := CodexModelsResponse(snap)
 	existing.Models = resp.Models
+	existing.CQNative = nativeProvenance(snap, ProviderCodex, existing.Models)
 
 	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {

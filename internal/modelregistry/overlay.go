@@ -45,6 +45,9 @@ func LoadOverlays(fsys fsutil.FileSystem, path string) (OverlayFile, error) {
 		}
 	}
 
+	if err := validateOverlayFile(f); err != nil {
+		return OverlayFile{}, err
+	}
 	return f, nil
 }
 
@@ -52,6 +55,9 @@ func LoadOverlays(fsys fsutil.FileSystem, path string) (OverlayFile, error) {
 // Parent directories are created with 0o700; the file is written with 0o600.
 // The .tmp file is removed on rename failure so no partial file is left behind.
 func SaveOverlays(fsys fsutil.FileSystem, path string, overlays OverlayFile) error {
+	if err := validateOverlayFile(overlays); err != nil {
+		return err
+	}
 	overlays.Models = copyEntries(overlays.Models)
 	data, err := json.MarshalIndent(overlays, "", "  ")
 	if err != nil {
@@ -99,4 +105,24 @@ func PruneOverlays(overlays OverlayFile, natives []Entry) (OverlayFile, []Entry)
 	}
 
 	return OverlayFile{Version: overlays.Version, Models: kept}, pruned
+}
+
+func validateOverlayFile(f OverlayFile) error {
+	if f.Version != 0 && f.Version != 1 {
+		return fmt.Errorf("unsupported model overlay version")
+	}
+	for _, e := range f.Models {
+		if err := e.Validate(); err != nil {
+			return err
+		}
+		if err := ValidateModelID(e.ID); err != nil {
+			return err
+		}
+		if e.CloneFrom != "" {
+			if err := ValidateModelID(e.CloneFrom); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

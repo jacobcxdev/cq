@@ -310,7 +310,6 @@ func runModelsList(args []string, deps modelsDeps) error {
 	if err != nil {
 		return err
 	}
-	natives = removeNativesShadowedByOverlays(natives, overlays.Models)
 	merged := modelregistry.Merge(natives, overlays.Models)
 	entries := filterModelEntries(merged.Active, providerFilter)
 	if jsonOut {
@@ -550,26 +549,6 @@ func loadCachedNativeEntries(deps modelsDeps, providers ...modelregistry.Provide
 	}
 
 	return all, nil
-}
-
-func removeNativesShadowedByOverlays(natives, overlays []modelregistry.Entry) []modelregistry.Entry {
-	type key struct {
-		provider modelregistry.Provider
-		id       string
-	}
-	overlaySet := make(map[key]struct{}, len(overlays))
-	for _, overlay := range overlays {
-		overlaySet[key{overlay.Provider, overlay.ID}] = struct{}{}
-	}
-
-	out := make([]modelregistry.Entry, 0, len(natives))
-	for _, native := range natives {
-		if _, ok := overlaySet[key{native.Provider, native.ID}]; ok {
-			continue
-		}
-		out = append(out, native)
-	}
-	return out
 }
 
 func filterModelEntries(entries []modelregistry.Entry, provider modelregistry.Provider) []modelregistry.Entry {

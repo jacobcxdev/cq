@@ -43,7 +43,7 @@ func Merge(natives, overlays []Entry) MergeResult {
 			continue
 		}
 		// Overlay has no native counterpart — try to infer missing metadata.
-		ov = inferOverlayMetadata(ov, natives)
+		ov = InferOverlayMetadata(ov, natives)
 		active = append(active, ov)
 	}
 
@@ -53,15 +53,10 @@ func Merge(natives, overlays []Entry) MergeResult {
 	}
 }
 
-// inferOverlayMetadata fills in missing metadata on an overlay entry using
+// InferOverlayMetadata fills in missing metadata on an overlay entry using
 // InferClone. Only fields that are zero-valued in the overlay are filled;
 // the overlay's ID, Provider, Source, and CloneFrom are never changed.
-func inferOverlayMetadata(ov Entry, natives []Entry) Entry {
-	// Only attempt inference when at least one metadata field is missing.
-	if ov.DisplayName != "" && ov.Description != "" &&
-		ov.ContextWindow != 0 && ov.Visibility != "" {
-		return ov
-	}
+func InferOverlayMetadata(ov Entry, natives []Entry) Entry {
 
 	clone, ok := InferClone(ov, natives)
 	if !ok {
@@ -86,8 +81,9 @@ func inferOverlayMetadata(ov Entry, natives []Entry) Entry {
 	if ov.Visibility == "" {
 		ov.Visibility = clone.Visibility
 	}
-	if ov.Priority == 0 {
+	if ov.Priority == 0 && !ov.PriorityKnown {
 		ov.Priority = clone.Priority
+		ov.PriorityKnown = clone.PriorityKnown || clone.Priority != 0
 	}
 	// Record where the metadata was inferred from.
 	ov.InferredFrom = clone.ID

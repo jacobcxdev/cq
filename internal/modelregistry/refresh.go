@@ -12,6 +12,9 @@ import (
 
 // RefreshDiagnostics summarises what happened during a Refresh call.
 type RefreshDiagnostics struct {
+	Publication *Publication
+	Snapshot    Snapshot
+
 	// Counts is the number of native entries fetched per provider.
 	Counts map[string]int
 	// Prunable contains overlay entries that conflicted with native entries.
@@ -68,6 +71,7 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	}
 
 	diag := RefreshDiagnostics{
+		Snapshot:        r.Catalog.Snapshot(),
 		Counts:          make(map[string]int),
 		SourceErrors:    make(map[Provider]error),
 		MalformedCounts: make(map[Provider]int),
@@ -168,7 +172,9 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	prev := r.Catalog.Snapshot()
 	prevByProvider := make(map[Provider][]Entry)
 	for _, e := range prev.Entries {
-		prevByProvider[e.Provider] = append(prevByProvider[e.Provider], e)
+		if e.Source == SourceNative {
+			prevByProvider[e.Provider] = append(prevByProvider[e.Provider], e)
+		}
 	}
 
 	// Build a case-insensitive set of IDs that are present in fresh data from
@@ -205,13 +211,17 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	if r.Overlays != nil {
 		loaded, err := r.Overlays.Load()
 		if err != nil {
-			return diag, fmt.Errorf("load model overlays: %w", err)
+			return diag, &OverlayError{Err: err}
 		}
 		overlays = loaded
 	}
 
 	merged := Merge(natives, overlays)
-	diag.Prunable = merged.Prunable
+	for _, entry := range merged.Prunable {
+		if _, fresh := freshByProvider[entry.Provider]; fresh {
+			diag.Prunable = append(diag.Prunable, entry)
+		}
+	}
 
 	// Merge raw maps: start from previous snapshot, overwrite with fresh data.
 	codexRaw := make(map[string]json.RawMessage)
@@ -241,7 +251,13 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		return diag, err
 	}
 
+	diag.Snapshot = snap
 	r.Catalog.Replace(snap)
 
 	return diag, nil
 }
+
+type OverlayError struct{ Err error }
+
+func (e *OverlayError) Error() string { return "model overlay state unavailable" }
+func (e *OverlayError) Unwrap() error { return e.Err }

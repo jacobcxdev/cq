@@ -33,6 +33,7 @@ type Entry struct {
 	MaxOutputTokens  int      `json:"max_output_tokens,omitempty"`
 	Visibility       string   `json:"visibility,omitempty"`
 	Priority         int      `json:"priority,omitempty"`
+	PriorityKnown    bool     `json:"priority_known,omitempty"`
 	Source           Source   `json:"source"`
 	CloneFrom        string   `json:"clone_from,omitempty"`
 	InferredFrom     string   `json:"inferred_from,omitempty"`

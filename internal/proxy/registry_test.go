@@ -595,3 +595,53 @@ func TestServer_RegistryRefreshEndpoint_OmitsMalformedWhenNone(t *testing.T) {
 type testRefreshError struct{ msg string }
 
 func (e *testRefreshError) Error() string { return e.msg }
+
+func TestServer_RegistryRefreshEndpointPublicationReceipt(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "failed"}[failed], func(t *testing.T) {
+			diag := modelregistry.RefreshDiagnostics{Counts: map[string]int{"anthropic": 1, "codex": 1}, Prunable: []modelregistry.Entry{{Provider: modelregistry.ProviderCodex, ID: "redundant"}}}
+			var refreshErr error
+			targets := []modelregistry.PublicationTarget{{Target: "codex_cache", Path: "/synthetic/models_cache.json", Status: "written", Reason: "published"}, {Target: "claude_capabilities", Path: "/synthetic/model-capabilities.json", Status: "skipped", Reason: "optional_client_absent"}, {Target: "claude_picker", Path: "/synthetic/.claude.json", Status: "skipped", Reason: "optional_client_absent"}}
+			if failed {
+				refreshErr = &testRefreshError{"synthetic"}
+				diag.SourceErrors = map[modelregistry.Provider]error{modelregistry.ProviderAnthropic: refreshErr, modelregistry.ProviderCodex: refreshErr}
+				diag.Counts = map[string]int{}
+				diag.Prunable = nil
+				targets = nil
+			}
+			p := modelregistry.NewPublication(diag, 2, targets, "proxy")
+			diag.Publication = &p
+			srv := &Server{Config: &Config{ClaudeUpstream: "https://claude.invalid", LocalToken: "fixture"}, Refresher: RegistryRefresherFunc(func(context.Context) (modelregistry.RefreshDiagnostics, error) { return diag, refreshErr })}
+			handler, err := srv.handler()
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/registry/refresh", nil)
+			req.Header.Set("Authorization", "Bearer fixture")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			want := 200
+			if failed {
+				want = 500
+			}
+			if w.Code != want {
+				t.Fatalf("status=%d", w.Code)
+			}
+			var response struct {
+				OK          bool                          `json:"ok"`
+				Counts      map[string]int                `json:"counts"`
+				Publication modelregistry.Publication     `json:"publication"`
+				Prunable    []modelregistry.ModelIdentity `json:"prunable"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.OK == failed || response.Counts == nil || response.Publication.Status != p.Status || response.Prunable == nil {
+				t.Fatalf("legacy fields or receipt lost: %s", w.Body)
+			}
+			if !failed && (len(response.Publication.Targets) != 3 || len(response.Prunable) != 1 || response.Prunable[0].Provider != "codex") {
+				t.Fatalf("actual receipt lost: %s", w.Body)
+			}
+		})
+	}
+}

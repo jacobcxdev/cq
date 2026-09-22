@@ -1048,11 +1048,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	var proxyRefresher proxy.RegistryRefresher
 	if registryRefresher != nil {
 		proxyRefresher = proxy.RegistryRefresherFunc(func(ctx context.Context) (modelregistry.RefreshDiagnostics, error) {
-			diag, err := registryRefresher.Refresh(ctx)
+			phase, cancel := context.WithTimeout(ctx, 30*time.Second)
+			diag, err := registryRefresher.Refresh(phase)
+			cancel()
 			writeRegistrySourceDiagnostics(os.Stderr, diag)
-			if err == nil {
-				publishRegistry()
+			var targets []modelregistry.PublicationTarget
+			if err == nil && ctx.Err() == nil {
+				targets = pipeline.PublishReport(diag.Snapshot)
 			}
+			publication := modelregistry.NewPublication(diag, len(diag.Snapshot.Entries), targets, "proxy")
+			diag.Publication = &publication
 			return diag, err
 		})
 		initialRefreshCtx, initialRefreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
