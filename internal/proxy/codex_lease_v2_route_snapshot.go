@@ -19,6 +19,7 @@ type CodexLeaseRouteSnapshot struct {
 	BoundRecordGeneration     uint64
 	BoundChoice               RouteChoice
 	BoundRequiresAccount      bool
+	BoundRequestCompleted     bool
 	HistoricalAuthoritative   bool
 	RestartableFailedHead     bool
 	AffinityPresent           bool
@@ -150,6 +151,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 				snapshot.BoundRecordGeneration = record.Record.RecordGeneration
 				snapshot.BoundChoice = cloneRouteChoice(record.Choice)
 				snapshot.BoundRequiresAccount = codexLeaseRecordRequiresAccount(record.Record)
+				snapshot.BoundRequestCompleted = codexLeaseCurrentAttemptState(record.Record) == CodexAttemptProviderCompleted
 				break
 			}
 		}

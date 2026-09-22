@@ -97,10 +97,9 @@ type CodexCapacityObservationStream struct {
 // CodexCapacityLedger holds bounded capacity facts and active lease counts.
 type CodexCapacityLedger struct {
 	// Reserve is bound before serving requests.
-	Reserve          *CodexReserve
-	windows          map[codex.AccountKey]map[quota.WindowName]codexWindowFact
-	unsettledWindows map[codex.AccountKey]map[quota.WindowName]bool
-	mu               sync.RWMutex
+	Reserve *CodexReserve
+	windows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	mu      sync.RWMutex
 
 	now    func() time.Time
 	maxAge time.Duration
@@ -123,11 +122,10 @@ func NewCodexCapacityLedger(now func() time.Time, maxAge time.Duration) *CodexCa
 		maxAge = quotaSnapshotMaxAge
 	}
 	return &CodexCapacityLedger{
-		now:              now,
-		maxAge:           maxAge,
-		facts:            make(map[capacityFactKey]CapacityFact),
-		leases:           make(map[codex.AccountKey]int),
-		unsettledWindows: make(map[codex.AccountKey]map[quota.WindowName]bool),
+		now:    now,
+		maxAge: maxAge,
+		facts:  make(map[capacityFactKey]CapacityFact),
+		leases: make(map[codex.AccountKey]int),
 
 		livePositiveHighWater: make(map[capacityBucketKey]CapacityFact),
 		suppressedHardFences:  make(map[capacityFactKey]bool),
