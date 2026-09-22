@@ -82,7 +82,7 @@ To release a new version:
 
 ## Homebrew Cask Service Lifecycle
 
-The Homebrew Cask owns CQ as one complete installation. Its hooks call
+The Homebrew Cask owns CQ as one complete installation. Its installer artifacts call
 `cq service install --owner=homebrew` after installation and
 `cq service uninstall --owner=homebrew` before removal. Users should not run a
 manual post-install service command.
@@ -96,6 +96,10 @@ manual post-install service command.
 Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain
 available for focused development and repair work, but they are not a complete
 Homebrew installation path.
+
+The release lifecycle gate uses the unchanged previous release executable with
+the corrected installer artifacts. It verifies install, upgrade, transport and
+uninstall, but does not claim to reproduce every legacy stored-hook migration.
 
 For local development rollouts, never overwrite the running executable in place
 with `cp`, `install`, or shell redirection. macOS can kill the mapped process with

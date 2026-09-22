@@ -137,7 +137,7 @@ preflight = <<~'BLOCK'
   end
 
 BLOCK
-text.sub!(/^  postflight(?:_steps)? do$/) { |hook| preflight + hook } or abort "missing postflight hook"
+text.sub!(/^  installer script:/) { preflight + "  installer script:" } or abort "missing installer artifact"
 File.write(destination, text)
 RUBY
 }
@@ -146,7 +146,24 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew tap-new --no-git "$validation_tap" >/dev/null
 tap_root=$(brew --repository "$validation_tap")
 mkdir -p "$tap_root/Casks"
 validation_cask="$tap_root/Casks/cq.rb"
-rewrite_cask "$previous_cask" "$previous_archive" "$validation_cask"
+# Legacy flight hooks cannot bootstrap launchd under current Homebrew. Test the
+# unchanged previous executable with the same supported packaging as the candidate.
+previous_template="$temporary_root/previous-cq.rb"
+ruby - "$current_cask" "$previous_cask" "$previous_version" "$previous_template" <<'RUBY'
+current, previous, version, destination = ARGV
+text = File.read(current)
+old = File.read(previous)
+current_version = text.match(/^  version "([^"]+)"$/)&.captures&.first or abort "missing version stanza"
+text.gsub!(current_version, version)
+# Preserve the published previous archive checksums for both architectures.
+checksums = old.lines.grep(/^\s*sha256 /)
+abort "missing previous checksums" if checksums.empty?
+index = 0
+text.gsub!(/^\s*sha256 .*$/) { checksums.fetch(index).tap { index += 1 }.chomp }
+abort "checksum architecture count differs" unless index == checksums.length
+File.write(destination, text)
+RUBY
+rewrite_cask "$previous_template" "$previous_archive" "$validation_cask"
 
 assert_installed() {
   local expected_version=$1

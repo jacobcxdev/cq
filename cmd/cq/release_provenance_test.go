@@ -217,20 +217,25 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	for _, required := range []string{
 		"binaries:",
 		"- cq",
-		"hooks:",
-		"install: |",
-		"uninstall: |",
-		`attributes = system_command "/usr/bin/xattr",`,
-		`args: ["-d", "com.apple.quarantine", "#{HOMEBREW_PREFIX}/bin/cq"]`,
-		`raise "cq remains quarantined after installation"`,
-		`"service", "install", "--owner=homebrew",`,
-		`if File.executable?("#{HOMEBREW_PREFIX}/bin/cq")`,
-		`"service", "uninstall", "--owner=homebrew",`,
-		`"--service-executable=#{HOMEBREW_PREFIX}/bin/cq",`,
-		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.proxy"]`,
-		`args: ["bootout", "gui/#{Process.uid}/dev.jacobcx.cq.refresh"]`,
-		`args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"]`,
-		`args: ["-f", "#{Dir.home}/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"]`,
+		"custom_block: |",
+		"installer script:",
+		"uninstall script:",
+		`executable: "/bin/bash"`,
+		`set -euo pipefail`,
+		`attributes=$(/usr/bin/xattr "$source")`,
+		`/usr/bin/xattr -d com.apple.quarantine "$source"`,
+		`echo "cq remains quarantined after installation"`,
+		`if [[ ! -L "$target" || ! "$target" -ef "$source" ]]; then`,
+		`"$source" service install --owner=homebrew "--service-executable=$target"`,
+		`if [[ "$linked" == 1 && -L "$target" && "$target" -ef "$source" ]]; then`,
+		`if [[ -x "$source" && "$target" -ef "$source" ]]; then`,
+		`"$source" service uninstall --owner=homebrew "--service-executable=$target"`,
+		`if [[ ! -L "$target" || "$(readlink "$target")" != "$source" ]]; then`,
+		`"#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq"`,
+		`/bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.proxy"`,
+		`/bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.refresh"`,
+		`"$HOME/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"`,
+		`"$HOME/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask missing %q", required)
@@ -239,13 +244,13 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	if !strings.Contains(text, "skip_upload: true") {
 		t.Fatal("GoReleaser publishes the unformatted generated Homebrew Cask")
 	}
-	if strings.Contains(text, "\n    uninstall:\n") {
-		t.Fatal("Homebrew Cask duplicates transactional uninstall with privileged fallback")
+	if strings.Contains(text, "hooks:") || strings.Contains(text, "generated_script") {
+		t.Fatal("Homebrew Cask uses sandboxed hooks or prematurely evaluates staged paths")
 	}
-	if count := strings.Count(text, "must_succeed: false"); count != 2 {
+	if count := strings.Count(text, "|| true"); count != 2 {
 		t.Fatalf("Homebrew Cask has %d fail-open commands, want two launchd backstops", count)
 	}
-	if strings.Contains(text, `system_command "/usr/bin/sudo"`) {
+	if strings.Contains(text, "/usr/bin/sudo") {
 		t.Fatal("Homebrew Cask uninstall backstop requires privilege escalation")
 	}
 
@@ -255,8 +260,8 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	}
 	workflowText := string(workflow)
 	for _, required := range []string{
-		"brew style --fix",
-		"brew style \"$cask\"",
+		`.github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb`,
+		`.github/scripts/format-homebrew-cask.sh "$cask"`,
 		"repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb",
 		"secrets.HOMEBREW_TAP_TOKEN",
 		"brew audit --cask --strict jacobcxdev/tap/cq",
@@ -265,6 +270,34 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("Homebrew Cask publish workflow missing %q", required)
 		}
+	}
+}
+
+func TestHomebrewCaskFormatterChecksTappedBytes(t *testing.T) {
+	script, err := os.ReadFile("../../.github/scripts/format-homebrew-cask.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	for _, required := range []string{
+		`set -euo pipefail`,
+		`refusing to replace existing $formatting_tap tap`,
+		`brew tap-new --no-git "$formatting_tap"`,
+		`brew untap "$formatting_tap"`,
+		`cp "$1" "$formatting_root/Casks/cq.rb"`,
+		`brew style --fix "$formatting_tap/cq"`,
+		`brew style "$formatting_tap/cq"`,
+		`cp "$formatting_root/Casks/cq.rb" "$1"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Homebrew Cask formatter missing %q", required)
+		}
+	}
+	formatIndex := strings.Index(text, `brew style --fix "$formatting_tap/cq"`)
+	checkIndex := strings.Index(text, `brew style "$formatting_tap/cq"`)
+	copyIndex := strings.Index(text, `cp "$formatting_root/Casks/cq.rb" "$1"`)
+	if formatIndex >= checkIndex || checkIndex >= copyIndex {
+		t.Fatal("Homebrew Cask formatter does not check formatted bytes before returning them")
 	}
 }
 
@@ -283,10 +316,12 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 		`validation binary cleanup failed`,
 		`validation tap cleanup failed`,
 		`validation temporary directory cleanup failed`,
-		`lifecycle_commands == %w[install uninstall]`,
+		`%w[install uninstall].each do |action|`,
+		`unless text.scan(command).length == 1`,
+		`abort "missing supported installer artifact"`,
+		`abort "missing supported uninstall artifact"`,
 		`abort "CQ lifecycle command survived validation isolation"`,
 		`abort "production CQ binary path survived validation isolation"`,
-		`abort "missing Homebrew uninstall backstop for #{backstop}"`,
 		`abort "production CQ launchd label survived validation isolation"`,
 		`find "$validation_binary" -depth -delete`,
 	} {
@@ -325,7 +360,7 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		`gh release view "$RELEASE_TAG" --json tagName,isDraft,assets`,
 		`gh release edit "$RELEASE_TAG" --draft=false`,
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
-		`brew style --fix "$cask"`,
+		`.github/scripts/format-homebrew-cask.sh "$cask"`,
 		`for arch in amd64 arm64; do`,
 		`needs: [release, windows-packages, windows-acceptance]`,
 		`needs: [windows-deployed, linux-install]`,
@@ -372,7 +407,7 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	if releaseStart < 0 || publishStart <= releaseStart || !strings.Contains(text[releaseStart:publishStart], "fetch-depth: 0") {
 		t.Error("release job does not fetch prior tags for upgrade validation")
 	}
-	styleIndex := strings.Index(text, "brew style --fix dist/homebrew/Casks/cq.rb")
+	styleIndex := strings.Index(text, ".github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb")
 	lifecycleIndex := strings.Index(text, ".github/scripts/validate-homebrew-install.sh")
 	if styleIndex < 0 || lifecycleIndex < 0 || styleIndex > lifecycleIndex {
 		t.Error("release workflow does not validate formatted Homebrew Cask bytes")

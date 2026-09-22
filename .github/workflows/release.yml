@@ -22,6 +22,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Verify Homebrew lifecycle ownership and rollback
+        run: .github/scripts/test-homebrew-lifecycle.sh
+
       - name: Install current Codex client
         run: |
           brew update
@@ -135,8 +138,7 @@ jobs:
 
       - name: Format draft Homebrew Cask
         run: |
-          brew style --fix dist/homebrew/Casks/cq.rb
-          brew style dist/homebrew/Casks/cq.rb
+          .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb
 
       - name: Validate Homebrew Cask quarantine handling
         run: |
@@ -434,8 +436,7 @@ jobs:
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
-          brew style --fix "$cask"
-          brew style "$cask"
+          .github/scripts/format-homebrew-cask.sh "$cask"
           endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb"
           encoded="$(base64 <"$cask" | tr -d '\n')"
           current="$RUNNER_TEMP/cq-cask-current.json"
