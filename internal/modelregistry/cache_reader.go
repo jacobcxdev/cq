@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -85,7 +86,7 @@ func LoadClaudeEntriesFromCapabilities(fsys fsutil.FileSystem, path string) ([]E
 		return nil, fmt.Errorf("read claude capabilities %s: %w", path, err)
 	}
 	var cache struct {
-		Models   []claudeCapability     `json:"models"`
+		Models   []json.RawMessage      `json:"models"`
 		CQNative *cacheNativeProvenance `json:"cq_native"`
 	}
 	if err := json.Unmarshal(data, &cache); err != nil {
@@ -98,8 +99,9 @@ func LoadClaudeEntriesFromCapabilities(fsys fsutil.FileSystem, path string) ([]E
 		return nil, fmt.Errorf("invalid Claude model cache envelope")
 	}
 	entries := make([]Entry, 0, len(cache.Models))
-	for _, m := range cache.Models {
-		if ValidateModelID(m.ID) != nil {
+	for _, raw := range cache.Models {
+		var m claudeCapability
+		if json.Unmarshal(raw, &m) != nil || ValidateModelID(m.ID) != nil {
 			return nil, fmt.Errorf("invalid Claude model cache entry")
 		}
 		entries = append(entries, Entry{
@@ -121,7 +123,19 @@ type cacheNativeProvenance struct {
 }
 
 func cachePayloadDigest(models any) string {
-	data, _ := json.Marshal(models)
+	data, err := json.Marshal(models)
+	if err != nil {
+		return ""
+	}
+	// Hash every field, including unknown vendor metadata, independently of
+	// object key order and whitespace. Preserve numbers without float rounding.
+	var payload any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return ""
+	}
+	data, _ = json.Marshal(payload)
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 func nativeProvenance(snap Snapshot, provider Provider, models any) *cacheNativeProvenance {
@@ -134,7 +148,7 @@ func nativeProvenance(snap Snapshot, provider Provider, models any) *cacheNative
 	}
 	return p
 }
-func cachedNatives(p *cacheNativeProvenance, provider Provider, models any) ([]Entry, bool, error) {
+func cachedNatives(p *cacheNativeProvenance, provider Provider, models []json.RawMessage) ([]Entry, bool, error) {
 	if p == nil {
 		return nil, false, nil
 	}
@@ -147,8 +161,9 @@ func cachedNatives(p *cacheNativeProvenance, provider Provider, models any) ([]E
 	}
 	claudeIDs := map[string]bool{}
 	if provider == ProviderAnthropic {
-		for _, m := range models.([]claudeCapability) {
-			if ValidateModelID(m.ID) != nil {
+		for _, raw := range models {
+			var m claudeCapability
+			if json.Unmarshal(raw, &m) != nil || ValidateModelID(m.ID) != nil {
 				return nil, true, fmt.Errorf("invalid Claude model cache entry")
 			}
 			claudeIDs[m.ID] = true

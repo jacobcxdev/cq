@@ -116,7 +116,7 @@ func synthesiseCodexEntry(e Entry) json.RawMessage {
 	}
 
 	priority := e.Priority
-	if priority == 0 {
+	if priority == 0 && !e.PriorityKnown {
 		priority = 99
 	}
 
