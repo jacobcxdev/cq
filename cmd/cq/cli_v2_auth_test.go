@@ -542,3 +542,85 @@ func TestCLIV2AuthPromptInterruption(t *testing.T) {
 type authPromptWriter struct{ entered chan struct{} }
 
 func (w authPromptWriter) Write(p []byte) (int, error) { close(w.entered); return len(p), nil }
+
+func TestCLIV2AuthReauthenticationRetainsMergedStoreFailure(t *testing.T) {
+	for _, returnedFirst := range []bool{false, true} {
+		for _, laterSuccess := range []bool{false, true} {
+			t.Run(fmt.Sprintf("returned_first=%t/later_success=%t", returnedFirst, laterSuccess), func(t *testing.T) {
+				deps := authTestDependencies(t)
+				requested := keyring.ClaudeOAuth{AccountUUID: "a", Email: "a@test.invalid", ExpiresAt: 1}
+				returned := keyring.ClaudeOAuth{AccountUUID: "b", Email: "b@test.invalid", ExpiresAt: deps.Now().Add(time.Hour).UnixMilli()}
+				accounts := []keyring.ClaudeOAuth{requested, returned}
+				if returnedFirst {
+					accounts = []keyring.ClaudeOAuth{returned, requested}
+				}
+				if laterSuccess {
+					accounts = append(accounts, keyring.ClaudeOAuth{AccountUUID: "c", Email: "c@test.invalid", ExpiresAt: 1})
+				}
+				deps.DiscoverClaude = func(context.Context) []keyring.ClaudeOAuth { return accounts }
+				calls := 0
+				deps.Login = func(context.Context) (authReauthResult, error) {
+					calls++
+					result := authReauthResult{AccountUUID: "b", Email: "b@test.invalid", CredentialsChanged: true}
+					if calls == 1 {
+						return result, errAuthCredentialStore
+					}
+					return result, nil
+				}
+				out := handleV2AuthWithDependencies(context.Background(), cli.Invocation{Path: "auth refresh", Arguments: map[string][]string{"providers": {"claude"}}}, &cli.Session{In: strings.NewReader("\n\n"), Err: io.Discard, Interactive: true}, deps)
+				var data struct {
+					Providers    []AuthRefreshProviderResult `json:"providers"`
+					ChangedCount int                         `json:"changed_count"`
+				}
+				if err := json.Unmarshal(out.Data, &data); err != nil {
+					t.Fatal(err)
+				}
+				wantCalls := 1
+				if laterSuccess {
+					wantCalls++
+				}
+				if calls != wantCalls || out.ExitCode != 1 || data.ChangedCount != 1 || data.Providers[0].ChangedCount != 1 || data.Providers[0].Failed != 1 {
+					t.Fatalf("calls=%d exit=%d data=%s", calls, out.ExitCode, out.Data)
+				}
+				row := data.Providers[0].Accounts[1]
+				if row.AccountLabel != "b@test.invalid" || !row.CredentialsChanged || row.Status != "failed" || row.ErrorCode == nil || *row.ErrorCode != "auth_store_failed" {
+					t.Fatalf("lost store failure: %+v", row)
+				}
+				found := false
+				for _, diagnostic := range out.Errors {
+					found = found || diagnostic.Code == "auth_store_failed"
+				}
+				if !found {
+					t.Fatal("store diagnostic disappeared")
+				}
+			})
+		}
+	}
+}
+
+func TestCLIV2AuthReauthenticationResolvesMergedAuthenticationFailure(t *testing.T) {
+	deps := authTestDependencies(t)
+	deps.DiscoverClaude = func(context.Context) []keyring.ClaudeOAuth {
+		return []keyring.ClaudeOAuth{{AccountUUID: "b", Email: "b@test.invalid", ExpiresAt: 1}, {AccountUUID: "a", Email: "a@test.invalid", ExpiresAt: 1}}
+	}
+	calls := 0
+	deps.Login = func(context.Context) (authReauthResult, error) {
+		calls++
+		if calls == 1 {
+			return authReauthResult{}, app.ErrAccountAuthentication
+		}
+		return authReauthResult{AccountUUID: "b", Email: "b@test.invalid", CredentialsChanged: true}, nil
+	}
+	out := handleV2AuthWithDependencies(context.Background(), cli.Invocation{Path: "auth refresh", Arguments: map[string][]string{"providers": {"claude"}}}, &cli.Session{In: strings.NewReader("\n\n"), Err: io.Discard, Interactive: true}, deps)
+	var data struct {
+		Providers    []AuthRefreshProviderResult `json:"providers"`
+		ChangedCount int                         `json:"changed_count"`
+	}
+	if err := json.Unmarshal(out.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	row := data.Providers[0].Accounts[1]
+	if calls != 2 || out.ExitCode != 8 || data.ChangedCount != 1 || data.Providers[0].Failed != 0 || row.Status != "refreshed" || row.ErrorCode != nil || len(out.Errors) != 2 {
+		t.Fatalf("authentication error not resolved: exit=%d data=%s errors=%v", out.ExitCode, out.Data, out.Errors)
+	}
+}

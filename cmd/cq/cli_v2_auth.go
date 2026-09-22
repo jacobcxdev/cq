@@ -400,7 +400,14 @@ func refreshClaudeOutcomes(ctx context.Context, deps v2AuthDependencies, now tim
 	authenticated := map[string]bool{}
 	put := func(id string, row AuthRefreshAccountResult) {
 		if i, ok := indices[id]; ok {
-			row.CredentialsChanged = row.CredentialsChanged || w.result.Accounts[i].CredentialsChanged
+			previous := w.result.Accounts[i]
+			row.CredentialsChanged = row.CredentialsChanged || previous.CredentialsChanged
+			// A later successful login can resolve authentication, but cannot erase
+			// a failed persistence operation from this invocation.
+			if previous.ErrorCode != nil && *previous.ErrorCode == "auth_store_failed" {
+				row.Status, row.Reason = previous.Status, previous.Reason
+				row.ErrorCode, row.Message = previous.ErrorCode, previous.Message
+			}
 			w.result.Accounts[i] = row
 		} else {
 			indices[id] = len(w.result.Accounts)

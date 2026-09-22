@@ -69,7 +69,11 @@ func TestRefreshWriteResultRetainsKeyringCommit(t *testing.T) {
 				}
 			}
 			sets, deleted := 0, false
-			result := storeCQAccountResultContext(context.Background(), &ClaudeOAuth{AccountUUID: "id"}, func(string, string, string) error {
+			var diagnostics []string
+			ctx := WithDiagnostics(context.Background(), func(code, message string) {
+				diagnostics = append(diagnostics, code+": "+message)
+			})
+			result := storeCQAccountResultContext(ctx, &ClaudeOAuth{AccountUUID: "id"}, func(string, string, string) error {
 				sets++
 				if deleting {
 					return errors.New("set failed")
@@ -78,6 +82,12 @@ func TestRefreshWriteResultRetainsKeyringCommit(t *testing.T) {
 			}, func(string, string) error { deleted = true; return nil })
 			if !result.Changed || result.Err == nil {
 				t.Fatal("lost committed keyring mutation or failure")
+			}
+			if !deleting && (len(diagnostics) != 1 || diagnostics[0] != "manifest_directory_failed: Claude credential manifest directory could not be created.") {
+				t.Fatalf("unexpected manifest diagnostics: %v", diagnostics)
+			}
+			if deleting && len(diagnostics) != 0 {
+				t.Fatalf("unexpected retry diagnostics: %v", diagnostics)
 			}
 			if !deleting && (deleted || sets != 1) {
 				t.Fatal("manifest failure did not follow a successful initial Set")
