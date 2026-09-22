@@ -83,56 +83,45 @@ func TestCodexReserveAccountThresholdAndReset(t *testing.T) {
 	}
 }
 
-func TestCodexReserveBlocksUnsettledProtectedUsage(t *testing.T) {
-	now := time.Unix(1800000000, 0)
-	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
-	reserve, err := OpenCodexReserve(fsutil.NewMemFS(), "/state/reserve.json", ledger, &reserveInventory{active: "system"}, func() time.Time { return now })
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledger.Reserve = reserve
-	reset := now.Add(7 * 24 * time.Hour).Unix()
-	remaining := 100.0
-	ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 100, RemainingPctExact: &remaining, ResetAtUnix: reset}}}})
-	if _, err = reserve.Control("set", "7d", 5); err != nil {
-		t.Fatal(err)
-	}
+func TestCodexReserveUnchangedUsageRemainsAvailable(t *testing.T) {
+	for name, source := range map[string]CapacitySource{"websocket": CapacitySourceLiveRateLimits, "http": CapacitySourceHTTPHeaders} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Unix(1800000000, 0)
+			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			reserve, err := OpenCodexReserve(fsutil.NewMemFS(), "/state/reserve.json", ledger, &reserveInventory{active: "system"}, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger.Reserve = reserve
+			reset := now.Add(7 * 24 * time.Hour).Unix()
+			remaining := 91.0
+			windows := map[quota.WindowName]quota.Window{"7d": {RemainingPct: 91, RemainingPctExact: &remaining, ResetAtUnix: reset}}
+			ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: windows}})
+			if _, err := reserve.Control("set", "7d", 5); err != nil {
+				t.Fatal(err)
+			}
+			for sequence := uint64(1); sequence <= 2; sequence++ {
+				now = now.Add(time.Second)
+				ledger.Observe(CapacityFact{AccountKey: "system", Bucket: CapacityBucketBase, RemainingPct: 91, Source: source, Sequence: sequence, ConnectionGeneration: 1, ObservedAt: now, ResetAt: time.Unix(reset, 0), Confidence: CapacityConfidenceAuthoritative, Windows: windows})
+				if status := reserve.Status(); status.Blocked {
+					t.Fatalf("unchanged healthy usage blocked: %+v", status)
+				}
+				if err := reserveDispatchError(reserve, "system"); err != nil {
+					t.Fatalf("healthy continuation rejected: %v", err)
+				}
+				if got := ledger.Capacity("system", CapacityBucketBase); got.State != CapacityPositive {
+					t.Fatalf("capacity = %+v", got)
+				}
+			}
+			now = now.Add(time.Second)
+			remaining = 5
+			windows["7d"] = quota.Window{RemainingPct: 5, RemainingPctExact: &remaining, ResetAtUnix: reset}
+			ledger.Observe(CapacityFact{AccountKey: "system", Bucket: CapacityBucketBase, RemainingPct: 5, Source: source, Sequence: 3, ConnectionGeneration: 1, ObservedAt: now, ResetAt: time.Unix(reset, 0), Confidence: CapacityConfidenceAuthoritative, Windows: windows})
+			if status := reserve.Status(); !status.Blocked || status.Reason != "reserve_reached" {
+				t.Fatalf("actual reserve threshold not enforced: %+v", status)
+			}
 
-	now = now.Add(time.Second)
-	ledger.Observe(CapacityFact{
-		AccountKey: "system", Bucket: CapacityBucketBase, RemainingPct: 100,
-		Source: CapacitySourceLiveRateLimits, Sequence: 1, ConnectionGeneration: 1,
-		ObservedAt: now, ResetAt: time.Unix(reset, 0), Confidence: CapacityConfidenceAuthoritative,
-		Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 100, RemainingPctExact: &remaining, ResetAtUnix: reset}},
-	})
-	status := reserve.Status()
-	if !status.Blocked || status.Reason != "usage_unsettled" {
-		t.Fatalf("unchanged post-dispatch usage status = %+v", status)
-	}
-	if ledger.Capacity("other", CapacityBucketBase).State == CapacityZero {
-		t.Fatal("unsettled system usage blocked other account")
-	}
-	otherRemaining := 50.0
-	ledger.ObserveQuotaSnapshot("other", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 50, RemainingPctExact: &otherRemaining, ResetAtUnix: reset}}}})
-	selector := newCodexSelectorWithCapacity(func() []codex.CodexAccount {
-		return []codex.CodexAccount{{AccountKey: "system", AccessToken: "fake-system", IsActive: true}, {AccountKey: "other", AccessToken: "fake-other"}}
-	}, nil, ledger)
-	choice, err := selector.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.4"})
-	if err != nil || choice.AccountKey != "other" {
-		t.Fatalf("unsettled reserve choice=%+v error=%v", choice, err)
-	}
-
-	now = now.Add(time.Second)
-	remaining = 99
-	ledger.Observe(CapacityFact{
-		AccountKey: "system", Bucket: CapacityBucketBase, RemainingPct: 99,
-		Source: CapacitySourceLiveRateLimits, Sequence: 2, ConnectionGeneration: 1,
-		ObservedAt: now, ResetAt: time.Unix(reset, 0), Confidence: CapacityConfidenceAuthoritative,
-		Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 99, RemainingPctExact: &remaining, ResetAtUnix: reset}},
-	})
-	status = reserve.Status()
-	if status.Blocked || status.Reason != "" {
-		t.Fatalf("settled protected usage status = %+v", status)
+		})
 	}
 }
 

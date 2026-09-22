@@ -1540,6 +1540,129 @@ func TestCodexHTTPRequestPlanFactoryProbesStatefulBoundAccountForAuthenticatedPo
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryKeepsRecoveredStatefulAccountWithHealthyAlternate(t *testing.T) {
+	t.Parallel()
+	for _, transport := range []string{"http", "websocket"} {
+		t.Run(transport, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0).UTC()
+			coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			seed := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+				{AccountKey: "account", CandidateID: "candidate-stale", Kind: CodexAttemptSlotDirect},
+				{AccountKey: "account", CandidateID: "candidate-current", Kind: CodexAttemptSlotDirect},
+			})
+			seed.Key.Lane.Session = "session"
+			seed.Key.Lane.Thread = "thread"
+			seed.RequestedModel = "gpt-5"
+			seed.EffectiveModel = "gpt-5"
+			seed.RequiredBuckets = []CapacityBucket{CapacityBucketBase}
+			handle, err := runtimeLease.BeginRequest(seed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.AdmitWebSocketContext(context.Background(), CodexWebSocketAdmissionEvidence{
+				DownstreamGeneration: 1,
+				UpstreamGeneration:   1,
+				TurnState:            "private-turn-state",
+				HasTurnState:         true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := handle.Drain(); err != nil {
+				t.Fatal(err)
+			}
+
+			// Model an existing journal: a successful non-probe request retained the
+			// earlier quota rejection, despite completing on that same account.
+			snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), seed.Key, seed.Accounts, seed.Authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !snapshot.BoundRequestCompleted || !reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account"}) {
+				t.Fatalf("recovered journal = %#v, want completed account with stale quota marker", snapshot)
+			}
+
+			account := frozenDispatchTestLogicalAccount(
+				"account",
+				frozenDispatchCandidate("account", "candidate-stale", "revision-stale", codex.SourceSystem, false, now.Add(time.Hour)),
+				frozenDispatchCandidate("account", "candidate-current", "revision-current", codex.SourceSystem, false, now.Add(time.Hour)),
+			)
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{account, frozenDispatchTestLogicalAccount(
+					"alternate",
+					frozenDispatchCandidate("alternate", "candidate-alt", "revision-alt", codex.SourceManaged, true, now.Add(time.Hour)),
+				)}}},
+				TransportKind:     transport,
+				Routes:            coordinator,
+				Runtime:           runtimeLease,
+				DefaultAccountKey: "account",
+				Authority:         seed.Authority,
+				Now:               func() time.Time { return now },
+			}
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerCodex})
+			ctx = withRuntimeCallerIdentity(ctx, "account\x00candidate-current\x00revision-current")
+
+			prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{
+				Encoded: frozenRequestBody("gpt-5", CodexRequestTurn, "portable retry"),
+			})
+			if err != nil {
+				var planErr *CodexHTTPRequestPlanError
+				if errors.As(err, &planErr) {
+					t.Fatalf("authenticated portable retry = stage %s reason %s", planErr.Code, planErr.Reason)
+				}
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			if prepared.leaseHandle.AccountKey() != "account" || prepared.leaseHandle.RequestGeneration() != 2 {
+				t.Fatalf("retry authority = account %q generation %d, want account/2", prepared.leaseHandle.AccountKey(), prepared.leaseHandle.RequestGeneration())
+			}
+
+			if !prepared.leaseHandle.record.QuotaExhaustionProbe {
+				t.Fatal("recovered continuation must use the existing bound quota probe")
+			}
+			handle, err = prepared.leaseHandle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.AdmitHTTP2xx()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := handle.Drain(); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err = coordinator.LoadRouteSnapshot(context.Background(), seed.Key, seed.Accounts, seed.Authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.QuotaExhaustedAccountKeys) != 0 {
+				t.Fatalf("quota markers after completed recovery = %#v, want empty", snapshot.QuotaExhaustedAccountKeys)
+			}
+		})
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryRejectsAuthenticatedCallerWithoutRoutableCandidate(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()

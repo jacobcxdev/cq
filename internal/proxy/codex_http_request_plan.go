@@ -789,7 +789,9 @@ func codexHTTPRequestAccountUnavailablePortable(protocol CodexProtocolRequest) b
 }
 
 func codexHTTPRequestDetachPortableUnavailableRoute(snapshot CodexLeaseRouteSnapshot, protocol CodexProtocolRequest, expected *CodexLeaseBoundExpectation) CodexLeaseRouteSnapshot {
-	if expected != nil || snapshot.RestartableFailedHead || !codexHTTPRequestAccountUnavailablePortable(protocol) {
+	// A completed bound request proves recovery even if an older quota marker
+	// remains. Preserve its continuity and let the bound quota probe recover it.
+	if expected != nil || snapshot.RestartableFailedHead || snapshot.BoundRequestCompleted || !codexHTTPRequestAccountUnavailablePortable(protocol) {
 		return snapshot
 	}
 	unavailable := mergeCodexHTTPRequestAccountKeys(snapshot.UnavailableAccountKeys, snapshot.QuotaExhaustedAccountKeys)
