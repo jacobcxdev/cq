@@ -25,6 +25,18 @@ brew uninstall --formula cq
 brew install --cask jacobcxdev/tap/cq
 ```
 
+Homebrew versions that sandbox Cask flight hooks cannot run the service hooks
+stored by CQ 0.32.8. For that legacy installation, first verify that
+`$(brew --prefix)/bin/cq` is a symlink into the installed CQ Caskroom and that
+`cq service status --json` reports the `homebrew` owner and that stable executable.
+Keep a copy of the executable for rollback. Run `cq service uninstall
+--owner=homebrew --service-executable="$(brew --prefix)/bin/cq"` outside Homebrew,
+then remove only that verified symlink before running `brew upgrade --cask cq`.
+This makes the old hook skip its executable call; the new installer recreates
+the link and services. Keep existing CQ configuration. If the upgrade fails,
+restore the stable link to the saved executable and reinstall its Homebrew-owned
+services before retrying.
+
 ### Windows — WinGet
 
 ```powershell
