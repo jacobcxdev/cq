@@ -110,9 +110,15 @@ homebrew_casks:
       SH
       installer script: {
         executable: "/bin/bash",
-        args: ["-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "install", "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq"],
+        args: [
+          "-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "install",
+          "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
+        ],
       }
       uninstall script: {
         executable: "/bin/bash",
-        args: ["-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "uninstall", "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq"],
+        args: [
+          "-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "uninstall",
+          "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
+        ],
       }

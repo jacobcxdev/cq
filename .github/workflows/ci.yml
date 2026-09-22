@@ -120,6 +120,9 @@ jobs:
           name: ci-darwin-packages
           path: dist
 
+      - name: Format Homebrew Cask before validation
+        run: .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb
+
       - name: Validate Homebrew Cask quarantine handling
         run: |
           case "$(uname -m)" in
@@ -149,6 +152,9 @@ jobs:
         with:
           name: ci-darwin-packages
           path: dist
+
+      - name: Format Homebrew Cask before validation
+        run: .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb
 
       - name: Validate real Cask install, upgrade, transport, and uninstall
         env:
