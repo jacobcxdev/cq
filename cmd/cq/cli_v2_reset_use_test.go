@@ -666,6 +666,9 @@ func TestCLIV2ResetUseProductionAuthority(t *testing.T) {
 					want := int32(1)
 					if phase == 1 {
 						want = 0
+						if out.ExitCode != 1 || len(out.Errors) != 1 || out.Errors[0].Code != "codex_reset_upstream_failed" {
+							t.Fatalf("authority denial misclassified as authentication rejection: %+v", out)
+						}
 					}
 					if consumes.Load() != want {
 						t.Fatalf("consumes=%d want=%d out=%+v", consumes.Load(), want, out)
@@ -963,4 +966,102 @@ func init() {
 func TestCLIV2ResetUseContractOutcomes(t *testing.T) {
 	runV2Case(t, v2Case{Name: "indeterminate keeps retry", Scenario: "reset-indeterminate", Args: []string{"codex", "reset", "use", "alice@example.com", "--yes", "--json"}, Exit: 7, Command: "codex reset use", Code: "codex_reset_timeout", WantJSON: `{"outcome":"indeterminate","retry":{"account_reference":"key-a","credit_id":"credit-a"}}`, Calls: map[string]int{"consume": 1}, Forbid: []string{"credential-activate", "service"}})
 	runV2Case(t, v2Case{Name: "known success survives postcheck", Scenario: "reset-postcheck-fails", Args: []string{"codex", "resets", "use", "alice@example.com", "--yes", "--json"}, Exit: 8, Command: "codex reset use", Code: "codex_reset_postcheck_partial", WantJSON: `{"outcome":"reset","windows_reset":2,"changed_windows":[],"retry":null}`, Calls: map[string]int{"consume": 1}, Forbid: []string{"credential-activate", "service"}})
+}
+
+func TestCLIV2ResetUseProductionSelectedUsageAuthFailure(t *testing.T) {
+	for _, status := range []int{401, 403} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			store, record, journal := useProductionFixture(t)
+			var usage, exchanges, consumes atomic.Int32
+			client := testDoer(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/backend-api/wham/rate-limit-reset-credits":
+					return resetProductionResponse(200, `{"credits":[{"id":"credit","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-09-01T00:00:00Z"}],"available_count":1}`), nil
+				case "/backend-api/wham/usage":
+					usage.Add(1)
+					return resetProductionResponse(status, `{"error":{"type":"authentication_error"}}`), nil
+				case "/oauth/token":
+					exchanges.Add(1)
+					body, _ := json.Marshal(auth.CodexTokenResponse{AccessToken: "refreshed-synthetic", RefreshToken: "next-synthetic", IDToken: record.Credential.IDToken, ExpiresIn: 3600})
+					return resetProductionResponse(200, string(body)), nil
+				case "/backend-api/wham/rate-limit-reset-credits/consume":
+					consumes.Add(1)
+					return resetProductionResponse(200, `{"code":"reset","windows_reset":2}`), nil
+				default:
+					panic("unexpected fake HTTP")
+				}
+			})
+			coordinator, err := codexprov.NewCredentialCoordinator(store, journal.StateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coordinator.RefreshMutations = resetProductionRecorder{}
+			coordinator.CredentialOwner = resetProductionRecorder{}
+			coordinator.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+				return auth.RefreshCodexToken(ctx, client, token)
+			}
+			owner, err := codexprov.OpenCredentialControl(codexprov.DefaultCredentialControlPath(journal.StateDir), coordinator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer owner.Close()
+			inv, _ := cli.Parse([]string{"codex", "reset", "use", string(record.Metadata.AccountKey), "--yes", "--json"})
+			session := &cli.Session{In: noAccessV2Input{}, Out: io.Discard, Err: io.Discard}
+			out := handleV2ResetUseWithFactory(context.Background(), inv, session, func(ctx context.Context, _ bool) (v2ResetDependencies, error) {
+				return newV2ResetUseDependenciesWithClient(ctx, store.FS, client)
+			})
+			if usage.Load() != 2 || exchanges.Load() != 1 || consumes.Load() != 0 {
+				t.Fatalf("usage=%d exchanges=%d consumes=%d", usage.Load(), exchanges.Load(), consumes.Load())
+			}
+			if out.ExitCode != 5 || len(out.Errors) != 1 || out.Errors[0].Code != "codex_reset_auth_failed" {
+				t.Fatalf("authentication rejection lost: %+v", out)
+			}
+		})
+	}
+}
+
+func TestCLIV2ResetUseSelectedUsageAuthIdentity(t *testing.T) {
+	for _, scenario := range []string{"other-account-same-email", "duplicate-selected-errors", "cached-selected-error", "no-http-rejection", "typed-authority-denial", "usable-precedence", "duplicate-usable"} {
+		t.Run(scenario, func(t *testing.T) {
+			a, b, session, inv, _ := newUseTest(t)
+			selected := quota.ErrorResult("fetch_error", "synthetic unavailable", 0)
+			selected.AccountID, selected.Email = "id-a", "alice@example.com"
+			rejected := quota.ErrorResult("auth_expired", "synthetic rejected", 401)
+			rejected.AccountID, rejected.Email = "other-account", selected.Email
+			rows := []quota.Result{selected, rejected}
+			wantExit, wantCode, wantConsumes := 1, "codex_reset_upstream_failed", 0
+			switch scenario {
+			case "duplicate-selected-errors":
+				rejected.AccountID = selected.AccountID
+				rows = []quota.Result{rejected, rejected}
+			case "cached-selected-error":
+				rejected.AccountID, rejected.CacheAge = selected.AccountID, 1
+				rows = []quota.Result{rejected}
+			case "no-http-rejection":
+				rejected.AccountID, rejected.Error.HTTPStatus = selected.AccountID, 0
+				rows = []quota.Result{rejected}
+			case "typed-authority-denial":
+				selected.Error.Message = "Codex credential authority unavailable"
+				rows = []quota.Result{selected}
+			case "usable-precedence", "duplicate-usable":
+				usable := a.Usage.(v2ResetUsage).results[0]
+				rejected.AccountID = selected.AccountID
+				rows = []quota.Result{rejected, usable}
+				if scenario == "duplicate-usable" {
+					rows = append(rows, usable)
+				} else {
+					wantExit, wantCode, wantConsumes = 0, "", 1
+				}
+			}
+			a.Usage = v2ResetUsage{f: b.f, results: rows}
+			out := handleV2ResetUseWithApp(context.Background(), inv, session, a)
+			code := ""
+			if len(out.Errors) > 0 {
+				code = out.Errors[0].Code
+			}
+			if out.ExitCode != wantExit || code != wantCode || useCalls(b.f, "consume") != wantConsumes {
+				t.Fatalf("borrowed authentication error or consumed without selected usage: %+v", out)
+			}
+		})
+	}
 }

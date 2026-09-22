@@ -252,6 +252,11 @@ func (a *CodexResetApp) PrepareUse(ctx context.Context, reference, explicitCredi
 		return CodexResetUsePlan{}, resetAppError("credits_unavailable", err)
 	}
 	usageResult, matchCode := matchResetUsage(account, usage)
+	if matchCode == "usage_missing" {
+		if err := selectedResetUsageAuthError(account, usage); err != nil {
+			return CodexResetUsePlan{}, resetAppError("credits_unavailable", err)
+		}
+	}
 	if matchCode != "" || !validResetWindows(usageResult.Windows) {
 		return CodexResetUsePlan{}, resetAppError("credits_unavailable", errors.New("fresh shared windows unavailable"))
 	}
@@ -570,13 +575,7 @@ func matchResetUsage(account codexprov.ResetAccount, results []quota.Result) (qu
 		if !result.IsUsable() || result.CacheAge != 0 {
 			continue
 		}
-		if account.AccountID != "" {
-			if result.AccountID == account.AccountID {
-				matches = append(matches, result)
-			}
-			continue
-		}
-		if account.Email != "" && strings.EqualFold(strings.TrimSpace(result.Email), strings.TrimSpace(account.Email)) {
+		if resetUsageMatchesAccount(account, result) {
 			matches = append(matches, result)
 		}
 	}
@@ -587,6 +586,33 @@ func matchResetUsage(account codexprov.ResetAccount, results []quota.Result) (qu
 		return quota.Result{}, "usage_duplicate"
 	}
 	return matches[0], ""
+}
+
+// Only one fresh, identity-matched failure can classify selected usage. Usable
+// rows take precedence in matchResetUsage; ambiguous errors stay unavailable.
+func selectedResetUsageAuthError(account codexprov.ResetAccount, results []quota.Result) error {
+	var selected *quota.ErrorInfo
+	matched := false
+	for _, result := range results {
+		if result.CacheAge != 0 || !resetUsageMatchesAccount(account, result) {
+			continue
+		}
+		if matched {
+			return nil
+		}
+		matched, selected = true, result.Error
+	}
+	if selected != nil && selected.Code == "auth_expired" && (selected.HTTPStatus == 401 || selected.HTTPStatus == 403) {
+		return &codexprov.ResetHTTPError{Status: selected.HTTPStatus}
+	}
+	return nil
+}
+
+func resetUsageMatchesAccount(account codexprov.ResetAccount, result quota.Result) bool {
+	if account.AccountID != "" {
+		return result.AccountID == account.AccountID
+	}
+	return account.Email != "" && strings.EqualFold(strings.TrimSpace(result.Email), strings.TrimSpace(account.Email))
 }
 
 func resetScheduleAccountInput(now time.Time, account codexprov.ResetAccount, result quota.Result, credits []codexprov.ResetCredit, estimates history.RateEstimates) (aggregate.ResetScheduleAccountInput, bool) {

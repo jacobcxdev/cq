@@ -977,3 +977,44 @@ func TestResetCanonicalRefreshCancellationBeforeMutation(t *testing.T) {
 		t.Fatalf("lock wait exceeded deadline: %v", err)
 	}
 }
+
+func TestResetCanonicalRefreshPreservesAuthorityDenial(t *testing.T) {
+	for _, remote := range []bool{false, true} {
+		for _, missing := range []string{"recorder", "owner"} {
+			t.Run(fmt.Sprintf("remote=%t/missing=%s", remote, missing), func(t *testing.T) {
+				c, _, ref, revision := testRefreshRecord(t)
+				if missing == "recorder" {
+					c.RefreshMutations = nil
+				} else {
+					c.CredentialOwner = nil
+				}
+				var exchanges atomic.Int32
+				c.RefreshExchange = func(context.Context, string) (*auth.CodexTokenResponse, error) {
+					exchanges.Add(1)
+					return nil, errors.New("unexpected exchange")
+				}
+				owner := &CredentialControl{owner: true, coordinator: c}
+				control := owner
+				if remote {
+					serverConn, clientConn := net.Pipe()
+					server := rpc.NewServer()
+					if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: c, Control: owner}); err != nil {
+						t.Fatal(err)
+					}
+					go server.ServeConn(serverConn)
+					defer serverConn.Close()
+					control = &CredentialControl{client: rpc.NewClient(clientConn)}
+					defer control.Close()
+				}
+				_, err := control.CanonicalAdmin().Refresh(context.Background(), ref, revision)
+				if !errors.Is(err, ErrCredentialAuthorityUnavailable) || exchanges.Load() != 0 {
+					t.Fatalf("authority denial lost: err=%v exchanges=%d", err, exchanges.Load())
+				}
+				record, err := c.loadRef(ref)
+				if err != nil || record.Metadata.Revision != revision {
+					t.Fatalf("denied refresh changed record: revision=%s err=%v", record.Metadata.Revision, err)
+				}
+			})
+		}
+	}
+}

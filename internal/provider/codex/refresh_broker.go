@@ -195,7 +195,7 @@ func (c *CredentialCoordinator) refreshLocked(ctx context.Context, ref Candidate
 		return RefreshResult{}, err
 	}
 	if c.RefreshMutations == nil || c.CredentialOwner == nil {
-		return RefreshResult{}, errors.New("Codex refresh mutation authority unavailable")
+		return RefreshResult{}, ErrCredentialAuthorityUnavailable
 	}
 	selection, err := c.RefreshMutations.SelectRefreshMutation(operationID, ref, expected, fullRefreshMutationCapacity())
 	if err != nil {
