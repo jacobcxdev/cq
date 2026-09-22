@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
@@ -14,60 +14,60 @@ script.gsub!("/bin/launchctl", "\"$CQ_HOOK_TEST_ROOT/launchctl\"")
 File.write(destination, script)
 RUBY
 cat > "$root/xattr" <<'MOCK'
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 if [[ "${1:-}" == -d ]]; then
-  [[ ! -e "$CQ_HOOK_TEST_ROOT/reject-xattr" ]]
+  [[ ! -e "$CQ_HOOK_TEST_ROOT/reject-xattr" ]] || exit 1
   rm -f "$CQ_HOOK_TEST_ROOT/quarantine"
 elif [[ -e "$CQ_HOOK_TEST_ROOT/quarantine" ]]; then
   echo com.apple.quarantine
 fi
 MOCK
 cat > "$root/launchctl" <<'MOCK'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "$*" >> "$CQ_HOOK_TEST_ROOT/launchctl.log"
 MOCK
 cat > "$root/staged/cq" <<'MOCK'
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-[[ ! -e "$CQ_HOOK_TEST_ROOT/quarantine" ]]
+[[ ! -e "$CQ_HOOK_TEST_ROOT/quarantine" ]] || exit 1
 printf '%s\n' "$*" >> "$CQ_HOOK_TEST_ROOT/service.log"
-[[ ! -e "$CQ_HOOK_TEST_ROOT/reject-service" ]]
+[[ ! -e "$CQ_HOOK_TEST_ROOT/reject-service" ]] || exit 1
 MOCK
 chmod +x "$root/xattr" "$root/launchctl" "$root/staged/cq"
 hook="$root/staged/cq-homebrew-lifecycle.sh"
 target="$root/bin/cq"
-run_hook() { HOME="$root/home" bash "$hook" "$1" "$root/staged/cq" "$target"; }
+run_hook() { HOME="$root/home" /bin/bash "$hook" "$1" "$root/staged/cq" "$target"; }
 expect_failure() { if run_hook "$1" >"$root/error" 2>&1; then echo "unexpected lifecycle success" >&2; exit 1; fi; }
 touch "$root/quarantine"
 run_hook install
-[[ -L "$target" && "$target" -ef "$root/staged/cq" && ! -e "$root/quarantine" ]]
+[[ -L "$target" && "$target" -ef "$root/staged/cq" && ! -e "$root/quarantine" ]] || exit 1
 run_hook install
 run_hook uninstall
-[[ $(wc -l < "$root/service.log") -eq 3 ]]
+[[ $(wc -l < "$root/service.log") -eq 3 ]] || exit 1
 rm "$target"
 printf foreign > "$target"
 expect_failure install
 expect_failure uninstall
-[[ $(cat "$target") == foreign ]]
+[[ $(cat "$target") == foreign ]] || exit 1
 rm "$target"
 ln -s "$root/xattr" "$target"
 expect_failure install
 expect_failure uninstall
-[[ $(readlink "$target") == "$root/xattr" ]]
+[[ $(readlink "$target") == "$root/xattr" ]] || exit 1
 rm "$target"
 touch "$root/reject-service"
 expect_failure install
-[[ ! -e "$target" && ! -L "$target" ]]
+[[ ! -e "$target" && ! -L "$target" ]] || exit 1
 rm "$root/reject-service"
 touch "$root/quarantine" "$root/reject-xattr"
 expect_failure install
-[[ ! -e "$target" && ! -L "$target" ]]
+[[ ! -e "$target" && ! -L "$target" ]] || exit 1
 rm "$root/quarantine" "$root/reject-xattr"
 run_hook install
 rm "$root/staged/cq"
 touch "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"
 run_hook uninstall
-[[ ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" && ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist" ]]
-[[ $(wc -l < "$root/launchctl.log") -eq 4 ]]
+[[ ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" && ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist" ]] || exit 1
+[[ $(wc -l < "$root/launchctl.log") -eq 4 ]] || exit 1
 echo "Homebrew lifecycle ownership, quarantine, rollback, and missing-binary tests passed"
