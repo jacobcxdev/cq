@@ -506,6 +506,35 @@ func TestCodexHTTPRequestPlanFactoryAppliesSessionPolicyToWebSocketPrewarm(t *te
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryPrewarmsCyberAccount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, RoutingGeneration: 7,
+		Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber"}}},
+	}
+	eligibility := NewCyberEligibilityStore(&RoutingPolicyStore{current: &policy})
+	eligibility.ReplaceAccount("ordinary", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessIneligible}})
+	eligibility.ReplaceAccount("cyber", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessEligible}})
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("ordinary", frozenDispatchCandidate("ordinary", "ordinary-candidate", "ordinary-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("cyber", frozenDispatchCandidate("cyber", "cyber-candidate", "cyber-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+		}}},
+		DefaultAccountKey: "ordinary", SessionPolicy: NewSessionPolicyResolver(make([]byte, 32), policy),
+		CyberEligibility: eligibility, Now: func() time.Time { return now },
+	}
+	payload := []byte(`{"type":"response.create","model":"gpt-6-sol","generate":false,"access_programs":{"cyber":"daybreak_blue"},"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
+	dispatch, err := factory.planWebSocketPrewarm(ctx, CodexHTTPRequestPlanInput{Encoded: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := dispatch.Accounts()
+	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "cyber" {
+		t.Fatalf("Cyber prewarm accounts = %#v", accounts)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryAppliesPoolValueToWebSocketPrewarm(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -2811,6 +2840,117 @@ func (runtime *codexHTTPRequestPlanTestRuntime) BeginRequestContext(_ context.Co
 		return nil, err
 	}
 	return runtime.handle, err
+}
+
+func TestCodexHTTPRequestPlanFactorySwitchesCyberOnAndOff(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	key := []byte("01234567890123456789012345678901")
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{
+			{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber-a", "cyber-b"}},
+			{ID: testPoolIDB, Name: "Ordinary", Members: []codex.AccountKey{"ordinary"}},
+		},
+		SessionBindings: []SessionBindingV2{{SessionDigest: keyedSessionDigest(key, []byte("session")), PoolID: testPoolIDB}},
+	}
+	eligibility := NewCyberEligibilityStore(&RoutingPolicyStore{current: &policy})
+	eligibility.ReplaceAccount("ordinary", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessIneligible}})
+	eligibility.ReplaceAccount("cyber-a", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessEligible}})
+	eligibility.ReplaceAccount("cyber-b", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessIneligible}})
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("ordinary", frozenDispatchCandidate("ordinary", "ordinary-candidate", "ordinary-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("cyber-a", frozenDispatchCandidate("cyber-a", "cyber-a-candidate", "cyber-a-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("cyber-b", frozenDispatchCandidate("cyber-b", "cyber-b-candidate", "cyber-b-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	for _, test := range []struct {
+		name       string
+		previous   codex.AccountKey
+		programme  string
+		want       codex.AccountKey
+		wantPoolID PoolID
+	}{
+		{name: "enabled after ordinary", previous: "ordinary", programme: "daybreak_blue", want: "cyber-a", wantPoolID: testPoolIDA},
+		{name: "disabled after Cyber", previous: "cyber-a", want: "ordinary", wantPoolID: testPoolIDB},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: test.want}}
+			permits := &sessionPolicyPermitRecorder{}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				Routes: &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+					Classification: CodexRestoredLaneUnseen, JournalGeneration: 1,
+					AffinityPresent: true, AffinityAccountKey: test.previous, AffinityRequiresAccount: true,
+				}},
+				Runtime: runtime, DefaultAccountKey: "ordinary",
+				SessionPolicy: NewSessionPolicyResolver(key, policy), CyberEligibility: eligibility,
+				DispatchPermits: permits, Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+				Now: func() time.Time { return now },
+			}
+			body := frozenRequestBody("gpt-6-sol", CodexRequestTurn, "full history")
+			if test.programme != "" {
+				body = []byte(strings.TrimSuffix(string(body), "}") + `,"access_programs":{"cyber":"` + test.programme + `"}}`)
+			}
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{
+				Domain: NormalCallerLocal, SubjectID: "local", ConsumptionDigest: strings.Repeat("a", 64),
+			})
+			prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Frozen.Release()
+			if got := prepared.Dispatch.Accounts()[0].Choice().AccountKey; got != test.want {
+				t.Fatalf("selected account = %q, want %q", got, test.want)
+			}
+			if runtime.plan.RequiresAccountContinuity {
+				t.Fatal("full-history account switch required old account")
+			}
+			if len(permits.requests) != 1 || permits.requests[0].PoolID != test.wantPoolID {
+				t.Fatalf("request permits = %+v, want pool %q", permits.requests, test.wantPoolID)
+			}
+			if test.programme != "" {
+				if got := prepared.Dispatch.AccountUnavailableResetCandidates(); len(got) != 0 {
+					t.Fatalf("ineligible accounts included in reset = %v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryResetsCyberOffDeltaOnlyForCheaperAvailableAccount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber"}}},
+	}
+	eligibility := NewCyberEligibilityStore(&RoutingPolicyStore{current: &policy})
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+		frozenDispatchTestLogicalAccount("ordinary", frozenDispatchCandidate("ordinary", "ordinary-candidate", "ordinary-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+		frozenDispatchTestLogicalAccount("cyber", frozenDispatchCandidate("cyber", "cyber-candidate", "cyber-revision", codex.SourceSystem, false, now.Add(time.Hour))),
+	}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory:        &codexHTTPRequestPlanTestInventory{inventory: inventory},
+		SessionPolicy:    NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), policy),
+		CyberEligibility: eligibility, Now: func() time.Time { return now },
+	}
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
+	protocol := CodexProtocolRequest{Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
+	if !factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
+		t.Fatal("cheaper ordinary account did not trigger full-history retry")
+	}
+	protocol.CyberAccessProgram = "daybreak_blue"
+	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
+		t.Fatal("active Cyber request triggered Cyber-off retry")
+	}
+	protocol.CyberAccessProgram = ""
+	factory.PinnedAccountKey = "cyber"
+	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
+		t.Fatal("explicit pin triggered Cyber-off retry")
+	}
+	factory.PinnedAccountKey = ""
+	inventory.Accounts[0].Routable = false
+	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
+		t.Fatal("unroutable ordinary account triggered Cyber-off retry")
+	}
 }
 
 func codexHTTPRequestPlanTestFactory(runtime CodexHTTPRequestPlanRuntime) *CodexHTTPRequestPlanFactory {

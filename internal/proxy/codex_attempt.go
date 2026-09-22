@@ -33,6 +33,7 @@ const (
 	CodexPinnedAccepted CodexPinnedFailure = iota
 	CodexPinnedAuthFailure
 	CodexPinnedHardLimit
+	CodexPinnedCyberUnavailable
 )
 
 // Plan exposes secret-free route planning for WebSocket attempts.
@@ -220,7 +221,7 @@ func (r *CodexRequestRouter) do(ctx context.Context, requirements CodexRouteRequ
 			case CodexPinnedHardLimit:
 				replaceRejected(resp, plan.Choice, actual)
 				accountHardLimited = true
-			case CodexPinnedAccepted:
+			case CodexPinnedAccepted, CodexPinnedCyberUnavailable:
 				closeResponse(rejected)
 				return resp, plan.Choice, actual, nil
 			}
@@ -266,7 +267,7 @@ func (r *CodexRequestRouter) do(ctx context.Context, requirements CodexRouteRequ
 				case CodexPinnedHardLimit:
 					replaceRejected(resp, plan.Choice, actual)
 					accountHardLimited = true
-				case CodexPinnedAccepted:
+				case CodexPinnedAccepted, CodexPinnedCyberUnavailable:
 					closeResponse(rejected)
 					return resp, plan.Choice, actual, nil
 				}
@@ -321,7 +322,13 @@ func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, respons
 			return CodexPinnedAccepted, nil
 		}
 		wrapped, err := parseCodexHTTPError(body, response.StatusCode)
-		if err != nil || !wrapped.AuthFailure || wrapped.ErrorType != "authentication_error" {
+		if err != nil {
+			return CodexPinnedAccepted, nil
+		}
+		if wrapped.Found && wrapped.Code == "access_program_not_enabled" && wrapped.Param == "access_programs.cyber" {
+			return CodexPinnedCyberUnavailable, nil
+		}
+		if !wrapped.AuthFailure || wrapped.ErrorType != "authentication_error" {
 			return CodexPinnedAccepted, nil
 		}
 		return CodexPinnedAuthFailure, nil

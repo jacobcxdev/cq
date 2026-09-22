@@ -396,11 +396,52 @@ type CodexHTTPRequestPlanFactory struct {
 	HeadroomMode      HeadroomMode
 	Now               func() time.Time
 	SessionPolicy     *SessionPolicyResolver
+	CyberEligibility  *CyberEligibilityStore
 	DispatchPermits   CallerDispatchPermitAuthority
 	TransportKind     string
 	TurnReceipts      *CodexTurnReceiptStore
 
 	operations codexHTTPRequestPlanFactoryOperations
+}
+
+func (factory *CodexHTTPRequestPlanFactory) CyberEligibilityStore() *CyberEligibilityStore {
+	if factory == nil {
+		return nil
+	}
+	return factory.CyberEligibility
+}
+
+// A WebSocket delta cannot move its previous response to another account. If
+// Cyber was disabled and policy offers a cheaper account, ask Codex to replay
+// the turn with full history before planning the new route.
+func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Context, protocol CodexProtocolRequest, active codex.AccountKey) bool {
+	if factory == nil || factory.CyberEligibility == nil || factory.SessionPolicy == nil ||
+		factory.PinnedAccountKey != "" || protocol.CyberAccessProgram != "" ||
+		!containsCodexHTTPRequestAccountKey(factory.CyberEligibility.Members(), active) {
+		return false
+	}
+	inventory, err := factory.Inventory.List(ctx)
+	if err != nil {
+		return false
+	}
+	accounts := codexHTTPRequestPlanAccountKeys(inventory)
+	now := time.Now()
+	if factory.Now != nil {
+		now = factory.Now()
+	}
+	caller, _ := runtimeCallerAuthority(ctx)
+	decision, err := enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, "", now)
+	if err != nil {
+		return false
+	}
+	for _, account := range inventory.Accounts {
+		if account.Key != active && account.Routable && !account.Unstable &&
+			containsCodexHTTPRequestAccountKey(decision.Allowed, account.Key) &&
+			decision.AccountValues[account.Key] < decision.AccountValues[active] {
+			return true
+		}
+	}
+	return false
 }
 
 // Build prepares one immutable native HTTP request and commits its first
@@ -479,13 +520,43 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	caller, callerOK := runtimeCallerAuthority(ctx)
 	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), AccountValues: map[codex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}
 	if factory.SessionPolicy != nil {
-		policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
+		if factory.CyberEligibility != nil && protocol.CyberAccessProgram != "" {
+			policyDecision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
+		} else {
+			policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
+		}
 		if err != nil {
 			emitCodexTrace(ctx, CodexTraceEvent{Phase: "pool_policy", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
 		}
 		if policyDecision.Status == PolicyDecisionSelected {
 			inventory = filterCodexHTTPRequestInventory(inventory, policyDecision.Allowed)
+		}
+	}
+	cyberActive := factory.CyberEligibility != nil && protocol.CyberAccessProgram != ""
+	if cyberActive {
+		var eligible []codex.AccountKey
+		inventory, eligible = filterCodexCyberInventory(factory.CyberEligibility, inventory, protocol)
+		if len(inventory.Accounts) == 0 {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
+		}
+		policyDecision.Allowed = eligible
+	}
+	if snapshot.Classification == CodexRestoredLaneUnseen && input.ExpectedBound == nil &&
+		codexHTTPRequestAccountUnavailablePortable(protocol) && snapshot.AffinityAccountKey != "" {
+		switchAccount := cyberActive && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), snapshot.AffinityAccountKey)
+		if !cyberActive && factory.CyberEligibility != nil && containsCodexHTTPRequestAccountKey(factory.CyberEligibility.Members(), snapshot.AffinityAccountKey) {
+			for _, account := range inventory.Accounts {
+				if account.Routable && !account.Unstable && policyDecision.AccountValues[account.Key] < policyDecision.AccountValues[snapshot.AffinityAccountKey] {
+					switchAccount = true
+					break
+				}
+			}
+		}
+		if switchAccount {
+			snapshot.AffinityAccountKey = ""
+			snapshot.AffinityRequiresAccount = false
+			snapshot.AffinityEffectiveModel = ""
 		}
 	}
 	emitCodexTrace(ctx, CodexTraceEvent{
@@ -560,6 +631,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if boundAccountKey == "" {
 		boundAccountKey = factory.PinnedAccountKey
 	}
+	defaultAccountKey := factory.DefaultAccountKey
+	if cyberActive && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), defaultAccountKey) {
+		defaultAccountKey = inventory.Accounts[0].Key
+	}
 	accountUnavailablePortable := boundAccountKey != "" && codexHTTPRequestAccountUnavailablePortable(protocol) &&
 		continuityAccountKey == "" && !authenticatedBoundContinuation
 	dispatchUnavailable := append([]codex.AccountKey(nil), snapshot.QuotaExhaustedAccountKeys...)
@@ -574,7 +649,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		AccountValues:               policyDecision.AccountValues,
 		AffinityAccountKey:          affinityAccountKey,
 		AffinityEffectiveModel:      affinityEffectiveModel,
-		DefaultAccountKey:           factory.DefaultAccountKey,
+		DefaultAccountKey:           defaultAccountKey,
 		BoundAccountKey:             boundAccountKey,
 		UnavailableAccountKeys:      dispatchUnavailable,
 		ProbeUnavailableAccountKeys: append([]codex.AccountKey(nil), snapshot.QuotaExhaustedAccountKeys...),
@@ -928,6 +1003,23 @@ func filterCodexHTTPRequestInventory(inventory codex.Inventory, allowed []codex.
 	return filtered
 }
 
+func filterCodexCyberInventory(eligibility *CyberEligibilityStore, inventory codex.Inventory, protocol CodexProtocolRequest) (codex.Inventory, []codex.AccountKey) {
+	eligible := make([]codex.AccountKey, 0, len(inventory.Accounts))
+	unknown := make([]codex.AccountKey, 0, len(inventory.Accounts))
+	for _, account := range inventory.Accounts {
+		switch eligibility.Status(account.Key, protocol.Model, protocol.CyberAccessProgram) {
+		case CyberAccessEligible:
+			eligible = append(eligible, account.Key)
+		case CyberAccessUnknown:
+			unknown = append(unknown, account.Key)
+		}
+	}
+	if len(eligible) == 0 {
+		eligible = unknown
+	}
+	return filterCodexHTTPRequestInventory(inventory, eligible), eligible
+}
+
 func excludeCodexHTTPRequestAccountKeys(accounts, excluded []codex.AccountKey) []codex.AccountKey {
 	if len(excluded) == 0 {
 		return append([]codex.AccountKey(nil), accounts...)
@@ -997,19 +1089,36 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 	}
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
 	caller, _ := runtimeCallerAuthority(ctx)
-	decision, policyErr := enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, factory.PinnedAccountKey, now)
+	cyberActive := factory.CyberEligibility != nil && protocol.CyberAccessProgram != ""
+	var decision SessionPolicyDecision
+	var policyErr error
+	if cyberActive {
+		decision, policyErr = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, factory.PinnedAccountKey, now)
+	} else {
+		decision, policyErr = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, factory.PinnedAccountKey, now)
+	}
 	if policyErr != nil {
 		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, policyErr)
 	}
 	if decision.Status == PolicyDecisionSelected {
 		inventory = filterCodexHTTPRequestInventory(inventory, decision.Allowed)
 	}
+	if cyberActive {
+		inventory, decision.Allowed = filterCodexCyberInventory(factory.CyberEligibility, inventory, protocol)
+		if len(inventory.Accounts) == 0 {
+			return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
+		}
+	}
+	defaultAccountKey := factory.DefaultAccountKey
+	if cyberActive && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), defaultAccountKey) {
+		defaultAccountKey = inventory.Accounts[0].Key
+	}
 	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
 		Inventory:         inventory,
 		Capacity:          factory.Capacity,
 		Requirements:      codexHTTPRequestPlanRequirements(protocol),
 		AccountValues:     decision.AccountValues,
-		DefaultAccountKey: factory.DefaultAccountKey,
+		DefaultAccountKey: defaultAccountKey,
 		BoundAccountKey:   factory.PinnedAccountKey,
 		AcceptedRevision:  input.AcceptedRevision,
 		Now:               now,

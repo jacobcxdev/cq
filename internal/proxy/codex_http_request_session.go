@@ -380,9 +380,10 @@ func (lifecycle *codexLeaseHTTPRequestLifecycle) ProviderFailed(evidence CodexHT
 // CodexHTTPRequestSession owns bounded retry and response retention for one
 // frozen native Responses request.
 type CodexHTTPRequestSession struct {
-	Executor  CodexHTTPAttemptDispatcher
-	Refresher codex.CredentialReferenceRefresher
-	Capacity  *CodexCapacityLedger
+	Executor         CodexHTTPAttemptDispatcher
+	Refresher        codex.CredentialReferenceRefresher
+	Capacity         *CodexCapacityLedger
+	CyberEligibility *CyberEligibilityStore
 }
 
 // CodexHTTPRequestSessionResult transfers response ownership and the latest
@@ -456,6 +457,10 @@ func (session *CodexHTTPRequestSession) Do(
 		return session.abandonPrepared(ctx, result, plan.TerminalError())
 	}
 	frozenChoice, err := frozen.Choice()
+	if err != nil {
+		return session.abandonPrepared(ctx, result, err)
+	}
+	protocol, err := frozen.Protocol()
 	if err != nil {
 		return session.abandonPrepared(ctx, result, err)
 	}
@@ -653,16 +658,22 @@ accountsLoop:
 			}
 			authRejected := failure == CodexPinnedAuthFailure
 			hardRejected := failure == CodexPinnedHardLimit
+			cyberRejected := failure == CodexPinnedCyberUnavailable
+			if cyberRejected && session.CyberEligibility != nil {
+				session.CyberEligibility.MarkIneligible(choice.AccountKey, protocol.Model, protocol.CyberAccessProgram)
+			}
 			rejectReason := "upstream_rejected"
 			if authRejected {
 				rejectReason = "auth_rejected"
 			} else if hardRejected {
 				rejectReason = "capacity_exhausted"
+			} else if cyberRejected {
+				rejectReason = "cyber_access_unavailable"
 			}
 			emitCodexTrace(ctx, CodexTraceEvent{
 				Phase: "attempt", Stage: "response", Outcome: "rejected", AccountHint: codexTraceAccountHint(choice.AccountKey),
 				Attempt: actual.Ordinal, UpstreamStatus: response.StatusCode, Reason: rejectReason,
-				Retry: authRejected || hardRejected, Failover: accountIndex > 0,
+				Retry: authRejected || hardRejected || cyberRejected, Failover: accountIndex > 0,
 			})
 			rejectKind := codexInstalledHTTPRejectOther
 			if authRejected {
@@ -710,7 +721,7 @@ accountsLoop:
 				emitCodexTrace(ctx, CodexTraceEvent{Phase: "retry", Outcome: "credential", AccountHint: codexTraceAccountHint(choice.AccountKey), Attempt: attempts[attemptIndex+1].Ordinal, Reason: "auth_rejected", Retry: true})
 				continue
 			}
-			if accountUnavailable := authRejected || hardRejected; accountUnavailable {
+			if accountUnavailable := authRejected || hardRejected || cyberRejected; accountUnavailable {
 				nextAccountIndex, hasReplacement := codexHTTPRequestNextUnavailableAccount(
 					accountIndex,
 					ordinaryAccountCount,
@@ -757,7 +768,7 @@ accountsLoop:
 					continue accountsLoop
 				}
 			}
-			if (authRejected || hardRejected) && defaultRetained {
+			if (authRejected || hardRejected || cyberRejected) && defaultRetained {
 				discardCodexHTTPRequestResponse(ctx, response)
 				result.Response = nil
 				next, finishErr := codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
@@ -786,7 +797,7 @@ accountsLoop:
 			canRecordUnavailable := codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) || (hardRejected && plan.quotaRecoveryRetry)
 			var next CodexHTTPRequestLifecycle
 			var finishErr error
-			if (authRejected || hardRejected) && canRecordUnavailable {
+			if (authRejected || hardRejected || cyberRejected) && canRecordUnavailable {
 				next, finishErr = codexHTTPRequestRecordAccountUnavailable(ctx, result.Lifecycle, 0, hardRejected)
 			} else {
 				next, finishErr = result.Lifecycle.FinishRejected()

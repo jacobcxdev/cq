@@ -162,6 +162,45 @@ func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerA
 		return SessionPolicyDecision{Allowed: sortedAccountKeys(global), AccountValues: map[providerCodex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}, nil
 	}
 	decision, policy := resolver.resolveWithPolicy(exactSession, global)
+	return enforceSessionPolicyDecision(decision, policy, caller, global, continuity, now)
+}
+
+// A Cyber request selects the generated pool for this request only. Persistent
+// session bindings remain intact when the caller turns Cyber access off.
+func enforceSessionCyberPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, exactSession []byte, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
+	if resolver == nil {
+		return SessionPolicyDecision{}, ErrSessionPolicyUnavailable
+	}
+	decision, policy := resolver.resolveWithPolicy(exactSession, global)
+	index := poolIndexByName(&policy, "Cyber")
+	if index < 0 {
+		decision.Pool = ""
+		decision.PoolID = ""
+		decision.Status = PolicyDecisionUnbound
+		decision.Allowed = sortedAccountKeys(global)
+		return enforceSessionPolicyDecision(decision, policy, caller, global, continuity, now)
+	}
+	pool := policy.Pools[index]
+	decision.Pool = pool.Name
+	decision.PoolID = pool.ID
+	decision.Allowed = nil
+	for _, account := range global {
+		for _, member := range pool.Members {
+			if account == member {
+				decision.Allowed = append(decision.Allowed, account)
+				break
+			}
+		}
+	}
+	decision.Allowed = sortedAccountKeys(decision.Allowed)
+	decision.Status = PolicyDecisionSelected
+	if len(decision.Allowed) == 0 {
+		decision.Status = PolicyDecisionNoAccount
+	}
+	return enforceSessionPolicyDecision(decision, policy, caller, global, continuity, now)
+}
+
+func enforceSessionPolicyDecision(decision SessionPolicyDecision, policy RoutingPolicyV2, caller RuntimeCallerAuthorityV1, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
 	if decision.Status == PolicyDecisionUnbound {
 		decision.Allowed = sortedAccountKeys(global)
 		return decision, nil

@@ -54,6 +54,7 @@ type proxyCodexNativeHTTPDependencies struct {
 	Executor          proxy.CodexHTTPAttemptDispatcher
 	Refresher         codexprov.CredentialReferenceRefresher
 	SessionPolicy     *proxy.SessionPolicyResolver
+	CyberEligibility  *proxy.CyberEligibilityStore
 	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	TurnReceipts      *proxy.CodexTurnReceiptStore
 	Headroom          proxy.CodexRequestHeadroom
@@ -77,6 +78,7 @@ type proxyCodexWebSocketDependencies struct {
 	Executor          proxy.ExplicitWebSocketExecutor
 	Refresher         codexprov.CredentialReferenceRefresher
 	SessionPolicy     *proxy.SessionPolicyResolver
+	CyberEligibility  *proxy.CyberEligibilityStore
 	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	TurnReceipts      *proxy.CodexTurnReceiptStore
 	Upstream          string
@@ -138,6 +140,7 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		DefaultAccountKey: deps.DefaultAccountKey,
 		PinnedAccountKey:  deps.PinnedAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
+		CyberEligibility:  deps.CyberEligibility,
 		DispatchPermits:   deps.DispatchPermits,
 		TurnReceipts:      deps.TurnReceipts,
 		TransportKind:     "http",
@@ -147,9 +150,10 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		Now:               deps.Now,
 	}
 	session := &proxy.CodexHTTPRequestSession{
-		Executor:  deps.Executor,
-		Refresher: deps.Refresher,
-		Capacity:  deps.Capacity,
+		Executor:         deps.Executor,
+		Refresher:        deps.Refresher,
+		Capacity:         deps.Capacity,
+		CyberEligibility: deps.CyberEligibility,
 	}
 	var handler proxy.CodexNativeHTTPRoutingHandler
 	var err error
@@ -201,6 +205,7 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 		DefaultAccountKey: deps.DefaultAccountKey,
 		PinnedAccountKey:  deps.PinnedAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
+		CyberEligibility:  deps.CyberEligibility,
 		DispatchPermits:   deps.DispatchPermits,
 		TurnReceipts:      deps.TurnReceipts,
 		TransportKind:     "websocket",

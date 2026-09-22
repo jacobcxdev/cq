@@ -27,6 +27,36 @@ func (recorder *sessionPolicyPermitRecorder) IssueAndConsume(_ context.Context, 
 	return CallerDispatchPermitV2{Digest: strings.Repeat("d", 64)}, nil
 }
 
+func TestSessionCyberPolicyOverridesBindingOnlyForCyberRequest(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	session := []byte("session")
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 7, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{
+			{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber"}},
+			{ID: testPoolIDB, Name: "Ordinary", Members: []codex.AccountKey{"ordinary"}},
+		},
+		SessionBindings: []SessionBindingV2{{SessionDigest: keyedSessionDigest(key, session), PoolID: testPoolIDB}},
+	}
+	resolver := NewSessionPolicyResolver(key, policy)
+	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"}
+	accounts := []codex.AccountKey{"ordinary", "cyber"}
+	cyber, err := enforceSessionCyberPolicy(resolver, caller, session, accounts, "", time.Now())
+	if err != nil || cyber.PoolID != testPoolIDA || !slices.Equal(cyber.Allowed, []codex.AccountKey{"cyber"}) {
+		t.Fatalf("Cyber request policy = %+v, error %v", cyber, err)
+	}
+	ordinary, err := enforceSessionPolicy(resolver, caller, session, accounts, "", time.Now())
+	if err != nil || ordinary.PoolID != testPoolIDB || !slices.Equal(ordinary.Allowed, []codex.AccountKey{"ordinary"}) {
+		t.Fatalf("ordinary request policy = %+v, error %v", ordinary, err)
+	}
+	policy.Pools = policy.Pools[1:]
+	resolver.Replace(policy)
+	unknown, err := enforceSessionCyberPolicy(resolver, caller, session, accounts, "", time.Now())
+	if err != nil || unknown.Status != PolicyDecisionUnbound || !slices.Equal(unknown.Allowed, []codex.AccountKey{"cyber", "ordinary"}) {
+		t.Fatalf("pre-discovery Cyber policy = %+v, error %v", unknown, err)
+	}
+}
+
 func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinuity(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
 	session := []byte("private-session")

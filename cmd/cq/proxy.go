@@ -1112,6 +1112,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
 	var codexLeaseInvalidator proxy.CodexLeaseInvalidator
 	var sessionPolicy *proxy.SessionPolicyResolver
+	var cyberEligibility *proxy.CyberEligibilityStore
 	var dispatchPermits proxy.CallerDispatchPermitAuthority
 	if codexContinuity != nil {
 		codexRoutes = codexContinuity.Coordinator
@@ -1120,7 +1121,19 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	if resilienceState != nil {
 		sessionPolicy = resilienceState.Routing.Resolver()
+		cyberEligibility = proxy.NewCyberEligibilityStore(resilienceState.Routing)
 		dispatchPermits = resilienceState.DispatchPermits
+		cyberDiscoveryDone := make(chan struct{})
+		go func() {
+			defer close(cyberDiscoveryDone)
+			defer func() {
+				if recover() != nil {
+					fmt.Fprintln(os.Stderr, "cq: Cyber pool discovery stopped after panic")
+				}
+			}()
+			runCyberPoolDiscovery(proxyCtx, newCodexRegistryControlAdapter(credentialControl), refreshClient, cfg.CodexUpstream, codexClientBuild, resilienceState.Routing, cyberEligibility, sessionPolicy)
+		}()
+		defer func() { proxyCancel(); <-cyberDiscoveryDone }()
 	}
 	codexTurnReceipts, err := proxy.NewCodexTurnReceiptStore(rand.Reader, time.Now)
 	if err != nil {
@@ -1138,6 +1151,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Executor:          codexAttemptExecutor,
 		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
+		CyberEligibility:  cyberEligibility,
 		DispatchPermits:   dispatchPermits,
 		TurnReceipts:      codexTurnReceipts,
 		Headroom:          proxy.NewCodexRequestHeadroomAdapter(headroom),
@@ -1160,6 +1174,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Executor:          codexWebSocketExecutor,
 		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
+		CyberEligibility:  cyberEligibility,
 		DispatchPermits:   dispatchPermits,
 		TurnReceipts:      codexTurnReceipts,
 		Upstream:          cfg.CodexUpstream,

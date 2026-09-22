@@ -192,6 +192,10 @@ func codexRegistryModelsRequest(ctx context.Context, authority codexRegistryCred
 			out.Header = make(http.Header)
 		}
 		out.Header.Set("Authorization", "Bearer "+material.AccessToken)
+		out.Header.Del("ChatGPT-Account-ID")
+		if material.AccountID != "" {
+			out.Header.Set("ChatGPT-Account-ID", material.AccountID)
+		}
 		closeCodexRegistryResponse(rejected)
 		rejected = nil
 		response, err := client.Do(out)

@@ -414,6 +414,42 @@ func TestCodexHTTPRequestSessionAdvancesAccountOnlyForExactHard429(t *testing.T)
 	}, "HTTP account failover")
 }
 
+func TestCodexHTTPRequestSessionRetriesExactCyber403WithoutExhaustingQuota(t *testing.T) {
+	first := codexHTTPSessionChoice("account-a")
+	second := codexHTTPSessionChoice("account-b")
+	plan := CodexFrozenDispatchPlan{status: CodexRoutePlanReady, accounts: []CodexFrozenDispatchAccount{
+		{choice: first, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)}},
+		{choice: second, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-b", "candidate-b", "revision-b", 1)}},
+	}}
+	frozen, encoded := newCodexHTTPSessionFrozenRequest(t, first)
+	rejected := &codexRejectedTrackingBody{reader: strings.NewReader(`{"error":{"type":"invalid_request_error","code":"access_program_not_enabled","param":"access_programs.cyber","message":"The requested Cyber access program is not authorized for this workspace."}}`)}
+	events := make([]string, 0, 8)
+	dispatcher := &codexHTTPSessionDispatcher{t: t, events: &events, wantBody: encoded, outcomes: []codexHTTPSessionOutcome{
+		{response: &http.Response{StatusCode: http.StatusForbidden, Body: rejected}},
+		{response: &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("accepted"))}},
+	}}
+	lifecycle := &codexHTTPSessionLifecycle{account: "account-a", slotAccounts: map[uint32]codex.AccountKey{1: "account-a", 2: "account-b"}, events: &events}
+	ledger := NewCodexCapacityLedger(nil, 0)
+	template, err := http.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&CodexHTTPRequestSession{Executor: dispatcher, Capacity: ledger}).Do(context.Background(), template, plan, frozen, lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Response.Body.Close()
+	if result.Response.StatusCode != http.StatusOK || result.Choice.AccountKey != "account-b" || dispatcher.calls != 2 || rejected.closes != 1 {
+		t.Fatalf("result = %#v, dispatches = %d, rejected closes = %d", result, dispatcher.calls, rejected.closes)
+	}
+	if got := ledger.Capacity("account-a", CapacityBucketBase); got.State == CapacityZero {
+		t.Fatalf("Cyber denial exhausted quota: %#v", got)
+	}
+	if want := []string{"mark", "send:candidate-a", "exhaust:2", "mark", "send:candidate-b", "admit"}; !slices.Equal(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
 func TestCodexHTTPRequestSessionPayloadDiagnosticsCaptureEveryProviderAttempt(t *testing.T) {
 	payloadPath := filepath.Join(t.TempDir(), "payloads.jsonl")
 	payloads, err := OpenPayloadWriter(payloadPath)
