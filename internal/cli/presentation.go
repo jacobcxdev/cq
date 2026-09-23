@@ -122,7 +122,7 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 	case "check_partial", "check_timeout", "auth_refresh_partial", "auth_interrupted", "account_timeout", "gemini_account_timeout", "account_activation_partial", "account_login_partial", "account_login_postcheck_partial", "account_removal_partial", "codex_reset_inventory_partial", "codex_reset_postcheck_partial", "codex_reset_recommendation_incomplete", "codex_reset_timeout", "models_refresh_partial", "trace_history_gap":
 		marker, role = "Warning", Attention
 	}
-	if primary.Code == "routing_timeout" && outcome.ConfirmedReceipt {
+	if (primary.Code == "routing_timeout" || primary.Code == "interrupted") && outcome.ConfirmedReceipt {
 		marker, role = "Warning", Attention
 	}
 	command := "cq"
@@ -168,7 +168,7 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 		out.WriteString(TerminalLine(options, 2, Span{Text: label}, Span{Text: diagnostic.Code, Role: Identity}))
 		out.WriteString(TerminalLine(options, 4, Span{Text: diagnostic.Message}))
 	}
-	if primary.Code == "routing_timeout" {
+	if primary.Code == "routing_timeout" || primary.Code == "interrupted" && outcome.ConfirmedReceipt {
 		if outcome.TerminalResult != "" {
 			out.WriteString(TerminalLine(options, 2, Span{Text: "Result: "}, Span{Text: outcome.TerminalResult, Role: Attention}))
 		}

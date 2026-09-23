@@ -29,9 +29,11 @@ var terminalRoutingFixtures = []terminalRoutingFixture{
 	{terminalFixtureRegistration{"cq claude proxy pin clear", "No pin configured", "stdout", "text/cq-claude-proxy-pin-clear/03-no-pin-configured.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin clear", "Failure", "stderr", "text/cq-claude-proxy-pin-clear/04-failure.txt"}, 1, "routing_io_failed", "Routing operation failed: cannot read routing configuration.", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin clear", "Timeout", "stderr", "text/cq-claude-proxy-pin-clear/05-timeout.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq claude proxy pin clear", "Timeout", "stdout", "text/cq-claude-proxy-pin-clear/06-timeout.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin set", "Success", "stdout", "text/cq-claude-proxy-pin-set/02-success.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin set", "Failure", "stderr", "text/cq-claude-proxy-pin-set/03-failure.txt"}, 3, "routing_account_not_found", "Account not found: sam@example.test.", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin set", "Timeout", "stderr", "text/cq-claude-proxy-pin-set/04-timeout.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq claude proxy pin set", "Timeout", "stdout", "text/cq-claude-proxy-pin-set/05-timeout.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin show", "Success", "stdout", "text/cq-claude-proxy-pin-show/02-success.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin show", "No pin configured", "stdout", "text/cq-claude-proxy-pin-show/03-no-pin-configured.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq claude proxy pin show", "Failure", "stderr", "text/cq-claude-proxy-pin-show/04-failure.txt"}, 1, "routing_io_failed", "Routing operation failed: cannot read routing configuration.", ""},
@@ -173,6 +175,10 @@ func TestTerminalRoutingFixtures(t *testing.T) {
 	}
 	seen := make(map[string]bool)
 	commands := make(map[string]bool)
+	companions := make(map[string]string)
+	for _, fixture := range terminalRoutingFixtures {
+		companions[fixture.Command+"/"+fixture.Scenario+"/"+fixture.Stream] = fixture.File
+	}
 	for _, fixture := range terminalRoutingFixtures {
 		commands[fixture.Command] = true
 		entry, ok := byFile[fixture.File]
@@ -206,7 +212,22 @@ func TestTerminalRoutingFixtures(t *testing.T) {
 					got, other = other, got
 				}
 				if other != "" {
-					t.Fatalf("unexpected other stream: %q", other)
+					stream := "stderr"
+					if fixture.Stream == "stderr" {
+						stream = "stdout"
+					}
+					companion := companions[fixture.Command+"/"+fixture.Scenario+"/"+stream]
+					if companion == "" {
+						t.Fatalf("unexpected other stream: %q", other)
+					}
+					if width >= 100 {
+						assertTerminalFixture(t, companion, other)
+					}
+					for _, line := range strings.Split(other, "\n") {
+						if ansi.StringWidth(line) > min(width, 100) {
+							t.Fatalf("other stream line exceeds %d cells: %q", width, line)
+						}
+					}
 				}
 				if width >= 100 {
 					assertTerminalFixture(t, fixture.File, got)
@@ -222,8 +243,8 @@ func TestTerminalRoutingFixtures(t *testing.T) {
 			})
 		}
 	}
-	if len(commands) != 29 || len(seen) != 111 {
-		t.Errorf("routing coverage: %d commands, %d fixtures; want 29 and 111", len(commands), len(seen))
+	if len(commands) != 29 || len(seen) != 113 {
+		t.Errorf("routing coverage: %d commands, %d fixtures; want 29 and 113", len(commands), len(seen))
 	}
 	for _, entry := range index.Fixtures {
 		if commands[entry.Command] && entry.Scenario != "Help" && !seen[entry.File] {
@@ -237,6 +258,15 @@ func routingFixtureOutcome(f terminalRoutingFixture) cli.Outcome {
 		out := cli.Outcome{ExitCode: f.Exit, Errors: []cli.Diagnostic{{Code: f.Code, Message: f.Message}}, TerminalResult: f.Result}
 		if f.Code == "routing_timeout" && strings.HasPrefix(f.Command, "cq claude proxy pin ") {
 			out.ConfirmedReceipt = true
+			action := strings.TrimPrefix(f.Command, "cq claude proxy pin ")
+			data := v2SelectionData{Provider: "claude", Kind: "pin", Configured: action == "set"}
+			if data.Configured {
+				account := "alex@example.test"
+				data.Account = &account
+			}
+			out.Terminal = func(o cli.TerminalOptions) string {
+				return terminalSelection(data, action, o) + routingLine(o, 2, 17, "Live application", routingAttention("unconfirmed"))
+			}
 		}
 		return out
 	}
@@ -369,6 +399,38 @@ func TestTerminalRoutingRolesAndColourGates(t *testing.T) {
 			t.Errorf("missing semantic role %q", styled)
 		}
 	}
+	status.Blocked = false
+	got = terminalReserve(status, "status", o)
+	for _, neutral := range []string{"\x1b[36myes\x1b[0m", "\x1b[36mnot excluded by reserve\x1b[0m"} {
+		if !strings.Contains(got, neutral) {
+			t.Errorf("missing neutral reserve state %q", neutral)
+		}
+	}
+	status.Enabled = false
+	if !strings.Contains(terminalReserve(status, "status", o), "\x1b[36mno\x1b[0m") {
+		t.Error("disabled reserve state is not neutral")
+	}
+	policy := routingFixturePolicy(terminalRoutingFixture{terminalFixtureRegistration: terminalFixtureRegistration{Command: "cq codex proxy policy show", Scenario: "Success · retained capability evidence"}})
+	policyText := terminalPolicy(policy, "policy", "show", false, o)
+	for _, identity := range []string{"\x1b[36m12\x1b[0m", "\x1b[36m18\x1b[0m", "\x1b[36m1\x1b[0m"} {
+		if !strings.Contains(policyText, identity) {
+			t.Errorf("missing cyan generation/schema %q", identity)
+		}
+	}
+	if !strings.Contains(policyText, "\x1b[1;34m10\x1b[0m") {
+		t.Error("pool capacity value lost quantitative role")
+	}
+	if !strings.Contains(terminalLease(proxy.CodexLeaseInvalidationResult{JournalGeneration: 42}, o), "\x1b[36m42\x1b[0m") {
+		t.Error("journal generation is not cyan")
+	}
+	if strings.Count(ansi.Strip(policyText), "Expires ") != 2 || !strings.Contains(policyText, "Expires \x1b[35m") || strings.Contains(policyText, "Expires \x1b[33munknown\x1b[0m") {
+		t.Error("present expiry did not render as a time")
+	}
+	policy.CapabilityRoutingEvidence[0].ExpiresAt = nil
+	policyText = terminalPolicy(policy, "policy", "show", false, o)
+	if !strings.Contains(policyText, "Expires \x1b[33munknown\x1b[0m") || strings.Count(ansi.Strip(policyText), "Expires ") != 2 {
+		t.Error("missing expiry did not render unknown exactly once alongside delegation expiry")
+	}
 	for _, disabled := range []cli.TerminalOptions{{Width: 100, Now: o.Now, Location: o.Location}, {Width: 0, Colour: true, Now: o.Now, Location: o.Location}} {
 		if strings.Contains(terminalReserve(status, "status", disabled), "\x1b[") {
 			t.Fatal("colour leaked when terminal colour is disabled")
@@ -392,8 +454,12 @@ func TestTerminalRoutingRolesAndColourGates(t *testing.T) {
 		exit := cli.Run(context.Background(), args, session, func(string) (cli.Handler, bool) {
 			return func(context.Context, cli.Invocation, *cli.Session) cli.Outcome { return tc.outcome }, true
 		})
-		if exit != 7 || stdout.Len() != 0 || !strings.Contains(ansi.Strip(stderr.String()), tc.marker) || !strings.Contains(ansi.Strip(stderr.String()), tc.result) {
+		wantStdout := strings.HasPrefix(tc.path, "claude")
+		if exit != 7 || (stdout.Len() != 0) != wantStdout || !strings.Contains(ansi.Strip(stderr.String()), tc.marker) || !strings.Contains(ansi.Strip(stderr.String()), tc.result) {
 			t.Fatalf("%s: exit=%d stdout=%q stderr=%q", tc.path, exit, &stdout, &stderr)
+		}
+		if wantStdout && (!strings.Contains(ansi.Strip(stdout.String()), "Account          alex@example.test") || !strings.Contains(ansi.Strip(stdout.String()), "Live application unconfirmed")) {
+			t.Fatalf("known Claude save receipt lost: %q", &stdout)
 		}
 	}
 }

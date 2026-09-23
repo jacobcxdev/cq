@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -312,6 +313,71 @@ func TestCLIV2SelectionExactHumanAndTimeout(t *testing.T) {
 	})
 	if out.ExitCode != 7 || out.Errors[0].Code != "routing_timeout" || beforeSave {
 		t.Fatalf("timeout outcome=%+v saved=%t", out, beforeSave)
+	}
+}
+
+func TestCLIV2SelectionPostSaveReceipt(t *testing.T) {
+	for _, action := range []string{"set", "clear"} {
+		for _, stop := range []string{"timeout", "interrupted"} {
+			t.Run(action+"/"+stop, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				if stop == "timeout" {
+					ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+				}
+				defer cancel()
+				cfg := &proxy.Config{PinnedClaudeAccount: "old@example.test"}
+				var saved string
+				deps := v2SelectionDependencies{
+					LoadConfig: func() (*proxy.Config, error) { return cfg, nil },
+					SaveConfig: func(savedCfg *proxy.Config) error {
+						saved = savedCfg.PinnedClaudeAccount
+						if stop == "timeout" {
+							<-ctx.Done()
+						} else {
+							cancel()
+						}
+						return nil
+					},
+					Claude: func(context.Context) ([]keyring.ClaudeAccountInspection, error) {
+						return []keyring.ClaudeAccountInspection{{Account: keyring.ClaudeOAuth{Email: "alex@example.test"}}}, nil
+					},
+				}
+				args := []string{"claude", "proxy", "pin", action, "--timeout", "1s"}
+				wantAccount := "none"
+				if action == "set" {
+					args = append(args, "alex@example.test")
+					wantAccount = "alex@example.test"
+				}
+				var stdout, stderr bytes.Buffer
+				o := terminalFixtureOptions(100)
+				var outcome cli.Outcome
+				exit := cli.Run(ctx, args, &cli.Session{Out: &stdout, Err: &stderr, OutTerminal: o, ErrTerminal: o}, func(string) (cli.Handler, bool) {
+					return func(ctx context.Context, inv cli.Invocation, session *cli.Session) cli.Outcome {
+						outcome = handleV2SelectionWithDependencies(ctx, inv, session, deps)
+						return outcome
+					}, true
+				})
+				wantExit := 7
+				wantCode := "routing_timeout"
+				wantMarker := "Warning · Routing operation timed out"
+				if stop == "interrupted" {
+					wantExit, wantCode, wantMarker = 130, "interrupted", "Warning · Operation interrupted"
+				}
+				if exit != wantExit || !outcome.ConfirmedReceipt || len(outcome.Errors) != 1 || outcome.Errors[0].Code != wantCode || outcome.Human != "" || len(outcome.Data) != 0 {
+					t.Fatalf("exit=%d outcome=%+v", exit, outcome)
+				}
+				if saved != "" && action == "clear" || saved != "alex@example.test" && action == "set" {
+					t.Fatalf("saved selector=%q", saved)
+				}
+				plainOut, plainErr := ansi.Strip(stdout.String()), ansi.Strip(stderr.String())
+				if !strings.Contains(plainOut, "Account          "+wantAccount) || !strings.Contains(plainOut, "Live application unconfirmed") || !strings.Contains(plainErr, wantMarker) || !strings.Contains(plainErr, "Inspect saved state") {
+					t.Fatalf("stdout=%q stderr=%q", plainOut, plainErr)
+				}
+				if stop == "interrupted" && !strings.Contains(plainErr, "Result: completion unknown") {
+					t.Fatalf("interrupted completion status missing: %q", plainErr)
+				}
+			})
+		}
 	}
 }
 

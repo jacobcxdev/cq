@@ -160,6 +160,13 @@ func executeV2Selection(parent, ctx context.Context, inv cli.Invocation, deps v2
 	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
 		if intent.provider == "claude" && intent.action != "show" {
 			out.ConfirmedReceipt = true
+			if out.ExitCode == 130 {
+				out.TerminalResult = "completion unknown"
+			}
+			selection := v2SelectionOutcome(cfg, intent)
+			out.Terminal = func(o cli.TerminalOptions) string {
+				return selection.Terminal(o) + routingLine(o, 2, 17, "Live application", routingAttention("unconfirmed"))
+			}
 		}
 		return out
 	}

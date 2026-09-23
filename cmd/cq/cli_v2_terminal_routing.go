@@ -18,6 +18,9 @@ func routingIdentity(value string) cli.Span { return cli.Span{Text: value, Role:
 func routingQuantity(value uint64) cli.Span {
 	return cli.Span{Text: fmt.Sprint(value), Role: cli.Quantity}
 }
+func routingNumberIdentifier(value uint64) cli.Span {
+	return cli.Span{Text: fmt.Sprint(value), Role: cli.Identity}
+}
 func routingAttention(value string) cli.Span { return cli.Span{Text: value, Role: cli.Attention} }
 
 func terminalSelection(data v2SelectionData, action string, o cli.TerminalOptions) string {
@@ -106,7 +109,7 @@ func terminalPrime(enabled bool, overrides map[string]string, action string, o c
 func terminalLease(result proxy.CodexLeaseInvalidationResult, o cli.TerminalOptions) string {
 	return cli.TerminalLine(o, 0, cli.Span{Text: "Codex leases invalidated", Role: cli.Heading}) +
 		routingLine(o, 2, 20, "Invalidated leases", cli.TerminalCount(uint64(result.InvalidatedLeases))) +
-		routingLine(o, 2, 20, "Journal generation", routingQuantity(result.JournalGeneration)) +
+		routingLine(o, 2, 20, "Journal generation", routingNumberIdentifier(result.JournalGeneration)) +
 		"\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Active authority and required account continuity remain intact."})
 }
 
@@ -194,11 +197,11 @@ func terminalReserve(data v2ReserveStatus, action string, o cli.TerminalOptions)
 		protected = cli.TerminalPercent(*data.Percent, true)
 		protected.Text += " of full window"
 	}
-	enabled := cli.Span{Text: "no"}
+	enabled := routingIdentity("no")
 	if data.Enabled {
-		enabled = cli.Span{Text: "yes", Role: cli.Confirmed}
+		enabled = routingIdentity("yes")
 	}
-	routing := cli.Span{Text: "not excluded by reserve", Role: cli.Confirmed}
+	routing := routingIdentity("not excluded by reserve")
 	if data.Blocked {
 		routing = routingAttention("excluded by reserve")
 	}
@@ -252,10 +255,10 @@ func terminalPolicy(data v2PolicyDocument, kind, action string, offline bool, o 
 		}
 	}
 	text := cli.TerminalLine(o, 0, cli.Span{Text: title, Role: cli.Heading})
-	text += routingLine(o, 2, 22, "Authority generation", routingQuantity(data.AuthorityGeneration))
-	text += routingLine(o, 2, 22, "Routing generation", routingQuantity(data.RoutingGeneration))
-	text += routingLine(o, 2, 22, "Effective generation", routingQuantity(data.EffectiveGeneration))
-	text += routingLine(o, 2, 22, "Schema", routingQuantity(uint64(data.SchemaVersion)))
+	text += routingLine(o, 2, 22, "Authority generation", routingNumberIdentifier(data.AuthorityGeneration))
+	text += routingLine(o, 2, 22, "Routing generation", routingNumberIdentifier(data.RoutingGeneration))
+	text += routingLine(o, 2, 22, "Effective generation", routingNumberIdentifier(data.EffectiveGeneration))
+	text += routingLine(o, 2, 22, "Schema", routingNumberIdentifier(uint64(data.SchemaVersion)))
 	text += "\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Pools", Role: cli.Heading})
 	if len(data.Pools) == 0 {
 		text += cli.TerminalLine(o, 2, cli.Span{Text: "none", Role: cli.Secondary})
@@ -311,7 +314,7 @@ func terminalPolicy(data v2PolicyDocument, kind, action string, offline bool, o 
 	} else {
 		text += cli.TerminalLine(o, 2, cli.Span{Text: "Predicates", Role: cli.Heading})
 		for _, predicate := range data.CapabilityPredicates {
-			text += cli.TerminalLine(o, 4, cli.Span{Text: "Schema "}, routingQuantity(uint64(predicate.SchemaVersion)), cli.Span{Text: "; capability "}, routingIdentity(predicate.Capability))
+			text += cli.TerminalLine(o, 4, cli.Span{Text: "Schema "}, routingNumberIdentifier(uint64(predicate.SchemaVersion)), cli.Span{Text: "; capability "}, routingIdentity(predicate.Capability))
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Product surface "}, routingIdentity(predicate.ProductSurface), cli.Span{Text: "; access path "}, routingIdentity(predicate.AccessPath), cli.Span{Text: "; authentication mode "}, routingIdentity(predicate.AuthMode))
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Requested model "}, routingIdentity(predicate.RequestedModel), cli.Span{Text: "; effective model "}, routingIdentity(predicate.EffectiveModel))
 		}
@@ -321,7 +324,7 @@ func terminalPolicy(data v2PolicyDocument, kind, action string, offline bool, o 
 	} else {
 		text += cli.TerminalLine(o, 2, cli.Span{Text: "Evidence", Role: cli.Heading})
 		for _, evidence := range data.CapabilityRoutingEvidence {
-			text += cli.TerminalLine(o, 4, cli.Span{Text: "Schema "}, routingQuantity(uint64(evidence.SchemaVersion)), cli.Span{Text: "; account "}, routingIdentity(string(evidence.AccountKey)))
+			text += cli.TerminalLine(o, 4, cli.Span{Text: "Schema "}, routingNumberIdentifier(uint64(evidence.SchemaVersion)), cli.Span{Text: "; account "}, routingIdentity(string(evidence.AccountKey)))
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Account HMAC "}, routingIdentity(evidence.AccountKeyHMAC))
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Workspace "}, routingIdentity(evidence.Workspace))
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Capability "}, routingIdentity(evidence.Capability), cli.Span{Text: "; product surface "}, routingIdentity(evidence.ProductSurface))
@@ -339,8 +342,10 @@ func terminalPolicy(data v2PolicyDocument, kind, action string, offline bool, o 
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Observed "}, routingEvidenceTime(evidence.ObservedAt, o))
 			if evidence.ExpiresAt != nil {
 				text += cli.TerminalLine(o, 4, cli.Span{Text: "Expires "}, cli.TerminalTime(*evidence.ExpiresAt, o, true))
+			} else {
+				text += cli.TerminalLine(o, 4, cli.Span{Text: "Expires "}, routingAttention("unknown"))
 			}
-			text += cli.TerminalLine(o, 4, cli.Span{Text: "Routing generation "}, routingQuantity(evidence.RoutingGeneration))
+			text += cli.TerminalLine(o, 4, cli.Span{Text: "Routing generation "}, routingNumberIdentifier(evidence.RoutingGeneration))
 		}
 	}
 	text += "\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Delegations", Role: cli.Heading})

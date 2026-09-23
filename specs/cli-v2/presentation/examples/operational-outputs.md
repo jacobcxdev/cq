@@ -1325,7 +1325,7 @@ Exit: 1.
 
 ### Timeout
 
-Invocation: `cq claude proxy pin clear --timeout 1ms`. Stdout: empty.
+Invocation: `cq claude proxy pin clear --timeout 1ms`. The save returned before the deadline, then observation timed out.
 
 Stderr:
 
@@ -1338,7 +1338,17 @@ Inspect saved state
   cq claude proxy pin show
 ```
 
-Exit: 7. No receipt was returned. Do not claim that the old pin remains in place.
+Stdout:
+
+```text
+Claude proxy pin · Not configured
+  Account          none
+  Application      Hot reload · asynchronous
+  Restart required No
+  Live application unconfirmed
+```
+
+Exit: 7. The saved selector is known; live application remains unconfirmed.
 
 
 
@@ -1377,7 +1387,7 @@ Exit: 3.
 
 ### Timeout
 
-Invocation: `cq claude proxy pin set alex@example.test --timeout 1ms`. Stdout: empty.
+Invocation: `cq claude proxy pin set alex@example.test --timeout 1ms`. The save returned before the deadline, then observation timed out.
 
 Stderr:
 
@@ -1390,7 +1400,17 @@ Inspect saved state
   cq claude proxy pin show
 ```
 
-Exit: 7. No receipt was returned. Do not claim that the old pin remains in place.
+Stdout:
+
+```text
+Claude proxy pin · Configured
+  Account          alex@example.test
+  Application      Hot reload · asynchronous
+  Restart required No
+  Live application unconfirmed
+```
+
+Exit: 7. The saved selector is known; live application remains unconfirmed.
 
 
 
