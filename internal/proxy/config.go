@@ -220,9 +220,12 @@ func (c *Config) setDefaults() {
 	}
 }
 
+// ErrLocalTokenRequired identifies absent caller authority without exposing credentials.
+var ErrLocalTokenRequired = errors.New("local_token is required")
+
 func (c *Config) validate() error {
 	if c.LocalToken == "" {
-		return fmt.Errorf("local_token is required")
+		return ErrLocalTokenRequired
 	}
 	for _, upstream := range []struct{ name, value string }{{"claude_upstream", c.ClaudeUpstream}, {"codex_upstream", c.CodexUpstream}} {
 		u, err := url.Parse(upstream.value)

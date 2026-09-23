@@ -53,9 +53,38 @@ func runProxyLeasesWithDependencies(ctx context.Context, args []string, output i
 			return errors.New("proxy leases: invalid port")
 		}
 	}
-	cfg, err := deps.LoadConfig()
+	result, err := requestProxyLeaseInvalidation(ctx, port, deps)
 	if err != nil {
 		return err
+	}
+	return json.NewEncoder(output).Encode(result)
+}
+
+type proxyLeaseError struct {
+	kind   string
+	status int
+	code   string
+}
+
+func (e *proxyLeaseError) Error() string { return "proxy lease invalidation failed" }
+
+func requestProxyLeaseInvalidation(ctx context.Context, port int, deps proxyLeaseDependencies) (proxy.CodexLeaseInvalidationResult, error) {
+	var zero proxy.CodexLeaseInvalidationResult
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	cfg, err := deps.LoadConfig()
+	if ctx.Err() != nil {
+		return zero, ctx.Err()
+	}
+	if errors.Is(err, proxy.ErrLocalTokenRequired) {
+		return zero, &proxyLeaseError{kind: "auth"}
+	}
+	if err != nil || cfg == nil {
+		return zero, &proxyLeaseError{kind: "io"}
+	}
+	if cfg.LocalToken == "" {
+		return zero, &proxyLeaseError{kind: "auth"}
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -65,33 +94,38 @@ func runProxyLeasesWithDependencies(ctx context.Context, args []string, output i
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimeCodexLeaseInvalidationPath), http.NoBody)
 	if err != nil {
-		return err
+		return zero, &proxyLeaseError{kind: "io"}
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	response, err := deps.Doer.Do(request)
 	if err != nil {
-		return err
+		return zero, &proxyLeaseError{kind: "control"}
 	}
-	if response == nil || response.Body == nil {
-		return errors.New("proxy lease invalidation response unavailable")
+	if response == nil {
+		return zero, &proxyLeaseError{kind: "control"}
 	}
-	defer response.Body.Close()
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+	// Classify the status and allowlisted receipt before touching an unused body.
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = httputil.ReadBody(response.Body)
-		return fmt.Errorf("proxy lease invalidation failed: HTTP %d", response.StatusCode)
+		return zero, &proxyLeaseError{status: response.StatusCode, code: response.Header.Get(proxy.CodexLeaseErrorHeader)}
+	}
+	if response.Body == nil {
+		return zero, &proxyLeaseError{kind: "io"}
 	}
 	body, err := httputil.ReadBody(response.Body)
 	if err != nil {
-		return err
+		return zero, &proxyLeaseError{kind: "io"}
 	}
-	var result proxy.CodexLeaseInvalidationResult
+	var result struct {
+		InvalidatedLeases *int    `json:"invalidated_leases"`
+		JournalGeneration *uint64 `json:"journal_generation"`
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
-		return errors.New("proxy lease invalidation response invalid")
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.InvalidatedLeases == nil || result.JournalGeneration == nil || *result.InvalidatedLeases < 0 {
+		return zero, &proxyLeaseError{kind: "io"}
 	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("proxy lease invalidation response invalid")
-	}
-	return json.NewEncoder(output).Encode(result)
+	return proxy.CodexLeaseInvalidationResult{InvalidatedLeases: *result.InvalidatedLeases, JournalGeneration: *result.JournalGeneration}, nil
 }

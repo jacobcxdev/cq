@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
@@ -60,7 +61,15 @@ type proxyTraceRecord struct {
 	Raw            json.RawMessage `json:"-"`
 }
 
+type proxyTraceHistoryGap struct{ detail string }
+
+func (e *proxyTraceHistoryGap) Error() string { return e.detail }
+
+type proxyTraceEmitter func(proxyTraceRecord) error
+
 type proxyTraceFilter struct {
+	accept  func(proxyTraceRecord) bool
+	ctx     context.Context
 	traceID string
 	session map[string]struct{}
 	since   time.Time
@@ -139,7 +148,12 @@ func runProxyTraceWith(args []string, output io.Writer, deps proxyTraceDependenc
 		records = records[len(records)-options.tail:]
 	}
 	for _, record := range records {
-		writeProxyTraceRecord(output, record, options.json)
+		if err := writeProxyTraceRecord(output, record, options.json); err != nil {
+			if follower != nil {
+				_ = follower.Close()
+			}
+			return err
+		}
 	}
 	if !options.follow {
 		return nil
@@ -203,6 +217,9 @@ func parseProxyTraceOptions(args []string) (proxyTraceOptions, error) {
 func readProxyTraceRecords(path string, filter proxyTraceFilter) ([]proxyTraceRecord, error) {
 	var records []proxyTraceRecord
 	for _, candidate := range proxy.DiagnosticsLogPaths(path) {
+		if err := filter.contextError(); err != nil {
+			return nil, err
+		}
 		file, err := os.Open(candidate)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -210,7 +227,7 @@ func readProxyTraceRecords(path string, filter proxyTraceFilter) ([]proxyTraceRe
 		if err != nil {
 			return nil, fmt.Errorf("open diagnostics log: %w", err)
 		}
-		read, readErr := readProxyTraceStream(file, filter)
+		read, readErr := readProxyTraceStream(proxyTraceReader{file, filter.ctx}, filter)
 		closeErr := file.Close()
 		if readErr != nil || closeErr != nil {
 			return nil, errors.Join(readErr, closeErr)
@@ -239,7 +256,7 @@ func readProxyTraceRecordsForFollowWithHook(path string, filter proxyTraceFilter
 	}
 	if anchor != nil && proxyTraceFileIndex(files, anchor.info) < 0 {
 		closeErr := errors.Join(closeProxyTraceFiles(files), closeProxyTraceFile(anchor))
-		return nil, nil, errors.Join(errors.New("diagnostics log rotated beyond retained history while checkpointing"), closeErr)
+		return nil, nil, errors.Join(&proxyTraceHistoryGap{"diagnostics log rotated beyond retained history while checkpointing"}, closeErr)
 	}
 	if err := closeProxyTraceFile(anchor); err != nil {
 		_ = closeProxyTraceFiles(files)
@@ -248,7 +265,7 @@ func readProxyTraceRecordsForFollowWithHook(path string, filter proxyTraceFilter
 	follower := &proxyTraceFollower{}
 	var records []proxyTraceRecord
 	for index, opened := range files {
-		data, readErr := io.ReadAll(opened.file)
+		data, readErr := io.ReadAll(proxyTraceReader{opened.file, filter.ctx})
 		if readErr != nil {
 			_ = closeProxyTraceFiles(files[index:])
 			return nil, nil, readErr
@@ -258,7 +275,7 @@ func readProxyTraceRecordsForFollowWithHook(path string, filter proxyTraceFilter
 		if index != len(files)-1 {
 			if len(pending) != 0 {
 				_ = closeProxyTraceFiles(files[index:])
-				return nil, nil, fmt.Errorf("rotated diagnostics log %q ends with incomplete record", opened.path)
+				return nil, nil, &proxyTraceHistoryGap{fmt.Sprintf("rotated diagnostics log %q ends with incomplete record", opened.path)}
 			}
 			if err := opened.file.Close(); err != nil {
 				_ = closeProxyTraceFiles(files[index+1:])
@@ -358,6 +375,9 @@ func readProxyTraceStream(reader io.Reader, filter proxyTraceFilter) ([]proxyTra
 	scanner.Buffer(make([]byte, 64<<10), 128<<20)
 	var records []proxyTraceRecord
 	for scanner.Scan() {
+		if err := filter.contextError(); err != nil {
+			return nil, err
+		}
 		record, ok := parseProxyTraceRecord(scanner.Bytes(), filter)
 		if ok {
 			records = append(records, record)
@@ -371,6 +391,9 @@ func readProxyTraceStream(reader io.Reader, filter proxyTraceFilter) ([]proxyTra
 
 func parseProxyTraceRecord(raw []byte, filter proxyTraceFilter) (proxyTraceRecord, bool) {
 	var record proxyTraceRecord
+	if filter.contextError() != nil {
+		return record, false
+	}
 	if json.Unmarshal(raw, &record) != nil || record.TraceID == "" {
 		return record, false
 	}
@@ -395,13 +418,20 @@ func parseProxyTraceRecord(raw []byte, filter proxyTraceFilter) (proxyTraceRecor
 		return record, false
 	}
 	record.Raw = append(json.RawMessage(nil), raw...)
+	if filter.accept != nil && !filter.accept(record) {
+		return record, false
+	}
 	return record, true
 }
 
-func writeProxyTraceRecord(output io.Writer, record proxyTraceRecord, jsonOutput bool) {
+func writeProxyTraceRecord(output io.Writer, record proxyTraceRecord, jsonOutput bool) error {
 	if jsonOutput {
-		_, _ = output.Write(append(record.Raw, '\n'))
-		return
+		data := append(append([]byte(nil), record.Raw...), '\n')
+		n, err := output.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		return err
 	}
 	phase := record.Phase
 	if phase == "" {
@@ -440,22 +470,37 @@ func writeProxyTraceRecord(output io.Writer, record proxyTraceRecord, jsonOutput
 	if record.Reason != "" {
 		parts = append(parts, "reason="+record.Reason)
 	}
-	_, _ = fmt.Fprintln(output, strings.Join(parts, " "))
+	for i := range parts {
+		parts[i] = cli.HumanValue(parts[i])
+	}
+	data := strings.Join(parts, " ") + "\n"
+	n, err := io.WriteString(output, data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	return err
 }
 
 func followProxyTrace(ctx context.Context, path string, filter proxyTraceFilter, output io.Writer, jsonOutput bool, follower *proxyTraceFollower) error {
+	err := followProxyTraceWithEmitter(ctx, path, filter, func(record proxyTraceRecord) error { return writeProxyTraceRecord(output, record, jsonOutput) }, follower)
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+func followProxyTraceWithEmitter(ctx context.Context, path string, filter proxyTraceFilter, emit proxyTraceEmitter, follower *proxyTraceFollower) (err error) {
 	if follower == nil {
 		follower = &proxyTraceFollower{}
 	}
-	defer follower.Close()
+	defer func() { err = errors.Join(err, follower.Close()) }()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		case <-ticker.C:
-			if err := follower.ReadAvailable(path, filter, output, jsonOutput); err != nil {
+			if err := follower.readAvailableWithEmitter(path, filter, emit, nil); err != nil {
 				return err
 			}
 		}
@@ -467,13 +512,19 @@ func (follower *proxyTraceFollower) ReadAvailable(path string, filter proxyTrace
 }
 
 func (follower *proxyTraceFollower) readAvailableWithHook(path string, filter proxyTraceFilter, output io.Writer, jsonOutput bool, afterBridgeAttached func()) error {
+	return follower.readAvailableWithEmitter(path, filter, func(record proxyTraceRecord) error { return writeProxyTraceRecord(output, record, jsonOutput) }, afterBridgeAttached)
+}
+func (follower *proxyTraceFollower) readAvailableWithEmitter(path string, filter proxyTraceFilter, emit proxyTraceEmitter, afterBridgeAttached func()) error {
 	if follower.file == nil {
 		records, attached, err := readProxyTraceRecordsForFollow(path, filter)
 		if err != nil {
 			return err
 		}
 		for _, record := range records {
-			writeProxyTraceRecord(output, record, jsonOutput)
+			if err := emit(record); err != nil {
+				_ = attached.Close()
+				return err
+			}
 		}
 		*follower = *attached
 		return nil
@@ -496,7 +547,7 @@ func (follower *proxyTraceFollower) readAvailableWithHook(path string, filter pr
 			}
 			follower.pending = nil
 		}
-		return follower.readOpen(filter, output, jsonOutput)
+		return follower.readOpen(filter, emit)
 	}
 	files, err := openProxyTraceFiles(path)
 	if err != nil {
@@ -505,18 +556,18 @@ func (follower *proxyTraceFollower) readAvailableWithHook(path string, filter pr
 	previousIndex := proxyTraceFileIndex(files, follower.info)
 	if previousIndex < 0 {
 		_ = closeProxyTraceFiles(files)
-		return errors.New("diagnostics log rotated beyond retained history while following")
+		return &proxyTraceHistoryGap{"diagnostics log rotated beyond retained history while following"}
 	}
 	if afterBridgeAttached != nil {
 		afterBridgeAttached()
 	}
-	if err := follower.readOpen(filter, output, jsonOutput); err != nil {
+	if err := follower.readOpen(filter, emit); err != nil {
 		_ = closeProxyTraceFiles(files)
 		return err
 	}
 	if len(follower.pending) != 0 {
 		_ = closeProxyTraceFiles(files)
-		return errors.New("diagnostics log rotated with incomplete record")
+		return &proxyTraceHistoryGap{"diagnostics log rotated with incomplete record"}
 	}
 	if err := closeProxyTraceFiles(files[:previousIndex+1]); err != nil {
 		_ = closeProxyTraceFiles(files[previousIndex+1:])
@@ -531,16 +582,20 @@ func (follower *proxyTraceFollower) readAvailableWithHook(path string, filter pr
 		return err
 	}
 	for index, successor := range successors {
-		data, readErr := io.ReadAll(successor.file)
+		data, readErr := io.ReadAll(proxyTraceReader{successor.file, filter.ctx})
 		if readErr != nil {
 			_ = closeProxyTraceFiles(successors[index:])
 			return readErr
 		}
-		pending := writeProxyTraceData(data, nil, filter, output, jsonOutput)
+		pending, emitErr := writeProxyTraceData(data, nil, filter, emit)
+		if emitErr != nil {
+			_ = closeProxyTraceFiles(successors[index:])
+			return emitErr
+		}
 		if index != len(successors)-1 {
 			if len(pending) != 0 {
 				_ = closeProxyTraceFiles(successors[index:])
-				return fmt.Errorf("rotated diagnostics log %q ends with incomplete record", successor.path)
+				return &proxyTraceHistoryGap{fmt.Sprintf("rotated diagnostics log %q ends with incomplete record", successor.path)}
 			}
 			if err := successor.file.Close(); err != nil {
 				_ = closeProxyTraceFiles(successors[index+1:])
@@ -554,13 +609,13 @@ func (follower *proxyTraceFollower) readAvailableWithHook(path string, filter pr
 	}
 	return nil
 }
-func (follower *proxyTraceFollower) readOpen(filter proxyTraceFilter, output io.Writer, jsonOutput bool) error {
-	data, err := io.ReadAll(follower.file)
+func (follower *proxyTraceFollower) readOpen(filter proxyTraceFilter, emit proxyTraceEmitter) error {
+	data, err := io.ReadAll(proxyTraceReader{follower.file, filter.ctx})
 	if err != nil {
 		return err
 	}
-	follower.pending = writeProxyTraceData(data, follower.pending, filter, output, jsonOutput)
-	return nil
+	follower.pending, err = writeProxyTraceData(data, follower.pending, filter, emit)
+	return err
 }
 
 func (follower *proxyTraceFollower) Close() error {
@@ -574,14 +629,35 @@ func (follower *proxyTraceFollower) Close() error {
 	return err
 }
 
-func writeProxyTraceData(data, pending []byte, filter proxyTraceFilter, output io.Writer, jsonOutput bool) []byte {
+func writeProxyTraceData(data, pending []byte, filter proxyTraceFilter, emit proxyTraceEmitter) ([]byte, error) {
 	data = append(pending, data...)
 	lines := bytes.Split(data, []byte{'\n'})
 	pending = append(pending[:0], lines[len(lines)-1]...)
 	for _, line := range lines[:len(lines)-1] {
 		if record, ok := parseProxyTraceRecord(line, filter); ok {
-			writeProxyTraceRecord(output, record, jsonOutput)
+			if err := emit(record); err != nil {
+				return pending, err
+			}
 		}
 	}
-	return pending
+	return pending, nil
+}
+
+// Cancellation is checked between file reads; ownership stays in the caller.
+type proxyTraceReader struct {
+	io.Reader
+	ctx context.Context
+}
+
+func (r proxyTraceReader) Read(p []byte) (int, error) {
+	if r.ctx != nil && r.ctx.Err() != nil {
+		return 0, r.ctx.Err()
+	}
+	return r.Reader.Read(p)
+}
+func (f proxyTraceFilter) contextError() error {
+	if f.ctx != nil {
+		return f.ctx.Err()
+	}
+	return nil
 }

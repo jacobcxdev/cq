@@ -534,3 +534,12 @@ func TestConfigDiagnosticsLogPersisted(t *testing.T) {
 		t.Fatalf("loaded DiagnosticsLog = %q, want %q", cfg.DiagnosticsLog, path)
 	}
 }
+
+func TestProxyLeasesMissingLocalTokenHasTypedConfigError(t *testing.T) {
+	cfg := &Config{}
+	cfg.setDefaults()
+	err := cfg.validate()
+	if !errors.Is(err, ErrLocalTokenRequired) || err.Error() != "local_token is required" {
+		t.Fatalf("missing token error=%v", err)
+	}
+}

@@ -43,6 +43,10 @@ func TestCodexLeaseAffinityInvalidationPreservesActiveRequestAndSurvivesRestart(
 	if result.InvalidatedLeases != 1 || result.JournalGeneration <= before.JournalGeneration {
 		t.Fatalf("invalidation result = %#v, previous generation %d", result, before.JournalGeneration)
 	}
+	repeated, err := coordinator.InvalidateTaskAffinities(context.Background())
+	if err != nil || repeated.InvalidatedLeases != 0 || repeated.JournalGeneration != result.JournalGeneration+1 {
+		t.Fatalf("repeated invalidation = %#v, error = %v", repeated, err)
+	}
 	after, err := coordinator.LoadRouteSnapshot(context.Background(), next.Key, next.Accounts, next.Authority)
 	if err != nil {
 		t.Fatal(err)
