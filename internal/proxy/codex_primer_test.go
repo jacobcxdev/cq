@@ -512,3 +512,70 @@ func TestCodexPrimerAutomaticallyCorrectsDormantSharedModelCapability(t *testing
 		t.Fatalf("corrected lineage not verified: %+v", store.Records())
 	}
 }
+
+func TestCodexPrimerPrimesEarlyResetAfterVerifiedWindow(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restarted=%t", restarted), func(t *testing.T) {
+			now := time.Unix(20000, 0)
+			probe := 5 * time.Second
+			oldReset := now.Add(3 * 24 * time.Hour)
+			newReset := now.Add(7 * 24 * time.Hour)
+			usage := &queuedPrimerUsage{observations: []codex.UsageObservation{
+				primerObservation(newReset),
+				primerObservation(newReset.Add(probe)),
+				primerObservation(newReset.Add(probe)),
+				primerObservation(newReset.Add(probe)),
+			}}
+			requester := &recordingPrimerRequester{result: PrimerRequestResult{State: PrimerRequestAdmitted}}
+			primer, store := testPrimerScheduler(t, usage, requester)
+			oldTargets, unresolved := PlanCodexPrimerTargets(primerObservation(oldReset).Windows, nil, primer.Models())
+			if len(unresolved) != 0 || len(oldTargets) != 1 {
+				t.Fatalf("old targets = %+v, %+v", oldTargets, unresolved)
+			}
+			oldTarget := oldTargets[0]
+			if err := store.Observe("account-1", oldTarget); err != nil {
+				t.Fatal(err)
+			}
+			if claimed, err := store.ClaimDormant("account-1", oldTarget, now); err != nil || !claimed {
+				t.Fatalf("old claim = %t, %v", claimed, err)
+			}
+			if err := store.Mark("account-1", oldTarget, PrimerStateVerified, "dormant_epoch_stable"); err != nil {
+				t.Fatal(err)
+			}
+			if restarted {
+				var err error
+				primer.Store, err = OpenCodexPrimerStore(store.fs, store.path, store.keyPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := primer.RunOnce(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			if requester.calls != 0 {
+				t.Fatal("primed before confirming sliding reset")
+			}
+			if _, err := primer.RunOnce(context.Background(), now.Add(probe)); err != nil {
+				t.Fatal(err)
+			}
+			if requester.calls != 1 {
+				t.Fatalf("new dormant window requests = %d, want 1", requester.calls)
+			}
+			if _, err := primer.RunOnce(context.Background(), now.Add(2*probe)); err != nil {
+				t.Fatal(err)
+			}
+			if requester.calls != 1 {
+				t.Fatal("replayed newly primed window")
+			}
+			verified := 0
+			for _, record := range primer.Store.Records() {
+				if record.State == PrimerStateVerified {
+					verified++
+				}
+			}
+			if verified != 2 {
+				t.Fatalf("verified windows = %d, want old and new", verified)
+			}
+		})
+	}
+}

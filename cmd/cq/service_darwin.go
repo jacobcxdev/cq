@@ -232,12 +232,12 @@ func (platform *darwinServicePlatform) InstallProxy(ctx context.Context, executa
 		KeepAlive:         true,
 		StandardErrorPath: filepath.Join(platform.roots.Logs, "proxy.log"),
 	}
-	if selectedServiceContext(ctx) {
-		var err error
-		definition.EnvironmentVariables, err = darwinServiceEnvironment(platform.home, platform.roots, definition.Label == agentLabel)
-		if err != nil {
-			return err
-		}
+	// Package installers use the frozen machine argv too; every new definition
+	// must bind its roots and refresh completion contract for canonical status.
+	var err error
+	definition.EnvironmentVariables, err = darwinServiceEnvironment(platform.home, platform.roots, definition.Label == agentLabel)
+	if err != nil {
+		return err
 	}
 	return platform.reconcile(ctx, definition)
 }
@@ -257,12 +257,12 @@ func (platform *darwinServicePlatform) installRefresh(ctx context.Context, execu
 		StartInterval:     interval,
 		StandardErrorPath: filepath.Join(platform.roots.Logs, "refresh.log"),
 	}
-	if selectedServiceContext(ctx) {
-		var err error
-		definition.EnvironmentVariables, err = darwinServiceEnvironment(platform.home, platform.roots, definition.Label == agentLabel)
-		if err != nil {
-			return err
-		}
+	// Package installers use the frozen machine argv too; every new definition
+	// must bind its roots and refresh completion contract for canonical status.
+	var err error
+	definition.EnvironmentVariables, err = darwinServiceEnvironment(platform.home, platform.roots, definition.Label == agentLabel)
+	if err != nil {
+		return err
 	}
 	return platform.reconcile(ctx, definition)
 }

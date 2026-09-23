@@ -72,7 +72,7 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 func TestDarwinServiceEscapesLaunchAgentValues(t *testing.T) {
 	platform, _ := newDarwinServiceHarness(t)
 	platform.executable = filepath.Join(platform.home, "bin & tools", "cq")
-	platform.roots.Logs = filepath.Join(platform.home, "Logs & State")
+	platform.roots.Cache = filepath.Join(platform.home, "Cache & State", "cq")
 
 	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
 		t.Fatalf("InstallRefresh() error = %v", err)
@@ -81,7 +81,7 @@ func TestDarwinServiceEscapesLaunchAgentValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "bin & tools") || strings.Contains(string(data), "Logs & State") {
+	if strings.Contains(string(data), "bin & tools") || strings.Contains(string(data), "Cache & State") {
 		t.Fatalf("plist contains unescaped ampersand:\n%s", data)
 	}
 	definition := readDarwinDefinition(t, platform.plistPath(agentLabel))
@@ -254,7 +254,10 @@ func TestServiceStatusHealthyForAcceptsSymlinkedExecutable(t *testing.T) {
 func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinLaunchctl) {
 	t.Helper()
 	home := filepath.Join(t.TempDir(), "home")
-	logs := filepath.Join(home, "Library", "Logs", "cq")
+	roots, err := (userdirs.Resolver{UserHomeDir: func() (string, error) { return home, nil }}).Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
 	executable := filepath.Join(home, "bin", "cq")
 	if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
 		t.Fatal(err)
@@ -270,7 +273,7 @@ func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinL
 	}
 	platform := &darwinServicePlatform{
 		home:         home,
-		roots:        userdirs.Roots{Logs: logs},
+		roots:        roots,
 		uid:          501,
 		executable:   executable,
 		run:          runner.Run,
@@ -721,8 +724,8 @@ func TestDarwinServiceSelectedContextDoesNotLeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := readDarwinDefinition(t, p.plistPath(agentLabel))
-	if len(d.EnvironmentVariables) != 0 {
-		t.Fatal("legacy install gained selected environment")
+	if roots, err := darwinDefinitionRoots(d); err != nil || roots != p.roots || d.EnvironmentVariables["CQ_SERVICE_REFRESH"] != "1" {
+		t.Fatalf("legacy install omitted bound roots or refresh completion: %+v %v", d, err)
 	}
 	for _, call := range r.calls {
 		if call[0] == "enable" || call[0] == "print-disabled" {
@@ -1156,5 +1159,63 @@ func TestDarwinServiceFreshInstallExecutableAuthority(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDarwinHomebrewUpgradeBindsRootsForCanonicalStatus(t *testing.T) {
+	p, _ := newSelectedDarwinHarness(t)
+	// The released package had the same machine argv but no bound environment.
+	for _, label := range []string{proxyAgentLabel, agentLabel} {
+		d := readDarwinDefinition(t, p.plistPath(label))
+		d.EnvironmentVariables = nil
+		encoded, err := renderDarwinLaunchAgent(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := atomicWriteDarwinLaunchAgent(p.plistPath(label), encoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, _, store := newServiceHarness(t)
+	l.Platform, l.Executable = p, p.executable
+	// This is the lifecycle called by the frozen Homebrew installer ABI.
+	if err := l.Install(context.Background(), installstate.OwnerHomebrew); err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{proxyAgentLabel, agentLabel} {
+		d := readDarwinDefinition(t, p.plistPath(label))
+		roots, err := darwinDefinitionRoots(d)
+		if err != nil || roots != p.roots {
+			t.Fatalf("package roots for %s = %+v, %v", label, roots, err)
+		}
+		want := []string{p.executable, "proxy", "start"}
+		if label == agentLabel {
+			want = []string{p.executable, "refresh"}
+			if d.EnvironmentVariables["CQ_SERVICE_REFRESH"] != "1" {
+				t.Fatal("package refresh would not record completion")
+			}
+			if err := recordDarwinServiceRefresh(d, func() error { return nil }, time.Now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !reflect.DeepEqual(d.ProgramArguments, want) {
+			t.Fatalf("machine ABI changed: %v", d.ProgramArguments)
+		}
+	}
+	exit, data, code := runSelectedService(t, context.Background(), l, "service", "status", "--strict", "--json")
+	if exit != 0 {
+		t.Fatalf("status exit=%d code=%s data=%+v", exit, code, data)
+	}
+	for _, c := range data.Components {
+		if c.Owner != "package" || c.Healthy == nil || !*c.Healthy {
+			t.Fatalf("package status=%+v", c)
+		}
+		if c.ID == serviceRefresh && (c.LastRunAt == nil || c.LastExitCode == nil || *c.LastExitCode != 0) {
+			t.Fatalf("missing refresh completion: %+v", c)
+		}
+	}
+	record, err := store.Load()
+	if err != nil || record.Owner != installstate.OwnerHomebrew {
+		t.Fatalf("package ownership changed: %+v %v", record, err)
 	}
 }

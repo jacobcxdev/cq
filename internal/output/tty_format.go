@@ -49,24 +49,6 @@ func calcPace(periodS, resetEpoch, nowEpoch int64) int {
 	return int(math.Round(float64(100) - float64(elapsed)*100.0/float64(periodS)))
 }
 
-// calcBurndown estimates how many seconds of quota remain at the current
-// consumption rate. Returns (0, true) when pct is 0, and (0, false) when
-// the calculation is not meaningful.
-func calcBurndown(periodS, resetEpoch, nowEpoch int64, pct int) (int64, bool) {
-	if pct <= 0 {
-		return 0, true
-	}
-	elapsed := periodS - (resetEpoch - nowEpoch)
-	if elapsed <= 0 {
-		return 0, false
-	}
-	used := 100 - pct
-	if used <= 0 {
-		return 0, false
-	}
-	return int64(math.Round(float64(pct) * float64(elapsed) / float64(used))), true
-}
-
 // periodSeconds returns the period length in seconds for a window name.
 func periodSeconds(name quota.WindowName) int64 {
 	d := quota.PeriodFor(name)

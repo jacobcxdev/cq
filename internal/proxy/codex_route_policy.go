@@ -364,13 +364,13 @@ func codexRoutePolicyChoiceForAccount(frozen RouteChoice, accountKey codex.Accou
 }
 
 func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affinity codex.AccountKey, affinityModel string) bool {
+	if left.Value != right.Value {
+		return left.Value < right.Value
+	}
 	leftAffinity := affinity != "" && left.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(left.Choice.EffectiveModel, affinityModel))
 	rightAffinity := affinity != "" && right.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(right.Choice.EffectiveModel, affinityModel))
 	if leftAffinity != rightAffinity {
 		return leftAffinity
-	}
-	if left.Value != right.Value {
-		return left.Value < right.Value
 	}
 	leftView := codexRoutePolicyCapacity(left)
 	rightView := codexRoutePolicyCapacity(right)

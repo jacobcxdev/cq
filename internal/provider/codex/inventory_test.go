@@ -498,6 +498,9 @@ func TestInventoryFederatesFreshExternalCandidateIntoLogicalAccount(t *testing.T
 	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Candidates) != 2 {
 		t.Fatalf("inventory = %+v, want one logical account with two candidates", inventory)
 	}
+	if inventory.Accounts[0].Unstable {
+		t.Fatal("strong external identity did not stabilise logical account")
+	}
 	ordered := ResolveCandidate(inventory.Accounts[0], "", now)
 	if ordered[0].Source != SourceExternal || ordered[0].Revision != "fresh-revision" {
 		t.Fatalf("preferred candidate = %+v, want fresh external", ordered[0])
@@ -535,6 +538,9 @@ func TestInventoryKeepsCompleteExternalIdentityConflictsRoutable(t *testing.T) {
 	for _, logical := range inventory.Accounts {
 		if !logical.Routable {
 			t.Fatalf("complete strong identity was quarantined: %+v", logical.Identity)
+		}
+		if logical.Unstable {
+			t.Fatalf("complete strong external identity was marked unstable: %+v", logical.Identity)
 		}
 		if len(logical.Candidates) != 1 {
 			t.Fatalf("candidates = %+v, want one per strong identity", logical.Candidates)

@@ -22,6 +22,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Verify Homebrew lifecycle ownership and rollback
+        run: .github/scripts/test-homebrew-lifecycle.sh
+
       - name: Install current Codex client
         run: |
           brew update
@@ -135,8 +138,7 @@ jobs:
 
       - name: Format draft Homebrew Cask
         run: |
-          brew style --fix dist/homebrew/Casks/cq.rb
-          brew style dist/homebrew/Casks/cq.rb
+          .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb
 
       - name: Validate Homebrew Cask quarantine handling
         run: |
@@ -434,8 +436,7 @@ jobs:
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
-          brew style --fix "$cask"
-          brew style "$cask"
+          .github/scripts/format-homebrew-cask.sh "$cask"
           endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb"
           encoded="$(base64 <"$cask" | tr -d '\n')"
           current="$RUNNER_TEMP/cq-cask-current.json"
@@ -655,7 +656,7 @@ jobs:
             exit 0
           fi
           branch="cq-$version"
-          existing="$(gh pr list --repo microsoft/winget-pkgs --head "jacobcxdev:$branch" --state open --json url --jq '.[0].url // ""')"
+          existing="$(gh pr list --repo microsoft/winget-pkgs --head "$branch" --state open --json headRepositoryOwner,url --jq '[.[] | select(.headRepositoryOwner.login == "jacobcxdev")][0].url // ""')"
           if [[ -n "$existing" ]]; then
             echo "$existing"
             exit 0
@@ -681,7 +682,7 @@ jobs:
           fi
           git -C "$checkout" -c user.name=jacobcxdev -c user.email=41898282+jacobcxdev@users.noreply.github.com \
             commit -m "New version: jacobcxdev.cq version $version"
-          git -C "$checkout" push --force-with-lease origin "$branch"
+          git -C "$checkout" push origin "$branch"
           gh pr create \
             --repo microsoft/winget-pkgs \
             --base master \

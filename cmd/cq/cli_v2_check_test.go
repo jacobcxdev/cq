@@ -219,8 +219,9 @@ func (c *v2QuotaCache) Age(context.Context, string) (time.Duration, bool) {
 
 type v2QuotaHistory func(context.Context, map[string][]quota.Result, int64) (history.BurnRates, error)
 
-func (f v2QuotaHistory) UpdateAndGetBurnRates(ctx context.Context, rows map[string][]quota.Result, now int64) (history.BurnRates, error) {
-	return f(ctx, rows, now)
+func (f v2QuotaHistory) UpdateAndGetEstimates(ctx context.Context, rows map[string][]quota.Result, now int64) (history.BurnRates, history.RateEstimates, error) {
+	rates, err := f(ctx, rows, now)
+	return rates, nil, err
 }
 func TestCLIV2CheckFreshAndStaleEvidence(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
@@ -674,5 +675,51 @@ func TestCLIV2CheckRealCacheReadWarnings(t *testing.T) {
 				t.Fatal("raw cache path/body leaked")
 			}
 		})
+	}
+}
+
+func TestCLIV2CheckRecentForecastSurvivesObservedHistoryAndSubsets(t *testing.T) {
+	now := v2QuotaClock{}.Now().Unix()
+	store, err := history.New(fsutil.NewMemFS(), "/history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := func(pct int) []quota.Result {
+		var out []quota.Result
+		for _, account := range []string{"a", "b", "c"} {
+			out = append(out, quota.Result{AccountID: account, Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: pct, ResetAtUnix: now + 44*3600}}})
+		}
+		return out
+	}
+	for i, pct := range []int{24, 21} {
+		if _, _, err := store.UpdateAndGetEstimates(context.Background(), map[string][]quota.Result{"codex": rows(pct)}, now-int64(2-i)*1800); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := rows(18)
+	runner := quotaTestRunner(map[provider.ID][]quota.Result{provider.Codex: input})
+	runner.History = store
+	exit, encoded, diagnostics := quotaTestRun(t, context.Background(), []string{"check", "codex", "--fresh", "--json"}, v2CheckPrepared{Runner: runner, Enrich: func(_ context.Context, report *app.Report) error {
+		eligible := func(r quota.Result) bool { return r.AccountID != "c" }
+		app.AddProxyEligibility(report, provider.Codex, eligible)
+		app.AddProxyPool(report, provider.Codex, "work", eligible)
+		return nil
+	}})
+	if exit != 0 || diagnostics != "" || !strings.Contains(encoded, `"schema_version":2`) || !strings.Contains(encoded, `"command":"check"`) {
+		t.Fatalf("exit=%d out=%s err=%s", exit, encoded, diagnostics)
+	}
+	pr := quotaTestReport(t, encoded).Providers[0]
+	for _, aggregate := range []*app.AggregateReport{pr.Aggregate, pr.ProxyEligibility.Aggregate, pr.ProxyPools[0].Aggregate} {
+		if aggregate == nil || aggregate.Windows[quota.Window7Day].Burndown != 10800 {
+			t.Fatalf("recent forecast lost through v2: %+v", aggregate)
+		}
+	}
+	for _, row := range input {
+		if row.Windows[quota.Window7Day].RecentBurnRate != nil {
+			t.Fatal("provider input mutated")
+		}
+	}
+	if strings.Contains(encoded, "recent_burn") || strings.Contains(encoded, "RecentBurnRate") {
+		t.Fatal("internal forecast annotation leaked into schema")
 	}
 }

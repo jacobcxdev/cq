@@ -166,6 +166,7 @@ type codexTerminatingWebSocketHandler struct {
 	upstream       codexWSUpstreamDialer
 	refresher      codex.CredentialReferenceRefresher
 	capacity       *CodexCapacityLedger
+	cyber          *CyberEligibilityStore
 	upstreamURL    string
 	prewarmTimeout time.Duration
 	generation     atomic.Uint64
@@ -182,11 +183,16 @@ func NewCodexTerminatingWebSocketHandler(plans CodexNativeHTTPRequestPlanner, ex
 	if err != nil {
 		return nil, errors.New("Codex WebSocket upstream is invalid")
 	}
+	var cyber *CyberEligibilityStore
+	if provider, ok := plans.(interface{ CyberEligibilityStore() *CyberEligibilityStore }); ok {
+		cyber = provider.CyberEligibilityStore()
+	}
 	return &codexTerminatingWebSocketHandler{
 		plans:          plans,
 		upstream:       codexExplicitWSUpstreamDialer{executor: executor},
 		refresher:      refresher,
 		capacity:       capacity,
+		cyber:          cyber,
 		upstreamURL:    upstreamURL,
 		prewarmTimeout: codexWSPrewarmResponseTimeout,
 	}, nil
@@ -205,6 +211,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 		Upstream:             handler.upstream,
 		Refresher:            handler.refresher,
 		Capacity:             handler.capacity,
+		CyberEligibility:     handler.cyber,
 		UpstreamURL:          handler.upstreamURL,
 		Headers:              header,
 		DownstreamGeneration: generation,
@@ -254,6 +261,7 @@ type codexTerminatingWSBrokerConfig struct {
 	Upstream             codexWSUpstreamDialer
 	Refresher            codex.CredentialReferenceRefresher
 	Capacity             *CodexCapacityLedger
+	CyberEligibility     *CyberEligibilityStore
 	UpstreamURL          string
 	Headers              http.Header
 	AcceptedRevision     codex.Revision
@@ -751,6 +759,15 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 	if pending.prewarm {
 		return broker.servePrewarm(ctx, downstream, pending, active)
 	}
+	if pending != nil && !pending.portable && active != nil && active.account != "" {
+		if planner, ok := broker.config.Plans.(interface {
+			ShouldResetCyberOff(context.Context, CodexProtocolRequest, codex.AccountKey) bool
+		}); ok && planner.ShouldResetCyberOff(ctx, pending.request, active.account) {
+			closeCodexWSActiveUpstream(active)
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "resynchronise", Reason: "cyber_disabled", Retry: true})
+			return writeCodexWSAccountUnavailableClose(downstream)
+		}
+	}
 	input := CodexHTTPRequestPlanInput{
 		Encoded:          pending.encoded,
 		AcceptedRevision: broker.config.AcceptedRevision,
@@ -784,6 +801,11 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 		prepared, err = broker.config.Plans.Build(ctx, input)
 	}
 	if err != nil {
+		if broker.shouldResetCyberPlanFailure(err, pending, active) {
+			closeCodexWSActiveUpstream(active)
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "resynchronise", Reason: "cyber_access_unavailable", Retry: true})
+			return writeCodexWSAccountUnavailableClose(downstream)
+		}
 		return err
 	}
 	if prepared.Frozen != nil {
@@ -1113,7 +1135,10 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 			if dial.wrapped.HardUsageLimit {
 				broker.observeHardLimit(account, dial.response)
 			}
-			canRotate := accountIndex+1 < len(accounts) && (dial.wrapped.HardUsageLimit || dial.wrapped.AuthFailure)
+			if codexWSCyberAccessUnavailable(dial.wrapped) {
+				broker.markCyberIneligible(account.Choice().AccountKey, pending.request)
+			}
+			canRotate := accountIndex+1 < len(accounts) && (dial.wrapped.HardUsageLimit || dial.wrapped.AuthFailure || codexWSCyberAccessUnavailable(dial.wrapped))
 			if canRotate {
 				continue
 			}
@@ -1137,7 +1162,7 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 			return fmt.Errorf("Codex upstream WebSocket write failed")
 		}
 		prewarmCtx, cancelPrewarm := context.WithTimeout(ctx, broker.config.PrewarmTimeout)
-		rotate, err := broker.readPrewarmResponse(prewarmCtx, ctx, downstream, planner, account, accountIndex+1 < len(accounts), active)
+		rotate, err := broker.readPrewarmResponse(prewarmCtx, ctx, downstream, planner, account, accountIndex+1 < len(accounts), active, pending.request)
 		cancelPrewarm()
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 			noteCodexObservation(ctx, codexObservationFields{Decision: "broker_failed", Reason: "timeout"})
@@ -1205,7 +1230,7 @@ func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, acco
 	return last
 }
 
-func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx context.Context, downstream websocketRelayConn, planner codexWebSocketPrewarmPlanner, account CodexFrozenDispatchAccount, canRotate bool, active *codexWSActiveUpstream) (bool, error) {
+func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx context.Context, downstream websocketRelayConn, planner codexWebSocketPrewarmPlanner, account CodexFrozenDispatchAccount, canRotate bool, active *codexWSActiveUpstream, request CodexProtocolRequest) (bool, error) {
 	relayed := false
 	responseAnchor := ""
 	turnState := ""
@@ -1237,7 +1262,10 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx conte
 		if observation.Kind == CodexSSEError && observation.Error.HardUsageLimit {
 			broker.observeHardLimit(account, nil)
 		}
-		if observation.Kind == CodexSSEError && !relayed && canRotate && (observation.Error.HardUsageLimit || observation.Error.AuthFailure) {
+		if observation.Kind == CodexSSEError && codexWSCyberAccessUnavailable(observation.Error) {
+			broker.markCyberIneligible(account.Choice().AccountKey, request)
+		}
+		if observation.Kind == CodexSSEError && !relayed && canRotate && (observation.Error.HardUsageLimit || observation.Error.AuthFailure || codexWSCyberAccessUnavailable(observation.Error)) {
 			closeCodexWSActiveUpstream(active)
 			return true, nil
 		}
@@ -1424,11 +1452,21 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			Phase: "upstream_frame", Outcome: "accepted", FrameType: codexTraceWebSocketFrameType(messageType), FrameBytes: len(frame),
 			EventName: string(result.Kind), AccountHint: codexTraceAccountHint(active.account),
 		})
-		accountUnavailable := result.HardUsageLimit || result.AuthFailure
+		cyberRejected := false
+		if result.DefinitePreAdmissionRejection {
+			wrapped, _ := ParseCodexWrappedError(frame)
+			cyberRejected = codexWSCyberAccessUnavailable(wrapped)
+		}
+		accountUnavailable := result.HardUsageLimit || result.AuthFailure || cyberRejected
 		if accountUnavailable {
+			if cyberRejected {
+				broker.markCyberIneligible(active.account, pending.request)
+			}
 			reason := "auth_rejected"
 			if result.HardUsageLimit {
 				reason = "capacity_exhausted"
+			} else if cyberRejected {
+				reason = "cyber_access_unavailable"
 			}
 			terminalAccountHint := codexTraceAccountHint(active.account)
 			emitCodexTrace(ctx, CodexTraceEvent{Phase: "account_unavailable", Outcome: "observed", AccountHint: terminalAccountHint, Reason: reason, Retry: true})
@@ -1575,8 +1613,12 @@ func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Conte
 	if lifecycle == nil || accountIndex == nil {
 		return false, ErrCodexLeaseWriterUnavailable
 	}
-	accountUnavailable := dial.wrapped.HardUsageLimit || dial.wrapped.AuthFailure
+	cyberRejected := codexWSCyberAccessUnavailable(dial.wrapped)
+	accountUnavailable := dial.wrapped.HardUsageLimit || dial.wrapped.AuthFailure || cyberRejected
 	if accountUnavailable {
+		if cyberRejected {
+			broker.markCyberIneligible(accounts[*accountIndex].Choice().AccountKey, pending.request)
+		}
 		if dial.wrapped.HardUsageLimit {
 			broker.observeHardLimit(accounts[*accountIndex], dial.response)
 		}
@@ -1731,6 +1773,37 @@ func codexWSDialError(response *http.Response, body []byte) (CodexWrappedError, 
 		return wrapped, nil, nil
 	}
 	return wrapped, append([]byte(nil), decoded...), nil
+}
+
+func codexWSCyberAccessUnavailable(wrapped CodexWrappedError) bool {
+	return codexCyberAccessUnavailable(wrapped)
+}
+
+func (broker *codexTerminatingWSBroker) shouldResetCyberPlanFailure(err error, pending *codexWSPendingFrame, active *codexWSActiveUpstream) bool {
+	if broker == nil || broker.config.CyberEligibility == nil || pending == nil || pending.portable ||
+		pending.request.CyberAccessProgram == "" || active == nil || active.account == "" {
+		return false
+	}
+	var planErr *CodexHTTPRequestPlanError
+	if !errors.As(err, &planErr) || planErr.Code != CodexHTTPRequestPlanDispatch ||
+		(planErr.Reason != CodexRequestFailureSessionPolicyContinuity &&
+			planErr.Reason != CodexRequestFailureLeaseAuthorityMismatch &&
+			planErr.Reason != CodexRequestFailureContinuity &&
+			planErr.Reason != CodexRequestFailureReason(CodexRoutePlanBoundUnresolved)) {
+		return false
+	}
+	if broker.config.CyberEligibility.Status(active.account, pending.request.Model, pending.request.CyberAccessProgram) == CyberAccessIneligible {
+		return true
+	}
+	members := broker.config.CyberEligibility.Members()
+	return len(members) != 0 && !containsCodexHTTPRequestAccountKey(members, active.account)
+}
+
+func (broker *codexTerminatingWSBroker) markCyberIneligible(account codex.AccountKey, request CodexProtocolRequest) {
+	if broker == nil || broker.config.CyberEligibility == nil || request.Model == "" || request.CyberAccessProgram == "" {
+		return
+	}
+	broker.config.CyberEligibility.MarkIneligible(account, request.Model, request.CyberAccessProgram)
 }
 
 func codexWSPreparedPendingFrame(frozen *CodexFrozenRequest, original *codexWSPendingFrame) (*codexWSPendingFrame, error) {

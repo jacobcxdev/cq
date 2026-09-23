@@ -42,14 +42,16 @@ cleanup() {
   result=$?
   trap - EXIT
   set +e
-  if [[ -x "$installed_cq" ]]; then
-    "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq" >/dev/null 2>&1
+  if [[ "$owns_state" -eq 1 ]]; then
+    if [[ -x "$installed_cq" ]]; then
+      "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq" >/dev/null 2>&1
+    fi
+    HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force cq >/dev/null 2>&1
+    for label in "$proxy_label" "$refresh_label"; do
+      launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
+    done
+    HOMEBREW_NO_AUTO_UPDATE=1 brew untap "$validation_tap" >/dev/null 2>&1
   fi
-  HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force cq >/dev/null 2>&1
-  for label in "$proxy_label" "$refresh_label"; do
-    launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
-  done
-  HOMEBREW_NO_AUTO_UPDATE=1 brew untap "$validation_tap" >/dev/null 2>&1
   if [[ "$upstream_pid" =~ ^[1-9][0-9]*$ ]]; then
     kill "$upstream_pid" >/dev/null 2>&1
     wait "$upstream_pid" >/dev/null 2>&1
@@ -96,6 +98,12 @@ if lsof -nP -iTCP:19280 -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 owns_state=1
 
+if ! launchctl print "gui/$UID" >/dev/null 2>&1; then
+  echo "Homebrew lifecycle validation requires an available gui/$UID launchd domain" >&2
+  exit 69
+fi
+echo "Homebrew lifecycle launchd domain gui/$UID is available"
+
 go build -o "$probe_executable" ./.github/scripts/native-transport-probe.go
 "$probe_executable" serve --address-file "$address_file" &
 upstream_pid=$!
@@ -129,7 +137,7 @@ preflight = <<~'BLOCK'
   end
 
 BLOCK
-text.sub!(/^  postflight do$/, preflight + "  postflight do") or abort "missing postflight hook"
+text.sub!(/^  installer script:/) { preflight + "  installer script:" } or abort "missing installer artifact"
 File.write(destination, text)
 RUBY
 }
@@ -138,7 +146,24 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew tap-new --no-git "$validation_tap" >/dev/null
 tap_root=$(brew --repository "$validation_tap")
 mkdir -p "$tap_root/Casks"
 validation_cask="$tap_root/Casks/cq.rb"
-rewrite_cask "$previous_cask" "$previous_archive" "$validation_cask"
+# Legacy flight hooks cannot bootstrap launchd under current Homebrew. Test the
+# unchanged previous executable with the same supported packaging as the candidate.
+previous_template="$temporary_root/previous-cq.rb"
+ruby - "$current_cask" "$previous_cask" "$previous_version" "$previous_template" <<'RUBY'
+current, previous, version, destination = ARGV
+text = File.read(current)
+old = File.read(previous)
+current_version = text.match(/^  version "([^"]+)"$/)&.captures&.first or abort "missing version stanza"
+text.gsub!(current_version, version)
+# Preserve the published previous archive checksums for both architectures.
+checksums = old.lines.grep(/^\s*sha256 /)
+abort "missing previous checksums" if checksums.empty?
+index = 0
+text.gsub!(/^\s*sha256 .*$/) { checksums.fetch(index).tap { index += 1 }.chomp }
+abort "checksum architecture count differs" unless index == checksums.length
+File.write(destination, text)
+RUBY
+rewrite_cask "$previous_template" "$previous_archive" "$validation_cask"
 
 assert_installed() {
   local expected_version=$1
@@ -194,7 +219,20 @@ assert_installed() {
   return 1
 }
 
-HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"
+if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
+  launchctl print-disabled "gui/$UID" >&2 || true
+  for path in "$proxy_plist" "$refresh_plist"; do
+    if [[ -f "$path" ]]; then
+      /usr/bin/stat -f '%Sp %Su:%Sg %N' "$path" >&2 || true
+      /usr/bin/plutil -lint "$path" >&2 || true
+    else
+      echo "LaunchAgent absent after installer rollback: $path" >&2
+    fi
+  done
+  /usr/bin/log show --last 2m --style compact \
+    --predicate 'process == "launchd" AND eventMessage CONTAINS "dev.jacobcx.cq"' >&2 || true
+  exit 1
+fi
 assert_installed "$previous_version" previous
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"

@@ -55,6 +55,7 @@ type CodexFrozenDispatchPlan struct {
 	accountUnavailableFallbacks       []CodexFrozenDispatchAccount
 	accountUnavailableResetCandidates []codex.AccountKey
 	accountUnavailablePortable        bool
+	quotaRecoveryRetry                bool
 	policyCandidates                  []CodexRoutePolicyCandidate
 	status                            CodexRoutePlanStatus
 	probe                             codexInstalledHTTPDispatchFacts

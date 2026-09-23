@@ -32,11 +32,10 @@ type Cache interface {
 	Age(ctx context.Context, id string) (time.Duration, bool)
 }
 
-// History abstracts the persistent burn-rate store so the Runner can be
-// tested without touching the filesystem. Nil-safe: a nil History causes the
-// runner to skip rate computation, and the gauge cold-starts (GaugePos = -1).
+// History abstracts persistent burn rates for forecasts and gauge warnings.
+// Without history, the runner uses whole-window averages.
 type History interface {
-	UpdateAndGetBurnRates(ctx context.Context, results map[string][]quota.Result, nowEpoch int64) (history.BurnRates, error)
+	UpdateAndGetEstimates(ctx context.Context, results map[string][]quota.Result, nowEpoch int64) (history.BurnRates, history.RateEstimates, error)
 }
 
 type Renderer interface {

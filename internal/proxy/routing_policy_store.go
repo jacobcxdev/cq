@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -240,6 +241,76 @@ func (s *RoutingPolicyStore) SetPoolValue(name string, value PoolValue) error {
 	policy.Pools[index].Value = value
 	advanceRoutingPolicy(&policy)
 	return s.publishLocked(policy)
+}
+
+// ReconcileCyberPool applies per-account catalogue evidence without replacing
+// unknown accounts after a transient discovery failure. Existing pool value,
+// identity, and session bindings remain intact.
+func (s *RoutingPolicyStore) ReconcileCyberPool(known map[providerCodex.AccountKey]bool, available []providerCodex.AccountKey) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var policy RoutingPolicyV2
+	if s.current != nil {
+		policy = cloneRoutingPolicyV2(*s.current)
+	} else {
+		policy = RoutingPolicyV2{SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1}
+	}
+	index := poolIndexByName(&policy, "Cyber")
+	allowed := make(map[providerCodex.AccountKey]bool, len(available))
+	for _, account := range available {
+		if account != "" {
+			allowed[account] = true
+		}
+	}
+	members := make(map[providerCodex.AccountKey]bool)
+	if index >= 0 {
+		for _, account := range policy.Pools[index].Members {
+			if allowed[account] {
+				members[account] = true
+			}
+		}
+	}
+	for account, eligible := range known {
+		if !allowed[account] {
+			continue
+		}
+		if eligible {
+			members[account] = true
+		} else {
+			delete(members, account)
+		}
+	}
+	resolved := make([]providerCodex.AccountKey, 0, len(members))
+	for account := range members {
+		resolved = append(resolved, account)
+	}
+	sort.Slice(resolved, func(i, j int) bool { return resolved[i] < resolved[j] })
+	if len(resolved) == 0 {
+		// Empty pools are invalid. Keep existing policy until access returns or
+		// an operator explicitly removes the pool and its bindings.
+		return false, nil
+	}
+	if index >= 0 {
+		previous := append([]providerCodex.AccountKey(nil), policy.Pools[index].Members...)
+		sort.Slice(previous, func(i, j int) bool { return previous[i] < previous[j] })
+		if slices.Equal(previous, resolved) {
+			return false, nil
+		}
+		policy.Pools[index].Members = resolved
+	} else {
+		id, err := newPoolID(s.random)
+		if err != nil {
+			return false, err
+		}
+		policy.Pools = append(policy.Pools, AccountPoolV2{ID: id, Name: "Cyber", Value: 10, Members: resolved})
+	}
+	if s.current != nil {
+		advanceRoutingPolicy(&policy)
+	}
+	if err := s.publishLocked(policy); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func poolIndexByName(policy *RoutingPolicyV2, name string) int {

@@ -218,6 +218,13 @@ func TestCodexWSInvalidFrameClassifiesAllowlistedEventMetadata(t *testing.T) {
 			private:     []string{"bad_anchor", "private"},
 		},
 		{
+			name:        "compaction progress",
+			messageType: websocket.TextMessage,
+			payload:     []byte(`{"type":"response.compaction.compacting","item_id":"compaction-private","output_index":0,"sequence_number":2}`),
+			wantEvent:   "response.compaction.compacting",
+			private:     []string{"compaction-private"},
+		},
+		{
 			name:        "known usage limit error",
 			messageType: websocket.TextMessage,
 			payload:     []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`),

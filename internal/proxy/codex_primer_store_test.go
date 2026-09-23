@@ -506,3 +506,29 @@ func TestCodexPrimerStoreWriteFailureDoesNotAdvanceMemory(t *testing.T) {
 		t.Fatalf("retry did not persist journal: %v", err)
 	}
 }
+
+func TestCodexPrimerStoreVerifiedEpochDoesNotReplayEarlierWindow(t *testing.T) {
+	store, err := OpenCodexPrimerStore(fsutil.NewMemFS(), "/state/primer.json", "/state/primer.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified := testPrimerTarget()
+	now := verified.ResetAt.Add(-time.Hour)
+	if err := store.Observe("account-secret", verified); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mark("account-secret", verified, PrimerStateVerified, "dormant_epoch_stable"); err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []time.Duration{0, -time.Minute} {
+		target := testPrimerTarget()
+		target.ResetAt = target.ResetAt.Add(offset)
+		target.Windows[0].ResetAt = target.ResetAt
+		if err := store.Observe("account-secret", target); err != nil {
+			t.Fatal(err)
+		}
+		if claimed, err := store.ClaimDormant("account-secret", target, now); err != nil || claimed {
+			t.Fatalf("offset %v claim = %t, %v", offset, claimed, err)
+		}
+	}
+}

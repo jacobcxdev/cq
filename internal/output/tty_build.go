@@ -275,7 +275,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 
 			burn := ""
 			if periodS > 0 && w.ResetAtUnix > 0 {
-				if b, ok := calcBurndown(periodS, w.ResetAtUnix, nowEpoch, w.RemainingPct); ok {
+				if b, ok := w.Burndown(periodS, nowEpoch); ok {
 					burn = fmtDuration(b)
 				}
 			}

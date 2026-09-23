@@ -20,6 +20,26 @@ import (
 
 const codexLiveUsageLimitBody = `{"error":{"eligible_promo":null,"message":"The usage limit has been reached","plan_type":"pro","resets_at":1786832019,"resets_in_seconds":539708,"type":"usage_limit_reached"}}`
 
+func TestCodexAttemptClassifiesMessageOnlyCyber403(t *testing.T) {
+	router := &CodexRequestRouter{}
+	for _, test := range []struct {
+		name string
+		body string
+		want CodexPinnedFailure
+	}{
+		{name: "exact Cyber denial", body: `{"error":{"message":"The requested Cyber access program is not authorized for this workspace."}}`, want: CodexPinnedCyberUnavailable},
+		{name: "other forbidden response", body: `{"error":{"message":"Workspace access denied."}}`, want: CodexPinnedAccepted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(test.body))}
+			got, err := router.classifyAttemptResponse(RouteChoice{}, response)
+			if err != nil || got != test.want {
+				t.Fatalf("classification = %v, %v; want %v", got, err, test.want)
+			}
+		})
+	}
+}
+
 func gzipCodexAttemptBody(t *testing.T, body []byte) []byte {
 	t.Helper()
 	var encoded bytes.Buffer

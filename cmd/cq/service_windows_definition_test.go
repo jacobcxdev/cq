@@ -1296,7 +1296,7 @@ func TestWindowsServiceRefreshCompletionHealth(t *testing.T) {
 			if got.Healthy == nil || *got.Healthy != want {
 				t.Fatalf("health=%+v", got)
 			}
-			if got.LastRunAt == nil || *got.LastRunAt != then.UTC().Format(time.RFC3339) {
+			if got.LastRunAt == nil || *got.LastRunAt != then.UTC().Format(time.RFC3339Nano) {
 				t.Fatal("completion time lost")
 			}
 		})

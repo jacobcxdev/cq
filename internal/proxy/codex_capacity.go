@@ -26,6 +26,7 @@ const (
 	CapacitySourceUsageCache CapacitySource = iota + 1
 	CapacitySourceHardLimit
 	CapacitySourceHTTPHeaders
+	CapacitySourceLiveUsage
 	CapacitySourceLiveRateLimits
 )
 
@@ -80,6 +81,13 @@ type capacityBucketKey struct {
 	bucket  CapacityBucket
 }
 
+type capacitySnapshotAggregate struct {
+	windows   map[quota.WindowName]quota.Window
+	remaining int
+	reset     time.Time
+	set       bool
+}
+
 // CodexCapacityObservationStream orders facts from one upstream response or connection.
 type CodexCapacityObservationStream struct {
 	generation uint64
@@ -89,10 +97,9 @@ type CodexCapacityObservationStream struct {
 // CodexCapacityLedger holds bounded capacity facts and active lease counts.
 type CodexCapacityLedger struct {
 	// Reserve is bound before serving requests.
-	Reserve          *CodexReserve
-	windows          map[codex.AccountKey]map[quota.WindowName]codexWindowFact
-	unsettledWindows map[codex.AccountKey]map[quota.WindowName]bool
-	mu               sync.RWMutex
+	Reserve *CodexReserve
+	windows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	mu      sync.RWMutex
 
 	now    func() time.Time
 	maxAge time.Duration
@@ -115,11 +122,10 @@ func NewCodexCapacityLedger(now func() time.Time, maxAge time.Duration) *CodexCa
 		maxAge = quotaSnapshotMaxAge
 	}
 	return &CodexCapacityLedger{
-		now:              now,
-		maxAge:           maxAge,
-		facts:            make(map[capacityFactKey]CapacityFact),
-		leases:           make(map[codex.AccountKey]int),
-		unsettledWindows: make(map[codex.AccountKey]map[quota.WindowName]bool),
+		now:    now,
+		maxAge: maxAge,
+		facts:  make(map[capacityFactKey]CapacityFact),
+		leases: make(map[codex.AccountKey]int),
 
 		livePositiveHighWater: make(map[capacityBucketKey]CapacityFact),
 		suppressedHardFences:  make(map[capacityFactKey]bool),
@@ -191,7 +197,7 @@ func (l *CodexCapacityLedger) updateHardFenceState(key capacityFactKey, fact Cap
 	case CapacitySourceHardLimit:
 		live, ok := l.livePositiveHighWater[bucketKey]
 		l.suppressedHardFences[key] = ok && liveFactLiftsHardFence(live, fact)
-	case CapacitySourceLiveRateLimits:
+	case CapacitySourceLiveUsage, CapacitySourceLiveRateLimits:
 		if fact.Confidence != CapacityConfidenceAuthoritative || fact.RemainingPct <= 0 {
 			return
 		}
@@ -226,7 +232,7 @@ func validCapacityFact(fact CapacityFact) bool {
 		return fact.Confidence == CapacityConfidenceAdvisory && fact.ConnectionGeneration == 0
 	case CapacitySourceHardLimit:
 		return fact.Confidence == CapacityConfidenceAuthoritative && fact.ConnectionGeneration > 0 && fact.RemainingPct == 0
-	case CapacitySourceHTTPHeaders, CapacitySourceLiveRateLimits:
+	case CapacitySourceHTTPHeaders, CapacitySourceLiveUsage, CapacitySourceLiveRateLimits:
 		return fact.Confidence == CapacityConfidenceAuthoritative && fact.ConnectionGeneration > 0
 	default:
 		return false
@@ -238,13 +244,47 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 	if l == nil || account == "" || len(snap.Result.Windows) == 0 {
 		return
 	}
-	type aggregate struct {
-		windows   map[quota.WindowName]quota.Window
-		remaining int
-		reset     time.Time
-		set       bool
+	aggregates := capacitySnapshotAggregates(snap)
+	for bucket, aggregate := range aggregates {
+		l.mu.Lock()
+		l.seq++
+		fact := CapacityFact{
+			AccountKey:   account,
+			Windows:      aggregate.windows,
+			Bucket:       bucket,
+			RemainingPct: aggregate.remaining,
+			Source:       CapacitySourceUsageCache,
+			Sequence:     l.seq,
+			ObservedAt:   snap.FetchedAt,
+			ResetAt:      aggregate.reset,
+			Confidence:   CapacityConfidenceAdvisory,
+		}
+		l.observeLocked(fact)
+		l.mu.Unlock()
 	}
-	aggregates := make(map[CapacityBucket]aggregate)
+}
+
+// ObserveLivePositiveQuotaSnapshot records positive capacity from a fresh
+// authenticated usage response. Positive live evidence can lift an older hard
+// fence after a banked reset; zero usage remains advisory.
+func (l *CodexCapacityLedger) ObserveLivePositiveQuotaSnapshot(stream *CodexCapacityObservationStream, account codex.AccountKey, snap QuotaSnapshot) {
+	if l == nil || stream == nil || account == "" || len(snap.Result.Windows) == 0 {
+		return
+	}
+	for bucket, aggregate := range capacitySnapshotAggregates(snap) {
+		if aggregate.remaining <= 0 {
+			continue
+		}
+		l.Observe(stream.Stamp(CapacityFact{
+			AccountKey: account, Windows: aggregate.windows, Bucket: bucket,
+			RemainingPct: aggregate.remaining, Source: CapacitySourceLiveUsage,
+			ObservedAt: snap.FetchedAt, ResetAt: aggregate.reset, Confidence: CapacityConfidenceAuthoritative,
+		}))
+	}
+}
+
+func capacitySnapshotAggregates(snap QuotaSnapshot) map[CapacityBucket]capacitySnapshotAggregate {
+	aggregates := make(map[CapacityBucket]capacitySnapshotAggregate)
 	for name, window := range snap.Result.Windows {
 		bucket := CapacityBucketBase
 		if scoped := quota.WindowBucket(name); scoped != "" {
@@ -268,23 +308,7 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 		current.set = true
 		aggregates[bucket] = current
 	}
-	for bucket, aggregate := range aggregates {
-		l.mu.Lock()
-		l.seq++
-		fact := CapacityFact{
-			AccountKey:   account,
-			Windows:      aggregate.windows,
-			Bucket:       bucket,
-			RemainingPct: aggregate.remaining,
-			Source:       CapacitySourceUsageCache,
-			Sequence:     l.seq,
-			ObservedAt:   snap.FetchedAt,
-			ResetAt:      aggregate.reset,
-			Confidence:   CapacityConfidenceAdvisory,
-		}
-		l.observeLocked(fact)
-		l.mu.Unlock()
-	}
+	return aggregates
 }
 
 // Capacity returns exact bucket state, falling scoped requests back to shared
@@ -329,6 +353,7 @@ func (l *CodexCapacityLedger) capacityLocked(account codex.AccountKey, bucket Ca
 		CapacitySourceUsageCache,
 		CapacitySourceHardLimit,
 		CapacitySourceHTTPHeaders,
+		CapacitySourceLiveUsage,
 		CapacitySourceLiveRateLimits,
 	} {
 		fact, ok := l.facts[capacityFactKey{account: account, bucket: bucket, source: source}]
@@ -374,7 +399,7 @@ func (l *CodexCapacityLedger) factStale(fact CapacityFact, now time.Time) bool {
 }
 
 func liveFactLiftsHardFence(live, hard CapacityFact) bool {
-	if live.Source != CapacitySourceLiveRateLimits || live.Confidence != CapacityConfidenceAuthoritative || live.RemainingPct <= 0 {
+	if (live.Source != CapacitySourceLiveUsage && live.Source != CapacitySourceLiveRateLimits) || live.Confidence != CapacityConfidenceAuthoritative || live.RemainingPct <= 0 {
 		return false
 	}
 	if !capacityCursorAfter(live, hard) {

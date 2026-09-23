@@ -85,6 +85,29 @@ func TestCodexWSLifecycleAdmitsStatefulUpgradeOrCreatedEvent(t *testing.T) {
 	}
 }
 
+func TestCodexWSLifecycleCompactingPreservesStreamUntilCompletion(t *testing.T) {
+	t.Parallel()
+	lifecycle, store := newCodexWSLifecycleTest(t, []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	if _, err := lifecycle.ObserveFrame(context.Background(), 43, []byte(`{"type":"response.created","response":{"id":"response-a"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	before := append([]byte(nil), store.journalBytes...)
+	result, err := lifecycle.ObserveFrame(context.Background(), 43, []byte(`{"type":"response.compaction.compacting","item_id":"compaction-a","output_index":0,"sequence_number":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Terminal || result.Kind != CodexSSEIgnored || !bytes.Equal(before, store.journalBytes) {
+		t.Fatalf("compacting changed lifecycle: result=%#v state=%s", result, lifecycle.handle.State())
+	}
+	result, err = lifecycle.ObserveFrame(context.Background(), 43, []byte(`{"type":"response.completed","response":{"id":"response-a","output":[]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Terminal || lifecycle.handle.State() != LeaseContinuationPending {
+		t.Fatalf("completion = %#v state=%s", result, lifecycle.handle.State())
+	}
+}
+
 func TestCodexWSLifecycleRejectsStaleGenerationWithoutMutation(t *testing.T) {
 	t.Parallel()
 	lifecycle, store := newCodexWSLifecycleTest(t, []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})

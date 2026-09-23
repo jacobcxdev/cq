@@ -381,7 +381,7 @@ func TestCodexStage12AProductionVertical(t *testing.T) {
 	}
 }
 
-func TestCodexStage12AMonotonicAdmittedTurn(t *testing.T) {
+func TestCodexStage12AMonotonicResponseIDContinuation(t *testing.T) {
 	const (
 		accountA       codex.AccountKey = "account-a"
 		accountB       codex.AccountKey = "account-b"
@@ -522,7 +522,9 @@ func TestCodexStage12AMonotonicAdmittedTurn(t *testing.T) {
 
 	requestBody := stage12ARequestBody(t, "stage12a-private-session", "stage12a-private-thread", "stage12a-private-turn", "stage12a-private-prompt")
 	firstInput := newStage12AOwnedBody(encodeCodexZstd(t, requestBody))
-	secondInput := newStage12AOwnedBody(encodeCodexZstd(t, requestBody))
+	// Response-ID continuations cannot be replayed on a different account.
+	continuationBody := []byte(strings.TrimSuffix(string(requestBody), "}") + `,"previous_response_id":"stage12a-private-response-a"}`)
+	secondInput := newStage12AOwnedBody(encodeCodexZstd(t, continuationBody))
 	firstResponse := &stage12AAdmissionResponseRecorder{
 		ResponseRecorder: httptest.NewRecorder(),
 		beforeFirstWrite: func() {

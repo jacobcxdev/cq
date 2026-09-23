@@ -16,7 +16,7 @@ func TestCodexRoutePolicyAffinityBeatsHigherCapacity(t *testing.T) {
 	ordinary := routePolicyCandidate("account-b", CapacityPositive, 90)
 	ordinary.Value = 0
 	affinity := routePolicyCandidate("account-a", CapacityPositive, 10)
-	affinity.Value = 10
+	affinity.Value = 0
 	candidates := []CodexRoutePolicyCandidate{ordinary, affinity}
 
 	plan, err := BuildCodexRoutePlan(context.Background(), candidates, CodexRoutePolicyHints{
@@ -30,6 +30,30 @@ func TestCodexRoutePolicyAffinityBeatsHigherCapacity(t *testing.T) {
 		t.Fatalf("status = %q, want %q", plan.Status(), CodexRoutePlanReady)
 	}
 	assertRoutePolicyAccounts(t, plan, "account-a", "account-b")
+}
+
+func TestCodexRoutePolicyValuePrecedesSoftAffinity(t *testing.T) {
+	t.Parallel()
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+			ordinary := routePolicyCandidate("ordinary", CapacityPositive, 85)
+			cyber := routePolicyCandidate("cyber", CapacityPositive, 96)
+			cyber.Value = 10
+			hints := CodexRoutePolicyHints{AffinityAccountKey: "cyber", DefaultAccountKey: "ordinary"}
+			if bound {
+				hints.BoundAccountKey = "cyber"
+			}
+			plan, err := BuildCodexRoutePlan(context.Background(), []CodexRoutePolicyCandidate{cyber, ordinary}, hints)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bound {
+				assertRoutePolicyAccounts(t, plan, "cyber")
+			} else {
+				assertRoutePolicyAccounts(t, plan, "ordinary", "cyber")
+			}
+		})
+	}
 }
 
 func TestCodexRoutePolicyValuePreservesHigherValueCapacity(t *testing.T) {
@@ -46,7 +70,7 @@ func TestCodexRoutePolicyValuePreservesHigherValueCapacity(t *testing.T) {
 	assertRoutePolicyAccounts(t, plan, "account-lower-value", "account-higher-value")
 }
 
-func TestCodexRoutePolicyValueAppliesAfterEligibilityAndAffinity(t *testing.T) {
+func TestCodexRoutePolicyValueAppliesAfterEligibilityBeforeAffinity(t *testing.T) {
 	t.Parallel()
 
 	unknown := routePolicyCandidate("account-unknown", CapacityUnknown, -1)
@@ -62,7 +86,7 @@ func TestCodexRoutePolicyValueAppliesAfterEligibilityAndAffinity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRoutePolicyAccounts(t, plan, "account-valuable", "account-unknown")
+	assertRoutePolicyAccounts(t, plan, "account-unknown", "account-valuable")
 }
 
 func TestCodexRoutePolicyLowerValueUnknownCapacityStaysFirst(t *testing.T) {

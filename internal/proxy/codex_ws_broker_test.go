@@ -499,6 +499,56 @@ func TestCodexTerminatingWSBrokerDoesNotRotateApplicationPolicy403(t *testing.T)
 	}
 }
 
+func TestCodexTerminatingWSBrokerRotatesExactCyber403BeforeAdmission(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{
+			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+		},
+	}
+	request := codexTerminatingWSFrame("turn-a", `,"access_programs":{"cyber":"daybreak_blue"}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: request}, {err: io.EOF}}}
+	upstreamA := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexWSBrokerCyber403()}}}
+	created := []byte(`{"type":"response.created","response":{"id":"response-b"}}`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)
+	upstreamB := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: created}, {messageType: websocket.TextMessage, payload: completed}}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstreamA}, "account-b": {upstreamB}}}
+	capacity := NewCodexCapacityLedger(time.Now, time.Hour)
+	cyber := NewCyberEligibilityStore(nil)
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, Capacity: capacity, CyberEligibility: cyber, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("dial accounts = %#v", got)
+	}
+	if got := upstreamB.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{request}) {
+		t.Fatalf("fallback request = %q", got)
+	}
+	if got := downstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{created, completed}) {
+		t.Fatalf("downstream writes = %q", got)
+	}
+	if got := capacity.Capacity("account-a", CapacityBucketForModel("gpt-5.6-sol")); got.State == CapacityZero {
+		t.Fatalf("Cyber denial marked quota exhausted: %+v", got)
+	}
+	if got := cyber.Status("account-a", "gpt-5.6-sol", "daybreak_blue"); got != CyberAccessIneligible {
+		t.Fatalf("Cyber eligibility after denial = %v", got)
+	}
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), LeaseKey{Lane: LaneKey{Session: "runtime-session", Thread: "runtime-thread", Namespace: CodexResponsesNamespace}, Turn: "turn-a"}, []codex.AccountKey{"account-a", "account-b"}, CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.QuotaExhaustedAccountKeys) != 0 {
+		t.Fatalf("Cyber denial exhausted quota: %+v", snapshot)
+	}
+}
+
 func TestCodexTerminatingWSBrokerRotatesResponseFailedHardUsageLimitBeforeAdmission(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -1570,7 +1620,7 @@ func TestCodexTerminatingWSBrokerPayloadDiagnosticsCaptureHiddenPrewarmFailureBe
 	broker := &codexTerminatingWSBroker{}
 	account := CodexFrozenDispatchAccount{choice: RouteChoice{AccountKey: "account-a"}}
 	ctx := withCodexTrace(context.Background(), nil, payloads, CodexTraceStart{Transport: "websocket"})
-	rotate, err := broker.readPrewarmResponse(ctx, ctx, downstream, nil, account, true, active)
+	rotate, err := broker.readPrewarmResponse(ctx, ctx, downstream, nil, account, true, active, CodexProtocolRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2190,23 +2240,146 @@ func TestCodexTerminatingWSBrokerSurfacesCurrentAdmissionFailureWithoutReplay(t 
 
 func TestCodexTerminatingWSBrokerHidesIncrementalHard429AndRequiresFullCreate(t *testing.T) {
 	t.Parallel()
+	testCodexTerminatingWSBrokerHidesIncrementalAccountDenial(t, codexWSBrokerHard429(), "")
+}
+
+func TestCodexTerminatingWSBrokerHidesIncrementalCyber403AndRequiresFullCreate(t *testing.T) {
+	t.Parallel()
+	testCodexTerminatingWSBrokerHidesIncrementalAccountDenial(t, codexWSBrokerCyber403(), `,"access_programs":{"cyber":"daybreak_blue"}`)
+}
+
+func TestCodexTerminatingWSBrokerResetsKnownIneligibleCyberDeltaAfterPlannerRejection(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		planError  error
+		ineligible bool
+		wantReset  bool
+	}{
+		{name: "continuity conflict", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrSessionPolicyContinuity), ineligible: true, wantReset: true},
+		{name: "authority mismatch", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch), ineligible: true, wantReset: true},
+		{name: "prior account filtered", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, &CodexRoutePolicyError{Status: CodexRoutePlanBoundUnresolved}), ineligible: true, wantReset: true},
+		{name: "unknown access", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrSessionPolicyContinuity)},
+		{name: "unrelated failure", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseWriterUnavailable), ineligible: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cyber := NewCyberEligibilityStore(nil)
+			if test.ineligible {
+				cyber.MarkIneligible("account-a", "gpt-5.6-sol", "daybreak_blue")
+			}
+			planner := &codexWSBrokerFailingPlanner{err: test.planError}
+			broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: &codexWSBrokerDialerStub{}, CyberEligibility: cyber, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a","access_programs":{"cyber":"daybreak_blue"}`)
+			pending, err := newCodexWSPendingFrame(websocket.TextMessage, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pending.Release()
+			upstream := &codexWSBrokerConnStub{}
+			active := &codexWSActiveUpstream{conn: upstream, account: "account-a", generation: 1}
+			closeFrames := make(chan codexWSBrokerWrite, 1)
+			downstream := &codexWSBrokerConnStub{controlWrites: closeFrames}
+			gotErr := broker.serveFrame(context.Background(), downstream, pending, active)
+			if test.wantReset {
+				if gotErr != nil || planner.calls != 1 || !upstream.closed {
+					t.Fatalf("planner reset = error %v calls %d upstream closed %t", gotErr, planner.calls, upstream.closed)
+				}
+				select {
+				case got := <-closeFrames:
+					want := codexWSBrokerWrite{messageType: websocket.CloseMessage, payload: websocket.FormatCloseMessage(websocket.CloseServiceRestart, "account unavailable")}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("reset close = %#v, want %#v", got, want)
+					}
+				default:
+					t.Fatal("planner conflict did not request full-create retry")
+				}
+				return
+			}
+			if gotErr != test.planError || planner.calls != 1 || upstream.closed {
+				t.Fatalf("unrelated planner outcome = error %v calls %d upstream closed %t", gotErr, planner.calls, upstream.closed)
+			}
+			select {
+			case got := <-closeFrames:
+				t.Fatalf("unrelated planner failure closed downstream: %#v", got)
+			default:
+			}
+		})
+	}
+}
+
+func TestCodexTerminatingWSBrokerResetsCyberOffDeltaBeforePlanning(t *testing.T) {
+	t.Parallel()
+	planner := &codexWSBrokerFailingPlanner{reset: true}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: &codexWSBrokerDialerStub{}, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := newCodexWSPendingFrame(websocket.TextMessage, codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pending.Release()
+	upstream := &codexWSBrokerConnStub{}
+	active := &codexWSActiveUpstream{conn: upstream, account: "cyber", generation: 1}
+	closeFrames := make(chan codexWSBrokerWrite, 1)
+	downstream := &codexWSBrokerConnStub{controlWrites: closeFrames}
+	if err := broker.serveFrame(context.Background(), downstream, pending, active); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 0 || !upstream.closed {
+		t.Fatalf("Cyber-off reset planned %d requests; upstream closed = %t", planner.calls, upstream.closed)
+	}
+	select {
+	case got := <-closeFrames:
+		want := codexWSBrokerWrite{messageType: websocket.CloseMessage, payload: websocket.FormatCloseMessage(websocket.CloseServiceRestart, "account unavailable")}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("reset close = %#v, want %#v", got, want)
+		}
+	default:
+		t.Fatal("Cyber-off delta did not request full-history retry")
+	}
+}
+
+type codexWSBrokerFailingPlanner struct {
+	err   error
+	calls int
+	reset bool
+}
+
+func (planner *codexWSBrokerFailingPlanner) ShouldResetCyberOff(context.Context, CodexProtocolRequest, codex.AccountKey) bool {
+	return planner.reset
+}
+
+func (planner *codexWSBrokerFailingPlanner) Build(context.Context, CodexHTTPRequestPlanInput) (CodexPreparedHTTPRequest, error) {
+	planner.calls++
+	return CodexPreparedHTTPRequest{}, planner.err
+}
+
+func testCodexTerminatingWSBrokerHidesIncrementalAccountDenial(t *testing.T, denial []byte, cyberRequest string) {
+	t.Helper()
 	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexWSBrokerContinuationRuntime(t, coordinator, "turn-a", "response-a")
-	incremental := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a"`)
+	incremental := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a"`+cyberRequest)
 	closeFrames := make(chan codexWSBrokerWrite, 1)
 	firstDownstream := &codexWSBrokerConnStub{
 		reads:         []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: incremental}},
 		controlWrites: closeFrames,
 	}
-	upstreamA := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexWSBrokerHard429()}}}
+	upstreamA := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: denial}}}
+	cyber := NewCyberEligibilityStore(nil)
 	firstBroker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
 		Plans: &codexWSBrokerPlannerStub{
 			runtime:         runtimeLease,
 			slots:           []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}},
 			resetCandidates: []codex.AccountKey{"account-b"},
 		},
-		Upstream:    &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstreamA}}},
-		UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+		Upstream:         &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstreamA}}},
+		CyberEligibility: cyber,
+		UpstreamURL:      "wss://example.invalid/responses", DownstreamGeneration: 41,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2229,8 +2402,13 @@ func TestCodexTerminatingWSBrokerHidesIncrementalHard429AndRequiresFullCreate(t 
 	if !upstreamA.closed {
 		t.Fatal("exhausted incremental upstream was not closed")
 	}
+	if cyberRequest != "" {
+		if got := cyber.Status("account-a", "gpt-5.6-sol", "daybreak_blue"); got != CyberAccessIneligible {
+			t.Fatalf("Cyber eligibility after denial = %v", got)
+		}
+	}
 
-	fullCreate := codexTerminatingWSFrame("turn-a", "")
+	fullCreate := codexTerminatingWSFrame("turn-a", cyberRequest)
 	secondDownstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: fullCreate}, {err: io.EOF}}}
 	upstreamB := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
 		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-b"}}`)},
@@ -3352,6 +3530,49 @@ func TestCodexTerminatingWSBrokerRotatesHandshakeHard429BeforeAdmission(t *testi
 	}
 }
 
+func TestCodexTerminatingWSBrokerRotatesHandshakeCyber403BeforeAdmission(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{
+			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+		},
+	}
+	request := codexTerminatingWSFrame("turn-a", `,"access_programs":{"cyber":"daybreak_blue"}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: request}, {err: io.EOF}}}
+	upstreamB := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"end_turn":true}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{outcomes: map[codex.AccountKey][]codexWSBrokerDialOutcome{
+		"account-a": {{response: &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header)}, body: []byte(`{"error":{"type":"invalid_request_error","code":"access_program_not_enabled","param":"access_programs.cyber"}}`), err: errors.New("rejected")}},
+		"account-b": {{conn: upstreamB, response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}}},
+	}}
+	cyber := NewCyberEligibilityStore(nil)
+	capacity := NewCodexCapacityLedger(time.Now, time.Hour)
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: dialer, Capacity: capacity, CyberEligibility: cyber, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("dial accounts = %#v", got)
+	}
+	if got := upstreamB.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{request}) {
+		t.Fatalf("fallback request = %q", got)
+	}
+	if got := cyber.Status("account-a", "gpt-5.6-sol", "daybreak_blue"); got != CyberAccessIneligible {
+		t.Fatalf("Cyber eligibility after denial = %v", got)
+	}
+	if got := capacity.Capacity("account-a", CapacityBucketForModel("gpt-5.6-sol")); got.State == CapacityZero {
+		t.Fatalf("Cyber denial marked quota exhausted: %+v", got)
+	}
+}
+
 func codexTerminatingWSFrame(turn, extra string) []byte {
 	return []byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-metadata":{"session_id":"session-a","thread_id":"thread-a","turn_id":"` + turn + `","request_kind":"turn"}},"input":[]` + extra + `}`)
 }
@@ -3389,6 +3610,10 @@ func newCodexWSBrokerContinuationRuntime(t *testing.T, coordinator *CodexContinu
 
 func codexWSBrokerHard429() []byte {
 	return []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`)
+}
+
+func codexWSBrokerCyber403() []byte {
+	return []byte(`{"type":"error","status":403,"error":{"message":"The requested Cyber access program is not authorized for this workspace."}}`)
 }
 
 type codexWSBrokerPlannerStub struct {

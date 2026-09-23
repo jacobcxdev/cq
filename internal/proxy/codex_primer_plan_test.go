@@ -287,3 +287,20 @@ func equalPrimerStrings(left, right []string) bool {
 	}
 	return true
 }
+
+func TestPlanCodexPrimerTargetsSkipsBackendGatedReserve(t *testing.T) {
+	reset := time.Unix(1774569600, 0)
+	descriptors := []codex.WindowDescriptor{
+		{RawLimitName: "primary_window", WindowName: quota.Window7Day, Period: 7 * 24 * time.Hour, ScopeKind: codex.WindowScopeShared, ResetAt: reset},
+		{RawLimitName: "gpt-reserve", WindowName: "7d:gpt-reserve", Period: 7 * 24 * time.Hour, ScopeKind: codex.WindowScopeModelFamily, Scope: "gpt-reserve", ResetAt: reset},
+		{RawLimitName: "unknown-pool", WindowName: "7d:unknown-pool", Period: 7 * 24 * time.Hour, ScopeKind: codex.WindowScopeModelFamily, Scope: "unknown-pool", ResetAt: reset},
+	}
+	entries := append(primerRegistryEntries(), modelregistry.Entry{Provider: modelregistry.ProviderCodex, ID: "gpt-reserve", Visibility: "hide"})
+	targets, unresolved := PlanCodexPrimerTargets(descriptors, nil, entries)
+	if len(targets) != 1 || targets[0].ModelID != "gpt-5.4" || len(targets[0].Windows) != 1 {
+		t.Fatalf("ordinary priming targets = %+v", targets)
+	}
+	if len(unresolved) != 1 || unresolved[0].RawLimitName != "unknown-pool" {
+		t.Fatalf("unresolved = %+v, want only unknown pool", unresolved)
+	}
+}

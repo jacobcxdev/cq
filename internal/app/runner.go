@@ -141,10 +141,12 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	mu.Unlock()
 
 	var burnRates history.BurnRates
+	var estimates history.RateEstimates
 	if r.History != nil && ctx.Err() == nil {
 		type historyResult struct {
-			rates history.BurnRates
-			err   error
+			rates     history.BurnRates
+			estimates history.RateEstimates
+			err       error
 		}
 		update := func() (result historyResult) {
 			if ctx.Err() != nil {
@@ -157,11 +159,11 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 				}
 			}()
 			if h, ok := r.History.(interface {
-				UpdateAndGetBurnRatesObserved(context.Context, map[string][]quota.Result, int64, func(string, string)) (history.BurnRates, error)
+				UpdateAndGetEstimatesObserved(context.Context, map[string][]quota.Result, int64, func(string, string)) (history.BurnRates, history.RateEstimates, error)
 			}); observed && ok {
-				result.rates, result.err = h.UpdateAndGetBurnRatesObserved(ctx, providerFetched(snapshot), now.Unix(), func(code, message string) { provider.ObserveWarning(ctx, code, message) })
+				result.rates, result.estimates, result.err = h.UpdateAndGetEstimatesObserved(ctx, providerFetched(snapshot), now.Unix(), func(code, message string) { provider.ObserveWarning(ctx, code, message) })
 			} else {
-				result.rates, result.err = r.History.UpdateAndGetBurnRates(ctx, providerFetched(snapshot), now.Unix())
+				result.rates, result.estimates, result.err = r.History.UpdateAndGetEstimates(ctx, providerFetched(snapshot), now.Unix())
 			}
 			return
 		}
@@ -176,11 +178,12 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 		} else {
 			result = update()
 		}
-		burnRates = result.rates
+		burnRates, estimates = result.rates, result.estimates
 		if result.err != nil && !provider.ObserveWarning(ctx, "history_update_failed", "Quota history update failed.") {
 			fmt.Fprintf(os.Stderr, "cq: history update failed: %v\n", result.err)
 		}
 	}
+	attachRecentBurnRates(snapshot, estimates)
 	return buildReport(now, req.Providers, snapshot, burnRates), nil
 }
 
@@ -404,4 +407,28 @@ func (r *Runner) backfillFromCache(ctx context.Context, id provider.ID, results 
 		}
 	}
 	return out
+}
+
+// Copy provider-owned slices/maps before adding report-only forecasts. Proxy
+// subset aggregates then receive the same rates as account and total views.
+func attachRecentBurnRates(results map[provider.ID][]quota.Result, estimates history.RateEstimates) {
+	for id, fetched := range results {
+		copied := append([]quota.Result(nil), fetched...)
+		for i, result := range copied {
+			windows := make(map[quota.WindowName]quota.Window, len(result.Windows))
+			account := result.AccountID
+			if account == "" {
+				account = result.Email
+			}
+			for name, window := range result.Windows {
+				estimate, _ := estimates.Get(history.BurnRateKey{ProviderID: string(id), AccountKey: account, Window: string(name)})
+				window.RecentBurnRate = estimate.RecentRatePctPerS
+				windows[name] = window
+			}
+			if result.Windows != nil {
+				copied[i].Windows = windows
+			}
+		}
+		results[id] = copied
+	}
 }

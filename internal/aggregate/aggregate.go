@@ -72,7 +72,7 @@ func Compute(results []quota.Result, nowEpoch int64, providerID string, burnRate
 
 func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo, nowEpoch int64, providerID string, burnRates history.BurnRates) (quota.AggregateResult, bool) {
 	var sumRemaining, sumExpected, sumWeight float64
-	// Burndown: Σ(pct_i * m_i) / Σ((100-pct_i) * m_i / elapsed_i)
+	// Burndown: weighted remaining capacity / weighted selected burn rate.
 	var burnNum, burnDen float64
 	var sustainAccounts []acctInfo
 
@@ -115,10 +115,10 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		sumExpected += expected * weight
 		sumWeight += weight
 
-		used := 100.0 - pct
-		if pct > 0 && used > 0 && elapsed > 0 {
-			burnNum += pct * weight
-			burnDen += used * weight / elapsed
+		rate := w.BurnRate(periodS, nowEpoch)
+		if !weeklyGated && w.RemainingPercent() > 0 && rate > 0 {
+			burnNum += w.RemainingPercent() * weight
+			burnDen += rate * weight
 		}
 		if !weeklyGated {
 			sustainAccounts = append(sustainAccounts, a)

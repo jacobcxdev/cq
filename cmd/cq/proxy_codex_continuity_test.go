@@ -431,13 +431,16 @@ func TestProxyCodexEnforcedTransportsShareContinuityAuthority(t *testing.T) {
 	dependency := &proxyCodexNativeHTTPTestDependency{}
 	capacity := proxy.NewCodexCapacityLedger(time.Now, time.Hour)
 	var httpPlanner, webSocketPlanner *proxy.CodexHTTPRequestPlanFactory
+	cyber := proxy.NewCyberEligibilityStore(nil)
+	var httpSession *proxy.CodexHTTPRequestSession
 
 	_, err := newProxyCodexNativeHTTP(proxyCodexNativeHTTPDependencies{
-		Status: httpStatus, PeerStatus: webSocketStatus,
+		Status: httpStatus, PeerStatus: webSocketStatus, CyberEligibility: cyber,
 		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
 		Executor: dependency, Refresher: dependency, Upstream: "https://codex.example", Now: time.Now,
-		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, _ proxy.CodexNativeHTTPRequestSession, _ string) (proxy.CodexNativeHTTPRoutingHandler, error) {
+		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, session proxy.CodexNativeHTTPRequestSession, _ string) (proxy.CodexNativeHTTPRoutingHandler, error) {
 			httpPlanner, _ = planner.(*proxy.CodexHTTPRequestPlanFactory)
+			httpSession, _ = session.(*proxy.CodexHTTPRequestSession)
 			return &proxyCodexNativeHTTPTestHandler{}, nil
 		},
 	})
@@ -445,7 +448,7 @@ func TestProxyCodexEnforcedTransportsShareContinuityAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = newProxyCodexWebSocket(proxyCodexWebSocketDependencies{
-		Status: webSocketStatus, PeerStatus: httpStatus,
+		Status: webSocketStatus, PeerStatus: httpStatus, CyberEligibility: cyber,
 		Inventory: dependency, Capacity: capacity, Routes: dependency, Runtime: dependency,
 		Executor: proxyCodexWebSocketTestExecutor{}, Refresher: dependency, Upstream: "https://codex.example", Now: time.Now,
 		newHandler: func(planner proxy.CodexNativeHTTPRequestPlanner, _ proxy.ExplicitWebSocketExecutor, _ codexprov.CredentialReferenceRefresher, _ *proxy.CodexCapacityLedger, _ string) (proxy.CodexWebSocketRoutingHandler, error) {
@@ -464,6 +467,16 @@ func TestProxyCodexEnforcedTransportsShareContinuityAuthority(t *testing.T) {
 	}
 	if httpPlanner == nil || webSocketPlanner == nil || !reflect.DeepEqual(httpPlanner.Authority, want) || !reflect.DeepEqual(webSocketPlanner.Authority, want) {
 		t.Fatalf("cross-transport authorities = HTTP %#v WebSocket %#v, want %#v", httpPlanner.Authority, webSocketPlanner.Authority, want)
+	}
+
+	if httpSession == nil || httpSession.CyberEligibility != cyber || httpPlanner.CyberEligibility != cyber || webSocketPlanner.CyberEligibilityStore() != cyber {
+		t.Fatal("transports lost the shared discovered eligibility authority")
+	}
+	// An HTTP denial must immediately affect the next WebSocket plan, without
+	// refreshing credentials or replacing the continuity authority.
+	httpSession.CyberEligibility.MarkIneligible("account", "gpt-6-sol", daybreakBlue)
+	if webSocketPlanner.CyberEligibilityStore().Status("account", "gpt-6-sol", daybreakBlue) != proxy.CyberAccessIneligible {
+		t.Fatal("HTTP Cyber denial did not propagate to WebSocket planning")
 	}
 }
 
