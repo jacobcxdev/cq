@@ -1959,6 +1959,34 @@
       "task": "T07"
     },
     {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-clear/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-clear/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
       "command": "cq codex proxy fallback set",
       "scenario": "Help",
       "stream": "stdout",
@@ -1991,6 +2019,34 @@
       "scenario": "Timeout \u00b7 no receipt",
       "stream": "stderr",
       "file": "text/cq-codex-proxy-fallback-set/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-set/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-set/09-interruption-saved-configuration.txt",
       "task": "T07"
     },
     {
@@ -2064,6 +2120,34 @@
       "task": "T07"
     },
     {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-clear/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-clear/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
       "command": "cq codex proxy pin set",
       "scenario": "Help",
       "stream": "stdout",
@@ -2096,6 +2180,34 @@
       "scenario": "Timeout \u00b7 no receipt",
       "stream": "stderr",
       "file": "text/cq-codex-proxy-pin-set/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-set/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-set/09-interruption-saved-configuration.txt",
       "task": "T07"
     },
     {
@@ -2379,6 +2491,34 @@
       "task": "T07"
     },
     {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-disable/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-disable/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
       "command": "cq codex proxy prime enable",
       "scenario": "Help",
       "stream": "stdout",
@@ -2411,6 +2551,34 @@
       "scenario": "Timeout \u00b7 no receipt",
       "stream": "stderr",
       "file": "text/cq-codex-proxy-prime-enable/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Timeout \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-enable/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Interruption \u00b7 saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-enable/09-interruption-saved-configuration.txt",
       "task": "T07"
     },
     {

@@ -138,6 +138,30 @@ var terminalRoutingFixtures = []terminalRoutingFixture{
 	{terminalFixtureRegistration{"cq codex proxy session unbind", "Success", "stdout", "text/cq-codex-proxy-session-unbind/02-success.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq codex proxy session unbind", "Failure", "stderr", "text/cq-codex-proxy-session-unbind/03-failure.txt"}, 3, "session_binding_not_found", "Session binding not found.", ""},
 	{terminalFixtureRegistration{"cq codex proxy session unbind", "Timeout · no receipt", "stderr", "text/cq-codex-proxy-session-unbind/04-timeout-no-receipt.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", "unconfirmed"},
+	{terminalFixtureRegistration{"cq codex proxy fallback clear", "Timeout · saved configuration", "stdout", "text/cq-codex-proxy-fallback-clear/06-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy fallback clear", "Timeout · saved configuration", "stderr", "text/cq-codex-proxy-fallback-clear/07-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy fallback clear", "Interruption · saved configuration", "stdout", "text/cq-codex-proxy-fallback-clear/08-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy fallback clear", "Interruption · saved configuration", "stderr", "text/cq-codex-proxy-fallback-clear/09-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy fallback set", "Timeout · saved configuration", "stdout", "text/cq-codex-proxy-fallback-set/06-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy fallback set", "Timeout · saved configuration", "stderr", "text/cq-codex-proxy-fallback-set/07-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy fallback set", "Interruption · saved configuration", "stdout", "text/cq-codex-proxy-fallback-set/08-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy fallback set", "Interruption · saved configuration", "stderr", "text/cq-codex-proxy-fallback-set/09-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy pin clear", "Timeout · saved configuration", "stdout", "text/cq-codex-proxy-pin-clear/06-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy pin clear", "Timeout · saved configuration", "stderr", "text/cq-codex-proxy-pin-clear/07-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy pin clear", "Interruption · saved configuration", "stdout", "text/cq-codex-proxy-pin-clear/08-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy pin clear", "Interruption · saved configuration", "stderr", "text/cq-codex-proxy-pin-clear/09-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy pin set", "Timeout · saved configuration", "stdout", "text/cq-codex-proxy-pin-set/06-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy pin set", "Timeout · saved configuration", "stderr", "text/cq-codex-proxy-pin-set/07-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy pin set", "Interruption · saved configuration", "stdout", "text/cq-codex-proxy-pin-set/08-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy pin set", "Interruption · saved configuration", "stderr", "text/cq-codex-proxy-pin-set/09-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy prime disable", "Timeout · saved configuration", "stdout", "text/cq-codex-proxy-prime-disable/06-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy prime disable", "Timeout · saved configuration", "stderr", "text/cq-codex-proxy-prime-disable/07-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy prime disable", "Interruption · saved configuration", "stdout", "text/cq-codex-proxy-prime-disable/08-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy prime disable", "Interruption · saved configuration", "stderr", "text/cq-codex-proxy-prime-disable/09-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy prime enable", "Timeout · saved configuration", "stdout", "text/cq-codex-proxy-prime-enable/06-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy prime enable", "Timeout · saved configuration", "stderr", "text/cq-codex-proxy-prime-enable/07-timeout-saved-configuration.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", ""},
+	{terminalFixtureRegistration{"cq codex proxy prime enable", "Interruption · saved configuration", "stdout", "text/cq-codex-proxy-prime-enable/08-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
+	{terminalFixtureRegistration{"cq codex proxy prime enable", "Interruption · saved configuration", "stderr", "text/cq-codex-proxy-prime-enable/09-interruption-saved-configuration.txt"}, 130, "interrupted", "Operation interrupted; inspect state before retrying.", "completion unknown"},
 }
 
 type routingIndex struct {
@@ -306,8 +330,8 @@ func TestTerminalRoutingFixtures(t *testing.T) {
 			})
 		}
 	}
-	if len(commands) != 29 || len(seen) != 113 {
-		t.Errorf("routing coverage: %d commands, %d fixtures; want 29 and 113", len(commands), len(seen))
+	if len(commands) != 29 || len(seen) != 137 {
+		t.Errorf("routing coverage: %d commands, %d fixtures; want 29 and 137", len(commands), len(seen))
 	}
 	for _, entry := range index.Fixtures {
 		if commands[entry.Command] && entry.Scenario != "Help" && !seen[entry.File] {
@@ -319,6 +343,26 @@ func TestTerminalRoutingFixtures(t *testing.T) {
 func routingFixtureOutcome(f terminalRoutingFixture) cli.Outcome {
 	if f.Exit != 0 {
 		out := cli.Outcome{ExitCode: f.Exit, Errors: []cli.Diagnostic{{Code: f.Code, Message: f.Message}}, TerminalResult: f.Result}
+		if strings.HasSuffix(f.Scenario, "saved configuration") {
+			parts := strings.Fields(f.Command)
+			last := parts[len(parts)-1]
+			var receipt cli.Outcome
+			if strings.Contains(f.Command, " prime ") {
+				receipt = cli.Outcome{Terminal: func(o cli.TerminalOptions) string {
+					return terminalPrime(last == "enable", map[string]string{"gpt-reserve": "gpt-5.4"}, last, o)
+				}}
+			} else {
+				data := v2SelectionData{Provider: "codex", Kind: parts[3], Configured: last == "set"}
+				if data.Configured {
+					account := "acct-alex"
+					data.Account = &account
+				}
+				receipt = cli.Outcome{Terminal: func(o cli.TerminalOptions) string {
+					return terminalSelection(data, last, o)
+				}}
+			}
+			return v2CodexSelectionSavedStop(out, receipt)
+		}
 		if f.Code == "routing_timeout" && strings.HasPrefix(f.Command, "cq claude proxy pin ") {
 			out.ConfirmedReceipt = true
 			action := strings.TrimPrefix(f.Command, "cq claude proxy pin ")

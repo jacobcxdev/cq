@@ -2,7 +2,7 @@
 
 These are manually authored design fixtures, not captures from the current binary. Each scenario is independent. All accounts, keys, digests, paths and evidence are fictional. The fixed display clock is 23 Sep 2026, 16:30 BST (UTC+01:00). `alex@example.test` resolves to `acct-alex`; `sam@example.test` resolves to `acct-sam`. Terminal width is 100 columns. Frozen trace records remain single physical lines even when they exceed that width. These text bodies are the NO_COLOR terminal variant; colour roles follow the shared design, not escape sequences embedded in Markdown. Redirected legacy output and JSON are separate frozen contracts.
 
-Each Help fixture also applies to `-h` and `cq help PATH`. All help scenarios have empty stderr and exit 0. Unless a scenario explicitly says otherwise, success has empty stderr, failure has empty stdout. No command in this file adds a confirmation prompt: the existing routing commands do not ask for one. Atomic routing updates have no fabricated row-by-row partial success. Timeout examples preserve uncertainty when no receipt exists. Raw trace retains its stream contract.
+Each Help fixture also applies to `-h` and `cq help PATH`. All help scenarios have empty stderr and exit 0. Unless a scenario explicitly says otherwise, success has empty stderr, failure has empty stdout. No command in this file adds a confirmation prompt: the existing routing commands do not ask for one. Atomic routing updates have no fabricated row-by-row partial success. Timeout examples preserve uncertainty when no receipt exists. Codex pin, fallback and priming examples also show confirmed local saves after a timeout or interruption, with live application still unconfirmed. Raw trace retains its stream contract.
 ## `cq codex proxy fallback clear`
 
 ### Help
@@ -125,6 +125,69 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 ```
 
 Exit: `7`.
+
+### Timeout · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy fallback clear --timeout 1ms`
+
+Stdout:
+
+```text
+Saved Codex fallback configuration.
+Codex fallback · not configured
+  Account key  not configured
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy fallback clear
+```
+
+Exit: `7`.
+
+### Interruption · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy fallback clear`
+
+Stdout:
+
+```text
+Saved Codex fallback configuration.
+Codex fallback · not configured
+  Account key  not configured
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy fallback clear
+  Result: completion unknown
+```
+
+Exit: `130`.
 
 ## `cq codex proxy fallback set`
 
@@ -254,6 +317,69 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 ```
 
 Exit: `7`.
+
+### Timeout · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy fallback set alex@example.test --timeout 1ms`
+
+Stdout:
+
+```text
+Saved Codex fallback configuration.
+Codex fallback · configured
+  Account key  acct-alex
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy fallback set
+```
+
+Exit: `7`.
+
+### Interruption · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy fallback set alex@example.test`
+
+Stdout:
+
+```text
+Saved Codex fallback configuration.
+Codex fallback · configured
+  Account key  acct-alex
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy fallback set
+  Result: completion unknown
+```
+
+Exit: `130`.
 
 ## `cq codex proxy fallback show`
 
@@ -491,6 +617,69 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 
 Exit: `7`.
 
+### Timeout · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy pin clear --timeout 1ms`
+
+Stdout:
+
+```text
+Saved Codex pin configuration.
+Codex pin · not configured
+  Account key  not configured
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy pin clear
+```
+
+Exit: `7`.
+
+### Interruption · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy pin clear`
+
+Stdout:
+
+```text
+Saved Codex pin configuration.
+Codex pin · not configured
+  Account key  not configured
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy pin clear
+  Result: completion unknown
+```
+
+Exit: `130`.
+
 ## `cq codex proxy pin set`
 
 ### Help
@@ -619,6 +808,69 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 ```
 
 Exit: `7`.
+
+### Timeout · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy pin set alex@example.test --timeout 1ms`
+
+Stdout:
+
+```text
+Saved Codex pin configuration.
+Codex pin · configured
+  Account key  acct-alex
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy pin set
+```
+
+Exit: `7`.
+
+### Interruption · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy pin set alex@example.test`
+
+Stdout:
+
+```text
+Saved Codex pin configuration.
+Codex pin · configured
+  Account key  acct-alex
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy pin set
+  Result: completion unknown
+```
+
+Exit: `130`.
 
 ## `cq codex proxy pin show`
 
@@ -1864,6 +2116,75 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 
 Exit: `7`.
 
+### Timeout · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy prime disable --timeout 1ms`
+
+Stdout:
+
+```text
+Saved Codex priming configuration.
+Codex priming · configured disabled
+  Application  Live process acknowledgement not checked
+
+Model overrides
+  Window       Model
+  gpt-reserve  gpt-5.4
+Source: saved configuration
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy prime disable
+```
+
+Exit: `7`.
+
+### Interruption · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy prime disable`
+
+Stdout:
+
+```text
+Saved Codex priming configuration.
+Codex priming · configured disabled
+  Application  Live process acknowledgement not checked
+
+Model overrides
+  Window       Model
+  gpt-reserve  gpt-5.4
+Source: saved configuration
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy prime disable
+  Result: completion unknown
+```
+
+Exit: `130`.
+
 ## `cq codex proxy prime enable`
 
 ### Help
@@ -1991,6 +2312,75 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 ```
 
 Exit: `7`.
+
+### Timeout · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy prime enable --timeout 1ms`
+
+Stdout:
+
+```text
+Saved Codex priming configuration.
+Codex priming · configured enabled
+  Application  Live process acknowledgement not checked
+
+Model overrides
+  Window       Model
+  gpt-reserve  gpt-5.4
+Source: saved configuration
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy prime enable
+```
+
+Exit: `7`.
+
+### Interruption · saved configuration
+
+The local configuration save returned successfully before the operation stopped. Live application remains unconfirmed.
+
+Invocation: `cq codex proxy prime enable`
+
+Stdout:
+
+```text
+Saved Codex priming configuration.
+Codex priming · configured enabled
+  Application  Live process acknowledgement not checked
+
+Model overrides
+  Window       Model
+  gpt-reserve  gpt-5.4
+Source: saved configuration
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
+```
+
+Stderr:
+
+```text
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy prime enable
+  Result: completion unknown
+```
+
+Exit: `130`.
 
 ## `cq codex proxy prime status`
 
@@ -3916,4 +4306,3 @@ Error · Trace following interrupted.
 ```
 
 Exit: `130`.
-

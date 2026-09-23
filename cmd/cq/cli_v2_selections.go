@@ -118,6 +118,9 @@ func executeV2Selection(parent, ctx context.Context, inv cli.Invocation, deps v2
 			}
 		}
 		if out, stopped := v2SelectionStopped(parent, ctx); stopped {
+			if intent.action != "status" {
+				return v2CodexSelectionSavedStop(out, v2PrimeOutcome(cfg, intent.action))
+			}
 			return out
 		}
 		return v2PrimeOutcome(cfg, intent.action)
@@ -167,10 +170,24 @@ func executeV2Selection(parent, ctx context.Context, inv cli.Invocation, deps v2
 			out.Terminal = func(o cli.TerminalOptions) string {
 				return selection.Terminal(o) + routingLine(o, 2, 17, "Live application", routingAttention("unconfirmed"))
 			}
+		} else if intent.provider == "codex" && intent.action != "show" {
+			return v2CodexSelectionSavedStop(out, v2SelectionOutcome(cfg, intent))
 		}
 		return out
 	}
 	return v2SelectionOutcome(cfg, intent)
+}
+
+func v2CodexSelectionSavedStop(out, receipt cli.Outcome) cli.Outcome {
+	out.ConfirmedReceipt = true
+	if out.ExitCode == 130 {
+		out.TerminalResult = "completion unknown"
+	}
+	out.Terminal = func(o cli.TerminalOptions) string {
+		return receipt.Terminal(o) + "\n" + cli.TerminalLine(o, 0,
+			cli.Span{Text: "Live application "}, routingAttention("unconfirmed"))
+	}
+	return out
 }
 
 func v2AnnotateRoutingTimeout(out *cli.Outcome, path string) {

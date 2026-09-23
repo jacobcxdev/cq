@@ -20,5 +20,5 @@ The examples do not exercise live credentials, credits, services or routes. Prod
 - Initial viewer selection is the complete all-account `cq codex reset list` example.
 - `operational-outputs.md` collects every command's authored operational scenarios without help blocks.
 - Coverage checks verified all 89 commands have operational cases and all 127 help pages retain separate help examples.
-- Exports contain 498 fixtures, including the additional all-account reset-list result, two Claude post-save timeout receipts, and three full raw completion scripts.
+- Exports contain 522 fixtures, including the additional all-account reset-list result, two Claude post-save timeout receipts, 24 Codex local-save timeout/interruption stream fixtures, and three full raw completion scripts.
 - Viewer data, navigation source and JavaScript syntax were checked; browser rendering remains unverified.

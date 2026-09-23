@@ -381,6 +381,187 @@ func TestCLIV2SelectionPostSaveReceipt(t *testing.T) {
 	}
 }
 
+func TestCLIV2CodexSelectionPostSaveReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		path, account, saved, state string
+	}{
+		{"codex proxy pin set", "account-a", "pin", "Codex pin · configured"},
+		{"codex proxy pin clear", "", "pin", "Codex pin · not configured"},
+		{"codex proxy fallback set", "account-a", "fallback", "Codex fallback · configured"},
+		{"codex proxy fallback clear", "", "fallback", "Codex fallback · not configured"},
+		{"codex proxy prime enable", "", "priming", "Codex priming · configured enabled"},
+		{"codex proxy prime disable", "", "priming", "Codex priming · configured disabled"},
+	} {
+		for _, stop := range []string{"timeout", "interrupted"} {
+			t.Run(tc.path+"/"+stop, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				if stop == "timeout" {
+					ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+				}
+				defer cancel()
+				cfg := &proxy.Config{CodexRoutingPinnedAccountKey: "old-pin", CodexRoutingDefaultAccountKey: "old-fallback"}
+				saves, inventoryCalls := 0, 0
+				deps := v2SelectionDependencies{
+					LoadConfig: func() (*proxy.Config, error) { return cfg, nil },
+					SaveConfig: func(*proxy.Config) error {
+						saves++
+						if stop == "timeout" {
+							<-ctx.Done()
+						} else {
+							cancel()
+						}
+						return nil
+					},
+					Codex: func(context.Context) (codexprov.Inventory, codexprov.AccountAliasIndex, error) {
+						inventoryCalls++
+						return codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{Key: "account-a"}}}, codexprov.AccountAliasIndex{}, nil
+					},
+				}
+				args := strings.Fields(tc.path)
+				if tc.account != "" {
+					args = append(args, tc.account)
+				}
+				var stdout, stderr bytes.Buffer
+				o := terminalFixtureOptions(100)
+				var outcome cli.Outcome
+				exit := cli.Run(ctx, args, &cli.Session{Out: &stdout, Err: &stderr, OutTerminal: o, ErrTerminal: o}, func(string) (cli.Handler, bool) {
+					return func(ctx context.Context, inv cli.Invocation, s *cli.Session) cli.Outcome {
+						outcome = handleV2SelectionWithDependencies(ctx, inv, s, deps)
+						return outcome
+					}, true
+				})
+				wantExit, wantCode, wantWarning := 7, "routing_timeout", "Warning · Routing operation timed out"
+				if stop == "interrupted" {
+					wantExit, wantCode, wantWarning = 130, "interrupted", "Warning · Operation interrupted"
+				}
+				if exit != wantExit || !outcome.ConfirmedReceipt || len(outcome.Errors) != 1 || outcome.Errors[0].Code != wantCode || outcome.Human != "" || len(outcome.Data) != 0 || saves != 1 {
+					t.Fatalf("exit=%d outcome=%+v saves=%d", exit, outcome, saves)
+				}
+				wantInventory := 0
+				if tc.account != "" {
+					wantInventory = 1
+				}
+				if inventoryCalls != wantInventory {
+					t.Fatalf("inventory calls=%d want=%d", inventoryCalls, wantInventory)
+				}
+				plainOut, plainErr := ansi.Strip(stdout.String()), ansi.Strip(stderr.String())
+				if !strings.Contains(plainOut, "Saved Codex "+tc.saved+" configuration.") || !strings.Contains(plainOut, tc.state) || !strings.Contains(plainOut, "Live application unconfirmed") || !strings.Contains(plainErr, wantWarning) {
+					t.Fatalf("stdout=%q stderr=%q", plainOut, plainErr)
+				}
+				if !strings.Contains(stdout.String(), "\x1b[32mSaved Codex ") || !strings.Contains(stdout.String(), "\x1b[33munconfirmed\x1b[0m") || !strings.Contains(stderr.String(), "\x1b[33mWarning\x1b[0m") {
+					t.Fatalf("receipt or warning colour role missing: stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+				noColour := o
+				noColour.Colour = false
+				if rendered := outcome.Terminal(noColour); rendered != plainOut || strings.Contains(rendered, "\x1b[") {
+					t.Fatalf("colour-free receipt differs: %q", rendered)
+				}
+				if stop == "interrupted" && !strings.Contains(plainErr, "Result: completion unknown") {
+					t.Fatalf("interrupted completion status missing: %q", plainErr)
+				}
+				for _, line := range strings.Split(stdout.String()+stderr.String(), "\n") {
+					if ansi.StringWidth(line) > 100 {
+						t.Fatalf("line exceeds 100 cells: %q", line)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCLIV2CodexSelectionStoppedPlainAndJSON(t *testing.T) {
+	for _, mode := range []string{"plain", "json"} {
+		for _, stop := range []string{"timeout", "interrupted"} {
+			t.Run(mode+"/"+stop, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				deps := v2SelectionDependencies{
+					LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{}, nil },
+					SaveConfig: func(*proxy.Config) error {
+						if stop == "timeout" {
+							<-ctx.Done()
+						} else {
+							cancel()
+						}
+						return nil
+					},
+				}
+				args := []string{"codex", "proxy", "prime", "enable"}
+				if mode == "json" {
+					args = append(args, "--json")
+				}
+				var stdout, stderr bytes.Buffer
+				exit := cli.Run(ctx, args, &cli.Session{Out: &stdout, Err: &stderr}, func(string) (cli.Handler, bool) {
+					return func(ctx context.Context, inv cli.Invocation, session *cli.Session) cli.Outcome {
+						return handleV2SelectionWithDependencies(ctx, inv, session, deps)
+					}, true
+				})
+				wantExit, wantCode, wantMessage := 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation."
+				if stop == "interrupted" {
+					wantExit, wantCode, wantMessage = 130, "interrupted", "Operation interrupted; inspect state before retrying."
+				}
+				if exit != wantExit || strings.Contains(stdout.String(), "Saved Codex") || strings.Contains(stdout.String(), "Live application") {
+					t.Fatalf("exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+				}
+				if mode == "plain" {
+					if stdout.Len() != 0 || stderr.String() != "cq: "+wantMessage+"\n" {
+						t.Fatalf("plain stdout=%q stderr=%q", stdout.String(), stderr.String())
+					}
+				} else {
+					var envelope map[string]json.RawMessage
+					if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil || !bytes.Contains(stdout.Bytes(), []byte(`"`+wantCode+`"`)) || stderr.Len() != 0 {
+						t.Fatalf("JSON stdout=%q stderr=%q err=%v", stdout.String(), stderr.String(), err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCLIV2CodexSelectionNoUnconfirmedReceipt(t *testing.T) {
+	for _, path := range []string{"codex proxy pin set", "codex proxy pin clear", "codex proxy fallback set", "codex proxy fallback clear", "codex proxy prime enable", "codex proxy prime disable"} {
+		for _, phase := range []string{"before save timeout", "before save interruption", "failed save"} {
+			t.Run(path+"/"+phase, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				saves := 0
+				deps := v2SelectionDependencies{
+					LoadConfig: func() (*proxy.Config, error) {
+						if phase == "before save interruption" {
+							cancel()
+						} else if phase == "before save timeout" {
+							<-ctx.Done()
+						}
+						return &proxy.Config{}, nil
+					},
+					SaveConfig: func(*proxy.Config) error { saves++; return errors.New("private write error") },
+					Codex: func(context.Context) (codexprov.Inventory, codexprov.AccountAliasIndex, error) {
+						return codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{Key: "account-a"}}}, codexprov.AccountAliasIndex{}, nil
+					},
+				}
+				args := strings.Fields(path)
+				if strings.HasSuffix(path, " set") {
+					args = append(args, "account-a")
+				}
+				inv, err := cli.Parse(args)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := handleV2SelectionWithDependencies(ctx, inv, nil, deps)
+				wantExit, wantCode, wantSaves := 1, "routing_io_failed", 1
+				if phase == "before save timeout" {
+					wantExit, wantCode, wantSaves = 7, "routing_timeout", 0
+				} else if phase == "before save interruption" {
+					wantExit, wantCode, wantSaves = 130, "interrupted", 0
+				}
+				if out.ExitCode != wantExit || len(out.Errors) != 1 || out.Errors[0].Code != wantCode || out.ConfirmedReceipt || out.Terminal != nil || saves != wantSaves {
+					t.Fatalf("outcome=%+v saves=%d", out, saves)
+				}
+			})
+		}
+	}
+}
+
 func TestCLIV2SelectionIdentityAndInventoryFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name, reference, code string

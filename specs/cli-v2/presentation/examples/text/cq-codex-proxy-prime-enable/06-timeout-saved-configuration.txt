@@ -1,0 +1,13 @@
+Saved Codex priming configuration.
+Codex priming · configured enabled
+  Application  Live process acknowledgement not checked
+
+Model overrides
+  Window       Model
+  gpt-reserve  gpt-5.4
+Source: saved configuration
+
+Restart required: yes
+Next: cq service restart --component proxy
+
+Live application unconfirmed
