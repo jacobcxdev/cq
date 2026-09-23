@@ -13,7 +13,7 @@ func TestTerminalHelpPresentation(t *testing.T) {
 	for _, path := range []string{"", "service install", "codex proxy reserve set"} {
 		t.Run(path, func(t *testing.T) {
 			var out bytes.Buffer
-			session := &Session{Out: &out, Err: &bytes.Buffer{}, TerminalWidth: 80, Colour: true}
+			session := &Session{Out: &out, Err: &bytes.Buffer{}, OutTerminal: TerminalOptions{Width: 80, Colour: true}}
 			args := append([]string{"help"}, strings.Fields(path)...)
 			exit := Run(context.Background(), args, session, func(string) (Handler, bool) { t.Fatal("help accessed handlers"); return nil, false })
 			if exit != 0 {

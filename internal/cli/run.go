@@ -20,8 +20,8 @@ func Run(ctx context.Context, argv []string, session *Session, lookup Lookup) in
 		if !ok {
 			return render(session, inv, internalFailure())
 		}
-		if session.TerminalWidth > 0 {
-			if styled, available := terminalHelp(inv.Path, session.TerminalWidth, session.Colour); available {
+		if session.OutTerminal.Width > 0 {
+			if styled, available := terminalHelp(inv.Path, session.OutTerminal.Width, session.OutTerminal.Colour); available {
 				text = styled
 			}
 		}
@@ -85,6 +85,8 @@ func render(session *Session, inv Invocation, outcome Outcome) int {
 		// This branch encodes the actual resource as JSON, never a human
 		// template containing hand-escaped protocol text.
 		err = writeJSONValue(session.Out, outcome.Data)
+	case outcome.Terminal != nil && session.OutTerminal.Width > 0:
+		err = writeBytes(session.Out, []byte(outcome.Terminal(session.OutTerminal)))
 	default:
 		if outcome.Human != "" {
 			err = writeBytes(session.Out, []byte(outcome.Human))

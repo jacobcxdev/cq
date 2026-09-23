@@ -11,7 +11,115 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestTerminalDispatch(t *testing.T) {
+	now := time.Date(2026, 9, 23, 15, 30, 0, 0, time.UTC)
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name           string
+		args           []string
+		outTTY, errTTY bool
+		colour         bool
+		streamed       bool
+		want           string
+		calls          int
+	}{
+		{"both-colour", []string{"check"}, true, true, true, false, "terminal\n", 1},
+		{"stdout-only", []string{"check"}, true, false, true, false, "terminal\n", 1},
+		{"stderr-only", []string{"check"}, false, true, true, false, "human\n", 0},
+		{"neither", []string{"check"}, false, false, false, false, "human\n", 0},
+		{"no-colour-layout", []string{"check"}, true, true, false, false, "terminal\n", 1},
+		{"json", []string{"check", "--json"}, true, true, true, false, "", 0},
+		{"raw-hook", []string{"codex", "proxy", "hook", "stop"}, true, true, true, false, "{}\n", 0},
+		{"streamed", []string{"check"}, true, true, true, true, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, diagnostics bytes.Buffer
+			calls := 0
+			outOptions, errOptions := TerminalOptions{Now: now, Location: london}, TerminalOptions{Now: now, Location: london}
+			if tc.outTTY {
+				outOptions.Width = 40
+				outOptions.Colour = tc.colour
+			}
+			if tc.errTTY {
+				errOptions.Width = 80
+				errOptions.Colour = tc.colour
+			}
+			session := &Session{Out: &out, Err: &diagnostics, OutTerminal: outOptions, ErrTerminal: errOptions}
+			exit := Run(context.Background(), tc.args, session, func(string) (Handler, bool) {
+				return func(context.Context, Invocation, *Session) Outcome {
+					return Outcome{Human: "human\n", Data: json.RawMessage(`{}`), Streamed: tc.streamed, Terminal: func(got TerminalOptions) string {
+						calls++
+						if got != outOptions {
+							t.Errorf("callback options: %+v", got)
+						}
+						return "terminal\n"
+					}}
+				}, true
+			})
+			if exit != 0 || calls != tc.calls {
+				t.Fatalf("exit=%d callback calls=%d stderr=%q", exit, calls, diagnostics.String())
+			}
+			if tc.name == "json" {
+				decodeOutput(t, out.String())
+			} else if out.String() != tc.want {
+				t.Fatalf("stdout=%q want %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestTerminalDispatchWriteFailure(t *testing.T) {
+	for _, short := range []bool{false, true} {
+		writer := &failingOutput{left: 3, short: short}
+		var diagnostics bytes.Buffer
+		operations, renders := 0, 0
+		exit := Run(context.Background(), []string{"check"}, &Session{Out: writer, Err: &diagnostics, OutTerminal: TerminalOptions{Width: 80}}, func(string) (Handler, bool) {
+			return func(context.Context, Invocation, *Session) Outcome {
+				operations++
+				return Outcome{Human: "human\n", Terminal: func(TerminalOptions) string { renders++; return "terminal\n" }}
+			}, true
+		})
+		if exit != 1 || operations != 1 || renders != 1 || writer.calls != 1 || diagnostics.String() != "cq: Output could not be written.\n" {
+			t.Fatalf("short=%t exit=%d operations=%d renders=%d writes=%d stderr=%q", short, exit, operations, renders, writer.calls, diagnostics.String())
+		}
+	}
+}
+
+func TestTerminalDispatchPurePresentation(t *testing.T) {
+	help, ok := terminalHelp("check", 40, false)
+	if !ok {
+		t.Fatal("missing terminal help")
+	}
+	completion, ok := Completion("bash")
+	if !ok {
+		t.Fatal("missing completion")
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"help", []string{"check", "--help", "--json"}, help},
+		{"completion", []string{"completion", "bash"}, completion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			exit := Run(context.Background(), tc.args, &Session{Out: &out, Err: io.Discard, OutTerminal: TerminalOptions{Width: 40}}, func(string) (Handler, bool) {
+				t.Fatal("pure presentation reached handler lookup")
+				return nil, false
+			})
+			if exit != 0 || out.String() != tc.want {
+				t.Fatalf("exit=%d output=%q", exit, out.String())
+			}
+		})
+	}
+}
 
 type outputEnvelope struct {
 	Schema   int             `json:"schema_version"`

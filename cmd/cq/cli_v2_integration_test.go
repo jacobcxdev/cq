@@ -243,6 +243,40 @@ func TestCLIV2OutputWriteDoesNotReplayRefresh(t *testing.T) {
 	}
 }
 
+func TestTerminalDispatchOptions(t *testing.T) {
+	now := time.Date(2026, 9, 23, 15, 30, 0, 0, time.UTC)
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, noColour, term string
+		colour               bool
+	}{
+		{"colour", "", "xterm-256color", true},
+		{"no-colour", "1", "xterm-256color", false},
+		{"dumb", "", "dumb", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NO_COLOR", tc.noColour)
+			t.Setenv("TERM", tc.term)
+			got := terminalPresentation(40, now, london)
+			if got.Width != 40 || got.Colour != tc.colour || !got.Now.Equal(now) || got.Location != london {
+				t.Fatalf("options: %+v", got)
+			}
+		})
+	}
+	file, err := os.CreateTemp(t.TempDir(), "redirected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	redirected := terminalOptions(file, now, london)
+	if redirected.Width != 0 || redirected.Colour || !redirected.Now.Equal(now) || redirected.Location != london {
+		t.Fatalf("redirected: %+v", redirected)
+	}
+}
+
 var _ fsutil.FileSystem = resetProductionFS{}
 
 func TestCLIV2ExecutableMain(t *testing.T) {

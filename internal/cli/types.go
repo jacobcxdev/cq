@@ -28,17 +28,18 @@ type Outcome struct {
 	Errors   []Diagnostic
 	Warnings []Diagnostic
 	Human    string
+	Terminal TerminalRenderer
 	Streamed bool // stdout ownership consumed by terminal write or failed stream write
 }
 
 type Session struct {
-	In            io.Reader
-	Out           io.Writer
-	Err           io.Writer
-	Interactive   bool
-	TerminalWidth int // Zero keeps reference output for non-terminal writers.
-	Colour        bool
-	BuildInfo     BuildInfo
+	In          io.Reader
+	Out         io.Writer
+	Err         io.Writer
+	Interactive bool
+	OutTerminal TerminalOptions
+	ErrTerminal TerminalOptions
+	BuildInfo   BuildInfo
 }
 
 type Handler func(context.Context, Invocation, *Session) Outcome
