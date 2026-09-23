@@ -5,9 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,5 +163,116 @@ func TestPolicyPoolControlReturnsSafeFailureCodes(t *testing.T) {
 				t.Fatalf("failure leaked policy detail: %q", response.Body.String())
 			}
 		})
+	}
+}
+
+// T15's raw policy digest input deliberately differs from the frozen receipt ID.
+func TestProxyPolicySessionDigestRawBytesPreserveReceiptValidation(t *testing.T) {
+	store, _ := newRoutingPolicyStoreForTest(t)
+	server := &Server{RoutingPolicy: store}
+	for _, raw := range []string{"identifier", "identifier\n", "identifier\x00", strings.Repeat("Ω", 2048), strings.Repeat("x", 4097), "", string([]byte{0xff})} {
+		w := httptest.NewRecorder()
+		server.handlePolicySessionDigest(w, httptest.NewRequest(http.MethodPost, RuntimePolicySessionDigestPath, strings.NewReader(raw)))
+		valid := len(raw) > 0 && len(raw) <= 4096 && raw != string([]byte{0xff})
+		if !valid {
+			if w.Code != 400 {
+				t.Fatalf("invalid length=%d status=%d", len(raw), w.Code)
+			}
+			continue
+		}
+		var result struct {
+			Digest string `json:"session_digest"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || result.Digest != store.SessionDigest([]byte(raw)) {
+			t.Fatalf("length=%d status=%d err=%v", len(raw), w.Code, err)
+		}
+		if strings.ContainsAny(raw, "\n\x00") {
+			if validCanonicalSessionID([]byte(raw)) {
+				t.Fatal("policy input relaxation broadened receipt boundary")
+			}
+			receipts, err := NewCodexTurnReceiptStore(rand.Reader, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipts.register([]byte(raw), []byte("turn"), testCodexTurnReceipt()) != nil {
+				t.Fatal("receipt store accepted policy-only raw identity")
+			}
+			server.CodexTurnReceipts = receipts
+			for _, path := range []string{RuntimeCodexTurnReceiptPath, RuntimeCodexTurnReceiptV2Path} {
+				body, _ := json.Marshal(map[string]string{"session_id": raw, "turn_id": "turn"})
+				response := httptest.NewRecorder()
+				server.handleCodexTurnReceipt(response, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)))
+				if response.Code != 400 || response.Body.String() != "invalid Codex turn receipt lookup\n" {
+					t.Fatal("receipt control validation changed")
+				}
+			}
+		}
+	}
+}
+
+type policyReceiptPublisher struct {
+	DurableObjectPublisher
+	failure error
+}
+
+func (p policyReceiptPublisher) PublishImmutable(context.Context, fsutil.SecureDirectory, string, []byte, fs.FileMode) (StableObjectIdentity, error) {
+	return StableObjectIdentity{}, p.failure
+}
+func (p policyReceiptPublisher) ReplaceSelectorExactPrior(context.Context, fsutil.SecureDirectory, string, *StableObjectIdentity, []byte) (StableObjectIdentity, error) {
+	return StableObjectIdentity{}, p.failure
+}
+func TestProxyPolicyControlTypedErrorReceiptsPreserveLegacyResponses(t *testing.T) {
+	for _, scenario := range []string{"schema", "references", "generation", "persistence", "cas", "random"} {
+		t.Run(scenario, func(t *testing.T) {
+			store, _ := newRoutingPolicyStoreForTest(t)
+			document := RoutingPolicyDocument{SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1, Pools: []AccountPoolDocument{{Name: "Work", Members: []codex.AccountKey{"a"}}}}
+			if err := store.PublishDocument(document); err != nil {
+				t.Fatal(err)
+			}
+			before := store.Current()
+			document.AuthorityGeneration++
+			document.RoutingGeneration++
+			want := "policy_document_invalid"
+			switch scenario {
+			case "schema":
+				document.SchemaVersion = 2
+			case "references":
+				document.SessionBindings = []SessionBindingDocument{{SessionDigest: strings.Repeat("a", 64), Pool: "missing"}}
+			case "generation":
+				document.AuthorityGeneration--
+				want = "policy_generation_conflict"
+			case "persistence":
+				store.publisher = policyReceiptPublisher{store.publisher, errors.New("private storage failure")}
+				want = "routing_io_failed"
+			case "cas":
+				store.publisher = policyReceiptPublisher{store.publisher, ErrAuthorityPriorMismatch}
+				want = "routing_conflict"
+			case "random":
+				store.random = strings.NewReader("")
+				document.Pools = append(document.Pools, AccountPoolDocument{Name: "New", Members: []codex.AccountKey{"b"}})
+				want = "routing_io_failed"
+			}
+			server := &Server{RoutingPolicy: store, SessionPolicy: store.Resolver()}
+			body, _ := json.Marshal(document)
+			w := httptest.NewRecorder()
+			server.handlePolicyControl(w, httptest.NewRequest(http.MethodPut, RuntimePolicyPath, bytes.NewReader(body)))
+			if w.Code != 409 || w.Body.String() != "routing policy rejected\n" || w.Header().Get("X-CQ-Policy-Error") != want {
+				t.Fatalf("status=%d body=%q receipt=%q want=%s", w.Code, w.Body.String(), w.Header().Get("X-CQ-Policy-Error"), want)
+			}
+			if store.Current().RoutingGeneration != before.RoutingGeneration {
+				t.Fatal("failed publication changed authority")
+			}
+		})
+	}
+	err := invalidRoutingPolicy("invalid schema")
+	var typed *RoutingPolicyValidationError
+	if !errors.As(err, &typed) || err.Error() != "invalid schema" || errors.Unwrap(err) == nil {
+		t.Fatal("validation provenance lost")
+	}
+	if policyControlErrorCode(errors.Join(errors.New("context"), ErrAuthorityPriorMismatch)) != "routing_conflict" {
+		t.Fatal("CAS sentinel lost")
+	}
+	if policyControlErrorCode(io.ErrUnexpectedEOF) != "routing_io_failed" {
+		t.Fatal("entropy classified as document")
 	}
 }

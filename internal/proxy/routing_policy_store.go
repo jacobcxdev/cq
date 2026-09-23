@@ -38,6 +38,19 @@ var (
 	poolIDPattern             = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
 
+// RoutingPolicyValidationError preserves the original validation error while
+// distinguishing a stale generation from an invalid public document.
+type RoutingPolicyValidationError struct {
+	Generation bool
+	Err        error
+}
+
+func (e *RoutingPolicyValidationError) Error() string { return e.Err.Error() }
+func (e *RoutingPolicyValidationError) Unwrap() error { return e.Err }
+func invalidRoutingPolicy(message string) error {
+	return &RoutingPolicyValidationError{Err: errors.New(message)}
+}
+
 type CapabilityEvidenceState string
 
 const (
@@ -533,31 +546,31 @@ func validateRoutingPolicy(policy RoutingPolicyV1, prior *RoutingPolicyV1) error
 
 func validateRoutingPolicyV2(policy RoutingPolicyV2, prior *RoutingPolicyV2) error {
 	if policy.SchemaVersion != 2 || policy.AuthorityGeneration == 0 || policy.RoutingGeneration == 0 || policy.EffectiveGeneration > policy.RoutingGeneration {
-		return errors.New("invalid routing policy generations")
+		return invalidRoutingPolicy("invalid routing policy generations")
 	}
 	if prior != nil && (policy.AuthorityGeneration != prior.AuthorityGeneration+1 || policy.RoutingGeneration != prior.RoutingGeneration+1 || policy.EffectiveGeneration < prior.EffectiveGeneration) {
-		return errors.New("stale routing policy generation")
+		return &RoutingPolicyValidationError{Generation: true, Err: errors.New("stale routing policy generation")}
 	}
 	pools := make(map[PoolID]map[providerCodex.AccountKey]struct{}, len(policy.Pools))
 	names := make(map[string]struct{}, len(policy.Pools))
 	for _, pool := range policy.Pools {
 		if !validPoolID(pool.ID) || !validPoolName(pool.Name) || len(pool.Members) == 0 {
-			return errors.New("invalid account pool")
+			return invalidRoutingPolicy("invalid account pool")
 		}
 		if _, exists := pools[pool.ID]; exists {
-			return errors.New("duplicate account pool")
+			return invalidRoutingPolicy("duplicate account pool")
 		}
 		folded := foldPoolName(pool.Name)
 		if _, exists := names[folded]; exists {
-			return errors.New("duplicate account pool name")
+			return invalidRoutingPolicy("duplicate account pool name")
 		}
 		members := make(map[providerCodex.AccountKey]struct{}, len(pool.Members))
 		for _, member := range pool.Members {
 			if member == "" {
-				return errors.New("empty pool member")
+				return invalidRoutingPolicy("empty pool member")
 			}
 			if _, exists := members[member]; exists {
-				return errors.New("duplicate pool member")
+				return invalidRoutingPolicy("duplicate pool member")
 			}
 			members[member] = struct{}{}
 		}
@@ -567,65 +580,65 @@ func validateRoutingPolicyV2(policy RoutingPolicyV2, prior *RoutingPolicyV2) err
 	bindings := make(map[string]struct{}, len(policy.SessionBindings))
 	for _, binding := range policy.SessionBindings {
 		if !lowerHexDigest(binding.SessionDigest) || pools[binding.PoolID] == nil {
-			return errors.New("invalid session binding")
+			return invalidRoutingPolicy("invalid session binding")
 		}
 		if _, exists := bindings[binding.SessionDigest]; exists {
-			return errors.New("duplicate session binding")
+			return invalidRoutingPolicy("duplicate session binding")
 		}
 		bindings[binding.SessionDigest] = struct{}{}
 	}
 	evidence := make(map[providerCodex.AccountKey]struct{}, len(policy.CapabilityEvidence))
 	for _, item := range policy.CapabilityEvidence {
 		if item.AccountKey == "" || (item.State != CapabilitySupported && item.State != CapabilityUnsupported && item.State != CapabilityUnknown) {
-			return errors.New("invalid capability evidence")
+			return invalidRoutingPolicy("invalid capability evidence")
 		}
 		if _, exists := evidence[item.AccountKey]; exists {
-			return errors.New("duplicate capability evidence")
+			return invalidRoutingPolicy("duplicate capability evidence")
 		}
 		evidence[item.AccountKey] = struct{}{}
 	}
 	if (len(policy.CapabilityPredicates) == 0) != (len(policy.CapabilityRoutingEvidence) == 0) {
-		return errors.New("incomplete capability routing policy")
+		return invalidRoutingPolicy("incomplete capability routing policy")
 	}
 	if len(policy.CapabilityPredicates) > 0 {
 		if pools[policy.CapabilityPool] == nil {
-			return errors.New("invalid capability pool")
+			return invalidRoutingPolicy("invalid capability pool")
 		}
 	} else if policy.CapabilityPool != "" {
-		return errors.New("capability pool without routing policy")
+		return invalidRoutingPolicy("capability pool without routing policy")
 	}
 	seenPredicates := make(map[string]struct{}, len(policy.CapabilityPredicates))
 	for _, predicate := range policy.CapabilityPredicates {
 		if !validCapabilityPredicate(predicate) {
-			return errors.New("invalid capability predicate")
+			return invalidRoutingPolicy("invalid capability predicate")
 		}
 		key := capabilityPredicateKey(predicate)
 		if _, duplicate := seenPredicates[key]; duplicate {
-			return errors.New("duplicate capability predicate")
+			return invalidRoutingPolicy("duplicate capability predicate")
 		}
 		seenPredicates[key] = struct{}{}
 	}
 	for _, item := range policy.CapabilityRoutingEvidence {
 		if !validCapabilityEvidence(item, policy.RoutingGeneration, item.ObservedAt) {
-			return errors.New("invalid capability routing evidence")
+			return invalidRoutingPolicy("invalid capability routing evidence")
 		}
 	}
 	delegations := make(map[string]struct{}, len(policy.Delegations))
 	for _, delegation := range policy.Delegations {
 		if delegation.Caller == "" || len(delegation.Accounts) == 0 || delegation.ExpiresAt.IsZero() || !delegation.ExpiresAt.Equal(delegation.ExpiresAt.UTC()) {
-			return errors.New("invalid caller delegation")
+			return invalidRoutingPolicy("invalid caller delegation")
 		}
 		if _, exists := delegations[delegation.Caller]; exists {
-			return errors.New("duplicate caller delegation")
+			return invalidRoutingPolicy("duplicate caller delegation")
 		}
 		delegations[delegation.Caller] = struct{}{}
 		seen := make(map[providerCodex.AccountKey]struct{}, len(delegation.Accounts))
 		for _, account := range delegation.Accounts {
 			if account == "" {
-				return errors.New("invalid caller delegation account")
+				return invalidRoutingPolicy("invalid caller delegation account")
 			}
 			if _, exists := seen[account]; exists {
-				return errors.New("duplicate caller delegation account")
+				return invalidRoutingPolicy("duplicate caller delegation account")
 			}
 			seen[account] = struct{}{}
 		}
@@ -769,7 +782,7 @@ func routingPolicyDocument(policy RoutingPolicyV2) (RoutingPolicyDocument, error
 
 func compileRoutingPolicyDocument(document RoutingPolicyDocument, prior *RoutingPolicyV2, random io.Reader) (RoutingPolicyV2, error) {
 	if document.SchemaVersion != 1 {
-		return RoutingPolicyV2{}, errors.New("invalid routing policy schema")
+		return RoutingPolicyV2{}, invalidRoutingPolicy("invalid routing policy schema")
 	}
 	existing := make(map[string]AccountPoolV2)
 	if prior != nil {
@@ -792,11 +805,11 @@ func compileRoutingPolicyDocument(document RoutingPolicyDocument, prior *Routing
 	poolIDs := make(map[string]PoolID, len(document.Pools))
 	for index, pool := range document.Pools {
 		if !validPoolName(pool.Name) || len(pool.Members) == 0 {
-			return RoutingPolicyV2{}, errors.New("invalid account pool")
+			return RoutingPolicyV2{}, invalidRoutingPolicy("invalid account pool")
 		}
 		folded := foldPoolName(pool.Name)
 		if _, duplicate := poolIDs[folded]; duplicate {
-			return RoutingPolicyV2{}, errors.New("duplicate account pool name")
+			return RoutingPolicyV2{}, invalidRoutingPolicy("duplicate account pool name")
 		}
 		id := PoolID("")
 		name := pool.Name
@@ -816,14 +829,14 @@ func compileRoutingPolicyDocument(document RoutingPolicyDocument, prior *Routing
 	for index, binding := range document.SessionBindings {
 		id := poolIDs[foldPoolName(binding.Pool)]
 		if id == "" {
-			return RoutingPolicyV2{}, errors.New("invalid session binding")
+			return RoutingPolicyV2{}, invalidRoutingPolicy("invalid session binding")
 		}
 		policy.SessionBindings[index] = SessionBindingV2{SessionDigest: binding.SessionDigest, PoolID: id}
 	}
 	if document.CapabilityPool != "" {
 		policy.CapabilityPool = poolIDs[foldPoolName(document.CapabilityPool)]
 		if policy.CapabilityPool == "" {
-			return RoutingPolicyV2{}, errors.New("invalid capability pool")
+			return RoutingPolicyV2{}, invalidRoutingPolicy("invalid capability pool")
 		}
 	}
 	if err := validateRoutingPolicyV2(policy, prior); err != nil {

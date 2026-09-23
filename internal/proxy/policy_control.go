@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"unicode/utf8"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 const (
@@ -39,6 +41,7 @@ func (s *Server) handlePolicyControl(writer http.ResponseWriter, request *http.R
 	case http.MethodPut:
 		body, err := io.ReadAll(io.LimitReader(request.Body, routingPolicyMaxBytes+1))
 		if err != nil || len(body) > routingPolicyMaxBytes {
+			writer.Header().Set("X-CQ-Policy-Error", "policy_document_invalid")
 			http.Error(writer, "invalid routing policy", http.StatusBadRequest)
 			return
 		}
@@ -46,14 +49,17 @@ func (s *Server) handlePolicyControl(writer http.ResponseWriter, request *http.R
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&policy); err != nil {
+			writer.Header().Set("X-CQ-Policy-Error", "policy_document_invalid")
 			http.Error(writer, "invalid routing policy", http.StatusBadRequest)
 			return
 		}
 		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			writer.Header().Set("X-CQ-Policy-Error", "policy_document_invalid")
 			http.Error(writer, "invalid routing policy", http.StatusBadRequest)
 			return
 		}
 		if err := s.RoutingPolicy.PublishDocument(policy); err != nil {
+			writer.Header().Set("X-CQ-Policy-Error", policyControlErrorCode(err))
 			http.Error(writer, "routing policy rejected", http.StatusConflict)
 			return
 		}
@@ -117,6 +123,7 @@ func (s *Server) handlePolicyPoolControl(writer http.ResponseWriter, request *ht
 }
 
 func writePoolMutationError(writer http.ResponseWriter, err error) {
+	writer.Header().Set("X-CQ-Policy-Error", policyControlErrorCode(err))
 	code := "pool_mutation_rejected"
 	switch {
 	case errors.Is(err, ErrPoolNameInvalid):
@@ -139,7 +146,7 @@ func (s *Server) handlePolicySessionDigest(writer http.ResponseWriter, request *
 		return
 	}
 	session, err := io.ReadAll(io.LimitReader(request.Body, canonicalSessionIDMaxBytes+1))
-	if err != nil || !validCanonicalSessionID(session) {
+	if err != nil || len(session) == 0 || len(session) > canonicalSessionIDMaxBytes || !utf8.Valid(session) {
 		http.Error(writer, "invalid session ID", http.StatusBadRequest)
 		return
 	}
@@ -165,5 +172,27 @@ func writePolicyControlJSON(writer http.ResponseWriter, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
 		http.Error(writer, "routing policy response unavailable", http.StatusInternalServerError)
+	}
+}
+
+// Add a bounded, stable receipt without changing legacy response status or body.
+func policyControlErrorCode(err error) string {
+	var validation *RoutingPolicyValidationError
+	switch {
+	case errors.As(err, &validation):
+		if validation.Generation {
+			return "policy_generation_conflict"
+		}
+		return "policy_document_invalid"
+	case errors.Is(err, ErrPoolNameInvalid):
+		return "routing_invalid_argument"
+	case errors.Is(err, ErrPoolNotFound):
+		return "pool_not_found"
+	case errors.Is(err, ErrPoolNameConflict):
+		return "pool_name_conflict"
+	case errors.Is(err, ErrAuthorityPriorMismatch), errors.Is(err, fsutil.ErrExclusiveLockHeld), errors.Is(err, ErrLifecycleLockHeld):
+		return "routing_conflict"
+	default:
+		return "routing_io_failed"
 	}
 }

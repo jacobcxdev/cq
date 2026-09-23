@@ -161,13 +161,34 @@ func runProxyPolicyWithDependencies(ctx context.Context, args []string, output i
 	}
 }
 
-func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, method, path string, port int, requestValue any) (proxy.RoutingPolicyDocument, error) {
+type proxyPolicyControlError struct {
+	kind    string
+	status  int
+	code    string
+	message string
+}
+
+func (e *proxyPolicyControlError) Error() string { return e.message }
+
+func proxyPolicyRequest(ctx context.Context, deps proxyPolicyDependencies, method, path string, port int, body io.Reader, contentType string) ([]byte, error) {
+	fail := func(kind string, err error) ([]byte, error) {
+		return nil, &proxyPolicyControlError{kind: kind, message: err.Error()}
+	}
 	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
-		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy control unavailable")
+		return fail("control", errors.New("proxy policy control unavailable"))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	cfg, err := deps.LoadConfig()
 	if err != nil {
-		return proxy.RoutingPolicyDocument{}, err
+		return fail("io", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	if cfg == nil || cfg.LocalToken == "" {
+		return fail("auth", errors.New("proxy policy authentication unavailable"))
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -175,99 +196,87 @@ func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, metho
 			port = proxy.DefaultPort
 		}
 	}
+	request, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), body)
+	if err != nil {
+		return fail("io", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
+	request.Header.Set("Content-Type", contentType)
+	response, err := deps.Doer.Do(request)
+	if err != nil {
+		return fail("control", err)
+	}
+	if response == nil {
+		return fail("control", errors.New("proxy policy response unavailable"))
+	}
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		failure := &proxyPolicyControlError{status: response.StatusCode, code: response.Header.Get("X-CQ-Policy-Error"), message: fmt.Sprintf("proxy policy control failed: HTTP %d", response.StatusCode)}
+		// Older pool endpoints have a small JSON receipt instead of the header.
+		// Authentication and known receipts never depend on an unused response body.
+		if failure.code == "" && response.StatusCode == 409 && path == proxy.RuntimePolicyPoolPath && response.Body != nil {
+			data, readErr := httputil.ReadBody(response.Body)
+			var old struct {
+				Error string `json:"error"`
+			}
+			if readErr == nil && json.Unmarshal(data, &old) == nil {
+				failure.code = old.Error
+			}
+		}
+		switch failure.code {
+		case "invalid_pool_name", "routing_invalid_argument":
+			failure.message = "invalid pool name"
+		case "pool_not_found":
+			failure.message = "pool not found"
+		case "pool_name_conflict":
+			failure.message = "pool name already exists"
+		case "pool_mutation_rejected":
+			failure.message = "pool mutation rejected"
+		}
+		return nil, failure
+	}
+	if response.Body == nil {
+		return fail("io", errors.New("proxy policy response unavailable"))
+	}
+	data, err := httputil.ReadBody(response.Body)
+	if err != nil {
+		return fail("io", err)
+	}
+	return data, nil
+}
+
+func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, method, path string, port int, requestValue any) (proxy.RoutingPolicyDocument, error) {
 	var body io.Reader = http.NoBody
 	if requestValue != nil {
 		encoded, err := json.Marshal(requestValue)
 		if err != nil {
-			return proxy.RoutingPolicyDocument{}, err
+			return proxy.RoutingPolicyDocument{}, &proxyPolicyControlError{kind: "io", message: err.Error()}
 		}
 		body = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), body)
+	data, err := proxyPolicyRequest(ctx, deps, method, path, port, body, "application/json")
 	if err != nil {
 		return proxy.RoutingPolicyDocument{}, err
-	}
-	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := deps.Doer.Do(request)
-	if err != nil {
-		return proxy.RoutingPolicyDocument{}, err
-	}
-	if response == nil || response.Body == nil {
-		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy response unavailable")
-	}
-	defer response.Body.Close()
-	responseBody, err := httputil.ReadBody(response.Body)
-	if err != nil {
-		return proxy.RoutingPolicyDocument{}, err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if path == proxy.RuntimePolicyPoolPath {
-			var failure struct {
-				Error string `json:"error"`
-			}
-			if json.Unmarshal(responseBody, &failure) == nil {
-				switch failure.Error {
-				case "invalid_pool_name":
-					return proxy.RoutingPolicyDocument{}, errors.New("invalid pool name")
-				case "pool_not_found":
-					return proxy.RoutingPolicyDocument{}, errors.New("pool not found")
-				case "pool_name_conflict":
-					return proxy.RoutingPolicyDocument{}, errors.New("pool name already exists")
-				case "pool_mutation_rejected":
-					return proxy.RoutingPolicyDocument{}, errors.New("pool mutation rejected")
-				}
-			}
-		}
-		return proxy.RoutingPolicyDocument{}, fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
 	}
 	var policy proxy.RoutingPolicyDocument
-	if err := json.Unmarshal(responseBody, &policy); err != nil {
-		return proxy.RoutingPolicyDocument{}, errors.New("proxy policy response invalid")
+	if err := json.Unmarshal(data, &policy); err != nil {
+		return policy, &proxyPolicyControlError{kind: "io", message: "proxy policy response invalid"}
 	}
 	return policy, nil
 }
 
 func proxyPolicySessionDigest(ctx context.Context, deps proxyPolicyDependencies, port int, session []byte) (string, error) {
-	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
-		return "", errors.New("proxy policy control unavailable")
-	}
-	cfg, err := deps.LoadConfig()
+	body, err := proxyPolicyRequest(ctx, deps, http.MethodPost, proxy.RuntimePolicySessionDigestPath, port, bytes.NewReader(session), "application/octet-stream")
 	if err != nil {
 		return "", err
-	}
-	if port == 0 {
-		port = cfg.Port
-		if port == 0 {
-			port = proxy.DefaultPort
-		}
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimePolicySessionDigestPath), bytes.NewReader(session))
-	if err != nil {
-		return "", err
-	}
-	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
-	request.Header.Set("Content-Type", "application/octet-stream")
-	response, err := deps.Doer.Do(request)
-	if err != nil {
-		return "", err
-	}
-	if response == nil || response.Body == nil {
-		return "", errors.New("proxy policy response unavailable")
-	}
-	defer response.Body.Close()
-	body, err := httputil.ReadBody(response.Body)
-	if err != nil {
-		return "", err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
 	}
 	var result struct {
 		SessionDigest string `json:"session_digest"`
 	}
 	if json.Unmarshal(body, &result) != nil || !validProxyPolicyDigest(result.SessionDigest) {
-		return "", errors.New("proxy policy digest response invalid")
+		return "", &proxyPolicyControlError{kind: "io", message: "proxy policy digest response invalid"}
 	}
 	return result.SessionDigest, nil
 }
