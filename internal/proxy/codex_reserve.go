@@ -368,5 +368,7 @@ func (r *CodexReserve) RefreshInterval(account codex.AccountKey, windows map[quo
 	if !ok {
 		return 5 * time.Second
 	}
-	return reserveRefreshInterval(windowRemaining(w), r.document.Percent)
+	// Leave time for the service tick and bounded usage fetch before the
+	// last observation crosses the reserve's freshness deadline.
+	return max(5*time.Second, reserveRefreshInterval(windowRemaining(w), r.document.Percent)-10*time.Second)
 }

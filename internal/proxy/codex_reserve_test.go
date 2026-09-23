@@ -6,6 +6,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,6 +144,51 @@ func TestCodexReserveStaleWindowAndOrdering(t *testing.T) {
 	}
 	if _, err = reserve.Control("disable", "", 0); err == nil {
 		t.Fatal("disabled without fresh reset evidence")
+	}
+}
+
+type delayedReserveUsageReader struct {
+	clock   *atomic.Int64
+	resetAt int64
+}
+
+func (reader delayedReserveUsageReader) Read(context.Context, codex.AccountKey) (codex.UsageObservation, error) {
+	reader.clock.Add(int64(5 * time.Second))
+	return codex.UsageObservation{Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+		"7d": {RemainingPct: 75, ResetAtUnix: reader.resetAt},
+	}}}, nil
+}
+
+func TestCodexReserveRefreshRunsBeforeFreshnessDeadline(t *testing.T) {
+	start := time.Unix(1800000000, 0)
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+	ledger := NewCodexCapacityLedger(now, time.Hour)
+	reserve, err := OpenCodexReserve(fsutil.NewMemFS(), "/state/reserve.json", ledger, &reserveInventory{active: "system"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetAt := start.Add(7 * 24 * time.Hour).Unix()
+	windows := map[quota.WindowName]quota.Window{"7d": {RemainingPct: 75, ResetAtUnix: resetAt}}
+	ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: start, Result: quota.Result{Windows: windows}})
+	if _, err := reserve.Control("set", "7d", 5); err != nil {
+		t.Fatal(err)
+	}
+	refresher := &CodexRoutingCapacityRefresher{
+		Usage: delayedReserveUsageReader{clock: &clock, resetAt: resetAt}, Capacity: ledger,
+		Now: now, IntervalForAccount: reserve.RefreshInterval,
+	}
+	if !refresher.Refresh(context.Background(), []codex.AccountKey{"system"}) {
+		t.Fatal("initial usage refresh failed")
+	}
+	clock.Store(start.Add(55 * time.Second).UnixNano())
+	if !refresher.Refresh(context.Background(), []codex.AccountKey{"system"}) {
+		t.Fatal("reserve did not refresh before old observation expired")
+	}
+	clock.Store(start.Add(71 * time.Second).UnixNano())
+	if status := reserve.Status(); status.Blocked {
+		t.Fatalf("healthy reserve blocked after successful refresh: %+v", status)
 	}
 }
 
