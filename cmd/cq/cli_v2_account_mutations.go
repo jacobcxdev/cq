@@ -119,6 +119,9 @@ func handleV2AccountMutationWithDependencies(parent context.Context, inv cli.Inv
 			if account != nil {
 				name = cli.HumanValue(account.DisplayName)
 			}
+			outcome.Terminal = func(o cli.TerminalOptions) string {
+				return terminalAccountLogin(title, account, activated, outcome.ExitCode, o)
+			}
 			outcome.Human = fmt.Sprintf("Logged in to %s as %s.\nNative client default: %s.\n", title, name, activeText)
 			if errors.Is(err, app.ErrAccountActivation) && errors.Is(err, app.ErrAccountLoginPostcheck) {
 				outcome.Errors = append(outcome.Errors, v2MutationFailure("account_login_postcheck_partial").Errors...)
@@ -156,6 +159,9 @@ func handleV2AccountMutationWithDependencies(parent context.Context, inv cli.Inv
 				Account AccountSummary `json:"account"`
 				Changed bool           `json:"changed"`
 			}{selected.Account, result.Changed})
+			outcome.Terminal = func(o cli.TerminalOptions) string {
+				return terminalAccountActivation(title, selected.Account, result, outcome.ExitCode, o)
+			}
 			outcome.Human = fmt.Sprintf("%s native client default: %s.\nChanged: %t.\n", title, cli.HumanValue(selected.Account.DisplayName), result.Changed)
 		}
 		return outcome
@@ -167,6 +173,9 @@ func handleV2AccountMutationWithDependencies(parent context.Context, inv cli.Inv
 	confirmed := inv.Options["yes"][0] == "true"
 	if !confirmed {
 		prompt := fmt.Sprintf("Account: %s.\nAccount reference: %s.\nNative active credentials will be removed: %t.\nRemove local credentials for %s? [y/N] ", cli.HumanValue(selected.Account.DisplayName), cli.HumanValue(*selected.Account.AccountReference), selected.Account.Active, cli.HumanValue(selected.Account.DisplayName))
+		if s.ErrTerminal.Width > 0 {
+			prompt = terminalAccountRemovalPrompt(title, selected.Account, s.ErrTerminal)
+		}
 		if _, err := fmt.Fprint(s.Err, prompt); err != nil {
 			return v2MutationFailure("account_io_failed")
 		}
@@ -228,6 +237,9 @@ func handleV2AccountMutationWithDependencies(parent context.Context, inv cli.Inv
 		retained := "none"
 		if len(selected.Retained) > 0 {
 			retained = cli.HumanValue(strings.Join(selected.Retained, ","))
+		}
+		outcome.Terminal = func(o cli.TerminalOptions) string {
+			return terminalAccountRemoval(title, *selected.Account.AccountReference, result, selected.Retained, confirmed, outcome.ExitCode, o)
 		}
 		outcome.Human = fmt.Sprintf("Local %s credentials removed: %t.\nNative active credentials removed: %t.\nRetained external sources: %s.\n", title, result.Changed, result.ActiveRemoved, retained)
 	}

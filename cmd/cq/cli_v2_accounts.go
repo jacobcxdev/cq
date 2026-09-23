@@ -168,6 +168,7 @@ func handleV2AccountInspectionWithDependencies(parent context.Context, inv cli.I
 			Configured bool            `json:"configured"`
 			Account    *AccountSummary `json:"account"`
 		}{account != nil, account})
+		outcome.Terminal = func(o cli.TerminalOptions) string { return terminalGeminiAccount(account, outcome.ExitCode == 0, o) }
 		outcome.Human = fmt.Sprintf("Gemini configured: %t.\nAccount: %s.\nManaged by: Antigravity.\n", account != nil, name)
 	} else {
 		outcome.Data, err = cli.EncodeData(struct {
@@ -183,6 +184,12 @@ func handleV2AccountInspectionWithDependencies(parent context.Context, inv cli.I
 			fmt.Fprintf(&human, "%s\t%s\tactive=%t\t%s\n", reference, cli.HumanValue(account.DisplayName), account.Active, strings.Join(account.Sources, ","))
 		}
 		outcome.Human = human.String()
+		outcome.Terminal = func(o cli.TerminalOptions) string {
+			if outcome.ExitCode != 0 && len(result.accounts) == 0 {
+				return ""
+			}
+			return terminalAccounts(terminalProviderName(strings.Fields(inv.Path)[0]), result.accounts, o)
+		}
 	}
 	if err != nil {
 		return v2AccountFailure(inv.Path, false)

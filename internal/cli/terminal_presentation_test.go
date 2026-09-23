@@ -221,3 +221,39 @@ func TestHelpRelatedCommandDescriptionRoles(t *testing.T) {
 		t.Fatal("related command styling changed visible text")
 	}
 }
+
+func TestDiagnosticAuthInterruptionRetainsMachineCauses(t *testing.T) {
+	for _, mode := range []string{"terminal", "plain", "json"} {
+		t.Run(mode, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			s := &Session{Out: &out, Err: &stderr}
+			args := []string{"auth", "refresh", "codex"}
+			if mode == "terminal" {
+				s.ErrTerminal = TerminalOptions{Width: 100, Colour: true}
+			}
+			if mode == "json" {
+				args = append(args, "--json")
+			}
+			exit := Run(context.Background(), args, s, func(string) (Handler, bool) {
+				return func(context.Context, Invocation, *Session) Outcome {
+					return Outcome{ExitCode: 130, Errors: []Diagnostic{{Code: "auth_interrupted", Message: "Credential refresh interrupted."}}, Warnings: []Diagnostic{{Code: "auth_refresh_outcome_unknown", Message: "Inspect credentials before retrying."}}}
+				}, true
+			})
+			if exit != 130 {
+				t.Fatal(exit)
+			}
+			if mode == "terminal" {
+				got := ansi.Strip(stderr.String())
+				if !strings.HasPrefix(got, "Warning · Credential refresh interrupted.\n  Code: auth_interrupted\n") || strings.Contains(got, "Code: interrupted") || !strings.Contains(got, "Cause: auth_refresh_outcome_unknown") {
+					t.Fatal(got)
+				}
+			} else if mode == "json" {
+				if !strings.Contains(out.String(), `"code":"interrupted"`) || !strings.Contains(out.String(), `"code":"auth_interrupted"`) {
+					t.Fatal(out.String())
+				}
+			} else if !strings.Contains(stderr.String(), "Operation interrupted; inspect state before retrying.") || !strings.Contains(stderr.String(), "Credential refresh interrupted.") {
+				t.Fatal(stderr.String())
+			}
+		})
+	}
+}

@@ -159,6 +159,10 @@ func handleV2AuthWithDependencies(ctx context.Context, inv cli.Invocation, sessi
 		fmt.Fprintf(&human, "%s: %d refreshed, %d unchanged, %d need login, %d failed\n", r.Provider, r.Refreshed, r.Unchanged, r.ReauthRequired, r.Failed)
 	}
 	out.Human = human.String()
+	defer func() {
+		exit := out.ExitCode
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalAuthRefresh(works, total, exit, o) }
+	}()
 	out.Data, _ = json.Marshal(struct {
 		Providers          []AuthRefreshProviderResult `json:"providers"`
 		CredentialsChanged bool                        `json:"credentials_changed"`

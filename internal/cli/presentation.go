@@ -98,6 +98,18 @@ func terminalVersion(data versionData, options TerminalOptions) string {
 func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) string {
 	diagnostics := append([]Diagnostic{}, outcome.Errors...)
 	diagnostics = append(diagnostics, outcome.Warnings...)
+	// The dispatcher retains its generic interruption in the machine resource.
+	// Authentication supplies a more specific terminal primary; retain all
+	// other causes without printing the same interruption twice.
+	if path == "auth refresh" && len(diagnostics) > 1 && diagnostics[0].Code == "interrupted" {
+		for i, diagnostic := range diagnostics[1:] {
+			if diagnostic.Code == "auth_interrupted" {
+				index := i + 1
+				diagnostics = append([]Diagnostic{diagnostic}, append(diagnostics[1:index], diagnostics[index+1:]...)...)
+				break
+			}
+		}
+	}
 	if len(diagnostics) == 0 {
 		return ""
 	}
