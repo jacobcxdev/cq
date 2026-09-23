@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -1751,5 +1752,66 @@ func TestWindowsCheckedDirectoryRenameRemove(t *testing.T) {
 	}
 	if _, err = fsys.Lstat(filepath.Join(root, "replacement")); err != nil {
 		t.Fatalf("failed rename lost source: %v", err)
+	}
+}
+
+func TestWindowsFinalCheckpointRemoval(t *testing.T) {
+	for _, which := range []string{"success", "shared_handle", "unsupported", "cancel", "close_error_committed", "collision"} {
+		t.Run(which, func(t *testing.T) {
+			root := t.TempDir()
+			fsys := newWindowsTestFileSystem(t, root)
+			d, err := OpenOwnerControlledDirectory(fsys, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			if err = SecureAtomicCreateInOwnerControlledDirectory(fsys, d, root, "checkpoint", []byte("checkpoint"), nil); err != nil {
+				t.Fatal(err)
+			}
+			info, err := fsys.Lstat(filepath.Join(root, "checkpoint"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := fsys.FileIdentity(info)
+			oldDisposition, oldClose := finalWindowsDisposition, finalWindowsClose
+			defer func() { finalWindowsDisposition, finalWindowsClose = oldDisposition, oldClose }()
+			if which == "unsupported" {
+				finalWindowsDisposition = func(windows.Handle, uint32) error { return windows.ERROR_NOT_SUPPORTED }
+			}
+			if which == "close_error_committed" {
+				finalWindowsClose = func(f *os.File) error {
+					if err := f.Close(); err != nil {
+						return err
+					}
+					return windows.ERROR_INVALID_HANDLE
+				}
+			}
+			if which == "shared_handle" {
+				f, e := d.OpenNoFollow("checkpoint")
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer f.Close()
+			}
+			if which == "collision" {
+				if err = SecureAtomicCreateInOwnerControlledDirectory(fsys, d, root, "final", []byte("other"), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if which == "cancel" {
+				cancel()
+			}
+			committed, err := d.(FinalFileRemover).RemoveFinalFile(ctx, "checkpoint", "final", id)
+			want := which == "success" || which == "close_error_committed"
+			if committed != want || (err == nil) != want {
+				t.Fatalf("commit=%t err=%v", committed, err)
+			}
+			_, statErr := fsys.Lstat(filepath.Join(root, "checkpoint"))
+			if want && !errors.Is(statErr, os.ErrNotExist) || !want && statErr != nil {
+				t.Fatalf("checkpoint observation=%v", statErr)
+			}
+		})
 	}
 }

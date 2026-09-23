@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -991,4 +992,81 @@ func deleteWindowsHandle(handle windows.Handle) error {
 		(*byte)(unsafe.Pointer(&information)),
 		uint32(unsafe.Sizeof(information)),
 	)
+}
+
+var finalWindowsDisposition = func(handle windows.Handle, flags uint32) error {
+	return windows.SetFileInformationByHandle(handle, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags)))
+}
+var finalWindowsClose = func(file *os.File) error { return file.Close() }
+
+func (directory *windowsSecureDirectory) RemoveFinalFile(ctx context.Context, name, quarantine string, expected SecureFileIdentity) (bool, error) {
+	if ctx == nil || name == quarantine {
+		return false, ErrUnsafeSecurePath
+	}
+	if err := validateWindowsSecureEntryName(name); err != nil {
+		return false, err
+	}
+	if err := validateWindowsSecureEntryName(quarantine); err != nil {
+		return false, err
+	}
+	parent, err := directory.Stat()
+	if err != nil {
+		return false, err
+	}
+	if err = validateOwnerControlledDirectoryInfo(OSFileSystem{}, parent); err != nil {
+		return false, err
+	}
+	// Exclusive sharing prevents another handle from postponing deletion.
+	opened, err := openWindowsRelative(windows.Handle(directory.file.Fd()), name, windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE, 0, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+	if err != nil {
+		return false, err
+	}
+	handle := windows.Handle(opened.file.Fd())
+	info, err := inspectWindowsHandle(handle, name)
+	if err == nil {
+		err = validateSecureRegularInfo(OSFileSystem{}, info)
+	}
+	if err == nil && !SameSecureObject(info.(windowsSecureFileInfo).identity, expected) {
+		err = ErrUnsafeSecurePath
+	}
+	if err != nil {
+		_ = opened.file.Close()
+		return false, err
+	}
+	// Refuse a second known-name checkpoint even though Windows does not need
+	// a rename quarantine for its identity-bound native deletion handle.
+	other, otherErr := directory.OpenNoFollow(quarantine)
+	if otherErr == nil {
+		_ = other.Close()
+		_ = opened.file.Close()
+		return false, os.ErrExist
+	}
+	if !errors.Is(otherErr, os.ErrNotExist) {
+		_ = opened.file.Close()
+		return false, otherErr
+	}
+	if err = ctx.Err(); err != nil {
+		_ = opened.file.Close()
+		return false, err
+	}
+	flags := uint32(0x1 | 0x2) // FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS
+	if err = finalWindowsDisposition(handle, flags); err != nil {
+		_ = opened.file.Close()
+		return false, err
+	}
+	if err = finalWindowsClose(opened.file); err == nil {
+		return true, nil
+	}
+	// A failed native close is indeterminate. Never retry it or claim the
+	// checkpoint survives. Only bounded authoritative absence can prove commit.
+	if ctx.Err() == nil {
+		remaining, observeErr := directory.OpenNoFollow(name)
+		if errors.Is(observeErr, os.ErrNotExist) {
+			return true, nil
+		}
+		if observeErr == nil {
+			_ = remaining.Close()
+		}
+	}
+	return false, fmt.Errorf("%w: final checkpoint close: %v", ErrCommitIndeterminate, err)
 }

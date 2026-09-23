@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"context"
 	"io"
 	"os"
 
@@ -172,6 +173,14 @@ type IdentityBoundRenamer interface {
 
 type IdentityBoundRemover interface {
 	RemoveChecked(name string, expected SecureFileIdentity) error
+}
+
+// FinalFileRemover deletes one authenticated checkpoint at a final commit boundary.
+// Before commit, ordinary errors leave it under name or the deterministic quarantine.
+// ErrCommitIndeterminate reports an unresolved native deletion-handle close.
+// A true result means namespace deletion committed; callers must not infer rollback.
+type FinalFileRemover interface {
+	RemoveFinalFile(context.Context, string, string, SecureFileIdentity) (bool, error)
 }
 
 // NoFollowFileOpener opens a final path component without following links.

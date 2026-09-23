@@ -704,3 +704,36 @@ func TestCLIV2CandidateHelpAndSyntaxNoAccess(t *testing.T) {
 		})
 	}
 }
+
+func TestCLIV2CandidateRegistryCredentialDomainsNullability(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		domains []string
+		exit    int
+	}{{"null", nil, 6}, {"empty_array", []string{}, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, d := candidateV2Inputs(t)
+			var registry proxy.ClientSenderRegistryV1
+			if err := json.Unmarshal(candidateTestRegistry(t), &registry); err != nil {
+				t.Fatal(err)
+			}
+			registry.Senders = append(registry.Senders, proxy.ClientRequestSenderV1{SenderID: "additional", AdapterID: "synthetic", CredentialDomains: tc.domains, Transports: []string{"http"}, HookSupported: true})
+			body, err := proxy.CanonicalJSONV1(registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(a.LocalTokenClientRegistry, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			exit, out := runCandidateV2(t, context.Background(), candidatePrepareArgs(a), &d)
+			if exit != tc.exit {
+				t.Fatalf("prepare exit=%d want=%d %+v", exit, tc.exit, out)
+			}
+			if tc.exit != 0 {
+				if _, err = os.Stat(a.InstanceStateRoot); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("invalid registry created state: %v", err)
+				}
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -404,4 +405,57 @@ func validateSecureDirectoryFD(fd int) error {
 		return fmt.Errorf("%w: directory descriptor owner", ErrUnsafeSecurePath)
 	}
 	return nil
+}
+
+var finalFileUnlink = unix.Unlinkat
+
+func (directory *unixSecureDirectory) RemoveFinalFile(ctx context.Context, name, quarantine string, expected SecureFileIdentity) (bool, error) {
+	if ctx == nil || name == quarantine {
+		return false, ErrUnsafeSecurePath
+	}
+	if err := validateSecureEntryName(name); err != nil {
+		return false, err
+	}
+	if err := validateSecureEntryName(quarantine); err != nil {
+		return false, err
+	}
+	validate := func(leaf string) error {
+		parent, err := directory.Stat()
+		if err != nil {
+			return err
+		}
+		if err = validateOwnerControlledDirectoryInfo(OSFileSystem{}, parent); err != nil {
+			return err
+		}
+		info, err := secureRegularFileInfoInDirectory(OSFileSystem{}, directory, leaf)
+		if err != nil {
+			return err
+		}
+		identity, ok := (OSFileSystem{}).FileIdentity(info)
+		if !ok || !SameSecureObject(identity, expected) {
+			return ErrUnsafeSecurePath
+		}
+		return nil
+	}
+	if err := validate(name); err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	fd := int(directory.file.Fd())
+	if err := renameNoReplaceAt(fd, name, fd, quarantine); err != nil {
+		return false, err
+	}
+	// Failure deliberately leaves the sole checkpoint at the known quarantine.
+	if err := validate(quarantine); err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := finalFileUnlink(fd, quarantine, 0); err != nil {
+		return false, err
+	}
+	return true, nil
 }

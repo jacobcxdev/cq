@@ -131,6 +131,13 @@ func SecureAtomicCreateInDirectoryChecked(inspector SecurePathInspector, directo
 	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforePublish, nil, true)
 }
 
+// SecureAtomicCreateInOwnerControlledDirectory publishes one private file in a
+// retained current-owner 0700/0755 parent without weakening private-directory APIs.
+func SecureAtomicCreateInOwnerControlledDirectory(inspector SecurePathInspector, directory SecureDirectory, parentPath, name string, data []byte, beforePublish func() error) error {
+	fence := func() error { return ValidateOwnerControlledDirectoryHandle(inspector, directory, parentPath) }
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforePublish, fence, true)
+}
+
 func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error, noReplace bool) (result error) {
 	if inspector == nil || directory == nil {
 		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)

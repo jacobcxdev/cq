@@ -282,10 +282,7 @@ func readCandidateLifecycle(inspector fsutil.SecurePathInspector, directory fsut
 	if err != nil {
 		return CandidateLifecycleStateV1{}, nil, err
 	}
-	state, err := decodeCandidateLifecycle(body, key)
-	if err != nil {
-		return CandidateLifecycleStateV1{}, nil, err
-	}
+
 	registry, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, candidateClientRegistryName, (64<<10)+1)
 	if err != nil || len(registry) == 0 || len(registry) > 64<<10 {
 		if err != nil {
@@ -293,11 +290,27 @@ func readCandidateLifecycle(inspector fsutil.SecurePathInspector, directory fsut
 		}
 		return CandidateLifecycleStateV1{}, nil, ErrCandidateLifecycleInvalid
 	}
-	registryDigest := sha256.Sum256(registry)
-	if hex.EncodeToString(registryDigest[:]) != state.LocalTokenClientRegistryDigest {
-		return CandidateLifecycleStateV1{}, nil, ErrCandidateLifecycleInvalid
+	state, err := InspectCandidateLifecycleBytes(body, key, registry)
+	if err != nil {
+		return CandidateLifecycleStateV1{}, nil, err
 	}
 	return state, append([]byte(nil), key...), nil
+}
+
+// InspectCandidateLifecycleBytes authenticates exact retained metadata without IO.
+func InspectCandidateLifecycleBytes(body, key, registry []byte) (CandidateLifecycleStateV1, error) {
+	if len(key) != sha256.Size || len(body) == 0 || len(body) > 64<<10 || len(registry) == 0 || len(registry) > 64<<10 {
+		return CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
+	}
+	state, err := decodeCandidateLifecycle(body, key)
+	if err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
+	digest := sha256.Sum256(registry)
+	if hex.EncodeToString(digest[:]) != state.LocalTokenClientRegistryDigest {
+		return CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
+	}
+	return state, nil
 }
 
 func (s *CandidateLifecycleStore) State() CandidateLifecycleStateV1 {

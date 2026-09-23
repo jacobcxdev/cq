@@ -96,11 +96,25 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 	if err = parentDir.Close(); err != nil {
 		return finish(err)
 	}
+	checkpointState, checkpoint, receiptRoot, checkpointErr := inspectCandidateRemovalCheckpoint(ctx, deps.FS, root)
+	if checkpointErr != nil {
+		return finish(checkpointErr)
+	}
+	if checkpoint && inv.Path != "proxy candidate status" && inv.Path != "proxy candidate receipt show" {
+		return finish(proxy.ErrCandidateLifecycleInvalid)
+	}
 	if inv.Path == "proxy candidate receipt show" {
-		if err := fsutil.ValidateSecureDirectory(deps.FS, root); err != nil {
+		lookupRoot := root
+		if checkpoint {
+			if receiptRoot == "" {
+				return finish(os.ErrNotExist)
+			}
+			lookupRoot = receiptRoot
+		}
+		if err := fsutil.ValidateSecureDirectory(deps.FS, lookupRoot); err != nil {
 			return finish(err)
 		}
-		receipt, err := lookupCandidateReceipt(ctx, deps.FS, root, option("attempt-id"))
+		receipt, err := lookupCandidateReceipt(ctx, deps.FS, lookupRoot, option("attempt-id"))
 		if ctx.Err() != nil {
 			return finish(ctx.Err())
 		}
@@ -121,6 +135,7 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 		return out
 	}
 	var state proxy.CandidateLifecycleStateV1
+	removalCommitted := false
 	switch inv.Path {
 	case "proxy candidate prepare":
 		port, _ := strconv.Atoi(option("port"))
@@ -142,7 +157,11 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 			err = errors.Join(err, store.Close())
 		}
 	case "proxy candidate status":
-		state, err = proxy.InspectCandidateLifecycle(ctx, deps.FS, root)
+		if checkpoint {
+			state = checkpointState
+		} else {
+			state, err = proxy.InspectCandidateLifecycle(ctx, deps.FS, root)
+		}
 	case "proxy candidate stop", "proxy candidate remove":
 		var store *proxy.CandidateLifecycleStore
 		store, state, err = proxy.OpenCandidateLifecycle(ctx, deps.FS, root)
@@ -191,7 +210,7 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 				err = store.Close()
 			}
 			if err == nil {
-				err = removeCandidateStateRootWithCleanup(ctx, budget.Cleanup(), deps.FS, root, state)
+				removalCommitted, err = removeCandidateStateRootCommit(ctx, budget.Cleanup(), deps.FS, root, state)
 			}
 		}
 	default:
@@ -200,7 +219,7 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 	if err != nil {
 		return finish(err)
 	}
-	if budget.Cleanup().Err() != nil {
+	if !removalCommitted && budget.Cleanup().Err() != nil {
 		return finish(budget.Cleanup().Err())
 	}
 	out := cli.Outcome{}

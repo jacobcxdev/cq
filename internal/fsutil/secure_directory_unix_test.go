@@ -3,11 +3,13 @@
 package fsutil
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -513,5 +515,164 @@ func TestUnixCheckedDirectoryRemovalAndRestoration(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".cq-quarantine-") {
 			t.Fatalf("quarantine remains %s", entry.Name())
 		}
+	}
+}
+
+func TestUnixFinalFileRemovalCommitBoundary(t *testing.T) {
+	for _, which := range []string{"success", "cancel_before", "cancel_quarantine", "unlink_failure", "collision", "wrong_identity", "symlink", "directory"} {
+		t.Run(which, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "checkpoint")
+			if err := os.WriteFile(path, []byte("authenticated checkpoint"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if which == "symlink" {
+				if err := os.Rename(path, path+".target"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path+".target", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if which == "directory" {
+				_ = os.Remove(path)
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			directory, err := OpenOwnerControlledDirectory(OSFileSystem{}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := (OSFileSystem{}).FileIdentity(info)
+			if which == "wrong_identity" {
+				id.Inode++
+			}
+			if which == "collision" {
+				if err = os.WriteFile(filepath.Join(root, "final"), []byte("other"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			old := finalFileUnlink
+			defer func() { finalFileUnlink = old }()
+			if which == "cancel_before" {
+				cancel()
+			}
+			if which == "unlink_failure" || which == "cancel_quarantine" {
+				finalFileUnlink = func(int, string, int) error {
+					if which == "cancel_quarantine" {
+						cancel()
+					}
+					return syscall.EIO
+				}
+			}
+			committed, err := directory.(FinalFileRemover).RemoveFinalFile(ctx, "checkpoint", "final", id)
+			if which == "success" {
+				if err != nil || !committed {
+					t.Fatalf("commit=%t err=%v", committed, err)
+				}
+				if _, err = os.Stat(filepath.Join(root, "final")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("final leaf survived")
+				}
+				return
+			}
+			if err == nil || committed {
+				t.Fatalf("unexpected commit=%t err=%v", committed, err)
+			}
+			leaf := "checkpoint"
+			if which == "unlink_failure" || which == "cancel_quarantine" {
+				leaf = "final"
+			}
+			if _, err = os.Lstat(filepath.Join(root, leaf)); err != nil {
+				t.Fatalf("checkpoint lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestOwnerControlledAtomicCheckpointCreate(t *testing.T) {
+	for _, which := range []string{"private", "public_read", "writable", "symlink", "collision", "cancel"} {
+		t.Run(which, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "parent")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if which == "public_read" {
+				_ = os.Chmod(root, 0o755)
+			}
+			if which == "writable" {
+				_ = os.Chmod(root, 0o777)
+			}
+			if which == "symlink" {
+				target := root
+				root += "-link"
+				if err := os.Symlink(target, root); err != nil {
+					t.Fatal(err)
+				}
+			}
+			directory, err := OpenOwnerControlledDirectory(OSFileSystem{}, root)
+			if which == "writable" || which == "symlink" {
+				if err == nil {
+					directory.Close()
+					t.Fatal("unsafe parent accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			if which == "collision" {
+				if err = os.WriteFile(filepath.Join(root, "checkpoint"), []byte("original"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if which == "cancel" {
+				cancel()
+			}
+			err = SecureAtomicCreateInOwnerControlledDirectory(OSFileSystem{}, directory, root, "checkpoint", []byte("checkpoint"), ctx.Err)
+			if which == "collision" || which == "cancel" {
+				if err == nil {
+					t.Fatal("unexpected publication")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(root, "checkpoint"))
+			if err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("mode=%v err=%v", info, err)
+			}
+		})
+	}
+}
+
+type checkpointWrongOwner struct{ OSFileSystem }
+
+func (checkpointWrongOwner) FileOwnerUID(os.FileInfo) (uint64, bool) {
+	return uint64(os.Geteuid()) + 1, true
+}
+func TestOwnerControlledCheckpointWrongOwner(t *testing.T) {
+	root := t.TempDir()
+	d, err := OpenOwnerControlledDirectory(OSFileSystem{}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err = SecureAtomicCreateInOwnerControlledDirectory(checkpointWrongOwner{}, d, root, "checkpoint", []byte("secret"), nil); err == nil {
+		t.Fatal("wrong owner accepted")
+	}
+	if _, err = os.Stat(filepath.Join(root, "checkpoint")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("wrong owner published: %v", err)
 	}
 }

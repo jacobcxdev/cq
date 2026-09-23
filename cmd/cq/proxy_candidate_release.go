@@ -348,121 +348,95 @@ func removeCandidateStateRoot(ctx context.Context, fsys fsutil.FileSystem, root 
 }
 
 func removeCandidateStateRootWithCleanup(ctx, cleanup context.Context, fsys fsutil.FileSystem, root string, state proxy.CandidateLifecycleStateV1) error {
-	if ctx == nil || fsys == nil || state.Phase != proxy.CandidatePhaseRemoved || !cleanAbsolutePath(root) {
-		return proxy.ErrCandidateLifecycleInvalid
+	_, err := removeCandidateStateRootCommit(ctx, cleanup, fsys, root, state)
+	return err
+}
+
+func removeCandidateStateRootCommit(ctx, cleanup context.Context, fsys fsutil.FileSystem, root string, state proxy.CandidateLifecycleStateV1) (bool, error) {
+	if ctx == nil || cleanup == nil || fsys == nil || state.Phase != proxy.CandidatePhaseRemoved || !cleanAbsolutePath(root) {
+		return false, proxy.ErrCandidateLifecycleInvalid
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	inspector, ok := fsys.(fsutil.SecurePathInspector)
 	if !ok {
-		return fsutil.ErrSecureCapabilityUnavailable
+		return false, fsutil.ErrSecureCapabilityUnavailable
 	}
-	rootInfo, err := inspector.Lstat(root)
+	info, err := inspector.Lstat(root)
 	if err != nil {
-		return err
+		return false, err
 	}
-	identity, ok := inspector.FileIdentity(rootInfo)
+	identity, ok := inspector.FileIdentity(info)
 	if !ok {
-		return fsutil.ErrUnsafeSecurePath
+		return false, fsutil.ErrUnsafeSecurePath
 	}
 	current, err := proxy.InspectCandidateLifecycle(ctx, fsys, root)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if current != state {
-		return proxy.ErrCandidateLifecycleInvalid
+		return false, proxy.ErrCandidateLifecycleInvalid
 	}
 	if err = validateCandidateRemovalTree(ctx, fsys, root); err != nil {
-		return err
+		return false, err
 	}
-	// Keep only the minimum authenticated inspection state in memory until
-	// retirement finishes. Ordinary contents are removed first; partial cleanup
-	// remains a retired candidate, never a successful complete deletion.
-	metadata := map[string][]byte{}
-	for _, name := range []string{"candidate.key", "candidate.json", "candidate.lock", "client-sender-registry.json"} {
-		body, readErr := readCandidateInputFile(fsys, filepath.Join(root, name), 64<<10)
-		if name == "candidate.lock" && errors.Is(readErr, proxy.ErrCandidateLifecycleInvalid) {
-			body = nil
-			readErr = nil
-		}
-		if readErr != nil {
-			return readErr
-		}
-		metadata[name] = body
-	}
-	defer func() {
-		for _, body := range metadata {
-			zeroCandidateBytes(body)
-		}
-	}()
 	parentPath, base := filepath.Dir(root), filepath.Base(root)
 	parent, err := fsutil.OpenOwnerControlledDirectory(fsys, parentPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer parent.Close()
 	renamer, ok := parent.(fsutil.IdentityBoundRenamer)
 	if !ok {
-		return fsutil.ErrSecureCapabilityUnavailable
+		return false, fsutil.ErrSecureCapabilityUnavailable
+	}
+	finalRemover, ok := parent.(fsutil.FinalFileRemover)
+	if !ok {
+		return false, fsutil.ErrSecureCapabilityUnavailable
+	}
+	checkpointIdentity, err := publishCandidateRemovalCheckpoint(ctx, fsys, root, state, identity, parent)
+	if err != nil {
+		return false, err
+	}
+	// From here every failure has an independent, durable inspection checkpoint.
+	if err = ctx.Err(); err != nil {
+		return false, err
 	}
 	tombstone := "." + base + ".removed-" + state.OperationID
 	if err = renamer.RenameNoReplaceChecked(base, tombstone, identity); err != nil {
-		return err
+		return false, err
 	}
-	if err = parent.Sync(); err == nil {
-		err = removeCandidateTree(ctx, fsys, filepath.Join(parentPath, tombstone))
+	if err = parent.Sync(); err != nil {
+		return false, err
 	}
-	if err != nil {
-		if cleanup.Err() != nil {
-			return errors.Join(err, cleanup.Err())
-		}
-		// Restore the inspectable retired root if cleanup did not finish. Never
-		// overwrite an independently created replacement at the original name.
-		remaining, inspectErr := inspector.Lstat(filepath.Join(parentPath, tombstone))
-		if inspectErr != nil {
-			return errors.Join(err, inspectErr)
-		}
-		restoredIdentity, identityOK := inspector.FileIdentity(remaining)
-		if !identityOK || !candidateSameDirectoryIdentity(identity, restoredIdentity) {
-			return errors.Join(err, inspectErr, fsutil.ErrUnsafeSecurePath)
-		}
-		if securityErr := fsutil.ValidateSecureDirectory(fsys, filepath.Join(parentPath, tombstone)); securityErr != nil {
-			return errors.Join(err, securityErr)
-		}
-		if cleanup.Err() != nil {
-			return errors.Join(err, cleanup.Err())
-		}
-		restoreErr := renamer.RenameNoReplaceChecked(tombstone, base, restoredIdentity)
-		if restoreErr != nil {
-			return errors.Join(err, restoreErr)
-		}
-		opener, ok := fsys.(fsutil.SecureDirectoryOpener)
-		if !ok {
-			return errors.Join(err, fsutil.ErrSecureCapabilityUnavailable)
-		}
-		directory, openErr := opener.OpenSecureDirectory(root)
-		if openErr != nil {
-			return errors.Join(err, openErr)
-		}
-		defer directory.Close()
-		for _, name := range []string{"candidate.key", "client-sender-registry.json", "candidate.lock", "candidate.json"} {
-			if cleanup.Err() != nil {
-				return errors.Join(err, cleanup.Err())
+	if err = removeCandidateTree(ctx, fsys, filepath.Join(parentPath, tombstone)); err != nil {
+		return false, err
+	}
+	if err = cleanup.Err(); err != nil {
+		return false, err
+	}
+	for _, path := range []string{root, filepath.Join(parentPath, tombstone)} {
+		if _, e := inspector.Lstat(path); !errors.Is(e, os.ErrNotExist) {
+			if e != nil {
+				return false, e
 			}
-			if restoreErr = ensureCandidateExactFile(inspector, directory, name, metadata[name]); restoreErr != nil {
-				return errors.Join(err, restoreErr)
-			}
+			return false, proxy.ErrCandidateLifecycleInvalid
 		}
-		if cleanup.Err() != nil {
-			return errors.Join(err, cleanup.Err())
-		}
-		return errors.Join(err, parent.Sync())
 	}
-	if cleanup.Err() != nil {
-		return cleanup.Err()
+	if err = fsutil.ValidateOwnerControlledDirectoryHandle(inspector, parent, parentPath); err != nil {
+		return false, err
 	}
-	return parent.Sync()
+	if err = parent.Sync(); err != nil {
+		return false, err
+	}
+	if err = cleanup.Err(); err != nil {
+		return false, err
+	}
+	name, final := candidateCheckpointNames(root)
+	// Final unlink is the commit boundary. No later sync/deadline error may
+	// pretend that a deleted checkpoint still exists.
+	return finalRemover.RemoveFinalFile(cleanup, name, final, checkpointIdentity)
 }
 
 func validateCandidateRemovalTree(ctx context.Context, fsys fsutil.FileSystem, path string) error {

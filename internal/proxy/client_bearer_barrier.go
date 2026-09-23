@@ -112,6 +112,9 @@ func ValidateClientBearerBarrier(registry ClientSenderRegistryV1, receipt Client
 func ValidateClientSenderRegistry(registry ClientSenderRegistryV1) error {
 	registry.Senders = slices.Clone(registry.Senders)
 	for i := range registry.Senders {
+		if registry.Senders[i].CredentialDomains == nil {
+			return ErrClientBearerBarrier
+		}
 		registry.Senders[i].CredentialDomains = slices.Clone(registry.Senders[i].CredentialDomains)
 		registry.Senders[i].Transports = slices.Clone(registry.Senders[i].Transports)
 	}
