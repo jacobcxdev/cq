@@ -325,7 +325,7 @@ func (r *CodexRequestRouter) classifyAttemptResponse(choice RouteChoice, respons
 		if err != nil {
 			return CodexPinnedAccepted, nil
 		}
-		if wrapped.Found && wrapped.Code == "access_program_not_enabled" && wrapped.Param == "access_programs.cyber" {
+		if codexCyberAccessUnavailable(wrapped) {
 			return CodexPinnedCyberUnavailable, nil
 		}
 		if !wrapped.AuthFailure || wrapped.ErrorType != "authentication_error" {

@@ -3613,7 +3613,7 @@ func codexWSBrokerHard429() []byte {
 }
 
 func codexWSBrokerCyber403() []byte {
-	return []byte(`{"type":"error","status":403,"error":{"type":"invalid_request_error","code":"access_program_not_enabled","param":"access_programs.cyber"}}`)
+	return []byte(`{"type":"error","status":403,"error":{"message":"The requested Cyber access program is not authorized for this workspace."}}`)
 }
 
 type codexWSBrokerPlannerStub struct {
