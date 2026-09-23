@@ -2,7 +2,40 @@
 
 **Local preparation checkpoint only. Publication, native installation and release acceptance are blocked.** No authorised native target or disposable user has been supplied. No tag, push, PR, merge, GitHub status, release, package installation, service mutation or real reset consumption was performed for T28.
 
-## Immutable source and retained artefacts
+## Current candidate: final integration fixes
+
+The final I1/I2/M1 integration wave supersedes the historical T28 candidates below. **Use only the following new archives for subsequent candidate assessment.** Source is signed commit `8b377be27b22f7164f8dac6d61d17afcf1fd1c5f` (`fix: preserved CLI projection contracts`), built from a clean worktree. All six binaries identify this exact revision and `vcs.modified=false`; the later evidence-only commit is not their source.
+
+The fixes preserve typed environment diagnostics across canonical preparation boundaries, escape persisted pin/fallback labels in human output without changing JSON, and retain exact fractional seconds in canonical Timestamp projections. Frozen machine/vendor formats and platform-unavailable precedence remain unchanged.
+
+Current evidence directory:
+
+```text
+/Users/jacob/Developer/src/github/jacobcxdev/cq/.worktrees/cli-v2/.superpowers/sdd/plan/final-fix-evidence
+```
+
+Archives are `archives/cq_1.0.0_{os}_{arch}.tar.gz` for Darwin/Linux and `.zip` for Windows. `artifact-manifest.json` records each archive member, executable, build metadata and all 127 embedded help-page checks. All hashes below were verified against the archives and their extracted members.
+
+| Target | Archive SHA-256 | Executable SHA-256 |
+|---|---|---|
+| darwin/amd64 | `766a4237fcfb7fe95aa31e825d5415f03a30691cfef881eb21a1948f77ed375f` | `dc61f43cf145345a635f866019e1d47f7d93e68b8ab8750eef65320cd89d5e30` |
+| darwin/arm64 | `8356f64e5afcaad60e5b4def658ff7210721fd18bf664c5d97ff3a644ed7f026` | `4fd1e6ac32cc4da68fbd8664221c6af730922c8fb6eff45aa948b76b480c5ac4` |
+| linux/amd64 | `6196dd57a68e323d960404b947ee9381bec227c2fd2bc0f7344f37bcdec179e1` | `77075adaa183ce8133ec214545260053cd6992d38bf5a7f2ba55ac3c7f0cb894` |
+| linux/arm64 | `5b2177aa0dbba42201c0c0400d575eb284af6bc6b76ec0dad6e05afdca1c7a1a` | `00be1f9c041fb2489ca6428ffbe82907300aee9ebd48811bede7dfa5ffdad815` |
+| windows/amd64 | `586651e0cd6123e752931bd5bf52faf6c8764b3403468489eedda2e5971e68c7` | `d4d006e6fc30f406d226cce98ff4bfe59b1fc5c4e87e9ef74b0ce2a17efccd22` |
+| windows/arm64 | `49dd83a8eda51d6bf0073a017615446e884db5df74754bf40e3d35680ada9ac6` | `fad968001e4ab8ce480a2ad028f0994c0fdea95a6be2356ac06a8a0ad7768177` |
+
+The final `red-final.log` reproduces all three findings against reviewed base `3a266ffe237390dbaf44d74dc1827fadfcd88128`, with the final durable regression file included in its source hashes. All exact-second timestamp baselines pass in RED. `covering-race.log` subsequently records **203 passed, zero failed/skipped** affected-command top-level tests; `common-contract-race.log` records **71 passed, zero failed/skipped** CLI/user-directory tests. Both used `go test -race -count=1 -json`; `matched-tests.json` retains exact selected names. `go vet ./...`, `go build ./...` and the generator check passed. No new full-suite run was needed or claimed.
+
+The packaged Darwin/arm64 executable passed **271 cases**: 127 exact help pages, 127 schema-2 syntax failures, version, 13 fail-closed machine ABI forms (ten missing-descriptor and three malformed), and three completion outputs. The copied harness derives these counts from retained cases. Twelve real Tab/Enter PTY cases passed, as did twelve packaged regression probes: six invalid/unavailable-root diagnostics and three human/three JSON control-character label cases. Cross-target checks remain compilation/metadata only.
+
+`source-delta.json` and `source-fix.diff` map the reviewed base to the exact candidate source; `build-inputs.json`, gate JSON/log pairs and `source-signature.txt` retain commands, source hashes, allowlisted environment and signed provenance. `evidence-index.json` is a **new** final-fix index; the old T28 97-file index, candidates and failures remain unchanged. Initial regression-fixture setup failures are retained separately and are not counted as product findings or successful RED evidence.
+
+The parent environment used fresh task-owned HOME/XDG/CODEX/CLAUDE/TMP roots, including XDG_CONFIG_HOME, XDG_CACHE_HOME, XDG_STATE_HOME and XDG_DATA_HOME. The temporary root and TMPDIR use caller group 20; only existing tool/cache paths were shared, with GOPROXY/GOSUMDB disabled. `environment.json` and `isolation.json` retain exact values. No ambient credentials or live opt-in flags were inherited. The Gemini link secret was explicitly empty; no secret discovery occurred.
+
+**The historical full suite remains exit 1: 4,134 PASS, four FAIL and 29 SKIP.** Its four setgid-fixture failures and source-identical targeted correction under caller-group TMPDIR remain as documented below. This final focused green evidence does not rewrite that result. All native, installed-traffic, historical CU0/CU1, Gemini full-release and earlier ambient-incident limitations below remain unresolved. No publication, installation, real reset or native service operation was performed.
+
+## Historical T28 source and retained artefacts
 
 - Reviewed T27 base: `659891406fa81acd7d04694ead78d0788415dac7`.
 - Signed candidate source: `43638f3a2486815416e4cbd4cbab63efad71d285` (`ci: targeted the CLI v2 release line`). Signature verified. The build began with a clean tracked/nonignored worktree; all six Go build records report that revision and `vcs.modified=false`.
@@ -11,7 +44,7 @@
 - Exact version linked into every binary: **1.0.0**. Future CI package validation deliberately uses **1.0.0-ci**, retaining its existing CI-only local tag mechanism and previous published-release lookup. That workflow was not run; no temporary tag was created here.
 - Build host: macOS arm64. Go `go version go1.27.1 darwin/arm64`. GoReleaser 2.18.2. `CGO_ENABLED=0`, amd64 v1 and arm64 v8.0. Cross-builds establish compilation and metadata only.
 
-All retained paths below are relative to this exact local evidence directory:
+All historical T28 paths in this section are relative to this exact local evidence directory:
 
 ```text
 /Users/jacob/Developer/src/github/jacobcxdev/cq/.worktrees/cli-v2/.superpowers/sdd/plan/task-28-evidence
@@ -104,9 +137,9 @@ T28 changed none of the frozen CU manifest, release producer, blueprint or revie
 
 ## Prepared native rollout and restoration procedure — not executed
 
-Before running any command below, obtain explicit target authority and record: host and OS/architecture, disposable user/SID/UID, user-service domain, all five resolved roots, package owner/channel, current executable/version/digest, saved owner metadata and native definitions, enabled/running state, refresh completion baseline, approved traffic credentials without logging their contents, and the exact prior package/binary plus restoration path. The fields are unknown now; a user's ordinary installation is not a substitute. Transfer the matching archive above unchanged and verify both its SHA-256 and extracted executable SHA-256 from the table. Keep the old executable/definitions on the target until restoration is proved.
+Before running any command below, obtain explicit target authority and record: host and OS/architecture, disposable user/SID/UID, user-service domain, all five resolved roots, package owner/channel, current executable/version/digest, saved owner metadata and native definitions, enabled/running state, refresh completion baseline, approved traffic credentials without logging their contents, and the exact prior package/binary plus restoration path. The fields are unknown now; a user's ordinary installation is not a substitute. Transfer the matching current final-fix archive from the first table above unchanged and verify both its SHA-256 and extracted executable SHA-256 from the table. Keep the old executable/definitions on the target until restoration is proved.
 
-Use `CQ` only for the approved target's extracted executable, `SOURCE` for checkout of exact source `43638f3a2486815416e4cbd4cbab63efad71d285`, and `NATIVE_EVIDENCE` for its approved retained evidence directory. These target paths cannot be filled before a target is authorised. The known local source of each archive is the evidence directory plus the exact table filename under `archives/`.
+Use `CQ` only for the approved target's extracted executable, `SOURCE` for checkout of exact source `8b377be27b22f7164f8dac6d61d17afcf1fd1c5f`, and `NATIVE_EVIDENCE` for its approved retained evidence directory. These target paths cannot be filled before a target is authorised. The known local source of each current archive is the final-fix evidence directory plus its exact filename under `archives/`; the historical T28 archives are superseded.
 
 For an approved disposable Unix target, the canonical lifecycle sequence is:
 
