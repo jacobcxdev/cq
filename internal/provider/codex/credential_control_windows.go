@@ -26,8 +26,6 @@ const (
 	windowsCredentialRaceTimeout      = 2 * time.Second
 )
 
-var ErrCredentialEndpointIncompatible = errors.New("credential coordinator endpoint protocol incompatible")
-
 type CredentialEndpointPingArgs struct {
 	ProtocolVersion int
 }

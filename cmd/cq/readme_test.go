@@ -61,6 +61,7 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 	{"codex_canary.go", "runCodexCanary", "command", "codex canary"},
 	{"proxy_endpoint_maintenance.go", "runProxyEndpointWithDependencies", "args[0]", "proxy endpoint"},
 	{"proxy_endpoint_maintenance.go", "transitionLegacyEndpointCommand", "opts.action", "proxy endpoint transition-legacy"},
+	{"proxy_endpoint_maintenance.go", "executeLegacyEndpointTransition", "opts.action", "proxy endpoint transition-legacy"},
 	{"proxy_policy.go", "runProxyPolicyWithDependencies", "command", "proxy policy"},
 	{"proxy_policy.go", "runProxyPolicyPool", "args[0]", "proxy policy pool"},
 	{"proxy_policy.go", "runProxyPolicySession", "command", "proxy policy session"},

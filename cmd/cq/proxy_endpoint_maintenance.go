@@ -71,19 +71,36 @@ func runProxyEndpointWithDependencies(ctx context.Context, args []string, deps p
 	}
 }
 
+// The typed seam keeps v1 encoding separate from the v2 resource envelope.
+type legacyEndpointInspection struct {
+	Snapshot   *codexprov.LegacyCredentialEndpointSnapshot
+	Transition *codexprov.LegacyCredentialEndpointTransitionStatus
+}
+
 func inspectLegacyEndpointCommand(ctx context.Context, path string, out io.Writer) error {
+	result, err := inspectLegacyEndpoint(ctx, path)
+	if err != nil {
+		return err
+	}
+	if result.Snapshot != nil {
+		return encodeLegacyEndpointCommandResult(out, result.Snapshot)
+	}
+	return encodeLegacyEndpointCommandResult(out, result.Transition)
+}
+
+func inspectLegacyEndpoint(ctx context.Context, path string) (legacyEndpointInspection, error) {
 	snapshot, snapshotErr := codexprov.InspectLegacyCredentialEndpoint(ctx, path)
 	if snapshotErr == nil {
-		return encodeLegacyEndpointCommandResult(out, snapshot)
+		return legacyEndpointInspection{Snapshot: &snapshot}, nil
 	}
 	if !errors.Is(snapshotErr, codexprov.ErrLegacyCredentialEndpointArtifacts) && !errors.Is(snapshotErr, codexprov.ErrCredentialEndpointMaintenancePending) {
-		return snapshotErr
+		return legacyEndpointInspection{}, snapshotErr
 	}
 	status, statusErr := codexprov.InspectLegacyCredentialEndpointTransition(ctx, path)
 	if statusErr == nil {
-		return encodeLegacyEndpointCommandResult(out, status)
+		return legacyEndpointInspection{Transition: &status}, nil
 	}
-	return errors.Join(snapshotErr, statusErr)
+	return legacyEndpointInspection{}, errors.Join(snapshotErr, statusErr)
 }
 
 type legacyEndpointTransitionOptions struct {
@@ -109,6 +126,36 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 			return err
 		}
 	}
+	status, err := executeLegacyEndpointTransition(ctx, path, opts, legacyEndpointTransitionOperations{
+		ReadProof: func(_ context.Context, file string) ([]byte, error) {
+			return fsutil.ReadSecureFile(fsutil.OSFileSystem{}, file, legacyEndpointProofMaxBytes)
+		},
+		Resume: func(ctx context.Context, path string, ticket codexprov.LegacyCredentialEndpointTransitionTicket, drain codexprov.DrainAuthority, _ codexprov.LegacyCredentialEndpointAction) (*codexprov.LegacyCredentialEndpointTransition, error) {
+			return codexprov.ResumeLegacyCredentialEndpointTransition(ctx, path, ticket, drain)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return encodeLegacyEndpointCommandResult(deps.stdout, status)
+}
+
+type legacyEndpointProofError struct{ error }
+
+func (e *legacyEndpointProofError) Unwrap() error { return e.error }
+
+type legacyEndpointTransitionOperations struct {
+	ReadProof func(context.Context, string) ([]byte, error)
+	Reopen    func(context.Context, string, codexprov.LegacyCredentialEndpointTransitionTicket, codexprov.DrainAuthority) (codexprov.LegacyCredentialEndpointTransitionStatus, error)
+	Resume    func(context.Context, string, codexprov.LegacyCredentialEndpointTransitionTicket, codexprov.DrainAuthority, codexprov.LegacyCredentialEndpointAction) (*codexprov.LegacyCredentialEndpointTransition, error)
+}
+
+// Consent is checked by the command before entering this synchronous operation.
+// Finalise uses the live owner's verifier; no drain authority is passed to it.
+func executeLegacyEndpointTransition(ctx context.Context, path string, opts legacyEndpointTransitionOptions, ops legacyEndpointTransitionOperations) (status codexprov.LegacyCredentialEndpointTransitionStatus, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return status, err
+	}
 	authority := codexprov.DrainAuthorityFunc(func(assertCtx context.Context, assertedPath string) error {
 		if assertedPath != path {
 			return codexprov.ErrCredentialEndpointMaintenanceDrainRequired
@@ -118,62 +165,67 @@ func transitionLegacyEndpointCommand(ctx context.Context, path string, args []st
 	var transition *codexprov.LegacyCredentialEndpointTransition
 	switch opts.action {
 	case "prepare":
-		data, err := fsutil.ReadSecureFile(fsutil.OSFileSystem{}, opts.snapshotFile, legacyEndpointProofMaxBytes)
+		data, err := ops.ReadProof(ctx, opts.snapshotFile)
 		if err != nil {
-			return fmt.Errorf("read snapshot file: %w", err)
+			return status, fmt.Errorf("read snapshot file: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return status, err
 		}
 		snapshot, err := codexprov.ParseLegacyCredentialEndpointSnapshot(data)
 		if err != nil {
-			return err
+			return status, &legacyEndpointProofError{err}
 		}
 		if snapshot.Path != path {
-			return codexprov.ErrCredentialEndpointMaintenanceSnapshotChanged
+			return status, codexprov.ErrCredentialEndpointMaintenanceSnapshotChanged
 		}
 		transition, err = codexprov.PrepareLegacyCredentialEndpointTransition(ctx, path, snapshot, authority)
 		if err != nil {
-			return err
+			return status, err
 		}
 	case "resume", "activate", "rollback", "finalise":
-		data, err := fsutil.ReadSecureFile(fsutil.OSFileSystem{}, opts.ticketFile, legacyEndpointProofMaxBytes)
+		data, err := ops.ReadProof(ctx, opts.ticketFile)
 		if err != nil {
-			return fmt.Errorf("read ticket file: %w", err)
+			return status, fmt.Errorf("read ticket file: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return status, err
 		}
 		ticket, err := codexprov.ParseLegacyCredentialEndpointTransitionTicket(data)
 		if err != nil {
-			return err
+			return status, &legacyEndpointProofError{err}
 		}
 		if ticket.Path != path {
-			return codexprov.ErrCredentialEndpointMaintenanceTicketMismatch
+			return status, codexprov.ErrCredentialEndpointMaintenanceTicketMismatch
 		}
 		if opts.action == "finalise" {
 			if err := codexprov.FinaliseLegacyCredentialEndpointTransition(ctx, path, ticket); err != nil {
-				return err
+				return status, err
 			}
-			return encodeLegacyEndpointCommandResult(deps.stdout, codexprov.LegacyCredentialEndpointTransitionStatus{
-				State: codexprov.CredentialEndpointMaintenanceCommitted, Ticket: ticket,
-			})
+			return codexprov.LegacyCredentialEndpointTransitionStatus{State: codexprov.CredentialEndpointMaintenanceCommitted, Ticket: ticket}, nil
 		}
-		transition, err = codexprov.ResumeLegacyCredentialEndpointTransition(ctx, path, ticket, authority)
+		if opts.action == "resume" && ops.Reopen != nil {
+			return ops.Reopen(ctx, path, ticket, authority)
+		}
+		transition, err = ops.Resume(ctx, path, ticket, authority, codexprov.LegacyCredentialEndpointAction(opts.action))
 		if err != nil {
-			return err
+			return status, err
 		}
 	default:
-		return fmt.Errorf("unknown transition action: %s", opts.action)
+		return status, fmt.Errorf("unknown transition action: %s", opts.action)
 	}
 	defer func() { resultErr = errors.Join(resultErr, transition.Close()) }()
 	switch opts.action {
 	case "activate":
 		if err := transition.Activate(ctx); err != nil {
-			return err
+			return status, err
 		}
 	case "rollback":
 		if err := transition.Rollback(ctx); err != nil {
-			return err
+			return status, err
 		}
 	}
-	return encodeLegacyEndpointCommandResult(deps.stdout, codexprov.LegacyCredentialEndpointTransitionStatus{
-		State: transition.State(), Ticket: transition.Ticket(),
-	})
+	return codexprov.LegacyCredentialEndpointTransitionStatus{State: transition.State(), Ticket: transition.Ticket()}, nil
 }
 
 func parseLegacyEndpointTransitionOptions(args []string) (legacyEndpointTransitionOptions, error) {

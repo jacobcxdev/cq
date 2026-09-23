@@ -136,6 +136,9 @@ func Parse(argv []string) (Invocation, *ParseError) {
 	if e := p.firstError(); e != nil {
 		return p.in, e
 	}
+	if raw == retiredEndpointCommitPath {
+		return p.in, &ParseError{Path: raw, ExitCode: 4, Diagnostic: Diagnostic{Code: "endpoint_commit_retired", Message: "commit is unavailable; use activate, verify the exact live owner, then finalise."}}
+	}
 	if raw == "operation recover" {
 		return p.in, &ParseError{Path: raw, ExitCode: 4, Diagnostic: Diagnostic{Code: "operation_recovery_unavailable", Message: "Active operation recovery is unavailable; use cq proxy operation status OPERATION_ID to inspect retained state."}}
 	}

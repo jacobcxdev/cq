@@ -98,6 +98,8 @@ var compatibilityGroups = map[string]string{
 	"proxy candidate artifact": "proxy candidate release", "operation": "proxy operation", "proxy pin claude": "claude proxy pin", "proxy pin codex": "codex proxy pin",
 }
 
+const retiredEndpointCommitPath = "proxy endpoint transition-legacy commit"
+
 const compatibilityPinHelp = "Usage: cq <provider> proxy pin <command>\n\nChoose a provider explicitly:\n  cq claude proxy pin --help\n  cq codex proxy pin --help\n"
 
 func compatibilityHelp(path string) (string, bool) {
@@ -116,10 +118,10 @@ func knownParsePath(path string) bool {
 	if _, ok := compatibilityGroups[path]; ok {
 		return true
 	}
-	return path == "proxy pin" || path == "operation recover"
+	return path == "proxy pin" || path == "operation recover" || path == retiredEndpointCommitPath
 }
 func isParseLeaf(path string) bool {
-	if path == "operation recover" {
+	if path == "operation recover" || path == retiredEndpointCommitPath {
 		return true
 	}
 	if _, ok := aliases[path]; ok {
@@ -129,6 +131,19 @@ func isParseLeaf(path string) bool {
 	return ok && s.Kind == "command"
 }
 func parseSpec(path string, help bool) (CommandSpec, aliasSpec) {
+	if path == retiredEndpointCommitPath {
+		// The annex retires commit explicitly; it is never an alias for finalise.
+		// Recognise its old options for syntax checks without requiring authority
+		// inputs for an operation that cannot run.
+		spec, _ := commandSpec("codex proxy credential-endpoint legacy activate")
+		spec.Path = path
+		spec.Options = append([]ParameterSpec{}, spec.Options...)
+		for i := range spec.Options {
+			spec.Options[i].Required = false
+		}
+		return spec, aliasSpec{}
+	}
+
 	a := aliases[path]
 	if help {
 		if target, ok := compatibilityGroups[path]; ok && !a.conditional {
