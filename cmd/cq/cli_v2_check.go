@@ -183,6 +183,9 @@ func handleV2CheckWithDependencies(parent context.Context, inv cli.Invocation, _
 	outcome := v2CheckStatus(parent, ctx, report, stale)
 	outcome.Warnings = warnings
 	outcome.Human = output.QuotaReportHumanV2(report)
+	outcome.Terminal = func(options cli.TerminalOptions) string {
+		return output.QuotaReportTerminalV2(report, options)
+	}
 	outcome.Data, err = cli.EncodeData(v2CheckData{Report: report})
 	if err != nil {
 		return v2CheckFailure(1, "check_failed", "Quota checks failed for the selected providers.")
