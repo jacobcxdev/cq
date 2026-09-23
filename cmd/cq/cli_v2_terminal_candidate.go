@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,10 +62,10 @@ func terminalCandidateStatus(s v2CandidateStatus, o cli.TerminalOptions) string 
 	}{
 		{"Instance", candidateDisplay(s.InstanceID, cli.Identity)},
 		{"State", candidateDisplay(s.StateDir, cli.Identity)},
-		{"Port", cli.Span{Text: fmt.Sprint(s.Port), Role: cli.Quantity}},
+		{"Port", cli.Span{Text: strconv.Itoa(s.Port), Role: cli.Identity}},
 		{"Operation", candidateDisplay(s.OperationID, cli.Identity)},
 		{"Validation run", candidateDisplay(s.ValidationRunID, cli.Identity)},
-		{"Generation", cli.TerminalCount(s.Generation)},
+		{"Generation", cli.Span{Text: strconv.FormatUint(s.Generation, 10), Role: cli.Identity}},
 		{"Updated", updated},
 		{"Pending action", pending},
 		{"Effect started", effect},

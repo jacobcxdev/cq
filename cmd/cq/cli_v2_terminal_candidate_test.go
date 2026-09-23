@@ -202,12 +202,12 @@ func TestTerminalCandidateWidthsAndRoles(t *testing.T) {
 		}
 		plain := ansi.Strip(got)
 		compact := strings.Join(strings.Fields(plain), "")
-		for _, value := range []string{"18,446,744,073,709,551,615", strings.Repeat("9", 64), "stop", "Active release"} {
+		for _, value := range []string{"18446744073709551615", strings.Repeat("9", 64), "stop", "Active release"} {
 			if !strings.Contains(compact, strings.ReplaceAll(value, " ", "")) {
 				t.Fatalf("width %d lost %q", width, value)
 			}
 		}
-		if !strings.Contains(got, "\x1b[33m") || !strings.Contains(got, "\x1b[1;34m") || !strings.Contains(got, "\x1b[35m") {
+		if strings.Contains(compact, "18,446,744,073,709,551,615") || !strings.Contains(got, "\x1b[33m") || !strings.Contains(got, "\x1b[36m") || !strings.Contains(got, "\x1b[35m") {
 			t.Fatalf("width %d lost semantic roles", width)
 		}
 		if receiptOut := terminalCandidateReceipt(receipt, o); !strings.Contains(receiptOut, "\x1b[32m") || !strings.Contains(strings.Join(strings.Fields(ansi.Strip(receiptOut)), ""), receipt.ReceiptDigest) {
@@ -222,6 +222,10 @@ func TestTerminalCandidateWidthsAndRoles(t *testing.T) {
 		if strings.Contains(terminalCandidateStatus(s, o), "\x1b[") || strings.Contains(terminalCandidateReceipt(receipt, o), "\x1b[") {
 			t.Fatalf("width %d ignored NO_COLOR", width)
 		}
+	}
+	wide := terminalCandidateStatus(s, terminalFixtureOptions(100))
+	if !strings.Contains(wide, "\x1b[36m29280\x1b[0m") || !strings.Contains(wide, "\x1b[36m18446744073709551615\x1b[0m") {
+		t.Fatal("port and generation must be exact cyan identifiers")
 	}
 }
 
