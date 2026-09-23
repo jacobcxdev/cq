@@ -146,6 +146,23 @@ func TestCodexReserveStaleWindowAndOrdering(t *testing.T) {
 	}
 }
 
+func TestCodexReserveRefreshRunsBeforeFreshnessDeadline(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	reserve, err := OpenCodexReserve(fsutil.NewMemFS(), "/state/reserve.json", ledger, &reserveInventory{active: "system"}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	windows := map[quota.WindowName]quota.Window{"7d": {RemainingPct: 75, ResetAtUnix: now.Add(7 * 24 * time.Hour).Unix()}}
+	ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: windows}})
+	if _, err := reserve.Control("set", "7d", 5); err != nil {
+		t.Fatal(err)
+	}
+	if got := reserve.RefreshInterval("system", windows); got > 50*time.Second {
+		t.Fatalf("refresh interval %s leaves no margin for service tick and bounded usage fetch", got)
+	}
+}
+
 func TestCodexReserveNormalisesWindowsAndKeepsIdentityOnError(t *testing.T) {
 	now := time.Unix(1800000000, 0)
 	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)

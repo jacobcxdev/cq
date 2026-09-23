@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,31 @@ type codexRoutingUsageReaderStub struct {
 	errors  map[codex.AccountKey]error
 	panics  map[codex.AccountKey]bool
 	calls   map[codex.AccountKey]int
+}
+
+type delayedCapacityUsageReader struct{ clock *atomic.Int64 }
+
+func (reader delayedCapacityUsageReader) Read(context.Context, codex.AccountKey) (codex.UsageObservation, error) {
+	reader.clock.Add(int64(5 * time.Second))
+	return codex.UsageObservation{Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+		quota.Window7Day: {RemainingPct: 75, ResetAtUnix: time.Unix(1_800_000_000, 0).Add(7 * 24 * time.Hour).Unix()},
+	}}}, nil
+}
+
+func TestCodexRoutingCapacityRefresherStampsCompletedObservation(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+	ledger := NewCodexCapacityLedger(now, 5*time.Minute)
+	refresher := &CodexRoutingCapacityRefresher{Usage: delayedCapacityUsageReader{clock: &clock}, Capacity: ledger, Now: now}
+	if !refresher.Refresh(context.Background(), []codex.AccountKey{"system"}) {
+		t.Fatal("usage refresh failed")
+	}
+	_, observed := ledger.WindowSnapshot("system")
+	if want := start.Add(5 * time.Second); !observed.Equal(want) {
+		t.Fatalf("observed at %s, want completed fetch at %s", observed, want)
+	}
 }
 
 func (reader *codexRoutingUsageReaderStub) Read(_ context.Context, account codex.AccountKey) (codex.UsageObservation, error) {
