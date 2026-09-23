@@ -393,10 +393,8 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return fmt.Errorf("read existing LaunchAgent: %w", readErr)
 	}
-	oldLoaded := false
-	if _, err := platform.run(ctx, "bootout", platform.target(definition.Label)); err == nil {
-		oldLoaded = true
-	} else if !isDarwinLaunchctlNotLoaded(err) {
+	oldLoaded, err := platform.bootoutAndWait(ctx, definition.Label)
+	if err != nil {
 		return fmt.Errorf("boot out %s: %w", definition.Label, err)
 	}
 
@@ -429,8 +427,8 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 
 func (platform *darwinServicePlatform) restore(ctx context.Context, label, path string, data []byte, exists, loaded bool) error {
 	var restoreErr error
-	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
-		restoreErr = errors.Join(restoreErr, fmt.Errorf("boot out failed candidate: %w", err))
+	if _, err := platform.bootoutAndWait(ctx, label); err != nil {
+		return fmt.Errorf("boot out failed candidate: %w", err)
 	}
 	if exists {
 		if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
@@ -484,6 +482,37 @@ func (platform *darwinServicePlatform) printJob(ctx context.Context, label strin
 		return false, nil, nil
 	}
 	return false, nil, fmt.Errorf("inspect launchd job %s: %w", label, err)
+}
+
+// A successful bootout starts removal; launchd can still reject a following
+// bootstrap with EALREADY until the old registration has actually disappeared.
+func (platform *darwinServicePlatform) bootoutAndWait(ctx context.Context, label string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil {
+		if isDarwinLaunchctlNotLoaded(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for {
+		if err := waitCtx.Err(); err != nil {
+			return true, err
+		}
+		loaded, _, err := platform.printJob(waitCtx, label)
+		if err != nil {
+			return true, err
+		}
+		if !loaded {
+			return true, waitCtx.Err()
+		}
+		if err := waitForServicePoll(waitCtx, 20*time.Millisecond); err != nil {
+			return true, err
+		}
+	}
 }
 
 func (platform *darwinServicePlatform) readDefinition(label string) (darwinLaunchAgentDefinition, bool, error) {
@@ -1194,7 +1223,7 @@ func (platform *darwinServicePlatform) RestoreSelected(ctx context.Context, sele
 			return err
 		}
 		c := snapshot.Components[i]
-		if _, err := platform.run(ctx, "bootout", platform.target(c.ID)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
+		if _, err := platform.bootoutAndWait(ctx, c.ID); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {

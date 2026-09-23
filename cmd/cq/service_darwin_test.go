@@ -1219,3 +1219,89 @@ func TestDarwinHomebrewUpgradeBindsRootsForCanonicalStatus(t *testing.T) {
 		t.Fatalf("package ownership changed: %+v %v", record, err)
 	}
 }
+
+func TestDarwinServiceWaitsForRemovalBeforeReplacingJob(t *testing.T) {
+	for _, operation := range []string{"install", "restore", "selected-restore"} {
+		for _, outcome := range []string{"delayed", "inspection-error", "cancelled", "deadline"} {
+			t.Run(operation+"/"+outcome, func(t *testing.T) {
+				p, r := newDarwinServiceHarness(t)
+				if err := p.InstallProxy(context.Background(), p.executable); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(p.plistPath(proxyAgentLabel))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if outcome == "deadline" {
+					var stop context.CancelFunc
+					ctx, stop = context.WithTimeout(ctx, 30*time.Millisecond)
+					defer stop()
+				}
+				inspectionErr := errors.New("inspection unavailable")
+				pending, inspections, bootstraps := false, 0, 0
+				p.run = func(ctx context.Context, args ...string) ([]byte, error) {
+					switch args[0] {
+					case "bootout":
+						pending = true
+						return nil, nil
+					case "print":
+						if pending {
+							inspections++
+							deadline, bounded := ctx.Deadline()
+							if !bounded || time.Until(deadline) > 11*time.Second {
+								t.Error("removal inspection has no bounded context")
+							}
+							switch outcome {
+							case "inspection-error":
+								return nil, inspectionErr
+							case "cancelled":
+								cancel()
+								return []byte("still registered"), nil
+							case "deadline":
+								<-ctx.Done()
+								return nil, ctx.Err()
+							}
+							if inspections < 3 {
+								return []byte("still registered"), nil
+							}
+							pending = false
+							r.loaded[proxyAgentLabel] = false
+						}
+					case "bootstrap":
+						bootstraps++
+						if pending {
+							return nil, errors.New("operation already in progress")
+						}
+					}
+					return r.Run(ctx, args...)
+				}
+				switch operation {
+				case "install":
+					err = p.InstallProxy(ctx, p.executable)
+				case "restore":
+					err = p.restore(ctx, proxyAgentLabel, p.plistPath(proxyAgentLabel), data, true, true)
+				case "selected-restore":
+					err = p.RestoreSelected(ctx, serviceProxy, servicePlatformSnapshot{Manager: "launchd", Components: []serviceComponentSnapshot{{ID: proxyAgentLabel, Exists: true, Definition: data, Running: true, Enabled: true}}})
+				}
+				if outcome == "delayed" {
+					if err != nil || inspections != 3 || bootstraps != 1 {
+						t.Fatalf("err=%v inspections=%d bootstraps=%d", err, inspections, bootstraps)
+					}
+					return
+				}
+				expected := inspectionErr
+				if outcome == "cancelled" {
+					expected = context.Canceled
+				}
+				if outcome == "deadline" {
+					expected = context.DeadlineExceeded
+				}
+				if !errors.Is(err, expected) || bootstraps != 0 {
+					t.Fatalf("err=%v want=%v bootstraps=%d", err, expected, bootstraps)
+				}
+			})
+		}
+	}
+}
