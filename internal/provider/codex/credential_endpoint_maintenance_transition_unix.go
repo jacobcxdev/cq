@@ -365,7 +365,14 @@ func resumeLegacyCredentialEndpointTransition(ctx context.Context, path string, 
 			_ = namespace.Close()
 		}
 	}()
-	pair, err := namespace.readMaintenanceRecordPair()
+	absence := ErrCredentialEndpointMaintenancePending
+	if action != "" {
+		absence = ErrCredentialEndpointMaintenanceNotFound
+	}
+	pair, err := namespace.readMaintenanceRecordPairWithAbsence(absence)
+	if err == ErrCredentialEndpointMaintenanceNotFound {
+		return nil, namespace.confirmTransitionAbsent(ctx, ticket, authority)
+	}
 	pairTicket, pairTicketErr := pair.ticket()
 	if err != nil || pairTicketErr != nil || pairTicket != ticket {
 		return nil, errors.Join(ErrCredentialEndpointMaintenanceTicketMismatch, err, pairTicketErr)
@@ -1357,7 +1364,36 @@ func (namespace *legacyCredentialMaintenanceNamespace) readOptionalRecord(name s
 	return record, true, nil
 }
 
+// Absence grants no ticket authority. Check the retained namespace and lock,
+// then re-read under that existing lock before classifying a canonical request.
+func (namespace *legacyCredentialMaintenanceNamespace) confirmTransitionAbsent(ctx context.Context, ticket LegacyCredentialEndpointTransitionTicket, authority DrainAuthority) (resultErr error) {
+	lockProof, err := namespace.inspectRegular(namespace.lockName)
+	if err != nil || lockProof != ticket.Lock {
+		return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
+	}
+	lock, err := namespace.openExistingLock(ticket.Lock)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+	if err := namespace.validateHeldLock(ticket.Lock); err != nil {
+		return err
+	}
+	if err := assertLegacyCredentialDrainAuthority(ctx, ticket.Path, authority); err != nil {
+		return err
+	}
+	_, err = namespace.readMaintenanceRecordPairWithAbsence(ErrCredentialEndpointMaintenanceNotFound)
+	if err != ErrCredentialEndpointMaintenanceNotFound {
+		return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
+	}
+	return err
+}
+
 func (namespace *legacyCredentialMaintenanceNamespace) readMaintenanceRecordPair() (legacyCredentialMaintenanceRecordPair, error) {
+	return namespace.readMaintenanceRecordPairWithAbsence(ErrCredentialEndpointMaintenancePending)
+}
+
+func (namespace *legacyCredentialMaintenanceNamespace) readMaintenanceRecordPairWithAbsence(absence error) (legacyCredentialMaintenanceRecordPair, error) {
 	journal, journalExists, journalErr := namespace.readOptionalRecord(namespace.journalName)
 	rollback, rollbackExists, rollbackErr := namespace.readOptionalRecord(namespace.rollbackName)
 	if journalErr != nil || rollbackErr != nil {
@@ -1368,7 +1404,7 @@ func (namespace *legacyCredentialMaintenanceNamespace) readMaintenanceRecordPair
 		rollback: rollback, rollbackExists: rollbackExists,
 	}
 	if !journalExists && !rollbackExists {
-		return pair, ErrCredentialEndpointMaintenancePending
+		return pair, absence
 	}
 	if journalExists {
 		if journal.Owner != nil {

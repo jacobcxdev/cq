@@ -20,6 +20,7 @@ var (
 	ErrLegacyCredentialEndpointNotRefused            = errors.New("legacy credential endpoint is not an exact refused socket")
 	ErrLegacyCredentialEndpointArtifacts             = errors.New("legacy credential endpoint has coordination artifacts")
 	ErrCredentialEndpointMaintenancePending          = errors.New("credential endpoint maintenance is pending")
+	ErrCredentialEndpointMaintenanceNotFound         = errors.New("credential endpoint maintenance transition not found")
 	ErrCredentialEndpointMaintenanceUnsupported      = errors.New("credential endpoint maintenance unsupported")
 	ErrCredentialEndpointMaintenanceDrainRequired    = errors.New("credential endpoint stopped-and-drained authority required")
 	ErrCredentialEndpointMaintenanceSnapshotChanged  = errors.New("legacy credential endpoint snapshot changed")

@@ -639,3 +639,100 @@ func TestCLIV2EndpointConfirmationBudgetAndInterrupt(t *testing.T) {
 		t.Fatalf("consent interruption exit=%d", exit)
 	}
 }
+
+// This fixture authority is local to the temporary live owner; it never reads
+// credentials or substitutes an adapter outcome.
+type endpointV2FinaliseAuthority struct{}
+
+func (endpointV2FinaliseAuthority) AcquireLegacyMaintenanceFinalise(context.Context, codexprov.LegacyMaintenanceFinaliseVerification) (codexprov.LegacyMaintenanceFinaliseLease, error) {
+	return endpointV2FinaliseAuthority{}, nil
+}
+func (endpointV2FinaliseAuthority) Release() {}
+
+func TestCLIV2EndpointMissingTransition(t *testing.T) {
+	for _, action := range []string{"resume", "activate", "rollback"} {
+		for _, state := range []string{"absent", "wrong-directory", "wrong-lock", "missing-lock", "malformed-journal", "malformed-rollback", "unsafe-record", "mismatched-record"} {
+			t.Run(action+"/"+state, func(t *testing.T) {
+				path, file, ticket := endpointV2State(t, "activated")
+				rollbackFile := path + ".maintenance.rollback.json"
+				retained, err := os.ReadFile(rollbackFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := context.Background()
+				owner, err := codexprov.OpenCredentialControlPreparedWithLegacyMaintenanceVerifier(ctx, path, &codexprov.CredentialCoordinator{}, nil, endpointV2FinaliseAuthority{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer owner.Close()
+				deps := v2EndpointDependenciesForPath(path)
+				prepare := func(context.Context) (v2EndpointDependencies, error) { return deps, nil }
+				exit, result, _, _ := runEndpointV2(t, ctx, endpointV2Args("finalise", file, false), prepare, noAccessV2Input{}, false)
+				if exit != 0 || result.State != "committed" {
+					t.Fatalf("finalise exit=%d state=%s", exit, result.State)
+				}
+				if err := owner.Close(); err != nil {
+					t.Fatal(err)
+				}
+				for _, absent := range []string{path + ".maintenance.json", rollbackFile} {
+					if _, err := os.Lstat(absent); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("record remains: %v", err)
+					}
+				}
+				wantExit, wantCode := 6, "endpoint_conflict"
+				switch state {
+				case "absent":
+					wantExit, wantCode = 3, "endpoint_not_found"
+				case "wrong-directory":
+					ticket.Directory.Inode++
+				case "wrong-lock":
+					ticket.Lock.Inode++
+				case "missing-lock":
+					if err := os.Remove(path + ".lock"); err != nil {
+						t.Fatal(err)
+					}
+				case "malformed-journal", "malformed-rollback", "unsafe-record":
+					name := rollbackFile
+					if state == "malformed-journal" {
+						name = path + ".maintenance.json"
+					}
+					if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if state == "unsafe-record" {
+						if err := os.Chmod(name, 0o666); err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "mismatched-record":
+					if err := os.WriteFile(rollbackFile, retained, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					ticket.ID = strings.Repeat("b", 32)
+					ticket.QuarantineName = "." + filepath.Base(path) + ".legacy-" + ticket.ID + ".quarantine"
+				}
+				endpointV2Write(t, file, ticket)
+				before := endpointV2Inventory(t, path)
+				for repeat := 0; repeat < 2; repeat++ {
+					exit, _, envelope, _ := runEndpointV2(t, ctx, endpointV2Args(action, file, false), prepare, noAccessV2Input{}, false)
+					if exit != wantExit || len(envelope.Errors) != 1 || envelope.Errors[0].Code != wantCode {
+						t.Errorf("exit=%d errors=%v want %d/%s", exit, envelope.Errors, wantExit, wantCode)
+					}
+				}
+				if state == "absent" {
+					transition, err := codexprov.ResumeLegacyCredentialEndpointTransition(ctx, path, ticket, codexprov.DrainAuthorityFunc(func(context.Context, string) error { return nil }))
+					if transition != nil {
+						transition.Close()
+						t.Error("legacy resume unexpectedly succeeded")
+					}
+					if !errors.Is(err, codexprov.ErrCredentialEndpointMaintenancePending) || !errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceTicketMismatch) {
+						t.Errorf("legacy absence changed: %v", err)
+					}
+				}
+				if after := endpointV2Inventory(t, path); !reflect.DeepEqual(before, after) {
+					t.Fatal("absent/conflicting transition mutated bytes or identities")
+				}
+			})
+		}
+	}
+}

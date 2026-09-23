@@ -180,7 +180,7 @@ func v2EndpointFailure(err error) cli.Outcome {
 		return v2SelectionFailure(4, "endpoint_unsupported", "Credential endpoint maintenance is unavailable on this platform.")
 	case errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceConflict), errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceTicketMismatch), errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceSnapshotChanged), errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceDrainRequired), errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceVerifierRequired), errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceVerification), errors.Is(err, codexprov.ErrLegacyCredentialEndpointArtifacts), errors.Is(err, codexprov.ErrLegacyCredentialEndpointNotRefused), errors.Is(err, codexprov.ErrCredentialEndpointMaintenancePending), errors.Is(err, codexprov.ErrCredentialEndpointIdentityChanged), errors.Is(err, codexprov.ErrCredentialEndpointIncompatible), errors.Is(err, codexprov.ErrCredentialEndpointLockHeld), errors.Is(err, fsutil.ErrUnsafeSecurePath), errors.Is(err, fsutil.ErrExclusiveLockHeld):
 		return v2SelectionFailure(6, "endpoint_conflict", "Credential endpoint migration precondition failed: authority, identity or migration state does not match.")
-	case errors.Is(err, os.ErrNotExist):
+	case errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceNotFound), errors.Is(err, os.ErrNotExist):
 		return v2SelectionFailure(3, "endpoint_not_found", "Credential endpoint or transition does not exist.")
 	default:
 		return v2SelectionFailure(1, "endpoint_io_failed", "Credential endpoint operation failed: local state or owner operation failed.")

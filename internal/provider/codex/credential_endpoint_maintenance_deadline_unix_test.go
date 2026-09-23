@@ -443,3 +443,60 @@ func TestCredentialEndpointMaintenanceReopenAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialEndpointMaintenanceAbsentTransitionRechecksUnderLock(t *testing.T) {
+	for _, action := range []string{"resume", "activate", "rollback"} {
+		t.Run(action, func(t *testing.T) {
+			path := createRefusedLegacyCredentialSocket(t)
+			ctx := context.Background()
+			snapshot, err := InspectLegacyCredentialEndpoint(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drain := DrainAuthorityFunc(func(context.Context, string) error { return nil })
+			transition, err := PrepareLegacyCredentialEndpointTransition(ctx, path, snapshot, drain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ticket := transition.Ticket()
+			if err := transition.Close(); err != nil {
+				t.Fatal(err)
+			}
+			journal := credentialEndpointMaintenanceJournalPath(path)
+			body, err := os.ReadFile(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(journal); err != nil {
+				t.Fatal(err)
+			}
+			var observed map[string]string
+			calls := 0
+			drain = func(context.Context, string) error {
+				calls++
+				if calls == 2 {
+					if err := os.WriteFile(journal, body, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					observed = maintenanceExactInventory(t, path)
+				}
+				return nil
+			}
+			if action == "resume" {
+				_, err = ReopenLegacyCredentialEndpointTransition(ctx, path, ticket, drain)
+			} else {
+				transition, err = ResumeLegacyCredentialEndpointTransitionForAction(ctx, path, ticket, drain, LegacyCredentialEndpointAction(action))
+				if transition != nil {
+					transition.Close()
+					t.Error("resumed newly appeared record")
+				}
+			}
+			if calls != 2 || !errors.Is(err, ErrCredentialEndpointMaintenanceConflict) || errors.Is(err, ErrCredentialEndpointMaintenanceNotFound) {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+			if after := maintenanceExactInventory(t, path); !reflect.DeepEqual(observed, after) {
+				t.Fatal("absence recheck changed newly appeared record")
+			}
+		})
+	}
+}
