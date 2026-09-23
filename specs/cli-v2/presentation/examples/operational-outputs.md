@@ -4638,7 +4638,7 @@ Stdout:
 Stderr:
 
 ```text
-Warning · Trace history has a gap: required rotated segment is no longer retained.
+Warning · Trace history has a gap: diagnostics log rotated beyond retained history while following.
   Code: trace_history_gap
   Command: cq codex proxy trace
 ```

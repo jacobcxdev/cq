@@ -77,7 +77,7 @@ func internalFailure() Outcome {
 func render(session *Session, inv Invocation, outcome Outcome) int {
 	warnings := append([]Diagnostic{}, inv.Warnings...)
 	outcome.Warnings = append(warnings, outcome.Warnings...)
-	terminalErrors := !inv.JSON && inv.Path != "codex proxy hook stop" && session.ErrTerminal.Width > 0
+	terminalErrors := !inv.JSON && session.ErrTerminal.Width > 0
 	if !terminalErrors {
 		for _, warning := range outcome.Warnings {
 			if err := writeBytes(session.Err, []byte(fmt.Sprintf("cq: warning: %s\n", HumanValue(warning.Message)))); err != nil {
