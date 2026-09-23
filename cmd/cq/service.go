@@ -744,6 +744,14 @@ func (lifecycle *serviceLifecycle) Selected(ctx context.Context, action serviceA
 			return result, cause
 		}
 		result.Rollback = "failed"
+		// Restoration may alter every selected component, including components
+		// whose earlier mutation was already verified. Only fresh inspection below
+		// can establish their current enablement and health again.
+		for _, id := range components {
+			uncertain := result.Status.component(id)
+			uncertain.Observed = nil
+			result.Status.setComponent(id, uncertain)
+		}
 		// Cleanup shares the original deadline. Expiry is never proof of rollback.
 		restoreErr := ctx.Err()
 		if restoreErr == nil {
@@ -939,11 +947,13 @@ func (lifecycle *serviceLifecycle) waitSelected(ctx context.Context, action serv
 		wait = waitForServicePoll
 	}
 	var c componentStatus
+	var inspectErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return c, err
 		}
 		status, err := lifecycle.Platform.InspectSelected(ctx, id)
+		inspectErr = err
 		if err == nil {
 			c = status.component(id)
 			verified := false
@@ -985,6 +995,9 @@ func (lifecycle *serviceLifecycle) waitSelected(ctx context.Context, action serv
 				return c, err
 			}
 		}
+	}
+	if inspectErr != nil {
+		return c, inspectErr
 	}
 	return c, ErrServiceUnhealthy
 }

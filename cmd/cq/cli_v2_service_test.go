@@ -81,6 +81,8 @@ type selectedServicePlatform struct {
 	restoreFails, restoreLies, staleCompletion, losePolicy bool
 	inspectErr                                             error
 	afterMutation                                          func()
+	afterRestore                                           func()
+	inspectHook                                            func(context.Context, serviceSelection) error
 }
 
 func (p *selectedServicePlatform) PreflightSelected(ctx context.Context, _ string, s serviceSelection) error {
@@ -90,6 +92,11 @@ func (p *selectedServicePlatform) PreflightSelected(ctx context.Context, _ strin
 func (p *selectedServicePlatform) InspectSelected(ctx context.Context, s serviceSelection) (serviceStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return serviceStatus{}, err
+	}
+	if p.inspectHook != nil {
+		if err := p.inspectHook(ctx, s); err != nil {
+			return serviceStatus{}, err
+		}
 	}
 	if p.inspectErr != nil {
 		return serviceStatus{}, p.inspectErr
@@ -146,6 +153,9 @@ func (p *selectedServicePlatform) RestoreSelected(ctx context.Context, s service
 			p.statuses[id] = c
 			p.definitions[id] = string(v.Definition)
 		}
+	}
+	if p.afterRestore != nil {
+		p.afterRestore()
 	}
 	return nil
 }
@@ -846,5 +856,78 @@ func TestCLIV2ServiceVerificationRequiresExecutableIdentity(t *testing.T) {
 				t.Fatalf("accepted different executable with healthy=true: %v", err)
 			}
 		})
+	}
+}
+
+func TestCLIV2ServiceVerificationPreservesUnavailable(t *testing.T) {
+	l, p, _ := newSelectedServiceHarness(t)
+	p.afterMutation = func() { p.inspectErr = errServiceUnavailable }
+	p.afterRestore = func() { p.inspectErr = nil }
+	exit, data, code := runSelectedService(t, context.Background(), l, "service", "stop", "--component", "proxy", "--json")
+	if exit != 4 || code != "service_unavailable" {
+		t.Fatalf("verification unavailable became exit=%d code=%s", exit, code)
+	}
+	if data.Rollback != "restored" || data.Components[0].Enabled == nil || !*data.Components[0].Enabled {
+		t.Fatalf("restoration not observed: %+v", data)
+	}
+}
+
+func TestCLIV2ServiceRollbackInvalidatesObservations(t *testing.T) {
+	for _, mode := range []string{"unavailable", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			l, p, _ := newSelectedServiceHarness(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			p.fail = "proxy-stop" // Refresh was already stopped and successfully observed.
+			p.afterRestore = func() {
+				if mode == "unavailable" {
+					p.inspectErr = errServiceUnavailable
+				} else {
+					p.inspectHook = func(ctx context.Context, _ serviceSelection) error { cancel(); return ctx.Err() }
+				}
+			}
+			exit, data, code := runSelectedService(t, ctx, l, "service", "stop", "--json")
+			expected := 1
+			if mode == "cancelled" {
+				expected = 130
+			}
+			if exit != expected {
+				t.Fatalf("exit=%d code=%s", exit, code)
+			}
+			// Snapshot verification established rollback before the final inspection failed.
+			if data.Rollback != "restored" {
+				t.Fatalf("rollback=%s", data.Rollback)
+			}
+			for _, component := range data.Components {
+				if component.State != "indeterminate" || component.Enabled != nil || component.Healthy != nil {
+					t.Fatalf("pre-restore state shown as current: %+v", component)
+				}
+			}
+			for _, id := range serviceAll.components() {
+				if !*p.statuses[id].Observed.Enabled {
+					t.Fatalf("fixture did not restore %s", id)
+				}
+			}
+			if p.lock.held {
+				t.Fatal("lock leaked")
+			}
+		})
+	}
+}
+
+func TestCLIV2ServiceVerificationPollsObservedHealth(t *testing.T) {
+	l, p, _ := newSelectedServiceHarness(t)
+	l.StatusAttempts = 2
+	l.Wait = func(context.Context, time.Duration) error { return nil }
+	calls := 0
+	p.inspectHook = func(context.Context, serviceSelection) error {
+		calls++
+		p.statuses[serviceProxy].Observed.Healthy = serviceBool(calls == 2)
+		return nil
+	}
+	before := p.statuses[serviceProxy]
+	_, err := l.waitSelected(context.Background(), serviceRestart, serviceProxy, before, time.Now())
+	if err != nil || calls != 2 {
+		t.Fatalf("observed health polling err=%v calls=%d", err, calls)
 	}
 }
