@@ -128,7 +128,7 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 		if valid {
 			snapshot := QuotaSnapshot{
 				Result:    outcome.observation.Result,
-				FetchedAt: completedAt,
+				FetchedAt: now,
 			}
 			r.Capacity.ObserveQuotaSnapshot(outcome.account, snapshot)
 			r.Capacity.ObserveLivePositiveQuotaSnapshot(outcome.stream, outcome.account, snapshot)
