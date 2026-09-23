@@ -1267,7 +1267,9 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx conte
 			broker.markCyberIneligible(account.Choice().AccountKey, request)
 		}
 		if observation.Kind == CodexSSEError && !relayed && canRotate && (observation.Error.HardUsageLimit || observation.Error.AuthFailure || codexWSCyberAccessUnavailable(observation.Error)) {
+			reservation := active.prewarm
 			closeCodexWSActiveUpstream(active)
+			active.prewarm = reservation
 			return true, nil
 		}
 		if observation.Kind == CodexSSEMalformed || observation.Kind == CodexSSEUnknown {
