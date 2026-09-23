@@ -466,3 +466,85 @@ func TestCLIV2ReserveProductionRejectsRedirect(t *testing.T) {
 		t.Fatalf("redirect outcome=%+v target calls=%d", out, targetCalls.Load())
 	}
 }
+
+func TestCLIV2ReserveHumanEscapesControls(t *testing.T) {
+	email := "alice\n\x1b[31m\u0085@example.com"
+	selector := "7d:custom\n\x1b[2J\u009f"
+	status := proxy.CodexReserveStatus{Configured: true, Window: quota.WindowName(selector), Percent: 2, Email: email, Windows: map[quota.WindowName]quota.Window{quota.WindowName(selector): {RemainingPct: 3}}}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := proxyPolicyDependencies{LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{LocalToken: "synthetic"}, nil }, Doer: testDoer(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(encoded))}, nil
+	})}
+	for _, action := range []string{"status", "windows"} {
+		t.Run(action, func(t *testing.T) {
+			inv, parseErr := cli.Parse([]string{"codex", "proxy", "reserve", action})
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			out := handleV2ReserveWithDependencies(context.Background(), inv, nil, deps)
+			want := "System account reserve: true\nAccount: alice\\u000a\\u001b[31m\\u0085@example.com\nWindow: 7d:custom\\u000a\\u001b[2J\\u009f\nThreshold: 2%\nEnabled: false\nBlocked: false\nReason: none\nRemaining: unknown\nReset: unknown\nObserved: unknown\n"
+			if action == "windows" {
+				want = "7d:custom\\u000a\\u001b[2J\\u009f\n"
+			}
+			if out.ExitCode != 0 || out.Human != want {
+				t.Errorf("human output=%q want=%q exit=%d", out.Human, want, out.ExitCode)
+			}
+			var data struct {
+				Reserve v2ReserveStatus   `json:"reserve"`
+				Windows []v2ReserveWindow `json:"windows"`
+			}
+			if err := json.Unmarshal(out.Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			windows := data.Windows
+			if action == "status" {
+				if data.Reserve.Email == nil || *data.Reserve.Email != email || data.Reserve.Window == nil || *data.Reserve.Window != selector {
+					t.Fatal("human escaping changed JSON string data")
+				}
+				windows = data.Reserve.Windows
+			}
+			if len(windows) != 1 || windows[0].Selector != selector {
+				t.Fatal("human escaping changed JSON selector")
+			}
+		})
+	}
+}
+
+func TestCLIV2ReserveErrorStatusBeforeBody(t *testing.T) {
+	for _, tc := range []struct {
+		name, receipt, code string
+		status, exit        int
+	}{
+		{"unauthorised", "reserve_evidence_required", "routing_auth_failed", 401, 5},
+		{"forbidden", "routing_io_failed", "routing_auth_failed", 403, 5},
+		{"evidence", "reserve_evidence_required", "reserve_evidence_required", 409, 6},
+		{"unconfigured", "reserve_not_configured", "reserve_not_configured", 409, 6},
+		{"window", "reserve_window_unavailable", "reserve_window_unavailable", 409, 6},
+		{"persistence", "routing_io_failed", "routing_io_failed", 409, 1},
+		{"invalid", "routing_invalid_argument", "routing_invalid_argument", 409, 2},
+		{"missing receipt", "", "routing_conflict", 409, 6},
+		{"unknown receipt", "private error material", "routing_conflict", 409, 6},
+	} {
+		for _, oversized := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/oversized=%t", tc.name, oversized), func(t *testing.T) {
+				body := newReserveErrorBody(oversized)
+				inv, parseErr := cli.Parse([]string{"codex", "proxy", "reserve", "disable"})
+				if parseErr != nil {
+					t.Fatal(parseErr)
+				}
+				out := handleV2ReserveWithDependencies(context.Background(), inv, nil, proxyPolicyDependencies{LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{LocalToken: "synthetic"}, nil }, Doer: testDoer(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: tc.status, Header: http.Header{"X-Cq-Reserve-Error": []string{tc.receipt}}, Body: body}, nil
+				})})
+				if out.ExitCode != tc.exit || len(out.Errors) != 1 || out.Errors[0].Code != tc.code {
+					t.Errorf("outcome=%+v", out)
+				}
+				if body.reads != 0 || body.closes != 1 {
+					t.Errorf("error body reads=%d closes=%d", body.reads, body.closes)
+				}
+			})
+		}
+	}
+}

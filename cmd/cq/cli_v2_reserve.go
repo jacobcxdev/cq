@@ -80,7 +80,7 @@ func handleV2ReserveWithPreparation(parent context.Context, inv cli.Invocation, 
 		if len(data.Windows) > 0 {
 			var b strings.Builder
 			for _, window := range data.Windows {
-				fmt.Fprintln(&b, window.Selector)
+				fmt.Fprintln(&b, cli.HumanValue(window.Selector))
 			}
 			human = b.String()
 		}
@@ -181,7 +181,7 @@ func v2ReserveText(value *string, unknown string) string {
 	if value == nil {
 		return unknown
 	}
-	return *value
+	return cli.HumanValue(*value)
 }
 func v2ReserveNumber(value *float64) string {
 	if value == nil {

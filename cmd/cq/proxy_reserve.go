@@ -220,12 +220,12 @@ func requestProxyReserve(ctx context.Context, options proxyReserveOptions, deps 
 		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "unavailable", err: errors.New("proxy reserve response unavailable")}
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{status: response.StatusCode, code: response.Header.Get("X-CQ-Reserve-Error"), err: fmt.Errorf("proxy reserve control failed: HTTP %d", response.StatusCode)}
+	}
 	data, err := httputil.ReadBody(response.Body)
 	if err != nil {
 		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "io", err: err}
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return proxy.CodexReserveStatus{}, &proxyReserveError{status: response.StatusCode, code: response.Header.Get("X-CQ-Reserve-Error"), err: fmt.Errorf("proxy reserve control failed: HTTP %d", response.StatusCode)}
 	}
 	var status proxy.CodexReserveStatus
 	if err := json.Unmarshal(data, &status); err != nil {
