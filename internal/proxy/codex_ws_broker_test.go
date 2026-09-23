@@ -1298,7 +1298,7 @@ func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	}}
 	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream}}}
 	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
-		Plans:                planner,
+		Plans:                &codexWSBrokerCyberOffPlanner{codexWSBrokerPlannerStub: planner},
 		Upstream:             dialer,
 		UpstreamURL:          "wss://example.invalid/responses",
 		Headers:              http.Header{"X-Codex-Turn-Metadata": {`{"session_id":"session-a","thread_id":"thread-a","turn_id":"","request_kind":"prewarm"}`}},
@@ -1353,6 +1353,12 @@ func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
 		t.Fatalf("reconnected receipt = (%+v, %v)", gotReceipt, found)
 	}
+}
+
+type codexWSBrokerCyberOffPlanner struct{ *codexWSBrokerPlannerStub }
+
+func (*codexWSBrokerCyberOffPlanner) ShouldResetCyberOff(context.Context, CodexProtocolRequest, codex.AccountKey) bool {
+	return true
 }
 
 func TestCodexTerminatingWSBrokerResumesAfterCompletedClientDisconnect(t *testing.T) {
