@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -41,17 +42,28 @@ type installedHTTPValidationCandidateOperations struct {
 }
 
 func validateInstalledHTTPValidationCandidate(port int) (installedHTTPValidationCandidateAuthority, error) {
+	return validateCanonicalHTTPValidationCandidate(context.Background(), port)
+}
+func validateCanonicalHTTPValidationCandidate(ctx context.Context, port int) (installedHTTPValidationCandidateAuthority, error) {
+	if err := ctx.Err(); err != nil {
+		return installedHTTPValidationCandidateAuthority{}, err
+	}
+	if port < 1 || port > 65535 || port == proxy.DefaultPort {
+		return installedHTTPValidationCandidateAuthority{}, errValidationCandidateUnavailable
+	}
 	return validateInstalledHTTPValidationCandidateWithOperations(port, installedHTTPValidationCandidateOperations{
-		resolveService: resolveInstalledHTTPValidationService,
+		resolveService: func(label string) (installedHTTPValidationServiceBinding, error) {
+			return resolveCanonicalHTTPValidationService(ctx, label)
+		},
 		launchctlPrint: func(label string) ([]byte, error) {
 			target, err := installedHTTPValidationLaunchctlTarget(label, os.Geteuid)
 			if err != nil {
 				return nil, err
 			}
-			return exec.Command("launchctl", "print", target).Output()
+			return exec.CommandContext(ctx, "launchctl", "print", target).Output()
 		},
 		lsof: func(port int) ([]byte, error) {
-			return exec.Command("/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", port), "-sTCP:LISTEN", "-Fp").Output()
+			return exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", port), "-sTCP:LISTEN", "-Fp").Output()
 		},
 		effectiveUID: os.Geteuid,
 	})
@@ -152,6 +164,9 @@ func restartInstalledHTTPValidationCandidate(label string) error {
 func cleanupInstalledHTTPValidationCandidate() error { return nil }
 
 func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPValidationServiceBinding, error) {
+	return resolveCanonicalHTTPValidationService(context.Background(), expectedLabel)
+}
+func resolveCanonicalHTTPValidationService(ctx context.Context, expectedLabel string) (installedHTTPValidationServiceBinding, error) {
 	return resolveInstalledHTTPValidationServiceWithOperations(expectedLabel, installedHTTPValidationServiceOperations{
 		executable: os.Executable,
 		plistPath: func(label string) (string, error) {
@@ -179,7 +194,7 @@ func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPV
 			if err != nil {
 				return err
 			}
-			return exec.Command("launchctl", "print", target).Run()
+			return exec.CommandContext(ctx, "launchctl", "print", target).Run()
 		},
 		evalSymlinks: filepath.EvalSymlinks,
 	})
@@ -525,4 +540,15 @@ func nextInstalledHTTPValidationXMLToken(decoder *xml.Decoder) (xml.Token, error
 		}
 		return token, nil
 	}
+}
+
+func restartCanonicalHTTPValidationCandidate(ctx context.Context, label string) error {
+	if label != candidateProxyAgentLabel {
+		return errValidationCandidateUnavailable
+	}
+	target, err := installedHTTPValidationLaunchctlTarget(label, os.Geteuid)
+	if err != nil {
+		return err
+	}
+	return exec.CommandContext(ctx, "launchctl", "kickstart", "-k", target).Run()
 }

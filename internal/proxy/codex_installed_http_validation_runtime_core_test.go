@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -346,5 +348,76 @@ func assertCodexInstalledValidationPrivateTree(t *testing.T, root string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCodexInstalledWebSocketValidationExpiredCleanupClosesOwnedCore(t *testing.T) {
+	core, err := newCodexInstalledHTTPValidationRuntimeCore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := core.tempRoot
+	address := core.upstream.address
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := core.closeWithContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup err=%v", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned core leaked: %v", err)
+	}
+	conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		t.Fatal("owned upstream remained open")
+	}
+}
+
+// Fail after the constructor's first context check, once temporary preparation
+// has begun, without relying on a wall-clock race or live external state.
+type validationPreparationCancelledContext struct {
+	context.Context
+	checks atomic.Int64
+}
+
+func (ctx *validationPreparationCancelledContext) Err() error {
+	if ctx.checks.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+func TestCodexInstalledWebSocketValidationConstructorFailureCleansOwnedRoot(t *testing.T) {
+	root, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := filepath.Glob(filepath.Join(root, codexInstalledHTTPValidationTempPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := map[string]bool{}
+	for _, path := range before {
+		retained[path] = true
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx := &validationPreparationCancelledContext{Context: parent}
+	cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	core, err := newCodexInstalledHTTPValidationRuntimeCoreWithCleanup(ctx, cleanup)
+	if err == nil || core != nil {
+		if core != nil {
+			core.close()
+		}
+		t.Fatal("cancelled preparation succeeded")
+	}
+	after, err := filepath.Glob(filepath.Join(root, codexInstalledHTTPValidationTempPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range after {
+		if !retained[path] {
+			t.Errorf("failed preparation leaked owned root %s", path)
+		}
 	}
 }

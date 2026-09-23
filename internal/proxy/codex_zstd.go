@@ -96,7 +96,13 @@ func DecodeCodexRequest(body []byte, contentEncoding string, limits CodexZstdLim
 			return CodexDecodedRequest{}, errors.New("Codex zstd expansion ratio exceeds limit")
 		}
 	}
-	decodeTarget := make([]byte, 0, codexZstdDecodeCapacity(len(body), limits))
+	capacity := codexZstdDecodeCapacity(len(body), limits)
+	// DecodeAllCapLimit requires enough capacity for the documented bound;
+	// the small unlimited-path allocation is not a decoded-size limit.
+	if decodeLimit > 0 {
+		capacity = decodeLimit
+	}
+	decodeTarget := make([]byte, 0, capacity)
 	decodeOptions := []zstd.DOption{
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(true),

@@ -51,7 +51,7 @@ The second invocation fails because the output exists. Choose another filename. 
 - `retry_budget`: literal `1` for both transports in this specification revision.
 - `fixture_hash`: SHA256 of the compiled acceptance fixture set.
 - `cq_executable_sha256`, `client_executable_sha256`, `service_identity_sha256`: SHA256 for HTTP; null for isolated WebSocket evidence when no such installed-service binding exists.
-- `service_kind`: `launchd|homebrew` for HTTP; null for isolated WebSocket evidence.
+- `service_kind`: `launchd|homebrew|systemd-user` for HTTP; null for isolated WebSocket evidence.
 - `installed_result`: literal `passed` for valid evidence.
 - `completed_gates`: array of unique nonempty gate IDs, sorted lexically. Each ID names an engine acceptance gate, not a CLI option. The exact set must equal the frozen transport-specific gate set listed below; callers must not invent gates or treat a subset as equivalent.
 - `validated_at`: validation completion timestamp.
@@ -133,3 +133,15 @@ Frozen source references:
 - [runtime_control.go](../validation-annex-v1/runtime_control.go.txt), [runtime_supervisor.go](../validation-annex-v1/runtime_supervisor.go.txt): rescue mode wire values and transition/drain semantics.
 
 Source snapshots use the `.go.txt` suffix to keep documentation outside Go package discovery. Prose source paths such as `internal/proxy/example.go` name the corresponding `.go.txt` snapshot listed in the annex manifest.
+
+## Installed HTTP request platform support
+
+| Platform | Canonical `codex proxy validate http` capability |
+| --- | --- |
+| macOS | Requests an already loaded, attested candidate launchd service; never starts an absent candidate or restarts the production listener. |
+| Linux | Returns `validation_candidate_unavailable` (exit 4) before request persistence. The existing private owned-candidate exercise creates its own controller and waits synchronously; it is retained but does not provide this asynchronous installed-service contract. |
+| Windows and other platforms | Returns `validation_candidate_unavailable` (exit 4); no installed candidate attestation backend is available. |
+
+This limitation applies only to the canonical HTTP validation request. Fixture conversion, retained readiness inspection and isolated WebSocket validation keep their existing platform capabilities. Installed platform acceptance remains separately authorised work.
+
+The public readiness resource also accepts `service_kind: "systemd-user"` for retained Linux HTTP evidence. This explicitly preserves the existing engine's Linux marker validation; it does not change stored marker bytes, the frozen transport requirements, or imply support for the canonical asynchronous Linux request above.

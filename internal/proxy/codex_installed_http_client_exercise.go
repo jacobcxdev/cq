@@ -17,7 +17,8 @@ import (
 const codexInstalledHTTPClientTempPrefix = "cq-codex-installed-client-"
 
 type codexInstalledHTTPClientExercise struct {
-	mu sync.Mutex
+	cleanupContext context.Context
+	mu             sync.Mutex
 
 	address    string
 	executable codexInstalledExecutableProof
@@ -136,7 +137,7 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 	egressClosed := false
 	defer func() {
 		if !egressClosed {
-			shutdownCodexAcceptanceServer(egressServer)
+			returnErr = errors.Join(returnErr, exercise.closeServer(egressServer))
 		}
 	}()
 
@@ -158,6 +159,7 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 	args := codexAcceptanceExecArgumentsForTransport(baseURL, work, outputPath, exercise.webSocket)
 	args = append(args[:len(args)-1], append([]string{"-c", "chatgpt_base_url=" + strconv.Quote(egressURL)}, args[len(args)-1:]...)...)
 	command := codexAcceptanceCommand{
+		cleanupContext:     exercise.cleanupContext,
 		executable:         exercise.executable.path,
 		expectedExecutable: exercise.executable,
 		args:               args,
@@ -188,8 +190,11 @@ func (exercise *codexInstalledHTTPClientExercise) Run(ctx context.Context) (retu
 		return errCodexInstalledListenerAcceptance
 	}
 	exercise.outcome.exactPong.Store(true)
-	shutdownCodexAcceptanceServer(egressServer)
+	returnErr = errors.Join(returnErr, exercise.closeServer(egressServer))
 	egressClosed = true
+	if returnErr != nil {
+		return returnErr
+	}
 	if err := codexAcceptanceServeError(egressErrors); err != nil {
 		return errCodexInstalledListenerAcceptance
 	}
@@ -231,4 +236,12 @@ func (exercise *codexInstalledHTTPCompositeExercise) Run(ctx context.Context) er
 		return err
 	}
 	return exercise.second.Run(ctx)
+}
+
+func (exercise *codexInstalledHTTPClientExercise) closeServer(server *http.Server) error {
+	if exercise.cleanupContext != nil {
+		return shutdownCodexAcceptanceServerContext(exercise.cleanupContext, server)
+	}
+	shutdownCodexAcceptanceServer(server)
+	return nil
 }

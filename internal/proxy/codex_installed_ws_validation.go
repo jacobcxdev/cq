@@ -7,15 +7,22 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/userdirs"
+)
+
+var (
+	ErrCodexValidationClientUnavailable = errors.New("Codex validation client unavailable")
+	ErrCodexValidationBuildMismatch     = errors.New("Codex validation client build mismatch")
 )
 
 type codexInstalledWebSocketValidationDependencies struct {
+	cleanupContext    context.Context
 	resolveExecutable func() (string, error)
 	captureExecutable func(string) (codexInstalledExecutableProof, error)
 	runVersion        func(context.Context, string, codexInstalledExecutableProof) ([]byte, error)
@@ -27,6 +34,12 @@ type codexInstalledWebSocketValidationDependencies struct {
 // listener with exact installed Codex CLI. It never inspects, stops, replaces,
 // or restarts configured proxy service.
 func RunCodexInstalledWebSocketValidation(ctx context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
+	return RunCodexInstalledWebSocketValidationWithCleanup(ctx, ctx, cqBuild, clientBuild, clientExecutable, markerDir)
+}
+
+// RunCodexInstalledWebSocketValidationWithCleanup uses the caller's reserved
+// cleanup context; neither preparation nor cleanup starts a new allowance.
+func RunCodexInstalledWebSocketValidationWithCleanup(ctx, cleanup context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
 	if strings.TrimSpace(markerDir) == "" {
 		paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 		if err != nil {
@@ -39,11 +52,14 @@ func RunCodexInstalledWebSocketValidation(ctx context.Context, cqBuild, clientBu
 		resolveExecutable = func() (string, error) { return clientExecutable, nil }
 	}
 	return runCodexInstalledWebSocketValidationWithDependencies(ctx, cqBuild, clientBuild, markerDir, codexInstalledWebSocketValidationDependencies{
+		cleanupContext:    cleanup,
 		resolveExecutable: resolveExecutable,
 		captureExecutable: captureCodexInstalledExecutable,
-		runVersion:        runCodexInstalledVersionCommand,
-		runner:            osCodexAcceptanceRunner{},
-		now:               time.Now,
+		runVersion: func(ctx context.Context, path string, proof codexInstalledExecutableProof) ([]byte, error) {
+			return runCodexInstalledVersionCommandWithCleanup(ctx, cleanup, path, proof, osCodexAcceptanceRunner{})
+		},
+		runner: osCodexAcceptanceRunner{},
+		now:    time.Now,
 	})
 }
 
@@ -57,6 +73,9 @@ func runCodexInstalledWebSocketValidationWithDependencies(
 	if strings.TrimSpace(markerDir) == "" {
 		return marker, errCodexInstalledListenerAcceptance
 	}
+	if dependencies.cleanupContext == nil {
+		dependencies.cleanupContext = ctx
+	}
 	markerDir = filepath.Clean(markerDir)
 	if !filepath.IsAbs(markerDir) {
 		return marker, errCodexInstalledListenerAcceptance
@@ -65,7 +84,14 @@ func runCodexInstalledWebSocketValidationWithDependencies(
 		if recover() != nil {
 			returnErr = errCodexInstalledListenerAcceptance
 		}
+		if ctx != nil && ctx.Err() != nil {
+			returnErr = errors.Join(returnErr, ctx.Err())
+		}
+		if dependencies.cleanupContext != nil && dependencies.cleanupContext.Err() != nil {
+			returnErr = errors.Join(returnErr, dependencies.cleanupContext.Err())
+		}
 		if returnErr != nil {
+			marker = CodexReadinessMarker{}
 			returnErr = errors.Join(returnErr, invalidateCodexWebSocketReadinessMarkerDurably(markerDir))
 		}
 	}()
@@ -82,15 +108,46 @@ func runCodexInstalledWebSocketValidationWithDependencies(
 	}
 	executable, err := dependencies.resolveExecutable()
 	if err != nil {
-		return marker, codexInstalledWebSocketValidationStageError("client executable")
+		return marker, ErrCodexValidationClientUnavailable
 	}
-	probe, err := newCodexInstalledClientExecutableBuildProbe(ctx, executable, clientBuild, dependencies.captureExecutable, dependencies.runVersion)
+	runVersion := func(ctx context.Context, path string, proof codexInstalledExecutableProof) ([]byte, error) {
+		output, err := dependencies.runVersion(ctx, path, proof)
+		if err != nil {
+			return nil, ErrCodexValidationClientUnavailable
+		}
+		observed, ok := parseCodexInstalledVersionOutput(output)
+		if !ok {
+			return nil, ErrCodexValidationClientUnavailable
+		}
+		if observed != clientBuild {
+			return nil, ErrCodexValidationBuildMismatch
+		}
+		return output, nil
+	}
+	var versionErr error
+	probe, err := newCodexInstalledClientExecutableBuildProbe(ctx, executable, clientBuild, dependencies.captureExecutable, func(ctx context.Context, path string, proof codexInstalledExecutableProof) ([]byte, error) {
+		output, err := runVersion(ctx, path, proof)
+		versionErr = err
+		return output, err
+	})
 	if err != nil {
-		return marker, codexInstalledWebSocketValidationStageError("client build")
+		if versionErr != nil {
+			return marker, versionErr
+		}
+		return marker, ErrCodexValidationClientUnavailable
 	}
-	evidence, err := runCodexInstalledWebSocketAcceptance(ctx, cqBuild, clientBuild, probe.baseline, dependencies.runner)
+	evidence, err := runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, dependencies.cleanupContext, cqBuild, clientBuild, probe.baseline, dependencies.runner)
 	if err != nil {
 		return marker, codexInstalledWebSocketValidationStageError("isolated client")
+	}
+	if _, err := probe.Probe(ctx); err != nil {
+		return marker, errors.Join(ErrCodexValidationClientUnavailable, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return marker, err
+	}
+	if err := dependencies.cleanupContext.Err(); err != nil {
+		return marker, err
 	}
 	_, required := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
 	marker, err = buildCodexWebSocketReadinessMarker(evidence, required, dependencies.now().UTC())
@@ -122,24 +179,67 @@ func runCodexInstalledWebSocketAcceptance(
 	executable codexInstalledExecutableProof,
 	runner codexAcceptanceRunner,
 ) (evidence CodexWebSocketReadinessEvidence, returnErr error) {
+	return runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, ctx, cqBuild, clientBuild, executable, runner)
+}
+func runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, cleanup context.Context, cqBuild, clientBuild string, executable codexInstalledExecutableProof, runner codexAcceptanceRunner) (evidence CodexWebSocketReadinessEvidence, returnErr error) {
 	if ctx == nil || ctx.Err() != nil || !executable.valid() || runner == nil {
 		return evidence, errCodexInstalledListenerAcceptance
 	}
-	core, err := newCodexInstalledHTTPValidationRuntimeCore(ctx)
+	core, err := newCodexInstalledHTTPValidationRuntimeCoreWithCleanup(ctx, cleanup)
 	if err != nil {
 		return evidence, err
 	}
-	defer func() { returnErr = errors.Join(returnErr, core.close()) }()
+	trafficCtx, cancelTraffic := context.WithCancel(ctx)
+	var requests sync.WaitGroup
+	var activeRequests atomic.Int64
+	var servers []*http.Server
+	var closeOnce sync.Once
+	var closeErr error
+	closeTraffic := func() error {
+		closeOnce.Do(func() {
+			cancelTraffic()
+			for _, server := range servers {
+				closeErr = errors.Join(closeErr, shutdownCodexAcceptanceServerContext(cleanup, server))
+			}
+			if activeRequests.Load() == 0 {
+				closeErr = errors.Join(closeErr, core.closeWithContext(cleanup))
+				return
+			}
+			drained := make(chan struct{})
+			go func() { defer close(drained); requests.Wait() }()
+			select {
+			case <-drained:
+				closeErr = errors.Join(closeErr, core.closeWithContext(cleanup))
+			case <-cleanup.Done():
+				closeErr = errors.Join(closeErr, cleanup.Err())
+			}
+		})
+		return closeErr
+	}
+	defer func() { returnErr = errors.Join(returnErr, closeTraffic()) }()
+	track := func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			activeRequests.Add(1)
+			defer requests.Done()
+			defer activeRequests.Add(-1)
+			requestCtx, cancel := context.WithCancel(r.Context())
+			stop := context.AfterFunc(trafficCtx, cancel)
+			defer stop()
+			defer cancel()
+			handler.ServeHTTP(w, r.WithContext(requestCtx))
+		})
+	}
 	localToken, err := newCodexInstalledHTTPValidationToken()
 	if err != nil {
 		return evidence, err
 	}
 	traffic := &codexInstalledWebSocketTraffic{}
-	upstreamListener, upstreamServer, upstreamErrors, err := startCodexAcceptanceHTTP(http.HandlerFunc(traffic.serveUpstream))
+	upstreamListener, upstreamServer, upstreamErrors, err := startCodexAcceptanceHTTP(track(http.HandlerFunc(traffic.serveUpstream)))
 	if err != nil {
 		return evidence, errCodexInstalledListenerAcceptance
 	}
-	defer shutdownCodexAcceptanceServer(upstreamServer)
+	servers = append(servers, upstreamServer)
 	upstreamURL := "http://" + upstreamListener.Addr().String()
 	planner := &CodexHTTPRequestPlanFactory{
 		Inventory:         core.inventory,
@@ -186,21 +286,23 @@ func runCodexInstalledWebSocketAcceptance(
 		}
 		handler.ServeHTTP(writer, request)
 	})
-	candidateListener, candidateServer, candidateErrors, err := startCodexAcceptanceHTTP(candidateHandler)
+	candidateListener, candidateServer, candidateErrors, err := startCodexAcceptanceHTTP(track(candidateHandler))
 	if err != nil {
 		return evidence, errCodexInstalledListenerAcceptance
 	}
-	defer shutdownCodexAcceptanceServer(candidateServer)
+	servers = append(servers, candidateServer)
 	outcome := &codexInstalledHTTPClientOutcome{}
 	exercise, err := newCodexInstalledWebSocketClientExercise(candidateListener.Addr().String(), executable, localToken, runner, outcome)
 	if err != nil {
 		return evidence, errCodexInstalledListenerAcceptance
 	}
+	exercise.cleanupContext = cleanup
 	if err := exercise.Run(ctx); err != nil {
 		return evidence, err
 	}
-	shutdownCodexAcceptanceServer(candidateServer)
-	shutdownCodexAcceptanceServer(upstreamServer)
+	if err := closeTraffic(); err != nil {
+		return evidence, err
+	}
 	for _, serverErrors := range []<-chan error{candidateErrors, upstreamErrors} {
 		if err := codexAcceptanceServeError(serverErrors); err != nil {
 			return evidence, errCodexInstalledListenerAcceptance
@@ -257,6 +359,8 @@ func (traffic *codexInstalledWebSocketTraffic) serveUpstream(writer http.Respons
 		return
 	}
 	defer connection.Close()
+	stopClose := context.AfterFunc(request.Context(), func() { defer func() { _ = recover() }(); _ = connection.Close() })
+	defer stopClose()
 	for {
 		messageType, frame, err := connection.ReadMessage()
 		if err != nil {

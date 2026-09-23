@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -302,5 +303,16 @@ func writeInstalledHTTPValidationPlist(t *testing.T, path, label, executable, lo
 </dict></plist>`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write plist: %v", err)
+	}
+}
+
+func TestProxyHTTPValidationDarwinCancelledBeforeInspection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := validateCanonicalHTTPValidationCandidate(ctx, 19281); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := validateCanonicalHTTPValidationCandidate(context.Background(), 19280); !errors.Is(err, errValidationCandidateUnavailable) {
+		t.Fatalf("err=%v", err)
 	}
 }
