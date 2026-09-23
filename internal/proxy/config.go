@@ -299,6 +299,11 @@ func LoadExistingConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadExistingConfigAt(paths)
+}
+
+// LoadExistingConfigAt reads the captured configuration path without creating it.
+func LoadExistingConfigAt(paths DefaultPaths) (*Config, error) {
 	return loadConfigFile(paths.ConfigFile)
 }
 
@@ -430,6 +435,14 @@ func SaveConfig(cfg *Config) error {
 	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return err
+	}
+	return SaveConfigAt(paths, cfg)
+}
+
+// SaveConfigAt persists through captured paths, including rescue bootstrap state.
+func SaveConfigAt(paths DefaultPaths, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("proxy config is nil")
 	}
 	saved := *cfg
 	saved.setDefaults()

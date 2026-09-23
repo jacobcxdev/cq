@@ -462,3 +462,34 @@ func TestProxyConfigReloadAppliesPinButNotRoutingModes(t *testing.T) {
 		t.Fatalf("reload changed future config: %s", data)
 	}
 }
+
+func TestProxyConfigReloadFailureRetainsAppliedPin(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	configDir := filepath.Join(dir, "cq")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "proxy.json"), []byte(`{"pinned_claude_account":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selector := proxy.NewPinnedClaudeSelector(nil, nil, "known@example.com", nil)
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writeEnd
+	reloadProxyConfig(selector, nil)
+	os.Stderr = originalStderr
+	writeEnd.Close()
+	defer readEnd.Close()
+	message := make([]byte, 4096)
+	n, err := readEnd.Read(message)
+	if err != nil || !strings.Contains(string(message[:n]), "proxy config reload:") {
+		t.Fatalf("reload diagnostic missing: %v %q", err, message[:n])
+	}
+	if got := selector.Pin(); got != "known@example.com" {
+		t.Fatalf("pin after failed reload = %q", got)
+	}
+}

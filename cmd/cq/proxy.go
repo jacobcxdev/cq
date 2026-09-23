@@ -345,6 +345,23 @@ func runProxyPin(args []string) error {
 	})
 }
 
+// proxySelectionIntent separates routing configuration from account activation.
+type proxySelectionIntent struct {
+	provider, kind, action, reference string
+	legacyUUID                        bool
+}
+
+func applyProxySelection(cfg *proxy.Config, intent proxySelectionIntent, account string) {
+	switch {
+	case intent.provider == "claude":
+		cfg.PinnedClaudeAccount = account
+	case intent.kind == "fallback":
+		cfg.CodexRoutingDefaultAccountKey = codexprov.AccountKey(account)
+	default:
+		cfg.CodexRoutingPinnedAccountKey = codexprov.AccountKey(account)
+	}
+}
+
 func runProxyPinWithDependencies(ctx context.Context, args []string, deps proxyCodexDefaultDependencies) error {
 	if helpRequested(args) {
 		return writeManualHelp(os.Stdout, []string{"proxy", "pin"})
@@ -395,7 +412,7 @@ func runProxyClaudePin(args []string, deps proxyCodexDefaultDependencies) error 
 
 	// cq proxy pin claude --clear
 	if len(args) == 1 && args[0] == "--clear" {
-		cfg.PinnedClaudeAccount = ""
+		applyProxySelection(cfg, proxySelectionIntent{provider: "claude", kind: "pin", action: "clear"}, "")
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -421,7 +438,7 @@ func runProxyClaudePin(args []string, deps proxyCodexDefaultDependencies) error 
 			return fmt.Errorf("unknown flag %q", arg)
 		}
 
-		cfg.PinnedClaudeAccount = arg
+		applyProxySelection(cfg, proxySelectionIntent{provider: "claude", kind: "pin", action: "set", reference: arg}, arg)
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -451,7 +468,7 @@ func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefault
 			}
 			return nil
 		}
-		cfg.CodexRoutingPinnedAccountKey = ""
+		applyProxySelection(cfg, proxySelectionIntent{provider: "codex", kind: "pin", action: "clear"}, "")
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -476,7 +493,7 @@ func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefault
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	cfg.CodexRoutingPinnedAccountKey = accountKey
+	applyProxySelection(cfg, proxySelectionIntent{provider: "codex", kind: "pin", action: "set", reference: args[0]}, string(accountKey))
 	if err := deps.SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
