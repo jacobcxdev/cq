@@ -103,6 +103,23 @@ func handleV2EndpointWithPreparation(parent context.Context, inv cli.Invocation,
 			return finish(codexprov.ErrCredentialEndpointMaintenanceDrainRequired)
 		}
 		if !opts.nonInteractive {
+			if session.ErrTerminal.Width > 0 {
+				proofFile := opts.ticketFile
+				if action == "prepare" {
+					proofFile = opts.snapshotFile
+				}
+				path, ticketID := "", ""
+				if action == "finalise" {
+					if proof, readErr := readV2EndpointProof(parent, fsutil.OSFileSystem{}, proofFile); readErr == nil {
+						if ticket, parseErr := codexprov.ParseLegacyCredentialEndpointTransitionTicket(proof); parseErr == nil {
+							path, ticketID = ticket.Path, ticket.ID
+						}
+					}
+				}
+				if _, writeErr := io.WriteString(session.Err, terminalEndpointPrompt(action, proofFile, path, ticketID, session.ErrTerminal)); writeErr != nil {
+					return finish(writeErr)
+				}
+			}
 			budget.Pause()
 			err := confirmV2EndpointPhrase(parent, session, phrase, prompt)
 			budget.Resume()
@@ -148,7 +165,7 @@ func handleV2EndpointWithPreparation(parent context.Context, inv cli.Invocation,
 	if err != nil {
 		return finish(err)
 	}
-	return cli.Outcome{Data: data, Human: fmt.Sprintf("Credential endpoint: %s\nMigration state: %s\nTicket: %s\n", cli.HumanValue(result.Path), cli.HumanValue(result.State), cli.HumanValue(result.TicketID))}
+	return cli.Outcome{Data: data, Human: fmt.Sprintf("Credential endpoint: %s\nMigration state: %s\nTicket: %s\n", cli.HumanValue(result.Path), cli.HumanValue(result.State), cli.HumanValue(result.TicketID)), Terminal: func(o cli.TerminalOptions) string { return terminalEndpoint(result, o) }}
 }
 
 type v2EndpointResult struct {
