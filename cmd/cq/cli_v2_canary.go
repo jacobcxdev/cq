@@ -123,7 +123,9 @@ func handleV2CanaryWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 	data, _ := json.Marshal(struct {
 		State v2CanaryState `json:"state"`
 	}{state})
-	return cli.Outcome{Data: data, Human: fmt.Sprintf("Canary: %s\nActive: %t\nFinalised: %t\nAdmitted turns: %d\n", cli.HumanValue(state.RunID), state.Active, state.Finalised, state.AdmittedTurns)}
+	return cli.Outcome{Data: data, Human: fmt.Sprintf("Canary: %s\nActive: %t\nFinalised: %t\nAdmitted turns: %d\n", cli.HumanValue(state.RunID), state.Active, state.Finalised, state.AdmittedTurns), Terminal: func(o cli.TerminalOptions) string {
+		return terminalCanary(state, inv.Path[len("codex proxy canary "):], o)
+	}}
 }
 func v2CanaryFailure(err error) cli.Outcome {
 	if out, ok := v2EnvironmentFailure(err); ok {
@@ -154,7 +156,14 @@ type v2CanaryState struct {
 	ProtectedStateFailures  uint64                             `json:"protected_state_failures"`
 	ConsecutiveCalendarDays int                                `json:"consecutive_calendar_days"`
 	ProtectedDigests        []proxy.CodexCanaryProtectedDigest `json:"protected_digests"`
-	Finalisation            any                                `json:"finalisation"`
+	Finalisation            *v2CanaryFinalisation              `json:"finalisation"`
+}
+
+type v2CanaryFinalisation struct {
+	StopRequestDigest    string `json:"stop_request_digest"`
+	ProcessBindingDigest string `json:"process_binding_digest"`
+	CountersDigest       string `json:"counters_digest"`
+	ActiveSessions       uint64 `json:"active_sessions"`
 }
 
 func projectV2Canary(state proxy.CodexCanaryState) v2CanaryState {
@@ -167,5 +176,9 @@ func projectV2Canary(state proxy.CodexCanaryState) v2CanaryState {
 	}
 	digests := append([]proxy.CodexCanaryProtectedDigest{}, state.ProtectedDigests...)
 	sort.Slice(digests, func(i, j int) bool { return digests[i].Kind < digests[j].Kind })
-	return v2CanaryState{RunID: state.RunID, Active: state.Active, Finalised: state.Finalisation != nil, StartedAt: state.StartedAt.UTC().Format(time.RFC3339Nano), EndedAt: timestamp(state.EndedAt), LastObservedAt: timestamp(state.LastObservedAt), Tuple: state.Tuple, AdmittedTurns: state.AdmittedTurns, KeyedMismatches: state.KeyedMismatches, AutomaticHashChanges: state.AutomaticHashChanges, SecretLeaks: state.SecretLeaks, UnexplainedLifecycles: state.UnexplainedLifecycles, LiveSessionRepairs: state.LiveSessionRepairs, ProtectedStateFailures: state.ProtectedStateFailures, ConsecutiveCalendarDays: state.ConsecutiveCalendarDays, ProtectedDigests: digests, Finalisation: state.Finalisation}
+	var finalisation *v2CanaryFinalisation
+	if state.Finalisation != nil {
+		finalisation = &v2CanaryFinalisation{StopRequestDigest: state.Finalisation.StopRequestDigest, ProcessBindingDigest: state.Finalisation.ProcessBindingDigest, CountersDigest: state.Finalisation.CountersDigest, ActiveSessions: state.Finalisation.ActiveSessions}
+	}
+	return v2CanaryState{RunID: state.RunID, Active: state.Active, Finalised: state.Finalisation != nil, StartedAt: state.StartedAt.UTC().Format(time.RFC3339Nano), EndedAt: timestamp(state.EndedAt), LastObservedAt: timestamp(state.LastObservedAt), Tuple: state.Tuple, AdmittedTurns: state.AdmittedTurns, KeyedMismatches: state.KeyedMismatches, AutomaticHashChanges: state.AutomaticHashChanges, SecretLeaks: state.SecretLeaks, UnexplainedLifecycles: state.UnexplainedLifecycles, LiveSessionRepairs: state.LiveSessionRepairs, ProtectedStateFailures: state.ProtectedStateFailures, ConsecutiveCalendarDays: state.ConsecutiveCalendarDays, ProtectedDigests: digests, Finalisation: finalisation}
 }

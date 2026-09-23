@@ -121,6 +121,7 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 				Outcome  string `json:"outcome"`
 			}{"requested", port, false, "accepted"})
 			out.Human = fmt.Sprintf("HTTP validation requested on candidate port %d.\nValidation has not completed.\n", port)
+			out.Terminal = func(o cli.TerminalOptions) string { return terminalHTTPValidation(port, o) }
 		}
 		return finish(out, err)
 	}
@@ -164,7 +165,9 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 			ValidatedAt string            `json:"validated_at"`
 			Marker      v2ReadinessMarker `json:"marker"`
 		}{"http", build, true, marker.ValidatedAt.UTC().Format(time.RFC3339Nano), projectV2ReadinessMarker(marker)})
-		return cli.Outcome{Data: data, Human: fmt.Sprintf("HTTP readiness: current\nCodex build: %s\nValidated: %s\n", cli.HumanValue(build), marker.ValidatedAt.UTC().Format(time.RFC3339Nano))}
+		return cli.Outcome{Data: data, Human: fmt.Sprintf("HTTP readiness: current\nCodex build: %s\nValidated: %s\n", cli.HumanValue(build), marker.ValidatedAt.UTC().Format(time.RFC3339Nano)), Terminal: func(o cli.TerminalOptions) string {
+			return terminalReadiness(projectV2ReadinessMarker(marker).CodexReadinessMarker, build, o)
+		}}
 	}
 	executable := option("client-executable")
 	if executable != "" {
@@ -189,11 +192,18 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 			Marker      v2ReadinessMarker `json:"marker"`
 		}{"websocket", marker.ClientBuild, marker.ValidatedAt.UTC().Format(time.RFC3339Nano), projectV2ReadinessMarker(marker)})
 		out.Human = fmt.Sprintf("WebSocket validation: passed\nCodex build: %s\nValidated: %s\n", cli.HumanValue(marker.ClientBuild), marker.ValidatedAt.UTC().Format(time.RFC3339Nano))
+		out.Terminal = func(o cli.TerminalOptions) string {
+			return terminalWebSocketValidation(projectV2ReadinessMarker(marker).CodexReadinessMarker, o)
+		}
 	}
 	return finish(out, err)
 }
 
 func createV2Fixture(inv cli.Invocation) cli.Outcome {
+	return createV2FixtureWithClock(inv, time.Now)
+}
+
+func createV2FixtureWithClock(inv cli.Invocation, now func() time.Time) cli.Outcome {
 	input, output := inv.Options["input"][0], inv.Options["output"][0]
 	invalid := func() cli.Outcome {
 		return v2SelectionFailure(2, "fixture_input_invalid", "The request cannot be converted to a sanitised fixture.")
@@ -244,7 +254,7 @@ func createV2Fixture(inv cli.Invocation) cli.Outcome {
 			return invalid()
 		}
 	}
-	fixture, err := proxy.BuildSanitisedCodexFixture(body, encoding, metadata, time.Now())
+	fixture, err := proxy.BuildSanitisedCodexFixture(body, encoding, metadata, now())
 	if err != nil {
 		return invalid()
 	}
@@ -262,7 +272,7 @@ func createV2Fixture(inv cli.Invocation) cli.Outcome {
 		OutputPath string                      `json:"output_path"`
 		Fixture    proxy.SanitisedCodexFixture `json:"fixture"`
 	}{output, fixture})
-	return cli.Outcome{Data: data, Human: fmt.Sprintf("Created sanitised fixture: %s\n", cli.HumanValue(output))}
+	return cli.Outcome{Data: data, Human: fmt.Sprintf("Created sanitised fixture: %s\n", cli.HumanValue(output)), Terminal: func(o cli.TerminalOptions) string { return terminalFixture(output, fixture, o) }}
 }
 
 func validateV2ReadinessDirectory(path string) error {
