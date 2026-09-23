@@ -76,6 +76,9 @@ func handleV2ServiceWithPreparation(parent context.Context, inv cli.Invocation, 
 		}
 		fmt.Fprintf(&human, "\nRollback: %s\n", data.Rollback)
 		out.Human = human.String()
+		out.Terminal = func(options cli.TerminalOptions) string {
+			return terminalService(data, out.ExitCode, options)
+		}
 		return out
 	}
 	if ctx.Err() != nil {
