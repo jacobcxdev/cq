@@ -72,7 +72,7 @@ func validationFixtureCanary(start bool) v2CanaryState {
 	return state
 }
 
-func terminalValidationFixtureResult(f terminalFixtureRegistration, o cli.TerminalOptions) (string, int) {
+func terminalValidationFixtureResult(f terminalFixtureRegistration, invocation string, o cli.TerminalOptions) (string, int) {
 	if f.Stream == "stderr" {
 		var code, message string
 		switch f.File {
@@ -98,7 +98,6 @@ func terminalValidationFixtureResult(f terminalFixtureRegistration, o cli.Termin
 			code, message = "validation_timeout", "WebSocket validation timed out; readiness was not recorded."
 		}
 		var out, err bytes.Buffer
-		inv := cli.Invocation{Path: strings.TrimPrefix(f.Command, "cq ")}
 		outcome := v2SelectionFailure(1, code, message)
 		if f.File == "text/cq-codex-proxy-readiness-show/03-failure.txt" || f.File == "text/cq-codex-proxy-canary-start/03-failure.txt" || f.File == "text/cq-codex-proxy-fixture-create/03-failure.txt" || f.File == "text/cq-codex-proxy-validate-websocket/03-failure.txt" {
 			outcome.ExitCode = 6
@@ -113,15 +112,7 @@ func terminalValidationFixtureResult(f terminalFixtureRegistration, o cli.Termin
 			outcome.ExitCode = 7
 		}
 		s := &cli.Session{Out: &out, Err: &err, OutTerminal: o, ErrTerminal: o}
-		args := strings.Fields(inv.Path)
-		switch inv.Path {
-		case "codex proxy readiness show", "codex proxy validate websocket":
-			args = append(args, "--client-build", "0.146.0")
-		case "codex proxy validate http":
-			args = append(args, "--port", "29280")
-		case "codex proxy fixture create":
-			args = append(args, "--input", "request.json", "--output", "fixture.json")
-		}
+		args := strings.Fields(strings.TrimPrefix(invocation, "cq "))
 		exit := cli.Run(context.Background(), args, s, func(string) (cli.Handler, bool) {
 			return func(context.Context, cli.Invocation, *cli.Session) cli.Outcome { return outcome }, true
 		})
@@ -147,15 +138,15 @@ func terminalValidationFixtureResult(f terminalFixtureRegistration, o cli.Termin
 	return "", -1
 }
 
-func TestTerminalValidationFixtures(t *testing.T) {
+func TestTerminalValidationRendererFixtures(t *testing.T) {
 	data, err := os.ReadFile("../../specs/cli-v2/presentation/examples/index.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var index struct {
 		Fixtures []struct {
-			Command, Scenario, Stream, File string
-			Exit                            json.RawMessage
+			Command, Scenario, Stream, File, Invocation string
+			Exit                                        json.RawMessage
 		}
 	}
 	if err := json.Unmarshal(data, &index); err != nil {
@@ -176,9 +167,11 @@ func TestTerminalValidationFixtures(t *testing.T) {
 	for _, f := range terminalValidationFixtures {
 		t.Run(f.File, func(t *testing.T) {
 			found := false
+			invocation := ""
 			for _, entry := range index.Fixtures {
 				if entry.File == f.File {
 					found = true
+					invocation = entry.Invocation
 					if entry.Command != f.Command || entry.Scenario != f.Scenario || entry.Stream != f.Stream {
 						t.Fatal("fixture index mismatch")
 					}
@@ -190,7 +183,7 @@ func TestTerminalValidationFixtures(t *testing.T) {
 			}
 			for _, width := range []int{20, 40, 80, 100, 120} {
 				o := terminalFixtureOptions(width)
-				got, exit := terminalValidationFixtureResult(f, o)
+				got, exit := terminalValidationFixtureResult(f, invocation, o)
 				for _, entry := range index.Fixtures {
 					if entry.File == f.File {
 						var wantExit int
@@ -208,7 +201,7 @@ func TestTerminalValidationFixtures(t *testing.T) {
 					}
 				}
 				o.Colour = false
-				plain, _ := terminalValidationFixtureResult(f, o)
+				plain, _ := terminalValidationFixtureResult(f, invocation, o)
 				if strings.Contains(plain, "\x1b[") || plain != ansi.Strip(got) {
 					t.Fatalf("NO_COLOR differs at %d", width)
 				}
