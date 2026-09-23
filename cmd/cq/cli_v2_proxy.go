@@ -130,6 +130,9 @@ func handleV2ProxyWithPreparation(parent context.Context, inv cli.Invocation, se
 		return finish(cli.Outcome{})
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		return v2ProxyIO()
 	}
 	var out cli.Outcome

@@ -173,7 +173,7 @@ func v2EndpointFailure(err error) cli.Outcome {
 	case errors.Is(err, context.DeadlineExceeded):
 		return v2SelectionFailure(7, "endpoint_timeout", "Credential endpoint operation timed out; inspect migration state before continuing.")
 	case errors.As(err, &environment):
-		return v2SelectionFailure(2, "environment_invalid", environment.Error())
+		return v2SelectionFailure(environment.ExitCode, environment.Code, environment.Error())
 	case errors.As(err, &proof), errors.Is(err, fsutil.ErrSecureFileTooLarge):
 		return v2SelectionFailure(2, "endpoint_invalid_proof", "Credential endpoint proof is invalid: expected the exact endpoint proof schema and size.")
 	case errors.Is(err, codexprov.ErrCredentialEndpointMaintenanceUnsupported), errors.Is(err, fsutil.ErrSecureCapabilityUnavailable):

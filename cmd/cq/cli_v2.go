@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/jacobcxdev/cq/internal/cli"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func runCLIV2(ctx context.Context, argv []string, session *cli.Session) int {
@@ -165,4 +166,13 @@ func scheduledV2Refresh(handler cli.Handler) cli.Handler {
 		}
 		return outcome
 	}
+}
+
+// v2EnvironmentFailure preserves the resolver's safe common diagnostic at adapters.
+func v2EnvironmentFailure(err error) (cli.Outcome, bool) {
+	var environment *userdirs.EnvironmentError
+	if errors.As(err, &environment) {
+		return cli.Outcome{ExitCode: environment.ExitCode, Errors: []cli.Diagnostic{{Code: environment.Code, Message: environment.Error()}}}, true
+	}
+	return cli.Outcome{}, false
 }

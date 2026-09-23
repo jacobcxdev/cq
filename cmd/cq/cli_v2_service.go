@@ -86,6 +86,9 @@ func handleV2ServiceWithPreparation(parent context.Context, inv cli.Invocation, 
 		return finish(ctx.Err())
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		return finish(errors.Join(errServiceUnavailable, err))
 	}
 	if lifecycle == nil {
@@ -169,7 +172,7 @@ func projectV2ServiceComponent(id serviceSelection, c componentStatus, now time.
 	}
 	out.Executable = path(c.ConfiguredExecutable)
 	if obs.LastRunAt != nil {
-		value := obs.LastRunAt.UTC().Format(time.RFC3339)
+		value := obs.LastRunAt.UTC().Format(time.RFC3339Nano)
 		out.LastRunAt = &value
 	}
 	out.LastExitCode = obs.LastExitCode

@@ -126,6 +126,9 @@ func handleV2CanaryWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 	return cli.Outcome{Data: data, Human: fmt.Sprintf("Canary: %s\nActive: %t\nFinalised: %t\nAdmitted turns: %d\n", cli.HumanValue(state.RunID), state.Active, state.Finalised, state.AdmittedTurns)}
 }
 func v2CanaryFailure(err error) cli.Outcome {
+	if out, ok := v2EnvironmentFailure(err); ok {
+		return out
+	}
 	switch {
 	case errors.Is(err, proxy.ErrCodexCanaryActive), errors.Is(err, proxy.ErrCodexCanaryProtectedStateChanged):
 		return v2SelectionFailure(6, "canary_precondition_failed", "The Codex canary preconditions are not satisfied.")
@@ -159,10 +162,10 @@ func projectV2Canary(state proxy.CodexCanaryState) v2CanaryState {
 		if t.IsZero() {
 			return nil
 		}
-		v := t.UTC().Format(time.RFC3339)
+		v := t.UTC().Format(time.RFC3339Nano)
 		return &v
 	}
 	digests := append([]proxy.CodexCanaryProtectedDigest{}, state.ProtectedDigests...)
 	sort.Slice(digests, func(i, j int) bool { return digests[i].Kind < digests[j].Kind })
-	return v2CanaryState{RunID: state.RunID, Active: state.Active, Finalised: state.Finalisation != nil, StartedAt: state.StartedAt.UTC().Format(time.RFC3339), EndedAt: timestamp(state.EndedAt), LastObservedAt: timestamp(state.LastObservedAt), Tuple: state.Tuple, AdmittedTurns: state.AdmittedTurns, KeyedMismatches: state.KeyedMismatches, AutomaticHashChanges: state.AutomaticHashChanges, SecretLeaks: state.SecretLeaks, UnexplainedLifecycles: state.UnexplainedLifecycles, LiveSessionRepairs: state.LiveSessionRepairs, ProtectedStateFailures: state.ProtectedStateFailures, ConsecutiveCalendarDays: state.ConsecutiveCalendarDays, ProtectedDigests: digests, Finalisation: state.Finalisation}
+	return v2CanaryState{RunID: state.RunID, Active: state.Active, Finalised: state.Finalisation != nil, StartedAt: state.StartedAt.UTC().Format(time.RFC3339Nano), EndedAt: timestamp(state.EndedAt), LastObservedAt: timestamp(state.LastObservedAt), Tuple: state.Tuple, AdmittedTurns: state.AdmittedTurns, KeyedMismatches: state.KeyedMismatches, AutomaticHashChanges: state.AutomaticHashChanges, SecretLeaks: state.SecretLeaks, UnexplainedLifecycles: state.UnexplainedLifecycles, LiveSessionRepairs: state.LiveSessionRepairs, ProtectedStateFailures: state.ProtectedStateFailures, ConsecutiveCalendarDays: state.ConsecutiveCalendarDays, ProtectedDigests: digests, Finalisation: state.Finalisation}
 }

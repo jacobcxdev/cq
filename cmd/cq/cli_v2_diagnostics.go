@@ -106,6 +106,9 @@ func handleV2RoutingDiagnosticsWithPreparation(parent context.Context, inv cli.I
 		return finish(out)
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return finish(out)
+		}
 		return finish(v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: resolve proxy paths."))
 	}
 	if !trace {

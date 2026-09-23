@@ -275,7 +275,7 @@ func writeV2ResetPreview(s *cli.Session, plan app.CodexResetUsePlan, prompt bool
 	fmt.Fprintf(&text, "Account: %s.\nAccount reference: %s.\nCredit: %s.\n", cli.HumanValue(name), cli.HumanValue(string(plan.AccountKey)), cli.HumanValue(plan.Credit.ID))
 	for _, window := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
 		current := v2ResetWindow(window, plan.CurrentWindows[window])
-		fmt.Fprintf(&text, "%s: %g%% remaining; natural reset %s.\n", window, current.RemainingPct, current.ResetAt.Format(time.RFC3339))
+		fmt.Fprintf(&text, "%s: %g%% remaining; natural reset %s.\n", window, current.RemainingPct, current.ResetAt.Format(time.RFC3339Nano))
 	}
 	if plan.Recommendation != nil {
 		found := false

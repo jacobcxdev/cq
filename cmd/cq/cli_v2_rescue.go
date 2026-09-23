@@ -99,6 +99,9 @@ func handleV2RescueWithPreparation(parent context.Context, inv cli.Invocation, _
 		if err == nil {
 			return out
 		}
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		if operation {
 			return v2SelectionFailure(4, "operation_state_unavailable", "The operation state is unavailable.")
 		}

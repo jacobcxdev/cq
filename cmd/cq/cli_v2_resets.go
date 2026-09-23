@@ -268,7 +268,7 @@ func handleV2ResetInspectionWithApp(parent context.Context, inv cli.Invocation, 
 			Schedule ResetSchedule `json:"schedule"`
 		}{dto})
 		var human strings.Builder
-		fmt.Fprintf(&human, "Reset recommendation: complete=%t, exact=%t, confidence=%s.\nHorizon: %s.\n", dto.Complete, dto.Exact, dto.Confidence, dto.Horizon.Format(time.RFC3339))
+		fmt.Fprintf(&human, "Reset recommendation: complete=%t, exact=%t, confidence=%s.\nHorizon: %s.\n", dto.Complete, dto.Exact, dto.Confidence, dto.Horizon.Format(time.RFC3339Nano))
 		for _, item := range dto.Items {
 			fmt.Fprintf(&human, "%s\t%s\t%s\t%s\t%s\n", cli.HumanValue(item.AccountReference), cli.HumanValue(item.CreditID), item.Status, v2ResetTimeText(item.UseAt, "not scheduled"), v2ResetTimeText(item.UseBy, "no expiry"))
 		}
@@ -538,5 +538,5 @@ func v2ResetTimeText(value *time.Time, fallback string) string {
 	if value == nil {
 		return fallback
 	}
-	return value.UTC().Format(time.RFC3339)
+	return value.UTC().Format(time.RFC3339Nano)
 }

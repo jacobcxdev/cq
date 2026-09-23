@@ -72,6 +72,9 @@ func handleV2PolicyWithPreparation(parent context.Context, inv cli.Invocation, s
 		return out
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		return v2PolicyIO("resolve proxy paths")
 	}
 	out := executeV2Policy(ctx, inv, session, deps)

@@ -56,6 +56,9 @@ func handleV2ReserveWithPreparation(parent context.Context, inv cli.Invocation, 
 		return out
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: resolve proxy paths.")
 	}
 	parts := strings.Fields(inv.Path)

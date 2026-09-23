@@ -82,6 +82,9 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 			}
 			return v2SelectionFailure(7, "validation_timeout", message)
 		}
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		return out
 	}
 	if ctx.Err() != nil {
@@ -132,6 +135,9 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 		return finish(cli.Outcome{}, ctx.Err())
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		if inv.Path == "codex proxy readiness show" {
 			return v2SelectionFailure(1, "readiness_invalid", "HTTP readiness evidence could not be read.")
 		}
@@ -157,8 +163,8 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 			Current     bool              `json:"current"`
 			ValidatedAt string            `json:"validated_at"`
 			Marker      v2ReadinessMarker `json:"marker"`
-		}{"http", build, true, marker.ValidatedAt.UTC().Format(time.RFC3339), projectV2ReadinessMarker(marker)})
-		return cli.Outcome{Data: data, Human: fmt.Sprintf("HTTP readiness: current\nCodex build: %s\nValidated: %s\n", cli.HumanValue(build), marker.ValidatedAt.UTC().Format(time.RFC3339))}
+		}{"http", build, true, marker.ValidatedAt.UTC().Format(time.RFC3339Nano), projectV2ReadinessMarker(marker)})
+		return cli.Outcome{Data: data, Human: fmt.Sprintf("HTTP readiness: current\nCodex build: %s\nValidated: %s\n", cli.HumanValue(build), marker.ValidatedAt.UTC().Format(time.RFC3339Nano))}
 	}
 	executable := option("client-executable")
 	if executable != "" {
@@ -181,8 +187,8 @@ func handleV2ValidationWithPreparation(parent context.Context, inv cli.Invocatio
 			ClientBuild string            `json:"client_build"`
 			ValidatedAt string            `json:"validated_at"`
 			Marker      v2ReadinessMarker `json:"marker"`
-		}{"websocket", marker.ClientBuild, marker.ValidatedAt.UTC().Format(time.RFC3339), projectV2ReadinessMarker(marker)})
-		out.Human = fmt.Sprintf("WebSocket validation: passed\nCodex build: %s\nValidated: %s\n", cli.HumanValue(marker.ClientBuild), marker.ValidatedAt.UTC().Format(time.RFC3339))
+		}{"websocket", marker.ClientBuild, marker.ValidatedAt.UTC().Format(time.RFC3339Nano), projectV2ReadinessMarker(marker)})
+		out.Human = fmt.Sprintf("WebSocket validation: passed\nCodex build: %s\nValidated: %s\n", cli.HumanValue(marker.ClientBuild), marker.ValidatedAt.UTC().Format(time.RFC3339Nano))
 	}
 	return finish(out, err)
 }

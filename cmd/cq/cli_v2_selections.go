@@ -77,6 +77,9 @@ func handleV2SelectionWithPreparation(parent context.Context, inv cli.Invocation
 		return out
 	}
 	if err != nil {
+		if out, ok := v2EnvironmentFailure(err); ok {
+			return out
+		}
 		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: resolve proxy paths.")
 	}
 	return executeV2Selection(parent, ctx, inv, deps)
@@ -244,7 +247,7 @@ func v2SelectionOutcome(cfg *proxy.Config, intent proxySelectionIntent) cli.Outc
 	if intent.provider == "claude" && intent.action != "show" {
 		data.Application = "hot_reload"
 	}
-	label := account
+	label := cli.HumanValue(account)
 	if label == "" {
 		label = "not configured"
 	}
