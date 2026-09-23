@@ -658,7 +658,7 @@ func (supervisor *RuntimeSupervisor) serveRescueControl(writer http.ResponseWrit
 		Generation           uint64      `json:"generation"`
 		ActiveRescueRequests int         `json:"active_rescue_requests"`
 		DrainingSessions     []string    `json:"draining_sessions,omitempty"`
-	}{Mode: reportedTrafficMode(supervisor.trafficMode), Generation: supervisor.modeGeneration, ActiveRescueRequests: active, DrainingSessions: sessions}
+	}{Mode: supervisor.trafficMode, Generation: supervisor.modeGeneration, ActiveRescueRequests: active, DrainingSessions: sessions}
 	supervisor.mu.RUnlock()
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(response)

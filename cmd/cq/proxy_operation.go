@@ -10,6 +10,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 var inspectOperatorOperation = defaultInspectOperatorOperation
@@ -38,7 +39,15 @@ type operatorOperationResultV1 struct {
 }
 
 func defaultInspectOperatorOperation(ctx context.Context, operationID, _ string) (proxy.OperationCoordinatorInspectionV1, error) {
-	cfg, err := proxy.LoadExistingConfig()
+	paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot)
+	if err != nil {
+		return proxy.OperationCoordinatorInspectionV1{}, err
+	}
+	return inspectOperatorOperationAt(ctx, operationID, paths)
+}
+
+func inspectOperatorOperationAt(ctx context.Context, operationID string, paths proxy.DefaultPaths) (proxy.OperationCoordinatorInspectionV1, error) {
+	cfg, err := proxy.LoadExistingConfigAt(paths)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return proxy.OperationCoordinatorInspectionV1{}, nil

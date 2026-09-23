@@ -43,16 +43,8 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 	if ctx == nil || output == nil || load == nil || doer == nil || len(args) == 0 {
 		return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
 	}
-	method := http.MethodPost
-	path := ""
 	switch args[0] {
-	case "enter":
-		path = proxy.RuntimeRescueEnterPath
-	case "exit":
-		path = proxy.RuntimeRescueExitPath
-	case "status":
-		method = http.MethodGet
-		path = proxy.RuntimeRescueStatusPath
+	case "enter", "exit", "status":
 	default:
 		return fmt.Errorf("unknown proxy rescue command: %s", args[0])
 	}
@@ -67,9 +59,41 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 			return errors.New("proxy rescue: invalid port")
 		}
 	}
-	cfg, err := load()
+	body, err := requestProxyRescue(ctx, args[0], port, load, doer)
 	if err != nil {
 		return err
+	}
+	_, err = output.Write(body)
+	return err
+}
+
+// proxyRescueError retains the legacy diagnostic while giving canonical callers
+// a typed control outcome. Untrusted response bodies never become diagnostics.
+type proxyRescueError struct {
+	kind   string
+	status int
+	cause  error
+}
+
+func (e *proxyRescueError) Error() string { return e.cause.Error() }
+func (e *proxyRescueError) Unwrap() error { return e.cause }
+
+func requestProxyRescue(ctx context.Context, action string, port int, load func() (*proxy.Config, error), doer httputil.Doer) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cfg, err := load()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		return nil, errors.New("proxy rescue configuration unavailable")
+	}
+	if cfg.LocalToken == "" {
+		return nil, proxy.ErrLocalTokenRequired
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -77,30 +101,41 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 			port = proxy.DefaultPort
 		}
 	}
+	method, path := http.MethodPost, proxy.RuntimeRescueEnterPath
+	switch action {
+	case "exit":
+		path = proxy.RuntimeRescueExitPath
+	case "status":
+		method, path = http.MethodGet, proxy.RuntimeRescueStatusPath
+	}
 	request, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), http.NoBody)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	response, err := doer.Do(request)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if response == nil || response.Body == nil {
-		return errors.New("proxy rescue response unavailable")
+	if response == nil {
+		return nil, errors.New("proxy rescue response unavailable")
 	}
-	defer response.Body.Close()
+	// Classify known HTTP failures before reading any unused body.
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, proxyRescueResponseMaxBytes))
-		return fmt.Errorf("proxy rescue control failed: HTTP %d", response.StatusCode)
+		return nil, &proxyRescueError{status: response.StatusCode, cause: fmt.Errorf("proxy rescue control failed: HTTP %d", response.StatusCode)}
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, proxyRescueResponseMaxBytes+1))
+	if response.Body == nil {
+		return nil, &proxyRescueError{kind: "response", cause: errors.New("proxy rescue response unavailable")}
+	}
+	body, err := httputil.ReadBodyLimit(response.Body, proxyRescueResponseMaxBytes)
+	if errors.Is(err, httputil.ErrBodyTooLarge) {
+		err = errors.New("proxy rescue response exceeds 64 KiB")
+	}
 	if err != nil {
-		return err
+		return nil, &proxyRescueError{kind: "response", cause: err}
 	}
-	if len(body) > proxyRescueResponseMaxBytes {
-		return errors.New("proxy rescue response exceeds 64 KiB")
-	}
-	_, err = output.Write(body)
-	return err
+	return body, nil
 }

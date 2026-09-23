@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,8 +58,8 @@ func TestRuntimeSupervisorRescueControlTransitionsAndRoutes(t *testing.T) {
 	if err := json.Unmarshal(enterResponse.Body.Bytes(), &enterStatus); err != nil {
 		t.Fatal(err)
 	}
-	if enterStatus.Mode != TrafficModeRescue {
-		t.Fatalf("reported enter mode = %q, want rescue", enterStatus.Mode)
+	if enterStatus.Mode != TrafficModeRescueDraining && enterStatus.Mode != TrafficModeRescue {
+		t.Fatalf("reported enter mode = %q, want rescue_draining or rescue", enterStatus.Mode)
 	}
 	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 	rescue := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString("{}"))
@@ -186,8 +187,8 @@ func TestRuntimeSupervisorRescueEnterCancelsExitDrainAfterWorkerLoss(t *testing.
 	if err := json.Unmarshal(enterResponse.Body.Bytes(), &entered); err != nil {
 		t.Fatal(err)
 	}
-	if entered.Mode != TrafficModeRescue {
-		t.Fatalf("cancel enter reported mode = %q, want rescue", entered.Mode)
+	if entered.Mode != TrafficModeRescueDraining && entered.Mode != TrafficModeRescue {
+		t.Fatalf("cancel enter reported mode = %q, want rescue_draining or rescue", entered.Mode)
 	}
 
 	newRequest := httptest.NewRequest(http.MethodPost, "/new-rescue", bytes.NewBufferString("{}"))
@@ -439,6 +440,9 @@ func TestRuntimeSupervisorRescueExitHandsOffNewIngressWhileSessionDrains(t *test
 	if repeatedExitResponse.Code != http.StatusOK {
 		t.Fatalf("repeated exit = %d mode=%q body=%q", repeatedExitResponse.Code, supervisor.TrafficMode(), repeatedExitResponse.Body.String())
 	}
+	if !bytes.Equal(exitResponse.Body.Bytes(), repeatedExitResponse.Body.Bytes()) {
+		t.Fatalf("repeated exit changed durable generation or drain snapshot: %s", repeatedExitResponse.Body.String())
+	}
 
 	normal := httptest.NewRequest(http.MethodPost, "/normal?x=1", bytes.NewBufferString("body"))
 	normal.Header.Set("Authorization", "Bearer local-token")
@@ -581,5 +585,133 @@ func TestRunAdoptedRuntimeSupervisorServesRescueControlWhenNormalWorkerBootFails
 	)
 	if !errors.Is(err, bootErr) || !served {
 		t.Fatalf("error=%v served=%v", err, served)
+	}
+}
+
+// The real supervisor holds normal admission while this synthetic worker blocks.
+type rescueProjectionWorker struct {
+	*runtimeTestWorker
+	admitted chan struct{}
+	release  chan struct{}
+}
+
+func (w *rescueProjectionWorker) ExecuteHTTP(ctx context.Context, _ RuntimeHTTPRequestV1) (RuntimeHTTPResponseV1, error) {
+	close(w.admitted)
+	select {
+	case <-w.release:
+		return RuntimeHTTPResponseV1{StatusCode: 200}, nil
+	case <-ctx.Done():
+		return RuntimeHTTPResponseV1{}, ctx.Err()
+	}
+}
+
+type rescueProjectionLauncher struct{ worker RuntimeWorkerProcess }
+
+func (l rescueProjectionLauncher) Launch(context.Context, WorkerManifestV1) (RuntimeWorkerProcess, error) {
+	return l.worker, nil
+}
+
+func TestRuntimeRescueControlReportsEntryDrain(t *testing.T) {
+	events := []string{}
+	worker := &rescueProjectionWorker{runtimeTestWorker: &runtimeTestWorker{holder: runtimeHolder("projection-worker"), events: &events}, admitted: make(chan struct{}), release: make(chan struct{})}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), rescueProjectionLauncher{worker}, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	consumer := &callerAuthorityTestConsumer{consumed: make(map[string]ProviderBranchAdmissionConsumptionV1)}
+	authority := testNormalCallerAuthority(t, []NormalCallerCredentialV1{{Domain: NormalCallerLocal, Bearer: "local-token", SubjectID: "local-owner"}}, consumer)
+	authority.random = rand.Reader
+	if err := supervisor.SetCallerAuthority(authority); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.SetCallerClassifier(NewNormalCallerBranchClassifier(nil)); err != nil {
+		t.Fatal(err)
+	}
+	store := &runtimeEvidenceTestStore{}
+	if err := supervisor.ConfigureRescue(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(202) }), store); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if recover() != nil {
+				t.Error("normal fixture panic")
+			}
+		}()
+		req := httptest.NewRequest(http.MethodPost, "/normal", bytes.NewBufferString("body"))
+		req.Header.Set("Authorization", "Bearer local-token")
+		supervisor.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	released := false
+	defer func() {
+		if !released {
+			close(worker.release)
+		}
+		<-done
+		waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+	}()
+	select {
+	case <-worker.admitted:
+	case <-time.After(time.Second):
+		t.Fatal("normal request was not admitted")
+	}
+	control := func(path string) struct {
+		Mode       TrafficMode
+		Generation uint64
+	} {
+		t.Helper()
+		method := http.MethodPost
+		if path == RuntimeRescueStatusPath {
+			method = http.MethodGet
+		}
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer local-token")
+		reply := httptest.NewRecorder()
+		supervisor.ServeHTTP(reply, req)
+		var value struct {
+			Mode       TrafficMode
+			Generation uint64
+		}
+		if reply.Code != 200 || json.Unmarshal(reply.Body.Bytes(), &value) != nil {
+			t.Fatalf("control %s = %d %s", path, reply.Code, reply.Body.String())
+		}
+		return value
+	}
+	enter := control(RuntimeRescueEnterPath)
+	if enter.Mode != TrafficModeRescueDraining {
+		t.Fatalf("entry mode=%s want rescue_draining", enter.Mode)
+	}
+	for _, path := range []string{RuntimeRescueStatusPath, RuntimeRescueEnterPath} {
+		got := control(path)
+		if got != enter {
+			t.Fatalf("repeated control=%+v want %+v", got, enter)
+		}
+	}
+	// Health deliberately preserves its old effective rescue projection.
+	health := httptest.NewRecorder()
+	supervisor.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var healthValue struct{ Mode TrafficMode }
+	if json.Unmarshal(health.Body.Bytes(), &healthValue) != nil || healthValue.Mode != TrafficModeRescue {
+		t.Fatalf("health changed: %s", health.Body.String())
+	}
+	close(worker.release)
+	released = true
+	<-done
+	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
+	after := control(RuntimeRescueStatusPath)
+	if after.Mode != TrafficModeRescue || after.Generation != enter.Generation {
+		t.Fatalf("completed entry=%+v", after)
+	}
+	if repeated := control(RuntimeRescueEnterPath); repeated != after {
+		t.Fatalf("idempotent entry=%+v", repeated)
+	}
+	supervisor.mu.RLock()
+	defer supervisor.mu.RUnlock()
+	if len(store.records) != 2 || store.records[0].Phase != RuntimeModePhaseIntent || store.records[1].Phase != RuntimeModePhaseEffective {
+		t.Fatalf("durable transitions=%+v", store.records)
 	}
 }

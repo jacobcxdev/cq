@@ -317,25 +317,35 @@ func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadProxyRescueBootstrapConfigAt(paths, validateProxyRescueBootstrap)
+}
+
+// LoadCanonicalProxyRescueBootstrapConfigAt reads captured authority paths without
+// changing the legacy bootstrap validation or persisting canonical defaults.
+func LoadCanonicalProxyRescueBootstrapConfigAt(paths DefaultPaths) (*ProxyRescueBootstrapConfig, error) {
+	return loadProxyRescueBootstrapConfigAt(paths, validateCanonicalProxyRescueBootstrap)
+}
+
+func loadProxyRescueBootstrapConfigAt(paths DefaultPaths, validate func(*ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error)) (*ProxyRescueBootstrapConfig, error) {
 	data, err := os.ReadFile(paths.RescueBootstrap)
 	if errors.Is(err, os.ErrNotExist) {
-		return loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
+		return loadProxyRescueBootstrapFromNormalConfigWithValidation(paths.ConfigFile, validate)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read proxy rescue bootstrap: %w", err)
 	}
-	bootstrap, decodeErr := decodeProxyRescueBootstrap(data)
+	bootstrap, decodeErr := decodeProxyRescueBootstrapWithValidation(data, validate)
 	if decodeErr == nil {
 		return bootstrap, nil
 	}
-	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
+	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfigWithValidation(paths.ConfigFile, validate)
 	if fallbackErr == nil {
 		return fallback, nil
 	}
 	return nil, errors.Join(decodeErr, fallbackErr)
 }
 
-func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBootstrapConfig, error) {
+func loadProxyRescueBootstrapFromNormalConfigWithValidation(configPath string, validate func(*ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error)) (*ProxyRescueBootstrapConfig, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read proxy config: %w", err)
@@ -351,7 +361,7 @@ func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBo
 	if minimal.Port == 0 {
 		minimal.Port = DefaultPort
 	}
-	return validateProxyRescueBootstrap(&ProxyRescueBootstrapConfig{
+	return validate(&ProxyRescueBootstrapConfig{
 		SchemaVersion: 1,
 		LocalToken:    minimal.LocalToken,
 		StateRoot:     minimal.ProxyResilienceStateDir,
@@ -360,6 +370,10 @@ func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBo
 }
 
 func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error) {
+	return decodeProxyRescueBootstrapWithValidation(data, validateProxyRescueBootstrap)
+}
+
+func decodeProxyRescueBootstrapWithValidation(data []byte, validate func(*ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error)) (*ProxyRescueBootstrapConfig, error) {
 	if len(data) > proxyRescueBootstrapMax {
 		return nil, errors.New("proxy rescue bootstrap exceeds size limit")
 	}
@@ -372,7 +386,7 @@ func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("parse proxy rescue bootstrap: trailing value")
 	}
-	return validateProxyRescueBootstrap(&bootstrap)
+	return validate(&bootstrap)
 }
 
 func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
@@ -384,6 +398,28 @@ func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*Proxy
 		return nil, errors.New("proxy rescue bootstrap state root invalid")
 	}
 	return bootstrap, nil
+}
+
+func validateCanonicalProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
+	if bootstrap == nil {
+		return validateProxyRescueBootstrap(nil)
+	}
+	candidate := *bootstrap
+	if candidate.Port == 0 {
+		candidate.Port = DefaultPort
+	}
+	// Validate the authority shape before classifying missing authentication.
+	if candidate.SchemaVersion != 1 || candidate.Port < 1 || candidate.Port > 65535 {
+		return nil, errors.New("proxy rescue bootstrap invalid")
+	}
+	clean := filepath.Clean(candidate.StateRoot)
+	if candidate.StateRoot == "" || !filepath.IsAbs(candidate.StateRoot) || clean != candidate.StateRoot || clean == string(filepath.Separator) {
+		return nil, errors.New("proxy rescue bootstrap state root invalid")
+	}
+	if candidate.LocalToken == "" {
+		return nil, ErrLocalTokenRequired
+	}
+	return &candidate, nil
 }
 
 func loadConfigFile(path string) (*Config, error) {

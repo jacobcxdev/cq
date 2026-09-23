@@ -6,7 +6,7 @@
 
 `canary` means a real-traffic observation run, not a synthetic test or rollout percentage. `hook stop` receives a Codex Stop event; it does not stop the proxy. `proxy rescue` stays shared because its admission and worker transitions affect the shared listener. `proxy operation status` inspects shared durable coordination records; it does not recover them.
 
-Retire `operation recover`: the implementation has no recovery control. The compatibility parser requires its original `--operation-id ID`, rejects malformed input, and returns exit 4 / `operation_recovery_unsupported` with `Operation recovery is not supported. Inspect the record with cq proxy operation status ID.` Substitute the supplied ID. Never translate this request silently into successful inspection. No new recovery engine is specified.
+Retire `operation recover`: the implementation has no recovery control. The compatibility parser requires its original `--operation-id ID`, rejects malformed input, and returns exit 4 / `operation_recovery_unavailable` with `Active operation recovery is unavailable; use cq proxy operation status OPERATION_ID to inspect retained state.` This fixed diagnostic is owned by the legacy translation in `migration.json`; help bypasses the required ID while retaining the exit-4 retirement result. Never translate this request silently into successful inspection. No new recovery engine is specified.
 
 ## Primitive rendering
 
@@ -95,6 +95,8 @@ STATE is `planned|attempted|completed|failed|rejected|indeterminate`; TRANSPORT 
 ## Shared rescue state
 
 `normal`: normal worker admits traffic. `drain`: normal admission is draining during a runtime transition. `rescue_draining`: rescue entry accepted, normal worker still draining. `rescue`: fallback handler serves traffic. `rescue_exit_draining`: normal worker resumes new work while previously admitted rescue work drains. `generation` identifies the durable transition revision. `draining_sessions` contains opaque hashed session hints, never raw session IDs. The human template's `draining_sessions_count` is the array length.
+
+CLI v2 explicitly changes the frozen rescue-control response projection: enter, exit and status report the supervisor's actual traffic mode, including `rescue_draining` while entry is pending. The health response retains its existing effective-mode projection. Transition, drain, authority and persistence algorithms and all response field types remain unchanged. Legacy raw rescue callers also observe `rescue_draining` during pending entry; no new endpoint or negotiation is introduced.
 
 Entry from rescue is a no-op; repeated entry during entry drain retains the same intent. Entry while exit is draining requests rescue again with a new durable generation. Exit requires an available admitted worker. Neither entry nor exit guarantees all old traffic has drained when the control response returns. Exhausting the elapsed operation budget never triggers an automatic retry.
 

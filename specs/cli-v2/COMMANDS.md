@@ -10687,7 +10687,7 @@ Inspect a specific retained operation.
 ### Compatibility spellings
 
 - `cq operation status` → `proxy operation status; translate --operation-id ID to positional ID`. Deprecated spelling; preserve semantics and emit deprecation warning on stderr.
-- `cq operation recover` → `No execution translation; validate required --operation-id ID, then exit 4 with operation_recovery_unsupported.`. Retired misleading command. Exact message: Operation recovery is not supported. Inspect the record with cq proxy operation status ID. Never return success merely because a receipt exists.
+- `cq operation recover` → `No execution translation; validate required --operation-id ID, then exit 4 with operation_recovery_unavailable.`. Retired misleading command. Exact message: Active operation recovery is unavailable; use cq proxy operation status OPERATION_ID to inspect retained state. Never return success merely because a receipt exists.
 
 ### Source evidence
 
