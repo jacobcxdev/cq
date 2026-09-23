@@ -80,6 +80,9 @@ type ResetScheduleBlocker struct {
 }
 
 type ResetSchedule struct {
+	// ObjectiveComputed distinguishes a calculated zero from an unavailable result.
+	ObjectiveComputed bool `json:"-"`
+
 	GeneratedAt time.Time
 	Horizon     time.Time
 	Exact       bool
@@ -607,6 +610,7 @@ func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
 	node, exact := searchResetSchedule(state)
 	result.Exact = exact
 	result.Objective = node.state.objective
+	result.ObjectiveComputed = true
 	consumed := make(map[string]resetSearchConsumption, len(node.consumptions))
 	for _, consumption := range node.consumptions {
 		consumed[consumption.creditID] = consumption

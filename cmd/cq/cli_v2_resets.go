@@ -68,6 +68,8 @@ type ResetScheduleBlocker struct {
 	AccountID        *string `json:"account_id"`
 }
 type ResetSchedule struct {
+	ObjectiveComputed bool `json:"-"`
+
 	GeneratedAt time.Time                         `json:"generated_at"`
 	Horizon     time.Time                         `json:"horizon"`
 	Complete    bool                              `json:"complete"`
@@ -468,7 +470,7 @@ func v2ResetInventoryError(code string, index *int) ResetInventoryError {
 }
 func v2ResetSchedule(schedule aggregate.ResetSchedule) ResetSchedule {
 	legacy := publicCodexResetSchedule(schedule)
-	result := ResetSchedule{GeneratedAt: schedule.GeneratedAt.UTC(), Horizon: schedule.Horizon.UTC(), Complete: schedule.Complete, Exact: schedule.Exact, Confidence: schedule.Confidence, Items: []ResetScheduleItem{}, Objective: legacy.Objective, Blockers: []ResetScheduleBlocker{}}
+	result := ResetSchedule{ObjectiveComputed: schedule.ObjectiveComputed, GeneratedAt: schedule.GeneratedAt.UTC(), Horizon: schedule.Horizon.UTC(), Complete: schedule.Complete, Exact: schedule.Exact, Confidence: schedule.Confidence, Items: []ResetScheduleItem{}, Objective: legacy.Objective, Blockers: []ResetScheduleBlocker{}}
 	if result.Horizon.IsZero() {
 		result.Horizon = result.GeneratedAt.Add(7 * 24 * time.Hour)
 	}

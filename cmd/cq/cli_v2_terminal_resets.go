@@ -209,7 +209,7 @@ func terminalResetSchedule(s ResetSchedule, o cli.TerminalOptions) string {
 		}
 	}
 	text += "\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Objective", Role: cli.Heading})
-	if s.Horizon.IsZero() {
+	if !s.ObjectiveComputed {
 		text += cli.TerminalLine(o, 2, cli.Span{Text: "Objective unavailable.", Role: cli.Attention})
 	} else {
 		unmet := cli.Span{Text: fmt.Sprintf("%g", s.Objective.UnmetDemandPctSeconds), Role: cli.Quantity}

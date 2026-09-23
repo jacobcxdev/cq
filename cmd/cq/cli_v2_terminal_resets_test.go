@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -61,7 +62,7 @@ func resetFixtureInventory() []ResetAccountInventory {
 	}
 }
 func resetFixtureSchedule(scenario string) ResetSchedule {
-	s := ResetSchedule{Complete: true, Exact: true, Confidence: aggregate.ResetConfidenceHigh, GeneratedAt: resetFixtureTime(0, 0, 0), Horizon: resetFixtureTime(7, 0, 0)}
+	s := ResetSchedule{ObjectiveComputed: true, Complete: true, Exact: true, Confidence: aggregate.ResetConfidenceHigh, GeneratedAt: resetFixtureTime(0, 0, 0), Horizon: resetFixtureTime(7, 0, 0)}
 	if scenario == "Success" {
 		at, by := resetFixtureTime(0, 2, 15), resetFixtureTime(2, 0, 0)
 		s.Horizon = resetFixtureTime(9, 0, 0)
@@ -119,6 +120,23 @@ func resetFixtureUse(scenario string) (ResetUseResult, cli.Outcome) {
 	return d, out
 }
 func TestTerminalResetFixtures(t *testing.T) {
+	data, err := os.ReadFile("../../specs/cli-v2/presentation/examples/index.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Fixtures []struct {
+			File string
+			Exit json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatal(err)
+	}
+	exits := make(map[string]json.RawMessage)
+	for _, fixture := range index.Fixtures {
+		exits[fixture.File] = fixture.Exit
+	}
 	for _, f := range terminalResetsFixtures {
 		t.Run(f.File, func(t *testing.T) {
 			for _, width := range []int{20, 40, 80, 100, 120} {
@@ -131,7 +149,7 @@ func TestTerminalResetFixtures(t *testing.T) {
 				if f.Command == "cq codex reset use" {
 					args = append(args, "account-alex", "--yes")
 				}
-				cli.Run(context.Background(), args, s, func(string) (cli.Handler, bool) {
+				exit := cli.Run(context.Background(), args, s, func(string) (cli.Handler, bool) {
 					return func(_ context.Context, _ cli.Invocation, s *cli.Session) cli.Outcome {
 						switch f.Command {
 						case "cq codex reset list":
@@ -187,6 +205,13 @@ func TestTerminalResetFixtures(t *testing.T) {
 						return cli.Outcome{}
 					}, true
 				})
+				var wantExit int
+				if err := json.Unmarshal(exits[f.File], &wantExit); err != nil {
+					t.Fatalf("fixture %s indexed exit: %v", f.File, err)
+				}
+				if exit != wantExit {
+					t.Fatalf("fixture %s exit = %d; indexed = %d", f.File, exit, wantExit)
+				}
 				got := stdout.String()
 				if f.Stream == "stderr" {
 					got = stderr.String()
@@ -500,5 +525,51 @@ func TestTerminalResetUnobservedRecommendation(t *testing.T) {
 	}
 	if !strings.Contains(got, "Horizon     unknown") || !strings.Contains(got, "Confidence  unknown") {
 		t.Fatal(got)
+	}
+}
+
+func TestTerminalResetSyntheticHorizonIsNotObjectiveReceipt(t *testing.T) {
+	a, _ := v2ResetTestApp()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	usage := a.Usage.(v2ResetUsage)
+	usage.hook = cancel
+	a.Usage = usage
+	out := handleV2ResetInspectionWithApp(ctx, v2ResetInvocation("codex reset recommend"), nil, a)
+	var data struct{ Schedule ResetSchedule }
+	if err := json.Unmarshal(out.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Schedule.Horizon.IsZero() {
+		t.Fatal("test must exercise a synthetic nonzero horizon")
+	}
+	got := ansi.Strip(out.Terminal(terminalFixtureOptions(100)))
+	if out.ExitCode != 130 || !strings.Contains(got, "Objective unavailable.") || strings.Contains(got, "0 %-seconds") {
+		t.Fatalf("exit %d: %s", out.ExitCode, got)
+	}
+}
+
+func TestTerminalResetObservedZeroObjective(t *testing.T) {
+	a, b := v2ResetTestApp()
+	b.snapshot.Accounts = nil
+	out := handleV2ResetInspectionWithApp(context.Background(), v2ResetInvocation("codex reset recommend"), nil, a)
+	got := ansi.Strip(out.Terminal(terminalFixtureOptions(100)))
+	if out.ExitCode != 0 || strings.Contains(got, "Objective unavailable.") || !strings.Contains(got, "0 %-seconds") {
+		t.Fatalf("exit %d: %s", out.ExitCode, got)
+	}
+}
+
+func TestTerminalResetInvalidInputHasNoComputedObjective(t *testing.T) {
+	a, _ := v2ResetTestApp()
+	usage := a.Usage.(v2ResetUsage)
+	window := usage.results[0].Windows[quota.Window5Hour]
+	invalid := math.NaN()
+	window.RemainingPctExact = &invalid
+	usage.results[0].Windows[quota.Window5Hour] = window
+	a.Usage = usage
+	out := handleV2ResetInspectionWithApp(context.Background(), v2ResetInvocation("codex reset recommend"), nil, a)
+	got := ansi.Strip(out.Terminal(terminalFixtureOptions(100)))
+	if out.ExitCode == 0 || !strings.Contains(got, "Objective unavailable.") || strings.Contains(got, "0 %-seconds") {
+		t.Fatalf("exit %d: %s", out.ExitCode, got)
 	}
 }
