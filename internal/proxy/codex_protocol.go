@@ -152,6 +152,14 @@ type CodexWrappedError struct {
 	HardUsageLimit bool
 }
 
+func codexCyberAccessUnavailable(wrapped CodexWrappedError) bool {
+	if !wrapped.Found || wrapped.Status != http.StatusForbidden {
+		return false
+	}
+	return wrapped.Code == "access_program_not_enabled" && wrapped.Param == "access_programs.cyber" ||
+		strings.TrimSpace(wrapped.Message) == "The requested Cyber access program is not authorized for this workspace."
+}
+
 func ParseCodexWrappedError(payload []byte) (CodexWrappedError, error) {
 	return parseCodexError(payload, 0, false)
 }

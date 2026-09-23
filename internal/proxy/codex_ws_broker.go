@@ -1776,8 +1776,7 @@ func codexWSDialError(response *http.Response, body []byte) (CodexWrappedError, 
 }
 
 func codexWSCyberAccessUnavailable(wrapped CodexWrappedError) bool {
-	return wrapped.Found && wrapped.Status == http.StatusForbidden &&
-		wrapped.Code == "access_program_not_enabled" && wrapped.Param == "access_programs.cyber"
+	return codexCyberAccessUnavailable(wrapped)
 }
 
 func (broker *codexTerminatingWSBroker) shouldResetCyberPlanFailure(err error, pending *codexWSPendingFrame, active *codexWSActiveUpstream) bool {
