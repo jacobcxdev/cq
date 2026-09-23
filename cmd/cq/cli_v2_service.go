@@ -135,6 +135,15 @@ func projectV2ServiceComponent(id serviceSelection, c componentStatus, now time.
 		return out
 	}
 	obs := c.Observed
+	path := v2ServicePath
+	if c.Manager == "task-scheduler" {
+		path = func(value string) *string {
+			if !validWindowsServicePath(value) {
+				return nil
+			}
+			return &value
+		}
+	}
 	switch obs.Owner {
 	case "cq", "package", "foreign", "none":
 		out.Owner = obs.Owner
@@ -142,11 +151,11 @@ func projectV2ServiceComponent(id serviceSelection, c componentStatus, now time.
 	out.Enabled = obs.Enabled
 	out.ErrorCode = v2AccountString(obs.ErrorCode)
 	if obs.Roots != nil {
-		out.ConfigDir = v2ServicePath(obs.Roots.Config)
-		out.StateDir = v2ServicePath(obs.Roots.State)
-		out.CacheDir = v2ServicePath(obs.Roots.Cache)
-		out.RuntimeDir = v2ServicePath(obs.Roots.Runtime)
-		out.LogDir = v2ServicePath(obs.Roots.Logs)
+		out.ConfigDir = path(obs.Roots.Config)
+		out.StateDir = path(obs.Roots.State)
+		out.CacheDir = path(obs.Roots.Cache)
+		out.RuntimeDir = path(obs.Roots.Runtime)
+		out.LogDir = path(obs.Roots.Logs)
 	}
 	if !c.Registered {
 		out.State = "absent"
@@ -158,7 +167,7 @@ func projectV2ServiceComponent(id serviceSelection, c componentStatus, now time.
 	if c.PID > 0 {
 		out.PID = &c.PID
 	}
-	out.Executable = v2ServicePath(c.ConfiguredExecutable)
+	out.Executable = path(c.ConfiguredExecutable)
 	if obs.LastRunAt != nil {
 		value := obs.LastRunAt.UTC().Format(time.RFC3339)
 		out.LastRunAt = &value

@@ -199,13 +199,58 @@ func TestWindowsTaskRuntimeStateNative(t *testing.T) {
 	if !state.Running || len(state.EnginePIDs) != 1 || state.EnginePIDs[0] == 0 || !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, sid, false) {
 		t.Fatalf("runtime state = %#v", state)
 	}
-	executable, err := queryWindowsProcessExecutable(state.EnginePIDs[0])
+
+	engine, err := readWindowsServiceProcessIdentity(state.EnginePIDs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !equalWindowsPath(executable, definition.Actions.Exec.Command) {
-		t.Fatalf("EnginePID executable = %q, want %q", executable, definition.Actions.Exec.Command)
+	action := engine
+	if !equalWindowsPath(engine.Executable, definition.Actions.Exec.Command) {
+		if engine.Children != 1 {
+			t.Fatalf("ambiguous task engine children: %+v", engine)
+		}
+		action, err = readWindowsServiceProcessIdentity(engine.OnlyChildPID)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
+	if !windowsTaskOwnsProcess(state, action, engine, definition.Actions.Exec.Command, sid) {
+		t.Fatalf("task/action binding: engine=%+v action=%+v", engine, action)
+	}
+	t.Logf("native EnginePID=%d action PID=%d parent=%d creation=%d engine_creation=%d children=%d", engine.PID, action.PID, action.ParentPID, action.Created, engine.Created, engine.Children)
+	if _, err := runWindowsSchtasks(ctx, "/Disable", "/TN", windowsProxyTaskPath); err != nil {
+		t.Fatal(err)
+	}
+	data, err = runWindowsSchtasks(ctx, "/Query", "/TN", windowsProxyTaskPath, "/XML", "/HResult")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := parseWindowsTaskDefinition(data)
+	if err != nil || windowsTaskDefaultTrue(disabled.Settings.Enabled) {
+		t.Fatalf("task not disabled: %v", err)
+	}
+	if _, err := runWindowsSchtasks(ctx, "/End", "/TN", windowsProxyTaskPath); err != nil {
+		t.Fatal(err)
+	}
+	p := &windowsTaskServicePlatform{queryState: queryWindowsTaskState}
+	if err := p.waitTaskStopped(ctx, windowsProxyTaskPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runWindowsSchtasks(ctx, "/Run", "/TN", windowsProxyTaskPath); err == nil {
+		t.Fatal("disabled Run unexpectedly succeeded")
+	}
+	if _, err := runWindowsSchtasks(ctx, "/Enable", "/TN", windowsProxyTaskPath); err != nil {
+		t.Fatal(err)
+	}
+	data, err = runWindowsSchtasks(ctx, "/Query", "/TN", windowsProxyTaskPath, "/XML", "/HResult")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := parseWindowsTaskDefinition(data)
+	if err != nil || !windowsTaskDefaultTrue(enabled.Settings.Enabled) {
+		t.Fatalf("task not enabled: %v", err)
+	}
+
 }
 
 func TestWindowsServiceRuntimeInspectionRequiresMatchingListenerProcessAndHealth(t *testing.T) {
@@ -250,5 +295,42 @@ func TestWindowsServiceRuntimeInspectionRequiresMatchingListenerProcessAndHealth
 	status = inspectWindowsProxyRuntime(context.Background(), `C:\Program Files\cq\cq.exe`)
 	if status.Healthy || !strings.Contains(status.Error, "health") {
 		t.Fatalf("unhealthy status = %#v", status)
+	}
+}
+
+func TestWindowsServiceSelectedPreparationBudget(t *testing.T) {
+	original := windowsSelectedRoots
+	t.Cleanup(func() { windowsSelectedRoots = original })
+	ctx, cancel := context.WithCancel(context.Background())
+	windowsSelectedRoots = func(...userdirs.Root) (userdirs.Roots, error) {
+		cancel()
+		return userdirs.Roots{}, errors.New("preparation failed after cancellation")
+	}
+	if _, err := defaultSelectedWindowsServiceLifecycle(ctx, serviceStop, serviceProxy); !errors.Is(err, context.Canceled) {
+		t.Fatalf("preparation ignored original budget: %v", err)
+	}
+	expired, close := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer close()
+	windowsSelectedRoots = func(...userdirs.Root) (userdirs.Roots, error) {
+		t.Fatal("prepared after deadline")
+		return userdirs.Roots{}, nil
+	}
+	if _, err := defaultSelectedWindowsServiceLifecycle(expired, serviceStop, serviceProxy); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired preparation: %v", err)
+	}
+}
+func TestWindowsServiceForcedRefreshMarkerBypassesScheduler(t *testing.T) {
+	t.Setenv("CQ_SERVICE_REFRESH_DIRECT", "1")
+	calls := 0
+	expected := errors.New("refresh result")
+	err := runWindowsServiceRefresh(func() error {
+		calls++
+		if os.Getenv("CQ_SERVICE_REFRESH_DIRECT") != "" {
+			t.Fatal("direct marker leaked beyond wrapper")
+		}
+		return expected
+	})
+	if !errors.Is(err, expected) || calls != 1 {
+		t.Fatalf("calls=%d error=%v", calls, err)
 	}
 }

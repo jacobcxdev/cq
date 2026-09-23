@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -41,6 +42,8 @@ var (
 
 func init() {
 	serviceLifecycleFactory = defaultWindowsServiceLifecycle
+	selectedServiceLifecycleFactory = defaultSelectedWindowsServiceLifecycle
+	serviceRefreshRunner = runWindowsServiceRefresh
 }
 
 func defaultWindowsServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
@@ -85,6 +88,23 @@ func newWindowsServiceLifecycle(
 		createFolder:    createWindowsTaskFolder,
 		removeFolder:    removeWindowsTaskFolderIfEmpty,
 		inspectProxy:    inspectProxy,
+		roots:           roots, validateExecutable: validateWindowsServiceExecutable, completion: readServiceRefreshCompletion, forceRefresh: forceWindowsServiceRefresh, inspectSelectedProxy: inspectSelectedWindowsProxy,
+	}
+	platform.verifyProxyOwner = func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		record, err := (&installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if !record.HasService(windowsProxyTaskPath) || !sameServiceExecutable(record.Executable, platform.executable) {
+			return installstate.ErrOwnershipConflict
+		}
+		return nil
 	}
 	return &serviceLifecycle{
 		Platform:       platform,
@@ -120,7 +140,7 @@ func resolveWindowsExecutable() (string, error) {
 func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
 	if len(args) >= 3 && strings.EqualFold(args[1], "/TN") {
 		switch strings.ToLower(args[0]) {
-		case "/run", "/end", "/delete":
+		case "/run", "/end", "/delete", "/enable", "/disable":
 			return runWindowsTaskMutation(ctx, strings.ToLower(args[0]), args[2])
 		}
 	}
@@ -149,6 +169,12 @@ func runWindowsTaskMutation(ctx context.Context, action, taskPath string) ([]byt
 		operation = fmt.Sprintf(`$task=$service.GetFolder('%s').GetTask('%s'); $null=$task.Run($null)`, comTaskFolder, taskName)
 	case "/end":
 		operation = fmt.Sprintf(`$task=$service.GetFolder('%s').GetTask('%s'); $instances=$task.GetInstances(0); for($index=1;$index -le $instances.Count;$index++){ $instances.Item($index).Stop() }`, comTaskFolder, taskName)
+	case "/enable", "/disable":
+		enabled := "$false"
+		if action == "/enable" {
+			enabled = "$true"
+		}
+		operation = fmt.Sprintf(`$task=$service.GetFolder('%s').GetTask('%s'); $task.Enabled=%s`, comTaskFolder, taskName, enabled)
 	case "/delete":
 		operation = fmt.Sprintf(`$service.GetFolder('%s').DeleteTask('%s',0)`, comTaskFolder, taskName)
 	default:
@@ -454,4 +480,218 @@ func normaliseWindowsRefreshInterval(interval int) int {
 		return 1800
 	}
 	return interval
+}
+
+// Preparation uses only the selected registrations and authenticated native
+// current-subject roots; shell profile variables never establish authority.
+var windowsSelectedRoots = userdirs.Default
+var windowsSelectedSID = currentWindowsServiceSID
+var windowsSelectedExecutable = resolveWindowsExecutable
+var windowsSelectedRunner = runWindowsSchtasks
+
+func defaultSelectedWindowsServiceLifecycle(ctx context.Context, action serviceAction, selection serviceSelection) (*serviceLifecycle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	roots, err := windowsSelectedRoots()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	sid, err := windowsSelectedSID()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	executable, err := windowsSelectedExecutable()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWindowsServiceExecutable(executable); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lifecycle := newWindowsServiceLifecycle(executable, sid, roots, windowsSelectedRunner, queryWindowsTaskState, inspectWindowsProxyRuntime)
+	p := lifecycle.Platform.(*windowsTaskServicePlatform)
+	if err := p.selectedReady(ctx); err != nil {
+		return nil, err
+	}
+	registered := ""
+	for _, kind := range windowsSelectedKinds(selection) {
+		d, exists, err := p.queryDefinition(ctx, kind)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			continue
+		}
+		candidate := d.Actions.Exec.Command
+		if err := validateWindowsTaskDefinition(d, kind, sid, candidate, p.interval()); err != nil {
+			return nil, err
+		}
+		if err := p.validateSelectedExecutable(candidate); err != nil {
+			return nil, err
+		}
+		if registered != "" && !equalWindowsPath(registered, candidate) {
+			return nil, installstate.ErrOwnershipConflict
+		}
+		registered = candidate
+	}
+	if registered != "" {
+		if action == serviceInstall && !equalWindowsPath(executable, registered) {
+			return nil, installstate.ErrOwnershipConflict
+		}
+		p.executable = registered
+		lifecycle.Executable = registered
+	}
+	return lifecycle, ctx.Err()
+}
+func inspectSelectedWindowsProxy(ctx context.Context, executable, taskPath string, roots userdirs.Roots) componentStatus {
+	status := componentStatus{}
+	state, err := queryWindowsTaskState(ctx, taskPath)
+	if err != nil || ctx.Err() != nil {
+		return status
+	}
+	status.Running = state.Running
+	if !state.Running {
+		return status
+	}
+	config, err := proxy.LoadExistingConfigAt(proxy.PathsForRoots(roots))
+	if err != nil || config == nil {
+		return status
+	}
+	output, err := runWindowsNetstat(ctx)
+	if err != nil {
+		return status
+	}
+	pid, err := parseWindowsListeningPID(output, config.Port)
+	if err != nil {
+		return status
+	}
+	action, err := readWindowsServiceProcessIdentity(pid)
+	if err != nil || len(state.EnginePIDs) != 1 {
+		return status
+	}
+	engine, err := readWindowsServiceProcessIdentity(state.EnginePIDs[0])
+	if err != nil {
+		return status
+	}
+	sid, err := currentWindowsServiceSID()
+	if err != nil || !windowsTaskOwnsProcess(state, action, engine, executable, sid) {
+		return status
+	}
+	status.PID = int(pid)
+	status.LiveExecutable = action.Executable
+	status.Listener = fmt.Sprintf("127.0.0.1:%d", config.Port)
+	if !probeSelectedLinuxProxyHealth(ctx, status.Listener, config.LocalToken) {
+		return status
+	}
+	confirmed, err := queryWindowsTaskState(ctx, taskPath)
+	if err != nil {
+		return status
+	}
+	nextAction, err := readWindowsServiceProcessIdentity(pid)
+	if err != nil {
+		return status
+	}
+	nextEngine, err := readWindowsServiceProcessIdentity(engine.PID)
+	if err != nil || nextAction != action || nextEngine != engine || !windowsTaskOwnsProcess(confirmed, nextAction, nextEngine, executable, sid) {
+		return status
+	}
+	status.Healthy = ctx.Err() == nil
+	return status
+}
+func forceWindowsServiceRefresh(ctx context.Context, executable string, roots userdirs.Roots) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	nativeRoots, err := userdirs.Default()
+	if err != nil || nativeRoots != roots {
+		return errServiceUnavailable
+	}
+	held, err := (fsutil.OSFileSystem{}).OpenRetainedRegularFileNoFollow(executable, fsutil.RetainedRegularFileExecutableDenyReplacement)
+	if err != nil {
+		return err
+	}
+	defer held.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return recordServiceRefreshContext(ctx, executable, roots, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		command := exec.CommandContext(ctx, executable, "refresh")
+		command.Dir = windowsDirectory(executable)
+		command.Env = append(os.Environ(), "CQ_SERVICE_REFRESH_DIRECT=1")
+		command.Stdin = nil
+		command.Stdout = nil
+		command.Stderr = nil
+		err := command.Run()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}, time.Now)
+}
+func runWindowsServiceRefresh(run func() error) error {
+	if os.Getenv("CQ_SERVICE_REFRESH_DIRECT") == "1" {
+		_ = os.Unsetenv("CQ_SERVICE_REFRESH_DIRECT")
+		return run()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		return run()
+	}
+	sid, err := currentWindowsServiceSID()
+	if err != nil {
+		return run()
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		return run()
+	}
+	p := newWindowsServiceLifecycle(executable, sid, roots, runWindowsSchtasks, queryWindowsTaskState, inspectWindowsProxyRuntime).Platform.(*windowsTaskServicePlatform)
+	if err := p.PreflightSelected(ctx, executable, serviceRefresh); err != nil {
+		return run()
+	}
+	state, err := queryWindowsTaskState(ctx, windowsRefreshTaskPath)
+	if err != nil || len(state.EnginePIDs) != 1 {
+		return run()
+	}
+	action, err := readWindowsServiceProcessIdentity(uint32(os.Getpid()))
+	if err != nil {
+		return run()
+	}
+	engine, err := readWindowsServiceProcessIdentity(state.EnginePIDs[0])
+	if err != nil || !windowsTaskOwnsProcess(state, action, engine, executable, sid) {
+		return run()
+	}
+	confirmed, err := queryWindowsTaskState(ctx, windowsRefreshTaskPath)
+	if err != nil {
+		return run()
+	}
+	next, err := readWindowsServiceProcessIdentity(action.PID)
+	if err != nil || next != action {
+		return run()
+	}
+	nextEngine, err := readWindowsServiceProcessIdentity(engine.PID)
+	if err != nil || nextEngine != engine || !windowsTaskOwnsProcess(confirmed, next, nextEngine, executable, sid) {
+		return run()
+	}
+	return recordServiceRefresh(executable, roots, run, time.Now)
 }

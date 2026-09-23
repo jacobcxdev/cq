@@ -526,7 +526,12 @@ func (lifecycle *serviceLifecycle) validateWithoutOwner() error {
 	if lifecycle == nil || lifecycle.Platform == nil || lifecycle.Store == nil {
 		return fmt.Errorf("service lifecycle is unavailable")
 	}
-	if lifecycle.Executable == "" || !filepath.IsAbs(lifecycle.Executable) || filepath.Clean(lifecycle.Executable) != lifecycle.Executable {
+	_, windowsPlatform := lifecycle.Platform.(*windowsTaskServicePlatform)
+	validExecutable := filepath.IsAbs(lifecycle.Executable) && filepath.Clean(lifecycle.Executable) == lifecycle.Executable
+	if windowsPlatform {
+		validExecutable = validateAbsoluteWindowsExecutable(lifecycle.Executable) == nil
+	}
+	if lifecycle.Executable == "" || !validExecutable {
 		return fmt.Errorf("service executable must be a clean absolute path")
 	}
 	if lifecycle.Version == "" {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,18 +25,40 @@ type serviceRefreshCompletion struct {
 }
 
 func recordServiceRefresh(executable string, roots userdirs.Roots, run func() error, now func() time.Time) error {
+	return recordServiceRefreshContext(context.Background(), executable, roots, run, now)
+}
+func recordServiceRefreshContext(ctx context.Context, executable string, roots userdirs.Roots, run func() error, now func() time.Time) error {
+	return recordServiceRefreshContextWithFS(ctx, fsutil.OSFileSystem{}, executable, roots, run, now)
+}
+func recordServiceRefreshContextWithFS(ctx context.Context, fs fsutil.FileSystem, executable string, roots userdirs.Roots, run func() error, now func() time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Open the authority before execution and retain it through receipt publication.
-	fs := fsutil.OSFileSystem{}
+	inspector, ok := fs.(fsutil.SecurePathInspector)
+	if !ok {
+		return fsutil.ErrSecureCapabilityUnavailable
+	}
+	opener, ok := fs.(fsutil.SecureDirectoryOpener)
+	if !ok {
+		return fsutil.ErrSecureCapabilityUnavailable
+	}
 	if err := fsutil.EnsureSecureDirectory(fs, roots.State); err != nil {
 		return err
 	}
-	directory, err := fs.OpenSecureDirectory(roots.State)
+	directory, err := opener.OpenSecureDirectory(roots.State)
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	started := now().UTC()
 	runErr := run()
+	if err := ctx.Err(); err != nil {
+		return errors.Join(runErr, err)
+	}
 	completed := now().UTC()
 	exit := 0
 	if runErr != nil {
@@ -46,10 +69,18 @@ func recordServiceRefresh(executable string, roots userdirs.Roots, run func() er
 	if err != nil {
 		return errors.Join(runErr, err)
 	}
-	if err := fsutil.ValidateSecureDirectoryHandle(fs, directory, roots.State); err != nil {
+	if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, roots.State); err != nil {
 		return errors.Join(runErr, err)
 	}
-	err = fsutil.SecureAtomicWriteInDirectoryChecked(fs, directory, serviceRefreshCompletionName, append(data, '\n'), func() error { return fsutil.ValidateSecureDirectoryHandle(fs, directory, roots.State) })
+	if err := ctx.Err(); err != nil {
+		return errors.Join(runErr, err)
+	}
+	err = fsutil.SecureAtomicWriteInDirectoryChecked(inspector, directory, serviceRefreshCompletionName, append(data, '\n'), func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fsutil.ValidateSecureDirectoryHandle(inspector, directory, roots.State)
+	})
 	return errors.Join(runErr, err)
 }
 func readServiceRefreshCompletion(executable string, roots userdirs.Roots, now time.Time) (serviceRefreshCompletion, error) {
