@@ -135,7 +135,25 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 		out.WriteString(TerminalLine(options, 2, Span{Text: primary.Message}))
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}, Span{Text: " · Command: "}, Span{Text: command, Role: Identity}))
 	} else {
-		out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + primary.Message}))
+		if primary.Code == "models_clone_not_found" {
+			// The model adapter owns this fixed recovery clause. Keep its
+			// diagnostic and machine text intact while giving the commands a
+			// separate, copyable terminal line.
+			before, after, found := strings.Cut(primary.Message, "; run ")
+			if found {
+				out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + before + ";"}))
+				first, second, commands := strings.Cut(after, " and ")
+				if commands && strings.HasPrefix(first, "cq models ") && strings.HasPrefix(second, "cq models ") {
+					out.WriteString(TerminalLine(options, 2, Span{Text: "run "}, Span{Text: first, Role: Identity}, Span{Text: " and "}, Span{Text: strings.TrimSuffix(second, "."), Role: Identity}, Span{Text: "."}))
+				} else {
+					out.WriteString(TerminalLine(options, 2, Span{Text: "run " + after}))
+				}
+			} else {
+				out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + primary.Message}))
+			}
+		} else {
+			out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + primary.Message}))
+		}
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}))
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Command: "}, Span{Text: command, Role: Identity}))
 	}

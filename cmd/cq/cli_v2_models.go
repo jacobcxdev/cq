@@ -134,7 +134,9 @@ func handleV2ModelsWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 		for _, r := range rows {
 			fmt.Fprintf(&human, "%s\t%s\t%s\n", r.ID, r.Provider, r.Source)
 		}
-		return modelsData(cli.Outcome{Human: human.String()}, struct {
+		outcome := cli.Outcome{Human: human.String()}
+		outcome.Terminal = func(o cli.TerminalOptions) string { return terminalModelsList(rows, providerName, o) }
+		return modelsData(outcome, struct {
 			Models   []ModelEntry `json:"models"`
 			Provider *string      `json:"provider"`
 		}{rows, modelString(providerName)})
@@ -213,6 +215,9 @@ func handleV2ModelsWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 			source = *selection.SourceID
 		}
 		outcome.Human = fmt.Sprintf("Overlay saved: %s/%s\nMetadata source: %s (%s)\nPublication: %s\n", providerName, id, source, selection.Mode, publication.Status)
+		outcome.Terminal = func(o cli.TerminalOptions) string {
+			return terminalModelsOverlayAdd(saved, selection, publication, outcome.ExitCode, o)
+		}
 		return modelsData(outcome, struct {
 			Model        ModelEntry                `json:"model"`
 			OverlaySaved bool                      `json:"overlay_saved"`
@@ -221,6 +226,9 @@ func handleV2ModelsWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 		}{saved, true, selection, publication})
 	case "models overlay remove":
 		outcome.Human = fmt.Sprintf("Overlay removed: %s/%s\nPublication: %s\n", providerName, id, publication.Status)
+		outcome.Terminal = func(o cli.TerminalOptions) string {
+			return terminalModelsOverlayRemove(providerName, id, publication, outcome.ExitCode, o)
+		}
 		return modelsData(outcome, struct {
 			Provider       string           `json:"provider"`
 			ID             string           `json:"id"`
@@ -259,6 +267,14 @@ func handleV2ModelsWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 			return removed[i].ID < removed[j].ID
 		})
 		outcome.Human = fmt.Sprintf("Pruned %d overlays.\n", len(removed))
+		if outcome.ExitCode == 0 || len(removed) > 0 {
+			outcome.Terminal = func(o cli.TerminalOptions) string {
+				return terminalModelsOverlayPrune(removed, publication, outcome.ExitCode, o)
+			}
+		} else {
+			// A failed refresh or save provides no pruning receipt.
+			outcome.Terminal = func(cli.TerminalOptions) string { return "" }
+		}
 		return modelsData(outcome, struct {
 			Removed      []ModelIdentity  `json:"removed"`
 			RemovedCount int              `json:"removed_count"`
@@ -271,6 +287,9 @@ func handleV2ModelsWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 			fmt.Fprintf(&human, "%s: %s\n", target.Target, target.Status)
 		}
 		outcome.Human = human.String()
+		if (outcome.ExitCode == 0 || publication.Status != "complete") && (publication.Status != "failed" || len(publication.Targets) > 0) {
+			outcome.Terminal = func(o cli.TerminalOptions) string { return terminalModelsPublication(publication, o) }
+		}
 		return modelsData(outcome, struct {
 			Publication ModelPublication `json:"publication"`
 		}{publication})
