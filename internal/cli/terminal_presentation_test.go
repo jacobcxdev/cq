@@ -32,6 +32,27 @@ func TestDiagnosticPartialFixture(t *testing.T) {
 	}
 }
 
+func TestDiagnosticHeadingContinuation(t *testing.T) {
+	message := "Credential endpoint migration precondition failed: authority, identity or migration state does not match."
+	want := "Error · Credential endpoint migration precondition failed: authority, identity or migration state\n  does not match.\n  Code: endpoint_conflict\n  Command: cq codex proxy credential-endpoint legacy prepare\n"
+	for _, colour := range []bool{false, true} {
+		for _, width := range []int{20, 40, 80, 100, 120} {
+			got := terminalDiagnostics("codex proxy credential-endpoint legacy prepare", Outcome{ExitCode: 8, Errors: []Diagnostic{{Code: "endpoint_conflict", Message: message}}}, TerminalOptions{Width: width, Colour: colour})
+			if width >= 100 && ansi.Strip(got) != want {
+				t.Fatalf("heading at width %d: %q", width, ansi.Strip(got))
+			}
+			for _, line := range strings.Split(got, "\n") {
+				if ansi.StringWidth(line) > min(width, 100) {
+					t.Fatalf("heading exceeds width %d: %q", width, line)
+				}
+			}
+			if colour && !strings.Contains(got, "\x1b[31mError\x1b[0m") {
+				t.Fatalf("heading lost failure role: %q", got)
+			}
+		}
+	}
+}
+
 func TestDiagnosticStreamsAndPureBuiltins(t *testing.T) {
 	for _, outColour := range []bool{false, true} {
 		for _, errColour := range []bool{false, true} {

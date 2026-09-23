@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 const cliSchemaVersion = 2
@@ -93,6 +95,30 @@ func terminalVersion(data versionData, options TerminalOptions) string {
 		TerminalLine(options, 2, Span{Text: "CLI schema  "}, Span{Text: fmt.Sprint(data.CLISchemaVersion), Role: Identity})
 }
 
+// terminalDiagnosticHeading gives wrapped message continuations the same
+// two-cell inset as the diagnostic details below them.
+func terminalDiagnosticHeading(options TerminalOptions, marker Span, message string) string {
+	line := TerminalLine(options, 0, marker, Span{Text: " · " + message})
+	parts := strings.Split(strings.TrimSuffix(line, "\n"), "\n")
+	if len(parts) == 1 || bodyWidth(options) <= 2 {
+		return line
+	}
+	var out strings.Builder
+	out.WriteString(parts[0])
+	out.WriteByte('\n')
+	for _, part := range parts[1:] {
+		for _, wrapped := range strings.Split(ansi.Wrap(part, bodyWidth(options)-2, ""), "\n") {
+			if ansi.StringWidth(wrapped) > bodyWidth(options)-2 && ansi.StringWidth(strings.TrimRight(ansi.Strip(wrapped), " ")) <= bodyWidth(options)-2 {
+				wrapped = ansi.Truncate(wrapped, bodyWidth(options)-2, "")
+			}
+			out.WriteString("  ")
+			out.WriteString(wrapped)
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
+}
+
 // terminalDiagnostics groups structured causes without interpreting message text.
 // The exit code alone cannot establish a successful or rolled-back operation.
 func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) string {
@@ -134,7 +160,7 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 		out.WriteByte('\n')
 	}
 	if primary.Code == "unknown_command" {
-		out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · Unknown command"}))
+		out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, "Unknown command"))
 		out.WriteString(TerminalLine(options, 2, Span{Text: primary.Message}))
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}, Span{Text: " · Command: "}, Span{Text: command, Role: Identity}))
 	} else {
@@ -144,7 +170,7 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 			// separate, copyable terminal line.
 			before, after, found := strings.Cut(primary.Message, "; run ")
 			if found {
-				out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + before + ";"}))
+				out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, before+";"))
 				first, second, commands := strings.Cut(after, " and ")
 				if commands && strings.HasPrefix(first, "cq models ") && strings.HasPrefix(second, "cq models ") {
 					out.WriteString(TerminalLine(options, 2, Span{Text: "run "}, Span{Text: first, Role: Identity}, Span{Text: " and "}, Span{Text: strings.TrimSuffix(second, "."), Role: Identity}, Span{Text: "."}))
@@ -152,10 +178,10 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 					out.WriteString(TerminalLine(options, 2, Span{Text: "run " + after}))
 				}
 			} else {
-				out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + primary.Message}))
+				out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, primary.Message))
 			}
 		} else {
-			out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · " + primary.Message}))
+			out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, primary.Message))
 		}
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}))
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Command: "}, Span{Text: command, Role: Identity}))
