@@ -13,7 +13,7 @@ fail() {
 
 [ "$(uname -s)" = Darwin ] || fail "macOS is required"
 
-for command in gh git go lsof; do
+for command in gh git go lsof cq jq; do
 	command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 
@@ -57,10 +57,9 @@ production_snapshot() {
 	pid=$(lsof -nP -tiTCP:"$production_port" -sTCP:LISTEN 2>/dev/null || true)
 	mode=
 	if [ -n "$pid" ]; then
-		mode=$(
-			cq proxy rescue status 2>/dev/null |
-				sed -n 's/.*"mode":"\([^"]*\)".*/\1/p'
-		) || fail "cannot read production proxy mode"
+        snapshot_json=$(cq proxy rescue status --json 2>/dev/null) || fail "cannot read production proxy mode"
+        mode=$(printf '%s' "$snapshot_json" |
+            jq -er 'select(.schema_version == 2 and .ok == true) | .data.mode | select(. == "normal" or . == "rescue_draining" or . == "rescue" or . == "recovering" or . == "blocked")') || fail "cannot decode production proxy mode"
 		[ -n "$mode" ] || fail "cannot decode production proxy mode"
 	fi
 	printf '%s\n%s\n' "$pid" "$mode"

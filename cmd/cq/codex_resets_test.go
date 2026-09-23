@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/history"
@@ -188,70 +187,6 @@ func newCodexResetCLIFixture(input io.Reader) codexResetCLIFixture {
 	}
 }
 
-func parseCodexResetCLI(t *testing.T, args ...string) (*CLI, *kong.Context, error) {
-	t.Helper()
-	cli := &CLI{}
-	parser, err := kong.New(cli, kong.Writers(io.Discard, io.Discard), kong.Exit(func(int) {}))
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-	parsed, err := parser.Parse(args)
-	return cli, parsed, err
-}
-
-func TestCLIParsesCodexResets(t *testing.T) {
-	tests := []struct {
-		args       []string
-		command    string
-		reference  string
-		credit     *string
-		yes        bool
-		jsonOutput bool
-	}{
-		{args: []string{"codex", "resets", "list"}, command: "codex resets list"},
-		{args: []string{"codex", "resets", "list", "user@example.com"}, command: "codex resets list <account-reference>", reference: "user@example.com"},
-		{args: []string{"codex", "resets", "recommend"}, command: "codex resets recommend"},
-		{args: []string{"codex", "resets", "use", "user@example.com"}, command: "codex resets use <account-reference>", reference: "user@example.com"},
-		{args: []string{"codex", "resets", "use", "user@example.com", "--credit", "credit-1"}, command: "codex resets use <account-reference>", reference: "user@example.com", credit: stringPointer("credit-1")},
-		{args: []string{"codex", "resets", "use", "user@example.com", "--credit", "credit-1", "--yes"}, command: "codex resets use <account-reference>", reference: "user@example.com", credit: stringPointer("credit-1"), yes: true},
-		{args: []string{"--json", "codex", "resets", "recommend"}, command: "codex resets recommend", jsonOutput: true},
-	}
-
-	for _, test := range tests {
-		cli, parsed, err := parseCodexResetCLI(t, test.args...)
-		if err != nil {
-			t.Fatalf("Parse(%v): %v", test.args, err)
-		}
-		if got := parsed.Command(); got != test.command {
-			t.Fatalf("Parse(%v) command = %q, want %q", test.args, got, test.command)
-		}
-		if test.command == "codex resets list <account-reference>" && cli.Codex.Resets.List.Reference != test.reference {
-			t.Fatalf("list reference = %q", cli.Codex.Resets.List.Reference)
-		}
-		if strings.HasPrefix(test.command, "codex resets use") {
-			if cli.Codex.Resets.Use.Reference != test.reference || !equalStringPointers(cli.Codex.Resets.Use.Credit, test.credit) || cli.Codex.Resets.Use.Yes != test.yes {
-				t.Fatalf("use options = %+v", cli.Codex.Resets.Use)
-			}
-		}
-		if cli.JSON != test.jsonOutput {
-			t.Fatalf("JSON = %t, want %t", cli.JSON, test.jsonOutput)
-		}
-	}
-}
-
-func TestCLIRejectsInvalidCodexResetsInvocations(t *testing.T) {
-	for _, args := range [][]string{
-		{"codex", "resets", "recommend", "user@example.com"},
-		{"codex", "resets", "use"},
-		{"codex", "resets", "use", "user@example.com", "extra"},
-		{"codex", "resets", "use", "user@example.com", "--unknown"},
-	} {
-		if _, _, err := parseCodexResetCLI(t, args...); err == nil {
-			t.Fatalf("Parse(%v) error = nil", args)
-		}
-	}
-}
-
 func TestRunCodexResetsListRendersTTYAndJSON(t *testing.T) {
 	fixture := newCodexResetCLIFixture(strings.NewReader(""))
 	if err := runCodexResetsList(context.Background(), CodexResetsListCmd{}, false, fixture.deps); err != nil {
@@ -359,30 +294,6 @@ func TestRunCodexResetsUseRejectsEmptyCredit(t *testing.T) {
 	}
 	if fixture.backend.consumeCalls != 0 {
 		t.Fatal("empty credit consumed")
-	}
-}
-
-func TestDispatchCodexResetsPreservesGlobalJSON(t *testing.T) {
-	original := codexResetsDependenciesFactory
-	t.Cleanup(func() { codexResetsDependenciesFactory = original })
-
-	for _, args := range [][]string{
-		{"--json", "codex", "resets", "list"},
-		{"--json", "codex", "resets", "recommend"},
-		{"--json", "codex", "resets", "use", "user@example.com", "--yes"},
-	} {
-		fixture := newCodexResetCLIFixture(panicReader{})
-		codexResetsDependenciesFactory = func(context.Context) (codexResetsDependencies, func(), error) {
-			return fixture.deps, func() {}, nil
-		}
-		cli, parsed, err := parseCodexResetCLI(t, args...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := dispatch(parsed, cli); err != nil {
-			t.Fatalf("dispatch(%v): %v", args, err)
-		}
-		assertPublicCodexResetJSON(t, fixture.out.Bytes())
 	}
 }
 

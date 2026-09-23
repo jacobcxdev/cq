@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,41 +18,35 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/cli"
+	"github.com/jacobcxdev/cq/internal/compat"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/history"
+	"github.com/jacobcxdev/cq/internal/httputil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
-	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 func resetProductionFixture(t *testing.T) (*codexprov.ManagedStore, codexprov.ManagedRecord, codexprov.RemovalJournal) {
 	t.Helper()
-	temp, err := filepath.EvalSymlinks("/tmp")
+	root, err := os.MkdirTemp(v2FixtureTempRoot(), "cqr-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := os.MkdirTemp(temp, "cqr-")
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(root) })
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "c"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "k"))
-	store, err := codexprov.NewManagedStore(fsutil.OSFileSystem{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	fs := resetProductionFS{home: root}
+	store := &codexprov.ManagedStore{FS: fs, Home: root, Random: rand.Reader, EnsureEpoch: func() error {
+		return compat.EnsureEpoch(fs, filepath.Join(root, "state", "compatibility-epoch"), compat.CurrentEpoch)
+	}}
 	token := fakeRefreshCodexJWT("synthetic@example.test", "account", "user", time.Now().Add(time.Hour))
 	record, err := store.SaveNew(codexprov.LoginCredential{Tokens: auth.CodexTokenResponse{AccessToken: token, IDToken: token, RefreshToken: "synthetic-refresh"}, Claims: auth.CodexClaims{AccountID: "account", UserID: "user", Email: "synthetic@example.test"}, CreatedAt: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots, err := userdirs.Default(userdirs.StateRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store, record, codexprov.RemovalJournal{FS: store.FS, Store: store, StateDir: roots.State}
+	return store, record, codexprov.RemovalJournal{FS: store.FS, Store: store, StateDir: filepath.Join(root, "state")}
 }
 func resetProductionResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
@@ -126,7 +121,7 @@ func TestCLIV2ResetProductionRefreshAuthority(t *testing.T) {
 					defer func() { releaseWorker(); owner.Close() }()
 				} else if remote {
 					var err error
-					owner, err = codexprov.OpenDefaultCanonicalCredentialRefreshControl(context.Background(), store.FS, client)
+					owner, err = openResetProductionControl(context.Background(), store, client)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -142,9 +137,9 @@ func TestCLIV2ResetProductionRefreshAuthority(t *testing.T) {
 				defer cancel()
 				factory := func(ctx context.Context, recommend bool) (v2ResetDependencies, error) {
 					if !remote && owner != nil {
-						return newV2ResetDependenciesWithControl(recommend, store.FS, client, owner)
+						return newV2ResetDependenciesWithControlAt(recommend, store.FS, client, owner, store.Home, filepath.Join(store.Home, "cache"))
 					}
-					return newV2ResetDependenciesWithClient(ctx, recommend, store.FS, client)
+					return resetProductionDependencies(ctx, recommend, store, client)
 				}
 				completed := make(chan cli.Outcome, 1)
 				go func() {
@@ -266,13 +261,13 @@ func TestCLIV2ResetProductionDiagnostics(t *testing.T) {
 				var deps v2ResetDependencies
 				var err error
 				if strings.Contains(mode, "history") {
-					control, openErr := codexprov.OpenDefaultCanonicalCredentialRefreshControl(ctx, store.FS, client)
+					control, openErr := openResetProductionControl(ctx, store, client)
 					if openErr != nil {
 						return deps, openErr
 					}
-					deps, err = newV2ResetDependenciesWithControl(recommend, resetProductionHistoryFS{store.FS, entered, release}, client, control)
+					deps, err = newV2ResetDependenciesWithControlAt(recommend, resetProductionHistoryFS{store.FS, entered, release}, client, control, store.Home, filepath.Join(store.Home, "cache"))
 				} else {
-					deps, err = newV2ResetDependenciesWithClient(ctx, recommend, store.FS, client)
+					deps, err = resetProductionDependencies(ctx, recommend, store, client)
 				}
 				if err != nil {
 					return deps, err
@@ -378,4 +373,35 @@ func (h resetProductionHistoryWait) UpdateAndGetEstimatesObserved(ctx context.Co
 		return observed.UpdateAndGetEstimatesObserved(ctx, rows, now, warning)
 	}
 	return h.CodexResetHistory.UpdateAndGetEstimates(ctx, rows, now)
+}
+
+// Override the native home query as well as all CQ roots, including on Windows.
+type resetProductionFS struct {
+	fsutil.OSFileSystem
+	home string
+}
+
+func (f resetProductionFS) UserHomeDir() (string, error) { return f.home, nil }
+func openResetProductionControl(ctx context.Context, store *codexprov.ManagedStore, client httputil.Doer) (*codexprov.CredentialControl, error) {
+	state := filepath.Join(store.Home, "state")
+	coordinator, err := codexprov.NewCredentialCoordinator(store, state)
+	if err != nil {
+		return nil, err
+	}
+	coordinator.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+		return auth.RefreshCodexToken(ctx, client, token)
+	}
+	return codexprov.OpenCredentialControlPrepared(ctx, codexprov.DefaultCredentialControlPath(state), coordinator, func(ctx context.Context, _ *codexprov.CredentialCoordinator, cap codexprov.CredentialOwnerCapability) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return cap.AssertOwner()
+	})
+}
+func resetProductionDependencies(ctx context.Context, recommend bool, store *codexprov.ManagedStore, client httputil.Doer) (v2ResetDependencies, error) {
+	control, err := openResetProductionControl(ctx, store, client)
+	if err != nil {
+		return v2ResetDependencies{}, err
+	}
+	return newV2ResetDependenciesWithControlAt(recommend, store.FS, client, control, store.Home, filepath.Join(store.Home, "cache"))
 }

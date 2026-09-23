@@ -142,7 +142,15 @@ rewrite_cask "$previous_cask" "$previous_archive" "$validation_cask"
 
 assert_installed() {
   local expected_version=$1
-  [[ "$($installed_cq --version)" == "v$expected_version" ]]
+  local stage=$2
+  if [[ "$stage" == previous ]]; then
+    local actual_version
+    actual_version=$("$installed_cq" --version)
+    actual_version=${actual_version#cq }
+    [[ "${actual_version#v}" == "$expected_version" ]]
+  else
+    "$installed_cq" version --json | jq -e --arg version "$expected_version" 'select(.schema_version == 2 and .ok == true and .command == "version") | .data.version == $version' >/dev/null
+  fi
   if xattr -p com.apple.quarantine "$installed_cq" >/dev/null 2>&1; then
     echo "Homebrew Cask left cq quarantined" >&2
     return 1
@@ -151,15 +159,27 @@ assert_installed() {
   local live_executable=''
   for _ in $(seq 1 60); do
     status_json=$($installed_cq service status --json 2>/dev/null) || true
+    if [[ "$stage" == previous ]]; then
+      if jq -e --arg executable "$installed_cq" \
+        'select(.schema_version == 1) | .owner == "homebrew" and .proxy.running and .proxy.healthy and .refresh.healthy and .proxy.configured_executable == $executable and .proxy.listener == "127.0.0.1:19280" and (.proxy.pid > 0)' <<<"$status_json" >/dev/null 2>&1; then
+        live_executable=$(jq -er '.proxy.live_executable' <<<"$status_json") || true
+        if [[ -n "$live_executable" && -e "$live_executable" && "$live_executable" -ef "$installed_cq" ]]; then return 0; fi
+      fi
+    else
     if jq -e \
       --arg executable "$installed_cq" \
-      '.owner == "homebrew" and .proxy.running and .proxy.healthy and .refresh.healthy and
-       .proxy.configured_executable == $executable and
-       .proxy.listener == "127.0.0.1:19280" and (.proxy.pid > 0)' <<<"$status_json" >/dev/null 2>&1; then
-      live_executable=$(jq -er '.proxy.live_executable' <<<"$status_json") || true
-      if [[ -n "$live_executable" && -e "$live_executable" && "$live_executable" -ef "$installed_cq" ]]; then
+      'select(.schema_version == 2 and .ok == true) |
+       (.data.components | map({key: .id, value: .}) | from_entries) |
+       .proxy.owner == "package" and .proxy.state == "running" and .proxy.healthy and
+       .["token-refresh"].healthy and .proxy.executable == $executable and (.proxy.pid > 0)' <<<"$status_json" >/dev/null 2>&1; then
+      local pid
+      pid=$(jq -er '.data.components[] | select(.id == "proxy") | .pid' <<<"$status_json") || true
+      live_executable=$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1) || true
+      if [[ -n "$live_executable" && -e "$live_executable" && "$live_executable" -ef "$installed_cq" ]] &&
+        lsof -a -p "$pid" -iTCP@127.0.0.1:19280 -sTCP:LISTEN -t >/dev/null 2>&1; then
         return 0
       fi
+    fi
     fi
     sleep 1
   done
@@ -175,11 +195,11 @@ assert_installed() {
 }
 
 HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"
-assert_installed "$previous_version"
+assert_installed "$previous_version" previous
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"
 HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
-assert_installed "$current_version"
+assert_installed "$current_version" candidate
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
 
 find "$installed_cq" -depth -delete

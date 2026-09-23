@@ -242,11 +242,27 @@ def bash_completion():
         shell_case_function('_cq_path_value', paths),
     ]
     body = r'''_cq_complete() {
-  local cur="${COMP_WORDS[COMP_CWORD]}" path="" word candidate expect="" canonical="" used=$'\n'
+  # Bash 4+ splits adjacent assignments at '='; Bash 3 retains one word.
+  # Rejoin only option assignments before --, without changing word breaks or
+  # consuming a whitespace-separated literal '=' positional/value.
+  local -a words=()
+  local i last stopped=0 line="${COMP_LINE:0:COMP_POINT}"
+  for ((i=0; i<=COMP_CWORD; i++)); do
+    last=$((${#words[@]}-1))
+    if [[ "$stopped" -eq 0 && "${COMP_WORDS[i]}" == = && "$last" -ge 0 && "${words[last]}" == --?* && "$line" == *"${words[last]}="* ]]; then
+      words[last]+="="
+      if ((i<COMP_CWORD)); then ((i++)); words[last]+="${COMP_WORDS[i]}"; fi
+    else
+      words+=("${COMP_WORDS[i]}")
+      [[ "${COMP_WORDS[i]}" == -- ]] && stopped=1
+    fi
+  done
+  local cword=$((${#words[@]}-1))
+  local cur="${words[cword]}" path="" word candidate expect="" canonical="" used=$'\n'
   local inline_option="" inline_prefix=""
-  local after_options=0 positional=0 i
-  for ((i=1; i<COMP_CWORD; i++)); do
-    word="${COMP_WORDS[i]}"
+  local after_options=0 positional=0
+  for ((i=1; i<cword; i++)); do
+    word="${words[i]}"
     if [[ -n "$expect" ]]; then expect=""; continue; fi
     if [[ "$word" == -- && "$after_options" -eq 0 ]]; then after_options=1; continue; fi
     if [[ "$(_cq_kind "$path")" != command ]]; then

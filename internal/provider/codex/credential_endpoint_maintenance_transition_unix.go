@@ -1375,7 +1375,11 @@ func (namespace *legacyCredentialMaintenanceNamespace) confirmTransitionAbsent(c
 	if err != nil {
 		return err
 	}
-	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+	defer func() {
+		if closeErr := lock.Close(); closeErr != nil {
+			resultErr = fmt.Errorf("release endpoint transition lock: %w", closeErr)
+		}
+	}()
 	if err := namespace.validateHeldLock(ticket.Lock); err != nil {
 		return err
 	}

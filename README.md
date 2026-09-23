@@ -86,9 +86,9 @@ install Python or optional integrations.
 cq                                # Check Claude, Codex, and Gemini
 cq check claude codex             # Check selected providers
 cq check gemini                   # Check Gemini through Antigravity HTTP APIs
-cq --json                         # Machine-readable report
-cq --refresh                      # Bypass quota cache
-cq --version
+cq check --json                   # Machine-readable report
+cq check --fresh                  # Bypass quota cache
+cq version
 ```
 
 `check` accepts `claude`, `codex`, and `gemini`. Provider fetches run concurrently. Multi-account work also runs concurrently within each provider.
@@ -105,6 +105,33 @@ cq proxy --help
 cq models --help
 cq operation --help
 ```
+
+## CLI 1.0.0 migration
+
+The public CLI uses one canonical grammar and JSON envelope schema 2. Supported deprecated spellings remain until 2.0.0 and warn on stderr; they do not retain old JSON or exit-code contracts. Help and version are pure, and invalid input is rejected before IO.
+
+| Previous spelling | Canonical spelling |
+| --- | --- |
+| `cq codex accounts` | `cq codex account list` |
+| `cq claude switch EMAIL` | `cq claude account activate EMAIL` |
+| `cq proxy reserve status` | `cq codex proxy reserve status` |
+| `cq proxy policy status` | `cq codex proxy policy show` |
+| `cq proxy default codex ACCOUNT` | `cq codex proxy fallback set ACCOUNT` |
+| `cq agent install` | `cq service install --component token-refresh` |
+| `cq proxy restart` | `cq service restart --component proxy` |
+| `cq refresh` | `cq auth refresh` |
+
+Frozen package hooks and installed launch arguments remain unchanged. On Windows, the snapshot-based Go installer requires `cq service stop --component proxy` or `cq service stop --component token-refresh` before upgrade/uninstall if an auxiliary exists or a disabled primary is still running. Direct WiX/legacy service uninstall uses its owned cleanup path instead of installer snapshots.
+
+Install shell completions from the candidate binary:
+
+```sh
+cq completion bash > ~/.local/share/bash-completion/completions/cq
+cq completion zsh > ~/.zfunc/_cq
+cq completion fish > ~/.config/fish/completions/cq.fish
+```
+
+Create the destination directory first. Bash must load its completion directory; add `~/.zfunc` to Zsh `fpath` before `compinit`. Completion never invokes credentials, network or services.
 
 ## Capability map
 
@@ -131,7 +158,7 @@ cq operation --help
 
 ### Cache and history
 
-Successful quota rows are cached by provider. Default TTL is 30 seconds; `--refresh` bypasses it. If one account has a transient fetch failure and a matching usable cached row exists, cq shows stale quota with original error context instead of hiding that account. Auth errors are never written as fresh cache data.
+Successful quota rows are cached by provider. Default TTL is 30 seconds; `--fresh` bypasses it. If one account has a transient fetch failure and a matching usable cached row exists, cq shows stale quota with original error context instead of hiding that account. Auth errors are never written as fresh cache data.
 
 cq also keeps per-account/window EWMA burn history for trend display and a secondary imminent-block gauge override. Pace, burndown, and the main gauge derive from the current quota window and remain available without history. Cache and history failures degrade to uncached/cold-start behaviour.
 
@@ -153,29 +180,22 @@ TTY icons require a [Nerd Font](https://www.nerdfonts.com/). Recommended: [`jaco
 ### JSON report
 
 ```bash
-cq --json
-cq --json check codex
-cq codex accounts --json
-cq gemini accounts --json
+cq check --json
+cq codex account list --json
+cq service status --json
 ```
 
-JSON includes provider results, aggregates, cache age, error codes, proxy eligibility, and an `availability` object for automated consumers:
-
-- `available`: normal work is safe.
-- `limited`: quota is low; conserve it for small, necessary, or approved work.
-- `exhausted`: new work should not route there without explicit override.
-
-Account-level `active` means credential default/current account. It is not a proxy routing decision; pins, bindings, eligibility, continuity, and failover can select another account.
+CLI 1.0.0 emits schema 2 envelopes with `schema_version`, canonical `command`, `ok`, `data`, `errors` and `warnings`. Inspect `ok` and the process exit code before reading `data`; error messages do not expose credentials. Service components are in `data.components`, keyed by `id` (`proxy` or `token-refresh`). The trace stream and Codex Stop hook have their documented output exceptions. Public spelling aliases return the same schema 2 contract.
 
 ## Accounts and authentication
 
 ### Claude
 
 ```bash
-cq claude login --activate
-cq claude accounts
-cq claude switch EMAIL
-cq claude remove EMAIL
+cq claude account login --activate
+cq claude account list
+cq claude account activate EMAIL
+cq claude account remove EMAIL
 ```
 
 Claude login uses browser OAuth. Stored account credentials support multi-account checks and proxy routing.
@@ -183,27 +203,27 @@ Claude login uses browser OAuth. Stored account credentials support multi-accoun
 ### Codex
 
 ```bash
-cq codex login --activate
-cq codex accounts
-cq codex switch EMAIL
-cq codex remove EMAIL
-cq codex resets list
-cq codex resets recommend
-cq codex resets use EMAIL
-cq codex resets use EMAIL --credit CREDIT_ID --yes
+cq codex account login --activate
+cq codex account list
+cq codex account activate EMAIL
+cq codex account remove EMAIL
+cq codex reset list
+cq codex reset recommend
+cq codex reset use EMAIL
+cq codex reset use EMAIL --credit CREDIT_ID --yes
 ```
 
 CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
 
-`cq codex resets recommend` plans across every account shown by `cq codex accounts`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Banked resets restore shared-window percentages without changing natural 5-hour or 7-day reset dates.
+`cq codex reset recommend` plans across every account shown by `cq codex account list`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Banked resets restore shared-window percentages without changing natural 5-hour or 7-day reset dates.
 
-`cq codex resets use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
+`cq codex reset use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
 
 ### Gemini
 
 ```bash
-cq gemini accounts
-cq gemini accounts --json
+cq gemini account show
+cq gemini account show --json
 ```
 
 Gemini authentication and project selection remain owned by Antigravity. cq reads Keychain service `gemini`, account `antigravity`, plus Antigravity's project cache. It does not provide Gemini login, switch, or removal commands.
@@ -211,14 +231,14 @@ Gemini authentication and project selection remain owned by Antigravity. cq read
 ### Token refresh
 
 ```bash
-cq refresh
-cq agent install
-cq agent uninstall
+cq auth refresh
+cq service install --component token-refresh
+cq service uninstall --component token-refresh
 ```
 
-`cq refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. Complete installers schedule this work using the platform user service manager. `cq agent install` remains a focused macOS maintenance command. Expired Claude accounts can still require interactive login.
+`cq auth refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. Complete installers schedule this work using the platform user service manager. Use `--component token-refresh` for focused refresh maintenance. Expired Claude accounts can still require interactive login.
 
-Ordinary quota and account commands do not change background service registration. Complete installers use `cq service install`; focused `cq agent` commands remain available for maintenance.
+Ordinary quota and account commands do not change background service registration. Complete installers register both components; public maintenance uses `cq service` with an explicit `--component`.
 
 After an explicit account switch, already-running clients or MCP servers may need reconnection to reload credential state.
 
@@ -244,25 +264,24 @@ Focused proxy commands remain available for foreground and compatibility work,
 but do not form a complete installation:
 
 ```bash
-cq proxy start
-cq proxy start --port 19280
-cq proxy start --migrate-legacy-managed
-cq proxy install
-cq proxy restart
-cq proxy uninstall
+cq proxy serve
+cq proxy serve --port 19280
+cq service install
+cq service restart
+cq service uninstall
 ```
 
-`--migrate-legacy-managed` explicitly adds routing identity metadata to legacy CQ-managed Codex records. Ordinary startup does not perform this migration.
+Legacy managed-identity migration flags are retired. Ordinary startup does not rewrite credential routing identities.
 
-Bare `cq proxy status` performs a compatibility health probe. Inspection forms with flags reconcile desired configuration, service owner, listener, process, runtime health, and data-plane evidence:
+`cq proxy status` reconciles desired configuration, service ownership, listener, process, runtime health and data-plane evidence. Use `cq proxy health` for a health probe:
 
 ```bash
-cq proxy status                    # Compatibility /health JSON probe
-cq proxy status --human            # Reconciled human summary
+cq proxy health                    # Authenticated health inspection
+cq proxy status            # Reconciled human summary
 cq proxy status --json             # Reconciled stable JSON envelope
 cq proxy status --strict --json    # Non-zero when reconciled state is unhealthy
 cq proxy status --timeout 10s
-cq proxy status --instance-state-root PATH
+cq proxy status --state-dir PATH
 ```
 
 `GET /health` proves runtime reachability only; strict status checks broader ownership and runtime facts.
@@ -287,18 +306,19 @@ Core behaviour includes:
 ### Pins, defaults, and priming
 
 ```bash
-cq proxy pin                              # Show Claude and Codex pins
-cq proxy pin claude EMAIL_OR_UUID
-cq proxy pin claude --clear
-cq proxy pin codex EMAIL_ALIAS_OR_KEY
-cq proxy pin codex --clear
+cq claude proxy pin show
+cq codex proxy pin show
+cq claude proxy pin set EMAIL_OR_UUID
+cq claude proxy pin clear
+cq codex proxy pin set EMAIL_ALIAS_OR_KEY
+cq codex proxy pin clear
 
-cq proxy default codex EMAIL_ALIAS_OR_KEY
-cq proxy default codex --clear
+cq codex proxy fallback set EMAIL_ALIAS_OR_KEY
+cq codex proxy fallback clear
 
-cq proxy prime status
-cq proxy prime enable
-cq proxy prime disable
+cq codex proxy prime status
+cq codex proxy prime enable
+cq codex proxy prime disable
 ```
 
 Claude pin changes hot-reload. Codex pin/default/priming changes require proxy restart. A Codex pin affects new and unbound work but does not break existing hard continuity.
@@ -309,13 +329,13 @@ The running CQ service can protect a percentage of one Codex quota window for th
 The reserve follows the system account when it changes. Other accounts remain available under their existing routing rules.
 
 ```bash
-cq proxy reserve windows                     # List available window selectors
-cq proxy reserve set --window 7d --percent 2   # Protect the final 2% of weekly quota
-cq proxy reserve status
-cq proxy reserve status --json
-cq proxy reserve disable                     # Release the reserve until this window resets
-cq proxy reserve enable                      # Restore protection immediately
-cq proxy reserve clear                       # Remove the configuration
+cq codex proxy reserve windows                     # List available window selectors
+cq codex proxy reserve set --window 7d --percent 2   # Protect the final 2% of weekly quota
+cq codex proxy reserve status
+cq codex proxy reserve status --json
+cq codex proxy reserve disable                     # Release the reserve until this window resets
+cq codex proxy reserve enable                      # Restore protection immediately
+cq codex proxy reserve clear                       # Remove the configuration
 ```
 
 Use the selectors from `reserve windows` for scoped limits, such as `7d:gpt-reserve` or `5h:gpt-5.3-codex-spark`.
@@ -339,27 +359,27 @@ Already-running requests and usage outside CQ can cross the threshold before CQ 
 Advanced policy commands manage authenticated, capability-aware Codex account pools and privacy-safe session bindings:
 
 ```bash
-cq proxy policy initialise --state-root DIR
-cq proxy policy apply --file FILE
-cq proxy policy status
-cq proxy policy pool set NAME --account ACCOUNT --account ACCOUNT [--value VALUE]
-cq proxy policy pool rename OLD_NAME NEW_NAME
-cq proxy policy pool value NAME VALUE
-cq proxy policy session bind --pool NAME --session-id ID
-cq proxy policy session show --session-id ID
-cq proxy policy session list
-cq proxy policy session unbind --session-id ID
-cq proxy policy session digest --session-id ID
+cq proxy state initialise --state-dir DIR
+cq codex proxy policy apply --file FILE
+cq codex proxy policy show
+cq codex proxy pool set NAME --account ACCOUNT --account ACCOUNT [--value VALUE]
+cq codex proxy pool rename OLD_NAME NEW_NAME
+cq codex proxy pool value NAME VALUE
+cq codex proxy session bind --pool NAME --session-id ID
+cq codex proxy session show --session-id ID
+cq codex proxy session list
+cq codex proxy session unbind --session-id ID
+cq codex proxy session digest --session-id ID
 ```
 
-Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-root` supports offline state.
+Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-dir` supports offline state.
 
 Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first. Session bindings and task affinity remain hard constraints.
 
 ### Lease invalidation
 
 ```bash
-cq proxy leases invalidate
+cq codex proxy lease invalidate
 ```
 
 Lease invalidation clears reusable Codex account affinity across all sessions.
@@ -383,20 +403,20 @@ These commands exist for controlled validation, rollout, and recovery. Use each 
 ### Installed routing validation
 
 ```bash
-cq codex validate capture --input FILE --output FILE --content-encoding ENCODING --metadata FILE
-cq codex validate http --client-build BUILD [--state-dir DIR]
-cq codex validate websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]
-cq proxy validate-http --port CANDIDATE_PORT
+cq codex proxy fixture create --help
+cq codex proxy readiness show --client-build BUILD [--state-dir DIR]
+cq codex proxy validate websocket --help
+cq codex proxy validate http --port CANDIDATE_PORT
 ```
 
-Validation checks current installed-listener readiness against cq/client builds, request/response evidence, and process attestation. `proxy validate-http` refuses live port `19280` and does not change shared proxy configuration.
+Canonical HTTP validation is available only on macOS with an existing attested candidate service. Linux and Windows return `validation_candidate_unavailable` before IO. Port `19280` is forbidden. WebSocket validation, fixture creation and readiness inspection retain their separate contracts; retained readiness accepts `launchd`, `homebrew` and `systemd-user`. See each command’s help for required evidence.
 
 ### Routing canary
 
 ```bash
-cq codex canary start
-cq codex canary status
-cq codex canary stop
+cq codex proxy canary start
+cq codex proxy canary status
+cq codex proxy canary stop
 ```
 
 Canary start requires enforced HTTP routing and disabled payload diagnostics. Stop requests a drain; it does not discard active continuity.
@@ -404,38 +424,33 @@ Canary start requires enforced HTTP routing and disabled payload diagnostics. St
 ### Isolated candidate lifecycle
 
 ```bash
-cq proxy candidate prepare ...
-cq proxy candidate status --instance-state-root PATH
-cq proxy candidate client-bearer-barrier refresh ...
-cq proxy candidate start ...
-cq proxy candidate artifact switch ...
-cq proxy candidate validate-release ...
-cq proxy candidate receipt show ...
-cq proxy candidate stop ...
-cq proxy candidate remove ...
+cq proxy candidate prepare --help
+cq proxy candidate status --state-dir PATH
+cq proxy candidate receipt show --help
+cq proxy candidate stop --help
+cq proxy candidate remove --help
 ```
 
-Candidate validation uses an isolated state root, explicit port, pinned source/release/client digests, explicit credential mode, bounded timeouts, authenticated runtime control, client-bearer barrier, and retained receipts. It never uses installed listener or ambient credentials. Read-only credentials and payload capture require explicit confirmation; removal requires explicit state-loss confirmation.
+Preparation and inspection use explicit isolated state and supplied artefacts. A prepared artefact is not release qualification evidence. Four reserved commands return exit 4 before reading environment, credentials or files: `cq proxy candidate start`, `cq proxy candidate client-safety refresh`, `cq proxy candidate release activate` and `cq proxy candidate release validate`.
 
 ### Durable operations
 
 ```bash
-cq operation status
-cq operation status --operation-id ID --json
-cq operation recover --operation-id ID --json
+cq proxy operation status
+cq proxy operation status OPERATION_ID --json
 ```
 
-Durable operation inspection returns active, retained terminal, or idle state. Recovery reconciles exact operation identity instead of starting unrelated work.
+Inspection returns active, retained terminal or idle state. Active recovery is unavailable; the retired recovery spelling returns exit 4 and never mutates state.
 
 ### Legacy credential endpoint maintenance
 
 ```bash
-cq proxy endpoint inspect-legacy
-cq proxy endpoint transition-legacy prepare ...
-cq proxy endpoint transition-legacy resume ...
-cq proxy endpoint transition-legacy activate ...
-cq proxy endpoint transition-legacy finalise ...
-cq proxy endpoint transition-legacy rollback ...
+cq codex proxy credential-endpoint legacy inspect
+cq codex proxy credential-endpoint legacy prepare ...
+cq codex proxy credential-endpoint legacy resume ...
+cq codex proxy credential-endpoint legacy activate ...
+cq codex proxy credential-endpoint legacy finalise ...
+cq codex proxy credential-endpoint legacy rollback ...
 ```
 
 Ordinary cq/proxy startup never performs legacy endpoint maintenance. Inspection is read-only. Transition steps require explicit snapshots/tickets, stopped-and-drained or healthy-candidate confirmations, and retain rollback state.
@@ -443,7 +458,7 @@ Ordinary cq/proxy startup never performs legacy endpoint maintenance. Inspection
 ### Codex Stop hook and efficiency receipt
 
 ```bash
-cq proxy hook codex-stop
+cq codex proxy hook stop
 ```
 
 Configured as a Codex `Stop` hook, this command reads hook JSON from stdin, performs an authenticated loopback lookup, and returns a privacy-safe `systemMessage`. Receipt summarises recorded route state, transport, pool/account hint, model/effort, route reason, and observational no-affinity comparison. Recorded state can be planned, attempted, completed, failed, rejected, or indeterminate. Receipt does not include prompts, transcripts, raw IDs, or credentials and does not change routing.
@@ -474,7 +489,7 @@ Proxy endpoints also expose model metadata and authenticated registry refresh/sn
 
 ## Proxy configuration
 
-Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. First `cq proxy start` creates it with a random local token. Unknown fields are preserved across writes for version compatibility.
+Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. Canonical commands require existing configuration; complete installers create it with a random local token. Unknown fields are preserved across writes for version compatibility.
 
 | JSON field | Default | Purpose |
 |------------|---------|---------|
@@ -484,7 +499,7 @@ Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. 
 | `local_token` | generated | Local control/proxy bearer token. |
 | `headroom` | `false` | Enable request headroom compression. |
 | `headroom_mode` | `cache` | `cache` or `token` compression strategy. |
-| `pinned_claude_account` | unset | Claude email/account UUID pin. Prefer `cq proxy pin claude`. |
+| `pinned_claude_account` | unset | Claude email/account UUID pin. Prefer `cq claude proxy pin set`. |
 | `codex_turn_routing` | `off` | Codex HTTP routing mode: `off`, `observe`, or `enforce`. |
 | `codex_ws_turn_routing` | `off` | Codex WebSocket routing mode: `off`, `observe`, or `enforce`. |
 | `codex_routing_default_account_key` | unset | Default opaque Codex account key. |
@@ -506,14 +521,14 @@ Set `diagnostics_log` and restart. Every Codex HTTP request and WebSocket `respo
 Query one user-facing task, one trace, or recent traffic without manually searching JSONL:
 
 ```bash
-cq proxy trace --session codex://threads/THREAD_ID --since 15m
-cq proxy trace --trace trace:ID --json
-cq proxy trace --follow
+cq codex proxy trace --session codex://threads/THREAD_ID --since 15m
+cq codex proxy trace --trace trace:ID --json
+cq codex proxy trace --follow
 ```
 
 ### Payload diagnostics
 
-`payload_diagnostics_log` is disabled by default and requires restart. It records exact HTTP request and response bodies plus downstream and upstream Codex WebSocket frames. Every entry contains its causal trace ID, direction, byte count, encoding, account hint where applicable, and whether capture reached a complete body. Credential-bearing headers are excluded. Query it with `cq proxy trace --payload` and the same session/trace/time filters.
+`payload_diagnostics_log` is disabled by default and requires restart. It records exact HTTP request and response bodies plus downstream and upstream Codex WebSocket frames. Every entry contains its causal trace ID, direction, byte count, encoding, account hint where applicable, and whether capture reached a complete body. Credential-bearing headers are excluded. Query it with `cq codex proxy trace --payload` and the same session/trace/time filters.
 
 > **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, provider responses, and other sensitive content. Do not share without review. Request and response bodies can themselves contain secrets.
 
@@ -541,8 +556,8 @@ Session and thread keys in diagnostics are short deterministic hashes, not raw i
 | `~/.config/cq/state/` | Compatibility epoch, credential-control endpoint, and Codex removal journal. |
 | `~/.config/cq/` | Default live-runtime lifecycle, canary, normal-caller admission, config, and overlay files. |
 | Configured `codex_continuity_state_dir`, defaulting to `~/.config/cq/` | Durable Codex continuity and lease state. |
-| Configured `proxy_resilience_state_dir` | Routing policy, dispatch-permit, and runtime-mode/rescue authority. No default is assumed; `cq proxy policy initialise --state-root DIR` configures it. |
-| Command-supplied `--instance-state-root` | Isolated candidate lifecycle, validation, staged-release, and receipt state. |
+| Configured `proxy_resilience_state_dir` | Routing policy, dispatch-permit, and runtime-mode/rescue authority. No default is assumed; `cq proxy state initialise --state-dir DIR` configures it. |
+| Command-supplied `--state-dir` | Isolated candidate lifecycle, validation, staged-release, and receipt state. |
 | `$XDG_CACHE_HOME/cq/*.json` or platform cache equivalent | Provider quota cache. On macOS, default base is `~/Library/Caches/cq`. |
 | `$XDG_CACHE_HOME/cq/burn_state_v2.json` or platform cache equivalent | Smoothed burn history. |
 | `~/.claude/.credentials.json` | Claude account credentials. |
@@ -558,39 +573,99 @@ Secret/state writes use owner-only permissions and atomic replacement. External 
 
 ## Complete command index
 
-This index is checked against CQ's Kong model and production dispatchers in both directions.
+This index is checked against the canonical command catalogue. The executable registers every one of its 89 leaves; bare groups show help.
 
 <details>
 <summary>Show every command path</summary>
 
 <!-- public-command-index:start -->
 ```text
-cq agent
-cq agent install
-cq agent uninstall
+cq auth
+cq auth refresh
 cq check
-cq claude accounts
-cq claude login
-cq claude remove
-cq claude switch
+cq claude
+cq claude account
+cq claude account activate
+cq claude account list
+cq claude account login
+cq claude account remove
+cq claude proxy
+cq claude proxy pin
+cq claude proxy pin clear
+cq claude proxy pin set
+cq claude proxy pin show
 cq codex
-cq codex accounts
-cq codex canary
-cq codex canary start
-cq codex canary status
-cq codex canary stop
-cq codex login
-cq codex remove
-cq codex resets
-cq codex resets list
-cq codex resets recommend
-cq codex resets use
-cq codex switch
-cq codex validate
-cq codex validate capture
-cq codex validate http
-cq codex validate websocket
-cq gemini accounts
+cq codex account
+cq codex account activate
+cq codex account list
+cq codex account login
+cq codex account remove
+cq codex proxy
+cq codex proxy canary
+cq codex proxy canary start
+cq codex proxy canary status
+cq codex proxy canary stop
+cq codex proxy credential-endpoint
+cq codex proxy credential-endpoint legacy
+cq codex proxy credential-endpoint legacy activate
+cq codex proxy credential-endpoint legacy finalise
+cq codex proxy credential-endpoint legacy inspect
+cq codex proxy credential-endpoint legacy prepare
+cq codex proxy credential-endpoint legacy resume
+cq codex proxy credential-endpoint legacy rollback
+cq codex proxy fallback
+cq codex proxy fallback clear
+cq codex proxy fallback set
+cq codex proxy fallback show
+cq codex proxy fixture
+cq codex proxy fixture create
+cq codex proxy hook
+cq codex proxy hook stop
+cq codex proxy lease
+cq codex proxy lease invalidate
+cq codex proxy pin
+cq codex proxy pin clear
+cq codex proxy pin set
+cq codex proxy pin show
+cq codex proxy policy
+cq codex proxy policy apply
+cq codex proxy policy show
+cq codex proxy pool
+cq codex proxy pool rename
+cq codex proxy pool set
+cq codex proxy pool value
+cq codex proxy prime
+cq codex proxy prime disable
+cq codex proxy prime enable
+cq codex proxy prime status
+cq codex proxy readiness
+cq codex proxy readiness show
+cq codex proxy reserve
+cq codex proxy reserve clear
+cq codex proxy reserve disable
+cq codex proxy reserve enable
+cq codex proxy reserve set
+cq codex proxy reserve status
+cq codex proxy reserve windows
+cq codex proxy session
+cq codex proxy session bind
+cq codex proxy session digest
+cq codex proxy session list
+cq codex proxy session show
+cq codex proxy session unbind
+cq codex proxy trace
+cq codex proxy validate
+cq codex proxy validate http
+cq codex proxy validate websocket
+cq codex reset
+cq codex reset list
+cq codex reset recommend
+cq codex reset use
+cq completion
+cq gemini
+cq gemini account
+cq gemini account show
+cq help
 cq models
 cq models list
 cq models overlay
@@ -598,82 +673,39 @@ cq models overlay add
 cq models overlay prune
 cq models overlay remove
 cq models refresh
-cq operation
-cq operation recover
-cq operation status
 cq proxy
 cq proxy candidate
-cq proxy candidate artifact
-cq proxy candidate artifact switch
-cq proxy candidate client-bearer-barrier
-cq proxy candidate client-bearer-barrier refresh
+cq proxy candidate client-safety
+cq proxy candidate client-safety refresh
 cq proxy candidate prepare
 cq proxy candidate receipt
 cq proxy candidate receipt show
+cq proxy candidate release
+cq proxy candidate release activate
+cq proxy candidate release validate
 cq proxy candidate remove
 cq proxy candidate start
 cq proxy candidate status
 cq proxy candidate stop
-cq proxy candidate validate-release
-cq proxy default
-cq proxy default codex
-cq proxy endpoint
-cq proxy endpoint inspect-legacy
-cq proxy endpoint transition-legacy
-cq proxy endpoint transition-legacy activate
-cq proxy endpoint transition-legacy finalise
-cq proxy endpoint transition-legacy prepare
-cq proxy endpoint transition-legacy resume
-cq proxy endpoint transition-legacy rollback
-cq proxy hook
-cq proxy hook codex-stop
-cq proxy install
-cq proxy leases
-cq proxy leases invalidate
-cq proxy pin
-cq proxy pin claude
-cq proxy pin codex
-cq proxy policy
-cq proxy policy apply
-cq proxy policy initialise
-cq proxy policy pool
-cq proxy policy pool rename
-cq proxy policy pool set
-cq proxy policy pool value
-cq proxy policy session
-cq proxy policy session bind
-cq proxy policy session digest
-cq proxy policy session list
-cq proxy policy session show
-cq proxy policy session unbind
-cq proxy policy status
-cq proxy prime
-cq proxy prime disable
-cq proxy prime enable
-cq proxy prime status
+cq proxy health
+cq proxy operation
+cq proxy operation status
 cq proxy rescue
 cq proxy rescue enter
 cq proxy rescue exit
 cq proxy rescue status
-cq proxy reserve
-cq proxy reserve clear
-cq proxy reserve disable
-cq proxy reserve enable
-cq proxy reserve set
-cq proxy reserve status
-cq proxy reserve windows
-cq proxy restart
-cq proxy start
+cq proxy serve
+cq proxy state
+cq proxy state initialise
 cq proxy status
-cq proxy trace
-cq proxy uninstall
-cq proxy validate-http
-cq refresh
 cq service
 cq service install
 cq service restart
+cq service start
 cq service status
+cq service stop
 cq service uninstall
+cq version
 ```
 <!-- public-command-index:end -->
 

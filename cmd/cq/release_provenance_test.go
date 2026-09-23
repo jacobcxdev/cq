@@ -161,13 +161,13 @@ func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
 	}
 }
 
-func TestReleaseArchivesContainOnlyCQExecutable(t *testing.T) {
+func TestReleaseArchivesContainCQAndCanonicalDocumentation(t *testing.T) {
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(releaser), "    files:\n      - none*\n") {
-		t.Fatal("GoReleaser archives include default metadata files")
+	if !strings.Contains(string(releaser), "    files:\n      - README.md\n      - specs/cli-v2/COMMANDS.md\n") {
+		t.Fatal("GoReleaser archives lack the exact canonical documentation allowlist")
 	}
 }
 
@@ -437,8 +437,8 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	if count := strings.Count(text, "runs-on: macos-15"); count != 2 {
 		t.Fatalf("CI has %d macOS jobs, want Codex and Homebrew only", count)
 	}
-	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
-		t.Fatalf("full race suite appears in %d job definitions, want Linux matrix only", count)
+	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 2 {
+		t.Fatalf("full race suite appears in %d job definitions, want CLI contract and native Linux matrix", count)
 	}
 }
 
@@ -610,7 +610,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`export CODEX_HOME="$HOME/.codex"`,
 		`use_existing_user_manager=${CQ_LINUX_USE_EXISTING_USER_MANAGER:-}`,
 		`if [[ "$use_existing_user_manager" == "1" ]]; then`,
-		`[[ "$("$installed_cq" --version)" == "$version" ]]`,
+		`"$installed_cq" version --json`,
 	} {
 		if !strings.Contains(linuxText, required) {
 			t.Errorf("Linux installation script missing cleanup/proof %q", required)

@@ -490,8 +490,8 @@ func TestCLIV2ModelsCanonicalCredentialAuthority(t *testing.T) {
 			t.Run(fmt.Sprintf("remote=%t/%s", remote, mode), func(t *testing.T) {
 				t.Setenv("XDG_STATE_HOME", "")
 				store, record, journal := resetProductionFixture(t)
-				t.Setenv("CODEX_HOME", filepath.Join(os.Getenv("HOME"), ".codex"))
-				t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(os.Getenv("HOME"), ".claude"))
+				t.Setenv("CODEX_HOME", filepath.Join(store.Home, ".codex"))
+				t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(store.Home, ".claude"))
 				plan := codexprov.RemovalPlan{Version: 1, OperationID: "models-pending", AccountKey: record.Metadata.AccountKey, Candidates: []codexprov.RemovalCandidate{{CandidateID: record.Metadata.CandidateID, Revision: record.Metadata.Revision}}}
 				var exchanged atomic.Int32
 				client := modelHTTPFunc(func(req *http.Request) (*http.Response, error) {
@@ -542,17 +542,16 @@ func TestCLIV2ModelsCanonicalCredentialAuthority(t *testing.T) {
 					saved := newHTTPClientFn
 					newHTTPClientFn = func(time.Duration, string) httputil.Doer { return &http.Client{Transport: modelRoundTripper{client}} }
 					defer func() { newHTTPClientFn = saved }()
-					roots, err := userdirs.Default(userdirs.ConfigRoot)
-					if err != nil {
-						t.Fatal(err)
-					}
-					reg, err = buildCanonicalLocalRegistry(ctx, &proxy.Config{ClaudeUpstream: "https://claude.invalid", CodexUpstream: "https://codex.invalid"}, modelsDeps{FS: store.FS, HomeDir: os.Getenv("HOME"), CWD: os.Getenv("HOME"), Roots: roots, Env: os.Getenv})
+					roots := userdirs.Roots{Config: filepath.Join(store.Home, "config"), State: journal.StateDir, Cache: filepath.Join(store.Home, "cache")}
+					reg, err = buildCanonicalLocalRegistryWithControl(ctx, &proxy.Config{ClaudeUpstream: "https://claude.invalid", CodexUpstream: "https://codex.invalid"}, modelsDeps{FS: store.FS, HomeDir: store.Home, CWD: store.Home, Roots: roots, Env: os.Getenv}, func(ctx context.Context, _ fsutil.DurableFileSystem, client httputil.Doer) (*codexprov.CredentialControl, error) {
+						return openResetProductionControl(ctx, store, client)
+					})
 					if err != nil {
 						t.Fatal(err)
 					}
 					defer reg.Close()
 				} else {
-					reg, err = buildLocalRegistryFromAuthority(&proxy.Config{ClaudeUpstream: "https://claude.invalid", CodexUpstream: "https://codex.invalid"}, localRegistryDependencies{FS: store.FS, HomeDir: os.Getenv("HOME"), CWD: os.Getenv("HOME"), HTTPClient: client, ClaudeToken: func() (string, error) { return "synthetic", nil }, CredentialAuthority: newCanonicalCodexRegistryControlAdapter(owner), Env: os.Getenv})
+					reg, err = buildLocalRegistryFromAuthority(&proxy.Config{ClaudeUpstream: "https://claude.invalid", CodexUpstream: "https://codex.invalid"}, localRegistryDependencies{FS: store.FS, HomeDir: store.Home, CWD: store.Home, HTTPClient: client, ClaudeToken: func() (string, error) { return "synthetic", nil }, CredentialAuthority: newCanonicalCodexRegistryControlAdapter(owner), Env: os.Getenv})
 					if err != nil {
 						t.Fatal(err)
 					}

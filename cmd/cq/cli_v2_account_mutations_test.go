@@ -429,7 +429,7 @@ func TestCLIV2AccountMutationRealCodexRemovalFence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			directory, err := os.MkdirTemp("/tmp", "cq-t08-")
+			directory, err := os.MkdirTemp(v2FixtureTempRoot(), "cq-t08-")
 			if err != nil {
 				t.Fatal(err)
 			}

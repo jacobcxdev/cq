@@ -331,7 +331,7 @@ func TestCLIV2AuthProductionPendingRemoval(t *testing.T) {
 			deps := authTestDependencies(t)
 			deps.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 			deps.Codex = func(ctx context.Context) (codexRefreshAuthority, func() error, error) {
-				c, err := codexprov.OpenDefaultCanonicalCredentialRefreshControl(ctx, store.FS, client)
+				c, err := openResetProductionControl(ctx, store, client)
 				if err != nil {
 					return nil, nil, err
 				}

@@ -163,6 +163,7 @@ func runProxyPolicyWithDependencies(ctx context.Context, args []string, output i
 }
 
 type proxyPolicyControlError struct {
+	cause   error
 	kind    string
 	status  int
 	code    string
@@ -170,10 +171,11 @@ type proxyPolicyControlError struct {
 }
 
 func (e *proxyPolicyControlError) Error() string { return e.message }
+func (e *proxyPolicyControlError) Unwrap() error { return e.cause }
 
 func proxyPolicyRequest(ctx context.Context, deps proxyPolicyDependencies, method, path string, port int, body io.Reader, contentType string) ([]byte, error) {
 	fail := func(kind string, err error) ([]byte, error) {
-		return nil, &proxyPolicyControlError{kind: kind, message: err.Error()}
+		return nil, &proxyPolicyControlError{kind: kind, message: err.Error(), cause: err}
 	}
 	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
 		return fail("control", errors.New("proxy policy control unavailable"))

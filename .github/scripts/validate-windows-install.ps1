@@ -133,15 +133,43 @@ function Wait-File {
     throw "timed out waiting for $Path"
 }
 
+function Get-CQVersion {
+    param([string]$Executable, [switch]$PreviousRelease)
+    if ($PreviousRelease) {
+        $lines = @(& $Executable --version)
+        if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or $lines[0] -notmatch '^(cq )?v?([0-9]+\.[0-9]+\.[0-9]+)$') { throw "invalid previous version" }
+        return $Matches[2]
+    }
+    $result = & $Executable version --json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $result.schema_version -ne 2 -or $result.ok -ne $true -or $result.command -ne "version" -or $result.data.version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "invalid candidate version" }
+    return $result.data.version
+}
+
+function Convert-CQServiceStatus {
+    param($Envelope, [switch]$PreviousRelease)
+    if ($PreviousRelease) {
+        if ($Envelope.schema_version -ne 1) { throw "invalid previous release schema" }
+        return $Envelope
+    }
+    if ($Envelope.schema_version -ne 2 -or $Envelope.ok -ne $true) { throw "invalid CQ service envelope" }
+    $proxy = @($Envelope.data.components | Where-Object { $_.id -eq "proxy" })
+    $refresh = @($Envelope.data.components | Where-Object { $_.id -eq "token-refresh" })
+    if ($proxy.Count -ne 1 -or $refresh.Count -ne 1) { throw "missing CQ service components" }
+    return [pscustomobject]@{ proxy = $proxy[0]; refresh = $refresh[0] }
+}
+
 function Wait-ServiceStatus {
     param(
         [string]$Executable,
-        [string]$Owner
+        [string]$Owner,
+        [switch]$PreviousRelease
     )
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
         try {
-            $status = (& $Executable service status --json | ConvertFrom-Json)
-            if ($status.owner -eq $Owner -and $status.proxy.healthy -and $status.proxy.running -and $status.refresh.healthy) {
+            $status = Convert-CQServiceStatus -Envelope (& $Executable service status --json | ConvertFrom-Json) -PreviousRelease:$PreviousRelease
+            $healthy = $status.proxy.healthy -and $status.refresh.healthy
+            if (($PreviousRelease -and $healthy -and $status.owner -eq $Owner -and $status.proxy.running) -or
+                (-not $PreviousRelease -and $healthy -and $status.proxy.owner -eq $(if ($Owner -eq "go") { "cq" } else { "package" }) -and $status.proxy.state -eq "running")) {
                 return $status
             }
         }
@@ -235,12 +263,13 @@ function Assert-Installed {
         [string]$Executable,
         [string]$Version,
         [string]$Owner,
-        [bool]$ExpectWindowsMetadata
+        [bool]$ExpectWindowsMetadata,
+        [switch]$PreviousRelease
     )
-    if ((& $Executable --version).TrimStart("v") -ne $Version.TrimStart("v")) {
+    if ((Get-CQVersion -Executable $Executable -PreviousRelease:$PreviousRelease) -ne $Version.TrimStart("v")) {
         throw "installed CQ version differs"
     }
-    $status = Wait-ServiceStatus -Executable $Executable -Owner $Owner
+    $status = Wait-ServiceStatus -Executable $Executable -Owner $Owner -PreviousRelease:$PreviousRelease
     $currentSID = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $service = New-Object -ComObject "Schedule.Service"
     $service.Connect()
@@ -250,7 +279,8 @@ function Assert-Installed {
     if ($managerPID -ne $status.proxy.pid) {
         throw "service status PID differs from Task Scheduler EnginePID"
     }
-    if ($status.proxy.configured_executable -ne $Executable -or $status.proxy.live_executable -ne $Executable -or $status.proxy.listener -ne "127.0.0.1:$Port") {
+    if (($PreviousRelease -and ($status.proxy.configured_executable -ne $Executable -or $status.proxy.live_executable -ne $Executable -or $status.proxy.listener -ne "127.0.0.1:$Port")) -or
+        (-not $PreviousRelease -and $status.proxy.executable -ne $Executable)) {
         throw "installed process/listener identity differs"
     }
     $ownedProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$($status.proxy.pid)"
@@ -413,7 +443,7 @@ try {
     if (-not $SkipWinGet) {
         if ($hasPreviousWinGet) {
             Invoke-WinGet -Arguments @("install", "--manifest", $PreviousManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-            $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
+            $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true -PreviousRelease
             Invoke-WinGet -Arguments @("upgrade", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
         }
         else {
@@ -464,7 +494,7 @@ try {
 
     if ($hasPreviousGo) {
         Invoke-GoRunner -Version $PreviousGoVersion
-        $null = Assert-Installed -Executable $goInstalledCQ -Version $PreviousGoVersion -Owner "go" -ExpectWindowsMetadata $false
+        $null = Assert-Installed -Executable $goInstalledCQ -Version $PreviousGoVersion -Owner "go" -ExpectWindowsMetadata $false -PreviousRelease
         Invoke-GoRunner -Version $ExpectedVersion
     }
     else {

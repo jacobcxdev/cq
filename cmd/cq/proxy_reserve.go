@@ -140,26 +140,6 @@ func runProxyReserveWithDependencies(ctx context.Context, args []string, output 
 	return err
 }
 
-// ProxyReserveCmd exposes reserve commands in the CLI help tree.
-type ProxyReserveCmd struct {
-	Set     ProxyReserveSetCmd  `cmd:"" help:"Set the system account reserve"`
-	Disable ProxyReserveReadCmd `cmd:"" help:"Release the reserve until the selected window resets"`
-	Enable  ProxyReserveReadCmd `cmd:"" help:"Re-enable the reserve"`
-	Clear   ProxyReserveReadCmd `cmd:"" help:"Remove the reserve configuration"`
-	Status  ProxyReserveReadCmd `cmd:"" help:"Show reserve state"`
-	Windows ProxyReserveReadCmd `cmd:"" help:"List available system account quota window selectors"`
-}
-
-type ProxyReserveReadCmd struct {
-	Port int `help:"Proxy port"`
-}
-
-type ProxyReserveSetCmd struct {
-	Window  string  `required:"" help:"Exact quota window selector from reserve windows"`
-	Percent float64 `required:"" help:"Percentage of remaining quota to protect"`
-	Port    int     `help:"Proxy port"`
-}
-
 // proxyReserveError retains legacy diagnostics while exposing transport failures
 // independently of printed output or a second, racy status request.
 type proxyReserveError struct {

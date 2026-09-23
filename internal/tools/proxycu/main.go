@@ -31,6 +31,7 @@ type testDependencies struct {
 	VerifyBlueprintReview func(path, sibling string) error
 	SelfTest              func() error
 	Unit                  func(cuID string) error
+	CLIV2                 func() error
 }
 
 type commandRunner interface {
@@ -46,6 +47,7 @@ func main() {
 	dependencies := testDependencies{
 		VerifyBlueprintReview: proxy.VerifyBlueprintReview,
 		SelfTest:              selfTest,
+		CLIV2:                 func() error { return runCLIV2Compatibility(repositoryRoot) },
 		Unit: func(cuID string) error {
 			return runCU0(repositoryRoot, cuID)
 		},
@@ -594,6 +596,14 @@ func run(args []string, dependencies testDependencies) error {
 		mode = "unit"
 	}
 	switch mode {
+	case "--cli-v2":
+		if len(args) != 1 {
+			return fmt.Errorf("--cli-v2 accepts no arguments")
+		}
+		if dependencies.CLIV2 == nil {
+			return fmt.Errorf("CLI-v2 verifier unavailable")
+		}
+		return dependencies.CLIV2()
 	case "blueprint-review":
 		if len(args) != 3 {
 			return fmt.Errorf("usage: blueprint-review BLUEPRINT SIBLING")

@@ -368,6 +368,10 @@ func refreshV2ModelsFromConfig(ctx context.Context, state modelsDeps, cfg *proxy
 	return refreshV2LocalRegistry(ctx, reg)
 }
 func buildCanonicalLocalRegistry(ctx context.Context, cfg *proxy.Config, state modelsDeps) (*localRegistry, error) {
+	return buildCanonicalLocalRegistryWithControl(ctx, cfg, state, codexprov.OpenDefaultCanonicalCredentialRefreshControl)
+}
+
+func buildCanonicalLocalRegistryWithControl(ctx context.Context, cfg *proxy.Config, state modelsDeps, openControl func(context.Context, fsutil.DurableFileSystem, httputil.Doer) (*codexprov.CredentialControl, error)) (*localRegistry, error) {
 	home := state.HomeDir
 	var err error
 	if home == "" {
@@ -381,7 +385,7 @@ func buildCanonicalLocalRegistry(ctx context.Context, cfg *proxy.Config, state m
 	if !ok {
 		return nil, errors.New("durable filesystem unavailable")
 	}
-	control, err := codexprov.OpenDefaultCanonicalCredentialRefreshControl(ctx, durable, client)
+	control, err := openControl(ctx, durable, client)
 	if err != nil {
 		return nil, err
 	}

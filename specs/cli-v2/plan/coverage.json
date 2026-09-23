@@ -337,7 +337,7 @@
         "timeout"
       ],
       "positionals": [],
-      "acceptance_case_count": 7,
+      "acceptance_case_count": 10,
       "availability": true,
       "contract": "commands.json#claude.account.login"
     },
@@ -422,7 +422,7 @@
         "timeout"
       ],
       "positionals": [],
-      "acceptance_case_count": 7,
+      "acceptance_case_count": 10,
       "availability": true,
       "contract": "commands.json#codex.account.login"
     },

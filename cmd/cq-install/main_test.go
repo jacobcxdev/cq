@@ -187,7 +187,7 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 			}
 			calls = append(calls, append([]string{executable}, args...))
 			if len(args) == 3 && args[0] == "service" && args[1] == "status" {
-				return []byte(`{"schema_version":1,"owner":"go","proxy":{"registered":true,"running":true,"configured_executable":"/go/bin/cq","live_executable":"/go/bin/cq","healthy":true},"refresh":{"registered":true,"configured_executable":"/go/bin/cq","healthy":true}}`), nil
+				return []byte(`{"schema_version":2,"command":"service status","ok":true,"data":{"components":[{"id":"proxy","installed":true,"owner":"cq","state":"running","healthy":true,"executable":"/go/bin/cq"},{"id":"token-refresh","installed":true,"owner":"cq","state":"idle","healthy":true,"executable":"/go/bin/cq"}]},"errors":[],"warnings":[]}`), nil
 			}
 			return nil, nil
 		},
@@ -383,5 +383,52 @@ func TestCLIV2InternalInstallerCorpus(t *testing.T) {
 	}
 	if matched == 0 {
 		t.Fatal("empty installer corpus")
+	}
+}
+
+func TestCommandVersionRunnerStrictEnvelopes(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		valid        bool
+	}{
+		{"released", "v0.27.0\n", true},
+		{"candidate", `{"schema_version":2,"ok":true,"command":"version","data":{"version":"1.0.0"}}`, true},
+		{"extra-line", "v0.27.0\n1.0.0\n", false},
+		{"malformed", `{"schema_version":2`, false},
+		{"failed", `{"schema_version":2,"ok":false,"command":"version","data":{"version":"1.0.0"}}`, false},
+		{"wrong-schema", `{"schema_version":1,"ok":true,"command":"version","data":{"version":"1.0.0"}}`, false},
+		{"wrong-command", `{"schema_version":2,"ok":true,"command":"check","data":{"version":"1.0.0"}}`, false},
+		{"missing-data", `{"schema_version":2,"ok":true,"command":"version"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := commandVersionRunner{Run: func(context.Context, string) (string, error) { return tc.output, nil }}
+			_, err := runner.Version(context.Background(), "synthetic")
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestCommandLifecycleStatusStrictCandidate(t *testing.T) {
+	valid := `{"schema_version":2,"command":"service status","ok":true,"data":{"components":[{"id":"proxy","installed":true,"owner":"cq","state":"running","healthy":true,"executable":"synthetic"},{"id":"token-refresh","installed":true,"owner":"cq","state":"idle","healthy":true,"executable":"synthetic"}]}}`
+	for _, tc := range []struct {
+		name, value string
+		valid       bool
+	}{
+		{"candidate", valid, true},
+		{"legacy", `{"owner":"go","proxy":{"healthy":true},"refresh":{"healthy":true}}`, false},
+		{"duplicate", strings.Replace(valid, `"id":"token-refresh"`, `"id":"proxy"`, 1), false},
+		{"wrong-owner", strings.ReplaceAll(valid, `"cq"`, `"package"`), false},
+		{"failed", strings.Replace(valid, `"ok":true`, `"ok":false`, 1), false},
+		{"stopped", strings.Replace(valid, `"running"`, `"stopped"`, 1), false},
+		{"wrong-executable", strings.ReplaceAll(valid, `"executable":"synthetic"`, `"executable":"other"`), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := commandLifecycle{Executable: "synthetic", Owner: installstate.OwnerGo, Run: func(context.Context, string, *os.File, ...string) ([]byte, error) { return []byte(tc.value), nil }}
+			if err := lifecycle.Status(context.Background()); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
 	}
 }

@@ -529,8 +529,8 @@ func TestShellWrappersRejectArityBeforeGoOrTemporaryWork(t *testing.T) {
 	}{
 		{path: "scripts/build-proxy-release", want: "expected exactly one release-build manifest"},
 		{path: "scripts/verify-blueprint-review", args: []string{"extra"}, want: "expected no arguments"},
-		{path: "scripts/verify-proxy-cu", want: "expected exactly one CU-0, CU-1, CU-2, or --self-test argument"},
-		{path: "scripts/verify-proxy-cu", args: []string{"CU-0", "extra"}, want: "expected exactly one CU-0, CU-1, CU-2, or --self-test argument"},
+		{path: "scripts/verify-proxy-cu", want: "expected exactly one CU-0, CU-1, CU-2, --cli-v2, or --self-test argument"},
+		{path: "scripts/verify-proxy-cu", args: []string{"CU-0", "extra"}, want: "expected exactly one CU-0, CU-1, CU-2, --cli-v2, or --self-test argument"},
 	}
 	for _, fixture := range fixtures {
 		t.Run(strings.ReplaceAll(fixture.path+strings.Join(fixture.args, "_"), "/", "_"), func(t *testing.T) {
@@ -552,27 +552,32 @@ func TestShellWrappersRejectArityBeforeGoOrTemporaryWork(t *testing.T) {
 	}
 }
 
-func TestVerifyProxyCUWrapperRunsCU0(t *testing.T) {
-	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+func TestVerifyProxyCUWrapperRunsCLIV2Compatibility(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(filepath.Join(repositoryRoot, "scripts", "verify-proxy-cu"), "CU-0")
-	command.Dir = repositoryRoot
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("verify-proxy-cu CU-0: %v\n%s", err, output)
+	command := exec.Command(filepath.Join(root, "scripts", "verify-proxy-cu"), "--cli-v2")
+	command.Dir = root
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("compatibility: %v\n%s", err, output)
 	}
+	for _, required := range []string{"CLI-v2 compatibility only; not historical CU acceptance", "CU-0 original manifest SHA256:", "CU-1 original manifest SHA256:", "CLI-v2 replacement roster SHA256:"} {
+		if !strings.Contains(string(output), required) {
+			t.Fatal("missing provenance label", required)
+		}
+	}
+	t.Logf("%s", output)
 }
-
-func TestVerifyProxyCUWrapperRunsCU1(t *testing.T) {
-	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
-	if err != nil {
-		t.Fatal(err)
+func TestCLIV2CompatibilityDispatchAndArity(t *testing.T) {
+	calls := 0
+	deps := testDependencies{CLIV2: func() error { calls++; return nil }, Unit: func(string) error { t.Fatal("compatibility reached historical verifier"); return nil }}
+	if err := run([]string{"--cli-v2"}, deps); err != nil || calls != 1 {
+		t.Fatalf("calls=%d err=%v", calls, err)
 	}
-	command := exec.Command(filepath.Join(repositoryRoot, "scripts", "verify-proxy-cu"), "CU-1")
-	command.Dir = repositoryRoot
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("verify-proxy-cu CU-1: %v\n%s", err, output)
+	if err := run([]string{"--cli-v2", "CU-0"}, deps); err == nil || calls != 1 {
+		t.Fatal("accepted mixed historical and compatibility argv")
 	}
 }
 

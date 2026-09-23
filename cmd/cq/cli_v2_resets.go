@@ -184,21 +184,30 @@ func newV2ResetDependenciesWithClient(ctx context.Context, recommend bool, fs fs
 }
 
 func newV2ResetDependenciesWithControl(recommend bool, fs fsutil.DurableFileSystem, client httputil.Doer, control *codexprov.CredentialControl) (v2ResetDependencies, error) {
-	deps := v2ResetDependencies{close: control.Close}
-	store, err := codexprov.NewManagedStore(fs)
+	home, err := fs.UserHomeDir()
 	if err != nil {
-		return deps, err
+		return v2ResetDependencies{close: control.Close}, err
 	}
-	backend := &codexprov.ResetBackend{Inventory: v2ResetInventory{control.CanonicalAdmin()}, Resolver: control, Refresh: control.CanonicalAdmin(), Aliases: func() (codexprov.AccountAliasIndex, error) {
-		return (codexprov.Registry{FS: fs, Home: store.Home}).AccountAliasIndex()
-	}, Credits: codexprov.ResetCreditClient{HTTP: client}, Now: time.Now}
-	deps.app = &app.CodexResetApp{Backend: backend, Clock: systemClock{}}
+	cacheRoot := ""
 	if recommend {
 		roots, err := userdirs.Default(userdirs.CacheRoot)
 		if err != nil {
-			return deps, err
+			return v2ResetDependencies{close: control.Close}, err
 		}
-		store, err := history.New(fs, roots.Cache)
+		cacheRoot = roots.Cache
+	}
+	return newV2ResetDependenciesWithControlAt(recommend, fs, client, control, home, cacheRoot)
+}
+
+// Explicit roots keep production-engine fixtures independent of native folders.
+func newV2ResetDependenciesWithControlAt(recommend bool, fs fsutil.DurableFileSystem, client httputil.Doer, control *codexprov.CredentialControl, home, cacheRoot string) (v2ResetDependencies, error) {
+	deps := v2ResetDependencies{close: control.Close}
+	backend := &codexprov.ResetBackend{Inventory: v2ResetInventory{control.CanonicalAdmin()}, Resolver: control, Refresh: control.CanonicalAdmin(), Aliases: func() (codexprov.AccountAliasIndex, error) {
+		return (codexprov.Registry{FS: fs, Home: home}).AccountAliasIndex()
+	}, Credits: codexprov.ResetCreditClient{HTTP: client}, Now: time.Now}
+	deps.app = &app.CodexResetApp{Backend: backend, Clock: systemClock{}}
+	if recommend {
+		store, err := history.New(fs, cacheRoot)
 		if err != nil {
 			return deps, err
 		}

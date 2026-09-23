@@ -2606,3 +2606,19 @@ func TestParseCUManifestRejectsEmptySelectionDuplicateTestAndWrongRaceCount(t *t
 		})
 	}
 }
+
+func TestCLIV2CompatibilityCannotSatisfyHistoricalCU(t *testing.T) {
+	original, err := CanonicalCUManifestV1("CU-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := CUReportV1{CUID: "CU-0", VerificationManifestDigest: framedBytesDigestV1("cq/construction-unit-verification-manifest/v1\x00", original)}
+	evidence := ReleaseCUEvidenceV1{CUID: "CU-0", ManifestBytes: original, Command: ReleaseCommandEvidenceV1{Argv: []string{"./scripts/verify-proxy-cu", "--cli-v2"}}}
+	if err := verifyAvailableConstructionUnitEvidenceV1([]CUReportV1{report}, []ReleaseCUEvidenceV1{evidence}); err == nil || !strings.Contains(err.Error(), "not exact") {
+		t.Fatalf("substitution accepted: %v", err)
+	}
+	evidence.Command.Argv = []string{"./scripts/verify-proxy-cu", "CU-0"}
+	if err := verifyAvailableConstructionUnitEvidenceV1([]CUReportV1{report}, []ReleaseCUEvidenceV1{evidence}); err != nil {
+		t.Fatal(err)
+	}
+}

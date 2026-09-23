@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateCodexReleaseIgnoresCodexHomeForSystemAuth(t *testing.T) {
@@ -296,6 +298,7 @@ case "$1" in
 esac
 `,
 		"lsof": "#!/bin/sh\nexit 0\n",
+		"cq":   "#!/bin/sh\nprintf '{\"schema_version\":2,\"ok\":true,\"data\":{\"mode\":\"normal\"}}\\n'\n",
 	}
 	for name, body := range commands {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
@@ -303,13 +306,25 @@ esac
 		}
 	}
 
-	path := bin + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	for _, name := range []string{"env", "mktemp", "chmod", "rm", "cat", "grep", "jq"} {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := bin
 	if runtime.GOOS == "windows" {
 		t.Fatal("POSIX shell test ran on Windows")
 	}
 	env := []string{
 		"PATH=" + path,
 		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(root, "config"),
+		"XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
+		"XDG_STATE_HOME=" + filepath.Join(root, "state"),
 		"CODEX_HOME=" + codexHome,
 		"CQ_TEST_REPOSITORY_ROOT=" + repositoryRoot,
 		"CQ_TEST_AUTH_CAPTURE=" + authCapture,
@@ -326,7 +341,17 @@ esac
 		env = append(env, "CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE="+normalAuth)
 	}
 
-	command := exec.Command(filepath.Join(repositoryRoot, "scripts", "validate-codex-release"))
+	body, err := os.ReadFile(filepath.Join(repositoryRoot, "scripts", "validate-codex-release"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "validate-codex-release")
+	if err := os.WriteFile(script, body, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, script)
 	command.Dir = repositoryRoot
 	command.Env = env
 	output, err := command.CombinedOutput()

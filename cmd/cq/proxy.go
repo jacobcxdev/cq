@@ -252,10 +252,7 @@ func runProxy(args []string) error {
 		}
 		if authority.Terminating {
 			if authority.Row == "ordinary_help" {
-				path, ok := proxyHelpInspectionPath(args)
-				if ok {
-					return writeManualHelp(os.Stdout, path)
-				}
+				return writeManualHelp(os.Stdout, []string{"proxy", "candidate"})
 			}
 			return errors.New("proxy candidate usage")
 		}

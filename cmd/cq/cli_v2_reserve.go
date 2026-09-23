@@ -96,6 +96,9 @@ func handleV2ReserveWithPreparation(parent context.Context, inv cli.Invocation, 
 }
 
 func v2ReserveFailure(err error) cli.Outcome {
+	if errors.Is(err, proxy.ErrLocalTokenRequired) {
+		return v2SelectionFailure(5, "routing_auth_failed", "Local proxy authentication failed.")
+	}
 	var failure *proxyReserveError
 	if !errors.As(err, &failure) {
 		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: reserve control.")

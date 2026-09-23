@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jacobcxdev/cq/internal/cli"
 	"io"
 	"os"
 	"os/exec"
@@ -263,9 +264,9 @@ func TestServiceHelpIsPureAndHidesOwnerFlag(t *testing.T) {
 		{"service", "uninstall", "--help"},
 	} {
 		output := &bytes.Buffer{}
-		handled, exitCode, err := runPureGlobalInspection(args, output, io.Discard)
-		if !handled || exitCode != 0 || err != nil {
-			t.Fatalf("runPureGlobalInspection(%v) = %t, %d, %v", args, handled, exitCode, err)
+		exitCode := runCLIV2(context.Background(), args, &cli.Session{Out: output, Err: io.Discard})
+		if exitCode != 0 {
+			t.Fatalf("runCLIV2(%v) = %d", args, exitCode)
 		}
 		if strings.Contains(output.String(), "--owner") {
 			t.Fatalf("service help exposed package owner flag:\n%s", output.String())
@@ -294,7 +295,10 @@ func TestOrdinaryCheckDoesNotInstallRefreshAgent(t *testing.T) {
 		"XDG_CACHE_HOME="+filepath.Join(root, "cache"),
 	)
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("cq check gemini: %v\n%s", err, output)
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 4 || !bytes.Contains(output, []byte(`"code":"check_unavailable"`)) {
+			t.Fatalf("cq check gemini: %v\n%s", err, output)
+		}
 	}
 	agent := filepath.Join(home, "Library", "LaunchAgents", "dev.jacobcx.cq.refresh.plist")
 	if _, err := os.Stat(agent); !errors.Is(err, os.ErrNotExist) {

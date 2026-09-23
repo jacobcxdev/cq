@@ -69,6 +69,14 @@ type codexResetScheduleBlockerJSON struct {
 
 var codexResetsDependenciesFactory = newCodexResetsDependencies
 
+// Legacy engine argument values; public parsing belongs to internal/cli.
+type CodexResetsListCmd struct{ Reference string }
+type CodexResetsUseCmd struct {
+	Reference string
+	Credit    *string
+	Yes       bool
+}
+
 func withCodexResetsDependencies(ctx context.Context, run func(codexResetsDependencies) error) error {
 	deps, closeDependencies, err := codexResetsDependenciesFactory(ctx)
 	if err != nil {

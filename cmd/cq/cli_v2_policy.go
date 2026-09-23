@@ -399,15 +399,17 @@ func validV2PolicyNullability(decoder *json.Decoder, path string) bool {
 	}
 	switch delimiter {
 	case '{':
+		seen := make(map[string]bool)
 		for decoder.More() {
 			key, err := decoder.Token()
 			if err != nil {
 				return false
 			}
 			name, ok := key.(string)
-			if !ok {
+			if !ok || seen[name] {
 				return false
 			}
+			seen[name] = true
 			if path != "" {
 				name = path + "." + name
 			}
@@ -438,6 +440,8 @@ func v2PolicyFailure(err error, inv cli.Invocation) cli.Outcome {
 	var control *proxyPolicyControlError
 	var validation *proxy.RoutingPolicyValidationError
 	switch {
+	case errors.Is(err, proxy.ErrLocalTokenRequired):
+		code = "routing_auth_failed"
 	case errors.As(err, &validation):
 		if validation.Generation {
 			code = "policy_generation_conflict"

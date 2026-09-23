@@ -411,13 +411,10 @@ func TestRunModels_RefreshCallsInjectedFallback(t *testing.T) {
 	}
 }
 
-func TestMainManualDispatchIncludesModels(t *testing.T) {
-	file := parseGoFile(t, "main.go")
-	body := findFuncBody(t, file, "main")
-	if !hasStringLiteral(body, "models") {
-		t.Fatal("main manual dispatch should include models before kong parsing")
-	}
-	if !hasIdentifier(body, "runModelsCommand") {
-		t.Fatal("main manual dispatch should call runModelsCommand")
+func TestMainCanonicalDispatchIncludesModels(t *testing.T) {
+	for _, path := range []string{"models list", "models refresh", "models overlay add", "models overlay remove", "models overlay prune"} {
+		if handler, ok := lookupCLIV2(path); !ok || handler == nil {
+			t.Fatalf("missing %s", path)
+		}
 	}
 }

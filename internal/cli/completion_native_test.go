@@ -14,9 +14,17 @@ func TestCLIV2CompletionNativeInsertion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("python3 unavailable; native completion gate required: %v", err)
 	}
-	for _, shell := range []string{"bash", "zsh"} {
-		t.Run(shell, func(t *testing.T) {
-			binary := "/bin/" + shell
+	shells := []struct{ name, shell, binary string }{{"bash", "bash", "/bin/bash"}, {"zsh", "zsh", "/bin/zsh"}}
+	if bash, err := exec.LookPath("bash"); err == nil {
+		stock, stockErr := os.Stat("/bin/bash")
+		selected, selectedErr := os.Stat(bash)
+		if stockErr == nil && selectedErr == nil && !os.SameFile(stock, selected) {
+			shells = append(shells, struct{ name, shell, binary string }{"bash-path", "bash", bash})
+		}
+	}
+	for _, fixture := range shells {
+		shell, binary := fixture.shell, fixture.binary
+		t.Run(fixture.name, func(t *testing.T) {
 			if _, err := os.Stat(binary); err != nil {
 				t.Fatalf("%s unavailable; native completion gate required: %v", binary, err)
 			}
@@ -30,6 +38,10 @@ func TestCLIV2CompletionNativeInsertion(t *testing.T) {
 				want        []string
 			}{
 				{"inline-enum", "codex proxy fixture create --content-encoding=zs", []string{"codex", "proxy", "fixture", "create", "--content-encoding=zstd"}},
+				{"prior-inline-option", "codex proxy fixture create --content-encoding=gzip --input=Éq", []string{"codex", "proxy", "fixture", "create", "--content-encoding=gzip", "--input=Équipe bleue.json"}},
+				{"literal-equals-after-stop", "check -- =", []string{"check", "--", "="}},
+				{"option-like-after-stop", "check -- --content-encoding=zs", []string{"check", "--", "--content-encoding=zs"}},
+				{"literal-equals-value", "codex proxy fixture create --input =", []string{"codex", "proxy", "fixture", "create", "--input", "="}},
 				{"inline-path", "codex proxy fixture create --input=Éq", []string{"codex", "proxy", "fixture", "create", "--input=Équipe bleue.json"}},
 				{"separate-path", "codex proxy fixture create --input Éq", []string{"codex", "proxy", "fixture", "create", "--input", "Équipe bleue.json"}},
 				{"command-directory-collision", "ser", []string{"service"}},

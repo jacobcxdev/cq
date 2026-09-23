@@ -27,7 +27,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 
 | Package | Purpose | AGENTS.md |
 |---------|---------|-----------|
-| `cmd/cq` | CLI entry point (kong), wires providers/cache/renderer | [AGENTS.md](cmd/cq/AGENTS.md) |
+| `cmd/cq` | CLI entry point (canonical v2), wires providers/cache/renderer | [AGENTS.md](cmd/cq/AGENTS.md) |
 | `internal/provider` | Provider interface + ID constants | [AGENTS.md](internal/provider/AGENTS.md) |
 | `internal/provider/claude` | Multi-account, OAuth refresh, parallel profile+usage | [AGENTS.md](internal/provider/claude/AGENTS.md) |
 | `internal/provider/codex` | Multi-account, automatic reads only (shared system credentials) | [AGENTS.md](internal/provider/codex/AGENTS.md) |

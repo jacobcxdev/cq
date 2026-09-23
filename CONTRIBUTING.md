@@ -104,3 +104,11 @@ filesystem; a cross-filesystem move can degrade to a copy.
 ### Required Secret
 
 The release workflow needs a `HOMEBREW_TAP_TOKEN` repository secret — a GitHub PAT with `repo` scope on `jacobcxdev/homebrew-tap`.
+
+## CLI contract checks
+
+Public commands are defined in `specs/cli-v2/commands.json`; edit the specification and regenerate its catalogue, help and completion scripts together. The executable composes family adapters in `cmd/cq/cli_v2.go`. Keep frozen installer and launcher argv in `specs/cli-v2/internal-abi.md` unchanged.
+
+Run `python3 specs/cli-v2/generate.py --check --go-output internal/cli/catalogue_gen.go`, `python3 specs/cli-v2/plan/check.py`, `go build ./...`, `go vet ./...` and `go test -race -count=1 ./...`. Native completion checks require Bash, Zsh and Fish. Consumer tests use isolated fake tools and synthetic schema 2 envelopes; never run `scripts/validate-codex-release` locally as a unit test because it performs live validation and writes GitHub statuses. Native Linux, macOS and Windows package jobs remain separate release gates.
+
+`scripts/verify-proxy-cu --cli-v2` runs the explicit CLI compatibility roster and prints its SHA256 plus the unchanged historical CU-0/CU-1 manifest hashes. It cannot satisfy historical signed CU release evidence. The original CU-0/CU-1 rosters still name the retired public grammar and are unavailable on this cutover until separate provenance review; this gate does not claim release readiness.

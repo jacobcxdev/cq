@@ -77,8 +77,8 @@ func isMachineABI(argv []string) bool {
 }
 
 // dispatchMachineABI preserves native stdout and exit-1 error rendering. It is
-// intentionally not wired into main until the public parser can reject every
-// unhandled internal-looking form without invoking a permissive legacy alias.
+// called before public parsing; unhandled internal-looking forms are rejected
+// by the canonical parser without invoking a permissive legacy alias.
 func dispatchMachineABI(argv []string) (handled bool, exitCode int) {
 	if !isMachineABI(argv) {
 		return false, 0

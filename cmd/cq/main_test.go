@@ -2,20 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
-	"os"
 	"reflect"
-	"runtime"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -91,179 +85,6 @@ func TestIsTerminal(t *testing.T) {
 }
 
 // --- dispatch ---
-
-func TestDispatchUnknownCommandReturnsError(t *testing.T) {
-	// We need a kong.Context whose Command() returns something not in the switch.
-	// Define a minimal CLI type with a single command that dispatch doesn't handle.
-	type unknownCLI struct {
-		Bogus struct{} `cmd:""`
-	}
-	var cli unknownCLI
-	// Parse "bogus" against our stub CLI to get a real *kong.Context.
-	kctx, err := kong.New(&cli,
-		kong.Writers(io.Discard, io.Discard),
-		kong.Exit(func(int) {}),
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-	parsed, err := kctx.Parse([]string{"bogus"})
-	if err != nil {
-		t.Fatalf("kctx.Parse: %v", err)
-	}
-
-	// dispatch expects a *kong.Context; pass our real CLI as well (unused for
-	// the default branch).
-	var mainCLI CLI
-	dispatchErr := dispatch(parsed, &mainCLI)
-	if dispatchErr == nil {
-		t.Fatal("dispatch returned nil error for unknown command, want non-nil")
-	}
-}
-
-func TestDispatchCodexAccountsJSON(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	tempRoot := os.TempDir()
-	if runtime.GOOS == "darwin" {
-		tempRoot = "/private/tmp"
-	}
-	shortConfigDir, err := os.MkdirTemp(tempRoot, "cq-accounts-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(shortConfigDir) })
-	t.Setenv("XDG_CONFIG_HOME", shortConfigDir)
-
-	for _, args := range [][]string{
-		{"codex", "accounts", "--json"},
-		{"--json", "codex", "accounts"},
-	} {
-		var cli CLI
-		kctx, err := kong.New(&cli,
-			kong.Writers(io.Discard, io.Discard),
-			kong.Exit(func(int) {}),
-		)
-		if err != nil {
-			t.Fatalf("kong.New: %v", err)
-		}
-		parsed, err := kctx.Parse(args)
-		if err != nil {
-			t.Fatalf("Parse(%v): %v", args, err)
-		}
-
-		reader, writer, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		originalStdout := os.Stdout
-		os.Stdout = writer
-		dispatchErr := dispatch(parsed, &cli)
-		_ = writer.Close()
-		os.Stdout = originalStdout
-		output, readErr := io.ReadAll(reader)
-		_ = reader.Close()
-		if dispatchErr != nil {
-			t.Fatalf("dispatch(%v): %v", args, dispatchErr)
-		}
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-
-		var accounts []provider.Account
-		if err := json.Unmarshal(output, &accounts); err != nil {
-			t.Fatalf("dispatch(%v) output is not JSON: %v", args, err)
-		}
-		if accounts == nil || len(accounts) != 0 {
-			t.Fatalf("dispatch(%v) accounts = %#v, want []", args, accounts)
-		}
-	}
-}
-
-func TestCLIParsesRemoveCommands(t *testing.T) {
-	var cli CLI
-	kctx, err := kong.New(&cli,
-		kong.Writers(io.Discard, io.Discard),
-		kong.Exit(func(int) {}),
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "claude remove", args: []string{"claude", "remove", "user@example.com"}, want: "claude remove <email>"},
-		{name: "codex remove", args: []string{"codex", "remove", "user@example.com"}, want: "codex remove <email>"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parsed, err := kctx.Parse(tt.args)
-			if err != nil {
-				t.Fatalf("Parse(%v): %v", tt.args, err)
-			}
-			if got := parsed.Command(); got != tt.want {
-				t.Fatalf("Command() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCLIParsesProxyCodexDefault(t *testing.T) {
-	tests := []struct {
-		name          string
-		args          []string
-		wantClear     bool
-		wantReference string
-	}{
-		{name: "status", args: []string{"proxy", "default", "codex"}},
-		{name: "clear", args: []string{"proxy", "default", "codex", "--clear"}, wantClear: true},
-		{name: "reference", args: []string{"proxy", "default", "codex", "person@example.test"}, wantReference: "person@example.test"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var cli CLI
-			kctx, err := kong.New(&cli,
-				kong.Writers(io.Discard, io.Discard),
-				kong.Exit(func(int) {}),
-			)
-			if err != nil {
-				t.Fatalf("kong.New: %v", err)
-			}
-
-			parsed, err := kctx.Parse(tt.args)
-			if err != nil {
-				t.Fatalf("Parse(%v): %v", tt.args, err)
-			}
-			if got := parsed.Command(); !strings.HasPrefix(got, "proxy default codex") ||
-				(tt.wantReference != "" && !strings.Contains(got, "<account-reference>")) {
-				t.Fatalf("Command() = %q, want proxy default codex command for %q", got, tt.wantReference)
-			}
-			if cli.Proxy.Default.Codex.Clear != tt.wantClear {
-				t.Fatalf("Clear = %t, want %t", cli.Proxy.Default.Codex.Clear, tt.wantClear)
-			}
-			if cli.Proxy.Default.Codex.Reference != tt.wantReference {
-				t.Fatalf("Reference = %q, want %q", cli.Proxy.Default.Codex.Reference, tt.wantReference)
-			}
-		})
-	}
-
-	var cli CLI
-	kctx, err := kong.New(&cli,
-		kong.Writers(io.Discard, io.Discard),
-		kong.Exit(func(int) {}),
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-
-	if _, err := kctx.Parse([]string{"proxy", "codex-default"}); err == nil {
-		t.Fatal("Parse(proxy codex-default) error = nil, want unknown command")
-	}
-}
 
 func TestParseProxyCommandOptionsPort(t *testing.T) {
 	opts, err := parseProxyCommandOptions([]string{"--port", "19281", "--migrate-legacy-managed"})

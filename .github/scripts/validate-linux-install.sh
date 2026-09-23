@@ -42,7 +42,7 @@ cleanup() {
   set +e
   if [[ -x "$installed_cq" ]]; then
     status_json=$($installed_cq service status --json 2>/dev/null)
-    proxy_pid=$(jq -r '.proxy.pid // empty' <<<"$status_json" 2>/dev/null)
+    proxy_pid=$(jq -r 'select(.schema_version == 2 and .ok == true) | .data.components[] | select(.id == "proxy") | .pid // empty' <<<"$status_json" 2>/dev/null)
     if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ && -e "/proc/$proxy_pid/exe" ]]; then
       live_executable=$(readlink "/proc/$proxy_pid/exe" 2>/dev/null)
       if [[ "$live_executable" == "$installed_cq" ]]; then
@@ -146,7 +146,7 @@ else
 fi
 run_installer "$version"
 
-[[ "$("$installed_cq" --version)" == "$version" ]]
+[[ "$("$installed_cq" version --json | jq -er 'select(.schema_version == 2 and .ok == true and .command == "version") | .data.version')" == "$version" ]]
 for unit in cq-proxy.service cq-refresh.service cq-refresh.timer; do
   [[ -f "$XDG_CONFIG_HOME/systemd/user/$unit" ]]
 done
@@ -163,23 +163,21 @@ for _ in $(seq 1 60); do
   status_json=$($installed_cq service status --json)
   if jq -e \
     --arg executable "$installed_cq" \
-    '.proxy.registered and .proxy.running and .proxy.healthy and
-     .refresh.registered and .refresh.healthy and
-     .proxy.configured_executable == $executable and
-     .proxy.live_executable == $executable and
-     .proxy.listener == "127.0.0.1:19280" and
-     (.proxy.pid > 0)' <<<"$status_json" >/dev/null; then
+    'select(.schema_version == 2 and .ok == true) |
+     (.data.components | map({key: .id, value: .}) | from_entries) |
+     .proxy.installed and .proxy.state == "running" and .proxy.healthy and
+     .["token-refresh"].installed and .["token-refresh"].healthy and
+     .proxy.executable == $executable and (.proxy.pid > 0)' <<<"$status_json" >/dev/null; then
     break
   fi
   sleep 1
 done
 jq -e \
   --arg executable "$installed_cq" \
-  '.proxy.healthy and .refresh.healthy and
-   .proxy.configured_executable == $executable and
-   .proxy.live_executable == $executable and
-   .proxy.listener == "127.0.0.1:19280"' <<<"$status_json" >/dev/null
-proxy_pid=$(jq -r '.proxy.pid' <<<"$status_json")
+  'select(.schema_version == 2 and .ok == true) |
+   (.data.components | map({key: .id, value: .}) | from_entries) |
+   .proxy.healthy and .["token-refresh"].healthy and .proxy.executable == $executable' <<<"$status_json" >/dev/null
+proxy_pid=$(jq -r '.data.components[] | select(.id == "proxy") | .pid' <<<"$status_json")
 [[ "$(readlink "/proc/$proxy_pid/exe")" == "$installed_cq" ]]
 grep -F "cq-proxy.service" "/proc/$proxy_pid/cgroup" >/dev/null
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local

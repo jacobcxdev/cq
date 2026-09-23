@@ -293,31 +293,38 @@ func (lifecycle commandLifecycle) Status(ctx context.Context) error {
 		return err
 	}
 	var status struct {
-		SchemaVersion int                `json:"schema_version"`
-		Owner         installstate.Owner `json:"owner"`
-		Proxy         struct {
-			Registered           bool   `json:"registered"`
-			Running              bool   `json:"running"`
-			ConfiguredExecutable string `json:"configured_executable"`
-			LiveExecutable       string `json:"live_executable"`
-			Healthy              bool   `json:"healthy"`
-		} `json:"proxy"`
-		Refresh struct {
-			Registered           bool   `json:"registered"`
-			ConfiguredExecutable string `json:"configured_executable"`
-			Healthy              bool   `json:"healthy"`
-		} `json:"refresh"`
+		SchemaVersion int    `json:"schema_version"`
+		Command       string `json:"command"`
+		OK            bool   `json:"ok"`
+		Data          struct {
+			Components []struct {
+				ID         string `json:"id"`
+				Owner      string `json:"owner"`
+				Installed  bool   `json:"installed"`
+				State      string `json:"state"`
+				Executable string `json:"executable"`
+				Healthy    bool   `json:"healthy"`
+			} `json:"components"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &status); err != nil {
 		return fmt.Errorf("decode CQ service status: %w", err)
 	}
-	if status.SchemaVersion != 1 ||
-		status.Owner != lifecycle.Owner ||
-		!status.Proxy.Registered || !status.Proxy.Running || !status.Proxy.Healthy ||
-		status.Proxy.ConfiguredExecutable != lifecycle.Executable || status.Proxy.LiveExecutable != lifecycle.Executable ||
-		!status.Refresh.Registered || !status.Refresh.Healthy || status.Refresh.ConfiguredExecutable != lifecycle.Executable {
+	if status.SchemaVersion != 2 || status.Command != "service status" || !status.OK || len(status.Data.Components) != 2 {
 		return fmt.Errorf("CQ services are unhealthy")
 	}
+	owner := "package"
+	if lifecycle.Owner == installstate.OwnerGo {
+		owner = "cq"
+	}
+	seen := map[string]bool{}
+	for _, component := range status.Data.Components {
+		if seen[component.ID] || (component.ID != "proxy" && component.ID != "token-refresh") || component.Owner != owner || !component.Installed || !component.Healthy || component.Executable != lifecycle.Executable || (component.ID == "proxy" && component.State != "running") {
+			return fmt.Errorf("CQ services are unhealthy")
+		}
+		seen[component.ID] = true
+	}
+
 	return nil
 }
 
@@ -373,13 +380,28 @@ func (runner commandVersionRunner) Version(ctx context.Context, executable strin
 	if err != nil {
 		return "", err
 	}
-	return normaliseVersion(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "{") {
+		var envelope struct {
+			SchemaVersion int    `json:"schema_version"`
+			OK            bool   `json:"ok"`
+			Command       string `json:"command"`
+			Data          struct {
+				Version string `json:"version"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(value), &envelope); err != nil || envelope.SchemaVersion != 2 || !envelope.OK || envelope.Command != "version" {
+			return "", fmt.Errorf("invalid CQ version envelope")
+		}
+		value = envelope.Data.Version
+	}
+	return normaliseVersion(value)
 }
 
 func runCommandVersion(ctx context.Context, executable string) (string, error) {
 	var output boundedBuffer
 	output.Limit = maxVersionOutputBytes
-	command := exec.CommandContext(ctx, executable, "--version")
+	command := exec.CommandContext(ctx, executable, "--version", "--json")
 	command.Stdout = &output
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
