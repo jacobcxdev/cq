@@ -1,6 +1,57 @@
 # CLI v2 local release evidence — 1.0.0
 
-## Current status — 23 September 2026, 14:09 UTC
+## Current qualified candidate — 23 September 2026, 14:27 UTC
+
+**Six provider-complete candidate binaries are built and checked from signed source `244678521f4fab55ce423427d32600034a93d860`. The qualified Darwin/arm64 binary is now installed and verified on the existing Mac; the earlier incomplete build and rollback remain historical below.**
+
+The user authorised feature-branch push and candidate-only CI dispatch. [CI run 35873208509](https://github.com/jacobcxdev/cq/actions/runs/35873208509), attempt 1, succeeded using the legitimate release-time provider configuration. It built all six existing release targets; ordinary installation/native qualification jobs were skipped in this candidate-only run. No PR, main-branch merge, tag or published release was performed. Local archive assembly used the current release file allowlist and these exact downloaded binaries; it did not rebuild them or expose linker secret values.
+
+Source includes all 14 default-branch commits through `e019d2bff938317fa794a6c6605fa22aba5436bc`, plus reviewed history cancellation, launchd removal/policy parsing and dashboard corrections. `a00b4dc` also corrects absent integrations incorrectly causing partial failure: genuine authentication and network failures still fail visibly. Subsequent documentation-only commits are not the executable's source revision.
+
+### Current artefacts
+
+Directory: `.superpowers/sdd/plan/qualified-candidate-artifact-evidence/`. `artifact-manifest.json` binds source, run/attempt, downloaded metadata digest, clean build provenance, binary and archive hashes, archive members and all 127 embedded help pages per target. Each archive contains the executable, README.md and specs/cli-v2/COMMANDS.md. Darwin/Linux names are `archives/cq_1.0.0_{os}_{arch}.tar.gz`; Windows names end `.zip`.
+
+| Target | Archive SHA-256 | Executable SHA-256 |
+|---|---|---|
+| darwin/amd64 | `c02ba4f3210847547a2b5c3f9308e109eb161a7467f846b40b2b6212ca1f9378` | `4321c8f433921b00c14e0074c44c74198d81d06d21da9685730ea4eab8bed73b` |
+| darwin/arm64 | `35a9dc8705659277c10db213d2ec32430079dc4b13a89e5a1c73f02937ddba77` | `6679806a694c225a76e2386d18227ce797dcb91159e89db6f04afd1c47d26cc0` |
+| linux/amd64 | `0ee8d49cc060cf47983d15f9e50ca0fb2e3bf909e35e348a01745b2f51a15401` | `6db38c8b0368e66e50bd9c3c9f4068e51b63fec008ad95dc783928cde3e41896` |
+| linux/arm64 | `fed59979f523f60ba5f9953dec0311c569f8103db442e940959ba313ed263478` | `40ebb4ba482fde4725d763877bdff1e1bb0822c93387c097bb1762e5866981cc` |
+| windows/amd64 | `857fdb906bf0c9c513825a91b22eae59a3bae8bdb1bf73280d56d51704933dc0` | `ee1674ff3acbd36395a66865716476097991d3dddf888b0a0bdabe8839f45900` |
+| windows/arm64 | `9a0a1169441e533028e3ec24f503e13ee4b9218fcb251dd5a181a4e0f7b4a465` | `5240afcd2212ec2a092cbceed3aa4ef059eb36c4e3e1db1a4368f62fd3a6d4fa` |
+
+These are local archives of the qualified CI binaries, not MSI/Cask/WinGet packages or a published release. Cross-target metadata checks establish build provenance, not foreign runtime acceptance.
+
+### Current verification
+
+- All 25 indexed artefact-evidence hashes were verified by the controller. Packaged Darwin/arm64 checks passed 271 cases: 127 exact help pages, 127 schema-2 syntax errors, one version result, 13 fail-closed machine ABI forms and three completion outputs. Earlier 12 real-shell PTY cases remain applicable: the controller verified no completion/help implementation delta from that tested source, and current packaged completion outputs match exactly. No new foreign-shell execution is claimed.
+- Fresh Gemini check at 14:21:47 UTC passed with both 5h and 7d windows, cache age zero, no errors/warnings and empty stderr. Fresh all-provider check at 14:22:06 UTC exited 0, no warnings/stderr and no stale results: configured Codex and Gemini succeeded; absent Claude was represented as not configured without falsely failing the command. Receipts are under `.superpowers/sdd/plan/qualified-candidate-evidence/`; candidate identity records exact binary SHA-256 `6679806a694c225a76e2386d18227ce797dcb91159e89db6f04afd1c47d26cc0`.
+- Full integrated race history remains **4179 PASS, one stale timestamp assertion FAIL, 29 SKIP**, with the complete corrected timestamp test passing separately. Subsequent corrections have reviewed, source-bound focused race/vet proof. CI candidate success is not a new all-green full-suite claim.
+- Native policy correction `efa05a8a263bd9ec45674ddd44a940524d23893f` passed 40 top-level/144 total targeted race tests and focused vet; scoped review approved. The final installed stop/start cycle also passed, as recorded below.
+
+The combined `.superpowers/sdd/plan/qualified-release-evidence-index.json` binds 28 current candidate/deployment files and the separately verified 25-file artefact index; SHA-256 `57bb969884b8c78b0193a436849f9e9dc3f67b75545103d8d9989fe0d17f9230`. A fresh fetch at 14:27:46 UTC confirmed default `main` remained `e019d2bff938317fa794a6c6605fa22aba5436bc`, an ancestor of the candidate.
+
+### Deployment and completion boundary
+
+The legitimate Homebrew hook completed successfully at 14:24:26 UTC after atomic replacement. Installed `/opt/homebrew/bin/cq` resolves to the existing Caskroom path `/opt/homebrew/Caskroom/cq/0.32.12/cq`; this is a local deployment, not a newly published Homebrew package. The installed binary digest matches the qualified Darwin/arm64 artefact above. Version output is 1.0.0/schema 2; its nullable revision/dirty fields remain null, while source identity is independently bound by verified binary/build metadata and CI receipts.
+
+Actual `service stop --component all` and `service start --component all` both returned 0 with empty stderr. Strict status subsequently returned 0: proxy PID 5344 running and healthy; token refresh enabled, idle and healthy, with successful completion at 14:25:16.993461 UTC. This closes the observed native policy-parser regression for the executed all-component cycle; it does not prove every disabled/selective/failure-injection matrix.
+
+Installed fresh all-provider check at 14:25:51 UTC returned 0, no warnings, no stderr and zero cache ages. Gemini was OK; Codex had three usable accounts and one genuinely exhausted account; Claude remained expected not-configured. An actual terminal invocation also exited 0 with restored bars, active account first, weighted gauge, both Gemini windows and no partial-refresh warning.
+
+Both installed-client transport flows returned exact replies. HTTP observed upstream 429 then successful failover/200. WebSocket observed 101 and terminal success, followed by `cyber_disabled` resynchronisation through HTTP 200. Both recorded intervals contain zero 503 and zero continuity mismatch. This does not claim an exclusively WebSocket conversation.
+
+Evidence directory: `.superpowers/sdd/plan/qualified-deploy-evidence/`, including `attempt-jzit52aa/deployment.json`, `installed-identity.json`, `service-cycle.json`, `installed-service-status.json`, `installed-fresh-check.json` and `transport-acceptance.json`. Original executable, definitions and ownership record remain retained under the earlier local-deploy evidence rollback directory. User Codex connection settings remain unchanged.
+
+The user waived disposable environments and requested ordinary deployment to the existing Mac. Do not restore that prerequisite or describe it as passed. Preserve unavailable native macOS package/disabled-component, Linux confinement/systemd and Windows scheduler/WiX/credential qualification as unverified. Historical CU0/CU1 release provenance and installed vendor model-cache tolerance remain unverified; compatibility-only proof is not signed release acceptance. These limitations forbid broader release/platform claims and do not authorise a new proof backend.
+
+T00–T27 implementation and task reviews remain recorded in the execution ledger. Current T28 candidate preparation and the authorised existing-Mac installed acceptance checkpoint are evidenced above. This closes that local delivery checkpoint; it does not claim published-release or unavailable foreign-platform acceptance. No reset consumption or unrelated native/credential mutation is authorised by this evidence.
+
+---
+
+
+## Historical rollback checkpoint — 23 September 2026, 14:09 UTC
 
 **CLI v2 deployment was rolled back. The existing Mac is running the restored v0.32.12 installation; no current six-target CLI v2 candidate is qualified for another deployment.** Local source work remains intact. Publication, tagging, pushing and remote workflow execution have not been authorised.
 
@@ -17,7 +68,7 @@ The user explicitly rejected disposable environments and authorised normal deplo
 
 Current incident and deployment evidence is retained under `.superpowers/sdd/plan/local-deploy-evidence/`; default-branch evidence and mapping are under `.superpowers/sdd/plan/default-branch-integration-evidence/` and the corresponding report. Original executable, definitions and ownership record remain retained for rollback. User Codex connection settings were not changed. No reset credit was consumed.
 
-### Current gate reconciliation
+### Gate reconciliation at the rollback checkpoint
 
 | Requirement | Current evidence and status |
 |---|---|
