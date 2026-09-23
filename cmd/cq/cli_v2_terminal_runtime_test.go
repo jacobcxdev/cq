@@ -234,6 +234,22 @@ func TestTerminalRuntimeRolesAndStates(t *testing.T) {
 	}
 }
 
+func TestTerminalRescueGenerationIdentifier(t *testing.T) {
+	o := terminalFixtureOptions(100)
+	got := terminalProxyRescue(v2RescueState{
+		Mode: "normal", Generation: 1234567890, ActiveRescueRequests: 1234,
+	}, o)
+	if !strings.Contains(got, "\x1b[36m1234567890\x1b[0m") {
+		t.Errorf("generation should be an exact cyan identifier: %q", got)
+	}
+	if strings.Contains(ansi.Strip(got), "1,234,567,890") {
+		t.Errorf("generation should not be grouped: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[1;34m1,234\x1b[0m") {
+		t.Errorf("active requests should remain a grouped blue count: %q", got)
+	}
+}
+
 func TestTerminalProxyAdaptersAndPlainCompatibility(t *testing.T) {
 	requests := 0
 	health := v2ProxyDependencies{Client: &http.Client{Transport: v2ProxyRoundTrip(func(r *http.Request) (*http.Response, error) {
