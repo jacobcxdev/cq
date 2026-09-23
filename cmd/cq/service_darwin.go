@@ -965,9 +965,9 @@ func (platform *darwinServicePlatform) enabled(ctx context.Context, label string
 		}
 		found = true
 		switch strings.TrimSuffix(parts[1], ",") {
-		case "true":
+		case "true", "disabled":
 			value = false
-		case "false":
+		case "false", "enabled":
 			value = true
 		default:
 			return false, errServiceUnavailable

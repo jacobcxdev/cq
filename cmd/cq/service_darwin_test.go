@@ -1305,3 +1305,71 @@ func TestDarwinServiceWaitsForRemovalBeforeReplacingJob(t *testing.T) {
 		}
 	}
 }
+
+func TestDarwinServiceNativeWordPolicyStopAndRestore(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback_%t", rollback), func(t *testing.T) {
+			p, r := newSelectedDarwinHarness(t)
+			l, _, store := newSelectedServiceHarness(t)
+			l.Platform, l.Executable = p, p.executable
+			store.record.Executable = p.executable
+			store.record.Services = []string{proxyAgentLabel, agentLabel}
+			// Before the first explicit policy change launchd can omit both labels.
+			delete(r.disabled, proxyAgentLabel)
+			delete(r.disabled, agentLabel)
+			run := p.run
+			p.run = func(ctx context.Context, args ...string) ([]byte, error) {
+				output, err := run(ctx, args...)
+				if args[0] == "print-disabled" {
+					text := strings.ReplaceAll(string(output), "=> false", "=> enabled")
+					output = []byte(strings.ReplaceAll(text, "=> true", "=> disabled"))
+				}
+				return output, err
+			}
+			before, err := p.SnapshotSelected(context.Background(), serviceAll)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rollback {
+				r.failOnce["bootout\x00"+p.target(proxyAgentLabel)] = errors.New("injected proxy bootout failure")
+			}
+			exit, data, _ := runSelectedService(t, context.Background(), l, "service", "stop", "--component", "all", "--json")
+			if rollback {
+				after, err := p.SnapshotSelected(context.Background(), serviceAll)
+				if exit == 0 || data.Rollback != "restored" || err != nil || !sameServicePlatformSnapshot(before, after) {
+					t.Fatalf("exit=%d rollback=%s snapshot error=%v before=%+v after=%+v", exit, data.Rollback, err, before, after)
+				}
+			} else {
+				if exit != 0 || data.Rollback != "not_needed" {
+					t.Fatalf("exit=%d data=%+v", exit, data)
+				}
+				for _, c := range data.Components {
+					if c.Enabled == nil || *c.Enabled || c.State != "stopped" {
+						t.Fatalf("stop not verified: %+v", c)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDarwinServiceEnabledPolicyFormats(t *testing.T) {
+	for _, value := range []string{"true", "false", "enabled", "disabled", "maybe", "Enabled"} {
+		t.Run(value, func(t *testing.T) {
+			p, _ := newDarwinServiceHarness(t)
+			p.run = func(context.Context, ...string) ([]byte, error) {
+				return []byte(fmt.Sprintf("disabled services = {\n%q => %s\n}", proxyAgentLabel, value)), nil
+			}
+			enabled, err := p.enabled(context.Background(), proxyAgentLabel)
+			valid := value == "true" || value == "false" || value == "enabled" || value == "disabled"
+			if valid {
+				want := value == "false" || value == "enabled"
+				if err != nil || enabled != want {
+					t.Fatalf("enabled=%t want=%t err=%v", enabled, want, err)
+				}
+			} else if !errors.Is(err, errServiceUnavailable) {
+				t.Fatalf("invalid policy accepted: %v", err)
+			}
+		})
+	}
+}
