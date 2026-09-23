@@ -527,7 +527,7 @@ cq proxy trace --follow
 
 ### Payload diagnostics
 
-`payload_diagnostics_log` is disabled by default and requires restart. It records exact HTTP request and response bodies plus downstream and upstream Codex WebSocket frames. Every entry contains its causal trace ID, direction, byte count, encoding, account hint where applicable, and whether capture reached a complete body. Credential-bearing headers are excluded. Query it with `cq proxy trace --payload` and the same session/trace/time filters.
+`payload_diagnostics_log` is disabled by default and requires restart. It records up to 64 KiB of each HTTP request and response body and each downstream and upstream Codex WebSocket frame. Every entry contains its causal trace ID, direction, original byte count, encoding, account hint where applicable, and whether capture reached a complete body or was truncated. Credential-bearing headers are excluded. Query it with `cq proxy trace --payload` and the same session/trace/time filters.
 
 > **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, provider responses, and other sensitive content. Do not share without review. Request and response bodies can themselves contain secrets.
 

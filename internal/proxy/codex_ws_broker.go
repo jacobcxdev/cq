@@ -759,7 +759,8 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 	if pending.prewarm {
 		return broker.servePrewarm(ctx, downstream, pending, active)
 	}
-	if pending != nil && !pending.portable && active != nil && active.account != "" {
+	// A ready prewarm is this turn's anchor, not a prior Cyber turn.
+	if pending != nil && !pending.portable && active != nil && active.account != "" && active.prewarm.State != CodexPrewarmReady {
 		if planner, ok := broker.config.Plans.(interface {
 			ShouldResetCyberOff(context.Context, CodexProtocolRequest, codex.AccountKey) bool
 		}); ok && planner.ShouldResetCyberOff(ctx, pending.request, active.account) {

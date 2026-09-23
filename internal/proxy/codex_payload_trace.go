@@ -15,7 +15,7 @@ import (
 	"unicode/utf8"
 )
 
-const codexPayloadCaptureMaxBytes = codexProtocolMaxBytes
+const codexPayloadCaptureMaxBytes = 64 << 10
 
 func emitCodexTracePayload(ctx context.Context, event PayloadEvent) {
 	trace := codexTraceFromContext(ctx)
