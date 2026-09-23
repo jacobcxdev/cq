@@ -583,7 +583,7 @@ func TestCLIV2PolicyPublicEvidenceNullabilityAndHumanEscaping(t *testing.T) {
 	when := time.Date(2026, 9, 23, 1, 2, 3, 456, time.FixedZone("offset", 3600))
 	text := "opaque\u0085identity"
 	p := proxy.RoutingPolicyDocument{SchemaVersion: 1, AuthorityGeneration: 1, RoutingGeneration: 1, Pools: []proxy.AccountPoolDocument{{Name: "Work", Members: []codex.AccountKey{codex.AccountKey(text)}}}, CapabilityRoutingEvidence: []proxy.CapabilityRoutingEvidenceV1{{SchemaVersion: 1, AccountKey: codex.AccountKey(text), ObservedAt: when, RoutingGeneration: 1}}, Delegations: []proxy.CallerDelegationV1{{Caller: text, Accounts: []codex.AccountKey{"a"}, ExpiresAt: when}}}
-	out := v2PolicyOutcome(p, "policy")
+	out := v2PolicyOutcome(p, "policy", "show", false)
 	if !bytes.Contains(out.Data, []byte(`"expires_at":null`)) || !bytes.Contains(out.Data, []byte(`"observed_at":"2026-09-23T00:02:03.000000456Z"`)) || !bytes.Contains(out.Data, []byte(`"value":0`)) {
 		t.Fatalf("required fields missing: %s", out.Data)
 	}

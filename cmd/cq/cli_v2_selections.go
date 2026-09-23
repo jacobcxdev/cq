@@ -61,7 +61,8 @@ func handleV2Selection(ctx context.Context, inv cli.Invocation, session *cli.Ses
 
 type v2SelectionPreparation func(context.Context) (v2SelectionDependencies, error)
 
-func handleV2SelectionWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare v2SelectionPreparation) cli.Outcome {
+func handleV2SelectionWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare v2SelectionPreparation) (result cli.Outcome) {
+	defer func() { v2AnnotateRoutingTimeout(&result, inv.Path) }()
 	timeout, err := time.ParseDuration(inv.Options["timeout"][0])
 	if err != nil {
 		return v2SelectionFailure(2, "routing_invalid_argument", "Invalid argument: timeout.")
@@ -157,9 +158,25 @@ func executeV2Selection(parent, ctx context.Context, inv cli.Invocation, deps v2
 		}
 	}
 	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
+		if intent.provider == "claude" && intent.action != "show" {
+			out.ConfirmedReceipt = true
+		}
 		return out
 	}
 	return v2SelectionOutcome(cfg, intent)
+}
+
+func v2AnnotateRoutingTimeout(out *cli.Outcome, path string) {
+	if len(out.Errors) == 0 || out.Errors[0].Code != "routing_timeout" || out.ConfirmedReceipt {
+		return
+	}
+	last := path[strings.LastIndex(path, " ")+1:]
+	switch last {
+	case "show", "status", "windows", "list", "digest":
+		out.TerminalResult = "unavailable"
+	default:
+		out.TerminalResult = "unconfirmed"
+	}
 }
 
 func v2ResolveClaudeSelection(rows []keyring.ClaudeAccountInspection, reference string, legacyUUID bool) (string, error) {
@@ -252,7 +269,7 @@ func v2SelectionOutcome(cfg *proxy.Config, intent proxySelectionIntent) cli.Outc
 		label = "not configured"
 	}
 	raw, _ := json.Marshal(data)
-	return cli.Outcome{Data: raw, Human: fmt.Sprintf("%s proxy %s: %s\nApplication: %s\nRestart required: %t\n", intent.provider, intent.kind, label, data.Application, data.RestartRequired)}
+	return cli.Outcome{Data: raw, Human: fmt.Sprintf("%s proxy %s: %s\nApplication: %s\nRestart required: %t\n", intent.provider, intent.kind, label, data.Application, data.RestartRequired), Terminal: func(o cli.TerminalOptions) string { return terminalSelection(data, intent.action, o) }}
 }
 
 func v2PrimeOutcome(cfg *proxy.Config, action string) cli.Outcome {
@@ -270,5 +287,5 @@ func v2PrimeOutcome(cfg *proxy.Config, action string) cli.Outcome {
 	if data.Enabled {
 		state = "enabled"
 	}
-	return cli.Outcome{Data: raw, Human: fmt.Sprintf("Codex window priming: %s\nModel overrides: %d\nRestart required: %t\n", state, len(overrides), data.RestartRequired)}
+	return cli.Outcome{Data: raw, Human: fmt.Sprintf("Codex window priming: %s\nModel overrides: %d\nRestart required: %t\n", state, len(overrides), data.RestartRequired), Terminal: func(o cli.TerminalOptions) string { return terminalPrime(data.Enabled, data.ModelOverrides, action, o) }}
 }

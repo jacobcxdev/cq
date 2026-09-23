@@ -50,7 +50,8 @@ func handleV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessio
 func handleV2PolicyWithDependencies(ctx context.Context, inv cli.Invocation, session *cli.Session, deps proxyPolicyDependencies) cli.Outcome {
 	return handleV2PolicyWithPreparation(ctx, inv, session, func(context.Context) (proxyPolicyDependencies, error) { return deps, nil })
 }
-func handleV2PolicyWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare func(context.Context) (proxyPolicyDependencies, error)) cli.Outcome {
+func handleV2PolicyWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare func(context.Context) (proxyPolicyDependencies, error)) (result cli.Outcome) {
+	defer func() { v2AnnotateRoutingTimeout(&result, inv.Path) }()
 	timeout, err := time.ParseDuration(inv.Options["timeout"][0])
 	if err != nil {
 		return v2SelectionFailure(2, "routing_invalid_argument", "Invalid argument: timeout.")
@@ -63,9 +64,11 @@ func handleV2PolicyWithPreparation(parent context.Context, inv cli.Invocation, s
 	}
 	// Existing digests are pure values; do not even resolve filesystem roots.
 	if inv.Path == "codex proxy session digest" && len(inv.Options["digest"]) > 0 {
-		return v2PolicyResult(struct {
+		out := v2PolicyResult(struct {
 			Digest string `json:"session_digest"`
 		}{inv.Options["digest"][0]}, false, "")
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalSessionDigest(inv.Options["digest"][0], o) }
+		return out
 	}
 	deps, err := prepare(ctx)
 	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
@@ -134,7 +137,7 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 		if document.SchemaVersion != 1 {
 			return v2SelectionFailure(6, "routing_conflict", "Routing state conflict: no policy has been published.")
 		}
-		return v2PolicyOutcome(document, kind)
+		return v2PolicyOutcome(document, kind, action, len(inv.Options["state-dir"]) > 0)
 	}
 	if kind == "pool" {
 		if action != "set" {
@@ -151,7 +154,7 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 			if err != nil {
 				return v2PolicyFailure(err, inv)
 			}
-			return v2PolicyOutcome(updated, kind)
+			return v2PolicyOutcome(updated, kind, action, false)
 		}
 		if deps.ListInventory == nil || deps.LoadAliasIndex == nil {
 			return v2SelectionInventoryFailure()
@@ -208,7 +211,7 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 		if err != nil {
 			return v2PolicyFailure(err, inv)
 		}
-		return v2PolicyOutcome(updated, kind)
+		return v2PolicyOutcome(updated, kind, action, false)
 	}
 	digest := ""
 	if action != "list" {
@@ -241,9 +244,11 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 		}
 	}
 	if action == "digest" {
-		return v2PolicyResult(struct {
+		out := v2PolicyResult(struct {
 			Digest string `json:"session_digest"`
 		}{digest}, false, "")
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalSessionDigest(digest, o) }
+		return out
 	}
 	current, err := proxyPolicyControl(ctx, deps, http.MethodGet, proxy.RuntimePolicyPath, port, nil)
 	if err != nil {
@@ -253,9 +258,12 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 		return current.SessionBindings[i].SessionDigest < current.SessionBindings[j].SessionDigest
 	})
 	if action == "list" {
-		return v2PolicyResult(struct {
+		bindings := append([]proxy.SessionBindingDocument{}, current.SessionBindings...)
+		out := v2PolicyResult(struct {
 			Bindings []proxy.SessionBindingDocument `json:"bindings"`
-		}{append([]proxy.SessionBindingDocument{}, current.SessionBindings...)}, false, "")
+		}{bindings}, false, "")
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalSessionList(bindings, o) }
+		return out
 	}
 	index := -1
 	for i, binding := range current.SessionBindings {
@@ -270,9 +278,12 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 		}
 	}
 	if action == "show" {
-		return v2PolicyResult(struct {
+		binding := current.SessionBindings[index]
+		out := v2PolicyResult(struct {
 			Binding proxy.SessionBindingDocument `json:"binding"`
-		}{current.SessionBindings[index]}, false, "")
+		}{binding}, false, "")
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalSessionBinding(binding, true, o) }
+		return out
 	}
 	next := nextProxyRoutingPolicy(current)
 	if action == "bind" {
@@ -303,7 +314,7 @@ func executeV2Policy(ctx context.Context, inv cli.Invocation, session *cli.Sessi
 	if err != nil {
 		return v2PolicyFailure(err, inv)
 	}
-	return v2PolicyOutcome(updated, kind)
+	return v2PolicyOutcome(updated, kind, action, false)
 }
 
 // Reading caller-owned stdin is the only asynchronous work here. All state
@@ -582,7 +593,7 @@ func v2PublicPolicy(p proxy.RoutingPolicyDocument) v2PolicyDocument {
 	}
 	return result
 }
-func v2PolicyOutcome(p proxy.RoutingPolicyDocument, kind string) cli.Outcome {
+func v2PolicyOutcome(p proxy.RoutingPolicyDocument, kind, action string, offline bool) cli.Outcome {
 	data := struct {
 		Policy v2PolicyDocument `json:"policy"`
 	}{v2PublicPolicy(p)}
@@ -590,7 +601,9 @@ func v2PolicyOutcome(p proxy.RoutingPolicyDocument, kind string) cli.Outcome {
 	if kind == "pool" {
 		prefix = "Pool policy updated.\n"
 	}
-	return v2PolicyResult(data, kind != "session", prefix)
+	out := v2PolicyResult(data, kind != "session", prefix)
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalPolicy(data.Policy, kind, action, offline, o) }
+	return out
 }
 func v2PolicyResult(data any, policyOnly bool, prefix string) cli.Outcome {
 	raw, _ := json.Marshal(data)

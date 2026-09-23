@@ -40,7 +40,8 @@ func handleV2ReserveWithDependencies(ctx context.Context, inv cli.Invocation, se
 	return handleV2ReserveWithPreparation(ctx, inv, session, func(context.Context) (proxyPolicyDependencies, error) { return deps, nil })
 }
 
-func handleV2ReserveWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare func(context.Context) (proxyPolicyDependencies, error)) cli.Outcome {
+func handleV2ReserveWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare func(context.Context) (proxyPolicyDependencies, error)) (result cli.Outcome) {
+	defer func() { v2AnnotateRoutingTimeout(&result, inv.Path) }()
 	timeout, err := time.ParseDuration(inv.Options["timeout"][0])
 	if err != nil {
 		return v2SelectionFailure(2, "routing_invalid_argument", "Invalid argument: timeout.")
@@ -90,12 +91,12 @@ func handleV2ReserveWithPreparation(parent context.Context, inv cli.Invocation, 
 		raw, _ := json.Marshal(struct {
 			Windows []v2ReserveWindow `json:"windows"`
 		}{data.Windows})
-		return cli.Outcome{Data: raw, Human: human}
+		return cli.Outcome{Data: raw, Human: human, Terminal: func(o cli.TerminalOptions) string { return terminalReserve(data, options.action, o) }}
 	}
 	raw, _ := json.Marshal(struct {
 		Reserve v2ReserveStatus `json:"reserve"`
 	}{data})
-	return cli.Outcome{Data: raw, Human: fmt.Sprintf("System account reserve: %t\nAccount: %s\nWindow: %s\nThreshold: %s%%\nEnabled: %t\nBlocked: %t\nReason: %s\nRemaining: %s\nReset: %s\nObserved: %s\n", data.Configured, v2ReserveText(data.Email, "unavailable"), v2ReserveText(data.Window, "none"), v2ReserveNumber(data.Percent), data.Enabled, data.Blocked, v2ReserveText(data.Reason, "none"), v2ReserveNumber(data.RemainingPct), v2ReserveText(data.ResetAt, "unknown"), v2ReserveText(data.ObservedAt, "unknown"))}
+	return cli.Outcome{Data: raw, Human: fmt.Sprintf("System account reserve: %t\nAccount: %s\nWindow: %s\nThreshold: %s%%\nEnabled: %t\nBlocked: %t\nReason: %s\nRemaining: %s\nReset: %s\nObserved: %s\n", data.Configured, v2ReserveText(data.Email, "unavailable"), v2ReserveText(data.Window, "none"), v2ReserveNumber(data.Percent), data.Enabled, data.Blocked, v2ReserveText(data.Reason, "none"), v2ReserveNumber(data.RemainingPct), v2ReserveText(data.ResetAt, "unknown"), v2ReserveText(data.ObservedAt, "unknown")), Terminal: func(o cli.TerminalOptions) string { return terminalReserve(data, options.action, o) }}
 }
 
 func v2ReserveFailure(err error) cli.Outcome {

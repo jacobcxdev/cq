@@ -52,7 +52,8 @@ func handleV2RoutingDiagnosticsWithDependencies(ctx context.Context, inv cli.Inv
 	}
 	return handleV2RoutingDiagnosticsWithPreparation(ctx, inv, session, now, func(context.Context) (v2DiagnosticsDependencies, error) { return deps, nil })
 }
-func handleV2RoutingDiagnosticsWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, now func() time.Time, prepare func(context.Context) (v2DiagnosticsDependencies, error)) cli.Outcome {
+func handleV2RoutingDiagnosticsWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, now func() time.Time, prepare func(context.Context) (v2DiagnosticsDependencies, error)) (result cli.Outcome) {
+	defer func() { v2AnnotateRoutingTimeout(&result, inv.Path) }()
 	// Capture both the budget and --since origin before path or config preparation.
 	started := now()
 	ctx := parent
@@ -124,7 +125,7 @@ func handleV2RoutingDiagnosticsWithPreparation(parent context.Context, inv cli.I
 			return v2LeaseFailure(err)
 		}
 		data, _ := json.Marshal(result)
-		return cli.Outcome{Data: data, Human: fmt.Sprintf("Invalidated leases: %d\nJournal generation: %d\n", result.InvalidatedLeases, result.JournalGeneration)}
+		return cli.Outcome{Data: data, Human: fmt.Sprintf("Invalidated leases: %d\nJournal generation: %d\n", result.InvalidatedLeases, result.JournalGeneration), Terminal: func(o cli.TerminalOptions) string { return terminalLease(result, o) }}
 	}
 	cfg, err := deps.Trace.LoadConfig()
 	if ctx.Err() != nil {

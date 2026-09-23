@@ -29,7 +29,10 @@ type Outcome struct {
 	Warnings []Diagnostic
 	Human    string
 	Terminal TerminalRenderer
-	Streamed bool // stdout ownership consumed by terminal write or failed stream write
+	// TerminalResult and ConfirmedReceipt affect only TTY diagnostics.
+	TerminalResult   string
+	ConfirmedReceipt bool
+	Streamed         bool // stdout ownership consumed by terminal write or failed stream write
 }
 
 type Session struct {
