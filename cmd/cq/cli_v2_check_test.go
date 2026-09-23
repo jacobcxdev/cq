@@ -438,11 +438,55 @@ func TestCLIV2CheckSortingAndFrozenProjection(t *testing.T) {
 	}
 }
 func TestCLIV2CheckHumanReport(t *testing.T) {
-	r := app.Report{Providers: []app.ProviderReport{{Name: "Codex", Availability: app.ProviderAvailability{State: app.ProviderAvailabilityAvailable, Reason: "healthy_quota"}, Results: []quota.Result{{Email: "é\x1b\n\u0085", Active: true, Status: quota.StatusOK, Plan: "pro", Windows: map[quota.WindowName]quota.Window{"7d:codex": {RemainingPct: 0}, "5h": {RemainingPct: 25, ResetAtUnix: 1700000000}}, CacheAge: 9}, {Status: quota.StatusError, Error: &quota.ErrorInfo{Code: "fetch_error", Message: "safe"}}}}}}
-	got := output.QuotaReportHumanV2(r)
-	want := "Codex\n  Availability: available (healthy_quota)\n  é\\u001b\\u000a\\u0085 [active]  ok\n    5h: 25% remaining; reset 2023-11-14T22:13:20Z\n    codex 7d: 0% remaining; reset —\n    Cache age: 9s\n    Plan: pro; tier: —; rate-limit tier: —\n  Unknown account  error\n    Error: fetch_error — safe\n"
-	if got != want {
-		t.Fatalf("got %q want %q", got, want)
+	now := v2QuotaClock{}.Now()
+	rows := []quota.Result{
+		{AccountID: "a", Email: "other@example.com", Status: quota.StatusOK, Plan: "pro", RateLimitTier: "codex_pro_20x", Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 87, ResetAtUnix: now.Unix() + 86400}}},
+		{AccountID: "z", Email: "active@example.com", Active: true, Status: quota.StatusOK, Plan: "pro", RateLimitTier: "codex_pro_20x", Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 89, ResetAtUnix: now.Unix() + 86400}}},
+	}
+	runner := quotaTestRunner(map[provider.ID][]quota.Result{provider.Codex: rows, provider.Claude: {quota.ErrorResult("not_configured", "not configured", 0)}, provider.Gemini: {quota.ErrorResult("not_configured", "not configured", 0)}})
+	for _, args := range [][]string{nil, {"check", "codex"}} {
+		exit, text, _ := quotaTestRun(t, context.Background(), args, v2CheckPrepared{Runner: runner})
+		// Bare cq additionally reports unconfigured providers, hence partial status.
+		if exit != 0 && exit != 8 {
+			t.Fatalf("exit=%d", exit)
+		}
+		for _, want := range []string{"Codex pro 20x", "━", "╌", "89%", "1d", "40x", "─", "active@example.com"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("missing %q: %s", want, text)
+			}
+		}
+		if strings.Index(text, "active@example.com") > strings.Index(text, "other@example.com") {
+			t.Fatal("active account not first")
+		}
+		if len(args) == 0 && (!strings.Contains(text, "Claude · not configured") || !strings.Contains(text, "Gemini · not configured")) {
+			t.Fatalf("unconfigured providers lost compact headers: %s", text)
+		}
+
+		for _, absent := range []string{"Availability:", "Aggregate (", "sustainability=", "Proxy eligibility:"} {
+			if strings.Contains(text, absent) {
+				t.Fatalf("raw projection remains: %q", absent)
+			}
+		}
+	}
+	_, text, _ := quotaTestRun(t, context.Background(), []string{"check", "codex", "--json"}, v2CheckPrepared{Runner: runner})
+	report := quotaTestReport(t, text)
+	if report.Providers[0].Results[0].AccountID != "a" || !report.Providers[0].Results[1].Active || report.Providers[0].Aggregate.Windows["7d"].RemainingPct != 88 {
+		t.Fatalf("human rendering changed JSON report: %+v", report)
+	}
+}
+
+func TestCLIV2CheckHumanEscapesLabels(t *testing.T) {
+	report := app.Report{GeneratedAt: v2QuotaClock{}.Now(), Providers: []app.ProviderReport{{ID: provider.Codex, Results: []quota.Result{{Email: "é\x1b\n\u0085", Status: quota.StatusOK, Plan: "pro\x7f", Windows: map[quota.WindowName]quota.Window{"7d:bucket\x1b": {RemainingPct: 50}}}}}}}
+	before, _ := json.Marshal(report)
+	text := output.QuotaReportHumanV2(report)
+	for _, want := range []string{`é\u001b\u000a\u0085`, `pro\u007f`, `bucket\u001b`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing escaped label %q: %q", want, text)
+		}
+	}
+	after, _ := json.Marshal(report)
+	if !bytes.Equal(before, after) {
+		t.Fatal("human renderer mutated JSON data")
 	}
 }
 
@@ -468,10 +512,16 @@ func TestCLIV2CheckFrozenMixedTierMetrics(t *testing.T) {
 func TestCLIV2CheckAggregateHumanAndOmissions(t *testing.T) {
 	a := &app.AggregateReport{ProviderID: provider.Codex, Kind: "weighted_pace", Summary: aggregate.AccountSummary{Count: 2, TotalMulti: 25, Label: "25×"}, Windows: map[quota.WindowName]quota.AggregateResult{"5h": {RemainingPct: 68, ExpectedPct: 50, PaceDiff: 18, Burndown: 19125, Sustainability: 1.25, GaugePos: 4, GapStartS: 10, GapDurationS: 20, WastedPct: 30, WasteDeadlineS: 40, GaugeOverride: "imminent_block"}, "7d": {GaugePos: -1, Sustainability: -1}}}
 	report := app.Report{Providers: []app.ProviderReport{{Name: "Codex", Availability: app.ProviderAvailability{State: app.ProviderAvailabilityAvailable, Reason: "healthy_quota"}, Results: []quota.Result{}, Aggregate: a, ProxyEligibility: &app.ProxyEligibilityReport{DiscoveredCount: 3, EligibleCount: 2, ExcludedCount: 1}, ProxyPools: []app.ProxyPoolReport{{Name: "pool\x7f", ProxyEligibilityReport: app.ProxyEligibilityReport{DiscoveredCount: 3, EligibleCount: 1, ExcludedCount: 2}}}}}}
-	want := "Codex\n  Availability: available (healthy_quota)\n  Aggregate (weighted_pace): 25×; accounts=2; capacity=25\n    5h: remaining=68%; expected=50%; pace=+18pp; burndown=19125s; sustainability=1.25; gauge=4; gap-start=10s; gap-duration=20s; waste=30%; waste-deadline=40s; override=imminent_block\n    7d: remaining=0%; expected=0%; pace=+0pp; burndown=—; sustainability=-1; gauge=—; gap-start=—; gap-duration=—; waste=—; waste-deadline=—; override=—\n  Proxy eligibility: eligible=2; excluded=1; discovered=3\n  Proxy pool pool\\u007f: eligible=1; excluded=2; discovered=3\n"
-	if got := output.QuotaReportHumanV2(report); got != want {
-		t.Fatalf("got %q want %q", got, want)
+	text := output.QuotaReportHumanV2(report)
+	for _, want := range []string{"25×", "68%", "━", "─", `pool\u007f`, "Proxy"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing dashboard element %q: %q", want, text)
+		}
 	}
+	if strings.Contains(text, "remaining=") {
+		t.Fatal("raw aggregate projection remains")
+	}
+
 	encoded, err := json.Marshal(a.Windows["7d"])
 	if err != nil {
 		t.Fatal(err)
