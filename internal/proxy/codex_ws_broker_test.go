@@ -1298,7 +1298,7 @@ func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	}}
 	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {prewarmUpstream}}}
 	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
-		Plans:                planner,
+		Plans:                &codexWSBrokerCyberOffPlanner{codexWSBrokerPlannerStub: planner},
 		Upstream:             dialer,
 		UpstreamURL:          "wss://example.invalid/responses",
 		Headers:              http.Header{"X-Codex-Turn-Metadata": {`{"session_id":"session-a","thread_id":"thread-a","turn_id":"","request_kind":"prewarm"}`}},
@@ -1353,6 +1353,57 @@ func TestCodexTerminatingWSBrokerKeepsInstalledPrewarmConnection(t *testing.T) {
 	if !found || gotReceipt.State != CodexTurnReceiptCompleted || gotReceipt.ActualAccountHint != redactedAccountHint("codex", "account-a") {
 		t.Fatalf("reconnected receipt = (%+v, %v)", gotReceipt, found)
 	}
+}
+
+func TestCodexTerminatingWSBrokerKeepsPrewarmReservationAfterHardLimit(t *testing.T) {
+	t.Parallel()
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{
+		runtime: newCodexLeaseRuntimeTest(t, coordinator),
+		slots: []CodexLeaseAttemptSlotPlan{
+			{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect},
+			{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+		},
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+	downstream := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: prewarm},
+		{err: io.EOF},
+	}}
+	upstreamA := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: codexWSBrokerHard429()},
+	}}
+	upstreamB := &codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"prewarm-b"}}`)},
+		{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.completed","response":{"id":"prewarm-b"}}`)},
+	}}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{
+		"account-a": {upstreamA}, "account-b": {upstreamB},
+	}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Serve(context.Background(), downstream); err != nil {
+		t.Fatal(err)
+	}
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("dial accounts = %#v", got)
+	}
+	if got := downstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"prewarm-b"}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"prewarm-b"}}`),
+	}) {
+		t.Fatalf("prewarm downstream writes = %#v", got)
+	}
+}
+
+type codexWSBrokerCyberOffPlanner struct{ *codexWSBrokerPlannerStub }
+
+func (*codexWSBrokerCyberOffPlanner) ShouldResetCyberOff(context.Context, CodexProtocolRequest, codex.AccountKey) bool {
+	return true
 }
 
 func TestCodexTerminatingWSBrokerResumesAfterCompletedClientDisconnect(t *testing.T) {

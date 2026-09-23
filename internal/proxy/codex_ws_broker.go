@@ -759,7 +759,8 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 	if pending.prewarm {
 		return broker.servePrewarm(ctx, downstream, pending, active)
 	}
-	if pending != nil && !pending.portable && active != nil && active.account != "" {
+	// A ready prewarm is this turn's anchor, not a prior Cyber turn.
+	if pending != nil && !pending.portable && active != nil && active.account != "" && active.prewarm.State != CodexPrewarmReady {
 		if planner, ok := broker.config.Plans.(interface {
 			ShouldResetCyberOff(context.Context, CodexProtocolRequest, codex.AccountKey) bool
 		}); ok && planner.ShouldResetCyberOff(ctx, pending.request, active.account) {
@@ -1266,7 +1267,9 @@ func (broker *codexTerminatingWSBroker) readPrewarmResponse(ctx, activeCtx conte
 			broker.markCyberIneligible(account.Choice().AccountKey, request)
 		}
 		if observation.Kind == CodexSSEError && !relayed && canRotate && (observation.Error.HardUsageLimit || observation.Error.AuthFailure || codexWSCyberAccessUnavailable(observation.Error)) {
+			reservation := active.prewarm
 			closeCodexWSActiveUpstream(active)
+			active.prewarm = reservation
 			return true, nil
 		}
 		if observation.Kind == CodexSSEMalformed || observation.Kind == CodexSSEUnknown {

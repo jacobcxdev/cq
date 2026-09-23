@@ -2933,7 +2933,7 @@ func TestCodexHTTPRequestPlanFactoryResetsCyberOffDeltaOnlyForCheaperAvailableAc
 		CyberEligibility: eligibility, Now: func() time.Time { return now },
 	}
 	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
-	protocol := CodexProtocolRequest{Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
+	protocol := CodexProtocolRequest{Model: "gpt-5", Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
 	if !factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
 		t.Fatal("cheaper ordinary account did not trigger full-history retry")
 	}
@@ -2950,6 +2950,12 @@ func TestCodexHTTPRequestPlanFactoryResetsCyberOffDeltaOnlyForCheaperAvailableAc
 	inventory.Accounts[0].Routable = false
 	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
 		t.Fatal("unroutable ordinary account triggered Cyber-off retry")
+	}
+	inventory.Accounts[0].Routable = true
+	factory.Capacity = NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 0, now)
+	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
+		t.Fatal("exhausted ordinary account triggered Cyber-off retry")
 	}
 }
 
