@@ -47,13 +47,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          latest_tag=
-          while IFS= read -r candidate; do
-            if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              latest_tag="$candidate"
-              break
-            fi
-          done < <(git tag --sort=-v:refname)
           previous_tag="$(gh release list \
             --repo "$GITHUB_REPOSITORY" \
             --exclude-drafts \
@@ -61,12 +54,10 @@ jobs:
             --limit 1 \
             --json tagName \
             --jq '.[0].tagName')"
-          test -n "$latest_tag"
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
-          latest_version="${latest_tag#v}"
-          IFS=. read -r major minor patch <<<"$latest_version"
-          current_version="${major}.${minor}.$((patch + 1))-ci"
+          # CLI v2 is the 1.0.0 line; retain the isolated CI prerelease suffix.
+          current_version="1.0.0-ci"
           git tag "v$current_version"
           {
             echo "PREVIOUS_TAG=$previous_tag"
@@ -255,7 +246,7 @@ jobs:
       - run: .\cq.exe --version
       - run: .\cq-install.exe --help
       - run: go vet ./...
-      - run: go test -race -count=1 ./internal/fsutil
+      - run: go test -race -count=1 ./internal/userdirs ./internal/fsutil
       - run: go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'
       - run: go test -race -count=1 ./cmd/cq-install
       - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot|TestCLIV2ResetProduction|TestCLIV2AccountMutationRealCodexRemovalFence|TestCLIV2CompleteRegistry|TestCLIV2EveryGroupIsPure)'

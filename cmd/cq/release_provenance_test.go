@@ -428,11 +428,11 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 			t.Errorf("CI uses forbidden platform bypass %q", forbidden)
 		}
 	}
-	if strings.Contains(text, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1`) {
-		t.Error("CI uses pipefail-unsafe previous-tag selection")
+	if !strings.Contains(text, `current_version="1.0.0-ci"`) || strings.Contains(text, "patch + 1") {
+		t.Error("CI must deliberately target the CLI v2 prerelease line")
 	}
-	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
-		t.Error("CI does not use pipe-safe previous-tag selection")
+	if !strings.Contains(text, "go test -race -count=1 ./internal/userdirs ./internal/fsutil") {
+		t.Error("CI missing native Windows root and filesystem race gates")
 	}
 	if count := strings.Count(text, "runs-on: macos-15"); count != 2 {
 		t.Fatalf("CI has %d macOS jobs, want Codex and Homebrew only", count)
