@@ -34,12 +34,19 @@ type codexInstalledWebSocketValidationDependencies struct {
 // listener with exact installed Codex CLI. It never inspects, stops, replaces,
 // or restarts configured proxy service.
 func RunCodexInstalledWebSocketValidation(ctx context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
-	return RunCodexInstalledWebSocketValidationWithCleanup(ctx, ctx, cqBuild, clientBuild, clientExecutable, markerDir)
+	return runCodexInstalledWebSocketValidation(ctx, nil, cqBuild, clientBuild, clientExecutable, markerDir)
 }
 
 // RunCodexInstalledWebSocketValidationWithCleanup uses the caller's reserved
 // cleanup context; neither preparation nor cleanup starts a new allowance.
 func RunCodexInstalledWebSocketValidationWithCleanup(ctx, cleanup context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
+	if cleanup == nil {
+		return CodexReadinessMarker{}, errCodexInstalledListenerAcceptance
+	}
+	return runCodexInstalledWebSocketValidation(ctx, cleanup, cqBuild, clientBuild, clientExecutable, markerDir)
+}
+
+func runCodexInstalledWebSocketValidation(ctx, cleanup context.Context, cqBuild, clientBuild, clientExecutable, markerDir string) (CodexReadinessMarker, error) {
 	if strings.TrimSpace(markerDir) == "" {
 		paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 		if err != nil {
@@ -72,9 +79,6 @@ func runCodexInstalledWebSocketValidationWithDependencies(
 ) (marker CodexReadinessMarker, returnErr error) {
 	if strings.TrimSpace(markerDir) == "" {
 		return marker, errCodexInstalledListenerAcceptance
-	}
-	if dependencies.cleanupContext == nil {
-		dependencies.cleanupContext = ctx
 	}
 	markerDir = filepath.Clean(markerDir)
 	if !filepath.IsAbs(markerDir) {
@@ -146,8 +150,10 @@ func runCodexInstalledWebSocketValidationWithDependencies(
 	if err := ctx.Err(); err != nil {
 		return marker, err
 	}
-	if err := dependencies.cleanupContext.Err(); err != nil {
-		return marker, err
+	if dependencies.cleanupContext != nil {
+		if err := dependencies.cleanupContext.Err(); err != nil {
+			return marker, err
+		}
 	}
 	_, required := DefaultCodexRoutingRequirements(cqBuild, clientBuild)
 	marker, err = buildCodexWebSocketReadinessMarker(evidence, required, dependencies.now().UTC())
@@ -179,7 +185,7 @@ func runCodexInstalledWebSocketAcceptance(
 	executable codexInstalledExecutableProof,
 	runner codexAcceptanceRunner,
 ) (evidence CodexWebSocketReadinessEvidence, returnErr error) {
-	return runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, ctx, cqBuild, clientBuild, executable, runner)
+	return runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, nil, cqBuild, clientBuild, executable, runner)
 }
 func runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, cleanup context.Context, cqBuild, clientBuild string, executable codexInstalledExecutableProof, runner codexAcceptanceRunner) (evidence CodexWebSocketReadinessEvidence, returnErr error) {
 	if ctx == nil || ctx.Err() != nil || !executable.valid() || runner == nil {
@@ -198,6 +204,14 @@ func runCodexInstalledWebSocketAcceptanceWithCleanup(ctx, cleanup context.Contex
 	closeTraffic := func() error {
 		closeOnce.Do(func() {
 			cancelTraffic()
+			if cleanup == nil {
+				// Legacy callers retain their bounded per-resource cleanup and runner.
+				for _, server := range servers {
+					shutdownCodexAcceptanceServer(server)
+				}
+				closeErr = core.close()
+				return
+			}
 			for _, server := range servers {
 				closeErr = errors.Join(closeErr, shutdownCodexAcceptanceServerContext(cleanup, server))
 			}

@@ -324,3 +324,9 @@ func TestCodexInstalledWebSocketValidationCleanupDeadlineClosesServer(t *testing
 		t.Fatalf("server err=%v", err)
 	}
 }
+
+func TestCodexInstalledWebSocketValidationRequiresExplicitCleanup(t *testing.T) {
+	if _, err := RunCodexInstalledWebSocketValidationWithCleanup(context.Background(), nil, "test", "0.1.0", "", filepath.Join(t.TempDir(), "state")); err == nil {
+		t.Fatal("canonical entry accepted absent cleanup")
+	}
+}
