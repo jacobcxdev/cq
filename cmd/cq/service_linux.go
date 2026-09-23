@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,15 +32,23 @@ var linuxProxyRuntimePortFn = func() (int, error) {
 }
 
 var linuxProxyRuntimeInspector = func(ctx context.Context, executable string) componentStatus {
-	status := componentStatus{
-		ID:      systemdProxyUnit,
-		Manager: "systemd-user",
-	}
 	port, err := linuxProxyRuntimePortFn()
 	if err != nil {
-		status.Error = "Linux proxy runtime inspection is unavailable"
-		return status
+		return componentStatus{ID: systemdProxyUnit, Manager: "systemd-user", Error: "Linux proxy runtime inspection is unavailable"}
 	}
+	return inspectLinuxProxyAtPort(ctx, executable, port)
+}
+
+func inspectSelectedLinuxProxy(ctx context.Context, executable string, roots userdirs.Roots) componentStatus {
+	config, err := proxy.LoadExistingConfigAt(proxy.PathsForRoots(roots))
+	if err != nil || config == nil || config.Port < 1 || config.Port > 65535 {
+		return componentStatus{Error: "Linux proxy runtime inspection is unavailable"}
+	}
+	return inspectLinuxProxyAtPort(ctx, executable, config.Port)
+}
+
+func inspectLinuxProxyAtPort(ctx context.Context, executable string, port int) componentStatus {
+	status := componentStatus{ID: systemdProxyUnit, Manager: "systemd-user"}
 	identity, err := inspectLinuxProxyRuntimeFn(ctx, executable, port)
 	if err != nil || !identity.Valid() {
 		status.Error = "Linux proxy runtime inspection is unavailable"
@@ -72,7 +82,31 @@ var linuxProxyRuntimeInspector = func(ctx context.Context, executable string) co
 }
 
 func init() {
+	serviceRefreshRunner = runLinuxServiceRefresh
 	serviceLifecycleFactory = defaultLinuxServiceLifecycle
+	selectedServiceLifecycleFactory = func() (*serviceLifecycle, error) {
+		lifecycle, err := defaultLinuxServiceLifecycle("")
+		if err != nil {
+			return nil, err
+		}
+		home, err := linuxSelectedHome()
+		if err != nil {
+			return nil, err
+		}
+		lifecycle.Platform.(*systemdServicePlatform).home = home
+		return lifecycle, nil
+	}
+}
+
+var linuxSelectedHome = func() (string, error) {
+	current, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(current.HomeDir) {
+		return "", errServiceUnavailable
+	}
+	return filepath.Clean(current.HomeDir), nil
 }
 
 func defaultLinuxServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
@@ -91,10 +125,12 @@ func newLinuxServiceLifecycle(
 	inspectProxy func(context.Context, string) componentStatus,
 ) *serviceLifecycle {
 	platform := &systemdServicePlatform{
-		unitDirectory: unitDirectory,
-		executable:    executable,
-		run:           run,
-		inspectProxy:  inspectProxy,
+		unitDirectory:        unitDirectory,
+		roots:                roots,
+		inspectSelectedProxy: inspectSelectedLinuxProxy,
+		executable:           executable,
+		run:                  run,
+		inspectProxy:         inspectProxy,
 	}
 	return &serviceLifecycle{
 		Platform:       platform,
@@ -130,10 +166,12 @@ func defaultLinuxSystemdPlatform(stableExecutable ...string) (*systemdServicePla
 	}
 	executable = filepath.Clean(executable)
 	platform := &systemdServicePlatform{
-		unitDirectory: unitDirectory,
-		executable:    executable,
-		run:           runLinuxSystemctl,
-		inspectProxy:  linuxProxyRuntimeInspector,
+		unitDirectory:        unitDirectory,
+		roots:                roots,
+		inspectSelectedProxy: inspectSelectedLinuxProxy,
+		executable:           executable,
+		run:                  runLinuxSystemctl,
+		inspectProxy:         linuxProxyRuntimeInspector,
 	}
 	return platform, roots, executable, nil
 }
@@ -235,4 +273,43 @@ func normaliseRefreshInterval(interval int) int {
 		return 1800
 	}
 	return interval
+}
+
+// Only a canonical installed unit opts in to completion reporting. Ordinary
+// refresh calls preserve the frozen behaviour and never write service receipts.
+func runLinuxServiceRefresh(run func() error) error {
+	if os.Getenv("CQ_SERVICE_REFRESH") != "1" {
+		return run()
+	}
+	unitDirectory, err := linuxSystemdUserDirectory()
+	if err != nil {
+		return err
+	}
+	data, exists, err := readOwnedSystemdUnit(filepath.Join(unitDirectory, systemdRefreshService))
+	if err != nil || !exists {
+		return errServiceUnavailable
+	}
+	executable, roots, err := validateOwnedSystemdDefinition(systemdRefreshService, data)
+	if err != nil || roots == nil {
+		return errServiceUnavailable
+	}
+	home, _, err := systemdDefinitionRoots(data)
+	if err != nil {
+		return err
+	}
+	actual, err := os.Executable()
+	if err != nil || !sameServiceExecutable(actual, executable) {
+		return errServiceUnavailable
+	}
+	processRoots, err := userdirs.Default()
+	if err != nil || processRoots != *roots {
+		return errServiceUnavailable
+	}
+	if os.Getenv("HOME") != home || os.Getenv("XDG_CONFIG_HOME") != filepath.Dir(roots.Config) || os.Getenv("XDG_CACHE_HOME") != filepath.Dir(roots.Cache) {
+		return errServiceUnavailable
+	}
+	if !strings.Contains(string(data), "Environment=CQ_SERVICE_REFRESH=1\n") {
+		return errServiceUnavailable
+	}
+	return recordServiceRefresh(executable, *roots, run, time.Now)
 }

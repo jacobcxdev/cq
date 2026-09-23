@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"golang.org/x/sys/unix"
@@ -13,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -114,16 +111,9 @@ func uninstallAgent() error {
 	return nil
 }
 
-const darwinRefreshCompletionName = "refresh-completion.json"
+const darwinRefreshCompletionName = serviceRefreshCompletionName
 
-type darwinRefreshCompletion struct {
-	SchemaVersion int            `json:"schema_version"`
-	StartedAt     time.Time      `json:"started_at"`
-	CompletedAt   time.Time      `json:"completed_at"`
-	ExitCode      int            `json:"exit_code"`
-	Executable    string         `json:"executable"`
-	Roots         userdirs.Roots `json:"roots"`
-}
+type darwinRefreshCompletion = serviceRefreshCompletion
 
 func init() { serviceRefreshRunner = runDarwinServiceRefresh }
 func nativeDarwinHome() (string, error) {
@@ -201,86 +191,14 @@ func recordDarwinServiceRefresh(d darwinLaunchAgentDefinition, run func() error,
 	if err != nil {
 		return err
 	}
-	// Open the authority before execution and retain it through receipt publication.
-	fs := fsutil.OSFileSystem{}
-	if err := fsutil.EnsureSecureDirectory(fs, roots.State); err != nil {
-		return err
-	}
-	directory, err := fs.OpenSecureDirectory(roots.State)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	started := now().UTC()
-	runErr := run()
-	completed := now().UTC()
-	exit := 0
-	if runErr != nil {
-		exit = 1
-	}
-	receipt := darwinRefreshCompletion{SchemaVersion: 1, StartedAt: started, CompletedAt: completed, ExitCode: exit, Executable: d.ProgramArguments[0], Roots: roots}
-	data, err := json.Marshal(receipt)
-	if err != nil {
-		return errors.Join(runErr, err)
-	}
-	if err := fsutil.ValidateSecureDirectoryHandle(fs, directory, roots.State); err != nil {
-		return errors.Join(runErr, err)
-	}
-	err = fsutil.SecureAtomicWriteInDirectoryChecked(fs, directory, darwinRefreshCompletionName, append(data, '\n'), func() error { return fsutil.ValidateSecureDirectoryHandle(fs, directory, roots.State) })
-	return errors.Join(runErr, err)
+	return recordServiceRefresh(d.ProgramArguments[0], roots, run, now)
 }
 func readDarwinRefreshCompletion(d darwinLaunchAgentDefinition, now time.Time) (darwinRefreshCompletion, error) {
-	var receipt darwinRefreshCompletion
 	roots, err := darwinDefinitionRoots(d)
 	if err != nil {
-		return receipt, err
+		return darwinRefreshCompletion{}, err
 	}
-	fs := fsutil.OSFileSystem{}
-	data, err := fsutil.ReadSecureFile(fs, filepath.Join(roots.State, darwinRefreshCompletionName), 4096)
-	if err != nil {
-		return receipt, err
-	}
-	if err := rejectLegacyMaintenanceDuplicateJSONKeys(json.NewDecoder(strings.NewReader(string(data)))); err != nil {
-		return receipt, errServiceUnavailable
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&receipt); err != nil {
-		return receipt, errServiceUnavailable
-	}
-	// Exact canonical encoding rejects nulls/omissions, case aliases and unknown or
-	// duplicate fields, including nested root fields. Whitespace remains harmless.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil || len(raw) != 6 {
-		return receipt, errServiceUnavailable
-	}
-	for _, key := range []string{"schema_version", "started_at", "completed_at", "exit_code", "executable", "roots"} {
-		value, ok := raw[key]
-		if !ok || strings.TrimSpace(string(value)) == "null" {
-			return receipt, errServiceUnavailable
-		}
-	}
-	var rootFields map[string]json.RawMessage
-	if err := json.Unmarshal(raw["roots"], &rootFields); err != nil || len(rootFields) != 5 {
-		return receipt, errServiceUnavailable
-	}
-	for _, key := range []string{"Config", "State", "Cache", "Runtime", "Logs"} {
-		value, ok := rootFields[key]
-		if !ok || strings.TrimSpace(string(value)) == "null" {
-			return receipt, errServiceUnavailable
-		}
-	}
-	if receipt.SchemaVersion != 1 || receipt.StartedAt.IsZero() || receipt.CompletedAt.IsZero() || receipt.CompletedAt.Before(receipt.StartedAt) || receipt.CompletedAt.After(now) || receipt.ExitCode < 0 || receipt.Executable != d.ProgramArguments[0] || receipt.Roots != roots {
-		return receipt, errServiceUnavailable
-	}
-	for _, key := range []string{"started_at", "completed_at"} {
-		var value string
-		_ = json.Unmarshal(raw[key], &value)
-		if !strings.HasSuffix(value, "Z") {
-			return receipt, errServiceUnavailable
-		}
-	}
-	return receipt, nil
+	return readServiceRefreshCompletion(d.ProgramArguments[0], roots, now)
 }
 func runDarwinRefreshOnce(ctx context.Context, d darwinLaunchAgentDefinition) error {
 	if err := ctx.Err(); err != nil {

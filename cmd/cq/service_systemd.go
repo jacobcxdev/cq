@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jacobcxdev/cq/internal/userdirs"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installstate"
@@ -35,10 +38,13 @@ var systemdShowProperties = []string{
 }
 
 type systemdServicePlatform struct {
-	unitDirectory string
-	executable    string
-	run           func(context.Context, ...string) ([]byte, error)
-	inspectProxy  func(context.Context, string) componentStatus
+	unitDirectory        string
+	home                 string
+	roots                userdirs.Roots
+	inspectSelectedProxy func(context.Context, string, userdirs.Roots) componentStatus
+	executable           string
+	run                  func(context.Context, ...string) ([]byte, error)
+	inspectProxy         func(context.Context, string) componentStatus
 }
 
 func renderSystemdServiceDefinitions(executable string) (map[string][]byte, error) {
@@ -266,6 +272,9 @@ func supportedSystemdUnitFileState(state string) bool {
 }
 
 func (platform *systemdServicePlatform) InstallProxy(ctx context.Context, executable string) error {
+	if selectedServiceContext(ctx) {
+		return platform.installSelected(ctx, executable, serviceProxy)
+	}
 	definitions, err := renderSystemdServiceDefinitions(executable)
 	if err != nil {
 		return err
@@ -283,6 +292,9 @@ func (platform *systemdServicePlatform) InstallProxy(ctx context.Context, execut
 }
 
 func (platform *systemdServicePlatform) InstallRefresh(ctx context.Context, executable string) error {
+	if selectedServiceContext(ctx) {
+		return platform.installSelected(ctx, executable, serviceRefresh)
+	}
 	definitions, err := renderSystemdServiceDefinitions(executable)
 	if err != nil {
 		return err
@@ -331,6 +343,10 @@ func (platform *systemdServicePlatform) installRefreshOnly(ctx context.Context, 
 }
 
 func (platform *systemdServicePlatform) RestartProxy(ctx context.Context) error {
+	if selectedServiceContext(ctx) {
+		_, err := platform.selectedRun(ctx, "restart", systemdProxyUnit)
+		return err
+	}
 	if _, err := platform.run(ctx, "--user", "restart", systemdProxyUnit); err != nil {
 		return fmt.Errorf("restart %s: %w", systemdProxyUnit, err)
 	}
@@ -338,6 +354,10 @@ func (platform *systemdServicePlatform) RestartProxy(ctx context.Context) error 
 }
 
 func (platform *systemdServicePlatform) RestartRefresh(ctx context.Context) error {
+	if selectedServiceContext(ctx) {
+		_, err := platform.selectedRun(ctx, "restart", systemdRefreshService)
+		return err
+	}
 	if _, err := platform.run(ctx, "--user", "restart", systemdRefreshService); err != nil {
 		return fmt.Errorf("restart %s: %w", systemdRefreshService, err)
 	}
@@ -345,10 +365,16 @@ func (platform *systemdServicePlatform) RestartRefresh(ctx context.Context) erro
 }
 
 func (platform *systemdServicePlatform) RemoveProxy(ctx context.Context) error {
+	if selectedServiceContext(ctx) {
+		return platform.removeSelected(ctx, serviceProxy)
+	}
 	return platform.remove(ctx, []string{systemdProxyUnit}, []string{systemdProxyUnit})
 }
 
 func (platform *systemdServicePlatform) RemoveRefresh(ctx context.Context) error {
+	if selectedServiceContext(ctx) {
+		return platform.removeSelected(ctx, serviceRefresh)
+	}
 	return platform.remove(ctx, []string{systemdRefreshTimer, systemdRefreshService}, []string{systemdRefreshTimer})
 }
 
@@ -648,28 +674,645 @@ func sameServiceExecutable(left, right string) bool {
 
 var _ servicePlatform = (*systemdServicePlatform)(nil)
 
-// Selected lifecycle support is implemented by the native adapter tasks.
-func (platform *systemdServicePlatform) StartProxy(context.Context) error {
-	return errServiceUnavailable
+// Selected operations use native enablement and only the selected definitions.
+func systemdSelectedUnits(selection serviceSelection) []string {
+	var names []string
+	for _, component := range selection.components() {
+		if component == serviceProxy {
+			names = append(names, systemdProxyUnit)
+		} else {
+			names = append(names, systemdRefreshService, systemdRefreshTimer)
+		}
+	}
+	return names
 }
-func (platform *systemdServicePlatform) StopProxy(context.Context) error {
-	return errServiceUnavailable
+func (platform *systemdServicePlatform) selectedRun(ctx context.Context, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if platform.run == nil {
+		return nil, errServiceUnavailable
+	}
+	output, err := platform.run(ctx, append([]string{"--user"}, args...)...)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, errors.Join(errServiceUnavailable, err)
+	}
+	return output, nil
 }
-func (platform *systemdServicePlatform) StartRefresh(context.Context) error {
-	return errServiceUnavailable
+func (platform *systemdServicePlatform) selectedShow(ctx context.Context, name string) (map[string]string, error) {
+	properties := append(append([]string(nil), systemdShowProperties...), "DropInPaths", "NeedDaemonReload", "ExecMainStartTimestamp", "ExecMainExitTimestamp", "ExecMainCode", "ExecMainStatus")
+	output, err := platform.selectedRun(ctx, "show", name, "--no-pager", "--all", "--timestamp=us+utc", "--property="+strings.Join(properties, ","))
+	if err != nil {
+		return nil, err
+	}
+	values, err := parseSystemdShow(output)
+	if err != nil {
+		return nil, errors.Join(errServiceUnavailable, err)
+	}
+	return values, nil
 }
-func (platform *systemdServicePlatform) StopRefresh(context.Context) error {
-	return errServiceUnavailable
+func (platform *systemdServicePlatform) StartProxy(ctx context.Context) error {
+	_, err := platform.selectedRun(ctx, "enable", "--now", systemdProxyUnit)
+	return err
 }
-func (platform *systemdServicePlatform) PreflightSelected(context.Context, string, serviceSelection) error {
-	return errServiceUnavailable
+func (platform *systemdServicePlatform) StopProxy(ctx context.Context) error {
+	return platform.disableSelected(ctx, systemdProxyUnit)
 }
-func (platform *systemdServicePlatform) InspectSelected(context.Context, serviceSelection) (serviceStatus, error) {
-	return serviceStatus{}, errServiceUnavailable
+func (platform *systemdServicePlatform) StartRefresh(ctx context.Context) error {
+	if _, err := platform.selectedRun(ctx, "enable", "--now", systemdRefreshTimer); err != nil {
+		return err
+	}
+	_, err := platform.selectedRun(ctx, "start", systemdRefreshService)
+	return err
 }
-func (platform *systemdServicePlatform) SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error) {
-	return servicePlatformSnapshot{}, errServiceUnavailable
+func (platform *systemdServicePlatform) StopRefresh(ctx context.Context) error {
+	if err := platform.disableSelected(ctx, systemdRefreshTimer); err != nil {
+		return err
+	}
+	_, err := platform.selectedRun(ctx, "stop", systemdRefreshService)
+	return err
 }
-func (platform *systemdServicePlatform) RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error {
-	return errServiceUnavailable
+
+// Persistent and runtime enablement use different native symlink directories.
+// Clear persistent policy first, then any runtime policy revealed beneath it.
+func (platform *systemdServicePlatform) disableSelected(ctx context.Context, name string) error {
+	if _, err := platform.selectedRun(ctx, "disable", "--now", name); err != nil {
+		return err
+	}
+	properties, err := platform.selectedShow(ctx, name)
+	if err != nil {
+		return err
+	}
+	if properties["UnitFileState"] == "enabled-runtime" {
+		if _, err := platform.selectedRun(ctx, "disable", "--runtime", "--now", name); err != nil {
+			return err
+		}
+		properties, err = platform.selectedShow(ctx, name)
+		if err != nil {
+			return err
+		}
+	}
+	if properties["UnitFileState"] != "disabled" && properties["LoadState"] != "not-found" {
+		return installstate.ErrOwnershipConflict
+	}
+	if properties["ActiveState"] != "inactive" && properties["ActiveState"] != "failed" {
+		return ErrServiceUnhealthy
+	}
+	return nil
+}
+func validateSystemdOwnedExecutable(path string) error {
+	if err := validateSystemdExecutable(path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	fs := fsutil.OSFileSystem{}
+	uid, ok := fs.FileOwnerUID(info)
+	if !ok || (uid != 0 && uid != fs.EffectiveUID()) || info.Mode().Perm()&0o022 != 0 || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return installstate.ErrOwnershipConflict
+	}
+	return nil
+}
+func readOwnedSystemdUnit(path string) ([]byte, bool, error) {
+	fs := fsutil.OSFileSystem{}
+	directory, err := os.Lstat(filepath.Dir(path))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	owner, ownerOK := fs.FileOwnerUID(directory)
+	if !directory.IsDir() || directory.Mode()&os.ModeSymlink != 0 || directory.Mode().Perm()&0o022 != 0 || !ownerOK || owner != fs.EffectiveUID() {
+		return nil, false, installstate.ErrOwnershipConflict
+	}
+	// OpenNoFollow also uses O_NONBLOCK on Unix, so a replaced FIFO cannot hang.
+	file, err := fs.OpenNoFollow(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, errors.Join(installstate.ErrOwnershipConflict, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	uid, ok := fs.FileOwnerUID(info)
+	identity, identityOK := fs.FileIdentity(info)
+	if !info.Mode().IsRegular() || info.Size() > maxSystemdUnitBytes || info.Mode().Perm()&0o022 != 0 || !ok || uid != fs.EffectiveUID() || !identityOK || identity.Links != 1 {
+		return nil, false, installstate.ErrOwnershipConflict
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSystemdUnitBytes+1))
+	if len(data) > maxSystemdUnitBytes {
+		return nil, false, installstate.ErrOwnershipConflict
+	}
+	return data, err == nil, err
+}
+func systemdDefinitionRoots(data []byte) (string, *userdirs.Roots, error) {
+	env := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Environment=") {
+			continue
+		}
+		value, err := parseSystemdExecStartExecutable([]byte("ExecStart=" + strings.TrimPrefix(line, "Environment=")))
+		if err != nil {
+			return "", nil, installstate.ErrOwnershipConflict
+		}
+		pair := strings.SplitN(value, "=", 2)
+		if len(pair) != 2 || env[pair[0]] != "" {
+			return "", nil, installstate.ErrOwnershipConflict
+		}
+		env[pair[0]] = pair[1]
+	}
+	if len(env) == 0 {
+		return "", nil, nil
+	}
+	if len(env) != 3 && (len(env) != 4 || env["CQ_SERVICE_REFRESH"] != "1") {
+		return "", nil, installstate.ErrOwnershipConflict
+	}
+	for _, key := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"} {
+		value := env[key]
+		if !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsAny(value, "\x00\n\r") {
+			return "", nil, installstate.ErrOwnershipConflict
+		}
+	}
+	config := filepath.Join(env["XDG_CONFIG_HOME"], "cq")
+	state := filepath.Join(config, "state")
+	roots := &userdirs.Roots{Config: config, State: state, Runtime: state, Cache: filepath.Join(env["XDG_CACHE_HOME"], "cq"), Logs: filepath.Join(state, "logs")}
+	return env["HOME"], roots, nil
+}
+func renderSelectedSystemdDefinitions(executable, home string, roots userdirs.Roots) (map[string][]byte, error) {
+	definitions, err := renderSystemdServiceDefinitions(executable)
+	if err != nil {
+		return nil, err
+	}
+	values := []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Dir(roots.Config), "XDG_CACHE_HOME=" + filepath.Dir(roots.Cache)}
+	var environment strings.Builder
+	for _, value := range values {
+		encoded, err := encodeSystemdArgument(value)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&environment, "Environment=%s\n", encoded)
+	}
+	_, resolved, err := systemdDefinitionRoots([]byte(environment.String()))
+	if err != nil || resolved == nil || *resolved != roots {
+		return nil, fmt.Errorf("invalid installed systemd roots")
+	}
+	for _, name := range []string{systemdProxyUnit, systemdRefreshService} {
+		bindings := environment.String()
+		if name == systemdRefreshService {
+			bindings += "Environment=CQ_SERVICE_REFRESH=1\n"
+		}
+		definitions[name] = bytes.Replace(definitions[name], []byte("[Service]\n"), []byte("[Service]\n"+bindings), 1)
+	}
+	return definitions, nil
+}
+func validateOwnedSystemdDefinition(name string, data []byte) (string, *userdirs.Roots, error) {
+	if name == systemdRefreshTimer {
+		interval := 1800
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "OnUnitActiveSec=") {
+				continue
+			}
+			value := strings.TrimPrefix(line, "OnUnitActiveSec=")
+			if value != "30min" {
+				if !strings.HasSuffix(value, "s") {
+					return "", nil, installstate.ErrOwnershipConflict
+				}
+				parsed, err := strconv.Atoi(strings.TrimSuffix(value, "s"))
+				if err != nil || parsed <= 0 {
+					return "", nil, installstate.ErrOwnershipConflict
+				}
+				interval = parsed
+			}
+		}
+		defs, _ := renderSystemdServiceDefinitionsWithInterval("/cq", interval)
+		if !bytes.Equal(data, defs[name]) {
+			return "", nil, installstate.ErrOwnershipConflict
+		}
+		return "", nil, nil
+	}
+	executable, err := parseSystemdExecStartExecutable(data)
+	if err != nil || validateSystemdOwnedExecutable(executable) != nil {
+		return "", nil, installstate.ErrOwnershipConflict
+	}
+	home, roots, err := systemdDefinitionRoots(data)
+	if err != nil {
+		return "", nil, err
+	}
+	var defs map[string][]byte
+	if roots == nil {
+		defs, err = renderSystemdServiceDefinitions(executable)
+	} else {
+		defs, err = renderSelectedSystemdDefinitions(executable, home, *roots)
+	}
+	if err != nil || !bytes.Equal(data, defs[name]) {
+		return "", nil, installstate.ErrOwnershipConflict
+	}
+	return executable, roots, nil
+}
+func (platform *systemdServicePlatform) selectedDefinition(ctx context.Context, name string) ([]byte, bool, string, *userdirs.Roots, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, "", nil, err
+	}
+	data, exists, err := readOwnedSystemdUnit(platform.unitPath(name))
+	if err != nil || !exists {
+		return data, exists, "", nil, err
+	}
+	executable, roots, err := validateOwnedSystemdDefinition(name, data)
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	return data, exists, executable, roots, err
+}
+func (platform *systemdServicePlatform) validateSelectedFragment(name string, exists bool, properties map[string]string) error {
+	if _, ok := properties["DropInPaths"]; !ok {
+		return errServiceUnavailable
+	}
+	if properties["DropInPaths"] != "" || properties["NeedDaemonReload"] == "yes" {
+		return installstate.ErrOwnershipConflict
+	}
+	switch properties["LoadState"] {
+	case "not-found":
+		return nil
+	case "loaded":
+		if exists && properties["FragmentPath"] == platform.unitPath(name) {
+			return nil
+		}
+	}
+	return installstate.ErrOwnershipConflict
+}
+func (platform *systemdServicePlatform) PreflightSelected(ctx context.Context, executable string, selection serviceSelection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateSystemdOwnedExecutable(executable); err != nil {
+		return err
+	}
+	// Validate every selected file before launching the manager, including fresh installs.
+	for _, name := range systemdSelectedUnits(selection) {
+		_, exists, configured, _, err := platform.selectedDefinition(ctx, name)
+		if err != nil {
+			return err
+		}
+		if exists && configured != "" && !sameServiceExecutable(configured, executable) {
+			return installstate.ErrOwnershipConflict
+		}
+	}
+	if _, err := platform.selectedRun(ctx, "show-environment"); err != nil {
+		return err
+	}
+	for _, name := range systemdSelectedUnits(selection) {
+		_, exists, _, _, err := platform.selectedDefinition(ctx, name)
+		if err != nil {
+			return err
+		}
+		properties, err := platform.selectedShow(ctx, name)
+		if err != nil {
+			return err
+		}
+		if err := platform.validateSelectedFragment(name, exists, properties); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+func (platform *systemdServicePlatform) InspectSelected(ctx context.Context, selection serviceSelection) (serviceStatus, error) {
+	var status serviceStatus
+	if err := ctx.Err(); err != nil {
+		return status, err
+	}
+	if err := validateSystemdOwnedExecutable(platform.executable); err != nil {
+		return status, err
+	}
+	for _, component := range selection.components() {
+		names := systemdSelectedUnits(component)
+		c := componentStatus{ID: names[len(names)-1], Manager: "systemd-user", Observed: &serviceObservation{Owner: "none"}}
+		properties := map[string]map[string]string{}
+		allExist := true
+		anyExists := false
+		for _, name := range names {
+			_, exists, executable, roots, err := platform.selectedDefinition(ctx, name)
+			if err != nil {
+				return status, err
+			}
+			values, err := platform.selectedShow(ctx, name)
+			if err != nil {
+				return status, err
+			}
+			if err := platform.validateSelectedFragment(name, exists, values); err != nil {
+				return status, err
+			}
+			allExist = allExist && exists
+			anyExists = anyExists || exists
+			if executable != "" {
+				c.ConfiguredExecutable = executable
+				c.Observed.Roots = roots
+			}
+			properties[name] = values
+		}
+		c.Registered = allExist
+		if !allExist {
+			// A partial timer/service pair is owned but cannot be treated as absent.
+			if component == serviceRefresh {
+				if anyExists {
+					return status, installstate.ErrOwnershipConflict
+				}
+				for _, name := range names {
+					if properties[name]["LoadState"] == "loaded" {
+						return status, installstate.ErrOwnershipConflict
+					}
+				}
+			}
+			c.Observed.Enabled = serviceBool(false)
+			c.Observed.Healthy = serviceBool(false)
+			status.setComponent(component, c)
+			continue
+		}
+		c.Observed.Owner = "cq"
+		policy := properties[c.ID]["UnitFileState"]
+		switch policy {
+		case "enabled", "enabled-runtime":
+			c.Observed.Enabled = serviceBool(true)
+		case "disabled":
+			c.Observed.Enabled = serviceBool(false)
+		default:
+			return status, errServiceUnavailable
+		}
+		job := properties[names[0]]
+		c.Running = job["ActiveState"] == "active" || job["ActiveState"] == "activating" || job["ActiveState"] == "deactivating"
+		if component == serviceProxy {
+			if c.Running {
+				var err error
+				c.PID, err = strconv.Atoi(job["MainPID"])
+				if err != nil || c.PID <= 0 {
+					return status, errServiceUnavailable
+				}
+			}
+			c.Observed.Healthy = serviceBool(false)
+			if c.Running && c.Observed.Roots != nil && platform.inspectSelectedProxy != nil {
+				runtime := platform.inspectSelectedProxy(ctx, c.ConfiguredExecutable, *c.Observed.Roots)
+				if ctx.Err() != nil {
+					return status, ctx.Err()
+				}
+				c.LiveExecutable, c.Listener, c.Error = runtime.LiveExecutable, runtime.Listener, runtime.Error
+				c.Healthy = runtime.Running && runtime.Healthy && runtime.PID == c.PID && sameServiceExecutable(runtime.LiveExecutable, c.ConfiguredExecutable)
+				c.Observed.Healthy = serviceBool(c.Healthy)
+			}
+		} else {
+			if *c.Observed.Enabled && properties[systemdRefreshTimer]["ActiveState"] != "active" {
+				c.Observed.ErrorCode = "service_timer_unhealthy"
+			}
+			completed, exit, err := systemdCompletion(job)
+			if err != nil {
+				c.Observed.ErrorCode = "service_completion_unavailable"
+			}
+			if c.Observed.Roots != nil {
+				receipt, receiptErr := readServiceRefreshCompletion(c.ConfiguredExecutable, *c.Observed.Roots, time.Now())
+				if receiptErr == nil {
+					// Native exit evidence wins over an older retained receipt, including a
+					// failed/signalled process which could not publish a new receipt.
+					if completed == nil || receipt.CompletedAt.After(*completed) {
+						completed, exit = &receipt.CompletedAt, &receipt.ExitCode
+					}
+				} else if !errors.Is(receiptErr, os.ErrNotExist) {
+					c.Observed.ErrorCode = "service_completion_unavailable"
+				}
+			}
+			c.Observed.LastRunAt, c.Observed.LastExitCode = completed, exit
+		}
+		status.setComponent(component, c)
+	}
+	return status, ctx.Err()
+}
+func systemdCompletion(properties map[string]string) (*time.Time, *int, error) {
+	value := properties["ExecMainExitTimestamp"]
+	if value == "" || value == "n/a" {
+		if result := properties["Result"]; result != "" && result != "none" && result != "success" {
+			return nil, nil, errServiceUnavailable
+		}
+		return nil, nil, nil
+	}
+	completed, err := time.Parse("Mon 2006-01-02 15:04:05.999999 MST", value)
+	if err != nil || !strings.HasSuffix(value, " UTC") {
+		return nil, nil, errServiceUnavailable
+	}
+	started, err := time.Parse("Mon 2006-01-02 15:04:05.999999 MST", properties["ExecMainStartTimestamp"])
+	if err != nil || completed.After(time.Now()) {
+		return nil, nil, errServiceUnavailable
+	}
+	if completed.Before(started) {
+		if properties["ActiveState"] == "active" || properties["ActiveState"] == "activating" {
+			return nil, nil, nil
+		}
+		return nil, nil, errServiceUnavailable
+	}
+	code, err := strconv.Atoi(properties["ExecMainCode"])
+	if err != nil || code < 1 || code > 3 {
+		return nil, nil, errServiceUnavailable
+	}
+	exit, err := strconv.Atoi(properties["ExecMainStatus"])
+	if err != nil || exit < 0 {
+		return nil, nil, errServiceUnavailable
+	}
+	if code != 1 {
+		exit = 128 + exit
+	}
+	if properties["Result"] != "success" && exit == 0 {
+		return nil, nil, errServiceUnavailable
+	}
+	return &completed, &exit, nil
+}
+func (platform *systemdServicePlatform) SnapshotSelected(ctx context.Context, selection serviceSelection) (servicePlatformSnapshot, error) {
+	snapshot := servicePlatformSnapshot{Manager: "systemd-user"}
+	for _, name := range systemdSelectedUnits(selection) {
+		data, exists, _, _, err := platform.selectedDefinition(ctx, name)
+		if err != nil {
+			return snapshot, err
+		}
+		properties, err := platform.selectedShow(ctx, name)
+		if err != nil {
+			return snapshot, err
+		}
+		if err := platform.validateSelectedFragment(name, exists, properties); err != nil {
+			return snapshot, err
+		}
+		c := serviceComponentSnapshot{ID: name, Exists: exists, Definition: data}
+		if exists {
+			c.UnitFileState = properties["UnitFileState"]
+			if !supportedSystemdUnitFileState(c.UnitFileState) {
+				return snapshot, installstate.ErrOwnershipConflict
+			}
+			switch properties["ActiveState"] {
+			case "active", "activating":
+				c.Running = true
+			case "inactive", "failed":
+			default:
+				return snapshot, errServiceUnavailable
+			}
+		}
+		snapshot.Components = append(snapshot.Components, c)
+	}
+	return snapshot, ctx.Err()
+}
+func (platform *systemdServicePlatform) installSelected(ctx context.Context, executable string, selection serviceSelection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateSystemdOwnedExecutable(executable); err != nil {
+		return err
+	}
+	definitions, err := renderSelectedSystemdDefinitions(executable, platform.home, platform.roots)
+	if err != nil {
+		return err
+	}
+	for _, name := range systemdSelectedUnits(selection) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := atomicWriteSystemdUnit(platform.unitPath(name), definitions[name]); err != nil {
+			return err
+		}
+	}
+	if _, err := platform.selectedRun(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	if selection == serviceProxy {
+		return platform.StartProxy(ctx)
+	}
+	return platform.StartRefresh(ctx)
+}
+func (platform *systemdServicePlatform) removeSelected(ctx context.Context, selection serviceSelection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if selection == serviceRefresh {
+		if err := platform.StopRefresh(ctx); err != nil {
+			return err
+		}
+	} else {
+		if err := platform.StopProxy(ctx); err != nil {
+			return err
+		}
+	}
+	for _, name := range systemdSelectedUnits(selection) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := os.Remove(platform.unitPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if _, err := platform.selectedRun(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return syncSystemdDirectory(platform.unitDirectory)
+}
+func (platform *systemdServicePlatform) RestoreSelected(ctx context.Context, selection serviceSelection, snapshot servicePlatformSnapshot) error {
+	names := systemdSelectedUnits(selection)
+	if snapshot.Manager != "systemd-user" || snapshot.FolderExists || snapshot.FolderSecurityDescriptor != "" || len(snapshot.Components) != len(names) {
+		return fmt.Errorf("invalid systemd service snapshot")
+	}
+	for i, c := range snapshot.Components {
+		if c.ID != names[i] || c.Enabled || len(c.Definition) > maxSystemdUnitBytes || (!c.Exists && (len(c.Definition) != 0 || c.UnitFileState != "" || c.Running)) {
+			return fmt.Errorf("invalid systemd service snapshot component")
+		}
+		if c.Exists {
+			if !supportedSystemdUnitFileState(c.UnitFileState) {
+				return installstate.ErrOwnershipConflict
+			}
+			if _, _, err := validateOwnedSystemdDefinition(c.ID, c.Definition); err != nil {
+				return err
+			}
+		}
+	}
+	// Reverse native order stops the timer before its job. An install may have
+	// written definitions before a failed reload; proven-unloaded units need no stop.
+	for i := len(names) - 1; i >= 0; i-- {
+		name := names[i]
+		_, exists, _, _, err := platform.selectedDefinition(ctx, name)
+		if err != nil {
+			return err
+		}
+		properties, err := platform.selectedShow(ctx, name)
+		if err != nil {
+			return err
+		}
+		if properties["LoadState"] == "not-found" {
+			continue
+		}
+		if _, ok := properties["DropInPaths"]; !ok {
+			return errServiceUnavailable
+		}
+		// NeedDaemonReload is expected when restoring our own pending definition.
+		if !exists || properties["LoadState"] != "loaded" || properties["FragmentPath"] != platform.unitPath(name) || properties["DropInPaths"] != "" {
+			return installstate.ErrOwnershipConflict
+		}
+		if name == systemdRefreshService {
+			if _, err := platform.selectedRun(ctx, "stop", name); err != nil {
+				return err
+			}
+		} else if err := platform.disableSelected(ctx, name); err != nil {
+			return err
+		}
+	}
+	for _, c := range snapshot.Components {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if c.Exists {
+			if err := atomicWriteSystemdUnit(platform.unitPath(c.ID), c.Definition); err != nil {
+				return err
+			}
+		} else {
+			if err := os.Remove(platform.unitPath(c.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if _, err := platform.selectedRun(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	for _, c := range snapshot.Components {
+		if !c.Exists {
+			continue
+		}
+		switch c.UnitFileState {
+		case "enabled":
+			if _, err := platform.selectedRun(ctx, "enable", c.ID); err != nil {
+				return err
+			}
+		case "enabled-runtime":
+			if _, err := platform.selectedRun(ctx, "enable", "--runtime", c.ID); err != nil {
+				return err
+			}
+		}
+		if c.Running {
+			args := []string{"start", c.ID}
+			if c.ID == systemdRefreshService {
+				args = []string{"start", "--no-block", c.ID}
+			}
+			if _, err := platform.selectedRun(ctx, args...); err != nil {
+				return err
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := os.Stat(platform.unitDirectory); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return syncSystemdDirectory(platform.unitDirectory)
 }

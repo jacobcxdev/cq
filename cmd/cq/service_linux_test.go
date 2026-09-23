@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/jacobcxdev/cq/internal/cli"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -277,5 +280,119 @@ func TestLinuxServiceUserDirsRejectInvalidAndCleanAbsoluteBases(t *testing.T) {
 	got, err := linuxSystemdUserDirectory()
 	if err != nil || got != filepath.Join(dir, "systemd", "user") {
 		t.Fatalf("directory %q error %v", got, err)
+	}
+}
+
+func TestLinuxServiceSelectedFactoryAndPreparationBudget(t *testing.T) {
+	nativeHome := t.TempDir()
+	shellHome := t.TempDir()
+	t.Setenv("HOME", shellHome)
+	old := linuxSelectedHome
+	t.Cleanup(func() { linuxSelectedHome = old })
+	linuxSelectedHome = func() (string, error) { return nativeHome, nil }
+	lifecycle, err := selectedServiceLifecycleFactory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := lifecycle.Platform.(*systemdServicePlatform)
+	if p.home != nativeHome || p.inspectSelectedProxy == nil || p.roots.Config == "" {
+		t.Fatal("canonical Linux factory did not bind native authority")
+	}
+	linuxSelectedHome = func() (string, error) {
+		time.Sleep(5 * time.Millisecond)
+		return "", errors.New("late preparation failure")
+	}
+	inv := cli.Invocation{Path: "service status", Options: map[string][]string{"timeout": {"1ms"}, "component": {"proxy"}}}
+	outcome := handleV2Service(context.Background(), inv, &cli.Session{})
+	if outcome.ExitCode != 7 {
+		t.Fatalf("preparation timeout exit=%d", outcome.ExitCode)
+	}
+}
+func TestLinuxServiceSelectedRuntimeRejectsUnknownInstalledConfig(t *testing.T) {
+	old := linuxProxyRuntimePortFn
+	linuxProxyRuntimePortFn = func() (int, error) { t.Fatal("read invoking-shell config"); return 0, nil }
+	t.Cleanup(func() { linuxProxyRuntimePortFn = old })
+	roots := userdirs.Roots{Config: filepath.Join(t.TempDir(), "missing")}
+	status := inspectSelectedLinuxProxy(context.Background(), "/fixture/cq", roots)
+	if status.Healthy || status.Error == "" {
+		t.Fatal("unknown installed config became healthy")
+	}
+}
+
+func TestLinuxServiceRefreshHookBoundToInstalledUnit(t *testing.T) {
+	for _, scenario := range []string{"success", "failure", "unmarked", "wrong executable", "wrong roots", "wrong home", "missing unit"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, p, _ := newSelectedSystemdHarness(t)
+			actual, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			executable := actual
+			if scenario == "wrong executable" {
+				executable = p.executable
+			}
+			defs, err := renderSelectedSystemdDefinitions(executable, p.home, p.roots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicWriteSystemdUnit(p.unitPath(systemdRefreshService), defs[systemdRefreshService]); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", p.home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Dir(p.roots.Config))
+			t.Setenv("XDG_CACHE_HOME", filepath.Dir(p.roots.Cache))
+			t.Setenv("CQ_SERVICE_REFRESH", "1")
+			switch scenario {
+			case "unmarked":
+				t.Setenv("CQ_SERVICE_REFRESH", "")
+			case "wrong roots":
+				t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			case "wrong home":
+				t.Setenv("HOME", t.TempDir())
+			case "missing unit":
+				if err := os.Remove(p.unitPath(systemdRefreshService)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			sentinel := errors.New("refresh failed")
+			err = runLinuxServiceRefresh(func() error {
+				calls++
+				if scenario == "failure" {
+					return sentinel
+				}
+				return nil
+			})
+			if scenario == "success" || scenario == "failure" || scenario == "unmarked" {
+				if calls != 1 {
+					t.Fatalf("refresh calls=%d", calls)
+				}
+				if scenario == "failure" && !errors.Is(err, sentinel) {
+					t.Fatalf("failure lost: %v", err)
+				}
+				if scenario != "failure" && err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "unmarked" {
+					if _, err := os.Stat(filepath.Join(p.roots.State, serviceRefreshCompletionName)); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("ordinary refresh wrote receipt")
+					}
+				} else {
+					receipt, err := readServiceRefreshCompletion(executable, p.roots, time.Now())
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := 0
+					if scenario == "failure" {
+						want = 1
+					}
+					if receipt.ExitCode != want {
+						t.Fatalf("completion exit=%d", receipt.ExitCode)
+					}
+				}
+			} else if calls != 0 || err == nil {
+				t.Fatalf("unowned service refreshed: calls=%d err=%v", calls, err)
+			}
+		})
 	}
 }
