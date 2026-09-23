@@ -1,14 +1,51 @@
 # CLI v2 local release evidence — 1.0.0
 
-**Local preparation checkpoint only. Publication, native installation and release acceptance are blocked.** No authorised native target or disposable user has been supplied. No tag, push, PR, merge, GitHub status, release, package installation, service mutation or real reset consumption was performed for T28.
+## Current status — 23 September 2026, 14:09 UTC
 
-## Current candidate: final integration fixes
+**CLI v2 deployment was rolled back. The existing Mac is running the restored v0.32.12 installation; no current six-target CLI v2 candidate is qualified for another deployment.** Local source work remains intact. Publication, tagging, pushing and remote workflow execution have not been authorised.
 
-The final I1/I2/M1 integration wave supersedes the historical T28 candidates below. **Use only the following new archives for subsequent candidate assessment.** Source is signed commit `8b377be27b22f7164f8dac6d61d17afcf1fd1c5f` (`fix: preserved CLI projection contracts`), built from a clean worktree. All six binaries identify this exact revision and `vcs.modified=false`; the later evidence-only commit is not their source.
+The user explicitly rejected disposable environments and authorised normal deployment to the existing Mac after including default-branch fixes. This supersedes the former disposable-target prerequisite; it does not turn unexecuted platform or package gates into passes. All archive tables and the original gate table below are historical records, not current installation instructions.
+
+### Source and deployment chronology
+
+- Signed merge `5345884c9057d49196db789938b1d80a22c5fee3` included default `main` at `e019d2bff938317fa794a6c6605fa22aba5436bc`, including all 14 commits since the initial CLI v2 baseline. That main revision remains an ancestor of current source.
+- Follow-up `2678d9b9a78e304628102bfbbd7c40d33e3f63d7` fixed detached history-input ownership. `17a03667bddede51bcabd51f381660ee76da3442` added bounded launchd registration-removal waiting. `8a4e63b0462954d771cf32cd4cf16ab73dfd7991` restored the established human quota dashboard without changing canonical JSON.
+- Source `8a4e63b0462954d771cf32cd4cf16ab73dfd7991` was installed at 14:00 UTC through atomic replacement and the legitimate Homebrew hook. Recorded binary SHA-256 was `cb85338bcf506fdaa833672dbde1c8e93d2ed5ca85e5fb56934e8b5246c71510`. HTTP 200 and WebSocket 101/terminal success were observed, with zero 503 or continuity mismatch in the recorded intervals. The WebSocket flow later resynchronised through HTTP after `cyber_disabled`; this was not an exclusively WebSocket conversation.
+- That local build omitted the release-time Gemini OAuth client secret. The user reported previously working Gemini quota refresh had regressed. The empty build input was a known capability loss, not acceptable completion of their normal installation upgrade.
+- At 14:05 UTC, the original v0.32.12 binary and exact saved service definitions were restored. The legitimate old Homebrew hook initially rejected the newer plist environment dictionary; restoring the saved definitions allowed rollback. Controller verification recorded proxy PID 81033 healthy on port 19280, default `cq --json` exit 0 and Gemini OK. These are observations at rollback time, not perpetual health claims.
+- During rollback, canonical v2 `service stop --component all` returned exit 8, `service_partial` and `rollback=failed`, with both component states indeterminate. Signed source `efa05a8a263bd9ec45674ddd44a940524d23893f` (`fix: parsed native launchd policy values`) now addresses native launchd boolean-policy parsing. Scoped review approved the correction with no findings; 40 top-level/144 total targeted race tests and focused vet passed. It has not been deployed by this checkpoint.
+
+Current incident and deployment evidence is retained under `.superpowers/sdd/plan/local-deploy-evidence/`; default-branch evidence and mapping are under `.superpowers/sdd/plan/default-branch-integration-evidence/` and the corresponding report. Original executable, definitions and ownership record remain retained for rollback. User Codex connection settings were not changed. No reset credit was consumed.
+
+### Current gate reconciliation
+
+| Requirement | Current evidence and status |
+|---|---|
+| Latest default-branch fixes | Included through `e019d2bff938317fa794a6c6605fa22aba5436bc`; 14-commit behaviour/test mapping retained. |
+| Integrated build, vet, catalogue and plan checks | Passed at the default-branch integration checkpoint; subsequent narrow fixes have their own source-bound covering evidence. |
+| Integrated full race suite | **4179 PASS, one stale timestamp assertion FAIL, 29 SKIP.** Corrected complete timestamp test passed separately: one top-level and six child tests. No all-green full-suite claim. |
+| History cancellation correction | Scoped review approved; 40 top-level/74 total race-test passes, zero failures/skips, focused vet passed. |
+| Launchd registration-removal correction | Scoped review approved; 38 top-level/134 total race-test passes, zero failures/skips, focused vet passed. |
+| Human quota dashboard restoration | Scoped review approved; covering renderer/check race tests and vet passed. Installed terminal appearance was verified before rollback. |
+| Native policy parsing / selected stop | Source fix `efa05a8a263bd9ec45674ddd44a940524d23893f` committed and scoped review approved; 40 top-level/144 total targeted race-test passes and focused vet passed. Failed native stop/rollback result remains retained. No successful redeployment claimed. |
+| Current six-target candidates and packaged checks | **Not yet prepared for current source.** All six-target archives below predate upstream integration and later fixes. A replacement candidate workflow is being prepared locally; no remote run or new artefact digest is claimed. |
+| Gemini capability | **Unqualified in the rolled-back v2 build.** Another deployment requires the legitimate release-time build input and verification. No binary scraping, runtime fallback or warning suppression substitutes for it. |
+| Existing Mac deployment | **Rolled back to v0.32.12.** Earlier v2 HTTP/WebSocket observations are historical, not acceptance of current source or current installation. |
+| Other native/package qualifications | Remain explicitly unverified where no native run occurred. Cross-builds establish compilation only. Disposable lifecycle prerequisite was waived, not passed. |
+| Historical CU0/CU1 provenance | Unresolved historical release qualification; compatibility-only roster is not signed release acceptance. No replacement proof backend was added. |
+| Publication | Not authorised or performed. Local implementation/evidence preparation and a published release remain separate checkpoints. |
+
+Remaining work: prepare a full-provider candidate through the legitimate release build mechanism, refresh current artefacts and packaged checks, then perform any authorised redeployment with rollback retained. Keep implementation goal open; this document does not claim completion. Retain all failed attempts and earlier qualification limits below without treating them as current authority.
+
+---
+
+## Historical candidate: final integration fixes (superseded)
+
+This historical I1/I2/M1 integration wave superseded the original T28 candidates below. **These archives are now superseded too; do not install or treat them as the current CLI v2 candidate.** Source is signed commit `8b377be27b22f7164f8dac6d61d17afcf1fd1c5f` (`fix: preserved CLI projection contracts`), built from a clean worktree. All six binaries identify this exact revision and `vcs.modified=false`; the later evidence-only commit is not their source.
 
 The fixes preserve typed environment diagnostics across canonical preparation boundaries, escape persisted pin/fallback labels in human output without changing JSON, and retain exact fractional seconds in canonical Timestamp projections. Frozen machine/vendor formats and platform-unavailable precedence remain unchanged.
 
-Current evidence directory:
+Historical evidence directory:
 
 ```text
 /Users/jacob/Developer/src/github/jacobcxdev/cq/.worktrees/cli-v2/.superpowers/sdd/plan/final-fix-evidence
@@ -73,7 +110,7 @@ The GoReleaser metadata still reports pre-existing Git tag `v0.32.5` as its disc
 
 The release-time Gemini OAuth client secret was **explicitly empty** in the isolated build environment; no secret was read, sourced, copied or printed. These binaries cannot establish Gemini release qualification. The unchanged release requirement still requires the real release-time secret before a publishable build. No placeholder was treated as production authority. Stage-11 provenance is derived from the existing reviewed manifest for version 1.0.0: `4dd0c380fcff85171d29028c65e8cb4f58357c9d0ce98384b1344ecedca46f41`. This preserves the existing linker flag; it does not confer historical CU acceptance.
 
-## Gate results and boundaries
+## Historical T28 gate results and boundaries — not current authority
 
 | Gate | Result at this checkpoint | Evidence / remaining requirement |
 |---|---|---|
@@ -135,9 +172,11 @@ T28 changed none of the frozen CU manifest, release producer, blueprint or revie
 
 `scripts/verify-proxy-cu --cli-v2` is explicitly compatibility-only, roster SHA-256 `b8670225a8b3f2c1d283f53ab00964478e07e4e86efb0f4b686a8648062a235b`. Its source tests ran in the full suite. Historical signed validator/producer formats and exact CU-ID argv remain frozen. No replacement release-proof backend, fake signed acceptance, status write or release script execution was introduced.
 
-## Prepared native rollout and restoration procedure — not executed
+## Historical proposed disposable rollout — superseded by user direction
 
-Before running any command below, obtain explicit target authority and record: host and OS/architecture, disposable user/SID/UID, user-service domain, all five resolved roots, package owner/channel, current executable/version/digest, saved owner metadata and native definitions, enabled/running state, refresh completion baseline, approved traffic credentials without logging their contents, and the exact prior package/binary plus restoration path. The fields are unknown now; a user's ordinary installation is not a substitute. Transfer the matching current final-fix archive from the first table above unchanged and verify both its SHA-256 and extracted executable SHA-256 from the table. Keep the old executable/definitions on the target until restoration is proved.
+The procedure below is retained as the original, unexecuted T28 proposal. The user subsequently rejected disposable environments and authorised normal installation on their existing Mac. Do not reinstate this procedure as a prerequisite or treat its former unknown-target statements as current facts.
+
+At the time of this proposal: before running any command below, obtain explicit target authority and record: host and OS/architecture, disposable user/SID/UID, user-service domain, all five resolved roots, package owner/channel, current executable/version/digest, saved owner metadata and native definitions, enabled/running state, refresh completion baseline, approved traffic credentials without logging their contents, and the exact prior package/binary plus restoration path. The fields are unknown now; a user's ordinary installation is not a substitute. Transfer the matching current final-fix archive from the first table above unchanged and verify both its SHA-256 and extracted executable SHA-256 from the table. Keep the old executable/definitions on the target until restoration is proved.
 
 Use `CQ` only for the approved target's extracted executable, `SOURCE` for checkout of exact source `8b377be27b22f7164f8dac6d61d17afcf1fd1c5f`, and `NATIVE_EVIDENCE` for its approved retained evidence directory. These target paths cannot be filled before a target is authorised. The known local source of each current archive is the final-fix evidence directory plus its exact filename under `archives/`; the historical T28 archives are superseded.
 
