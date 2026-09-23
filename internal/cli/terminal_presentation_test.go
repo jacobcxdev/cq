@@ -191,3 +191,18 @@ func TestHelpTypedDefaultRoles(t *testing.T) {
 		t.Fatal("untyped prose numeral coloured")
 	}
 }
+
+func TestHelpRelatedCommandDescriptionRoles(t *testing.T) {
+	got, ok := terminalHelp("auth", 100, true)
+	if !ok {
+		t.Fatal("missing auth help")
+	}
+	want := "\x1b[36mcq claude account\x1b[0m   Add, inspect, select and remove Claude accounts."
+	if !strings.Contains(got, want) {
+		t.Fatalf("related command and description roles were not split: %q", got)
+	}
+	plain, _ := terminalHelp("auth", 100, false)
+	if ansi.Strip(got) != plain {
+		t.Fatal("related command styling changed visible text")
+	}
+}

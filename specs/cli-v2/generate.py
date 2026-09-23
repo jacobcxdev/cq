@@ -265,6 +265,9 @@ def authored_terminal_help_source():
                     parameter = None
             elif section == 'Usage' and indent:
                 spans = [(value, 'Identity')]
+            elif section == 'Related commands' and value.startswith('cq '):
+                match = re.match(r'(.*?)( {2,}.*)$', value)
+                spans = [(match[1], 'Identity'), (match[2], 'Body')] if match else [(value, 'Identity')]
             elif value.startswith('cq ') or value == 'cq':
                 spans = [(value, 'Identity')]
             elif (value.startswith('-') and indent == 2) or (section in {'Commands', 'Quotas', 'Providers', 'Operations', 'Utilities', 'Arguments'} and indent == 2):
