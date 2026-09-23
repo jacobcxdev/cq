@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -386,4 +387,60 @@ func TestCLIV2SelectionHelpHasNoStateAccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCLIV2SelectionPreparationBudget(t *testing.T) {
+	inv, parseErr := cli.Parse([]string{"codex", "proxy", "pin", "show", "--timeout", "1ms"})
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	var reads int
+	deps := v2SelectionDependencies{LoadConfig: func() (*proxy.Config, error) { reads++; return &proxy.Config{}, nil }}
+	t.Run("pre-cancelled parent skips preparation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		prepares := 0
+		out := handleV2SelectionWithPreparation(ctx, inv, nil, func(context.Context) (v2SelectionDependencies, error) {
+			prepares++
+			return deps, nil
+		})
+		if out.ExitCode != 130 || prepares != 0 || reads != 0 {
+			t.Fatalf("outcome=%+v prepares=%d reads=%d", out, prepares, reads)
+		}
+	})
+	t.Run("slow preparation exhausts one budget", func(t *testing.T) {
+		out := handleV2SelectionWithPreparation(context.Background(), inv, nil, func(ctx context.Context) (v2SelectionDependencies, error) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(100 * time.Millisecond):
+			}
+			return deps, nil
+		})
+		if out.ExitCode != 7 || out.Errors[0].Code != "routing_timeout" || reads != 0 {
+			t.Fatalf("outcome=%+v reads=%d", out, reads)
+		}
+	})
+	t.Run("deadline precedes preparation error", func(t *testing.T) {
+		out := handleV2SelectionWithPreparation(context.Background(), inv, nil, func(ctx context.Context) (v2SelectionDependencies, error) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(100 * time.Millisecond):
+			}
+			return v2SelectionDependencies{}, errors.New("private preparation error")
+		})
+		if out.ExitCode != 7 || out.Errors[0].Code != "routing_timeout" || reads != 0 {
+			t.Fatalf("outcome=%+v reads=%d", out, reads)
+		}
+	})
+	t.Run("cancellation precedes preparation error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		out := handleV2SelectionWithPreparation(ctx, inv, nil, func(context.Context) (v2SelectionDependencies, error) {
+			cancel()
+			return v2SelectionDependencies{}, errors.New("private preparation error")
+		})
+		if out.ExitCode != 130 || out.Errors[0].Code != "interrupted" || reads != 0 {
+			t.Fatalf("outcome=%+v reads=%d", out, reads)
+		}
+	})
 }

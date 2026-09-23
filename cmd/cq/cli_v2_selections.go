@@ -36,25 +36,50 @@ func lookupV2Selection(path string) (cli.Handler, bool) {
 }
 
 func handleV2Selection(ctx context.Context, inv cli.Invocation, session *cli.Session) cli.Outcome {
-	roots, err := userdirs.Default(userdirs.ConfigRoot, userdirs.StateRoot)
+	return handleV2SelectionWithPreparation(ctx, inv, session, func(context.Context) (v2SelectionDependencies, error) {
+		roots, err := userdirs.Default(userdirs.ConfigRoot, userdirs.StateRoot)
+		if err != nil {
+			return v2SelectionDependencies{}, err
+		}
+		paths := proxy.PathsForRoots(roots)
+		accounts := &codexprov.Accounts{FS: fsutil.OSFileSystem{}, StateDir: roots.State}
+		return v2SelectionDependencies{
+			LoadConfig: func() (*proxy.Config, error) { return proxy.LoadExistingConfigAt(paths) },
+			SaveConfig: func(cfg *proxy.Config) error { return proxy.SaveConfigAt(paths, cfg) },
+			Codex: func(ctx context.Context) (codexprov.Inventory, codexprov.AccountAliasIndex, error) {
+				inventory, err := accounts.Inspect(ctx)
+				if err != nil {
+					return inventory, codexprov.AccountAliasIndex{}, err
+				}
+				aliases, err := accounts.InspectAliases(ctx)
+				return inventory, aliases, err
+			},
+			Claude: (&claudeprov.Accounts{}).Inspect,
+		}, nil
+	})
+}
+
+type v2SelectionPreparation func(context.Context) (v2SelectionDependencies, error)
+
+func handleV2SelectionWithPreparation(parent context.Context, inv cli.Invocation, session *cli.Session, prepare v2SelectionPreparation) cli.Outcome {
+	timeout, err := time.ParseDuration(inv.Options["timeout"][0])
+	if err != nil {
+		return v2SelectionFailure(2, "routing_invalid_argument", "Invalid argument: timeout.")
+	}
+	budget := cli.BeginBudget(parent, timeout, 0)
+	defer budget.Close()
+	ctx := budget.Work()
+	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
+		return out
+	}
+	deps, err := prepare(ctx)
+	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
+		return out
+	}
 	if err != nil {
 		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: resolve proxy paths.")
 	}
-	paths := proxy.PathsForRoots(roots)
-	accounts := &codexprov.Accounts{FS: fsutil.OSFileSystem{}, StateDir: roots.State}
-	return handleV2SelectionWithDependencies(ctx, inv, session, v2SelectionDependencies{
-		LoadConfig: func() (*proxy.Config, error) { return proxy.LoadExistingConfigAt(paths) },
-		SaveConfig: func(cfg *proxy.Config) error { return proxy.SaveConfigAt(paths, cfg) },
-		Codex: func(ctx context.Context) (codexprov.Inventory, codexprov.AccountAliasIndex, error) {
-			inventory, err := accounts.Inspect(ctx)
-			if err != nil {
-				return inventory, codexprov.AccountAliasIndex{}, err
-			}
-			aliases, err := accounts.InspectAliases(ctx)
-			return inventory, aliases, err
-		},
-		Claude: (&claudeprov.Accounts{}).Inspect,
-	})
+	return executeV2Selection(parent, ctx, inv, deps)
 }
 
 func v2Intent(inv cli.Invocation) proxySelectionIntent {
@@ -66,18 +91,13 @@ func v2Intent(inv cli.Invocation) proxySelectionIntent {
 	return intent
 }
 
-func handleV2SelectionWithDependencies(parent context.Context, inv cli.Invocation, _ *cli.Session, deps v2SelectionDependencies) cli.Outcome {
+func handleV2SelectionWithDependencies(parent context.Context, inv cli.Invocation, session *cli.Session, deps v2SelectionDependencies) cli.Outcome {
+	return handleV2SelectionWithPreparation(parent, inv, session, func(context.Context) (v2SelectionDependencies, error) { return deps, nil })
+}
+
+func executeV2Selection(parent, ctx context.Context, inv cli.Invocation, deps v2SelectionDependencies) cli.Outcome {
 	intent := v2Intent(inv)
-	timeout, err := time.ParseDuration(inv.Options["timeout"][0])
-	if err != nil {
-		return v2SelectionFailure(2, "routing_invalid_argument", "Invalid argument: timeout.")
-	}
-	budget := cli.BeginBudget(parent, timeout, 0)
-	defer budget.Close()
-	ctx := budget.Work()
-	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
-		return out
-	}
+	var err error
 	cfg, err := deps.LoadConfig()
 	if out, stopped := v2SelectionStopped(parent, ctx); stopped {
 		return out
