@@ -678,11 +678,11 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 	serve := serveRuntimeSupervisor
 	if ready != nil {
 		serve = func(ctx context.Context, listener net.Listener, handler http.Handler) error {
-			if runtime, ok := handler.(*proxy.RuntimeSupervisor); ok && !runtime.AdmissionReady() && runtime.TrafficMode() != proxy.TrafficModeRescue {
-				return proxy.ErrRuntimeSupervisorUnavailable
-			}
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if runtime, ok := handler.(*proxy.RuntimeSupervisor); ok && !runtime.AdmissionReady() && runtime.TrafficMode() != proxy.TrafficModeRescue {
+				return proxy.ErrRuntimeSupervisorUnavailable
 			}
 			providers := []string{"claude", "codex"}
 			if runtime, ok := handler.(*proxy.RuntimeSupervisor); ok && runtime.TrafficMode() == proxy.TrafficModeRescue {

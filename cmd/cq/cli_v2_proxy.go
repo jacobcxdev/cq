@@ -471,7 +471,7 @@ func executeV2ProxyServe(ctx context.Context, inv cli.Invocation, session *cli.S
 	out := cli.Outcome{}
 	if err != nil {
 		out = v2ProxyIO()
-		if address == "" && err == context.Canceled && ctx.Err() == context.Canceled {
+		if address == "" && v2ProxyCancellationOnly(err) && ctx.Err() == context.Canceled {
 			out = cli.Outcome{}
 			if !errors.Is(context.Cause(ctx), errV2ProxyTerminated) {
 				out = v2SelectionFailure(130, "interrupted", "Operation interrupted; inspect state before retrying.")
@@ -504,6 +504,31 @@ func executeV2ProxyServe(ctx context.Context, inv cli.Invocation, session *cli.S
 	out.Warnings = nil
 	out.Streamed = true
 	return out
+}
+
+// Startup joins boot and serve results, then platform wrappers add context.
+// Every leaf must be cancellation: errors.Is alone would hide a joined failure.
+func v2ProxyCancellationOnly(err error) bool {
+	if err == context.Canceled {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !v2ProxyCancellationOnly(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return v2ProxyCancellationOnly(wrapped.Unwrap())
+	default:
+		return false
+	}
 }
 
 func proxyBoundPort(err error, fallback int) int {
