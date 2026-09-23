@@ -10,9 +10,10 @@ import (
 
 // ParseError preserves the retirement exit as well as ordinary syntax failures.
 type ParseError struct {
-	Path       string
-	ExitCode   int
-	Diagnostic Diagnostic
+	Path          string
+	AttemptedPath string // Human diagnostic context; never the canonical machine path.
+	ExitCode      int
+	Diagnostic    Diagnostic
 }
 
 func (e *ParseError) Error() string { return e.Diagnostic.Message }
@@ -26,6 +27,7 @@ type parseIssue struct {
 	position      int
 	code, message string
 	value         bool
+	attemptedPath string
 }
 type suppliedValue struct {
 	parameter ParameterSpec
@@ -207,7 +209,7 @@ func (p *parser) resolve(tokens []argvToken) (string, []argvToken, bool) {
 			return path, nil, help
 		}
 		p.in.Path = path
-		p.issue(t.position, "unknown_command", "Unknown command: "+safeText(t.text)+". Run cq help.", false)
+		p.unknownCommand(t, path)
 		return path, nil, help
 	}
 	return path, nil, help
@@ -270,7 +272,7 @@ func (p *parser) scan(spec CommandSpec, tokens []argvToken) {
 			continue
 		}
 		if p.helpCommand {
-			p.issue(t.position, "unknown_command", "Unknown command: "+safeText(t.text)+". Run cq help.", false)
+			p.unknownCommand(t, p.in.Path)
 			continue
 		}
 		if positional < len(spec.Positionals) {
@@ -325,8 +327,17 @@ func (p *parser) defaults(spec CommandSpec) {
 func (p *parser) flag(name string) bool {
 	return len(p.in.Options[name]) > 0 && p.in.Options[name][0] == "true"
 }
+func (p *parser) unknownCommand(token argvToken, parent string) {
+	p.issue(token.position, "unknown_command", "Unknown command: "+safeText(token.text)+". Run cq help.", false)
+	attempted := token.text
+	if parent != "" {
+		attempted = parent + " " + token.text
+	}
+	p.issues[len(p.issues)-1].attemptedPath = attempted
+}
+
 func (p *parser) issue(position int, code, message string, value bool) {
-	p.issues = append(p.issues, parseIssue{position, code, message, value})
+	p.issues = append(p.issues, parseIssue{position: position, code: code, message: message, value: value})
 }
 func (p *parser) invalid(position int, name, constraint string) {
 	p.issue(position, "invalid_argument", "Invalid "+name+": "+strings.TrimSuffix(constraint, ".")+".", true)
@@ -349,7 +360,7 @@ func (p *parser) firstError() *ParseError {
 			}
 		}
 		code, message := specificDiagnostic(p.in.Path, issue.code, message)
-		return &ParseError{Path: p.in.Path, ExitCode: 2, Diagnostic: Diagnostic{code, message}}
+		return &ParseError{Path: p.in.Path, AttemptedPath: issue.attemptedPath, ExitCode: 2, Diagnostic: Diagnostic{code, message}}
 	}
 	return nil
 }

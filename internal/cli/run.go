@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 )
 
 var interruptedDiagnostic = Diagnostic{"interrupted", "Operation interrupted; inspect state before retrying."}
@@ -13,6 +14,9 @@ func Run(ctx context.Context, argv []string, session *Session, lookup Lookup) in
 	inv, parseErr := Parse(argv)
 	if parseErr != nil {
 		inv.Path = parseErr.Path
+		if !inv.JSON && session.ErrTerminal.Width > 0 && parseErr.AttemptedPath != "" {
+			inv.Path = parseErr.AttemptedPath
+		}
 		return render(session, inv, Outcome{ExitCode: parseErr.ExitCode, Errors: []Diagnostic{parseErr.Diagnostic}})
 	}
 	if inv.Presentation == "help" {
@@ -21,7 +25,11 @@ func Run(ctx context.Context, argv []string, session *Session, lookup Lookup) in
 			return render(session, inv, internalFailure())
 		}
 		if session.OutTerminal.Width > 0 {
-			if styled, available := terminalHelp(inv.Path, session.OutTerminal.Width, session.OutTerminal.Colour); available {
+			helpPath := inv.Path
+			if helpPath == "" && slices.Contains(argv, "help") && slices.Contains(inv.Options["help"], "true") {
+				helpPath = "help"
+			}
+			if styled, available := terminalHelp(helpPath, session.OutTerminal.Width, session.OutTerminal.Colour); available {
 				text = styled
 			}
 		}
@@ -69,9 +77,12 @@ func internalFailure() Outcome {
 func render(session *Session, inv Invocation, outcome Outcome) int {
 	warnings := append([]Diagnostic{}, inv.Warnings...)
 	outcome.Warnings = append(warnings, outcome.Warnings...)
-	for _, warning := range outcome.Warnings {
-		if err := writeBytes(session.Err, []byte(fmt.Sprintf("cq: warning: %s\n", HumanValue(warning.Message)))); err != nil {
-			return 1
+	terminalErrors := !inv.JSON && inv.Path != "codex proxy hook stop" && session.ErrTerminal.Width > 0
+	if !terminalErrors {
+		for _, warning := range outcome.Warnings {
+			if err := writeBytes(session.Err, []byte(fmt.Sprintf("cq: warning: %s\n", HumanValue(warning.Message)))); err != nil {
+				return 1
+			}
 		}
 	}
 	var err error
@@ -98,7 +109,13 @@ func render(session *Session, inv Invocation, outcome Outcome) int {
 		_ = writeBytes(session.Err, []byte("cq: Output could not be written.\n"))
 		return 1
 	}
-	if !inv.JSON {
+	if terminalErrors {
+		if diagnostic := terminalDiagnostics(inv.Path, outcome, session.ErrTerminal); diagnostic != "" {
+			if err := writeBytes(session.Err, []byte(diagnostic)); err != nil {
+				return 1
+			}
+		}
+	} else if !inv.JSON {
 		for _, diagnostic := range outcome.Errors {
 			if err := writeBytes(session.Err, []byte(fmt.Sprintf("cq: %s\n", HumanValue(diagnostic.Message)))); err != nil {
 				return 1

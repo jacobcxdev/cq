@@ -87,10 +87,16 @@ func TerminalLine(options TerminalOptions, indent int, spans ...Span) string {
 		for {
 			wrapped := ansi.Wrap(content.String(), width-indent, "")
 			overflow := 0
-			for _, line := range strings.Split(wrapped, "\n") {
-				overflow = max(overflow, ansi.StringWidth(line)-(width-indent))
+			// The upstream wrapper can retain a trailing separator past the
+			// limit. Remove only overflowing spaces, never visible content.
+			lines := strings.Split(wrapped, "\n")
+			for i, line := range lines {
+				if ansi.StringWidth(line) > width-indent && ansi.StringWidth(strings.TrimRight(ansi.Strip(line), " ")) <= width-indent {
+					lines[i] = ansi.Truncate(line, width-indent, "")
+				}
+				overflow = max(overflow, ansi.StringWidth(lines[i])-(width-indent))
 			}
-			value = wrapped
+			value = strings.Join(lines, "\n")
 			if overflow == 0 || indent == 0 {
 				break
 			}
