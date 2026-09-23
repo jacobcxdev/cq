@@ -372,8 +372,62 @@ func readV2PolicyFile(path string) (proxy.RoutingPolicyDocument, error) {
 	if decoder.Decode(&document) != nil || !errors.Is(decoder.Decode(&struct{}{}), io.EOF) || document.SchemaVersion != 1 {
 		return invalid()
 	}
+	// Go accepts null for non-pointer scalars and slices. Reject those inputs
+	// before returning the document for publication. Check types first so this
+	// walk only sees the shallow public schema, not arbitrary nested objects.
+	shape := json.NewDecoder(bytes.NewReader(body))
+	shape.UseNumber()
+	if !validV2PolicyNullability(shape, "") {
+		return invalid()
+	}
 	return document, nil
 }
+
+// Only these two public field paths are nullable. Walking tokens also checks
+// every occurrence of a duplicate field before decoding can overwrite it.
+func validV2PolicyNullability(decoder *json.Decoder, path string) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	if token == nil {
+		return path == "capability_pool" || path == "capability_routing_evidence[].expires_at"
+	}
+	delimiter, container := token.(json.Delim)
+	if !container {
+		return true
+	}
+	switch delimiter {
+	case '{':
+		for decoder.More() {
+			key, err := decoder.Token()
+			if err != nil {
+				return false
+			}
+			name, ok := key.(string)
+			if !ok {
+				return false
+			}
+			if path != "" {
+				name = path + "." + name
+			}
+			if !validV2PolicyNullability(decoder, name) {
+				return false
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if !validV2PolicyNullability(decoder, path+"[]") {
+				return false
+			}
+		}
+	default:
+		return false
+	}
+	_, err = decoder.Token()
+	return err == nil
+}
+
 func v2PolicyIO(detail string) cli.Outcome {
 	return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: "+detail+".")
 }

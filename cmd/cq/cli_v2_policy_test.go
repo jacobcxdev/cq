@@ -658,3 +658,139 @@ func TestCLIV2PolicySessionListOrderingIsReadOnly(t *testing.T) {
 		t.Fatalf("list ordering mutated state or was unsorted: %s", out.Data)
 	}
 }
+
+func TestCLIV2PolicyRejectsNonNullableNullBeforePublication(t *testing.T) {
+	const base = `{"schema_version":1,"authority_generation":2,"routing_generation":2,"effective_generation":1,"pools":[{"name":"Work","value":7,"members":["account-a"]}]}`
+	for _, tc := range []struct{ name, old, replacement string }{
+		{"schema", "\"schema_version\":1", "\"schema_version\":null"},
+		{"authority generation", "\"authority_generation\":2", "\"authority_generation\":null"},
+		{"routing generation", "\"routing_generation\":2", "\"routing_generation\":null"},
+		{"effective generation", "\"effective_generation\":1", "\"effective_generation\":null"},
+		{"pool value", "\"value\":7", "\"value\":null"},
+		{"duplicate pool value", "\"value\":7", "\"value\":null,\"value\":7"},
+		{"pool name", "\"name\":\"Work\"", "\"name\":null"},
+		{"pool members", "\"members\":[\"account-a\"]", "\"members\":null"},
+		{"member element", "[\"account-a\"]", "[null]"},
+		{"pool element", "{\"name\":\"Work\",\"value\":7,\"members\":[\"account-a\"]}", "null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, deps := newV2PolicyRig(t)
+			before := state.Routing.Current()
+			calls := 0
+			underlying := deps.Doer
+			deps.Doer = testDoer(func(r *http.Request) (*http.Response, error) { calls++; return underlying.Do(r) })
+			file := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(file, []byte(strings.Replace(base, tc.old, tc.replacement, 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, _ := policyRun(t, deps, nil, "policy", "apply", "--file", file)
+			requirePolicyCode(t, out, 2, "policy_document_invalid")
+			if calls != 0 || !reflect.DeepEqual(before, state.Routing.Current()) {
+				t.Fatalf("invalid input accessed control or changed authority: calls=%d", calls)
+			}
+		})
+	}
+	for _, field := range []string{"pools", "session_bindings", "capability_evidence", "capability_predicates", "capability_routing_evidence", "delegations"} {
+		t.Run(field+" array", func(t *testing.T) {
+			state, deps := newV2PolicyRig(t)
+			before := state.Routing.Current()
+			body := `{"schema_version":1,"authority_generation":2,"routing_generation":2,"effective_generation":1,"` + field + `":null}`
+			file := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			deps.Doer = testDoer(func(*http.Request) (*http.Response, error) {
+				t.Fatal("null array reached publication")
+				return nil, nil
+			})
+			out, _ := policyRun(t, deps, nil, "policy", "apply", "--file", file)
+			requirePolicyCode(t, out, 2, "policy_document_invalid")
+			if !reflect.DeepEqual(before, state.Routing.Current()) {
+				t.Fatal("null array changed authority")
+			}
+		})
+	}
+}
+
+func v2PolicyNullableEvidenceFixture() []byte {
+	predicate := proxy.CapabilityPredicateCoreV1{SchemaVersion: 1, Capability: "model.invoke", ProductSurface: "desktop", AccessPath: "responses", AuthMode: "oauth", RequestedModel: "gpt-5", EffectiveModel: "gpt-5"}
+	document := proxy.RoutingPolicyDocument{SchemaVersion: 1, AuthorityGeneration: 2, RoutingGeneration: 2, EffectiveGeneration: 1, Pools: []proxy.AccountPoolDocument{{Name: "Work", Value: 7, Members: []codex.AccountKey{"account-a"}}}, SessionBindings: []proxy.SessionBindingDocument{{SessionDigest: strings.Repeat("a", 64), Pool: "Work"}}, CapabilityEvidence: []proxy.CapabilityEvidenceV1{{AccountKey: "account-a", State: proxy.CapabilitySupported}}, CapabilityPool: "Work", CapabilityPredicates: []proxy.CapabilityPredicateCoreV1{predicate}, CapabilityRoutingEvidence: []proxy.CapabilityRoutingEvidenceV1{{SchemaVersion: 1, AccountKey: "account-a", AccountKeyHMAC: strings.Repeat("a", 64), Workspace: "synthetic", Capability: predicate.Capability, ProductSurface: predicate.ProductSurface, AccessPath: predicate.AccessPath, AuthMode: predicate.AuthMode, RequestedModel: predicate.RequestedModel, EffectiveModel: predicate.EffectiveModel, Source: "synthetic", State: proxy.CapabilityEvidenceEligible, ObservedAt: time.Now().UTC().Add(-time.Minute), RoutingGeneration: 2, Authenticated: true}}, Delegations: []proxy.CallerDelegationV1{{Caller: "fixture", Accounts: []codex.AccountKey{"account-a"}, ExpiresAt: time.Now().UTC().Add(time.Hour)}}}
+	body, _ := json.Marshal(v2PublicPolicy(document))
+	return body
+}
+func TestCLIV2PolicyNestedNullabilityBeforePublication(t *testing.T) {
+	for _, tc := range []struct{ array, field string }{
+		{"session_bindings", "session_digest"}, {"session_bindings", "pool"}, {"capability_evidence", "account_key"}, {"capability_evidence", "state"},
+		{"capability_predicates", "schema_version"}, {"capability_predicates", "capability"},
+		{"capability_routing_evidence", "schema_version"}, {"capability_routing_evidence", "routing_generation"}, {"capability_routing_evidence", "authenticated"}, {"capability_routing_evidence", "observed_at"},
+		{"delegations", "caller"}, {"delegations", "accounts"}, {"delegations", "expires_at"},
+	} {
+		t.Run(tc.array+"/"+tc.field, func(t *testing.T) {
+			state, deps := newV2PolicyRig(t)
+			before := state.Routing.Current()
+			var document map[string]any
+			if err := json.Unmarshal(v2PolicyNullableEvidenceFixture(), &document); err != nil {
+				t.Fatal(err)
+			}
+			document[tc.array].([]any)[0].(map[string]any)[tc.field] = nil
+			body, _ := json.Marshal(document)
+			file := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(file, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			deps.Doer = testDoer(func(*http.Request) (*http.Response, error) {
+				t.Fatal("non-nullable nested field reached publication")
+				return nil, nil
+			})
+			out, _ := policyRun(t, deps, nil, "policy", "apply", "--file", file)
+			requirePolicyCode(t, out, 2, "policy_document_invalid")
+			if !reflect.DeepEqual(before, state.Routing.Current()) {
+				t.Fatal("nested null changed authority")
+			}
+		})
+	}
+	for _, value := range []string{`"7"`, `true`, `7.5`, `4294967296`} {
+		t.Run("integer type "+value, func(t *testing.T) {
+			body := `{"schema_version":1,"authority_generation":2,"routing_generation":2,"effective_generation":1,"pools":[{"name":"Work","value":` + value + `,"members":["account-a"]}]}`
+			file := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, _ := policyRun(t, proxyPolicyDependencies{}, nil, "policy", "apply", "--file", file)
+			requirePolicyCode(t, out, 2, "policy_document_invalid")
+		})
+	}
+}
+func TestCLIV2PolicyPermittedNullAndOmissionControls(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		body        []byte
+		value       proxy.PoolValue
+		hasEvidence bool
+	}{
+		{"omitted pool value and optional arrays", []byte(`{"schema_version":1,"authority_generation":2,"routing_generation":2,"effective_generation":1,"pools":[{"name":"Work","members":["account-a"]}]}`), 0, false},
+		{"nullable capability pool", []byte(`{"schema_version":1,"authority_generation":2,"routing_generation":2,"effective_generation":1,"pools":[{"name":"Work","value":7,"members":["account-a"]}],"capability_pool":null}`), 7, false},
+		{"nullable evidence expiry", v2PolicyNullableEvidenceFixture(), 7, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, deps := newV2PolicyRig(t)
+			file := filepath.Join(t.TempDir(), "policy.json")
+			if err := os.WriteFile(file, tc.body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, _ := policyRun(t, deps, nil, "policy", "apply", "--file", file)
+			requirePolicyCode(t, out, 0, "")
+			current := state.Routing.Current()
+			if current.RoutingGeneration != 2 || current.Pools[0].Value != tc.value {
+				t.Fatalf("omission semantics changed: %+v", current)
+			}
+			if tc.hasEvidence {
+				if len(current.CapabilityRoutingEvidence) != 1 || current.CapabilityRoutingEvidence[0].ExpiresAt != nil {
+					t.Fatal("nullable evidence expiry lost")
+				}
+			} else if !bytes.Contains(out.Data, []byte(`"capability_pool":null`)) {
+				t.Fatal("nullable capability pool lost")
+			}
+		})
+	}
+}
