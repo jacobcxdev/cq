@@ -179,6 +179,21 @@ func TestDiagnosticHostileCausesAndDeprecation(t *testing.T) {
 	}
 }
 
+func TestAccountDiagnosticAttentionRoles(t *testing.T) {
+	for _, code := range []string{"account_timeout", "gemini_account_timeout", "account_login_postcheck_partial", "auth_interrupted"} {
+		t.Run(code, func(t *testing.T) {
+			outcome := Outcome{ExitCode: 7, Errors: []Diagnostic{{Code: code, Message: "Inspect state before retrying."}}}
+			got := terminalDiagnostics("auth refresh", outcome, TerminalOptions{Width: 100, Colour: true})
+			if !strings.HasPrefix(got, "\x1b[33mWarning\x1b[0m · Inspect state before retrying.\n") {
+				t.Fatalf("indeterminate diagnostic must be amber: %q", got)
+			}
+			if strings.Contains(got, "\x1b[31m") {
+				t.Fatalf("indeterminate diagnostic marked failed: %q", got)
+			}
+		})
+	}
+}
+
 func TestHelpTypedDefaultRoles(t *testing.T) {
 	for _, tc := range []struct{ path, value, code string }{{"check", "30s", "35"}, {"codex proxy trace", "200", "1;34"}} {
 		got, _ := terminalHelp(tc.path, 100, true)
