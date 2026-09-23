@@ -74,17 +74,28 @@ func bodyWidth(options TerminalOptions) int {
 
 func TerminalLine(options TerminalOptions, indent int, spans ...Span) string {
 	indent = max(indent, 0)
-	if width := bodyWidth(options); width > 0 {
-		indent = min(indent, width-1)
-	}
 	var content strings.Builder
 	for _, span := range spans {
 		content.WriteString(paintSpan(options, span))
 	}
 	value := content.String()
 	width := bodyWidth(options)
-	if width > indent {
-		value = ansi.Wrap(value, width-indent, "")
+	if width > 0 {
+		if indent >= width {
+			indent = 0
+		}
+		for {
+			wrapped := ansi.Wrap(content.String(), width-indent, "")
+			overflow := 0
+			for _, line := range strings.Split(wrapped, "\n") {
+				overflow = max(overflow, ansi.StringWidth(line)-(width-indent))
+			}
+			value = wrapped
+			if overflow == 0 || indent == 0 {
+				break
+			}
+			indent = max(0, indent-overflow)
+		}
 	}
 	prefix := strings.Repeat(" ", indent)
 	return prefix + strings.ReplaceAll(value, "\n", "\n"+prefix) + "\n"

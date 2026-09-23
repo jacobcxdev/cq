@@ -47,8 +47,23 @@ func TestTerminalLineWrapsGraphemeCells(t *testing.T) {
 func TestTerminalLineClampsIndentToBody(t *testing.T) {
 	for _, width := range []int{20, 120} {
 		got := TerminalLine(TerminalOptions{Width: width}, 100, Span{Text: "x"})
-		if got != strings.Repeat(" ", min(width, 100)-1)+"x\n" {
+		if got != "x\n" {
 			t.Fatalf("width %d: oversized indent: %q", width, got)
+		}
+	}
+}
+
+func TestTerminalLineFitsWideGraphemeAfterIndent(t *testing.T) {
+	for _, tc := range []struct {
+		indent int
+		want   string
+	}{
+		{100, "界\n"},
+		{19, strings.Repeat(" ", 18) + "界\n"},
+	} {
+		got := TerminalLine(TerminalOptions{Width: 20}, tc.indent, Span{Text: "界"})
+		if got != tc.want || ansi.StringWidth(strings.TrimSuffix(got, "\n")) > 20 {
+			t.Fatalf("indent %d: got %q, want %q", tc.indent, got, tc.want)
 		}
 	}
 }
