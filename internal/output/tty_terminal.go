@@ -3,6 +3,7 @@ package output
 import (
 	"fmt"
 	"math"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -34,13 +35,11 @@ func QuotaReportTerminalV2(report app.Report, options cli.TerminalOptions) strin
 		if pr.Aggregate != nil {
 			blocks = append(blocks, terminalQuotaAggregate(pr.Aggregate, providerDisplayName(pr.ID), options))
 		}
-		if pr.ProxyEligibility != nil && pr.ProxyEligibility.ExcludedCount > 0 && pr.ProxyEligibility.Aggregate != nil {
-			blocks = append(blocks, terminalQuotaAggregate(pr.ProxyEligibility.Aggregate, "Proxy", options))
+		if pr.ProxyEligibility != nil && pr.ProxyEligibility.ExcludedCount > 0 {
+			blocks = append(blocks, terminalQuotaBlock(pr.ProxyEligibility.Aggregate, "Proxy", options))
 		}
 		for _, pool := range pr.ProxyPools {
-			if pool.Aggregate != nil {
-				blocks = append(blocks, terminalQuotaAggregate(pool.Aggregate, pool.Name, options))
-			}
+			blocks = append(blocks, terminalQuotaBlock(pool.Aggregate, pool.Name, options))
 		}
 	}
 	if len(blocks) == 0 {
@@ -70,7 +69,9 @@ func terminalQuotaResult(id provider.ID, r quota.Result, observedAt time.Time, o
 	title = append(title, cli.Span{Text: name, Role: cli.Heading})
 	if !r.IsUsable() {
 		state, role := "Unavailable", cli.Attention
-		if r.Error != nil {
+		if r.Error != nil && r.Error.HTTPStatus == http.StatusUnauthorized {
+			state, role = "Authentication required", cli.Failed
+		} else if r.Error != nil {
 			switch r.Error.Code {
 			case "not_configured":
 				state, role = "not configured", cli.Secondary
@@ -90,7 +91,9 @@ func terminalQuotaResult(id provider.ID, r quota.Result, observedAt time.Time, o
 		} else if r.Email != "" {
 			out += cli.TerminalLine(options, 2, cli.Span{Text: r.Email, Role: cli.Identity})
 		}
-		if r.Error != nil && r.Error.Message != "" {
+		if r.Error != nil && r.Error.HTTPStatus == http.StatusUnauthorized {
+			out += cli.TerminalLine(options, 2, cli.Span{Text: "Authentication is required."})
+		} else if r.Error != nil && r.Error.Message != "" {
 			out += cli.TerminalLine(options, 2, cli.Span{Text: r.Error.Message})
 		}
 		return out
@@ -138,6 +141,13 @@ func terminalQuotaResult(id provider.ID, r quota.Result, observedAt time.Time, o
 		out += cli.TerminalLine(options, 2, cli.Span{Text: "Cached observation: "}, terminalQuotaDetailedTime(observed, options, false))
 	}
 	return out
+}
+
+func terminalQuotaBlock(agg *app.AggregateReport, name string, options cli.TerminalOptions) string {
+	if agg != nil {
+		return terminalQuotaAggregate(agg, name, options)
+	}
+	return cli.TerminalLine(options, 0, cli.Span{Text: name, Role: cli.Heading})
 }
 
 func terminalQuotaWindow(name quota.WindowName, w quota.Window, options cli.TerminalOptions, detailGap bool) string {

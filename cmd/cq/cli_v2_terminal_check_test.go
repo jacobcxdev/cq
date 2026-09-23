@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,5 +178,34 @@ func TestTerminalCheckAggregateGaugeAndReserveWindows(t *testing.T) {
 	}
 	if strings.Contains(plain, "sustainability") || strings.Contains(got, "\x1b[31m0%") {
 		t.Fatal("aggregate leaked raw arithmetic or coloured zero as a failure")
+	}
+}
+
+func TestTerminalCheckProxyHeadersWithoutAggregates(t *testing.T) {
+	for _, eligible := range []int{0, 1} {
+		report := app.Report{Providers: []app.ProviderReport{{
+			ID:               provider.Codex,
+			Results:          []quota.Result{{AccountID: "one", Status: quota.StatusOK}},
+			ProxyEligibility: &app.ProxyEligibilityReport{DiscoveredCount: 2, EligibleCount: eligible, ExcludedCount: 2 - eligible},
+			ProxyPools:       []app.ProxyPoolReport{{Name: "团队", ProxyEligibilityReport: app.ProxyEligibilityReport{DiscoveredCount: 2, EligibleCount: eligible, ExcludedCount: 2 - eligible}}},
+		}}}
+		for _, width := range []int{20, 40, 80, 120} {
+			got := ansi.Strip(output.QuotaReportTerminalV2(report, terminalFixtureOptions(width)))
+			if !strings.Contains(got, "\nProxy\n") || !strings.Contains(got, "\n团队\n") {
+				t.Fatalf("eligible=%d width=%d: missing proxy heading: %q", eligible, width, got)
+			}
+		}
+	}
+}
+
+func TestTerminalCheckUnauthorizedOverridesNotConfigured(t *testing.T) {
+	report := app.Report{Providers: []app.ProviderReport{{ID: provider.Codex, Results: []quota.Result{quota.ErrorResult("not_configured", "Provider is not configured.", http.StatusUnauthorized)}}}}
+	outcome := v2CheckStatus(context.Background(), context.Background(), report, false)
+	if outcome.ExitCode != 5 || outcome.Errors[0].Code != "check_authentication" {
+		t.Fatalf("status = %+v", outcome)
+	}
+	got := ansi.Strip(output.QuotaReportTerminalV2(report, terminalFixtureOptions(100)))
+	if !strings.Contains(got, "Codex · Authentication required") || !strings.Contains(got, "Authentication is required.") || strings.Contains(got, "not configured") {
+		t.Fatal(got)
 	}
 }
