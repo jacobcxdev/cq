@@ -10,6 +10,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"os"
 	"strings"
 	"testing"
@@ -398,5 +399,95 @@ func TestTerminalAuthUnavailableInventoryIsNotZero(t *testing.T) {
 	got := ansi.Strip(out.Terminal(terminalFixtureOptions(100)))
 	if !strings.Contains(got, "Provider: Codex\n") || !strings.Contains(got, "Refreshed: unknown") {
 		t.Fatalf("failed inventory not unknown: %s", got)
+	}
+}
+
+func TestTerminalAuthUnknownWriteReceipt(t *testing.T) {
+	for _, previousSave := range []bool{false, true} {
+		t.Run(fmt.Sprintf("previous-save-%t", previousSave), func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			accounts := []codexprov.LogicalAccount{{Key: "unknown-account", Identity: codexprov.AccountIdentity{Email: "unknown@example.test"}, Candidates: []codexprov.CredentialCandidate{authCandidate("unknown", now)}}}
+			if previousSave {
+				accounts = append([]codexprov.LogicalAccount{{Key: "saved-account", Identity: codexprov.AccountIdentity{Email: "saved@example.test"}, Candidates: []codexprov.CredentialCandidate{authCandidate("saved", now)}}}, accounts...)
+			}
+			// This account was observed, but never needed a write. Another account's
+			// unknown mutation must not erase this known unchanged observation.
+			accounts = append(accounts, codexprov.LogicalAccount{Key: "unchanged-account", Identity: codexprov.AccountIdentity{Email: "unchanged@example.test"}, Candidates: []codexprov.CredentialCandidate{authCandidate("unchanged", now.Add(time.Hour))}})
+			for _, mode := range []string{"terminal", "plain", "json"} {
+				t.Run(mode, func(t *testing.T) {
+					calls := 0
+					authority := &authTestAuthority{inventory: codexprov.Inventory{Accounts: accounts}, refresh: func(_ context.Context, ref codexprov.CandidateRef, _ codexprov.Revision) (codexprov.RefreshResult, error) {
+						calls++
+						if ref.CandidateID == "saved" {
+							return codexprov.RefreshResult{CredentialsChanged: true}, nil
+						}
+						return codexprov.RefreshResult{}, &codexprov.MutationOutcomeUnknown{Err: context.DeadlineExceeded}
+					}}
+					deps := authTestDependencies(t)
+					deps.Codex = func(context.Context) (codexRefreshAuthority, func() error, error) { return authority, nil, nil }
+					var stdout, stderr bytes.Buffer
+					session := &cli.Session{Out: &stdout, Err: &stderr}
+					args := []string{"auth", "refresh", "codex"}
+					if mode == "terminal" {
+						session.OutTerminal = terminalFixtureOptions(100)
+						session.ErrTerminal = terminalFixtureOptions(100)
+					}
+					if mode == "json" {
+						args = append(args, "--json")
+					}
+					exit := cli.Run(context.Background(), args, session, func(string) (cli.Handler, bool) {
+						return func(ctx context.Context, inv cli.Invocation, s *cli.Session) cli.Outcome {
+							return handleV2AuthWithDependencies(ctx, inv, s, deps)
+						}, true
+					})
+					wantExit, wantCalls, saved := 5, 1, 0
+					if previousSave {
+						wantExit, wantCalls, saved = 8, 2, 1
+					}
+					if exit != wantExit || calls != wantCalls {
+						t.Fatalf("exit %d calls %d", exit, calls)
+					}
+					switch mode {
+					case "terminal":
+						got := stdout.String()
+						if !strings.Contains(got, "Credentials: \x1b[33mUnknown\x1b[0m") {
+							t.Fatalf("unknown mutation lacks amber receipt: %s", got)
+						}
+						if strings.Count(ansi.Strip(got), "Credentials: Unchanged") != 1 {
+							t.Fatalf("known unchanged observation lost: %s", got)
+						}
+						if previousSave && !strings.Contains(got, "Credentials: \x1b[32mSaved\x1b[0m") {
+							t.Fatalf("confirmed save lost: %s", got)
+						}
+						if !strings.Contains(stderr.String(), "auth_refresh_outcome_unknown") {
+							t.Fatal(stderr.String())
+						}
+					case "plain":
+						want := fmt.Sprintf("codex: %d refreshed, 1 unchanged, 0 need login, 1 failed\n", saved)
+						if stdout.String() != want {
+							t.Fatalf("plain changed: %q", stdout.String())
+						}
+					case "json":
+						var envelope struct {
+							Data struct {
+								Providers    []AuthRefreshProviderResult `json:"providers"`
+								ChangedCount int                         `json:"changed_count"`
+							}
+						}
+						if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+							t.Fatal(err)
+						}
+						if envelope.Data.ChangedCount != saved || len(envelope.Data.Providers) != 1 {
+							t.Fatal(stdout.String())
+						}
+						for _, a := range envelope.Data.Providers[0].Accounts {
+							if a.AccountLabel == "unknown@example.test" && (a.CredentialsChanged || a.Status != "failed") {
+								t.Fatalf("machine resource changed: %#v", a)
+							}
+						}
+					}
+				})
+			}
+		})
 	}
 }

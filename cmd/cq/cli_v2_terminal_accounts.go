@@ -235,6 +235,11 @@ func terminalAuthRefresh(works []authRefreshWork, total, exit int, o cli.Termina
 				text += cli.TerminalFields(o, 4, []cli.Field{{Label: "Reference", Value: []cli.Span{terminalAccountValue(a.AccountKey)}}})
 			}
 			saved := cli.Span{Text: "Unchanged"}
+			// Uncertainty is retained at provider scope. A failed account without
+			// a write receipt cannot prove unchanged credentials in that scope.
+			if w.unknown && a.Status == "failed" {
+				saved = cli.Span{Text: "Unknown", Role: cli.Attention}
+			}
 			if a.CredentialsChanged {
 				saved = cli.Span{Text: "Saved", Role: cli.Confirmed}
 			}
