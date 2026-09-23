@@ -1,0 +1,3 @@
+Error · Service operation was only partially completed; inspect component results.
+  Code: service_partial
+  Command: cq service install

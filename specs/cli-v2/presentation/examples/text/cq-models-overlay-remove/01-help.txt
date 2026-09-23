@@ -1,0 +1,31 @@
+cq models overlay remove
+Remove one local model overlay and publish caches.
+
+Usage
+  cq models overlay remove --provider PROVIDER --id ID [options]
+
+Requires an existing overlay. Native entries remain available. Removal commits before
+publication; a later publication failure does not restore the overlay.
+No overall deadline: proxy refresh 5s; local source refresh 30s; HTTP requests 30s;
+legacy health probe 2s. File publication has no separate deadline.
+
+Options
+  --provider PROVIDER  Required: claude or codex. Legacy anthropic means claude
+                       with a deprecation warning.
+  --id ID              Required exact, case-sensitive model ID. Non-empty UTF-8;
+                       no outer whitespace or control characters.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq models list
+  cq models overlay add
+  cq models overlay prune
+
+Examples
+  Remove the known fictional overlay
+    cq models overlay remove --provider codex --id example-code-2

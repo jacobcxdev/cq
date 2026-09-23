@@ -1,0 +1,14 @@
+Models · 1 · Codex
+
+  example-code-1 · Example Code 1
+    Provider          Codex
+    Source            Native
+    Aliases           example-code
+    Description       Fictional coding model for presentation fixtures
+    Context           200,000 tokens
+    Maximum context   200,000 tokens
+    Maximum output    16,000 tokens
+    Visibility        list
+    Priority          1
+    Explicit clone    none
+    Metadata source   none

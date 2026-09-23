@@ -1,0 +1,5 @@
+Codex leases invalidated
+  Invalidated leases  0
+  Journal generation  43
+
+Active authority and required account continuity remain intact.

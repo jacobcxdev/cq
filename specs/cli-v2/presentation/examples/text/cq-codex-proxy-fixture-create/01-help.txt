@@ -1,0 +1,43 @@
+cq codex proxy fixture create
+Create a sanitised fixture from a saved Codex request.
+
+Usage
+  cq codex proxy fixture create --input INPUT --output OUTPUT [OPTIONS]
+
+No raw request content or credentials appear in the output fixture.
+No positional arguments.
+
+Options
+  --input INPUT
+      Required readable regular file; not stdin. Maximum encoded size: 2,097,152 B.
+  --output OUTPUT
+      Required new destination; must not exist or alias input. Creates missing parents as 0700.
+  --content-encoding ENCODING
+      auto, identity or zstd. Default: auto; detects Zstandard magic, otherwise identity.
+      Decoded size at most 8,388,608 B; zstd expansion at most 128 times encoded size.
+  --metadata-json JSON
+      Literal FixtureMetadata object, not a filename. Default: metadata from request body.
+      Reject duplicate keys and trailing JSON; metadata at most 65,536 UTF-8 bytes.
+      request_kind: turn, prewarm, compaction or memory. turn requires session_id,
+      thread_id and turn_id. prewarm requires session_id/thread_id and empty turn_id.
+      compaction requires all three IDs and standalone_turn, pre_turn or mid_turn compaction.
+      memory permits empty IDs. Non-compaction omits compaction; IDs at most 4,096 bytes.
+      Optional window_id defaults empty. session_id/thread_id/turn_id default empty when
+      their request kind permits it. Only documented FixtureMetadata fields are accepted.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy validate websocket
+
+Examples
+  Sanitise a saved request into a new file:
+  cq codex proxy fixture create --input /Users/alex/cq-inputs/request.json \
+    --output /Users/alex/cq-inputs/fixture.json

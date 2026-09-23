@@ -1,0 +1,23 @@
+cq claude proxy
+Control Claude-specific routing through the shared proxy.
+
+Usage
+  cq claude proxy <COMMAND> [OPTIONS]
+
+Commands
+  pin   Inspect, set or clear the Claude proxy account override.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq proxy     Shared proxy runtime, health, state and diagnostics.
+  cq service   Manage background services.
+
+Examples
+  Inspect the Claude routing override
+  cq claude proxy pin show

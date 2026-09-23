@@ -1,0 +1,30 @@
+cq codex
+Manage Codex accounts, quota resets and provider-specific proxy controls.
+
+Usage
+  cq codex <COMMAND> [OPTIONS]
+
+Commands
+  account   Authenticate, inspect, activate and remove Codex accounts.
+  proxy     Control routing, quota protection and transport evidence.
+  reset     Inspect, schedule and use banked quota-reset credits.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help   All commands.
+
+Examples
+  List locally configured accounts
+  cq codex account list
+
+  Inspect quota protection
+  cq codex proxy reserve status
+
+  List reset credits without consuming one
+  cq codex reset list

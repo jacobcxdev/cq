@@ -1,0 +1,3 @@
+Error · Port 19280 is already in use.
+  Code: proxy_port_in_use
+  Command: cq proxy serve

@@ -1,0 +1,31 @@
+cq proxy candidate release
+Reserve release activation and qualification; currently unavailable.
+
+Usage
+  cq proxy candidate release <COMMAND> [OPTIONS]
+
+Both commands below are reserved. Operational invocations are unavailable;
+help succeeds without activating or qualifying a release.
+
+Commands
+  activate   Activate a prepared runtime release inside a candidate.
+             Currently unavailable.
+  validate   Verify release evidence and write a validation receipt.
+             Currently unavailable.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help proxy candidate   Candidate commands.
+
+Examples
+  Inspect the reserved activation contract
+  cq proxy candidate release activate --help
+
+  Inspect the reserved validation contract
+  cq proxy candidate release validate --help

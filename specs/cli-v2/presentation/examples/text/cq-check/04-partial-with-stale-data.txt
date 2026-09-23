@@ -1,0 +1,5 @@
+Warning · Some quota results could not be refreshed.
+  Code: check_partial
+  Command: cq check
+  Cause: quota_stale_fallback
+    Cached quota used after a failed fetch for codex.

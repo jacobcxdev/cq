@@ -1,0 +1,3 @@
+Proxy state · existing
+  Directory         /Users/alex/cq-runtime
+  Restart required  no

@@ -1,0 +1,29 @@
+cq codex proxy prime status
+Show configured Codex quota-window priming.
+
+Usage
+  cq codex proxy prime status [options]
+
+Priming sends small real Codex requests to start eligible dormant quota windows; it is not a
+cache refresh. Read configured state only; live-process acknowledgement is not checked.
+
+Options
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq service restart --component proxy
+  cq proxy status
+
+Examples
+  Inspect priming configuration.
+  cq codex proxy prime status

@@ -1,0 +1,13 @@
+Fixture · created
+  File               /Users/alex/cq-inputs/fixture.json
+  Request kind       turn
+  Input size         2,048 B
+  Converted          0s ago · 23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Metadata source    nested
+  Session hint       session:111122223333
+  Thread hint        thread:444455556666
+  Turn hint          turn:777788889999
+  Previous response  no
+  Encrypted state    no
+  Body SHA-256       0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  Schema             1

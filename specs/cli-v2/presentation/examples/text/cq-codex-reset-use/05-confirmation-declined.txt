@@ -1,0 +1,8 @@
+Codex reset preview
+  Account    alex@example.test
+  Reference  account-alex
+  Credit     credit-september-01
+  5h         75% remaining · in 2h · 23 Sep 2026, 18:30 BST (UTC+01:00)
+  7d         5% remaining · in 2d 18h · 26 Sep 2026, 10:30 BST (UTC+01:00)
+
+Use reset credit credit-september-01 for alex@example.test? [y/N]

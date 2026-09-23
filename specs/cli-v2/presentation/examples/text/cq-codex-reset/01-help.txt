@@ -1,0 +1,29 @@
+cq codex reset
+Inspect, schedule and use banked Codex quota-reset credits.
+
+Usage
+  cq codex reset <COMMAND> [OPTIONS]
+
+A reset credit restores shared usage percentages. Consuming one spends it.
+
+Commands
+  list        List Codex banked reset credits.
+  recommend   Recommend when to use Codex reset credits.
+  use         Consume one Codex banked reset credit.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex   Codex commands.
+
+Examples
+  List credits without consuming one
+  cq codex reset list
+
+  Inspect consumption and confirmation requirements
+  cq codex reset use --help

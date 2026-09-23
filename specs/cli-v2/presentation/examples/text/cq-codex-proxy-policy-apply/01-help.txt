@@ -1,0 +1,43 @@
+cq codex proxy policy apply
+Apply a complete Codex routing policy.
+
+Usage
+  cq codex proxy policy apply --file FILE [options]
+
+Policy schema is version 1, separate from CLI envelope version 2. Members are opaque AccountKeys.
+Validate and publish one complete document atomically. Live updates need no restart.
+Offline writes affect selected state only; ensure no live owner uses it concurrently.
+Authority and routing generations must each advance by one; effective generation cannot decrease.
+A stale replay conflicts. Preserve valid exported evidence; never fabricate authenticated evidence.
+
+Options
+  --file FILE
+      Required. Readable regular UTF-8 JSON file. Relative paths use the working directory.
+      Complete replacement, not a patch: strict schema_version 1, no unknown fields/trailing data.
+      Validate the document and generations before mutation.
+  --state-dir STATE_DIR
+      Use this existing offline state root instead of authenticated live control.
+      Clean absolute non-root directory; mutually exclusive with --port.
+      Does not create state. Initialise with cq proxy state initialise first.
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex proxy pool --help
+  cq codex proxy session --help
+
+Examples
+  Apply a prepared complete document.
+  cq codex proxy policy apply --file /Users/alex/cq-policy.json

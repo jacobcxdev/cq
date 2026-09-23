@@ -1,0 +1,3 @@
+Error · Proxy state initialisation partially completed; inspect state before retrying.
+  Code: proxy_state_initialise_partial
+  Command: cq proxy state initialise

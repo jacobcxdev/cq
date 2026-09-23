@@ -1,0 +1,3 @@
+Error · Proxy rescue control is unavailable.
+  Code: rescue_unavailable
+  Command: cq proxy rescue status

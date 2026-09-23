@@ -1,0 +1,35 @@
+cq check
+Report quota usage for selected providers.
+
+Usage
+  cq check [PROVIDER…] [options]
+
+Bare cq checks all providers too. Exhausted quota is a valid observation.
+A failed fetch may return labelled stale data, even with --fresh.
+This command does not select a proxy routing account.
+
+Arguments
+  PROVIDER  claude, codex or gemini. Omit for all three, in that order.
+            Exact lowercase names; no duplicates.
+
+Options
+  --fresh             Skip the initial quota cache lookup. Default: false.
+                      Does not separately refresh authentication credentials.
+  --timeout DURATION  Total work deadline. Default: 30s.
+                      Positive Go duration, at most 10m; bare numbers invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq auth refresh
+  cq codex reset recommend
+
+Examples
+  Check Codex
+    cq check codex
+  Fetch selected providers and emit JSON
+    cq check claude codex --fresh --json

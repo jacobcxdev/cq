@@ -1,0 +1,27 @@
+cq help
+Show help for a command path.
+
+Usage
+  cq help [COMMAND…] [options]
+
+Resolves an exact complete group or command path without reading state.
+Omit COMMAND for root help. Recognised legacy paths show canonical help.
+Help remains human text even with --json.
+
+Arguments
+  COMMAND  Zero or more command words, in order. Unknown children are errors.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq completion
+
+Examples
+  Explore shared proxy commands
+    cq help proxy
+  Inspect Codex reserve controls
+    cq help codex proxy reserve

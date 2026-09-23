@@ -1,0 +1,9 @@
+Proxy · listening
+  Address    127.0.0.1:19280
+  PID        4217
+  Providers  Claude, Codex
+
+Ctrl-C stops this foreground process.
+
+Proxy · stopped
+  Reason     interrupted

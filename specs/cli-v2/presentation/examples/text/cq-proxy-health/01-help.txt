@@ -1,0 +1,34 @@
+cq proxy health
+Probe proxy HTTP liveness.
+
+Usage
+  cq proxy health [OPTIONS]
+
+Probe the health endpoint only; success does not verify model traffic or routing acceptance.
+
+Options
+  --port PORT
+      Loopback integer 1–65535. Default: configured port, or 19280 if absent.
+      Reading the default does not create configuration.
+  --timeout DURATION
+      Maximum elapsed time including locks, requests and local verification. Default: 5s.
+      Positive Go duration, at most 10m; no bare number. Expiry does not imply rollback.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy status
+  cq service status
+
+Examples
+  Check the configured listener:
+  cq proxy health
+  Probe a specific loopback listener:
+  cq proxy health --port 29280

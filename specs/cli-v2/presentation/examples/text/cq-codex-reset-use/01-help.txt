@@ -1,0 +1,38 @@
+cq codex reset use
+Consume one Codex reset credit for one account.
+
+Usage
+  cq codex reset use ACCOUNT [options]
+
+Shows account, selected credit and current windows before confirmation.
+A timeout or unknown result never authorises another credit. Retry only the same
+account and credit when the returned retry receipt instructs you to do so.
+
+Arguments
+  ACCOUNT  Exact opaque key, unique email or existing CQ alias. Exact keys win.
+           Email and alias matching ignores case and outer whitespace.
+           Empty, ambiguous and unstable references are rejected.
+
+Options
+  --credit CREDIT_ID  Exact, non-empty ID with no outer whitespace; must belong to ACCOUNT.
+                      Must be an eligible codex_rate_limits credit or unresolved replay.
+                      Omit to resume the single unresolved attempt, otherwise choose
+                      earliest expiry. No-expiry credits sort last; ties use ID bytes.
+  --yes               Confirm this consumption without a prompt. Default: false.
+                      Required with --json or non-terminal stdin; applies only once.
+  --timeout DURATION  Work deadline excluding confirmation. Default: 120s.
+                      Go duration from 1s to 10m; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq codex reset list
+  cq codex reset recommend
+
+Examples
+  Review one known credit before deciding
+    cq codex reset use alex@example.test --credit credit-september-01

@@ -1,0 +1,6 @@
+HTTP validation · requested
+  Candidate port  29280
+  Completion      not yet known
+
+Request accepted; validation has not completed.
+Inspect retained readiness evidence before retrying.

@@ -1,0 +1,3 @@
+Error · Proxy state ownership conflicts with the requested directory.
+  Code: proxy_state_conflict
+  Command: cq proxy state initialise

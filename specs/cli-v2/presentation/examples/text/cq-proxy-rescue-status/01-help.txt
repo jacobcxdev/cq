@@ -1,0 +1,33 @@
+cq proxy rescue status
+Show shared proxy rescue and drain state.
+
+Usage
+  cq proxy rescue status [OPTIONS]
+
+Read-only inspection; does not request a transition. Session labels are privacy-safe hints.
+
+Options
+  --port PORT
+      Loopback control port, integer 1–65535. Default: configured rescue bootstrap port,
+      or 19280 when its value is zero. Omission reads existing config without creating it.
+  --timeout DURATION
+      Total monotonic budget for preparation, requests and cleanup. Default: 30s.
+      Go duration 1s–5m inclusive. Interactive confirmation time excluded.
+      Nested requests cannot extend this deadline.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy rescue enter
+  cq proxy rescue exit
+
+Examples
+  Observe traffic mode and drain progress:
+  cq proxy rescue status

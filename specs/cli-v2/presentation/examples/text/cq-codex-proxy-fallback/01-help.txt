@@ -1,0 +1,29 @@
+cq codex proxy fallback
+Inspect, set or clear the terminal fallback account for Codex routing.
+
+Usage
+  cq codex proxy fallback <COMMAND> [OPTIONS]
+
+The fallback account is a terminal routing option, not a first-choice pin.
+
+Commands
+  clear   Clear the Codex proxy fallback.
+  set     Set the Codex proxy fallback.
+  show    Show the Codex proxy fallback.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect the configured fallback
+  cq codex proxy fallback show
+
+  Inspect fallback-selection syntax
+  cq codex proxy fallback set --help

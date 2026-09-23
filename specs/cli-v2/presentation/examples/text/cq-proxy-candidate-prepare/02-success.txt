@@ -1,0 +1,29 @@
+Candidate · prepared
+  Instance        11112222333344445555666677778888
+  State           /Users/alex/cq-candidate-29280
+  Port            29280
+  Operation       88887777666655554444333322221111
+  Validation run  1234567812345678123456781234567812345678123456781234567812345678
+  Generation      1
+  Updated         0s ago · 23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Pending action  —
+  Effect started  no
+
+Identity and authority
+  Client build     0.114.0
+  Credential mode  none
+  Payload capture  no
+  Attempt          —
+
+Digests
+  Source config          1111111111111111111111111111111111111111111111111111111111111111
+  Target bundle file     2222222222222222222222222222222222222222222222222222222222222222
+  Target release         abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
+  Active release         —
+  Client executable      3333333333333333333333333333333333333333333333333333333333333333
+  Client registry file   4444444444444444444444444444444444444444444444444444444444444444
+  Credential manifest    —
+  Policy snapshot        —
+  Effect receipt         —
+  Client safety receipt  —
+  Validation receipt     —

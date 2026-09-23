@@ -1,0 +1,3 @@
+Error · WebSocket validation timed out; readiness was not recorded.
+  Code: validation_timeout
+  Command: cq codex proxy validate websocket

@@ -1,0 +1,36 @@
+cq codex account remove
+Remove CQ-managed local Codex credentials.
+
+Usage
+  cq codex account remove ACCOUNT [options]
+
+Shows the resolved account and native credential impact before confirmation.
+Removes local managed credentials only; external sources and upstream accounts remain.
+Externally managed credentials cannot be removed by CQ.
+
+Arguments
+  ACCOUNT  Exact opaque key, unique email or existing CQ alias. Exact keys win.
+           Email and alias matching ignores case and surrounding whitespace.
+           Empty, ambiguous and unstable references are rejected.
+
+Options
+  --yes               Confirm this removal without a prompt. Default: false.
+                      Required with --json or non-terminal stdin; applies only once.
+  --timeout DURATION  Work deadline, excluding confirmation. Default: 30s.
+                      Go duration from 1s to 10m; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq codex account list
+  cq codex account login
+
+Examples
+  Review and confirm removal
+    cq codex account remove alex@example.test
+  Explicitly confirm non-interactive removal
+    cq codex account remove alex@example.test --yes --json

@@ -1,0 +1,3 @@
+Codex session binding
+  Digest  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  Pool    work

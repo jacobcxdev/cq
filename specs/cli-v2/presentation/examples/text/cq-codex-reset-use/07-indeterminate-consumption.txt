@@ -1,0 +1,7 @@
+Codex reset · Completion unknown
+  Account        account-alex
+  Credit         credit-september-01
+  Windows reset  unknown
+
+Retry only this request
+  cq codex reset use account-alex --credit credit-september-01

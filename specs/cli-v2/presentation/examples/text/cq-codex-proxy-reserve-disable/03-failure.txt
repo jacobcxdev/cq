@@ -1,0 +1,3 @@
+Error · Fresh usage and reset evidence are required to disable the reserve.
+  Code: reserve_evidence_required
+  Command: cq codex proxy reserve disable

@@ -1,0 +1,33 @@
+cq proxy operation status
+Show a retained shared proxy operation record.
+
+Usage
+  cq proxy operation status [OPERATION_ID] [OPTIONS]
+
+Inspect the selected coordinator record without requesting recovery or another transition.
+
+Arguments
+  OPERATION_ID
+      Optional exact operation ID: 32 lowercase hexadecimal characters.
+      Default: currently selected coordinator record. Explicit missing IDs fail.
+
+No command-specific options.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy status
+  cq proxy rescue status
+
+Examples
+  Inspect the selected record:
+  cq proxy operation status
+  Inspect an exact returned ID:
+  cq proxy operation status 0123456789abcdef0123456789abcdef

@@ -1,0 +1,29 @@
+cq models overlay
+Add, remove or prune local model-registry additions.
+
+Usage
+  cq models overlay <COMMAND> [OPTIONS]
+
+Overlays expose local model entries before native discovery supplies them.
+
+Commands
+  add      Add or replace one local model overlay and publish caches.
+  prune    Remove overlays now supplied by native model sources.
+  remove   Remove one local model overlay and publish caches.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help models   Model registry commands.
+
+Examples
+  Inspect model entry and provider options
+  cq models overlay add --help
+
+  Inspect pruning and publication behaviour
+  cq models overlay prune --help

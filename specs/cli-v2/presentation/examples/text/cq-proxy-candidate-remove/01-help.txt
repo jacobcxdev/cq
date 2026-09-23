@@ -1,0 +1,33 @@
+cq proxy candidate remove
+Delete stopped candidate state and retained receipts.
+
+Usage
+  cq proxy candidate remove --state-dir STATE_DIR --confirm-candidate-state-loss [OPTIONS]
+
+Permanently deletes only the exact candidate directory, keys and retained receipts.
+Requires independent process/listener absence proof; never removes the shared installation.
+
+Options
+  --state-dir STATE_DIR
+      Required existing candidate directory from prepare. Absolute, clean, non-root,
+      current-user-owned; no symlink; parent owner-controlled. Never defaults to shared state.
+  --confirm-candidate-state-loss
+      Required; must be true. Authorise permanent loss of this candidate directory,
+      keys and retained receipts.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy candidate status
+
+Examples
+  Use exact retained candidate identity after the stated preconditions:
+  cq proxy candidate remove --state-dir /Users/alex/cq-candidate-29280 \
+    --confirm-candidate-state-loss

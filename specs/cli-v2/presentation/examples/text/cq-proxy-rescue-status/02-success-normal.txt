@@ -1,0 +1,6 @@
+Proxy rescue · normal
+  Generation         14
+  Active requests    0
+  Draining sessions  0
+
+No draining sessions.

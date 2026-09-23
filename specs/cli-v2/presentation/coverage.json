@@ -1,0 +1,1051 @@
+{
+  "status": "draft",
+  "root_help": "groups.md",
+  "groups": {
+    "auth": "groups.md",
+    "claude": "groups.md",
+    "claude account": "groups.md",
+    "claude proxy": "groups.md",
+    "claude proxy pin": "groups.md",
+    "codex": "groups.md",
+    "codex account": "groups.md",
+    "codex proxy": "groups.md",
+    "codex proxy canary": "groups.md",
+    "codex proxy credential-endpoint": "groups.md",
+    "codex proxy credential-endpoint legacy": "groups.md",
+    "codex proxy fallback": "groups.md",
+    "codex proxy fixture": "groups.md",
+    "codex proxy hook": "groups.md",
+    "codex proxy lease": "groups.md",
+    "codex proxy pin": "groups.md",
+    "codex proxy policy": "groups.md",
+    "codex proxy pool": "groups.md",
+    "codex proxy prime": "groups.md",
+    "codex proxy readiness": "groups.md",
+    "codex proxy reserve": "groups.md",
+    "codex proxy session": "groups.md",
+    "codex proxy validate": "groups.md",
+    "codex reset": "groups.md",
+    "gemini": "groups.md",
+    "gemini account": "groups.md",
+    "models": "groups.md",
+    "models overlay": "groups.md",
+    "proxy": "groups.md",
+    "proxy candidate": "groups.md",
+    "proxy candidate client-safety": "groups.md",
+    "proxy candidate receipt": "groups.md",
+    "proxy candidate release": "groups.md",
+    "proxy operation": "groups.md",
+    "proxy rescue": "groups.md",
+    "proxy state": "groups.md",
+    "service": "groups.md"
+  },
+  "commands": {
+    "auth refresh": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "cli_invalid_usage",
+        "auth_refresh_failed",
+        "auth_refresh_partial",
+        "auth_authority_unavailable",
+        "auth_inventory_degraded",
+        "auth_store_failed",
+        "auth_interrupted"
+      ]
+    },
+    "check": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "check_partial",
+        "check_unavailable",
+        "check_authentication",
+        "check_failed",
+        "check_timeout"
+      ]
+    },
+    "claude account activate": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout",
+        "account_io_failed",
+        "account_reference_empty",
+        "account_not_found",
+        "account_ambiguous",
+        "account_unstable",
+        "account_not_activatable",
+        "account_activation_partial"
+      ]
+    },
+    "claude account list": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout"
+      ]
+    },
+    "claude account login": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout",
+        "account_io_failed",
+        "account_auth_failed",
+        "account_login_partial",
+        "account_login_postcheck_partial"
+      ]
+    },
+    "claude account remove": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout",
+        "account_io_failed",
+        "account_reference_empty",
+        "account_not_found",
+        "account_ambiguous",
+        "account_unstable",
+        "account_confirmation_required",
+        "account_read_only",
+        "account_removal_partial"
+      ]
+    },
+    "claude proxy pin clear": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "claude proxy pin set": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_account_not_found",
+        "routing_account_ambiguous",
+        "routing_inventory_unavailable"
+      ]
+    },
+    "claude proxy pin show": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex account activate": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout",
+        "account_io_failed",
+        "account_reference_empty",
+        "account_not_found",
+        "account_ambiguous",
+        "account_unstable",
+        "account_not_activatable",
+        "account_activation_partial"
+      ]
+    },
+    "codex account list": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout"
+      ]
+    },
+    "codex account login": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout",
+        "account_io_failed",
+        "account_auth_failed",
+        "account_login_partial",
+        "account_login_postcheck_partial"
+      ]
+    },
+    "codex account remove": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "account_inventory_unavailable",
+        "account_timeout",
+        "account_io_failed",
+        "account_reference_empty",
+        "account_not_found",
+        "account_ambiguous",
+        "account_unstable",
+        "account_confirmation_required",
+        "account_read_only",
+        "account_removal_partial"
+      ]
+    },
+    "codex proxy canary start": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "canary_missing",
+        "canary_precondition_failed",
+        "canary_state_unavailable"
+      ]
+    },
+    "codex proxy canary status": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "canary_missing",
+        "canary_precondition_failed",
+        "canary_state_unavailable"
+      ]
+    },
+    "codex proxy canary stop": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "canary_missing",
+        "canary_precondition_failed",
+        "canary_state_unavailable"
+      ]
+    },
+    "codex proxy credential-endpoint legacy activate": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "endpoint_invalid_proof",
+        "endpoint_not_found",
+        "endpoint_unsupported",
+        "endpoint_conflict",
+        "endpoint_timeout",
+        "endpoint_io_failed"
+      ]
+    },
+    "codex proxy credential-endpoint legacy finalise": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "endpoint_invalid_proof",
+        "endpoint_not_found",
+        "endpoint_unsupported",
+        "endpoint_conflict",
+        "endpoint_timeout",
+        "endpoint_io_failed"
+      ]
+    },
+    "codex proxy credential-endpoint legacy inspect": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "endpoint_invalid_proof",
+        "endpoint_not_found",
+        "endpoint_unsupported",
+        "endpoint_conflict",
+        "endpoint_timeout",
+        "endpoint_io_failed"
+      ]
+    },
+    "codex proxy credential-endpoint legacy prepare": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "endpoint_invalid_proof",
+        "endpoint_not_found",
+        "endpoint_unsupported",
+        "endpoint_conflict",
+        "endpoint_timeout",
+        "endpoint_io_failed"
+      ]
+    },
+    "codex proxy credential-endpoint legacy resume": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "endpoint_invalid_proof",
+        "endpoint_not_found",
+        "endpoint_unsupported",
+        "endpoint_conflict",
+        "endpoint_timeout",
+        "endpoint_io_failed"
+      ]
+    },
+    "codex proxy credential-endpoint legacy rollback": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "endpoint_invalid_proof",
+        "endpoint_not_found",
+        "endpoint_unsupported",
+        "endpoint_conflict",
+        "endpoint_timeout",
+        "endpoint_io_failed"
+      ]
+    },
+    "codex proxy fallback clear": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy fallback set": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_account_not_found",
+        "routing_account_ambiguous",
+        "routing_inventory_unavailable"
+      ]
+    },
+    "codex proxy fallback show": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy fixture create": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "fixture_input_invalid",
+        "fixture_output_exists",
+        "fixture_io_failed"
+      ]
+    },
+    "codex proxy hook stop": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "hook_input_invalid",
+        "hook_unavailable",
+        "hook_auth_failed",
+        "hook_timeout"
+      ]
+    },
+    "codex proxy lease invalidate": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "lease_journal_unavailable"
+      ]
+    },
+    "codex proxy pin clear": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy pin set": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_account_not_found",
+        "routing_account_ambiguous",
+        "routing_inventory_unavailable"
+      ]
+    },
+    "codex proxy pin show": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy policy apply": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "policy_document_invalid",
+        "policy_generation_conflict"
+      ]
+    },
+    "codex proxy policy show": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "policy_document_invalid",
+        "policy_generation_conflict"
+      ]
+    },
+    "codex proxy pool rename": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "routing_account_not_found",
+        "routing_account_ambiguous",
+        "routing_inventory_unavailable",
+        "pool_not_found",
+        "pool_name_conflict"
+      ]
+    },
+    "codex proxy pool set": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "routing_account_not_found",
+        "routing_account_ambiguous",
+        "routing_inventory_unavailable",
+        "pool_not_found",
+        "pool_name_conflict"
+      ]
+    },
+    "codex proxy pool value": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "routing_account_not_found",
+        "routing_account_ambiguous",
+        "routing_inventory_unavailable",
+        "pool_not_found",
+        "pool_name_conflict"
+      ]
+    },
+    "codex proxy prime disable": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy prime enable": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy prime status": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout"
+      ]
+    },
+    "codex proxy readiness show": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "readiness_missing",
+        "readiness_stale",
+        "readiness_invalid"
+      ]
+    },
+    "codex proxy reserve clear": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "reserve_not_configured",
+        "reserve_evidence_required",
+        "reserve_window_unavailable"
+      ]
+    },
+    "codex proxy reserve disable": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "reserve_not_configured",
+        "reserve_evidence_required",
+        "reserve_window_unavailable"
+      ]
+    },
+    "codex proxy reserve enable": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "reserve_not_configured",
+        "reserve_evidence_required",
+        "reserve_window_unavailable"
+      ]
+    },
+    "codex proxy reserve set": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "reserve_not_configured",
+        "reserve_evidence_required",
+        "reserve_window_unavailable"
+      ]
+    },
+    "codex proxy reserve status": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "reserve_not_configured",
+        "reserve_evidence_required",
+        "reserve_window_unavailable"
+      ]
+    },
+    "codex proxy reserve windows": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "reserve_not_configured",
+        "reserve_evidence_required",
+        "reserve_window_unavailable"
+      ]
+    },
+    "codex proxy session bind": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "session_binding_not_found",
+        "pool_not_found"
+      ]
+    },
+    "codex proxy session digest": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "session_binding_not_found",
+        "pool_not_found"
+      ]
+    },
+    "codex proxy session list": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "session_binding_not_found",
+        "pool_not_found"
+      ]
+    },
+    "codex proxy session show": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "session_binding_not_found",
+        "pool_not_found"
+      ]
+    },
+    "codex proxy session unbind": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "session_binding_not_found",
+        "pool_not_found"
+      ]
+    },
+    "codex proxy trace": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "trace_timeout",
+        "trace_not_configured",
+        "trace_history_gap",
+        "trace_interrupted"
+      ]
+    },
+    "codex proxy validate http": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "validation_candidate_unavailable",
+        "validation_candidate_changed",
+        "validation_request_failed",
+        "validation_timeout"
+      ]
+    },
+    "codex proxy validate websocket": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "validation_client_unavailable",
+        "validation_build_mismatch",
+        "validation_failed",
+        "validation_timeout"
+      ]
+    },
+    "codex reset list": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "codex_reset_credentials_unavailable",
+        "codex_reset_auth_failed",
+        "codex_reset_timeout",
+        "codex_reset_upstream_failed",
+        "account_reference_empty",
+        "account_not_found",
+        "account_ambiguous",
+        "account_unstable",
+        "codex_reset_inventory_partial"
+      ]
+    },
+    "codex reset recommend": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "codex_reset_credentials_unavailable",
+        "codex_reset_auth_failed",
+        "codex_reset_timeout",
+        "codex_reset_upstream_failed",
+        "codex_reset_recommendation_incomplete"
+      ]
+    },
+    "codex reset use": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "codex_reset_credentials_unavailable",
+        "codex_reset_auth_failed",
+        "codex_reset_timeout",
+        "codex_reset_upstream_failed",
+        "account_reference_empty",
+        "account_not_found",
+        "account_ambiguous",
+        "account_unstable",
+        "codex_reset_confirmation_required",
+        "codex_reset_credit_not_found",
+        "codex_reset_credit_ineligible",
+        "codex_reset_pending_ambiguous",
+        "codex_reset_attempt_unavailable",
+        "codex_reset_consume_indeterminate",
+        "codex_reset_postcheck_partial"
+      ]
+    },
+    "completion": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": []
+    },
+    "gemini account show": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "gemini_account_unavailable",
+        "gemini_account_timeout"
+      ]
+    },
+    "help": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": []
+    },
+    "models list": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "cli_invalid_usage",
+        "models_store_failed"
+      ]
+    },
+    "models overlay add": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "cli_invalid_usage",
+        "models_store_failed",
+        "models_refresh_partial",
+        "models_refresh_failed",
+        "models_conflict",
+        "models_clone_not_found"
+      ]
+    },
+    "models overlay prune": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "cli_invalid_usage",
+        "models_store_failed",
+        "models_refresh_partial",
+        "models_refresh_failed",
+        "models_conflict"
+      ]
+    },
+    "models overlay remove": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "cli_invalid_usage",
+        "models_store_failed",
+        "models_refresh_partial",
+        "models_refresh_failed",
+        "models_conflict",
+        "models_overlay_not_found"
+      ]
+    },
+    "models refresh": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": [
+        "cli_invalid_usage",
+        "models_store_failed",
+        "models_refresh_partial",
+        "models_refresh_failed",
+        "models_conflict"
+      ]
+    },
+    "proxy candidate client-safety refresh": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_evidence_unavailable"
+      ]
+    },
+    "proxy candidate prepare": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_not_found",
+        "candidate_conflict",
+        "candidate_io_failed",
+        "candidate_timeout"
+      ]
+    },
+    "proxy candidate receipt show": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_not_found",
+        "candidate_conflict",
+        "candidate_io_failed",
+        "candidate_timeout",
+        "candidate_receipt_conflicted"
+      ]
+    },
+    "proxy candidate release activate": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_evidence_unavailable"
+      ]
+    },
+    "proxy candidate release validate": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_evidence_unavailable"
+      ]
+    },
+    "proxy candidate remove": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_not_found",
+        "candidate_conflict",
+        "candidate_io_failed",
+        "candidate_timeout"
+      ]
+    },
+    "proxy candidate start": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_evidence_unavailable"
+      ]
+    },
+    "proxy candidate status": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_not_found",
+        "candidate_conflict",
+        "candidate_io_failed",
+        "candidate_timeout"
+      ]
+    },
+    "proxy candidate stop": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "candidate_not_found",
+        "candidate_conflict",
+        "candidate_io_failed",
+        "candidate_timeout"
+      ]
+    },
+    "proxy health": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "proxy_health_failed",
+        "proxy_unreachable",
+        "proxy_health_timeout"
+      ]
+    },
+    "proxy operation status": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "operation_not_found",
+        "operation_state_unavailable"
+      ]
+    },
+    "proxy rescue enter": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "rescue_unavailable",
+        "rescue_auth_failed",
+        "rescue_transition_conflict",
+        "rescue_timeout",
+        "rescue_response_invalid"
+      ]
+    },
+    "proxy rescue exit": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "rescue_unavailable",
+        "rescue_auth_failed",
+        "rescue_transition_conflict",
+        "rescue_timeout",
+        "rescue_response_invalid"
+      ]
+    },
+    "proxy rescue status": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "rescue_unavailable",
+        "rescue_auth_failed",
+        "rescue_transition_conflict",
+        "rescue_timeout",
+        "rescue_response_invalid"
+      ]
+    },
+    "proxy serve": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "proxy_port_in_use",
+        "proxy_config_invalid"
+      ]
+    },
+    "proxy state initialise": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "proxy_state_conflict",
+        "proxy_state_initialise_timeout",
+        "proxy_state_initialise_partial"
+      ]
+    },
+    "proxy status": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "proxy_unhealthy",
+        "proxy_absent",
+        "proxy_indeterminate",
+        "proxy_status_timeout"
+      ]
+    },
+    "service install": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_owner_conflict",
+        "service_unavailable",
+        "service_not_installed",
+        "service_unhealthy",
+        "service_partial",
+        "service_install_timeout"
+      ]
+    },
+    "service restart": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_owner_conflict",
+        "service_unavailable",
+        "service_not_installed",
+        "service_unhealthy",
+        "service_partial",
+        "service_restart_timeout"
+      ]
+    },
+    "service start": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_owner_conflict",
+        "service_unavailable",
+        "service_not_installed",
+        "service_unhealthy",
+        "service_partial",
+        "service_start_timeout"
+      ]
+    },
+    "service status": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_owner_conflict",
+        "service_unavailable",
+        "service_not_installed",
+        "service_unhealthy",
+        "service_partial",
+        "service_status_timeout"
+      ]
+    },
+    "service stop": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_owner_conflict",
+        "service_unavailable",
+        "service_not_installed",
+        "service_unhealthy",
+        "service_partial",
+        "service_stop_timeout"
+      ]
+    },
+    "service uninstall": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_owner_conflict",
+        "service_unavailable",
+        "service_not_installed",
+        "service_unhealthy",
+        "service_partial",
+        "service_uninstall_timeout"
+      ]
+    },
+    "version": {
+      "document": "accounts.md",
+      "help": true,
+      "declared_errors": []
+    }
+  }
+}

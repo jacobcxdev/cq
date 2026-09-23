@@ -1,0 +1,27 @@
+Codex reset plan · Advisory
+  Inputs      Complete
+  Search      Exact
+  Confidence  High
+  Generated   23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Horizon     in 9d · 2 Oct 2026, 16:30 BST (UTC+01:00)
+
+  alex@example.test · Scheduled
+    Reference    account-alex
+    Account ID   acct_alex_01
+    Credit       credit-september-01
+    Use at       in 2h 15m · 23 Sep 2026, 18:45 BST (UTC+01:00)
+    Use by       in 2d · 25 Sep 2026, 16:30 BST (UTC+01:00)
+    Confidence   High
+    Gap avoided  45m
+    Restored     5h 100% · 7d 80%
+    Reasons      gap_avoidance, expiry_pressure
+
+Objective
+  Unmet demand                   0 %-seconds
+  Gap duration                   0s
+  Useful credits expired unused  0
+  Weighted discarded quota       4%
+  Restored quota                 180%
+
+Blockers
+  None

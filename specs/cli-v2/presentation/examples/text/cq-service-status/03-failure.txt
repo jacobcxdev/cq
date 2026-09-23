@@ -1,0 +1,3 @@
+Error · The current-user service manager is unavailable.
+  Code: service_unavailable
+  Command: cq service status

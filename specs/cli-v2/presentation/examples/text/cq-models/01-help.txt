@@ -1,0 +1,27 @@
+cq models
+Inspect model registries and publish local model-cache updates.
+
+Usage
+  cq models <COMMAND> [OPTIONS]
+
+Commands
+  list      List active models from local registry caches.
+  overlay   Add, remove or prune local model-registry additions.
+  refresh   Refresh model sources and publish client model caches.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help   All commands.
+
+Examples
+  Inspect locally cached model availability
+  cq models list
+
+  Inspect refresh and publication options
+  cq models refresh --help

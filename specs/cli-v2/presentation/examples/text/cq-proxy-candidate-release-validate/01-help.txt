@@ -1,0 +1,71 @@
+cq proxy candidate release validate
+Validate one isolated candidate release against accepted rollback evidence.
+
+Usage
+  cq proxy candidate release validate --state-dir STATE_DIR --target-release-bundle PATH
+    --rollback-bundle PATH --rollback-receipt PATH --rollback-receipt-digest DIGEST --client-build
+    CLIENT_BUILD --client-executable PATH --validation-run-id RUN_ID --receipt-file PATH
+    --confirm-control-health [OPTIONS]
+
+Unavailable in this build.
+Syntax is validated, then exit 4 before state access. No transition, receipt or evidence is created.
+Validation does not install or promote the shared service.
+Input files require absolute clean non-root paths, no symlinks, current-user ownership,
+owner-controlled parents and no group/other writes. Structured JSON rejects unknown/missing fields,
+duplicate keys, invalid UTF-8 and trailing JSON; canonical documents have no trailing newline.
+
+Required options
+  --state-dir STATE_DIR
+      Required existing candidate directory from prepare. Absolute, clean, non-root,
+      current-user-owned; no symlink; parent owner-controlled. Never defaults to shared state.
+  --target-release-bundle PATH
+      Exact target OperationalReleaseBundleV1 used by prepare; 1–16,777,216 B.
+  --rollback-bundle PATH
+      Accepted OperationalReleaseBundleV1, purpose floor; 1–16,777,216 B.
+      Source commit must be a strict ancestor of target.
+  --rollback-receipt PATH
+      Original authenticated acceptance-system bytes, 1–65,536 B; never fabricated proof.
+  --rollback-receipt-digest DIGEST
+      Exactly 64 lowercase hex characters. SHA-256 over UTF-8 cq/release-import-floor/v1,
+      then NUL, then exact receipt bytes. Not an ordinary file SHA-256.
+  --client-build CLIENT_BUILD
+      Nonempty UTF-8 without NUL/controls; exact measured executable provenance and value
+      bound by prepare. No trimming, case folding, aliases or arbitrary operator labels.
+  --client-executable PATH
+      Absolute clean regular executable, 1–536,870,912 B; stable identity; no symlink or
+      group/other writes. File and trusted parent may belong to current user or root.
+  --validation-run-id VALIDATION_RUN_ID
+      Required exact stored run identifier: 64 lowercase hexadecimal characters.
+      Obtain from prepare or status; this is an identifier, not a file hash.
+  --receipt-file PATH
+      New absolute clean non-root path; no existing leaf, including symlink.
+      Existing current-user-owned, owner-controlled parent; hold identity through creation.
+      Write a new regular file as 0600 atomically; never overwrite or follow a leaf.
+  --confirm-control-health
+      Required; must be true. Assert exact candidate passed control health.
+      CQ must also verify live identity and health itself.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy candidate status
+  cq proxy candidate receipt show
+
+Examples
+  Show the unavailable result; values below are fictional, not valid proof:
+  cq proxy candidate release validate \
+  --state-dir /Users/alex/cq-candidate-29280 \
+  --target-release-bundle /Users/alex/cq-inputs/target.json \
+  --rollback-bundle /Users/alex/cq-inputs/floor.json \
+  --rollback-receipt /Users/alex/cq-inputs/floor-receipt.bin \
+  --rollback-receipt-digest 7777777777777777777777777777777777777777777777777777777777777777 \
+  --client-build 0.114.0 --client-executable /Users/alex/bin/codex \
+  --validation-run-id 1234567812345678123456781234567812345678123456781234567812345678 \
+  --receipt-file /Users/alex/cq-inputs/promotion.json --confirm-control-health

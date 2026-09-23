@@ -1,0 +1,45 @@
+cq codex proxy credential-endpoint legacy finalise
+Finalise a verified credential endpoint replacement.
+
+Usage
+  cq codex proxy credential-endpoint legacy finalise --ticket-file TICKET_FILE
+    --confirm-candidate-healthy [OPTIONS]
+
+Maintains the current user's Codex credential.sock, not the HTTP listener.
+No arbitrary socket path. Requires a supported local Unix backend.
+Input identity and owner must still match the retained proof.
+Irreversibly retire rollback state only after exact live-owner verification.
+Requires activated state. A successful finalisation cannot be rolled back.
+
+Options
+  --ticket-file TICKET_FILE
+      Required. Exact proof from the preceding JSON result; preserve unchanged.
+      Absolute clean non-root path; no symlink; current-user-owned regular file and
+      owner-controlled parent. Size 1–16,384 B; no group/other write permission.
+  --confirm-candidate-healthy
+      Required; must be true. Assert the exact candidate passed live health verification.
+      CQ also verifies the owner itself.
+  --non-interactive
+      Skip typed confirmation only. Default: false; --json implies true.
+      Required when stdin is not a TTY. Does not supply semantic confirmation.
+      Explicit false equals omission.
+  --timeout TIMEOUT
+      Total deadline including cleanup. Default: 30s; Go duration from 1s to 5m inclusive.
+      Cleanup reserve: 0s. Expiry does not prove rollback or an unchanged journal.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy credential-endpoint legacy inspect
+
+Examples
+  Use the retained, independently obtained proof:
+  cq codex proxy credential-endpoint legacy finalise --ticket-file \
+    /Users/alex/cq-inputs/endpoint-ticket.json --confirm-candidate-healthy --non-interactive

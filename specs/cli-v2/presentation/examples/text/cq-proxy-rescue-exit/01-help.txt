@@ -1,0 +1,33 @@
+cq proxy rescue exit
+Request return to normal proxy traffic.
+
+Usage
+  cq proxy rescue exit [OPTIONS]
+
+New normal traffic can resume while old rescue work drains. An acknowledgement is not completion.
+
+Options
+  --port PORT
+      Loopback control port, integer 1–65535. Default: configured rescue bootstrap port,
+      or 19280 when its value is zero. Omission reads existing config without creating it.
+  --timeout DURATION
+      Total monotonic budget for preparation, requests and cleanup. Default: 30s.
+      Go duration 1s–5m inclusive. Interactive confirmation time excluded.
+      Nested requests cannot extend this deadline.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy rescue status
+  cq proxy operation status
+
+Examples
+  Request the transition, then inspect its progress:
+  cq proxy rescue exit

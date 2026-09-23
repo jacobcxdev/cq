@@ -1,0 +1,11 @@
+Codex login · Credentials saved
+  alex@example.test
+  Native default: Not selected
+  Reference       account-alex
+  Account ID      acct_alex_01
+  Email           alex@example.test
+  Native default  Not active
+  Identity        Stable
+  Sources         cq_managed
+  Aliases         none
+  Tier            codex_pro_20x

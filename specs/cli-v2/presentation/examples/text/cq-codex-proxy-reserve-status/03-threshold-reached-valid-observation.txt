@@ -1,0 +1,21 @@
+Codex reserve · excludes system account
+  Scope          Current system account only
+  Account        alex@example.test
+  Account key    acct-alex
+  Window         7d
+  Protected      2.05% of full window
+  Remaining      2%
+  Enabled        yes
+  Routing        excluded by reserve
+  Reason         protected threshold reached (reserve_reached)
+  Reset          in 2h 15m · 23 Sep 2026, 18:45 BST (UTC+01:00)
+  Observed       5s ago · 23 Sep 2026, 16:29:55 BST (UTC+01:00)
+
+System-account windows
+  Window     7d
+  Remaining  2%
+  Reset      in 2h 15m · 23 Sep 2026, 18:45 BST (UTC+01:00)
+
+  Window     7d:gpt-reserve
+  Remaining  100%
+  Reset      in 7d · 30 Sep 2026, 16:30 BST (UTC+01:00)

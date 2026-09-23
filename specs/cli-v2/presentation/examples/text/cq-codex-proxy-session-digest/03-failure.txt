@@ -1,0 +1,3 @@
+Error · Local proxy authentication failed.
+  Code: routing_auth_failed
+  Command: cq codex proxy session digest

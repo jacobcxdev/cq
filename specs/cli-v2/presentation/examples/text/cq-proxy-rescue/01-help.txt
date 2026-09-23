@@ -1,0 +1,30 @@
+cq proxy rescue
+Inspect or transition the shared runtime rescue-serving mode.
+
+Usage
+  cq proxy rescue <COMMAND> [OPTIONS]
+
+Rescue is the shared supervisor's fallback traffic mode while the normal
+worker is unavailable.
+
+Commands
+  enter    Request shared proxy rescue traffic mode.
+  exit     Request return to normal proxy traffic.
+  status   Show shared proxy rescue and drain state.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help proxy   Shared proxy commands.
+
+Examples
+  Inspect rescue and drain observation options
+  cq proxy rescue status --help
+
+  Inspect transition requirements without requesting a transition
+  cq proxy rescue enter --help

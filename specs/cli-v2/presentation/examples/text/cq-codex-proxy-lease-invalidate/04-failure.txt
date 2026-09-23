@@ -1,0 +1,3 @@
+Error · Lease journal is unavailable for invalidation.
+  Code: lease_journal_unavailable
+  Command: cq codex proxy lease invalidate

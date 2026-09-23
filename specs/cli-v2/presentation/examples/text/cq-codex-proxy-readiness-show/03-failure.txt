@@ -1,0 +1,3 @@
+Error · HTTP readiness evidence does not match the requested build.
+  Code: readiness_stale
+  Command: cq codex proxy readiness show

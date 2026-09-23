@@ -1,0 +1,7 @@
+Proxy health · healthy
+  Address    127.0.0.1:19280
+  HTTP       200
+  Reachable  yes
+  Elapsed    12ms
+
+Health endpoint only; model traffic not verified.

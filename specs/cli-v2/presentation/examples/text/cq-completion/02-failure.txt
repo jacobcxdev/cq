@@ -1,0 +1,3 @@
+Error · Unknown option: --shell. Run cq completion --help.
+  Code: unknown_option
+  Command: cq completion

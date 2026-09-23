@@ -1,0 +1,28 @@
+cq codex proxy canary stop
+Request a graceful end to the Codex routing observation run.
+
+Usage
+  cq codex proxy canary stop [OPTIONS]
+
+Observe real routing; no synthetic traffic or routing-policy changes.
+Last observed day is a UTC calendar-day bucket, not the last heartbeat or exact event time.
+No arguments or command-specific options.
+Requires an existing readable run. Records a stop request; the service drains asynchronously.
+Success means requested, not finalised. Repeating the same stop request is idempotent.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy canary status
+
+Examples
+  Request drain and inspect completion:
+  cq codex proxy canary stop
+  cq codex proxy canary status

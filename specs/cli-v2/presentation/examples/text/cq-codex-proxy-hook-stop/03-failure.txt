@@ -1,0 +1,3 @@
+Error · Invalid Codex Stop hook input.
+  Code: hook_input_invalid
+  Command: cq codex proxy hook stop

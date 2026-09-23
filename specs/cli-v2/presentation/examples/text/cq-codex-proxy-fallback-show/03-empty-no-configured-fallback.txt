@@ -1,0 +1,4 @@
+Codex fallback · not configured
+  Account key  not configured
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked

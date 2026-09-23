@@ -1,0 +1,3 @@
+Error · Routing operation failed: load config.
+  Code: routing_io_failed
+  Command: cq codex proxy pin clear

@@ -1,0 +1,13 @@
+Claude login · Credentials saved
+  alex@example.test
+  Native default: Selected
+  Reference       alex@example.test
+  Account ID      acct_alex_01
+  Email           alex@example.test
+  Native default  Active
+  Identity        Stable
+  Sources         cq_managed
+  Aliases         none
+  Tier            claude_max_20x
+
+Existing clients may need reconnection.

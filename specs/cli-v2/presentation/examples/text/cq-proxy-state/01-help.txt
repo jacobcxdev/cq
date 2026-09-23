@@ -1,0 +1,22 @@
+cq proxy state
+Initialise an explicitly selected shared proxy authority directory.
+
+Usage
+  cq proxy state <COMMAND> [OPTIONS]
+
+Commands
+  initialise   Initialise shared authenticated proxy state.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help proxy   Shared proxy commands.
+
+Examples
+  Inspect authority-directory and owner requirements
+  cq proxy state initialise --help

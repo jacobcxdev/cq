@@ -1,0 +1,20 @@
+Codex reset plan · Incomplete
+  Inputs      Incomplete
+  Search      Bounded
+  Confidence  Low
+  Generated   23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Horizon     in 7d · 30 Sep 2026, 16:30 BST (UTC+01:00)
+
+Recommendation unavailable until blockers are resolved.
+
+Objective
+  Unmet demand                   0 %-seconds
+  Gap duration                   0s
+  Useful credits expired unused  0
+  Weighted discarded quota       0%
+  Restored quota                 0%
+
+Blockers
+  usage_unavailable · alex@example.test
+    Reference: account-alex
+    Account ID: acct_alex_01

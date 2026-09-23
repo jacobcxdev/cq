@@ -1,0 +1,3 @@
+Error · Candidate qualification evidence is unavailable; no transition was performed.
+  Code: candidate_evidence_unavailable
+  Command: cq proxy candidate start

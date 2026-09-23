@@ -1,0 +1,33 @@
+cq proxy state initialise
+Initialise shared authenticated proxy state.
+
+Usage
+  cq proxy state initialise --state-dir STATE_DIR [OPTIONS]
+
+Creates or safely reuses shared runtime-control authority. Does not restart the service.
+Known creation/binding receipts survive later failures; failure never proves rollback.
+
+Options
+  --state-dir STATE_DIR
+      Required clean absolute non-root directory. Reject symlink path components and
+      existing foreign or incompatible state.
+  --timeout DURATION
+      Maximum elapsed time including locks, requests and verification. Default: 30s.
+      Positive Go duration, at most 10m; no bare number. Expiry does not imply rollback.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy status
+  cq service restart
+
+Examples
+  Initialise an explicitly chosen owned directory:
+  cq proxy state initialise --state-dir /Users/alex/cq-runtime

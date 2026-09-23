@@ -1,0 +1,45 @@
+cq codex proxy credential-endpoint legacy activate
+Activate a reversible replacement credential endpoint.
+
+Usage
+  cq codex proxy credential-endpoint legacy activate --ticket-file TICKET_FILE
+    --confirm-stopped-and-drained [OPTIONS]
+
+Maintains the current user's Codex credential.sock, not the HTTP listener.
+No arbitrary socket path. Requires a supported local Unix backend.
+Input identity and owner must still match the retained proof.
+Open a reversible replacement window; preserve quarantine for rollback.
+Does not start the proxy. Start and verify the exact intended owner separately.
+
+Options
+  --ticket-file TICKET_FILE
+      Required. Exact proof from the preceding JSON result; preserve unchanged.
+      Absolute clean non-root path; no symlink; current-user-owned regular file and
+      owner-controlled parent. Size 1–16,384 B; no group/other write permission.
+  --confirm-stopped-and-drained
+      Required; must be true. Assert every proxy/credential participant stays stopped and drained.
+      This includes all participants, not only the current request.
+  --non-interactive
+      Skip typed confirmation only. Default: false; --json implies true.
+      Required when stdin is not a TTY. Does not supply semantic confirmation.
+      Explicit false equals omission.
+  --timeout TIMEOUT
+      Total deadline including cleanup. Default: 30s; Go duration from 1s to 5m inclusive.
+      Cleanup reserve: 0s. Expiry does not prove rollback or an unchanged journal.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy credential-endpoint legacy inspect
+
+Examples
+  Use the retained, independently obtained proof:
+  cq codex proxy credential-endpoint legacy activate --ticket-file \
+    /Users/alex/cq-inputs/endpoint-ticket.json --confirm-stopped-and-drained --non-interactive

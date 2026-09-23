@@ -1,0 +1,30 @@
+cq codex proxy pin show
+Show the Codex proxy pin.
+
+Usage
+  cq codex proxy pin show [options]
+
+A pin selects one account for new or unbound work and overrides fallback and allowlist.
+Required existing continuity remains on its bound account.
+Read saved configuration only; no live-process acknowledgement is checked.
+
+Options
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex account list
+  cq service restart --component proxy
+
+Examples
+  Inspect or remove the configured pin.
+  cq codex proxy pin show

@@ -1,0 +1,31 @@
+Model overlay · Saved · Publication incomplete
+  Provider          Codex
+  ID                example-code-2
+  Display name      Example Code 1
+  Source            Overlay
+  Aliases           none
+  Description       Fictional coding model for presentation fixtures
+  Context           200,000 tokens
+  Maximum context   200,000 tokens
+  Maximum output    16,000 tokens
+  Visibility        list
+  Priority          1
+  Explicit clone    example-code-1
+  Metadata source   example-code-1 · Explicit
+
+Publication · Partial · via local
+  Models: 2 active
+
+Sources
+  Provider  Result     Native models  Malformed rows
+  Claude    Refreshed              0               0
+  Codex     Refreshed              1               0
+
+Client caches
+  Codex cache · Failed · Write failed
+    /Users/alex/.codex/models_cache.json
+    models_store_failed: Cannot write model cache.
+  Claude capabilities · Skipped · Optional client absent
+    /Users/alex/.claude/cache/model-capabilities.json
+  Claude picker · Skipped · Optional client absent
+    /Users/alex/.claude/cache/model-picker.json

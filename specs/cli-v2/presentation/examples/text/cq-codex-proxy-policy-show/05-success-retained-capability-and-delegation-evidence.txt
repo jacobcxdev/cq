@@ -1,0 +1,46 @@
+Codex routing policy
+  Authority generation  12
+  Routing generation    18
+  Effective generation  17
+  Schema                1
+
+Pools
+  Name  Value  Members
+  work  10     acct-alex
+               acct-sam
+
+Session bindings
+  Digest  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  Pool    work
+
+Capability account evidence
+  Account key  State
+  acct-alex    supported
+  acct-sam     unknown
+
+Capability routing
+  Pool  work
+  Predicates
+    Schema 1; capability program-access
+    Product surface codex; access path responses; authentication mode oauth
+    Requested model gpt-5.4; effective model *
+  Evidence
+    Schema 1; account acct-alex
+    Account HMAC 89abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567
+    Workspace example-workspace
+    Capability program-access; product surface codex
+    Access path responses; authentication mode oauth
+    Requested model gpt-5.4; effective model gpt-5.4
+    Source authenticated-probe; state eligible; authenticated yes
+    Observed 4m 59s ago · 23 Sep 2026, 16:25:00.125 BST (UTC+01:00)
+    Expires in 2h 15m · 23 Sep 2026, 18:45 BST (UTC+01:00)
+    Routing generation 18
+
+Delegations
+  Caller example-runner
+  Accounts acct-alex
+           acct-sam
+  Expires in 1h 30m · 23 Sep 2026, 18:00 BST (UTC+01:00)
+
+Application: routing generation not yet effective
+Source: authenticated proxy control

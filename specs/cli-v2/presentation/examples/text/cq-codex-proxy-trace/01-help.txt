@@ -1,0 +1,52 @@
+cq codex proxy trace
+Read or follow retained Codex request traces.
+
+Usage
+  cq codex proxy trace [options]
+
+Read configured local log files only; do not contact or change the proxy. Filters combine with AND;
+tail applies after filtering retained history. Follow preserves retained rotation and reports gaps.
+Configured missing files produce zero records; follow waits for creation. Malformed records skip.
+JSON is JSONL: one record envelope per event, then exactly one terminal envelope. Successful end
+exits 0, timeout 7, interruption 130; no second error envelope follows.
+Payload mode reads existing capture. Known authentication fields are redacted; arbitrary prompt
+or response content may still contain secrets. Human payload output never prints the body.
+
+Options
+  --session SESSION
+      Raw session ID or codex://threads/ID, matched using privacy-safe session/thread keys.
+      Trim surrounding whitespace and take the final slash component; reject an empty result.
+      Omit to match all sessions.
+  --trace TRACE
+      Exact nonempty trace ID. Omit to match all trace IDs.
+  --since SINCE
+      Positive Go duration. Include records at or after command start minus this duration.
+      Omit for no lower time bound.
+  --tail TAIL
+      Nonnegative integer. Newest matching retained records before following; default: 200.
+      Use 0 for all matching retained records.
+  --follow
+      Read new records and rotated logs until interrupted. No proxy connection.
+  --payload
+      Read the existing opt-in payload log instead of route events; never enable capture.
+      May expose recorded user content in JSON.
+  --timeout TIMEOUT
+      Optional positive Go duration for reading/following. Omit for no deadline. Expiry exits 7.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit record envelopes and one terminal envelope as JSONL; disable prompts.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq proxy --help
+  cq codex proxy policy show
+
+Examples
+  Read up to 50 records from the last 15 minutes.
+  cq codex proxy trace --since 15m --tail 50
+
+  Follow one fictional session as JSONL envelopes.
+  cq codex proxy trace --session codex://threads/example-session --follow --json

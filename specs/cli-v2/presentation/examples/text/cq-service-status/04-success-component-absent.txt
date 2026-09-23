@@ -1,0 +1,20 @@
+CQ services · status    token-refresh
+
+Component      State   Auto-start  Health  PID
+token-refresh  absent  no          no      —
+
+token-refresh
+  Installed   no
+  Manager     launchd
+  Owner       none
+  Executable  unknown
+  Last run    unknown
+  Last exit   unknown
+  Error       —
+  Config      unknown
+  State       unknown
+  Cache       unknown
+  Runtime     unknown
+  Logs        unknown
+
+Rollback · not_needed

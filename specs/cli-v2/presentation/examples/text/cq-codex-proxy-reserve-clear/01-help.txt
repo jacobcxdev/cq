@@ -1,0 +1,34 @@
+cq codex proxy reserve clear
+Remove the system-account reserve configuration.
+
+Usage
+  cq codex proxy reserve clear [options]
+
+Scope: the current Codex system account only, not all accounts or a selected pool.
+Missing, stale, expired or unsettled usage can block the protected account. A nominal reset
+time alone does not prove renewed capacity.
+Remove protection; repeated clear leaves equivalent state. Persist and apply live.
+
+Options
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex proxy reserve --help
+  cq codex proxy reserve status
+
+Examples
+  Remove reserve protection.
+  cq codex proxy reserve clear

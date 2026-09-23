@@ -1,0 +1,29 @@
+cq codex proxy canary
+Manage a bounded Codex routing-observation run.
+
+Usage
+  cq codex proxy canary <COMMAND> [OPTIONS]
+
+A canary observes real routing with protected-state checks.
+
+Commands
+  start    Start a protected observation run.
+  status   Show the retained observation run.
+  stop     Request a graceful end to the observation run.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect a retained run
+  cq codex proxy canary status
+
+  Inspect run limits before starting
+  cq codex proxy canary start --help

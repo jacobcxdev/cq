@@ -1,0 +1,3 @@
+Error · Unknown command
+  Unknown command: inspect. Run cq help.
+  Code: unknown_command · Command: cq claude account inspect

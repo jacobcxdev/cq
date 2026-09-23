@@ -1,0 +1,7 @@
+Credential endpoint · activated
+  Path    /Users/alex/Library/Application Support/cq/codex/credential.sock
+  Kind    transition
+  Ticket  0123456789abcdef0123456789abcdef
+
+Ticket retained.
+Use --json to retain the exact structured proof.

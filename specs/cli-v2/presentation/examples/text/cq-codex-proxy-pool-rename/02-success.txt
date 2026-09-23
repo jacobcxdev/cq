@@ -1,0 +1,28 @@
+Saved Codex pool policy.
+  Authority generation  12
+  Routing generation    18
+  Effective generation  18
+  Schema                1
+
+Pools
+  Name  Value  Members
+  primary  10     acct-alex
+               acct-sam
+
+Session bindings
+  Digest  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  Pool    primary
+
+Capability account evidence
+  none
+
+Capability routing
+  Pool        none
+  Predicates  none
+  Evidence    none
+
+Delegations
+  none
+
+Application: generations match
+Source: authenticated proxy control

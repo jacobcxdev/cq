@@ -1,0 +1,38 @@
+cq proxy serve
+Run the shared API proxy in the foreground.
+
+Usage
+  cq proxy serve [OPTIONS]
+
+Owns a foreground listener for Claude and Codex. Does not install a background service.
+Ready output appears only after binding and runtime initialisation; it is not model acceptance
+  proof.
+Ctrl-C requests shutdown and exits 130. SIGTERM uses the successful termination contract.
+--json emits ready/stopped JSONL events, not a single JSON envelope; never colour or wrap it.
+
+Options
+  --port PORT
+      Loopback integer 1–65535. Default: proxy.json port, or 19280 if absent.
+      Port 0 is forbidden. A listener owned by another process is a conflict.
+  --migrate-legacy-managed
+      Add missing routing identity metadata to legacy CQ-managed credentials before serving.
+      Default: false. Never changes external or system-owned credentials.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq service install
+  cq proxy health
+
+Examples
+  Run in the foreground on the configured port:
+  cq proxy serve
+  Run on an explicit port:
+  cq proxy serve --port 29280

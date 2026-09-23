@@ -1,0 +1,32 @@
+cq claude account login
+Authenticate and store a Claude account.
+
+Usage
+  cq claude account login [options]
+
+Opens browser authentication and saves CQ-managed credentials.
+Login alone does not select the native default. No service is installed.
+JSON suppresses terminal prompts; browser authentication still needs your input.
+Proxy pins and session bindings do not change.
+
+Options
+  --activate          Select this account as native default after saving. Default: false.
+                      Existing clients may need reconnection.
+  --timeout DURATION  Total work deadline. Default: 10m; range: 1s to 30m.
+                      Use Go duration syntax; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq claude account list
+  cq claude account activate
+
+Examples
+  Store an account without selecting it
+    cq claude account login
+  Store and select the account
+    cq claude account login --activate

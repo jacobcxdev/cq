@@ -1,0 +1,27 @@
+cq claude proxy pin show
+Show the saved Claude proxy account pin.
+
+Usage
+  cq claude proxy pin show [options]
+
+Displays saved configuration only; does not prove live proxy acknowledgement.
+
+Options
+  --timeout DURATION  Total work deadline, including preparation and requests.
+                      Default: 10s. Positive Go duration; bare numbers invalid.
+                      A timed-out write may have committed: inspect state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq claude account list
+  cq claude proxy pin
+  cq proxy
+
+Examples
+  Show the saved Claude proxy account pin.
+    cq claude proxy pin show

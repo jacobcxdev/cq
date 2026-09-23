@@ -1,0 +1,4 @@
+Codex fallback · configured
+  Account key  acct-alex
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked

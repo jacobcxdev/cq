@@ -1,0 +1,42 @@
+cq codex proxy session digest
+Compute or validate a privacy-keyed session digest.
+
+Usage
+  cq codex proxy session digest (--session-id SESSION_ID | --session-id-stdin | --digest DIGEST)
+    [options]
+
+Normal output exposes keyed digests only, never raw session identifiers.
+A raw selector requires authenticated live control. An existing --digest is validated and
+returned unchanged without state access. No binding is created.
+
+Options
+  --session-id SESSION_ID
+      Exact raw UTF-8 session identifier, 1–4096 bytes. Prefer stdin to avoid shell history.
+  --session-id-stdin
+      Read 1–4096 exact UTF-8 bytes from stdin. No newline is removed; use printf, not echo.
+  --digest DIGEST
+      Existing full keyed digest: exactly 64 lowercase hexadecimal characters.
+      Obtain it with cq codex proxy session digest.
+      Exactly one selector is required. These three options are mutually exclusive.
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex proxy policy show
+  cq codex proxy pool --help
+
+Examples
+  Hash exact bytes without putting a session ID in shell history.
+  printf %s example-session | cq codex proxy session digest --session-id-stdin

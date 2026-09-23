@@ -1,0 +1,7 @@
+Remove Codex local credentials
+  Account: alex@example.test
+  Reference: account-alex
+  Native active credentials will be removed: Yes
+  Upstream account: Retained
+
+Remove local credentials for alex@example.test? [y/N]

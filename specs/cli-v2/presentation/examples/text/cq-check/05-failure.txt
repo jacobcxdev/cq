@@ -1,0 +1,3 @@
+Gemini · Authentication required
+  antigravity-cli
+  Authentication is required.

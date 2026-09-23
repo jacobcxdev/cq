@@ -1,0 +1,3 @@
+Error · The requested operation does not exist.
+  Code: operation_not_found
+  Command: cq proxy operation status

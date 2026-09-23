@@ -1,0 +1,6 @@
+Codex reset · Already completed
+  Account        account-alex
+  Credit         credit-september-01
+  Windows reset  0
+
+This reset request was already completed.

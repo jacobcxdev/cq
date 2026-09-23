@@ -1,0 +1,3 @@
+Error · Proxy readiness could not be determined.
+  Code: proxy_indeterminate
+  Command: cq proxy status

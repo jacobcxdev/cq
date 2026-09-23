@@ -1,0 +1,3 @@
+Error · Policy generations conflict; show current policy and prepare a fresh document.
+  Code: policy_generation_conflict
+  Command: cq codex proxy policy apply

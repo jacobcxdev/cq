@@ -1,0 +1,42 @@
+cq codex proxy reserve set
+Configure the current system-account quota reserve.
+
+Usage
+  cq codex proxy reserve set --window WINDOW --percent PERCENT [options]
+
+Scope: the current Codex system account only, not all accounts or a selected pool.
+Missing, stale, expired or unsettled usage can block the protected account. A nominal reset
+time alone does not prove renewed capacity.
+Persist and apply live. Replace any previous bypass. No default window or percentage.
+
+Options
+  --window WINDOW
+      Required. Exact currently observed selector from cq codex proxy reserve windows.
+      Legacy case, surrounding spaces and underscores canonicalise before observed-window
+        validation.
+  --percent PERCENT
+      Required. Finite number strictly greater than 0 and less than 100.
+      Protect this percentage of the full window. 2 keeps the final 2 percentage points,
+      not 2% of currently remaining quota. Exclude the account at or below the threshold.
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex proxy reserve --help
+  cq codex proxy reserve status
+
+Examples
+  Keep the final 2.05 percentage points of the observed 7d window.
+  cq codex proxy reserve set --window 7d --percent 2.05

@@ -1,0 +1,5 @@
+Codex priming · configured disabled
+  Application  Live process acknowledgement not checked
+
+Model overrides: none
+Source: saved configuration

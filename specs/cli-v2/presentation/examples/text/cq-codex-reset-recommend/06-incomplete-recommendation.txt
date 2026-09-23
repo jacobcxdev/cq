@@ -1,0 +1,3 @@
+Warning · Reset recommendation is incomplete; resolve the reported blockers.
+  Code: codex_reset_recommendation_incomplete
+  Command: cq codex reset recommend

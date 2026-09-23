@@ -1,0 +1,3 @@
+Error · Candidate receipt is conflicted.
+  Code: candidate_receipt_conflicted
+  Command: cq proxy candidate receipt show

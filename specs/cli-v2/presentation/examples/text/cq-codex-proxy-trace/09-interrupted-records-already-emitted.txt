@@ -1,0 +1,3 @@
+Error · Trace following interrupted.
+  Code: trace_interrupted
+  Command: cq codex proxy trace

@@ -1,0 +1,28 @@
+cq models list
+List active models from the local merged registry.
+
+Usage
+  cq models list [options]
+
+Reads cached native data and overlays without refreshing sources.
+An empty registry succeeds. Native entries win over same-provider overlays.
+
+Options
+  --provider PROVIDER  Filter by claude or codex. Omit to list both.
+                       Legacy anthropic means claude and emits a deprecation warning.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq models refresh
+  cq models overlay
+
+Examples
+  Inspect all cached models
+    cq models list
+  Inspect Codex model metadata as JSON
+    cq models list --provider codex --json

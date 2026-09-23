@@ -1,0 +1,4 @@
+Error · Unknown command
+  Invalid arguments: Unknown command: inspect. Run cq help.
+  Run cq models overlay --help.
+  Code: cli_invalid_usage · Command: cq models overlay inspect

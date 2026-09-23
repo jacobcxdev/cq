@@ -1,0 +1,37 @@
+Codex canary · active
+  Run                AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  Finalised          no
+  Started            0s ago · 23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Last observed day  unknown
+  Ended              —
+
+Observations
+  Admitted turns             0
+  Keyed mismatches            0
+  Protected-state changes    0
+  Secret leaks               0
+  Unexplained lifecycles      0
+  Live-session repairs       0
+  Protected-state failures   0
+  Consecutive calendar days  0
+
+Build binding
+  CQ build               1.0.0
+  Client build           0.114.0
+  Parser schema          1
+  Lease schema           3
+  Semantics revision     http-conservative-routing-v3
+  Retry budget           1
+  Fixture SHA-256        618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1
+  Readiness fingerprint  1122334411223344112233441122334411223344112233441122334411223344
+
+Protected digests
+  account_registry  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  codexbar_auth     bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  codexbar_manifest cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  cq_managed_auth   dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  routing_default   eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  system_auth       ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+Finalisation
+  Not finalised.

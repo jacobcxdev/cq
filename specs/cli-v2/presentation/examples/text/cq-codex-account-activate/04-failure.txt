@@ -1,0 +1,3 @@
+Error · Account has no managed credentials that can be activated.
+  Code: account_not_activatable
+  Command: cq codex account activate

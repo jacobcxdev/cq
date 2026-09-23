@@ -1,0 +1,8 @@
+System-account windows
+  Window     7d
+  Remaining  12.5%
+  Reset      in 2h 15m · 23 Sep 2026, 18:45 BST (UTC+01:00)
+
+  Window     7d:gpt-reserve
+  Remaining  100%
+  Reset      in 7d · 30 Sep 2026, 16:30 BST (UTC+01:00)

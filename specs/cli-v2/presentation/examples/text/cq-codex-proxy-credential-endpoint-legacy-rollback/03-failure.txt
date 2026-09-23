@@ -1,0 +1,4 @@
+Error · Credential endpoint migration precondition failed: authority, identity or migration state
+  does not match.
+  Code: endpoint_conflict
+  Command: cq codex proxy credential-endpoint legacy rollback

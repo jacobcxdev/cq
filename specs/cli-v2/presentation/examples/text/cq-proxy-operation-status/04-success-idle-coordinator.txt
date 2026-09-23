@@ -1,0 +1,6 @@
+Proxy operation · idle
+  Operation         idle
+  Phase             —
+  Result available  no
+  Result digest     —
+  Recovery support  unavailable

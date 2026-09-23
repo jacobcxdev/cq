@@ -1,0 +1,3 @@
+Error · Model refresh failed: proxy registry refresh unavailable.
+  Code: models_refresh_failed
+  Command: cq models refresh

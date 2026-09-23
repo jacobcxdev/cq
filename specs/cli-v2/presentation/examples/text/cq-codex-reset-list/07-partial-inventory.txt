@@ -1,0 +1,3 @@
+Warning · Reset-credit inventory is incomplete.
+  Code: codex_reset_inventory_partial
+  Command: cq codex reset list

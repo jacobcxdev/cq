@@ -1,0 +1,20 @@
+CQ services · start    proxy
+
+Component  State    Auto-start  Health  PID
+proxy      running  yes         yes     4217
+
+proxy
+  Installed   yes
+  Manager     launchd
+  Owner       cq
+  Executable  /opt/homebrew/bin/cq
+  Last run    0s ago · 23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Last exit   unknown
+  Error       —
+  Config      /Users/alex/Library/Application Support/cq
+  State       /Users/alex/Library/Application Support/cq
+  Cache       /Users/alex/Library/Caches/cq
+  Runtime     /Users/alex/Library/Application Support/cq/runtime
+  Logs        /Users/alex/Library/Logs/cq
+
+Rollback · not_needed

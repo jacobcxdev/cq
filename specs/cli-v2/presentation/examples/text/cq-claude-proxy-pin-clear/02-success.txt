@@ -1,0 +1,4 @@
+Claude proxy pin · Not configured
+  Account          none
+  Application      Hot reload · asynchronous
+  Restart required No

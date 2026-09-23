@@ -1,0 +1,3 @@
+Error · Selected window is unavailable; inspect reserve windows.
+  Code: reserve_window_unavailable
+  Command: cq codex proxy reserve set

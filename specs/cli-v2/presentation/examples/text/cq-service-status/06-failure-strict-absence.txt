@@ -1,0 +1,3 @@
+Error · Service component token-refresh is not installed.
+  Code: service_not_installed
+  Command: cq service status

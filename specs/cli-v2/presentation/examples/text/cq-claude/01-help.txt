@@ -1,0 +1,26 @@
+cq claude
+Manage Claude accounts and proxy routing pins.
+
+Usage
+  cq claude <COMMAND> [OPTIONS]
+
+Commands
+  account   Authenticate, inspect, activate and remove Claude accounts.
+  proxy     Control Claude-specific routing through the shared proxy.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help   All commands.
+
+Examples
+  List locally configured Claude accounts
+  cq claude account list
+
+  Inspect the proxy account override
+  cq claude proxy pin show

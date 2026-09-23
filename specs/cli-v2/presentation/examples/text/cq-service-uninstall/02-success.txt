@@ -1,0 +1,21 @@
+CQ services · uninstall    proxy
+
+Component  State   Auto-start  Health  PID
+proxy      absent  no          no      —
+
+proxy
+  Installed   no
+  Manager     launchd
+  Owner       none
+  Executable  unknown
+  Last run    unknown
+  Last exit   unknown
+  Error       —
+  Config      unknown
+  State       unknown
+  Cache       unknown
+  Runtime     unknown
+  Logs        unknown
+
+Registration removed; credentials and user data retained.
+Rollback · not_needed

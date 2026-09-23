@@ -1,0 +1,6 @@
+Warning · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq claude proxy pin clear
+
+Inspect saved state
+  cq claude proxy pin show

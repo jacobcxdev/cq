@@ -1,0 +1,7 @@
+Codex reset credits · Complete
+  alex@example.test
+  Reference: account-alex
+  Account ID: acct_alex_01
+  Available: 0 credits
+
+No reset credits.

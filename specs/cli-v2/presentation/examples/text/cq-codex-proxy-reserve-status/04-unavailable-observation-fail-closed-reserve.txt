@@ -1,0 +1,14 @@
+Codex reserve · excludes system account
+  Scope          Current system account only
+  Account        alex@example.test
+  Account key    acct-alex
+  Window         7d
+  Protected      2.05% of full window
+  Remaining      unknown
+  Enabled        yes
+  Routing        excluded by reserve
+  Reason         usage observation stale (usage_stale)
+  Reset          unknown
+  Observed       unknown
+
+No system-account quota windows available.

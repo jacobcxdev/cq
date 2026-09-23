@@ -1,0 +1,3 @@
+Error · The Codex canary preconditions are not satisfied.
+  Code: canary_precondition_failed
+  Command: cq codex proxy canary start

@@ -1,0 +1,32 @@
+cq proxy candidate start
+Start the exact release bound to an isolated candidate.
+
+Usage
+  cq proxy candidate start --state-dir STATE_DIR [OPTIONS]
+
+Unavailable in this build.
+Syntax is validated, then exit 4 before state access. No transition, receipt or evidence is created.
+
+Options
+  --state-dir STATE_DIR
+      Required existing candidate directory from prepare. Absolute, clean, non-root,
+      current-user-owned; no symlink; parent owner-controlled. Never defaults to shared state.
+  --timeout DURATION
+      Total budget including cleanup. Default: 30s; Go duration 30s–90s inclusive.
+      Reserve final 15s within this budget for cleanup.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy candidate status
+
+Examples
+  Demonstrate the unavailable result with syntactically valid inputs:
+  cq proxy candidate start --state-dir /Users/alex/cq-candidate-29280

@@ -1,0 +1,3 @@
+Error · Reserve is not configured; use reserve set first.
+  Code: reserve_not_configured
+  Command: cq codex proxy reserve enable

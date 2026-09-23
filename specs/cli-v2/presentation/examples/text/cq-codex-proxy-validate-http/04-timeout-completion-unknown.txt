@@ -1,0 +1,3 @@
+Error · The HTTP validation operation timed out; inspect readiness before retrying.
+  Code: validation_timeout
+  Command: cq codex proxy validate http

@@ -1,0 +1,40 @@
+cq service stop
+Stop and disable selected CQ services.
+
+Usage
+  cq service stop [OPTIONS]
+
+CQ services: shared API proxy and token-refresh job. The job runs auth refresh at load and
+then every 30 minutes; it does not fetch quota reports. Managers: launchd on macOS,
+per-user systemd on Linux, current-user Task Scheduler on Windows. No automatic elevation.
+Writes verify ownership. Package-owned services permit start/stop/restart; manual install/uninstall
+cannot replace package or foreign ownership. Selected components never widen after validation.
+May interrupt active Claude/Codex traffic when proxy selected. Disables automatic starts, then stops
+and verifies token-refresh before proxy. Keeps definitions, credentials, configuration, caches and
+logs. Already stopped is idempotent. Later quota/account commands do not re-enable services.
+
+Options
+  --component COMPONENT
+      all, proxy or token-refresh. Default: all; exact enum.
+  --timeout DURATION
+      Maximum elapsed time including locks, requests and local verification. Default: 60s.
+      Positive Go duration, at most 10m; no bare number. Expiry does not imply rollback.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq service start
+  cq service status
+
+Examples
+  Stop and disable both components:
+  cq service stop
+  Stop only the shared proxy:
+  cq service stop --component proxy

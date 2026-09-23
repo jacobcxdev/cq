@@ -1,0 +1,35 @@
+cq codex proxy validate http
+Request startup validation of an installed candidate HTTP listener.
+
+Usage
+  cq codex proxy validate http --port PORT [OPTIONS]
+
+Requires the verified installed candidate's service label, process and listener binding.
+An accepted request is not completed validation. Readiness inspection is retained build evidence,
+not correlation with this request: the engine exposes no public request ID.
+
+Options
+  --port PORT
+      Required integer from 1 to 65535, excluding live port 19280.
+      Must match the verified installed candidate binding.
+  --timeout DURATION
+      Total monotonic budget for preparation, requests and cleanup. Default: 30s.
+      Go duration from 1s to 5m inclusive; interactive confirmation time excluded.
+      Nested requests cannot extend the deadline. Accepted work may outlive a timeout.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy readiness show
+  cq proxy candidate status
+
+Examples
+  Request validation of the already installed candidate:
+  cq codex proxy validate http --port 29280

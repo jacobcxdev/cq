@@ -1,0 +1,7 @@
+Proxy rescue · rescue_exit_draining
+  Generation         13
+  Active requests    1
+  Draining sessions  1
+
+Draining sessions
+  session:abcdef123456

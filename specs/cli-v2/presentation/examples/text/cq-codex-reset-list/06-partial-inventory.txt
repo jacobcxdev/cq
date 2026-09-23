@@ -1,0 +1,12 @@
+Codex reset credits · Incomplete
+  alex@example.test
+    Reference: account-alex
+    Account ID: acct_alex_01
+    Available: 0 credits
+    No reset credits.
+
+  sam@example.test
+    Reference: account-sam
+    Account ID: acct_sam_01
+    Available: unknown
+    credits_unavailable: Reset-credit inventory is unavailable.
