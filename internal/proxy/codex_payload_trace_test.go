@@ -120,6 +120,32 @@ func TestCodexPayloadTraceBoundsStreamingResponseCapture(t *testing.T) {
 	}
 }
 
+func TestCodexPayloadTraceBoundsLargeWebSocketFrame(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payloads.jsonl")
+	payloads, err := OpenPayloadWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := withCodexTrace(context.Background(), nil, payloads, CodexTraceStart{Transport: "websocket"})
+	raw := append([]byte(`{"input":"`), bytes.Repeat([]byte{'x'}, 1<<20)...)
+	raw = append(raw, []byte(`"}`)...)
+	emitCodexRawTracePayload(ctx, PayloadEvent{Direction: "downstream_request", FrameType: "text"}, raw)
+	if err := payloads.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readCodexPayloadEvents(t, path)
+	if len(events) != 1 || events[0].BodyBytes != len(raw) || !events[0].Truncated {
+		t.Fatalf("large frame capture count = %d, want one truncated event", len(events))
+	}
+	var captured string
+	if err := json.Unmarshal(events[0].Body, &captured); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) > 64<<10 || captured != string(raw[:len(captured)]) {
+		t.Fatalf("captured %d bytes, want bounded prefix", len(captured))
+	}
+}
+
 func readCodexPayloadEvents(t *testing.T, path string) []PayloadEvent {
 	t.Helper()
 	file, err := os.Open(path)
