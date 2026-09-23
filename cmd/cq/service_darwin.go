@@ -452,6 +452,9 @@ func (platform *darwinServicePlatform) remove(ctx context.Context, label string)
 	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
 		result = errors.Join(result, fmt.Errorf("boot out %s: %w", label, err))
 	}
+	if selectedServiceContext(ctx) && ctx.Err() != nil {
+		return errors.Join(result, ctx.Err())
+	}
 	path := platform.plistPath(label)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		result = errors.Join(result, fmt.Errorf("remove %s definition: %w", label, err))
@@ -1031,7 +1034,7 @@ func (platform *darwinServicePlatform) PreflightSelected(ctx context.Context, ex
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := validateDarwinServiceExecutable(executable); err != nil {
+	if err := validateDarwinOwnedExecutable(executable); err != nil {
 		return err
 	}
 	for _, label := range darwinSelectedLabels(selection) {

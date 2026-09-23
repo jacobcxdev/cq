@@ -327,7 +327,7 @@ func openDarwinRefreshLog(path string) (*os.File, error) {
 	if err := fsutil.EnsureSecureDirectory(fs, filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, err
 	}

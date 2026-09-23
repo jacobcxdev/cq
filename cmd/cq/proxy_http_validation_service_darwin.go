@@ -324,7 +324,7 @@ func readInstalledHTTPValidationRegularFile(path string, maxBytes int64, executa
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || maxBytes <= 0 {
 		return nil, "", errors.New("invalid installed service file path")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, "", err
 	}

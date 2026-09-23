@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -991,5 +993,168 @@ func TestDarwinServiceSelectedInstallRollbackOwner(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDarwinServiceSelectedUninstallCancellation(t *testing.T) {
+	for _, component := range []serviceSelection{serviceProxy, serviceRefresh} {
+		t.Run(string(component), func(t *testing.T) {
+			p, _ := newSelectedDarwinHarness(t)
+			label := darwinSelectedLabels(component)[0]
+			path := p.plistPath(label)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			lateCalls := 0
+			run := p.run
+			p.run = func(ctx context.Context, args ...string) ([]byte, error) {
+				if ctx.Err() != nil {
+					lateCalls++
+				}
+				if args[0] == "bootout" && args[1] == p.target(label) {
+					cancel()
+					return nil, ctx.Err()
+				}
+				return run(ctx, args...)
+			}
+			l, _, store := newSelectedServiceHarness(t)
+			l.Platform, l.Executable = p, p.executable
+			store.record.Executable = p.executable
+			store.record.Services = []string{proxyAgentLabel, agentLabel}
+			exit, data, _ := runSelectedService(t, ctx, l, "service", "uninstall", "--component", string(component), "--json")
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("cancelled uninstall changed definition: %v", err)
+			}
+			if exit != 130 || data.Rollback != "failed" || lateCalls != 0 || data.Components[0].Healthy != nil {
+				t.Fatalf("exit=%d data=%+v latecalls=%d", exit, data, lateCalls)
+			}
+		})
+	}
+}
+
+func TestDarwinServiceLegacyUninstallCancellation(t *testing.T) {
+	for _, label := range []string{proxyAgentLabel, agentLabel} {
+		t.Run(label, func(t *testing.T) {
+			p, _ := newSelectedDarwinHarness(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			p.run = func(ctx context.Context, args ...string) ([]byte, error) { cancel(); return nil, ctx.Err() }
+			remove := p.RemoveProxy
+			if label == agentLabel {
+				remove = p.RemoveRefresh
+			}
+			if err := remove(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("remove=%v", err)
+			}
+			if _, err := os.Stat(p.plistPath(label)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("legacy definition remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestDarwinServiceFIFOInputs(t *testing.T) {
+	if kind := os.Getenv("CQ_TEST_SERVICE_FIFO_KIND"); kind != "" {
+		path := os.Getenv("CQ_TEST_SERVICE_FIFO_PATH")
+		var err error
+		if kind == "log" {
+			var file *os.File
+			file, err = openDarwinRefreshLog(path)
+			if file != nil {
+				file.Close()
+			}
+		} else {
+			p := &darwinServicePlatform{home: os.Getenv("CQ_TEST_SERVICE_FIFO_HOME")}
+			_, _, err = p.ownedDefinition(proxyAgentLabel)
+		}
+		if err == nil {
+			t.Fatal("FIFO accepted as a regular file")
+		}
+		return
+	}
+	for _, kind := range []string{"log", "plist"} {
+		t.Run(kind, func(t *testing.T) {
+			p, _ := newSelectedDarwinHarness(t)
+			path := filepath.Join(p.roots.Logs, "fifo.log")
+			if kind == "plist" {
+				path = p.plistPath(proxyAgentLabel)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Isolate the potentially blocking open so a regression is killed and
+			// reaped, rather than leaving a blocked goroutine in the test process.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDarwinServiceFIFOInputs$")
+			command.Env = append(os.Environ(), "CQ_TEST_SERVICE_FIFO_KIND="+kind, "CQ_TEST_SERVICE_FIFO_PATH="+path, "CQ_TEST_SERVICE_FIFO_HOME="+p.home)
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("FIFO open blocked until timeout: %v", ctx.Err())
+			}
+			if err != nil {
+				t.Fatalf("FIFO rejection failed: %v: %s", err, output)
+			}
+		})
+	}
+}
+
+func TestDarwinServiceFreshInstallExecutableAuthority(t *testing.T) {
+	for _, mode := range []os.FileMode{0o770, 0o707, 0o700 | os.ModeSetuid, 0o700 | os.ModeSetgid} {
+		for _, component := range []serviceSelection{serviceProxy, serviceRefresh} {
+			t.Run(fmt.Sprintf("%s/%s", mode, component), func(t *testing.T) {
+				p, r := newSelectedDarwinHarness(t)
+				for _, label := range []string{proxyAgentLabel, agentLabel} {
+					if err := os.Remove(p.plistPath(label)); err != nil {
+						t.Fatal(err)
+					}
+					r.loaded[label] = false
+				}
+				if err := os.Chmod(p.executable, mode); err != nil {
+					t.Fatal(err)
+				}
+				l, _, store := newSelectedServiceHarness(t)
+				l.Platform, l.Executable = p, p.executable
+				store.record.Executable = p.executable
+				store.record.Services = []string{proxyAgentLabel, agentLabel}
+				exit, _, _ := runSelectedService(t, context.Background(), l, "service", "install", "--component", string(component), "--json")
+				if exit == 0 {
+					t.Error("unsafe executable installation succeeded")
+				}
+				for _, call := range r.calls {
+					if call[0] != "print" && call[0] != "print-disabled" {
+						t.Errorf("unsafe install mutated manager: %v", call)
+					}
+				}
+				for _, label := range []string{proxyAgentLabel, agentLabel} {
+					if _, err := os.Stat(p.plistPath(label)); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("unsafe install published definition: %s: %v", label, err)
+					}
+				}
+				// The same adapter still applies the frozen legacy validator and
+				// install semantics to an ordinary context; only the fake manager runs.
+				if err := p.Preflight(context.Background(), p.executable); err != nil {
+					t.Fatalf("legacy preflight changed: %v", err)
+				}
+				install := p.InstallProxy
+				if component == serviceRefresh {
+					install = p.InstallRefresh
+				}
+				if err := install(context.Background(), p.executable); err != nil {
+					t.Fatalf("legacy install changed: %v", err)
+				}
+				label := darwinSelectedLabels(component)[0]
+				if !r.loaded[label] {
+					t.Fatal("legacy installation did not load fake service")
+				}
+			})
+		}
 	}
 }
