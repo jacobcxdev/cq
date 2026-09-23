@@ -210,6 +210,12 @@ func v2CheckStatus(parent, ctx context.Context, report app.Report, stale bool) c
 				usable = true
 				continue
 			}
+			// An unused integration is absent, not a failed refresh. Keep its report
+			// row visible, but let successfully observed providers determine success.
+			if row.Error != nil && row.Error.Code == "not_configured" && row.Error.HTTPStatus != http.StatusUnauthorized {
+				continue
+			}
+
 			failed = true
 			code := ""
 			if row.Error != nil {

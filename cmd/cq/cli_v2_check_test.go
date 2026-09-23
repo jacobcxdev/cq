@@ -139,7 +139,9 @@ func TestCLIV2CheckPrecedence(t *testing.T) {
 		{"authentication over operation", []quota.Result{fail("fetch_error"), fail("auth_expired")}, 5, "check_authentication"},
 		{"operation over unavailable", []quota.Result{fail("not_configured"), fail("parse_error")}, 1, "check_failed"},
 		{"partial over authentication", []quota.Result{usable, fail("auth_expired")}, 8, "check_partial"},
-		{"partial over unavailable", []quota.Result{usable, fail("not_configured")}, 8, "check_partial"},
+		{"unconfigured alongside success", []quota.Result{usable, fail("not_configured")}, 0, ""},
+		{"partial over network failure", []quota.Result{usable, fail("fetch_error")}, 8, "check_partial"},
+		{"partial over unavailable", []quota.Result{usable, fail("unavailable")}, 8, "check_partial"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exit, text, diagnostics := quotaTestRun(t, context.Background(), []string{"check", "codex", "--json"}, v2CheckPrepared{Runner: quotaTestRunner(map[provider.ID][]quota.Result{provider.Codex: tc.rows})})
@@ -155,6 +157,27 @@ func TestCLIV2CheckPrecedence(t *testing.T) {
 		})
 	}
 }
+func TestCLIV2CheckUnconfiguredProvidersDoNotFailDefault(t *testing.T) {
+	absent := quota.ErrorResult("not_configured", "not configured", 0)
+	rows := map[provider.ID][]quota.Result{provider.Claude: {absent}, provider.Codex: {{Status: quota.StatusOK}}, provider.Gemini: {{Status: quota.StatusOK}}}
+	for _, args := range [][]string{{"--json"}, {"check", "--json"}} {
+		exit, text, diagnostics := quotaTestRun(t, context.Background(), args, v2CheckPrepared{Runner: quotaTestRunner(rows)})
+		report := quotaTestReport(t, text)
+		if exit != 0 || diagnostics != "" || len(report.Providers) != 3 || report.Providers[0].Results[0].Error.Code != "not_configured" {
+			t.Fatalf("absent provider mishandled: exit=%d diagnostics=%q report=%+v", exit, diagnostics, report)
+		}
+	}
+	for _, id := range []provider.ID{provider.Claude, provider.Codex, provider.Gemini} {
+		rows[id] = []quota.Result{absent}
+	}
+	for _, args := range [][]string{{"--json"}, {"check", "claude", "--json"}} {
+		exit, text, _ := quotaTestRun(t, context.Background(), args, v2CheckPrepared{Runner: quotaTestRunner(rows)})
+		if exit != 4 || !strings.Contains(text, `"check_unavailable"`) {
+			t.Fatalf("all absent: exit=%d report=%s", exit, text)
+		}
+	}
+}
+
 func TestCLIV2CheckProviderOrderAndDefaults(t *testing.T) {
 	runner := quotaTestRunner(map[provider.ID][]quota.Result{provider.Claude: {{Status: quota.StatusOK}}, provider.Codex: {{Status: quota.StatusOK}}, provider.Gemini: {{Status: quota.StatusOK}}})
 	var first string
@@ -446,8 +469,8 @@ func TestCLIV2CheckHumanReport(t *testing.T) {
 	runner := quotaTestRunner(map[provider.ID][]quota.Result{provider.Codex: rows, provider.Claude: {quota.ErrorResult("not_configured", "not configured", 0)}, provider.Gemini: {quota.ErrorResult("not_configured", "not configured", 0)}})
 	for _, args := range [][]string{nil, {"check", "codex"}} {
 		exit, text, _ := quotaTestRun(t, context.Background(), args, v2CheckPrepared{Runner: runner})
-		// Bare cq additionally reports unconfigured providers, hence partial status.
-		if exit != 0 && exit != 8 {
+		// Unconfigured providers remain visible without failing a usable report.
+		if exit != 0 {
 			t.Fatalf("exit=%d", exit)
 		}
 		for _, want := range []string{"Codex pro 20x", "━", "╌", "89%", "1d", "40x", "─", "active@example.com"} {
