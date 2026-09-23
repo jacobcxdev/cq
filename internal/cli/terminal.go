@@ -48,7 +48,7 @@ var roleSGR = [...]string{"", "1", "36", "1;34", "35", "32", "33", "31", "2"}
 func terminalText(text string) string {
 	var out strings.Builder
 	for _, r := range text {
-		if unicode.IsControl(r) || r == '\u202a' || r == '\u202b' || r == '\u202c' || r == '\u202d' || r == '\u202e' || r == '\u2066' || r == '\u2067' || r == '\u2068' || r == '\u2069' {
+		if unicode.IsControl(r) || r == '\u061c' || r == '\u200e' || r == '\u200f' || r == '\u202a' || r == '\u202b' || r == '\u202c' || r == '\u202d' || r == '\u202e' || r == '\u2066' || r == '\u2067' || r == '\u2068' || r == '\u2069' {
 			fmt.Fprintf(&out, `\u%04x`, r)
 		} else {
 			out.WriteRune(r)
@@ -74,6 +74,9 @@ func bodyWidth(options TerminalOptions) int {
 
 func TerminalLine(options TerminalOptions, indent int, spans ...Span) string {
 	indent = max(indent, 0)
+	if width := bodyWidth(options); width > 0 {
+		indent = min(indent, width-1)
+	}
 	var content strings.Builder
 	for _, span := range spans {
 		content.WriteString(paintSpan(options, span))
@@ -101,32 +104,36 @@ func TerminalFields(options TerminalOptions, indent int, fields []Field) string 
 // TerminalTable renders columns only when the complete header and every cell fit.
 // The caller owns the empty-state message.
 func TerminalTable(options TerminalOptions, headers []string, rows [][]Span) string {
-	if len(rows) == 0 || len(headers) == 0 {
+	if len(rows) == 0 {
 		return ""
 	}
 	widths := make([]int, len(headers))
+	mismatched := false
 	for i, header := range headers {
 		widths[i] = ansi.StringWidth(terminalText(header))
 	}
 	for _, row := range rows {
+		mismatched = mismatched || len(row) != len(headers)
 		for i := range headers {
 			if i < len(row) {
 				widths[i] = max(widths[i], ansi.StringWidth(terminalText(row[i].Text)))
 			}
 		}
 	}
-	total := 2 * (len(headers) - 1)
+	total := 2 * max(0, len(headers)-1)
 	for _, width := range widths {
 		total += width
 	}
-	if bodyWidth(options) == 0 || total > bodyWidth(options) {
+	if bodyWidth(options) == 0 || total > bodyWidth(options) || mismatched {
 		var out strings.Builder
 		for _, row := range rows {
-			fields := make([]Field, 0, len(headers))
-			for i, header := range headers {
-				if i < len(row) {
-					fields = append(fields, Field{Label: header, Value: []Span{row[i]}})
+			fields := make([]Field, 0, len(row))
+			for i, cell := range row {
+				label := fmt.Sprintf("Column %d", i+1)
+				if i < len(headers) {
+					label = headers[i]
 				}
+				fields = append(fields, Field{Label: label, Value: []Span{cell}})
 			}
 			out.WriteString(TerminalFields(options, 0, fields))
 		}

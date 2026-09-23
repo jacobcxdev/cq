@@ -69,5 +69,9 @@ func durationUnits(delta time.Duration, roundUp bool) string {
 	if minutes < 24*60 {
 		return fmt.Sprintf("%dh %dm", minutes/60, minutes%60)
 	}
-	return fmt.Sprintf("%dd %dh", minutes/(24*60), minutes%(24*60)/60)
+	hours := int64(delta / time.Hour)
+	if roundUp && delta%time.Hour != 0 {
+		hours++
+	}
+	return fmt.Sprintf("%dd %dh", hours/24, hours%24)
 }

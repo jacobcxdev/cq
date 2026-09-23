@@ -26,6 +26,13 @@ func TestTerminalLineEscapesHostileTextAndClosesStyles(t *testing.T) {
 	}
 }
 
+func TestTerminalLineEscapesDirectionalMarks(t *testing.T) {
+	got := TerminalLine(TerminalOptions{Width: 80}, 0, Span{Text: "a\u200eb\u200fc\u061cd", Role: Identity})
+	if got != "a\\u200eb\\u200fc\\u061cd\n" {
+		t.Fatalf("directional marks must be visible escapes: %q", got)
+	}
+}
+
 func TestTerminalLineWrapsGraphemeCells(t *testing.T) {
 	for _, width := range []int{20, 40, 80, 120} {
 		got := TerminalLine(TerminalOptions{Width: width}, 2, Span{Text: strings.Repeat("日本語👩‍💻 ", 18)})
@@ -37,6 +44,15 @@ func TestTerminalLineWrapsGraphemeCells(t *testing.T) {
 	}
 }
 
+func TestTerminalLineClampsIndentToBody(t *testing.T) {
+	for _, width := range []int{20, 120} {
+		got := TerminalLine(TerminalOptions{Width: width}, 100, Span{Text: "x"})
+		if got != strings.Repeat(" ", min(width, 100)-1)+"x\n" {
+			t.Fatalf("width %d: oversized indent: %q", width, got)
+		}
+	}
+}
+
 func TestTerminalTableFallsBackToOrderedRecords(t *testing.T) {
 	got := TerminalTable(TerminalOptions{Width: 20}, []string{"Account", "Generation"}, [][]Span{{
 		{Text: "long account name", Role: Identity}, {Text: "18446744073709551615", Role: Identity},
@@ -44,6 +60,22 @@ func TestTerminalTableFallsBackToOrderedRecords(t *testing.T) {
 	want := "Account: long\naccount name\nGeneration:\n18446744073709551615\n"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestTerminalTableRetainsExtraCells(t *testing.T) {
+	got := TerminalTable(TerminalOptions{Width: 20}, []string{"Name", "Count"}, [][]Span{{
+		{Text: "a"}, TerminalCount(0), {Text: "extra", Role: Identity},
+	}})
+	if got != "Name: a\nCount: 0\nColumn 3: extra\n" {
+		t.Fatalf("extra cell lost or mislabelled: %q", got)
+	}
+}
+
+func TestTerminalTableLabelsCellsWithoutHeaders(t *testing.T) {
+	got := TerminalTable(TerminalOptions{Width: 20}, nil, [][]Span{{{Text: "orphan"}}})
+	if got != "Column 1: orphan\n" {
+		t.Fatalf("unlabelled cell lost: %q", got)
 	}
 }
 

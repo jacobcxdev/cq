@@ -67,4 +67,10 @@ func TestTerminalTimeRoundsRemainingUpAndAgeDown(t *testing.T) {
 	if got := TerminalTime(now.Add(-time.Second), options, true).Text; !strings.Contains(got, "past") {
 		t.Fatalf("past deadline should be explicit: %q", got)
 	}
+	if got := TerminalTime(now.Add(24*time.Hour+time.Second), options, true).Text; !strings.Contains(got, "in 1d 1h") {
+		t.Fatalf("remaining days should round the displayed hour up: %q", got)
+	}
+	if got := TerminalTime(now.Add(-24*time.Hour-time.Second), options, false).Text; !strings.Contains(got, "1d 0h ago") {
+		t.Fatalf("elapsed days should round the displayed hour down: %q", got)
+	}
 }
