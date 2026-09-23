@@ -444,3 +444,449 @@ func codexCanaryStopRequestPath(statePath string) string {
 func codexCanaryStopInflightPath(statePath string) string {
 	return codexCanaryStopDirectoryPath(statePath) + "/" + codexCanaryStopInflightName
 }
+
+// Test hooks wrap retained directory capabilities; all state stays in MemFS.
+type canaryStopOnceFS struct {
+	*fsutil.MemFS
+	onRead                                         func(string, string)
+	onLock                                         func()
+	lockError, lockCloseError, directoryCloseError bool
+	beforeRemove                                   func(string, string)
+	removeError, syncError, publishError           bool
+}
+
+func (fsys *canaryStopOnceFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fsys.MemFS.OpenSecureDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return &canaryStopOnceDirectory{SecureDirectory: directory, IdentityBoundRenamer: directory.(fsutil.IdentityBoundRenamer), IdentityBoundRemover: directory.(fsutil.IdentityBoundRemover), fs: fsys, path: path}, nil
+}
+
+type canaryStopOnceDirectory struct {
+	fsutil.SecureDirectory
+	fsutil.IdentityBoundRenamer
+	fsutil.IdentityBoundRemover
+	fs   *canaryStopOnceFS
+	path string
+}
+
+func (directory *canaryStopOnceDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	if directory.fs.onRead != nil {
+		directory.fs.onRead(directory.path, name)
+	}
+	return directory.SecureDirectory.OpenNoFollow(name)
+}
+func (directory *canaryStopOnceDirectory) OpenExclusiveLock(name string, mode os.FileMode) (fsutil.ExclusiveLock, error) {
+	if name != ".codex-canary-stop-request.lock" {
+		return directory.SecureDirectory.OpenExclusiveLock(name, mode)
+	}
+	if directory.fs.lockError {
+		return nil, errors.New("lock unavailable")
+	}
+	lock, err := directory.SecureDirectory.OpenExclusiveLock(name, mode)
+	if err != nil {
+		return nil, err
+	}
+	if directory.fs.onLock != nil {
+		directory.fs.onLock()
+	}
+	return canaryStopOnceLock{ExclusiveLock: lock, fail: directory.fs.lockCloseError}, nil
+}
+func (directory *canaryStopOnceDirectory) RemoveChecked(name string, identity fsutil.SecureFileIdentity) error {
+	if directory.fs.beforeRemove != nil {
+		directory.fs.beforeRemove(directory.path, name)
+	}
+	if directory.fs.removeError {
+		return errors.New("remove failed")
+	}
+	return directory.IdentityBoundRemover.RemoveChecked(name, identity)
+}
+func (directory *canaryStopOnceDirectory) Sync() error {
+	if directory.fs.syncError && directory.path == "/state/codex-canary-stop" {
+		return errors.New("sync failed")
+	}
+	return directory.SecureDirectory.Sync()
+}
+func (directory *canaryStopOnceDirectory) RenameChecked(oldName, newName string, identity fsutil.SecureFileIdentity) error {
+	if directory.fs.publishError && directory.path == "/state" && newName == "canary.json" {
+		return errors.New("publish failed")
+	}
+	return directory.IdentityBoundRenamer.RenameChecked(oldName, newName, identity)
+}
+func (directory *canaryStopOnceDirectory) Close() error {
+	err := directory.SecureDirectory.Close()
+	if directory.fs.directoryCloseError {
+		return errors.New("directory close failed")
+	}
+	return err
+}
+
+type canaryStopOnceLock struct {
+	fsutil.ExclusiveLock
+	fail bool
+}
+
+func (lock canaryStopOnceLock) Close() error {
+	err := lock.ExclusiveLock.Close()
+	if lock.fail {
+		return errors.New("lock close failed")
+	}
+	return err
+}
+
+func TestRequestCodexCanaryStopOnceSerialisesPublishers(t *testing.T) {
+	fsys := &canaryStopOnceFS{MemFS: fsutil.NewMemFS()}
+	now := time.Now().UTC()
+	path := "/state/canary.json"
+	recorder, err := StartCodexCanary(fsys, path, nil, canaryTestTuple(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recorder.Close()
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	var once sync.Once
+	fsys.onLock = func() { once.Do(func() { close(acquired); <-release }) }
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- errors.New("publisher panicked")
+			}
+		}()
+		done <- RequestCodexCanaryStopOnce(fsys, path, nil, now)
+	}()
+	<-acquired
+	other := RequestCodexCanaryStopOnce(fsys, path, nil, now)
+	close(release)
+	first := <-done
+	if first != nil || !errors.Is(other, ErrCodexCanaryStopUnavailable) {
+		t.Fatalf("publishers: %v / %v", first, other)
+	}
+	before, err := fsys.ReadFile("/state/codex-canary-stop/request.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = RequestCodexCanaryStopOnce(fsys, path, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := fsys.ReadFile("/state/codex-canary-stop/request.json")
+	if string(before) != string(after) {
+		t.Fatal("repeat rewrote intent")
+	}
+}
+func TestRequestCodexCanaryStopOnceSeesConcurrentClaim(t *testing.T) {
+	fsys := &canaryStopOnceFS{MemFS: fsutil.NewMemFS()}
+	now := time.Now().UTC()
+	path := "/state/canary.json"
+	// Serving recorder uses the underlying filesystem, independently of CLI reads.
+	recorder, err := StartCodexCanary(fsys.MemFS, path, nil, canaryTestTuple(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recorder.Close()
+	if err = RequestCodexCanaryStop(fsys.MemFS, path, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := fsys.ReadFile("/state/codex-canary-stop/request.json")
+	claimed := false
+	fsys.onRead = func(directory, name string) {
+		if !claimed && directory == "/state/codex-canary-stop" && name == "request.json" {
+			claimed = true
+			if _, err := claimCodexCanaryStopRequest(recorder, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err = RequestCodexCanaryStopOnce(fsys, path, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("claim interleaving was not exercised")
+	}
+	if _, err = fsys.Stat("/state/codex-canary-stop/request.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("duplicate request published after claim")
+	}
+	after, _ := fsys.ReadFile("/state/codex-canary-stop/inflight.json")
+	if string(before) != string(after) {
+		t.Fatal("claim changed intent")
+	}
+	// A claimed intent remains valid after its original expiry.
+	if err = RequestCodexCanaryStopOnce(fsys, path, nil, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestRequestCodexCanaryStopOnceFailsClosed(t *testing.T) {
+	for _, kind := range []string{"lock", "lock-close", "directory-close", "invalid", "unsafe", "mismatch", "stale"} {
+		t.Run(kind, func(t *testing.T) {
+			fsys := &canaryStopOnceFS{MemFS: fsutil.NewMemFS()}
+			now := time.Now().UTC()
+			path := "/state/canary.json"
+			recorder, err := StartCodexCanary(fsys.MemFS, path, nil, canaryTestTuple(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer recorder.Close()
+			if err = RequestCodexCanaryStop(fsys.MemFS, path, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			requestPath := "/state/codex-canary-stop/request.json"
+			switch kind {
+			case "lock":
+				fsys.lockError = true
+			case "lock-close":
+				fsys.lockCloseError = true
+			case "directory-close":
+				fsys.directoryCloseError = true
+			case "invalid":
+				if err = fsys.WriteFile(requestPath, []byte("invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "unsafe":
+				if err = fsys.Chmod(requestPath, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "stale":
+				now = now.Add(time.Hour)
+			case "mismatch":
+				body, _ := fsys.ReadFile(requestPath)
+				var request codexCanaryStopRequest
+				if err = json.Unmarshal(body, &request); err != nil {
+					t.Fatal(err)
+				}
+				request.RunID, err = newCodexCanaryRandomID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.MAC, err = codexCanaryStopRequestMAC(recorder.key, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, _ = json.MarshalIndent(request, "", "  ")
+				if err = fsys.WriteFile(requestPath, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := fsys.ReadFile(requestPath)
+			stateBefore, _ := fsys.ReadFile(path)
+			if err = RequestCodexCanaryStopOnce(fsys, path, nil, now); !errors.Is(err, ErrCodexCanaryStopUnavailable) {
+				t.Fatalf("error: %v", err)
+			}
+			after, _ := fsys.ReadFile(requestPath)
+			stateAfter, _ := fsys.ReadFile(path)
+			if string(before) != string(after) || string(stateBefore) != string(stateAfter) {
+				t.Fatal("failed stop changed intent or state")
+			}
+		})
+	}
+}
+func TestRequestCodexCanaryStopOnceFencesFinalisationRace(t *testing.T) {
+	fsys := &canaryStopOnceFS{MemFS: fsutil.NewMemFS()}
+	now := time.Now().UTC()
+	path := "/state/canary.json"
+	recorder, err := StartCodexCanary(fsys.MemFS, path, nil, canaryTestTuple(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recorder.Close()
+	reads := 0
+	finalised := false
+	fsys.onRead = func(directory, name string) {
+		if directory != "/state" || name != "canary.json" {
+			return
+		}
+		reads++
+		if reads != 3 {
+			return
+		}
+		if err := RequestCodexCanaryStop(fsys.MemFS, path, nil, now); err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := claimCodexCanaryStopRequest(recorder, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = recorder.finaliseCodexCanaryStop(now.Add(time.Second), claimed, [32]byte{1}, 0); err != nil {
+			t.Fatal(err)
+		}
+		finalised = true
+	}
+	if err = RequestCodexCanaryStopOnce(fsys, path, nil, now); !errors.Is(err, ErrCodexCanaryStopUnavailable) {
+		t.Fatalf("race error: %v", err)
+	}
+	if !finalised {
+		t.Fatalf("finalisation interleaving missed (reads=%d)", reads)
+	}
+	if _, err = fsys.Stat("/state/codex-canary-stop/request.json"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("published after finalisation")
+	}
+}
+
+func TestCodexCanaryCompletedRunCanRestartAndStop(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	now := time.Now().UTC()
+	path := "/state/canary.json"
+	first, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finaliseCodexCanaryForTest(t, first, now.Add(time.Minute))
+	firstID := first.State().RunID
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if second.State().RunID == firstID {
+		t.Fatal("run identity reused")
+	}
+	if err = RequestCodexCanaryStopOnce(fsys, path, nil, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("second run cannot stop: %v", err)
+	}
+}
+
+func TestCodexCanaryRestartRetirementFailsClosed(t *testing.T) {
+	for _, kind := range []string{"orphan", "mixed", "replacement", "remove", "sync", "publish", "close", "owner", "publisher"} {
+		t.Run(kind, func(t *testing.T) {
+			fsys := &canaryStopOnceFS{MemFS: fsutil.NewMemFS()}
+			now := time.Now().UTC()
+			path := "/state/canary.json"
+			inflight := "/state/codex-canary-stop/inflight.json"
+			first, err := StartCodexCanary(fsys.MemFS, path, nil, canaryTestTuple(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finaliseCodexCanaryForTest(t, first, now.Add(time.Minute))
+			if kind != "owner" {
+				if err = first.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				defer first.Close()
+			}
+			oldState, _ := fsys.ReadFile(path)
+			oldIntent, _ := fsys.ReadFile(inflight)
+			switch kind {
+			case "orphan":
+				if err = fsys.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "mixed":
+				if err = fsys.WriteFile("/state/codex-canary-stop/request.json", oldIntent, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err = fsys.WriteFile(inflight, []byte("unrelated-invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "replacement":
+				fsys.beforeRemove = func(directory, name string) {
+					if directory != "/state/codex-canary-stop" || name != "inflight.json" {
+						return
+					}
+					if err := fsys.Remove(inflight); err != nil {
+						t.Fatal(err)
+					}
+					if err := fsys.WriteFile(inflight, oldIntent, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "remove":
+				fsys.removeError = true
+			case "sync":
+				fsys.syncError = true
+			case "publish":
+				fsys.publishError = true
+			case "close":
+				fsys.directoryCloseError = true
+			case "publisher":
+				lock, err := fsys.MemFS.OpenExclusiveLock("/state/.codex-canary-stop-request.lock", 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lock.Close()
+			}
+			recorder, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now.Add(2*time.Minute))
+			if err == nil || recorder != nil {
+				if recorder != nil {
+					_ = recorder.Close()
+				}
+				t.Fatal("unsafe restart succeeded")
+			}
+			if kind == "orphan" {
+				if _, err = fsys.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("orphan intent authorised new run")
+				}
+			} else {
+				after, _ := fsys.ReadFile(path)
+				if string(oldState) != string(after) {
+					t.Fatal("failed retirement replaced signed completed record")
+				}
+			}
+			if kind == "mixed" {
+				request, _ := fsys.ReadFile("/state/codex-canary-stop/request.json")
+				if string(request) != string(oldIntent) {
+					t.Fatal("valid intent deleted before all artifacts were validated")
+				}
+			}
+			if kind == "replacement" {
+				replacement, _ := fsys.ReadFile(inflight)
+				if string(replacement) != string(oldIntent) {
+					t.Fatal("replacement identity deleted")
+				}
+			}
+			if kind == "sync" || kind == "publish" {
+				// Retirement may have committed before a later failure. The old finalisation
+				// remains sufficient proof and the next attempt must not recreate old intent.
+				fsys.syncError = false
+				fsys.publishError = false
+				retried, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now.Add(3*time.Minute))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer retried.Close()
+				if retried.State().RunID == first.State().RunID {
+					t.Fatal("retry did not create new run")
+				}
+			}
+		})
+	}
+}
+func TestCodexCanaryRestartRetirementHoldsServingOwner(t *testing.T) {
+	fsys := &canaryStopOnceFS{MemFS: fsutil.NewMemFS()}
+	now := time.Now().UTC()
+	path := "/state/canary.json"
+	first, err := StartCodexCanary(fsys.MemFS, path, nil, canaryTestTuple(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finaliseCodexCanaryForTest(t, first, now.Add(time.Minute))
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	attempted := false
+	fsys.beforeRemove = func(directory, name string) {
+		if directory != "/state/codex-canary-stop" || name != "inflight.json" {
+			return
+		}
+		attempted = true
+		other, err := StartCodexCanary(fsys.MemFS, path, nil, canaryTestTuple(), now.Add(2*time.Minute))
+		if other != nil {
+			_ = other.Close()
+		}
+		if !errors.Is(err, ErrCodexCanaryActive) {
+			t.Fatalf("concurrent owner acquired during retirement: %v", err)
+		}
+	}
+	second, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if !attempted {
+		t.Fatal("owner interleaving not exercised")
+	}
+}

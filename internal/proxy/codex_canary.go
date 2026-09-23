@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const CodexCanaryVersion = 2
@@ -31,8 +31,10 @@ const (
 )
 
 var (
-	ErrCodexCanaryActive        = errors.New("Codex canary is already active")
-	ErrCodexCanaryNotPromotable = errors.New("Codex canary is not promotable")
+	ErrCodexCanaryProtectedStateChanged     = errors.New("Codex canary protected state changed")
+	ErrCodexCanaryProtectedStateUnavailable = errors.New("Codex canary protected state unavailable")
+	ErrCodexCanaryActive                    = errors.New("Codex canary is already active")
+	ErrCodexCanaryNotPromotable             = errors.New("Codex canary is not promotable")
 )
 
 type CodexCanaryProtectionKind string
@@ -328,6 +330,10 @@ func CodexCanaryRoutingPolicyProtection(kind CodexCanaryProtectionKind, path, de
 }
 
 func StartCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []CodexCanaryProtection, tuple CodexCanaryTuple, now time.Time) (*CodexCanaryRecorder, error) {
+	return startCodexCanary(fsys, path, protected, tuple, now, nil)
+}
+
+func startCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []CodexCanaryProtection, tuple CodexCanaryTuple, now time.Time, beforeReplace func(*CodexCanaryRecorder) error) (*CodexCanaryRecorder, error) {
 	protected, err := prepareCodexCanaryProtection(protected)
 	if fsys == nil || path == "" || !completeCodexCanaryTuple(tuple) || err != nil {
 		return nil, errors.New("incomplete Codex canary configuration")
@@ -349,6 +355,11 @@ func StartCodexCanary(fsys fsutil.DurableFileSystem, path string, protected []Co
 	}
 	if openErr != nil && !errors.Is(openErr, os.ErrNotExist) {
 		return nil, errors.New("open existing Codex canary")
+	}
+	if beforeReplace != nil {
+		if err := beforeReplace(existing); err != nil {
+			return nil, err
+		}
 	}
 	var key []byte
 	if existing != nil {
@@ -645,6 +656,24 @@ func (recorder *CodexCanaryRecorder) requireOwnerLocked() error {
 	if !heldOwnerOK || !pathOwnerOK ||
 		!heldIdentityOK || !pathIdentityOK || heldIdentity != pathIdentity || heldIdentity.Links != 1 {
 		return errors.New("Codex canary serving owner unavailable")
+	}
+	return nil
+}
+
+// ValidateProtectedState compares current sources with retained evidence without
+// acquiring serving ownership, changing counters or writing retained state.
+func (recorder *CodexCanaryRecorder) ValidateProtectedState() error {
+	if recorder == nil {
+		return ErrCodexCanaryProtectedStateUnavailable
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	current, err := recorder.digestsLocked()
+	if err != nil {
+		return ErrCodexCanaryProtectedStateUnavailable
+	}
+	if !equalCodexCanaryDigests(current, recorder.state.ProtectedDigests) {
+		return ErrCodexCanaryProtectedStateChanged
 	}
 	return nil
 }
