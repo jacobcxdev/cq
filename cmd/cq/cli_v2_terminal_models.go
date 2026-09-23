@@ -29,16 +29,23 @@ func terminalModelSource(source string) string {
 	}
 }
 
-func terminalModelOptional(value *string) cli.Span {
+func terminalModelKnownAbsence(value *string) cli.Span {
 	if value == nil || *value == "" {
 		return cli.Span{Text: "none"}
 	}
 	return cli.Span{Text: *value, Role: cli.Identity}
 }
 
+func terminalModelObserved(value *string) cli.Span {
+	if value == nil || *value == "" {
+		return cli.Span{Text: "unknown", Role: cli.Attention}
+	}
+	return cli.Span{Text: *value, Role: cli.Identity}
+}
+
 func terminalModelNumber(value *int, suffix string) cli.Span {
 	if value == nil {
-		return cli.Span{Text: "none"}
+		return cli.Span{Text: "unknown", Role: cli.Attention}
 	}
 	if *value < 0 {
 		return cli.Span{Text: fmt.Sprintf("%d%s", *value, suffix), Role: cli.Quantity}
@@ -55,14 +62,14 @@ func terminalModelDetails(e ModelEntry, selection *ModelCloneSelectionResult, o 
 	if len(e.Aliases) > 0 {
 		aliases = cli.Span{Text: strings.Join(e.Aliases, ", "), Role: cli.Identity}
 	}
-	description := cli.Span{Text: "none"}
+	description := cli.Span{Text: "unknown", Role: cli.Attention}
 	if e.Description != nil && *e.Description != "" {
-		description.Text = *e.Description
+		description = cli.Span{Text: *e.Description}
 	}
-	metadata := terminalModelOptional(e.InferredFrom)
+	metadata := terminalModelKnownAbsence(e.InferredFrom)
 	mode := ""
 	if selection != nil && selection.SourceID != nil {
-		metadata = terminalModelOptional(selection.SourceID)
+		metadata = terminalModelKnownAbsence(selection.SourceID)
 		switch selection.Mode {
 		case "explicit":
 			mode = "Explicit"
@@ -79,16 +86,16 @@ func terminalModelDetails(e ModelEntry, selection *ModelCloneSelectionResult, o 
 	}{
 		{"Provider", cli.Span{Text: terminalModelProvider(e.Provider), Role: cli.Identity}},
 		{"ID", cli.Span{Text: e.ID, Role: cli.Identity}},
-		{"Display name", terminalModelOptional(e.DisplayName)},
+		{"Display name", terminalModelObserved(e.DisplayName)},
 		{"Source", cli.Span{Text: terminalModelSource(e.Source), Role: cli.Identity}},
 		{"Aliases", aliases},
 		{"Description", description},
 		{"Context", terminalModelNumber(e.ContextWindow, " tokens")},
 		{"Maximum context", terminalModelNumber(e.MaxContextWindow, " tokens")},
 		{"Maximum output", terminalModelNumber(e.MaxOutputTokens, " tokens")},
-		{"Visibility", terminalModelOptional(e.Visibility)},
+		{"Visibility", terminalModelObserved(e.Visibility)},
 		{"Priority", terminalModelNumber(e.Priority, "")},
-		{"Explicit clone", terminalModelOptional(e.CloneFrom)},
+		{"Explicit clone", terminalModelKnownAbsence(e.CloneFrom)},
 		{"Metadata source", metadata},
 	}
 	var out strings.Builder
@@ -104,20 +111,21 @@ func terminalModelDetails(e ModelEntry, selection *ModelCloneSelectionResult, o 
 
 func terminalModelsList(rows []ModelEntry, provider string, o cli.TerminalOptions) string {
 	spans := []cli.Span{{Text: "Models", Role: cli.Heading}, {Text: " · "}, cli.TerminalCount(uint64(len(rows)))}
-	if provider != "" && len(rows) > 0 {
+	if provider != "" {
 		spans = append(spans, cli.Span{Text: " · "}, cli.Span{Text: terminalModelProvider(provider), Role: cli.Identity})
 	}
 	text := cli.TerminalLine(o, 0, spans...)
 	if len(rows) == 0 {
-		return text + cli.TerminalLine(o, 2, cli.Span{Text: "No cached models."}) + "\n" +
+		empty := cli.TerminalLine(o, 2, cli.Span{Text: "No cached models."})
+		if provider != "" {
+			empty = cli.TerminalLine(o, 2, cli.Span{Text: "No "}, cli.Span{Text: terminalModelProvider(provider), Role: cli.Identity}, cli.Span{Text: " models in the local registry."})
+		}
+		return text + empty + "\n" +
 			cli.TerminalLine(o, 0, cli.Span{Text: "Fetch model data", Role: cli.Heading}) +
 			cli.TerminalLine(o, 2, cli.Span{Text: "cq models refresh", Role: cli.Identity})
 	}
 	for _, row := range rows {
-		name := terminalModelOptional(row.DisplayName)
-		if name.Text == "none" {
-			name = cli.Span{Text: "none"}
-		}
+		name := terminalModelObserved(row.DisplayName)
 		text += "\n" + cli.TerminalLine(o, 2, cli.Span{Text: row.ID, Role: cli.Identity}, cli.Span{Text: " · "}, name)
 		text += terminalModelDetails(row, nil, o)
 	}
@@ -171,14 +179,27 @@ func terminalModelReason(reason string) cli.Span {
 	}
 }
 
+func terminalModelSourceError(source ModelSourceResult, o cli.TerminalOptions) string {
+	if source.ErrorCode != nil && source.Message != nil {
+		return cli.TerminalLine(o, 4, cli.Span{Text: *source.ErrorCode, Role: cli.Identity}, cli.Span{Text: ": " + *source.Message})
+	}
+	if source.Status == "failed" {
+		return cli.TerminalLine(o, 4, cli.Span{Text: "Reason: "}, cli.Span{Text: "unknown", Role: cli.Attention})
+	}
+	return ""
+}
+
 func terminalModelsPublication(p ModelPublication, o cli.TerminalOptions) string {
 	text := cli.TerminalLine(o, 0, cli.Span{Text: "Publication", Role: cli.Heading}, cli.Span{Text: " · "}, terminalModelStatus(p.Status), cli.Span{Text: " · via "}, cli.Span{Text: p.Via, Role: cli.Identity})
 	if p.Status == "unknown" || (len(p.Targets) == 0 && p.Status == "failed") {
-		return text + cli.TerminalLine(o, 2, cli.Span{Text: "Models: "}, cli.Span{Text: "unknown", Role: cli.Attention})
+		text += cli.TerminalLine(o, 2, cli.Span{Text: "Models: "}, cli.Span{Text: "unknown", Role: cli.Attention})
+	} else {
+		text += cli.TerminalLine(o, 2, cli.Span{Text: "Models: "}, cli.TerminalCount(uint64(p.ActiveCount)), cli.Span{Text: " active"})
 	}
-	text += cli.TerminalLine(o, 2, cli.Span{Text: "Models: "}, cli.TerminalCount(uint64(p.ActiveCount)), cli.Span{Text: " active"})
 	text += "\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Sources", Role: cli.Heading})
-	if o.Width >= 58 {
+	if len(p.Sources) == 0 {
+		text += cli.TerminalLine(o, 2, cli.Span{Text: "No refresh source results."})
+	} else if o.Width >= 58 {
 		text += cli.TerminalLine(o, 2, cli.Span{Text: "Provider  Result     Native models  Malformed rows", Role: cli.Heading})
 		for _, source := range p.Sources {
 			native, malformed := cli.TerminalCount(uint64(source.NativeCount)), cli.TerminalCount(uint64(source.MalformedCount))
@@ -190,6 +211,7 @@ func terminalModelsPublication(p ModelPublication, o cli.TerminalOptions) string
 				cli.Span{Text: fmt.Sprintf("%-11s", terminalModelStatus(source.Status).Text), Role: terminalModelStatus(source.Status).Role},
 				cli.Span{Text: fmt.Sprintf("%13s", native.Text), Role: native.Role}, cli.Span{Text: " "},
 				cli.Span{Text: fmt.Sprintf("%15s", malformed.Text), Role: malformed.Role})
+			text += terminalModelSourceError(source, o)
 		}
 	} else {
 		for _, source := range p.Sources {
@@ -200,14 +222,13 @@ func terminalModelsPublication(p ModelPublication, o cli.TerminalOptions) string
 			}
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Native models: "}, native)
 			text += cli.TerminalLine(o, 4, cli.Span{Text: "Malformed rows: "}, malformed)
-		}
-	}
-	for _, source := range p.Sources {
-		if source.ErrorCode != nil && source.Message != nil {
-			text += cli.TerminalLine(o, 4, cli.Span{Text: *source.ErrorCode, Role: cli.Identity}, cli.Span{Text: ": " + *source.Message})
+			text += terminalModelSourceError(source, o)
 		}
 	}
 	text += "\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Client caches", Role: cli.Heading})
+	if len(p.Targets) == 0 {
+		text += cli.TerminalLine(o, 2, cli.Span{Text: "No client cache publication results."})
+	}
 	for _, target := range p.Targets {
 		text += cli.TerminalLine(o, 2, cli.Span{Text: terminalModelTargetName(target.Target), Role: cli.Identity}, cli.Span{Text: " · "}, terminalModelStatus(target.Status), cli.Span{Text: " · "}, terminalModelReason(target.Reason))
 		text += cli.TerminalLine(o, 4, cli.Span{Text: target.Path, Role: cli.Identity})
@@ -219,24 +240,26 @@ func terminalModelsPublication(p ModelPublication, o cli.TerminalOptions) string
 }
 
 func terminalModelsOverlayAdd(entry ModelEntry, selection ModelCloneSelectionResult, p ModelPublication, exit int, o cli.TerminalOptions) string {
-	if exit != 0 && p.Status == "complete" {
-		p.Status = "unknown"
-	}
 	spans := []cli.Span{{Text: "Model overlay", Role: cli.Heading}, {Text: " · "}, {Text: "Saved", Role: cli.Confirmed}}
 	if exit != 0 {
-		spans = append(spans, cli.Span{Text: " · "}, cli.Span{Text: "Publication incomplete", Role: cli.Attention})
+		status := "Publication incomplete"
+		if p.Status == "complete" {
+			status = "Command incomplete"
+		}
+		spans = append(spans, cli.Span{Text: " · "}, cli.Span{Text: status, Role: cli.Attention})
 	}
 	text := cli.TerminalLine(o, 0, spans...) + terminalModelDetails(entry, &selection, o)
 	return text + "\n" + terminalModelsPublication(p, o)
 }
 
 func terminalModelsOverlayRemove(provider, id string, p ModelPublication, exit int, o cli.TerminalOptions) string {
-	if exit != 0 && p.Status == "complete" {
-		p.Status = "unknown"
-	}
 	spans := []cli.Span{{Text: "Model overlay", Role: cli.Heading}, {Text: " · "}, {Text: "Removed", Role: cli.Confirmed}}
 	if exit != 0 {
-		spans = append(spans, cli.Span{Text: " · "}, cli.Span{Text: "Publication incomplete", Role: cli.Attention})
+		status := "Publication incomplete"
+		if p.Status == "complete" {
+			status = "Command incomplete"
+		}
+		spans = append(spans, cli.Span{Text: " · "}, cli.Span{Text: status, Role: cli.Attention})
 	}
 	text := cli.TerminalLine(o, 0, spans...)
 	text += cli.TerminalLine(o, 2, cli.Span{Text: "Provider  "}, cli.Span{Text: terminalModelProvider(provider), Role: cli.Identity})

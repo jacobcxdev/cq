@@ -287,9 +287,7 @@ func handleV2ModelsWithDependencies(ctx context.Context, inv cli.Invocation, _ *
 			fmt.Fprintf(&human, "%s: %s\n", target.Target, target.Status)
 		}
 		outcome.Human = human.String()
-		if (outcome.ExitCode == 0 || publication.Status != "complete") && (publication.Status != "failed" || len(publication.Targets) > 0) {
-			outcome.Terminal = func(o cli.TerminalOptions) string { return terminalModelsPublication(publication, o) }
-		}
+		outcome.Terminal = func(o cli.TerminalOptions) string { return terminalModelsPublication(publication, o) }
 		return modelsData(outcome, struct {
 			Publication ModelPublication `json:"publication"`
 		}{publication})

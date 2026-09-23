@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -423,7 +424,92 @@ func TestTerminalModelsIndependentStreamGates(t *testing.T) {
 	}
 }
 
-func TestTerminalModelsUnconfirmedPublication(t *testing.T) {
+func TestTerminalModelsFilteredEmptyScope(t *testing.T) {
+	for _, width := range []int{20, 40, 80, 100, 120} {
+		o := terminalFixtureOptions(width)
+		got := terminalModelsList(nil, "codex", o)
+		plain := ansi.Strip(got)
+		if !strings.Contains(plain, "Models · 0 · Codex") || !strings.Contains(got, "\x1b[36mCodex") || (width >= 100 && !strings.Contains(plain, "No Codex models in the local registry.")) {
+			t.Fatal("filtered empty scope lost", got)
+		}
+		for _, line := range strings.Split(got, "\n") {
+			if ansi.StringWidth(line) > min(width, 100) {
+				t.Fatalf("width %d: %q", width, line)
+			}
+		}
+	}
+}
+
+func TestTerminalModelsUnknownAndKnownAbsentMetadata(t *testing.T) {
+	entry := ModelEntry{Provider: "codex", ID: "model-1", Source: "native"}
+	for _, width := range []int{20, 40, 80, 100, 120} {
+		o := terminalFixtureOptions(width)
+		for _, got := range []string{terminalModelsList([]ModelEntry{entry}, "codex", o), terminalModelsOverlayAdd(entry, ModelCloneSelectionResult{Mode: "none"}, terminalModelsFixturePublication(1, "local", false), 0, o)} {
+			plain := ansi.Strip(got)
+			for _, label := range []string{"Description", "Context", "Maximum context", "Maximum output", "Visibility", "Priority"} {
+				if !strings.Contains(plain, label) {
+					t.Fatalf("missing %s: %s", label, plain)
+				}
+			}
+			if strings.Count(plain, "unknown") < 7 || !strings.Contains(got, "\x1b[33munknown") {
+				t.Fatal("missing metadata became known absence", got)
+			}
+			for _, label := range []string{"Aliases", "Explicit clone", "Metadata source"} {
+				if !strings.Contains(plain, label) {
+					t.Fatalf("known absence %s omitted: %s", label, plain)
+				}
+			}
+			if strings.Count(plain, "none") < 3 {
+				t.Fatal("known absence became unknown", plain)
+			}
+			for _, line := range strings.Split(got, "\n") {
+				if ansi.StringWidth(line) > min(width, 100) {
+					t.Fatalf("width %d: %q", width, line)
+				}
+			}
+		}
+	}
+	empty := ""
+	entry.DisplayName, entry.Description, entry.Visibility = &empty, &empty, &empty
+	got := ansi.Strip(terminalModelsList([]ModelEntry{entry}, "codex", terminalFixtureOptions(100)))
+	if strings.Count(got, "unknown") < 4 {
+		t.Fatal("empty metadata became known absence", got)
+	}
+	zero := 0
+	entry.ContextWindow, entry.Priority = &zero, &zero
+	got = ansi.Strip(terminalModelsList([]ModelEntry{entry}, "codex", terminalFixtureOptions(100)))
+	if !strings.Contains(got, "Context           0 tokens") || !strings.Contains(got, "Priority          0") {
+		t.Fatal("known zero became unknown", got)
+	}
+}
+
+func TestTerminalModelsFailedPublicationEvidence(t *testing.T) {
+	p := failedModelsPublication("proxy")
+	for _, width := range []int{20, 40, 80, 100, 120} {
+		got := terminalModelsPublication(p, terminalFixtureOptions(width))
+		plain := ansi.Strip(got)
+		if !strings.Contains(plain, "Publication") || !strings.Contains(plain, "Models: unknown") || !strings.Contains(plain, "Claude") || !strings.Contains(plain, "Codex") || !strings.Contains(plain, "Client caches") || (width >= 100 && (!strings.Contains(plain, "models_source_failed: Model source refresh failed.") || !strings.Contains(plain, "No client cache publication results."))) {
+			t.Fatal("failed publication evidence lost", got)
+		}
+		for _, line := range strings.Split(got, "\n") {
+			if ansi.StringWidth(line) > min(width, 100) {
+				t.Fatalf("width %d: %q", width, line)
+			}
+		}
+	}
+	entry := terminalModelsFixtureEntry()
+	got := ansi.Strip(terminalModelsOverlayAdd(entry, ModelCloneSelectionResult{Mode: "explicit", SourceID: entry.CloneFrom}, p, 1, terminalFixtureOptions(100)))
+	if !strings.Contains(got, "Model overlay · Saved") || !strings.Contains(got, "models_source_failed") {
+		t.Fatal("saved overlay hid failed source", got)
+	}
+	p.Sources[0].ErrorCode, p.Sources[0].Message = nil, nil
+	got = ansi.Strip(terminalModelsPublication(p, terminalFixtureOptions(100)))
+	if !strings.Contains(got, "Claude    Failed") || !strings.Contains(got, "Reason: unknown") {
+		t.Fatal("failed source without reason claimed known result", got)
+	}
+}
+
+func TestTerminalModelsCompletePublicationOnNonzeroExit(t *testing.T) {
 	p := terminalModelsFixturePublication(2, "proxy", false)
 	o := terminalFixtureOptions(100)
 	entry := terminalModelsFixtureEntry()
@@ -432,8 +518,73 @@ func TestTerminalModelsUnconfirmedPublication(t *testing.T) {
 		terminalModelsOverlayRemove("codex", entry.ID, p, 1, o),
 	} {
 		plain := ansi.Strip(got)
-		if !strings.Contains(plain, "Publication · Unknown") || strings.Contains(plain, "Publication · Complete") || !strings.Contains(plain, "Model overlay · ") {
-			t.Fatal("failed request claimed confirmed publication", plain)
+		if !strings.Contains(plain, "Publication · Complete") || !strings.Contains(plain, "Codex cache · Written · Published") || !strings.Contains(plain, "Command incomplete") || !strings.Contains(plain, "Model overlay · ") {
+			t.Fatal("explicit publication receipt lost on nonzero exit", plain)
 		}
+	}
+	unknown := ModelPublication{Status: "unknown", Via: "proxy"}
+	got := ansi.Strip(terminalModelsPublication(unknown, o))
+	if !strings.Contains(got, "Publication · Unknown") || !strings.Contains(got, "Models: unknown") || strings.Contains(got, "Written") || strings.Contains(got, "0 active") {
+		t.Fatal("unknown publication promoted to complete", got)
+	}
+}
+
+func TestTerminalModelsAdapterPreservesCompleteReceiptAfterCancellation(t *testing.T) {
+	for _, args := range [][]string{
+		{"models", "refresh"},
+		{"models", "overlay", "add", "--provider", "codex", "--id", "overlay-example", "--clone-from", "native-example"},
+		{"models", "overlay", "remove", "--provider", "codex", "--id", "overlay-example"},
+	} {
+		t.Run(strings.Join(args[:2], " ")+" "+args[len(args)-1], func(t *testing.T) {
+			m := newModelTestFixture(t)
+			if len(args) > 2 && args[2] == "remove" {
+				m.save(t, modelregistry.Entry{Provider: modelregistry.ProviderCodex, ID: "overlay-example", Source: modelregistry.SourceOverlay})
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			p := terminalModelsFixturePublication(2, "proxy", false)
+			m.deps.Refresh = func(context.Context, modelsDeps) (ModelPublication, []ModelIdentity, error) {
+				m.fixture.Call("refresh")
+				cancel()
+				return p, nil, nil
+			}
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run(ctx, args, &cli.Session{Out: &stdout, Err: &stderr, OutTerminal: terminalFixtureOptions(100), ErrTerminal: terminalFixtureOptions(100)}, m.fixture.Lookup)
+			plain := ansi.Strip(stdout.String())
+			if exit != 130 || !strings.Contains(plain, "Publication · Complete") || !strings.Contains(plain, "Codex cache · Written · Published") || m.fixture.calls["refresh"] != 1 {
+				t.Fatal("complete receipt lost after cancellation", exit, plain, m.fixture.calls)
+			}
+			if len(args) > 2 && (!strings.Contains(plain, "Command incomplete") || !strings.Contains(plain, "Model overlay · ")) {
+				t.Fatal("command status conflated with publication", plain)
+			}
+			if !strings.Contains(stderr.String(), "interrupted") {
+				t.Fatal("interruption diagnostic lost", stderr.String())
+			}
+		})
+	}
+}
+
+func TestTerminalModelsAdapterKeepsFailedSourceReceiptAfterSave(t *testing.T) {
+	m := newModelTestFixture(t)
+	m.deps.Refresh = func(context.Context, modelsDeps) (ModelPublication, []ModelIdentity, error) {
+		m.fixture.Call("refresh")
+		return failedModelsPublication("proxy"), nil, errors.New("source unavailable")
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"models", "overlay", "add", "--provider", "codex", "--id", "overlay-example", "--clone-from", "native-example"}
+	var captured cli.Outcome
+	exit := cli.Run(context.Background(), args, &cli.Session{Out: &stdout, Err: &stderr, OutTerminal: terminalFixtureOptions(100), ErrTerminal: terminalFixtureOptions(100)}, func(string) (cli.Handler, bool) {
+		return func(ctx context.Context, inv cli.Invocation, s *cli.Session) cli.Outcome {
+			captured = handleV2ModelsWithDependencies(ctx, inv, s, m.deps)
+			return captured
+		}, true
+	})
+	plain := ansi.Strip(stdout.String())
+	if exit != 1 || !strings.Contains(plain, "Model overlay · Saved · Publication incomplete") || !strings.Contains(plain, "models_source_failed: Model source refresh failed.") || !strings.Contains(plain, "No client cache publication results.") || !bytes.Contains(captured.Data, []byte(`"overlay_saved":true`)) || m.fixture.calls["refresh"] != 1 {
+		t.Fatal("failed source or saved receipt lost", exit, plain, string(captured.Data), m.fixture.calls)
+	}
+	stored, err := loadModelsOverlayFile(m.state)
+	if err != nil || len(stored.Models) != 1 {
+		t.Fatal("local save not confirmed", err, stored)
 	}
 }
