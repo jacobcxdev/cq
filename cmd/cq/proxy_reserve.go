@@ -97,58 +97,14 @@ func runProxyReserveWithDependencies(ctx context.Context, args []string, output 
 	if err != nil {
 		return err
 	}
-	action, window, percent, port, asJSON := options.action, options.window, options.percent, options.port, options.asJSON
-	if ctx == nil || output == nil || deps.LoadConfig == nil || deps.Doer == nil {
+	if output == nil {
 		return errors.New("proxy reserve control unavailable")
 	}
-	cfg, err := deps.LoadConfig()
+	status, err := requestProxyReserve(ctx, options, deps)
 	if err != nil {
 		return err
 	}
-	if cfg == nil || cfg.LocalToken == "" {
-		return errors.New("proxy reserve: local proxy credentials unavailable")
-	}
-	if port == 0 {
-		port = cfg.Port
-		if port == 0 {
-			port = proxy.DefaultPort
-		}
-	}
-	method := http.MethodGet
-	var body io.Reader = http.NoBody
-	if action != "status" && action != "windows" {
-		method = http.MethodPost
-		encoded, err := json.Marshal(proxy.CodexReserveControlRequest{Action: action, Window: window, Percent: percent})
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(encoded)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimeReservePath), body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
-	req.Header.Set("Content-Type", "application/json")
-	response, err := deps.Doer.Do(req)
-	if err != nil {
-		return fmt.Errorf("proxy reserve: running CQ service required: %w", err)
-	}
-	if response == nil || response.Body == nil {
-		return errors.New("proxy reserve response unavailable")
-	}
-	defer response.Body.Close()
-	data, err := httputil.ReadBody(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("proxy reserve control failed: HTTP %d", response.StatusCode)
-	}
-	var status proxy.CodexReserveStatus
-	if err := json.Unmarshal(data, &status); err != nil {
-		return errors.New("proxy reserve response invalid")
-	}
+	action, asJSON := options.action, options.asJSON
 	if asJSON {
 		return json.NewEncoder(output).Encode(status)
 	}
@@ -202,4 +158,78 @@ type ProxyReserveSetCmd struct {
 	Window  string  `required:"" help:"Exact quota window selector from reserve windows"`
 	Percent float64 `required:"" help:"Percentage of remaining quota to protect"`
 	Port    int     `help:"Proxy port"`
+}
+
+// proxyReserveError retains legacy diagnostics while exposing transport failures
+// independently of printed output or a second, racy status request.
+type proxyReserveError struct {
+	kind   string
+	status int
+	code   string
+	err    error
+}
+
+func (e *proxyReserveError) Error() string { return e.err.Error() }
+func (e *proxyReserveError) Unwrap() error { return e.err }
+
+func requestProxyReserve(ctx context.Context, options proxyReserveOptions, deps proxyPolicyDependencies) (proxy.CodexReserveStatus, error) {
+	action, window, percent, port := options.action, options.window, options.percent, options.port
+	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "unavailable", err: errors.New("proxy reserve control unavailable")}
+	}
+	if err := ctx.Err(); err != nil {
+		return proxy.CodexReserveStatus{}, err
+	}
+	cfg, err := deps.LoadConfig()
+	if stopped := ctx.Err(); stopped != nil {
+		return proxy.CodexReserveStatus{}, stopped
+	}
+	if err != nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "io", err: err}
+	}
+	if cfg == nil || cfg.LocalToken == "" {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "auth", err: errors.New("proxy reserve: local proxy credentials unavailable")}
+	}
+	if port == 0 {
+		port = cfg.Port
+		if port == 0 {
+			port = proxy.DefaultPort
+		}
+	}
+	method := http.MethodGet
+	var body io.Reader = http.NoBody
+	if action != "status" && action != "windows" {
+		method = http.MethodPost
+		encoded, err := json.Marshal(proxy.CodexReserveControlRequest{Action: action, Window: window, Percent: percent})
+		if err != nil {
+			return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "io", err: err}
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimeReservePath), body)
+	if err != nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "io", err: err}
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
+	req.Header.Set("Content-Type", "application/json")
+	response, err := deps.Doer.Do(req)
+	if err != nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "unavailable", err: fmt.Errorf("proxy reserve: running CQ service required: %w", err)}
+	}
+	if response == nil || response.Body == nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "unavailable", err: errors.New("proxy reserve response unavailable")}
+	}
+	defer response.Body.Close()
+	data, err := httputil.ReadBody(response.Body)
+	if err != nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "io", err: err}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{status: response.StatusCode, code: response.Header.Get("X-CQ-Reserve-Error"), err: fmt.Errorf("proxy reserve control failed: HTTP %d", response.StatusCode)}
+	}
+	var status proxy.CodexReserveStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return proxy.CodexReserveStatus{}, &proxyReserveError{kind: "io", err: errors.New("proxy reserve response invalid")}
+	}
+	return status, nil
 }

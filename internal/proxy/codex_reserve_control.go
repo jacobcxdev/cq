@@ -49,8 +49,28 @@ func (s *Server) handleReserveControl(w http.ResponseWriter, r *http.Request) {
 	}
 	status, err := s.Reserve.Control(mutation.Action, mutation.Window, mutation.Percent)
 	if err != nil {
+		w.Header().Set("X-CQ-Reserve-Error", reserveControlErrorCode(err))
 		http.Error(w, "reserve control rejected", http.StatusConflict)
 		return
 	}
 	writePolicyControlJSON(w, status)
+}
+
+// Keep legacy status and body stable; the receipt contains only an allowlisted code.
+func reserveControlErrorCode(err error) string {
+	var persistence *CodexReserveControlError
+	switch {
+	case errors.Is(err, ErrReserveInvalidArgument), errors.Is(err, ErrReserveInvalidAction):
+		return "routing_invalid_argument"
+	case errors.Is(err, ErrReserveWindowUnavailable):
+		return "reserve_window_unavailable"
+	case errors.Is(err, ErrReserveNotConfigured):
+		return "reserve_not_configured"
+	case errors.Is(err, ErrReserveEvidenceRequired):
+		return "reserve_evidence_required"
+	case errors.As(err, &persistence):
+		return "routing_io_failed"
+	default:
+		return "routing_conflict"
+	}
 }

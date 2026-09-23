@@ -3,11 +3,16 @@ package proxy
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
-	"testing"
-	"time"
 )
 
 type reserveInventory struct {
@@ -389,4 +394,71 @@ func TestCodexReserveDoesNotTreatSmallCorrectionAsReset(t *testing.T) {
 	if reserve.Status().Enabled {
 		t.Fatal("quota correction and timestamp jitter mistaken for reset")
 	}
+}
+
+// The receipt is additive: old clients retain the exact status and body.
+func TestCodexReserveControlErrorReceipts(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, code             string
+		configured, stale, failWrite bool
+	}{
+		{"invalid", `{"action":"set","window":"7d","percent":0}`, "routing_invalid_argument", false, false, false},
+		{"unknown action", `{"action":"unknown"}`, "routing_invalid_argument", false, false, false},
+		{"unavailable window", `{"action":"set","window":"5h","percent":2}`, "reserve_window_unavailable", false, false, false},
+		{"enable absent", `{"action":"enable"}`, "reserve_not_configured", false, false, false},
+		{"disable absent", `{"action":"disable"}`, "reserve_not_configured", false, false, false},
+		{"stale", `{"action":"disable"}`, "reserve_evidence_required", true, true, false},
+		{"write failure", `{"action":"clear"}`, "routing_io_failed", true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Unix(1800000000, 0)
+			fs := &reserveFailureFS{MemFS: fsutil.NewMemFS()}
+			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Minute)
+			r, err := OpenCodexReserve(fs, "/state/reserve.json", ledger, &reserveInventory{active: "system"}, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 2, ResetAtUnix: now.Add(time.Hour).Unix()}}}})
+			if tc.configured {
+				if _, err := r.Control("set", "7d", 2); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.stale {
+				now = now.Add(time.Minute)
+			}
+			if tc.failWrite {
+				fs.failure = errors.New("private failure material")
+			}
+			w := httptest.NewRecorder()
+			(&Server{Reserve: r}).handleReserveControl(w, httptest.NewRequest(http.MethodPost, RuntimeReservePath, strings.NewReader(tc.body)))
+			if w.Code != 409 || w.Body.String() != "reserve control rejected\n" {
+				t.Fatalf("legacy response changed: %d %q", w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("X-CQ-Reserve-Error"); got != tc.code {
+				t.Fatalf("receipt=%q want=%q", got, tc.code)
+			}
+			if tc.failWrite {
+				if !r.Status().Configured {
+					t.Fatal("failed clear changed in-memory configuration")
+				}
+				_, err := r.Control("clear", "", 0)
+				if !errors.Is(err, fs.failure) || err.Error() != fs.failure.Error() {
+					t.Fatal("persistence cause or legacy diagnostic lost")
+				}
+			}
+		})
+	}
+}
+
+type reserveFailureFS struct {
+	*fsutil.MemFS
+	failure error
+}
+
+func (fs *reserveFailureFS) MkdirAll(path string, mode os.FileMode) error {
+	if fs.failure != nil {
+		return fs.failure
+	}
+	return fs.MemFS.MkdirAll(path, mode)
 }

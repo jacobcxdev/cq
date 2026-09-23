@@ -323,6 +323,22 @@ func (r *CodexReserve) Blocked(account codex.AccountKey) (bool, int64) {
 	// Retain the last observed system identity when inventory is temporarily unavailable.
 	return status.Blocked && status.AccountKey == account, status.ResetAt
 }
+
+// Stable control errors carry the under-lock decision without a second status read.
+var (
+	ErrReserveInvalidArgument   = errors.New("reserve requires a valid window and percentage greater than 0 and less than 100")
+	ErrReserveWindowUnavailable = errors.New("selected window unavailable; inspect reserve windows")
+	ErrReserveNotConfigured     = errors.New("reserve is not configured")
+	ErrReserveEvidenceRequired  = errors.New("fresh usage and reset evidence required to disable reserve")
+	ErrReserveInvalidAction     = errors.New("unknown reserve action")
+)
+
+// CodexReserveControlError identifies persistence failure while preserving its cause.
+type CodexReserveControlError struct{ Err error }
+
+func (e *CodexReserveControlError) Error() string { return e.Err.Error() }
+func (e *CodexReserveControlError) Unwrap() error { return e.Err }
+
 func (r *CodexReserve) Control(action string, window quota.WindowName, percent float64) (CodexReserveStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -332,32 +348,32 @@ func (r *CodexReserve) Control(action string, window quota.WindowName, percent f
 	case "set":
 		window = canonicalReserveWindow(window)
 		if quota.PeriodFor(window) <= 0 || !validReservePercent(percent) {
-			return status, errors.New("reserve requires a valid window and percentage greater than 0 and less than 100")
+			return status, ErrReserveInvalidArgument
 		}
 		if _, ok := status.Windows[window]; !ok {
-			return status, errors.New("selected window unavailable; inspect reserve windows")
+			return status, ErrReserveWindowUnavailable
 		}
 		d = codexReserveDocument{Window: window, Percent: percent, LastSystemAccount: status.AccountKey}
 	case "disable":
 		if !status.Configured {
-			return status, errors.New("reserve is not configured")
+			return status, ErrReserveNotConfigured
 		}
 		if status.RemainingPct == nil || status.AccountKey == "" || status.ResetAt <= r.now().Unix() || r.now().Sub(status.ObservedAt) > reserveFreshnessLimit(*status.RemainingPct, d.Percent) {
-			return status, errors.New("fresh usage and reset evidence required to disable reserve")
+			return status, ErrReserveEvidenceRequired
 		}
 		d.Bypass = &codexReserveBypass{Account: status.AccountKey, ResetAt: status.ResetAt, Remaining: *status.RemainingPct, ObservedAt: status.ObservedAt}
 	case "enable":
 		if !status.Configured {
-			return status, errors.New("reserve is not configured")
+			return status, ErrReserveNotConfigured
 		}
 		d.Bypass = nil
 	case "clear":
 		d = codexReserveDocument{}
 	default:
-		return status, errors.New("unknown reserve action")
+		return status, ErrReserveInvalidAction
 	}
 	if err := r.saveLocked(d); err != nil {
-		return status, err
+		return status, &CodexReserveControlError{Err: err}
 	}
 	if action == "set" {
 		r.ledger.clearWindowUsageUnsettled(d.LastSystemAccount, d.Window)
