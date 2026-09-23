@@ -128,10 +128,12 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 		if receipt.Outcome == "conflicted" {
 			out = v2SelectionFailure(6, "candidate_receipt_conflicted", "Candidate receipt is conflicted.")
 		}
+		data := v2CandidateReceipt{receipt.AttemptID, receipt.Outcome, receipt.ReceiptDigest, receipt.PromotionDigest}
 		out.Data, _ = json.Marshal(struct {
 			Receipt v2CandidateReceipt `json:"receipt"`
-		}{v2CandidateReceipt{receipt.AttemptID, receipt.Outcome, receipt.ReceiptDigest, receipt.PromotionDigest}})
+		}{data})
 		out.Human = fmt.Sprintf("Attempt: %s\nOutcome: %s\nReceipt digest: %s\nPromotion digest: %s\n", cli.HumanValue(receipt.AttemptID), cli.HumanValue(receipt.Outcome), cli.HumanValue(receipt.ReceiptDigest), cli.HumanValue(receipt.PromotionDigest))
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalCandidateReceipt(data, o) }
 		return out
 	}
 	var state proxy.CandidateLifecycleStateV1
@@ -223,10 +225,12 @@ func handleV2CandidateWithPreparation(parent context.Context, inv cli.Invocation
 		return finish(budget.Cleanup().Err())
 	}
 	out := cli.Outcome{}
+	data := projectV2Candidate(root, state)
 	out.Data, _ = json.Marshal(struct {
 		Candidate v2CandidateStatus `json:"candidate"`
-	}{projectV2Candidate(root, state)})
+	}{data})
 	out.Human = fmt.Sprintf("Candidate: %s\nState directory: %s\nPhase: %s\nPort: %d\nValidation run: %s\n", cli.HumanValue(state.ProxyInstanceID), cli.HumanValue(root), cli.HumanValue(string(state.Phase)), state.Port, cli.HumanValue(state.ValidationRunID))
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalCandidateStatus(data, o) }
 	return out
 }
 
