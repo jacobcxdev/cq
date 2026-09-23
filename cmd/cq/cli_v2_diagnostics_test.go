@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -483,6 +484,9 @@ func TestCLIV2RoutingDiagnosticsSignalHelper(t *testing.T) {
 	os.Exit(code)
 }
 func TestCLIV2RoutingDiagnosticsSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sending os.Interrupt to another process is unsupported on Windows")
+	}
 	root := t.TempDir()
 	config := filepath.Join(root, "config", "cq")
 	if err := os.MkdirAll(config, 0o700); err != nil {
