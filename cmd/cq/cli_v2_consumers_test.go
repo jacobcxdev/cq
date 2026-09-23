@@ -230,3 +230,74 @@ func TestCLIV2PackageJQConsumers(t *testing.T) {
 		}
 	}
 }
+
+// Execute only the extracted identity assertion with synthetic native queries.
+// The package script, Task Scheduler, process API and listener API never run.
+func TestCLIV2WindowsInstallExpectedListener(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell native/package job provides consumer coverage")
+	}
+	raw, err := os.ReadFile("../../.github/scripts/validate-windows-install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	start := strings.Index(source, "    if (($PreviousRelease -and ($status.proxy.configured_executable")
+	if start < 0 {
+		t.Fatal("missing installed identity assertion")
+	}
+	end := strings.Index(source[start:], "    if ($ExpectWindowsMetadata)")
+	if end < 0 {
+		t.Fatal("missing identity assertion boundary")
+	}
+	assertion := source[start : start+end]
+	for _, tc := range []struct {
+		name  string
+		valid bool
+	}{
+		{"valid", true}, {"missing", false}, {"wrong-port", false}, {"wrong-pid", false},
+		{"wrong-executable", false}, {"wrong-process-executable", false},
+		{"previous", true}, {"previous-wrong-listener", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := `
+$ErrorActionPreference = "Stop"
+$Executable = "/synthetic/cq"
+$Port = 19280
+$PreviousRelease = $false
+$status = [pscustomobject]@{proxy=[pscustomobject]@{pid=123;executable=$Executable;configured_executable=$Executable;live_executable=$Executable;listener="127.0.0.1:$Port"}}
+$case = "` + tc.name + `"
+if ($case -like "previous*") { $PreviousRelease = $true }
+if ($case -eq "previous-wrong-listener") { $status.proxy.listener = "127.0.0.1:19000" }
+if ($case -eq "wrong-executable") { $status.proxy.executable = "/foreign/cq" }
+function Get-CimInstance {
+ param($ClassName, $Filter)
+ if ($ClassName -ne "Win32_Process" -or $Filter -ne "ProcessId=123") { throw "unexpected process query" }
+ return [pscustomobject]@{ExecutablePath=$(if($case -eq "wrong-process-executable"){ "/foreign/cq" }else{$Executable})}
+}
+function Get-NetTCPConnection {
+ param($State, $LocalAddress, $LocalPort, $ErrorAction)
+ if ($State -ne "Listen" -or $LocalAddress -ne "127.0.0.1" -or $LocalPort -ne $Port) { throw "unexpected listener query" }
+ $listeners = @()
+ if ($case -ne "missing") {
+  $listeners = @([pscustomobject]@{LocalAddress="127.0.0.1";LocalPort=$(if($case -eq "wrong-port"){19000}else{$Port});OwningProcess=$(if($case -eq "wrong-pid"){456}else{123})})
+ }
+ return @($listeners | Where-Object { $_.LocalAddress -eq $LocalAddress -and $_.LocalPort -eq $LocalPort })
+}
+` + assertion
+			path := filepath.Join(t.TempDir(), "fixture.ps1")
+			if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-File", path)
+			cmd.Env = []string{"HOME=" + filepath.Dir(path), "PATH=" + filepath.Dir(pwsh)}
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%t err=%v output=%s", tc.valid, err, output)
+			}
+		})
+	}
+}

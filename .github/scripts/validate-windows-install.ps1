@@ -287,6 +287,12 @@ function Assert-Installed {
     if ($ownedProcess.ExecutablePath -ne $Executable) {
         throw "listener process is not installed CQ"
     }
+    if (-not $PreviousRelease) {
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalAddress "127.0.0.1" -LocalPort $Port -ErrorAction Stop)
+        if ($listeners.Count -ne 1 -or $listeners[0].OwningProcess -ne $status.proxy.pid) {
+            throw "installed CQ does not own the expected listener"
+        }
+    }
     if ($ExpectWindowsMetadata) {
         $root = Split-Path -Parent $Executable
         $entries = @(Get-CQARPEntries | Where-Object { $_.DisplayVersion -eq $Version.TrimStart("v") })
