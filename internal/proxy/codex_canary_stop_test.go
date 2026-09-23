@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -888,5 +889,109 @@ func TestCodexCanaryRestartRetirementHoldsServingOwner(t *testing.T) {
 	defer second.Close()
 	if !attempted {
 		t.Fatal("owner interleaving not exercised")
+	}
+}
+
+// The replacement rename reaches the temporary OS directory before this seam
+// fails its durability sync. The final start error is produced by the writer.
+type canaryPostRenameFS struct {
+	fsutil.OSFileSystem
+	stateDirectory                 string
+	stateSyncError, statePublished bool
+}
+
+func (fsys *canaryPostRenameFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fsys.OSFileSystem.OpenSecureDirectory(path)
+	if err != nil || path != fsys.stateDirectory {
+		return directory, err
+	}
+	return &canaryPostRenameDirectory{SecureDirectory: directory, IdentityBoundRenamer: directory.(fsutil.IdentityBoundRenamer), IdentityBoundRemover: directory.(fsutil.IdentityBoundRemover), fs: fsys}, nil
+}
+
+type canaryPostRenameDirectory struct {
+	fsutil.SecureDirectory
+	fsutil.IdentityBoundRenamer
+	fsutil.IdentityBoundRemover
+	fs *canaryPostRenameFS
+}
+
+func (directory *canaryPostRenameDirectory) RenameChecked(oldName, newName string, identity fsutil.SecureFileIdentity) error {
+	err := directory.IdentityBoundRenamer.RenameChecked(oldName, newName, identity)
+	if err == nil && newName == "canary.json" {
+		directory.fs.statePublished = true
+	}
+	return err
+}
+func (directory *canaryPostRenameDirectory) Sync() error {
+	if directory.fs.stateSyncError && directory.fs.statePublished {
+		return errors.New("state directory sync failed after publication")
+	}
+	return directory.SecureDirectory.Sync()
+}
+
+func TestCodexCanaryRestartPostRenameFailure(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fsys := &canaryPostRenameFS{stateDirectory: directory}
+	now := time.Now().UTC()
+	path := filepath.Join(fsys.stateDirectory, "canary.json")
+	first, err := StartCodexCanary(fsys.OSFileSystem, path, nil, canaryTestTuple(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finaliseCodexCanaryForTest(t, first, now.Add(time.Minute))
+	firstID := first.State().RunID
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	oldState, err := fsys.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsys.stateSyncError = true
+	returned, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now.Add(2*time.Minute))
+	if returned != nil || !errors.Is(err, fsutil.ErrCommitIndeterminate) {
+		t.Fatalf("post-rename start: recorder=%v error=%v", returned, err)
+	}
+	if !fsys.statePublished {
+		t.Fatal("replacement rename was not exercised")
+	}
+	retained, err := OpenCodexCanary(fsys.OSFileSystem, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := retained.State()
+	newState, err := fsys.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A post-rename error does not roll back publication or retain the old proof.
+	if string(oldState) == string(newState) {
+		t.Fatal("post-rename error fabricated rollback to the old completed record")
+	}
+	if state.RunID == firstID || !state.Active || state.Finalisation != nil || !state.EndedAt.IsZero() {
+		t.Fatalf("retained replacement is not a new active run: %+v", state)
+	}
+	for _, name := range []string{"request.json", "inflight.json"} {
+		if _, err := fsys.Stat(filepath.Join(fsys.stateDirectory, "codex-canary-stop", name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("old intent was recreated: %s", name)
+		}
+	}
+	fsys.stateSyncError = false
+	retried, err := StartCodexCanaryOnce(fsys, path, nil, canaryTestTuple(), now.Add(3*time.Minute))
+	if retried != nil || !errors.Is(err, ErrCodexCanaryActive) {
+		t.Fatalf("retry did not report active conflict: recorder=%v error=%v", retried, err)
+	}
+	afterRetry, err := fsys.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(newState) != string(afterRetry) {
+		t.Fatal("retry changed the indeterminate publication's retained state")
 	}
 }

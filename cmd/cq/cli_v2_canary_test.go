@@ -373,3 +373,98 @@ func TestCLIV2CanaryProductionMissingUsesResolvedPaths(t *testing.T) {
 		t.Fatal("missing canary read created directories")
 	}
 }
+
+// Exercise the adapter through the durable writer's real OS rename, followed
+// by an injected state-directory sync error, rather than a mocked start error.
+type v2CanaryPostRenameFS struct {
+	fsutil.OSFileSystem
+	stateDirectory      string
+	failSync, published bool
+}
+
+func (fsys *v2CanaryPostRenameFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	directory, err := fsys.OSFileSystem.OpenSecureDirectory(path)
+	if err != nil || path != fsys.stateDirectory {
+		return directory, err
+	}
+	return &v2CanaryPostRenameDirectory{SecureDirectory: directory, IdentityBoundRenamer: directory.(fsutil.IdentityBoundRenamer), IdentityBoundRemover: directory.(fsutil.IdentityBoundRemover), fs: fsys}, nil
+}
+
+type v2CanaryPostRenameDirectory struct {
+	fsutil.SecureDirectory
+	fsutil.IdentityBoundRenamer
+	fsutil.IdentityBoundRemover
+	fs *v2CanaryPostRenameFS
+}
+
+func (directory *v2CanaryPostRenameDirectory) RenameChecked(oldName, newName string, identity fsutil.SecureFileIdentity) error {
+	err := directory.IdentityBoundRenamer.RenameChecked(oldName, newName, identity)
+	if err == nil && newName == "canary.json" {
+		directory.fs.published = true
+	}
+	return err
+}
+func (directory *v2CanaryPostRenameDirectory) Sync() error {
+	if directory.fs.failSync && directory.fs.published {
+		return errors.New("state directory sync failed after publication")
+	}
+	return directory.SecureDirectory.Sync()
+}
+func TestCLIV2CanaryRestartPostRenameFailure(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fsys := &v2CanaryPostRenameFS{stateDirectory: directory}
+	deps, _ := newV2CanaryFixture(t)
+	deps.fs, deps.path = fsys.OSFileSystem, filepath.Join(directory, "canary.json")
+	if got := callV2Canary(t, deps, "start"); got.ExitCode != 0 {
+		t.Fatal(got)
+	}
+	setV2CanaryFixtureFinalised(t, deps, true)
+	previous, err := proxy.OpenCodexCanary(deps.fs, deps.path, deps.protected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldID := previous.State().RunID
+	deps.fs, fsys.failSync = fsys, true
+	got := callV2Canary(t, deps, "start")
+	if got.ExitCode != 1 || len(got.Errors) != 1 || got.Errors[0].Code != "canary_state_unavailable" || len(got.Data) != 0 {
+		t.Fatalf("indeterminate publication outcome: %+v", got)
+	}
+	if !fsys.published {
+		t.Fatal("replacement rename was not exercised")
+	}
+	fsys.failSync = false
+	beforeRetry, err := fsys.ReadFile(deps.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = callV2Canary(t, deps, "start")
+	if got.ExitCode != 6 || len(got.Errors) != 1 || got.Errors[0].Code != "canary_precondition_failed" || len(got.Data) != 0 {
+		t.Fatalf("retry outcome: %+v", got)
+	}
+	got = callV2Canary(t, deps, "status")
+	var data struct {
+		State v2CanaryState `json:"state"`
+	}
+	if got.ExitCode != 0 {
+		t.Fatalf("retained state unavailable: %+v", got)
+	}
+	if err = json.Unmarshal(got.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.State.RunID == oldID || !data.State.Active || data.State.Finalised || data.State.Finalisation != nil {
+		t.Fatalf("status did not expose replacement: %s", got.Data)
+	}
+	afterRetry, err := fsys.ReadFile(deps.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeRetry, afterRetry) {
+		t.Fatal("retry or status modified retained replacement")
+	}
+}
