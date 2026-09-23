@@ -443,24 +443,35 @@ func SaveConfig(cfg *Config) error {
 }
 
 // SaveConfigAt persists through captured paths, including rescue bootstrap state.
+// ConfigSaveResult records completed config publication even when subsequent
+// rescue-bootstrap persistence fails. An empty result on error is not a
+// guarantee that an earlier write had no effects.
+type ConfigSaveResult struct{ Published bool }
+
 func SaveConfigAt(paths DefaultPaths, cfg *Config) error {
+	_, err := SaveConfigAtWithResult(paths, cfg)
+	return err
+}
+
+func SaveConfigAtWithResult(paths DefaultPaths, cfg *Config) (result ConfigSaveResult, returnErr error) {
 	if cfg == nil {
-		return fmt.Errorf("proxy config is nil")
+		return result, fmt.Errorf("proxy config is nil")
 	}
 	saved := *cfg
 	saved.setDefaults()
 	if err := saved.validate(); err != nil {
-		return err
+		return result, err
 	}
 	if err := saveConfig(paths.ConfigFile, &saved); err != nil {
-		return err
+		return result, err
 	}
+	result.Published = true
 	bootstrapPath := paths.RescueBootstrap
 	if saved.ProxyResilienceStateDir == "" {
 		if err := os.Remove(bootstrapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove proxy rescue bootstrap: %w", err)
+			return result, fmt.Errorf("remove proxy rescue bootstrap: %w", err)
 		}
-		return nil
+		return result, nil
 	}
 	bootstrap, err := json.Marshal(ProxyRescueBootstrapConfig{
 		SchemaVersion: 1,
@@ -469,12 +480,12 @@ func SaveConfigAt(paths DefaultPaths, cfg *Config) error {
 		Port:          saved.Port,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
+		return result, fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
 	}
 	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, bootstrapPath, bootstrap); err != nil {
-		return fmt.Errorf("write proxy rescue bootstrap: %w", err)
+		return result, fmt.Errorf("write proxy rescue bootstrap: %w", err)
 	}
-	return nil
+	return result, nil
 }
 
 func saveConfig(path string, cfg *Config) error {

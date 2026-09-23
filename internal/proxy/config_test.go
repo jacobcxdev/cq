@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -541,5 +542,35 @@ func TestProxyLeasesMissingLocalTokenHasTypedConfigError(t *testing.T) {
 	err := cfg.validate()
 	if !errors.Is(err, ErrLocalTokenRequired) || err.Error() != "local_token is required" {
 		t.Fatalf("missing token error=%v", err)
+	}
+}
+
+func TestProxyResilienceStateConfigPublicationReceipt(t *testing.T) {
+	for _, failBootstrap := range []bool{false, true} {
+		t.Run(fmt.Sprint(failBootstrap), func(t *testing.T) {
+			root := t.TempDir()
+			paths := DefaultPaths{ConfigFile: filepath.Join(root, "proxy.json"), RescueBootstrap: filepath.Join(root, "state", "proxy-rescue.json")}
+			if failBootstrap {
+				if err := os.WriteFile(filepath.Join(root, "state"), []byte("blocked parent"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := &Config{LocalToken: "fixture-token", ProxyResilienceStateDir: filepath.Join(root, "authority")}
+			result, err := SaveConfigAtWithResult(paths, cfg)
+			if !result.Published || (err != nil) != failBootstrap {
+				t.Fatalf("published=%v err=%v", result.Published, err)
+			}
+			saved, readErr := LoadExistingConfigAt(paths)
+			if readErr != nil || saved.ProxyResilienceStateDir != cfg.ProxyResilienceStateDir {
+				t.Fatalf("published config unreadable: %v", readErr)
+			}
+			legacyErr := SaveConfigAt(paths, cfg)
+			if (legacyErr != nil) != (err != nil) {
+				t.Fatalf("wrapper=%v result=%v", legacyErr, err)
+			}
+			if err != nil && legacyErr.Error() != err.Error() {
+				t.Fatalf("changed wrapper error: %v vs %v", legacyErr, err)
+			}
+		})
 	}
 }

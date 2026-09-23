@@ -11316,6 +11316,7 @@ Restart required: {restart_required}
 | --- | ---: | --- | --- |
 | proxy_state_conflict | 6 | Directory owned by another instance or config refers to another initialised root. | Proxy state ownership conflicts with the requested directory. |
 | proxy_state_initialise_timeout | 7 | The declared total operational deadline expires. Retain completed observations or known mutation outcomes; do not infer rollback. | Operation timed out; inspect state before retrying. |
+| proxy_state_initialise_partial | 8 | A positive authority-creation or configuration-binding mutation receipt is followed by a later failure, without deadline expiry or interruption. Retain the known outcome. | Proxy state initialisation partially completed; inspect state before retrying. |
 
 ### Examples
 

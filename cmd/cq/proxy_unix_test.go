@@ -3,6 +3,10 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,5 +99,47 @@ func TestResolveUnixRuntimeExecutableRejectsCycle(t *testing.T) {
 
 	if _, err := resolveUnixRuntimeExecutable(first); err == nil {
 		t.Fatal("symlink cycle unexpectedly resolved")
+	}
+}
+
+func TestCLIV2ProxyMigrationAfterRuntimePreconditions(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", root)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	called := false
+	sentinel := errors.New("migration stopped before worker launch")
+	ctx := context.WithValue(context.Background(), proxyForegroundMigrationKey{}, func(context.Context) error { called = true; return sentinel })
+	serve := func(context.Context, net.Listener, http.Handler) error {
+		t.Fatal("served after migration failed")
+		return nil
+	}
+	_, err = runUnixProxyOwnedRuntime(ctx, listener.Addr().(*net.TCPAddr).Port, serve)
+	if err == nil || called {
+		t.Fatalf("migration ran before port ownership: called=%v err=%v", called, err)
+	}
+	path, err := proxy.DefaultRuntimeLifecyclePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runUnixProxyOwnedRuntime(ctx, 0, serve)
+	if err == nil || called {
+		t.Fatalf("migration ran before authority validation: called=%v err=%v", called, err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runUnixProxyOwnedRuntime(ctx, 0, serve)
+	if !errors.Is(err, sentinel) || !called {
+		t.Fatalf("migration omitted after preconditions: called=%v err=%v", called, err)
 	}
 }

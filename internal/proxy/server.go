@@ -83,10 +83,15 @@ type CodexHealth struct {
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	Config    *Config
-	Selector  ClaudeSelector
-	Discover  ClaudeDiscoverer
-	Transport http.RoundTripper
+	// Ready runs after binding and handler/attestor initialisation, before serving.
+	// Failure follows the same owned-listener cleanup path as a serving failure.
+	Ready func(string) error
+	// ExternallyManagedSignals leaves signal handling to the caller.
+	ExternallyManagedSignals bool
+	Config                   *Config
+	Selector                 ClaudeSelector
+	Discover                 ClaudeDiscoverer
+	Transport                http.RoundTripper
 	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
 	// public work to the selected private worker instead of running normal
 	// proxy semantics in the supervisor process.
@@ -250,7 +255,12 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	var stop context.CancelFunc
+	if s.ExternallyManagedSignals {
+		ctx, stop = context.WithCancel(ctx)
+	} else {
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	}
 	defer stop()
 	var startupValidation codexHTTPStartupValidationRun
 	if s.CodexHTTPStartupValidation != nil {
@@ -310,7 +320,16 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 
 	fmt.Fprintf(os.Stderr, "cq: proxy listening on %s\n", listener.Addr().String())
 
-	serveErr := srv.Serve(serveListener)
+	var serveErr error
+	if s.Ready != nil {
+		serveErr = s.Ready(listener.Addr().String())
+		if serveErr != nil {
+			serveErr = errors.Join(serveErr, serveListener.Close())
+		}
+	}
+	if serveErr == nil {
+		serveErr = srv.Serve(serveListener)
+	}
 	if !errors.Is(serveErr, http.ErrServerClosed) && s.ServingAttestor != nil {
 		<-s.ServingAttestor.abortUnexpected()
 	}

@@ -44,6 +44,11 @@ func runUnixProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serv
 		return fmt.Errorf("open supervisor runtime lifecycle: %w", err)
 	}
 	defer file.Close()
+	if migrate, ok := ctx.Value(proxyForegroundMigrationKey{}).(func(context.Context) error); ok {
+		if err := migrate(ctx); err != nil {
+			return err
+		}
+	}
 	holderDigest, err := proxy.RuntimeDescriptorIdentityDigest(file)
 	if err != nil {
 		return fmt.Errorf("digest supervisor runtime lifecycle: %w", err)

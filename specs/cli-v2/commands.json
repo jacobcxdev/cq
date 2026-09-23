@@ -11755,6 +11755,12 @@
           "exit": 7,
           "condition": "The declared total operational deadline expires. Retain completed observations or known mutation outcomes; do not infer rollback.",
           "message": "Operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "proxy_state_initialise_partial",
+          "exit": 8,
+          "condition": "A positive authority-creation or configuration-binding mutation receipt is followed by a later failure, without deadline expiry or interruption. Retain the known outcome.",
+          "message": "Proxy state initialisation partially completed; inspect state before retrying."
         }
       ],
       "examples": [

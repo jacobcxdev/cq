@@ -280,7 +280,11 @@ func TestParseProxyCommandOptionsPort(t *testing.T) {
 
 func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
-	body := findFuncBody(t, file, "runProxyStart")
+	wrapper := findFuncBody(t, file, "runProxyStart")
+	if !hasIdentifier(wrapper, "runProxyStartWithContext") {
+		t.Fatal("legacy startup must delegate to the shared implementation")
+	}
+	body := findFuncBody(t, file, "runProxyStartWithContext")
 
 	if hasQualifiedSelector(body, "keyring", "DiscoverClaudeAccounts") {
 		t.Fatal("runProxyStart should not call keyring.DiscoverClaudeAccounts directly")
@@ -314,7 +318,11 @@ func TestListProxyCodexStartupInventoryPreservesCandidates(t *testing.T) {
 
 func TestRunProxyStartDoesNotReachCodexCredentialMutators(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
-	body := findFuncBody(t, file, "runProxyStart")
+	wrapper := findFuncBody(t, file, "runProxyStart")
+	if !hasIdentifier(wrapper, "runProxyStartWithContext") {
+		t.Fatal("legacy startup must delegate to the shared implementation")
+	}
+	body := findFuncBody(t, file, "runProxyStartWithContext")
 
 	for _, selector := range codexCredentialMutationSelectors(body) {
 		t.Errorf("runProxyStart must not reference Codex credential mutation selector %s", selector)
@@ -326,7 +334,11 @@ func TestRunProxyStartDoesNotReachCodexCredentialMutators(t *testing.T) {
 
 func TestRunProxyStartDoesNotLogLocalToken(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
-	body := findFuncBody(t, file, "runProxyStart")
+	wrapper := findFuncBody(t, file, "runProxyStart")
+	if !hasIdentifier(wrapper, "runProxyStartWithContext") {
+		t.Fatal("legacy startup must delegate to the shared implementation")
+	}
+	body := findFuncBody(t, file, "runProxyStartWithContext")
 
 	if hasQualifiedSelector(body, "cfg", "LocalToken") || hasStringLiteral(body, "cq: proxy token: %s\n") {
 		t.Fatal("runProxyStart must not print the local proxy token")

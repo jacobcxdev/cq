@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -679,4 +680,110 @@ func writeProxyPolicyJSON(output io.Writer, policy proxy.RoutingPolicyDocument) 
 	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(policy)
+}
+
+var errProxyStateConflict = errors.New("proxy state ownership conflict")
+var errProxyStateObservation = errors.New("proxy service adoption observation unavailable")
+
+// validateProxyStatePath checks every existing component without creating or
+// following links. The authenticated store applies its stricter owner checks.
+func validateProxyStatePath(root string, mustExist bool) error {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
+		return errProxyStateConflict
+	}
+	for path := root; ; path = filepath.Dir(path) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) || (path == root && mustExist) {
+				return err
+			}
+		} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errProxyStateConflict
+		}
+		if path == filepath.Dir(path) {
+			break
+		}
+	}
+	return nil
+}
+
+func initialiseProxyState(ctx context.Context, root string, cfg *proxy.Config, paths proxy.DefaultPaths, inspect func(context.Context, string) proxy.ProxySnapshot) (result v2ProxyState, returnErr error) {
+	result.StateDir = root
+	if cfg != nil && cfg.ResolvedProxyResilienceStateDir() != "" && cfg.ResolvedProxyResilienceStateDir() != root {
+		return result, errProxyStateConflict
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if err := validateProxyStatePath(root, false); err != nil {
+		return result, errors.Join(errProxyStateConflict, err)
+	}
+	if err := validateProxyStatePath(filepath.Dir(paths.ConfigFile), false); err != nil {
+		return result, errors.Join(errProxyStateConflict, err)
+	}
+	fsys := fsutil.OSFileSystem{}
+	if err := fsutil.ValidateOwnerControlledDirectory(fsys, filepath.Dir(paths.ConfigFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return result, errors.Join(errProxyStateConflict, err)
+	}
+	if err := fsutil.ValidateSecureRegularFile(fsys, paths.ConfigFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return result, errors.Join(errProxyStateConflict, err)
+	}
+	// The existing snapshot has no authenticated state-root adoption identity.
+	// Refuse to invent restart_required when a running or unobserved service
+	// could still own state. Stopped/absent service is the observable safe case.
+	snapshot := proxy.ReconcileProxySnapshot(inspect(ctx, ""))
+	service := snapshot.Service
+	if service.Status != proxy.FactAbsent && (service.Status != proxy.FactKnown || service.Value == nil || (service.Value.State != "stopped" && service.Value.State != "absent")) {
+		return result, errProxyStateObservation
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	options := proxy.ProxyResilienceStateOptions{FS: fsys, Root: root, Random: rand.Reader, Now: proxyPolicyNow}
+	existing := cfg != nil && cfg.ResolvedProxyResilienceStateDir() == root
+	if _, err := os.Lstat(filepath.Join(root, "authority.key")); err == nil {
+		existing = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return result, errors.Join(errProxyStateConflict, err)
+	}
+	if !existing {
+		entries, err := os.ReadDir(root)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return result, err
+		}
+		if len(entries) > 0 {
+			return result, errProxyStateConflict
+		}
+		receipt, err := proxy.InitialiseProxyResilienceStateWithResult(ctx, options)
+		result.Created = receipt.Created
+		if err != nil {
+			return result, err
+		}
+	}
+	state, err := proxy.OpenProxyResilienceState(ctx, options)
+	if err != nil {
+		return result, errors.Join(errProxyStateConflict, err)
+	}
+	defer func() { returnErr = errors.Join(returnErr, state.Close()) }()
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if cfg != nil && cfg.ResolvedProxyResilienceStateDir() == root {
+		return result, nil
+	}
+	if cfg == nil {
+		token := make([]byte, 32)
+		if _, err := rand.Read(token); err != nil {
+			return result, err
+		}
+		cfg = &proxy.Config{Port: proxy.DefaultPort, LocalToken: base64.RawURLEncoding.EncodeToString(token)}
+	}
+	updated := *cfg
+	updated.ProxyResilienceStateDir = root
+	receipt, err := proxy.SaveConfigAtWithResult(paths, &updated)
+	result.bound = receipt.Published
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
