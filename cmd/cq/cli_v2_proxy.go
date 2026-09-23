@@ -120,6 +120,7 @@ func handleV2ProxyWithPreparation(parent context.Context, inv cli.Invocation, se
 		}
 		failure.Data = out.Data
 		failure.Human = out.Human
+		failure.Terminal = out.Terminal
 		return failure
 	}
 	if ctx.Err() != nil {
@@ -231,6 +232,7 @@ func executeV2ProxyHealth(ctx context.Context, inv cli.Invocation, deps v2ProxyD
 	result := v2ProxyResource(data, fmt.Sprintf("Proxy HTTP health: %s\nAddress: %s\nHTTP status: %s\n", health, data.Address, status))
 	result.ExitCode = out.ExitCode
 	result.Errors = out.Errors
+	result.Terminal = func(o cli.TerminalOptions) string { return terminalProxyHealth(data, o) }
 	return result
 }
 
@@ -298,55 +300,25 @@ func projectV2ProxySnapshot(snapshot proxy.ProxySnapshot, root string) v2ProxySt
 	}
 	data.Facts = append(data.Facts,
 		v2ProxyFactValue("inspector", snapshot.Inspector, func(v proxy.InspectorIdentity) any {
-			return struct {
-				Executable *string `json:"executable"`
-				Version    *string `json:"version"`
-				Commit     *string `json:"commit"`
-				Digest     *string `json:"digest"`
-			}{v2ProxyNullable(v.Executable), v2ProxyNullable(v.Version), v2ProxyNullable(v.Commit), v2ProxyNullable(v.Digest)}
+			return v2ProxyInspectorValue{v2ProxyNullable(v.Executable), v2ProxyNullable(v.Version), v2ProxyNullable(v.Commit), v2ProxyNullable(v.Digest)}
 		}),
 		v2ProxyFactValue("desired", snapshot.Desired, func(v proxy.DesiredProxyState) any {
-			return struct {
-				Manager    *string `json:"manager"`
-				Configured bool    `json:"configured"`
-				Listener   *string `json:"listener"`
-			}{v2ProxyNullable(v.Manager), v.Configured, v2ProxyNullable(v.Listener)}
+			return v2ProxyDesiredValue{v2ProxyNullable(v.Manager), v.Configured, v2ProxyNullable(v.Listener)}
 		}),
 		v2ProxyFactValue("service", snapshot.Service, func(v proxy.ServiceState) any {
-			return struct {
-				Manager    *string `json:"manager"`
-				State      *string `json:"state"`
-				Executable *string `json:"executable"`
-				PID        *int    `json:"pid"`
-			}{v2ProxyNullable(v.Manager), v2ProxyNullable(v.State), v2ProxyNullable(v.Executable), v2ProxyPID(v.PID)}
+			return v2ProxyServiceValue{v2ProxyNullable(v.Manager), v2ProxyNullable(v.State), v2ProxyNullable(v.Executable), v2ProxyPID(v.PID)}
 		}),
 		v2ProxyFactValue("listener", snapshot.Listener, func(v proxy.ListenerState) any {
-			return struct {
-				State      *string `json:"state"`
-				Listener   *string `json:"listener"`
-				Executable *string `json:"executable"`
-				PID        *int    `json:"pid"`
-			}{v2ProxyNullable(v.State), v2ProxyNullable(v.Listener), v2ProxyNullable(v.Executable), v2ProxyPID(v.PID)}
+			return v2ProxyListenerValue{v2ProxyNullable(v.State), v2ProxyNullable(v.Listener), v2ProxyNullable(v.Executable), v2ProxyPID(v.PID)}
 		}),
 		v2ProxyFactValue("process", snapshot.Process, func(v proxy.ProcessState) any {
-			return struct {
-				PID        int    `json:"pid"`
-				Executable string `json:"executable"`
-			}{v.PID, v.Executable}
+			return v2ProxyProcessValue{v.PID, v.Executable}
 		}),
 		v2ProxyFactValue("runtime", snapshot.Runtime, func(v proxy.RuntimeIdentity) any {
-			return struct {
-				Reachable  bool    `json:"reachable"`
-				PID        *int    `json:"pid"`
-				Executable *string `json:"executable"`
-				Health     *string `json:"health"`
-			}{v.Reachable, v2ProxyPID(v.PID), v2ProxyNullable(v.Executable), v2ProxyNullable(v.Health)}
+			return v2ProxyRuntimeValue{v.Reachable, v2ProxyPID(v.PID), v2ProxyNullable(v.Executable), v2ProxyNullable(v.Health)}
 		}),
 		v2ProxyFactValue("data_plane", snapshot.DataPlane, func(v proxy.DataPlaneProof) any {
-			return struct {
-				Proven bool    `json:"proven"`
-				Code   *string `json:"code"`
-			}{v.Proven, v2ProxyNullable(v.Code)}
+			return v2ProxyDataPlaneValue{v.Proven, v2ProxyNullable(v.Code)}
 		}),
 	)
 	return data
@@ -372,6 +344,7 @@ func executeV2ProxyStatus(ctx context.Context, inv cli.Invocation, deps v2ProxyD
 		fmt.Fprintf(&human, "%s: %s — %s\n", fact.Name, fact.State, cli.HumanValue(fact.Detail))
 	}
 	out := v2ProxyResource(data, human.String())
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalProxyStatus(data, o) }
 	if inv.Options["strict"][0] == "true" {
 		var failure cli.Outcome
 		switch data.State {
@@ -409,6 +382,7 @@ func executeV2ProxyInitialise(ctx context.Context, inv cli.Invocation, deps v2Pr
 	}
 	data, err := deps.Initialise(ctx, root, cfg)
 	out := v2ProxyResource(data, fmt.Sprintf("Proxy state: %s\nCreated: %t\nRestart required: %t\n", cli.HumanValue(data.StateDir), data.Created, data.RestartRequired))
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalProxyState(data, false, o) }
 	if err != nil {
 		failure := v2ProxyIO()
 		if errors.Is(err, errProxyStateConflict) {
@@ -422,6 +396,7 @@ func executeV2ProxyInitialise(ctx context.Context, inv cli.Invocation, deps v2Pr
 			failure = v2SelectionFailure(8, "proxy_state_initialise_partial", "Proxy state initialisation partially completed; inspect state before retrying.")
 			failure.Data = out.Data
 			failure.Human = out.Human
+			failure.Terminal = func(o cli.TerminalOptions) string { return terminalProxyState(data, true, o) }
 		}
 		return failure
 	}
@@ -450,15 +425,20 @@ func executeV2ProxyServe(ctx context.Context, inv cli.Invocation, session *cli.S
 		}
 		address = value
 		providers = append([]string{}, enabled...)
-		out := v2ProxyResource(v2ProxyEvent{"ready", value, os.Getpid(), providers, nil}, fmt.Sprintf("Proxy listening on %s (PID %d).\nPress Ctrl-C to stop.\n", cli.HumanValue(value), os.Getpid()))
+		event := v2ProxyEvent{"ready", value, os.Getpid(), providers, nil}
+		out := v2ProxyResource(event, fmt.Sprintf("Proxy listening on %s (PID %d).\nPress Ctrl-C to stop.\n", cli.HumanValue(value), os.Getpid()))
 		var err error
 		if inv.JSON {
 			out.Warnings = inv.Warnings
 			err = cli.WriteJSON(session.Out, inv.Path, out)
 		} else {
+			message := out.Human
+			if session.OutTerminal.Width > 0 {
+				message = terminalProxyServeReady(event, session.OutTerminal)
+			}
 			var n int
-			n, err = io.WriteString(session.Out, out.Human)
-			if err == nil && n != len(out.Human) {
+			n, err = io.WriteString(session.Out, message)
+			if err == nil && n != len(message) {
 				err = io.ErrShortWrite
 			}
 		}
@@ -495,7 +475,14 @@ func executeV2ProxyServe(ctx context.Context, inv cli.Invocation, session *cli.S
 		if ctx.Err() == context.Canceled {
 			reason = "interrupted"
 		}
-		out.Data, _ = json.Marshal(v2ProxyEvent{"stopped", address, os.Getpid(), providers, &reason})
+		stopped := v2ProxyEvent{"stopped", address, os.Getpid(), providers, &reason}
+		out.Data, _ = json.Marshal(stopped)
+		if !inv.JSON && session.OutTerminal.Width > 0 {
+			message := terminalProxyServeStopped(stopped, session.OutTerminal)
+			if n, err := io.WriteString(session.Out, message); err != nil || n != len(message) {
+				out = v2ProxyIO()
+			}
+		}
 	}
 	if inv.JSON {
 		out.Warnings = inv.Warnings

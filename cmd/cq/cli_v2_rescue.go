@@ -162,7 +162,9 @@ func handleV2RescueWithPreparation(parent context.Context, inv cli.Invocation, _
 			}
 			humanID, humanPhase = cli.HumanValue(inspection.OperationID), cli.HumanValue(inspection.Phase)
 		}
-		return finish(v2ProxyResource(data, fmt.Sprintf("Operation: %s\nState: %s\nPhase: %s\nResult available: %t\nRecovery supported: false\n", humanID, data.State, humanPhase, data.ResultAvailable)), nil)
+		out := v2ProxyResource(data, fmt.Sprintf("Operation: %s\nState: %s\nPhase: %s\nResult available: %t\nRecovery supported: false\n", humanID, data.State, humanPhase, data.ResultAvailable))
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalProxyOperation(data, o) }
+		return finish(out, nil)
 	}
 	port := 0
 	if values := inv.Options["port"]; len(values) > 0 {
@@ -176,7 +178,9 @@ func handleV2RescueWithPreparation(parent context.Context, inv cli.Invocation, _
 	if err != nil {
 		return finish(cli.Outcome{}, &proxyRescueError{kind: "response", cause: err})
 	}
-	return finish(v2ProxyResource(data, fmt.Sprintf("Proxy mode: %s\nGeneration: %d\nActive rescue requests: %d\nDraining sessions: %d\n", data.Mode, data.Generation, data.ActiveRescueRequests, len(data.DrainingSessions))), nil)
+	out := v2ProxyResource(data, fmt.Sprintf("Proxy mode: %s\nGeneration: %d\nActive rescue requests: %d\nDraining sessions: %d\n", data.Mode, data.Generation, data.ActiveRescueRequests, len(data.DrainingSessions)))
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalProxyRescue(data, o) }
+	return finish(out, nil)
 }
 
 type v2OperationStatus struct {
