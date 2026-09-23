@@ -767,3 +767,23 @@ func TestRefreshCodexFSStatIsHermetic(t *testing.T) {
 		t.Fatalf("Stat absent file: got %v, want ErrNotExist", err)
 	}
 }
+
+func TestRunRefreshCommandServiceHook(t *testing.T) {
+	original := serviceRefreshRunner
+	t.Cleanup(func() { serviceRefreshRunner = original })
+	sentinel := errors.New("service wrapper result")
+	calls := 0
+	serviceRefreshRunner = func(run func() error) error {
+		calls++
+		if run == nil {
+			t.Fatal("missing refresh body")
+		}
+		return sentinel
+	}
+	if err := runRefreshCommand(nil); err != sentinel || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+	if err := runRefreshCommand([]string{"unexpected"}); err == nil || calls != 1 {
+		t.Fatal("invalid arguments reached service hook")
+	}
+}

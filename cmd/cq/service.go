@@ -606,7 +606,17 @@ func (status *serviceStatus) setComponent(id serviceSelection, c componentStatus
 	}
 }
 
+// selectedServiceContext distinguishes canonical semantics in native methods also
+// called by the frozen machine lifecycle, without retaining adapter state.
+type selectedServiceContextKey struct{}
+
+func selectedServiceContext(ctx context.Context) bool {
+	selected, _ := ctx.Value(selectedServiceContextKey{}).(bool)
+	return selected
+}
+
 func (lifecycle *serviceLifecycle) Selected(ctx context.Context, action serviceAction, selection serviceSelection, strict bool) (result serviceOperationResult, returnErr error) {
+	ctx = context.WithValue(ctx, selectedServiceContextKey{}, true)
 	result.Rollback = "not_needed"
 	if err := lifecycle.validateWithoutOwner(); err != nil {
 		return result, errors.Join(errServiceUnavailable, err)

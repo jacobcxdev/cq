@@ -5,14 +5,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"github.com/jacobcxdev/cq/internal/httputil"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -28,34 +33,45 @@ const (
 )
 
 type darwinLaunchAgentDefinition struct {
-	Label             string
-	ProgramArguments  []string
-	RunAtLoad         bool
-	KeepAlive         bool
-	StartInterval     int
-	StandardErrorPath string
+	Label                string
+	ProgramArguments     []string
+	RunAtLoad            bool
+	KeepAlive            bool
+	StartInterval        int
+	StandardErrorPath    string
+	EnvironmentVariables map[string]string
 }
 
 type darwinServicePlatform struct {
-	home            string
-	roots           userdirs.Roots
-	uid             int
-	executable      string
-	run             func(context.Context, ...string) ([]byte, error)
-	inspectProxy    func(context.Context, string) componentStatus
-	initialiseProxy func() error
+	home                 string
+	roots                userdirs.Roots
+	uid                  int
+	executable           string
+	run                  func(context.Context, ...string) ([]byte, error)
+	inspectProxy         func(context.Context, string) componentStatus
+	initialiseProxy      func() error
+	runRefreshOnce       func(context.Context, darwinLaunchAgentDefinition) error
+	processAlive         func(int) bool
+	inspectSelectedProxy func(context.Context, string, userdirs.Roots, int) componentStatus
 }
 
 func init() {
 	serviceLifecycleFactory = defaultDarwinServiceLifecycle
+	selectedServiceLifecycleFactory = func() (*serviceLifecycle, error) { return darwinServiceLifecycleWithHome("", darwinSelectedHome) }
 }
 
+var darwinSelectedHome = nativeDarwinHome
+
 func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
+	return darwinServiceLifecycleWithHome(stableExecutable, os.UserHomeDir)
+}
+
+func darwinServiceLifecycleWithHome(stableExecutable string, resolveHome func() (string, error)) (*serviceLifecycle, error) {
 	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
 	}
-	home, err := os.UserHomeDir()
+	home, err := resolveHome()
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory: %w", err)
 	}
@@ -214,6 +230,13 @@ func (platform *darwinServicePlatform) InstallProxy(ctx context.Context, executa
 		KeepAlive:         true,
 		StandardErrorPath: filepath.Join(platform.roots.Logs, "proxy.log"),
 	}
+	if selectedServiceContext(ctx) {
+		var err error
+		definition.EnvironmentVariables, err = darwinServiceEnvironment(platform.home, platform.roots, definition.Label == agentLabel)
+		if err != nil {
+			return err
+		}
+	}
 	return platform.reconcile(ctx, definition)
 }
 
@@ -232,14 +255,42 @@ func (platform *darwinServicePlatform) installRefresh(ctx context.Context, execu
 		StartInterval:     interval,
 		StandardErrorPath: filepath.Join(platform.roots.Logs, "refresh.log"),
 	}
+	if selectedServiceContext(ctx) {
+		var err error
+		definition.EnvironmentVariables, err = darwinServiceEnvironment(platform.home, platform.roots, definition.Label == agentLabel)
+		if err != nil {
+			return err
+		}
+	}
 	return platform.reconcile(ctx, definition)
 }
 
 func (platform *darwinServicePlatform) RestartProxy(ctx context.Context) error {
+	if selectedServiceContext(ctx) {
+		return platform.startSelected(ctx, proxyAgentLabel, false)
+	}
 	return platform.kickstart(ctx, proxyAgentLabel)
 }
 
 func (platform *darwinServicePlatform) RestartRefresh(ctx context.Context) error {
+	if selectedServiceContext(ctx) {
+		enabled, err := platform.enabled(ctx, agentLabel)
+		if err != nil {
+			return err
+		}
+		if !enabled {
+			definition, _, err := platform.ownedDefinition(agentLabel)
+			if err != nil {
+				return err
+			}
+			run := platform.runRefreshOnce
+			if run == nil {
+				run = runDarwinRefreshOnce
+			}
+			return run(ctx, definition)
+		}
+		return platform.startSelected(ctx, agentLabel, false)
+	}
 	return platform.kickstart(ctx, agentLabel)
 }
 
@@ -324,6 +375,9 @@ func (platform *darwinServicePlatform) inspectRefreshComponent(ctx context.Conte
 }
 
 func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition darwinLaunchAgentDefinition) error {
+	if selectedServiceContext(ctx) && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err := os.MkdirAll(platform.roots.Logs, 0o700); err != nil {
 		return fmt.Errorf("create service log directory: %w", err)
 	}
@@ -344,14 +398,29 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 		return fmt.Errorf("boot out %s: %w", definition.Label, err)
 	}
 
+	if selectedServiceContext(ctx) && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	rollback := func() error {
+		// The selected lifecycle owns its full native/policy snapshot and deadline.
+		if selectedServiceContext(ctx) {
+			return nil
+		}
+		return platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded)
+	}
 	if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
-		return errors.Join(fmt.Errorf("write %s definition: %w", definition.Label, err), platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+		return errors.Join(fmt.Errorf("write %s definition: %w", definition.Label, err), rollback())
+	}
+	if selectedServiceContext(ctx) {
+		if _, err := platform.run(ctx, "enable", platform.target(definition.Label)); err != nil {
+			return err
+		}
 	}
 	if _, err := platform.run(ctx, "bootstrap", platform.domain(), path); err != nil {
-		return errors.Join(fmt.Errorf("bootstrap %s: %w", definition.Label, err), platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+		return errors.Join(fmt.Errorf("bootstrap %s: %w", definition.Label, err), rollback())
 	}
 	if err := platform.kickstart(ctx, definition.Label); err != nil {
-		return errors.Join(err, platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+		return errors.Join(err, rollback())
 	}
 	return nil
 }
@@ -464,6 +533,18 @@ func renderDarwinLaunchAgent(definition darwinLaunchAgentDefinition) ([]byte, er
 	}
 	writeDarwinBool(&output, "RunAtLoad", definition.RunAtLoad)
 	writeDarwinString(&output, "ProcessType", "Background")
+	if len(definition.EnvironmentVariables) > 0 {
+		output.WriteString("\t<key>EnvironmentVariables</key>\n\t<dict>\n")
+		keys := make([]string, 0, len(definition.EnvironmentVariables))
+		for key := range definition.EnvironmentVariables {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			writeDarwinString(&output, key, definition.EnvironmentVariables[key])
+		}
+		output.WriteString("\t</dict>\n")
+	}
 	writeDarwinString(&output, "StandardErrorPath", definition.StandardErrorPath)
 	output.WriteString("</dict>\n</plist>\n")
 	return output.Bytes(), nil
@@ -561,6 +642,8 @@ func parseDarwinPlistValue(decoder *xml.Decoder, start xml.StartElement) (any, e
 		value := start.Name.Local == "true"
 		var discard struct{}
 		return value, decoder.DecodeElement(&discard, &start)
+	case "dict":
+		return parseDarwinPlistDict(decoder)
 	case "array":
 		var values []string
 		for {
@@ -614,6 +697,20 @@ func darwinDefinitionFromValues(values map[string]any) (darwinLaunchAgentDefinit
 	definition.KeepAlive, _ = values["KeepAlive"].(bool)
 	definition.StartInterval, _ = values["StartInterval"].(int)
 	definition.StandardErrorPath, _ = values["StandardErrorPath"].(string)
+	if env, exists := values["EnvironmentVariables"]; exists {
+		items, ok := env.(map[string]any)
+		if !ok {
+			return definition, fmt.Errorf("invalid plist environment")
+		}
+		definition.EnvironmentVariables = make(map[string]string, len(items))
+		for key, value := range items {
+			text, ok := value.(string)
+			if !ok {
+				return definition, fmt.Errorf("invalid plist environment value")
+			}
+			definition.EnvironmentVariables[key] = text
+		}
+	}
 	return definition, nil
 }
 
@@ -766,26 +863,504 @@ func equalStrings(left, right []string) bool {
 
 var _ servicePlatform = (*darwinServicePlatform)(nil)
 
-// Selected lifecycle support is implemented by the native adapter tasks.
-func (platform *darwinServicePlatform) StartProxy(context.Context) error {
-	return errServiceUnavailable
+// Selected methods deliberately inspect only the requested definitions/jobs.
+func darwinSelectedLabels(selection serviceSelection) []string {
+	var labels []string
+	for _, component := range selection.components() {
+		if component == serviceProxy {
+			labels = append(labels, proxyAgentLabel)
+		} else {
+			labels = append(labels, agentLabel)
+		}
+	}
+	return labels
 }
-func (platform *darwinServicePlatform) StopProxy(context.Context) error { return errServiceUnavailable }
-func (platform *darwinServicePlatform) StartRefresh(context.Context) error {
-	return errServiceUnavailable
+func (platform *darwinServicePlatform) StartProxy(ctx context.Context) error {
+	return platform.startSelected(ctx, proxyAgentLabel, true)
 }
-func (platform *darwinServicePlatform) StopRefresh(context.Context) error {
-	return errServiceUnavailable
+func (platform *darwinServicePlatform) StartRefresh(ctx context.Context) error {
+	return platform.startSelected(ctx, agentLabel, true)
 }
-func (platform *darwinServicePlatform) PreflightSelected(context.Context, string, serviceSelection) error {
-	return errServiceUnavailable
+func (platform *darwinServicePlatform) StopProxy(ctx context.Context) error {
+	return platform.stopSelected(ctx, proxyAgentLabel)
 }
-func (platform *darwinServicePlatform) InspectSelected(context.Context, serviceSelection) (serviceStatus, error) {
-	return serviceStatus{}, errServiceUnavailable
+func (platform *darwinServicePlatform) StopRefresh(ctx context.Context) error {
+	return platform.stopSelected(ctx, agentLabel)
 }
-func (platform *darwinServicePlatform) SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error) {
-	return servicePlatformSnapshot{}, errServiceUnavailable
+
+func (platform *darwinServicePlatform) ownedDefinition(label string) (darwinLaunchAgentDefinition, bool, error) {
+	data, _, err := readInstalledHTTPValidationRegularFile(platform.plistPath(label), maxDarwinPlistBytes, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return darwinLaunchAgentDefinition{}, false, nil
+	}
+	if err != nil {
+		return darwinLaunchAgentDefinition{}, false, fmt.Errorf("%w: unsafe service definition", installstate.ErrOwnershipConflict)
+	}
+	d, err := parseDarwinLaunchAgent(data)
+	args := []string{"refresh"}
+	if label == proxyAgentLabel {
+		args = []string{"proxy", "start"}
+	}
+	if err != nil || d.Label != label || len(d.ProgramArguments) != len(args)+1 || !equalStrings(d.ProgramArguments[1:], args) || validateDarwinOwnedExecutable(d.ProgramArguments[0]) != nil {
+		return d, true, fmt.Errorf("%w: invalid service definition", installstate.ErrOwnershipConflict)
+	}
+	return d, true, nil
 }
-func (platform *darwinServicePlatform) RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error {
-	return errServiceUnavailable
+func (platform *darwinServicePlatform) enabled(ctx context.Context, label string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	output, err := platform.run(ctx, "print-disabled", platform.domain())
+	if err != nil {
+		return false, errors.Join(errServiceUnavailable, err)
+	}
+	// Require a recognisable domain result, including the valid empty dictionary.
+	text := strings.TrimSpace(string(output))
+	if !strings.HasPrefix(text, "disabled services = {") || !strings.HasSuffix(text, "}") {
+		return false, errServiceUnavailable
+	}
+	value := true
+	found := false
+	for _, line := range strings.Split(text, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), " => ", 2)
+		if len(parts) != 2 || parts[0] != strconv.Quote(label) {
+			continue
+		}
+		if found {
+			return false, errServiceUnavailable
+		}
+		found = true
+		switch strings.TrimSuffix(parts[1], ",") {
+		case "true":
+			value = false
+		case "false":
+			value = true
+		default:
+			return false, errServiceUnavailable
+		}
+	}
+	return value, nil
+}
+func (platform *darwinServicePlatform) startSelected(ctx context.Context, label string, enable bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, exists, err := platform.ownedDefinition(label)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return installstate.ErrNotInstalled
+	}
+	if enable {
+		if _, err := platform.run(ctx, "enable", platform.target(label)); err != nil {
+			return err
+		}
+	}
+	loaded, _, err := platform.printJob(ctx, label)
+	if err != nil {
+		return err
+	}
+	if !loaded {
+		if !enable && label == proxyAgentLabel {
+			enabled, err := platform.enabled(ctx, label)
+			if err != nil {
+				return err
+			}
+			if !enabled {
+				return platform.forceLoadDisabledProxy(ctx)
+			}
+		}
+		if _, err := platform.run(ctx, "bootstrap", platform.domain(), platform.plistPath(label)); err != nil {
+			return err
+		}
+	}
+	return platform.kickstart(ctx, label)
+}
+func (platform *darwinServicePlatform) stopSelected(ctx context.Context, label string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, exists, err := platform.ownedDefinition(label)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	_, output, err := platform.printJob(ctx, label)
+	if err != nil {
+		return err
+	}
+	pid := darwinLaunchctlPID(output)
+	if _, err := platform.run(ctx, "disable", platform.target(label)); err != nil {
+		return err
+	}
+	enabled, err := platform.enabled(ctx, label)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return ErrServiceUnhealthy
+	}
+	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
+		return err
+	}
+	alive := platform.processAlive
+	if alive == nil {
+		alive = func(pid int) bool { err := syscall.Kill(pid, 0); return err == nil || errors.Is(err, syscall.EPERM) }
+	}
+	for pid > 0 && alive(pid) {
+		if err := waitForServicePoll(ctx, 20*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func darwinLaunchctlPID(output []byte) int {
+	for _, line := range strings.Split(string(output), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), " = ", 2)
+		if len(parts) == 2 && parts[0] == "pid" {
+			pid, _ := strconv.Atoi(parts[1])
+			return pid
+		}
+	}
+	return 0
+}
+func (platform *darwinServicePlatform) PreflightSelected(ctx context.Context, executable string, selection serviceSelection) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateDarwinServiceExecutable(executable); err != nil {
+		return err
+	}
+	for _, label := range darwinSelectedLabels(selection) {
+		if label == proxyAgentLabel {
+			loaded, _, err := platform.printJob(ctx, homebrewProxyAgentLabel)
+			if err != nil {
+				return err
+			}
+			if loaded {
+				return installstate.ErrOwnershipConflict
+			}
+		}
+		definition, exists, err := platform.ownedDefinition(label)
+		if err != nil {
+			return err
+		}
+		if exists && !sameServiceExecutable(definition.ProgramArguments[0], executable) {
+			return installstate.ErrOwnershipConflict
+		}
+		loaded, _, err := platform.printJob(ctx, label)
+		if err != nil {
+			return err
+		}
+		if loaded && !exists {
+			return installstate.ErrOwnershipConflict
+		}
+	}
+	platform.executable = executable
+	return ctx.Err()
+}
+func (platform *darwinServicePlatform) InspectSelected(ctx context.Context, selection serviceSelection) (serviceStatus, error) {
+	var status serviceStatus
+	for _, component := range selection.components() {
+		if err := ctx.Err(); err != nil {
+			return status, err
+		}
+		label := agentLabel
+		if component == serviceProxy {
+			label = proxyAgentLabel
+		}
+		c := componentStatus{ID: label, Manager: "launchd", Observed: &serviceObservation{Owner: "none"}}
+		d, exists, err := platform.ownedDefinition(label)
+		c.Registered = exists
+		if err != nil {
+			c.Observed.Owner = "foreign"
+			c.Observed.ErrorCode = "service_ownership_conflict"
+			status.setComponent(component, c)
+			return status, err
+		}
+		loaded, output, err := platform.printJob(ctx, label)
+		if err != nil {
+			return status, err
+		}
+		if !exists {
+			if loaded {
+				return status, installstate.ErrOwnershipConflict
+			}
+			c.Observed.Enabled = serviceBool(false)
+			c.Observed.Healthy = serviceBool(false)
+			status.setComponent(component, c)
+			continue
+		}
+		c.Observed.Owner = "cq"
+		c.ConfiguredExecutable = d.ProgramArguments[0]
+		enabled, err := platform.enabled(ctx, label)
+		if err != nil {
+			return status, err
+		}
+		c.Observed.Enabled = serviceBool(enabled)
+		roots, rootErr := darwinDefinitionRoots(d)
+		if rootErr == nil {
+			c.Observed.Roots = &roots
+		}
+		c.PID = darwinLaunchctlPID(output)
+		c.Running = loaded && c.PID > 0
+		if component == serviceProxy {
+			c.Observed.Healthy = serviceBool(false)
+			if loaded && rootErr == nil {
+				inspect := platform.inspectSelectedProxy
+				if inspect == nil {
+					inspect = inspectDarwinSelectedProxyRuntime
+				}
+				runtime := inspect(ctx, c.ConfiguredExecutable, roots, c.PID)
+				c.LiveExecutable, c.Listener = runtime.LiveExecutable, runtime.Listener
+				c.Healthy = runtime.Healthy
+				c.Observed.Healthy = serviceBool(runtime.Healthy)
+			}
+		} else if rootErr == nil {
+			receipt, err := readDarwinRefreshCompletion(d, time.Now())
+			if err == nil {
+				c.Observed.LastRunAt = &receipt.CompletedAt
+				c.Observed.LastExitCode = &receipt.ExitCode
+			} else if !errors.Is(err, os.ErrNotExist) {
+				c.Observed.ErrorCode = "service_completion_unavailable"
+			}
+		}
+		if !enabled && (component == serviceRefresh || !c.Running) {
+			c.Observed.Healthy = serviceBool(false)
+		}
+		status.setComponent(component, c)
+	}
+	return status, ctx.Err()
+}
+func (platform *darwinServicePlatform) SnapshotSelected(ctx context.Context, selection serviceSelection) (servicePlatformSnapshot, error) {
+	snapshot := servicePlatformSnapshot{Manager: "launchd"}
+	for _, label := range darwinSelectedLabels(selection) {
+		if err := ctx.Err(); err != nil {
+			return snapshot, err
+		}
+		_, exists, err := platform.ownedDefinition(label)
+		if err != nil {
+			return snapshot, err
+		}
+		var data []byte
+		if exists {
+			data, _, err = readInstalledHTTPValidationRegularFile(platform.plistPath(label), maxDarwinPlistBytes, false)
+			if err != nil {
+				return snapshot, err
+			}
+		}
+		loaded, _, err := platform.printJob(ctx, label)
+		if err != nil {
+			return snapshot, err
+		}
+		if loaded && !exists {
+			return snapshot, installstate.ErrOwnershipConflict
+		}
+		enabled, err := platform.enabled(ctx, label)
+		if err != nil {
+			return snapshot, err
+		}
+		snapshot.Components = append(snapshot.Components, serviceComponentSnapshot{ID: label, Definition: data, Exists: exists, Running: loaded, Enabled: enabled})
+	}
+	return snapshot, nil
+}
+func (platform *darwinServicePlatform) RestoreSelected(ctx context.Context, selection serviceSelection, snapshot servicePlatformSnapshot) error {
+	labels := darwinSelectedLabels(selection)
+	if snapshot.Manager != "launchd" || snapshot.FolderExists || snapshot.FolderSecurityDescriptor != "" || len(snapshot.Components) != len(labels) {
+		return fmt.Errorf("invalid selected launchd snapshot")
+	}
+	// Validate the whole selected snapshot before the first mutation.
+	for i, c := range snapshot.Components {
+		if c.ID != labels[i] || c.UnitFileState != "" || len(c.Definition) > maxDarwinPlistBytes || (!c.Exists && (c.Running || len(c.Definition) > 0)) || (c.Running && !c.Enabled && c.ID != proxyAgentLabel) {
+			return fmt.Errorf("invalid selected launchd component")
+		}
+		if c.Exists {
+			d, err := parseDarwinLaunchAgent(c.Definition)
+			if err != nil || d.Label != c.ID {
+				return fmt.Errorf("invalid selected launchd definition")
+			}
+		}
+	}
+	for i := len(labels) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c := snapshot.Components[i]
+		if _, err := platform.run(ctx, "bootout", platform.target(c.ID)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path := platform.plistPath(c.ID)
+		if c.Exists {
+			if err := atomicWriteDarwinLaunchAgent(path, c.Definition); err != nil {
+				return err
+			}
+		} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		operation := "disable"
+		if c.Enabled {
+			operation = "enable"
+		}
+		if _, err := platform.run(ctx, operation, platform.target(c.ID)); err != nil {
+			return err
+		}
+		if c.Running {
+			if !c.Enabled {
+				if err := platform.forceLoadDisabledProxy(ctx); err != nil {
+					return err
+				}
+			} else {
+				if _, err := platform.run(ctx, "bootstrap", platform.domain(), path); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return ctx.Err()
+}
+
+// Selected service health uses installed roots and the native process identity.
+// It does not reuse the legacy inspector, which resolves the invoking shell.
+func inspectDarwinSelectedProxyRuntime(ctx context.Context, executable string, roots userdirs.Roots, pid int) componentStatus {
+	return inspectDarwinSelectedProxyRuntimeWith(ctx, executable, roots, pid, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, name, args...).Output()
+	}, &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("service health redirect refused") }})
+}
+func inspectDarwinSelectedProxyRuntimeWith(ctx context.Context, executable string, roots userdirs.Roots, pid int, run func(context.Context, string, ...string) ([]byte, error), client httputil.Doer) componentStatus {
+	status := componentStatus{PID: pid, Running: pid > 0}
+	if pid <= 0 || ctx.Err() != nil {
+		return status
+	}
+	cfg, err := proxy.LoadExistingConfigAt(proxy.PathsForRoots(roots))
+	if err != nil || cfg.LocalToken == "" {
+		return status
+	}
+	output, err := run(ctx, "/bin/ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+	if err != nil {
+		return status
+	}
+	live := strings.TrimSpace(string(output))
+	if !sameServiceExecutable(live, executable) {
+		return status
+	}
+	status.LiveExecutable = live
+	output, err = run(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", cfg.Port), "-sTCP:LISTEN", "-Fp")
+	if err != nil || requireInstalledHTTPValidationListenerPID(output, pid) != nil {
+		return status
+	}
+	status.Listener = fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	for _, path := range []string{proxy.RuntimeRescueStatusPath, "/health"} {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+status.Listener+path, http.NoBody)
+		if err != nil {
+			return status
+		}
+		request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
+		response, err := client.Do(request)
+		if err != nil {
+			return status
+		}
+		if response == nil || response.Body == nil {
+			return status
+		}
+		if response.StatusCode != http.StatusOK {
+			_ = response.Body.Close()
+			return status
+		}
+		body, err := httputil.ReadBody(response.Body)
+		_ = response.Body.Close()
+		if err != nil {
+			return status
+		}
+		if path == proxy.RuntimeRescueStatusPath {
+			var result struct {
+				Mode string `json:"mode"`
+			}
+			if json.Unmarshal(body, &result) != nil || result.Mode != "normal" {
+				return status
+			}
+		} else {
+			var result struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(body, &result) != nil || result.Status != "ok" {
+				return status
+			}
+		}
+	}
+	status.Healthy = true
+	return status
+}
+
+func validateDarwinOwnedExecutable(path string) error {
+	if err := validateDarwinServiceExecutable(path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	fs := fsutil.OSFileSystem{}
+	uid, ok := fs.FileOwnerUID(info)
+	if !ok || (uid != fs.EffectiveUID() && uid != 0) || info.Mode().Perm()&0o022 != 0 || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return installstate.ErrOwnershipConflict
+	}
+	return nil
+}
+
+// Unlike load -w, the documented -F operation ignores Disabled without writing
+// an enabled override. Legacy load exit status is not proof: observe both the
+// exact GUI target and durable policy. Native qualification remains required.
+func (platform *darwinServicePlatform) forceLoadDisabledProxy(ctx context.Context) (returnErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	defer func() {
+		if returnErr == nil || ctx.Err() != nil {
+			return
+		}
+		_, disableErr := platform.run(ctx, "disable", platform.target(proxyAgentLabel))
+		_, stopErr := platform.run(ctx, "bootout", platform.target(proxyAgentLabel))
+		if isDarwinLaunchctlNotLoaded(stopErr) {
+			stopErr = nil
+		}
+		enabled, verifyErr := platform.enabled(ctx, proxyAgentLabel)
+		if verifyErr == nil && enabled {
+			verifyErr = ErrServiceUnhealthy
+		}
+		returnErr = errors.Join(returnErr, disableErr, stopErr, verifyErr)
+	}()
+	if _, err := platform.run(ctx, "load", "-F", platform.plistPath(proxyAgentLabel)); err != nil {
+		return err
+	}
+	loaded, _, err := platform.printJob(ctx, proxyAgentLabel)
+	if err != nil {
+		return err
+	}
+	if !loaded {
+		return ErrServiceUnhealthy
+	}
+	enabled, err := platform.enabled(ctx, proxyAgentLabel)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return ErrServiceUnhealthy
+	}
+	if err := platform.kickstart(ctx, proxyAgentLabel); err != nil {
+		return err
+	}
+	enabled, err = platform.enabled(ctx, proxyAgentLabel)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return ErrServiceUnhealthy
+	}
+	return ctx.Err()
 }

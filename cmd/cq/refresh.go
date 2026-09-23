@@ -24,6 +24,7 @@ import (
 const refreshMarginMs = 30 * 60 * 1000
 
 var (
+	serviceRefreshRunner      func(func() error) error
 	discoverClaudeAccountsFn  = keyring.DiscoverClaudeAccounts
 	newHTTPClientFn           = func(timeout time.Duration, version string) httputil.Doer { return httputil.NewClient(timeout, version) }
 	refreshCodexAccountsFn    = refreshCodexAccounts
@@ -42,6 +43,9 @@ func runRefreshCommand(args []string) error {
 	}
 	if len(args) > 0 {
 		return fmt.Errorf("refresh: unexpected arguments")
+	}
+	if serviceRefreshRunner != nil {
+		return serviceRefreshRunner(runRefresh)
 	}
 	return runRefresh()
 }
