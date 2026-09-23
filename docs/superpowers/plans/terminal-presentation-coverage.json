@@ -1602,6 +1602,13 @@
       "task": "T07"
     },
     {
+      "command": "cq claude proxy pin clear",
+      "scenario": "Timeout",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-clear/06-timeout.txt",
+      "task": "T07"
+    },
+    {
       "command": "cq claude proxy pin set",
       "scenario": "Help",
       "stream": "stdout",
@@ -1627,6 +1634,13 @@
       "scenario": "Timeout",
       "stream": "stderr",
       "file": "text/cq-claude-proxy-pin-set/04-timeout.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "scenario": "Timeout",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-set/05-timeout.txt",
       "task": "T07"
     },
     {

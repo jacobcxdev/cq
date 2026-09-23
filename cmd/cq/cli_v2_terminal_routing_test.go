@@ -147,6 +147,69 @@ type routingIndex struct {
 	} `json:"fixtures"`
 }
 
+func TestTerminalRoutingManifestParity(t *testing.T) {
+	manifestBytes, err := os.ReadFile(filepath.Join("..", "..", "docs", "superpowers", "plans", "terminal-presentation-coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Fixtures []struct {
+			Command, Scenario, Stream, File, Task string
+		} `json:"fixtures"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	indexBytes, err := os.ReadFile(filepath.Join("..", "..", "specs", "cli-v2", "presentation", "examples", "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index routingIndex
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Fixtures) != len(index.Fixtures) {
+		t.Errorf("manifest has %d fixtures; catalogue has %d", len(manifest.Fixtures), len(index.Fixtures))
+	}
+	indexed := make(map[string]terminalFixtureRegistration, len(index.Fixtures))
+	for _, entry := range index.Fixtures {
+		if _, exists := indexed[entry.File]; exists {
+			t.Errorf("duplicate catalogue fixture %s", entry.File)
+		}
+		indexed[entry.File] = terminalFixtureRegistration{entry.Command, entry.Scenario, entry.Stream, entry.File}
+	}
+	registered := make(map[string]terminalFixtureRegistration, len(terminalRoutingFixtures))
+	for _, fixture := range terminalRoutingFixtures {
+		registered[fixture.File] = fixture.terminalFixtureRegistration
+	}
+	seen := make(map[string]bool, len(manifest.Fixtures))
+	routingCount := 0
+	for _, entry := range manifest.Fixtures {
+		if seen[entry.File] {
+			t.Errorf("duplicate manifest fixture %s", entry.File)
+		}
+		seen[entry.File] = true
+		want := terminalFixtureRegistration{entry.Command, entry.Scenario, entry.Stream, entry.File}
+		if got, ok := indexed[entry.File]; !ok || got != want {
+			t.Errorf("catalogue mismatch for %s", entry.File)
+		}
+		if entry.Task == "T07" {
+			routingCount++
+			if got, ok := registered[entry.File]; !ok || got != want {
+				t.Errorf("routing registration mismatch for %s", entry.File)
+			}
+		}
+	}
+	for file := range indexed {
+		if !seen[file] {
+			t.Errorf("catalogue fixture missing from manifest: %s", file)
+		}
+	}
+	if routingCount != len(registered) {
+		t.Errorf("manifest owns %d routing fixtures; tests register %d", routingCount, len(registered))
+	}
+}
+
 func TestTerminalRoutingFixtures(t *testing.T) {
 	indexBytes, err := os.ReadFile(filepath.Join("..", "..", "specs", "cli-v2", "presentation", "examples", "index.json"))
 	if err != nil {
