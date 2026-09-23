@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -179,7 +180,7 @@ func inspectCandidateRuntime(ctx context.Context, port int, token []byte) (candi
 }
 
 func candidateRuntimeHTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{Proxy: nil, DisableCompression: true, DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &http.Transport{Proxy: nil, DisableCompression: true, DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil || host != "127.0.0.1" {
 			return nil, errors.New("candidate runtime address invalid")
@@ -291,4 +292,107 @@ func healthPort(args []string) int {
 
 func candidateRuntimeReceipt(state string, health candidateRuntimeHealthV1) []byte {
 	return []byte(state + "\x00" + health.ProxyInstanceID + "\x00" + health.ValidationRunID + "\x00" + strconv.FormatUint(health.Generation, 10))
+}
+
+// The lease refers to one native process incarnation, never merely a PID.
+type candidateProcessLease interface {
+	Revalidate(context.Context) error
+	Exited(context.Context) (bool, error)
+	Close() error
+}
+
+func candidateListenerAbsent(ctx context.Context, port int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err == nil {
+		_ = conn.Close()
+		return proxy.ErrCandidateLifecycleInvalid
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return nil
+	}
+	return proxy.ErrCandidateLifecycleInvalid
+}
+
+type candidateStopOperation struct {
+	Run   func(context.Context, context.Context, proxy.CandidateLifecycleStateV1) ([]byte, error)
+	Close func() error
+}
+
+func prepareCandidateRuntimeStop(work context.Context, state proxy.CandidateLifecycleStateV1, token []byte) (*candidateStopOperation, error) {
+	health, err := inspectCandidateRuntime(work, state.Port, token)
+	if err != nil {
+		return nil, err
+	}
+	if health.ProxyInstanceID != state.ProxyInstanceID || health.ValidationRunID != state.ValidationRunID {
+		return nil, proxy.ErrCandidateLifecycleInvalid
+	}
+	lease, err := captureCandidateProcess(work, state, health.Generation)
+	if err != nil {
+		return nil, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = lease.Close()
+		}
+	}()
+	if err = lease.Revalidate(work); err != nil {
+		return nil, err
+	}
+	again, err := inspectCandidateRuntime(work, state.Port, token)
+	if err != nil || again != health {
+		return nil, proxy.ErrCandidateLifecycleInvalid
+	}
+	keep = true
+	return &candidateStopOperation{Close: lease.Close, Run: func(work, cleanup context.Context, current proxy.CandidateLifecycleStateV1) ([]byte, error) {
+		if err := lease.Revalidate(work); err != nil {
+			return nil, err
+		}
+		request, err := http.NewRequestWithContext(work, http.MethodPost, candidateRuntimeURL(state.Port, "/__cq_candidate_control/stop"), nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set(candidateRuntimeControlHeader, hex.EncodeToString(token))
+		response, err := candidateRuntimeHTTPClient().Do(request)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return nil, proxy.ErrCandidateLifecycleInvalid
+		}
+		body, err := httputil.ReadBody(response.Body)
+		if err != nil {
+			return nil, err
+		}
+		var stopped candidateRuntimeHealthV1
+		if err = json.Unmarshal(body, &stopped); err != nil || stopped != health {
+			return nil, proxy.ErrCandidateLifecycleInvalid
+		}
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			exited, err := lease.Exited(cleanup)
+			if err != nil {
+				return nil, err
+			}
+			if exited {
+				if err = candidateListenerAbsent(cleanup, state.Port); err != nil {
+					return nil, err
+				}
+				return candidateNativeStopMaterial(current), nil
+			}
+			select {
+			case <-cleanup.Done():
+				return nil, cleanup.Err()
+			case <-ticker.C:
+			}
+		}
+	}}, nil
 }

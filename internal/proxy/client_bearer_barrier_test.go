@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -63,5 +64,24 @@ func TestClientBearerBarrierRejectsMissingHookAndStaleStopProof(t *testing.T) {
 	evidence := []ClientSenderBarrierEvidenceV1{{SenderID: "cq-config", CredentialDomain: "cq_local_token", Transport: "http"}}
 	if _, err := SignClientBearerBarrier(registry, evidence, now, now.Add(time.Hour), privateKey); err == nil {
 		t.Fatal("missing sender hook accepted")
+	}
+}
+
+func TestCandidateRegistryValidationDoesNotMutateInput(t *testing.T) {
+	registry := ClientSenderRegistryV1{SchemaVersion: 1, Revision: 1, Senders: []ClientRequestSenderV1{
+		{SenderID: "z", AdapterID: "cq_config_read_per_call_v1", CredentialDomains: []string{"cq_local_token"}, Transports: []string{"websocket", "http"}, HookSupported: true},
+		{SenderID: "a", AdapterID: "synthetic", CredentialDomains: []string{"codex_bearer", "claude_bearer"}, Transports: []string{"http"}, HookSupported: true},
+	}}
+	before, _ := json.Marshal(registry)
+	if err := ValidateClientSenderRegistry(registry); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(registry)
+	if string(before) != string(after) {
+		t.Fatal("registry mutated")
+	}
+	registry.Senders[0].HookSupported = false
+	if err := ValidateClientSenderRegistry(registry); err == nil {
+		t.Fatal("invalid hook accepted")
 	}
 }

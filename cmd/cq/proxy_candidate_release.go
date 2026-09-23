@@ -14,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -184,6 +186,23 @@ func decodeOperationalCandidateRelease(body []byte, purpose string) (candidateOp
 	if bundle.SchemaVersion != 1 || bundle.Kind != "operational_release_bundle_v1" || bundle.Purpose != purpose || len(bundle.SourceCommit) != 40 || len(bundle.Digest) != 64 {
 		return bundle, errors.New("operational release bundle invalid")
 	}
+	if !candidateLowerHex(bundle.AuthorityDigest, 32) || !candidateLowerHex(bundle.SourceCommit, 20) || !candidateLowerHex(bundle.SourceTreeDigest, 32) || !candidateLowerHex(bundle.Digest, 32) || !candidateLowerHex(bundle.SignerPublicKey, 32) || !candidateLowerHex(bundle.Signature, 64) {
+		return bundle, proxy.ErrCandidateLifecycleInvalid
+	}
+	built, err := time.Parse(time.RFC3339, bundle.BuiltAt)
+	if err != nil || built.IsZero() || !strings.HasSuffix(bundle.BuiltAt, "Z") {
+		return bundle, proxy.ErrCandidateLifecycleInvalid
+	}
+	roles := map[string]bool{}
+	for _, role := range bundle.Roles {
+		if (role.Role != "launcher" && role.Role != "supervisor" && role.Role != "worker") || roles[role.Role] || !candidateLowerHex(role.ArtifactDigest, 32) || role.ByteCount < 1 || role.ByteCount > candidateExecutableMaxBytes {
+			return bundle, proxy.ErrCandidateLifecycleInvalid
+		}
+		roles[role.Role] = true
+	}
+	if !roles["supervisor"] || !roles["worker"] {
+		return bundle, proxy.ErrCandidateLifecycleInvalid
+	}
 	publicKey, err := hex.DecodeString(bundle.SignerPublicKey)
 	if err != nil || len(publicKey) != ed25519.PublicKeySize {
 		return bundle, errors.New("operational release signer invalid")
@@ -325,32 +344,130 @@ func ensureCandidateExactFile(inspector fsutil.SecurePathInspector, directory fs
 }
 
 func removeCandidateStateRoot(ctx context.Context, fsys fsutil.FileSystem, root string, state proxy.CandidateLifecycleStateV1) error {
-	if ctx == nil || fsys == nil || ctx.Err() != nil || state.Phase != proxy.CandidatePhaseRemoved || !cleanAbsolutePath(root) {
+	return removeCandidateStateRootWithCleanup(ctx, ctx, fsys, root, state)
+}
+
+func removeCandidateStateRootWithCleanup(ctx, cleanup context.Context, fsys fsutil.FileSystem, root string, state proxy.CandidateLifecycleStateV1) error {
+	if ctx == nil || fsys == nil || state.Phase != proxy.CandidatePhaseRemoved || !cleanAbsolutePath(root) {
 		return proxy.ErrCandidateLifecycleInvalid
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	if !ok {
+		return fsutil.ErrSecureCapabilityUnavailable
+	}
+	rootInfo, err := inspector.Lstat(root)
+	if err != nil {
+		return err
+	}
+	identity, ok := inspector.FileIdentity(rootInfo)
+	if !ok {
+		return fsutil.ErrUnsafeSecurePath
+	}
+	current, err := proxy.InspectCandidateLifecycle(ctx, fsys, root)
+	if err != nil {
+		return err
+	}
+	if current != state {
+		return proxy.ErrCandidateLifecycleInvalid
+	}
+	if err = validateCandidateRemovalTree(ctx, fsys, root); err != nil {
+		return err
+	}
+	// Keep only the minimum authenticated inspection state in memory until
+	// retirement finishes. Ordinary contents are removed first; partial cleanup
+	// remains a retired candidate, never a successful complete deletion.
+	metadata := map[string][]byte{}
+	for _, name := range []string{"candidate.key", "candidate.json", "candidate.lock", "client-sender-registry.json"} {
+		body, readErr := readCandidateInputFile(fsys, filepath.Join(root, name), 64<<10)
+		if name == "candidate.lock" && errors.Is(readErr, proxy.ErrCandidateLifecycleInvalid) {
+			body = nil
+			readErr = nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+		metadata[name] = body
+	}
+	defer func() {
+		for _, body := range metadata {
+			zeroCandidateBytes(body)
+		}
+	}()
 	parentPath, base := filepath.Dir(root), filepath.Base(root)
 	parent, err := fsutil.OpenOwnerControlledDirectory(fsys, parentPath)
 	if err != nil {
 		return err
 	}
+	defer parent.Close()
+	renamer, ok := parent.(fsutil.IdentityBoundRenamer)
+	if !ok {
+		return fsutil.ErrSecureCapabilityUnavailable
+	}
 	tombstone := "." + base + ".removed-" + state.OperationID
-	if err := parent.RenameNoReplace(base, tombstone); err != nil {
-		_ = parent.Close()
+	if err = renamer.RenameNoReplaceChecked(base, tombstone, identity); err != nil {
 		return err
 	}
-	if err := parent.Sync(); err != nil {
-		_ = parent.Close()
-		return err
+	if err = parent.Sync(); err == nil {
+		err = removeCandidateTree(ctx, fsys, filepath.Join(parentPath, tombstone))
 	}
-	if err := parent.Close(); err != nil {
-		return err
+	if err != nil {
+		if cleanup.Err() != nil {
+			return errors.Join(err, cleanup.Err())
+		}
+		// Restore the inspectable retired root if cleanup did not finish. Never
+		// overwrite an independently created replacement at the original name.
+		remaining, inspectErr := inspector.Lstat(filepath.Join(parentPath, tombstone))
+		if inspectErr != nil {
+			return errors.Join(err, inspectErr)
+		}
+		restoredIdentity, identityOK := inspector.FileIdentity(remaining)
+		if !identityOK || !candidateSameDirectoryIdentity(identity, restoredIdentity) {
+			return errors.Join(err, inspectErr, fsutil.ErrUnsafeSecurePath)
+		}
+		if securityErr := fsutil.ValidateSecureDirectory(fsys, filepath.Join(parentPath, tombstone)); securityErr != nil {
+			return errors.Join(err, securityErr)
+		}
+		if cleanup.Err() != nil {
+			return errors.Join(err, cleanup.Err())
+		}
+		restoreErr := renamer.RenameNoReplaceChecked(tombstone, base, restoredIdentity)
+		if restoreErr != nil {
+			return errors.Join(err, restoreErr)
+		}
+		opener, ok := fsys.(fsutil.SecureDirectoryOpener)
+		if !ok {
+			return errors.Join(err, fsutil.ErrSecureCapabilityUnavailable)
+		}
+		directory, openErr := opener.OpenSecureDirectory(root)
+		if openErr != nil {
+			return errors.Join(err, openErr)
+		}
+		defer directory.Close()
+		for _, name := range []string{"candidate.key", "client-sender-registry.json", "candidate.lock", "candidate.json"} {
+			if cleanup.Err() != nil {
+				return errors.Join(err, cleanup.Err())
+			}
+			if restoreErr = ensureCandidateExactFile(inspector, directory, name, metadata[name]); restoreErr != nil {
+				return errors.Join(err, restoreErr)
+			}
+		}
+		if cleanup.Err() != nil {
+			return errors.Join(err, cleanup.Err())
+		}
+		return errors.Join(err, parent.Sync())
 	}
-	return removeCandidateTree(ctx, fsys, filepath.Join(parentPath, tombstone))
+	if cleanup.Err() != nil {
+		return cleanup.Err()
+	}
+	return parent.Sync()
 }
 
-func removeCandidateTree(ctx context.Context, fsys fsutil.FileSystem, path string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func validateCandidateRemovalTree(ctx context.Context, fsys fsutil.FileSystem, path string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	inspector, ok := fsys.(fsutil.SecurePathInspector)
 	if !ok {
@@ -360,23 +477,121 @@ func removeCandidateTree(ctx context.Context, fsys fsutil.FileSystem, path strin
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fsutil.ErrUnsafeSecurePath
-	}
 	if info.IsDir() {
+		if err = fsutil.ValidateSecureDirectory(fsys, path); err != nil {
+			return err
+		}
 		entries, err := fsys.ReadDir(path)
 		if err != nil {
 			return err
 		}
 		for _, entry := range entries {
-			if err := removeCandidateTree(ctx, fsys, filepath.Join(path, entry.Name())); err != nil {
+			if err = validateCandidateRemovalTree(ctx, fsys, filepath.Join(path, entry.Name())); err != nil {
 				return err
 			}
 		}
-	} else if !info.Mode().IsRegular() {
+		return nil
+	}
+	return fsutil.ValidateSecureRegularFile(fsys, path)
+}
+
+func removeCandidateTree(ctx context.Context, fsys fsutil.FileSystem, path string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	if !ok {
+		return fsutil.ErrSecureCapabilityUnavailable
+	}
+	info, err := inspector.Lstat(path)
+	if err != nil {
+		return err
+	}
+	identity, ok := inspector.FileIdentity(info)
+	if !ok {
 		return fsutil.ErrUnsafeSecurePath
 	}
-	return fsys.Remove(path)
+	if info.IsDir() {
+		if err = fsutil.ValidateSecureDirectory(fsys, path); err != nil {
+			return err
+		}
+		opener, ok := fsys.(fsutil.SecureDirectoryOpener)
+		if !ok {
+			return fsutil.ErrSecureCapabilityUnavailable
+		}
+		directory, err := opener.OpenSecureDirectory(path)
+		if err != nil {
+			return err
+		}
+		held, err := directory.Stat()
+		if err != nil {
+			_ = directory.Close()
+			return err
+		}
+		heldIdentity, ok := inspector.FileIdentity(held)
+		if !ok || heldIdentity != identity {
+			_ = directory.Close()
+			return fsutil.ErrUnsafeSecurePath
+		}
+		reader, ok := directory.(fsutil.SecureDirectoryReader)
+		if !ok {
+			_ = directory.Close()
+			return fsutil.ErrSecureCapabilityUnavailable
+		}
+		entries, err := reader.ReadDir()
+		if err != nil {
+			_ = directory.Close()
+			return err
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			return candidateRemovalOrder(entries[i].Name()) < candidateRemovalOrder(entries[j].Name())
+		})
+		for _, entry := range entries {
+			if err = fsutil.ValidateSecureDirectoryHandle(inspector, directory, path); err != nil {
+				_ = directory.Close()
+				return err
+			}
+			if err = removeCandidateTree(ctx, fsys, filepath.Join(path, entry.Name())); err != nil {
+				_ = directory.Close()
+				return err
+			}
+		}
+		// Child removal changes directory link counts on APFS. Refresh that count
+		// only after proving the original retained directory still owns this path.
+		if err = fsutil.ValidateSecureDirectoryHandle(inspector, directory, path); err != nil {
+			_ = directory.Close()
+			return err
+		}
+		finalInfo, statErr := directory.Stat()
+		if statErr != nil {
+			_ = directory.Close()
+			return statErr
+		}
+		finalIdentity, valid := inspector.FileIdentity(finalInfo)
+		if !valid || !candidateSameDirectoryIdentity(identity, finalIdentity) {
+			_ = directory.Close()
+			return fsutil.ErrUnsafeSecurePath
+		}
+		identity = finalIdentity
+		if err = directory.Close(); err != nil {
+			return err
+		}
+	} else if err = fsutil.ValidateSecureRegularFile(fsys, path); err != nil {
+		return err
+	}
+	parent, err := fsutil.OpenOwnerControlledDirectory(fsys, filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	remover, ok := parent.(fsutil.IdentityBoundRemover)
+	if !ok {
+		return fsutil.ErrSecureCapabilityUnavailable
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return remover.RemoveChecked(filepath.Base(path), identity)
 }
 
 func candidateSHA256(body []byte) string {
@@ -389,4 +604,28 @@ func candidateDomainDigest(domain string, body []byte) string {
 	_, _ = hash.Write([]byte(domain))
 	_, _ = hash.Write(body)
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func candidateLowerHex(value string, size int) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == size && hex.EncodeToString(decoded) == value
+}
+
+func candidateSameDirectoryIdentity(a, b fsutil.SecureFileIdentity) bool {
+	return a.Device == b.Device && a.Inode == b.Inode && a.FileID == b.FileID
+}
+
+func candidateRemovalOrder(name string) int {
+	switch name {
+	case "candidate.lock":
+		return 1
+	case "client-sender-registry.json":
+		return 2
+	case "candidate.json":
+		return 3
+	case "candidate.key":
+		return 4
+	default:
+		return 0
+	}
 }

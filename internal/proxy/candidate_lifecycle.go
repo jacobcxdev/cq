@@ -227,46 +227,77 @@ func OpenCandidateLifecycle(ctx context.Context, fsys fsutil.FileSystem, root st
 		_ = directory.Close()
 		return nil, CandidateLifecycleStateV1{}, err
 	}
-	key, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, candidateLifecycleKeyName, sha256.Size+1)
-	if err != nil || len(key) != sha256.Size {
+	state, key, err := readCandidateLifecycle(inspector, directory)
+	if err != nil {
 		_ = lock.Close()
 		_ = directory.Close()
+		return nil, CandidateLifecycleStateV1{}, err
+	}
+	defer zeroRuntimeBytes(key)
+	store := &CandidateLifecycleStore{ctx: ctx, inspector: inspector, directory: directory, lock: lock, now: time.Now, state: state}
+	copy(store.key[:], key)
+	return store, state, nil
+}
+
+// InspectCandidateLifecycle authenticates retained state without acquiring a
+// mutation lock or repairing files. It makes no runtime health assertion.
+func InspectCandidateLifecycle(ctx context.Context, fsys fsutil.FileSystem, root string) (CandidateLifecycleStateV1, error) {
+	if ctx == nil || fsys == nil || invalidInspectionRoot(root) {
+		return CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
+	if err := fsutil.ValidateSecureDirectory(fsys, root); err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	opener, openOK := fsys.(fsutil.SecureDirectoryOpener)
+	if !ok || !openOK {
+		return CandidateLifecycleStateV1{}, fsutil.ErrSecureCapabilityUnavailable
+	}
+	directory, err := opener.OpenSecureDirectory(root)
+	if err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
+	defer directory.Close()
+	state, key, err := readCandidateLifecycle(inspector, directory)
+	zeroRuntimeBytes(key)
+	if ctx.Err() != nil {
+		return CandidateLifecycleStateV1{}, ctx.Err()
+	}
+	return state, err
+}
+
+func readCandidateLifecycle(inspector fsutil.SecurePathInspector, directory fsutil.SecureDirectory) (CandidateLifecycleStateV1, []byte, error) {
+	key, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, candidateLifecycleKeyName, sha256.Size+1)
+	if err != nil || len(key) != sha256.Size {
 		if err != nil {
-			return nil, CandidateLifecycleStateV1{}, err
+			return CandidateLifecycleStateV1{}, nil, err
 		}
-		return nil, CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
+		return CandidateLifecycleStateV1{}, nil, ErrCandidateLifecycleInvalid
 	}
 	defer zeroRuntimeBytes(key)
 	body, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, candidateLifecycleStateName, 64<<10)
 	if err != nil {
-		_ = lock.Close()
-		_ = directory.Close()
-		return nil, CandidateLifecycleStateV1{}, err
+		return CandidateLifecycleStateV1{}, nil, err
 	}
 	state, err := decodeCandidateLifecycle(body, key)
 	if err != nil {
-		_ = lock.Close()
-		_ = directory.Close()
-		return nil, CandidateLifecycleStateV1{}, err
+		return CandidateLifecycleStateV1{}, nil, err
 	}
 	registry, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, candidateClientRegistryName, (64<<10)+1)
 	if err != nil || len(registry) == 0 || len(registry) > 64<<10 {
-		_ = lock.Close()
-		_ = directory.Close()
 		if err != nil {
-			return nil, CandidateLifecycleStateV1{}, err
+			return CandidateLifecycleStateV1{}, nil, err
 		}
-		return nil, CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
+		return CandidateLifecycleStateV1{}, nil, ErrCandidateLifecycleInvalid
 	}
 	registryDigest := sha256.Sum256(registry)
 	if hex.EncodeToString(registryDigest[:]) != state.LocalTokenClientRegistryDigest {
-		_ = lock.Close()
-		_ = directory.Close()
-		return nil, CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
+		return CandidateLifecycleStateV1{}, nil, ErrCandidateLifecycleInvalid
 	}
-	store := &CandidateLifecycleStore{ctx: ctx, inspector: inspector, directory: directory, lock: lock, now: time.Now, state: state}
-	copy(store.key[:], key)
-	return store, state, nil
+	return state, append([]byte(nil), key...), nil
 }
 
 func (s *CandidateLifecycleStore) State() CandidateLifecycleStateV1 {
@@ -329,12 +360,18 @@ func (s *CandidateLifecycleStore) ApplyTarget(ctx context.Context, action Candid
 			return CandidateLifecycleStateV1{}, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
 	s.state.EffectStarted = true
 	s.bump()
 	if err := s.persist(); err != nil {
 		return CandidateLifecycleStateV1{}, err
 	}
 	if err := s.callHook("effect_started"); err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return CandidateLifecycleStateV1{}, err
 	}
 	receipt, err := effect(s.state)
@@ -345,6 +382,9 @@ func (s *CandidateLifecycleStore) ApplyTarget(ctx context.Context, action Candid
 		return CandidateLifecycleStateV1{}, ErrCandidateLifecycleInvalid
 	}
 	if err := s.callHook("effect_returned"); err != nil {
+		return CandidateLifecycleStateV1{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return CandidateLifecycleStateV1{}, err
 	}
 	return s.complete(action, receipt)
@@ -553,7 +593,7 @@ func candidateActionAllowed(phase CandidateLifecyclePhase, action CandidateLifec
 	case CandidateActionStart:
 		return phase == CandidatePhasePrepared || phase == CandidatePhaseStopped || phase == CandidatePhaseValidated
 	case CandidateActionStop:
-		return phase == CandidatePhaseRunning
+		return phase == CandidatePhaseRunning || phase == CandidatePhaseValidated
 	case CandidateActionRefreshBarrier:
 		return phase == CandidatePhasePrepared || phase == CandidatePhaseStopped
 	case CandidateActionArtifactSwitch:

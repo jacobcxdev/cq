@@ -440,3 +440,78 @@ func TestUnixAcquireNewExclusiveLockNeverOpensExistingFile(t *testing.T) {
 		t.Fatalf("create error = %v, want already exists", err)
 	}
 }
+
+func TestUnixCheckedDirectoryRemovalAndRestoration(t *testing.T) {
+	fsys := OSFileSystem{}
+	root := t.TempDir()
+	directory, err := OpenOwnerControlledDirectory(fsys, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	rename := directory.(IdentityBoundRenamer)
+	remove := directory.(IdentityBoundRemover)
+	for _, name := range []string{"empty", "nonempty", "replacement"} {
+		if err = os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := func(name string) SecureFileIdentity {
+		t.Helper()
+		info, err := fsys.Lstat(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, ok := fsys.FileIdentity(info)
+		if !ok {
+			t.Fatal("missing identity")
+		}
+		return value
+	}
+	emptyID := identity("empty")
+	if err = rename.RenameNoReplaceChecked("empty", "renamed", emptyID); err != nil {
+		t.Fatal(err)
+	}
+	if err = remove.RemoveChecked("renamed", emptyID); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "nonempty", "owned"), []byte("retained"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := identity("nonempty")
+	if err = remove.RemoveChecked("nonempty", id); err == nil {
+		t.Fatal("removed nonempty directory")
+	}
+	if value, err := os.ReadFile(filepath.Join(root, "nonempty", "owned")); err != nil || string(value) != "retained" {
+		t.Fatalf("nonempty restoration=%q %v", value, err)
+	}
+	wrong := identity("replacement")
+	wrong.Inode++
+	if err = remove.RemoveChecked("replacement", wrong); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("wrong identity=%v", err)
+	}
+	if err = rename.RenameNoReplaceChecked("replacement", "nonempty", identity("replacement")); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("existing destination=%v", err)
+	}
+	if _, err = os.Stat(filepath.Join(root, "replacement")); err != nil {
+		t.Fatalf("rename source not restored: %v", err)
+	}
+	if err = os.Symlink(filepath.Join(root, "nonempty"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err = remove.RemoveChecked("link", identity("link")); err == nil {
+		t.Fatal("removed symlink through checked directory path")
+	}
+	if _, err = os.Lstat(filepath.Join(root, "link")); err != nil {
+		t.Fatalf("symlink not restored: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".cq-quarantine-") {
+			t.Fatalf("quarantine remains %s", entry.Name())
+		}
+	}
+}

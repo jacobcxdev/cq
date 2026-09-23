@@ -266,7 +266,11 @@ func (directory *unixSecureDirectory) RemoveChecked(name string, expected Secure
 	if !ok || !SameSecureObject(identity, expected) {
 		return restore(fmt.Errorf("%w: checked remove source identity", ErrUnsafeSecurePath))
 	}
-	if err := unix.Unlinkat(int(directory.file.Fd()), quarantine, 0); err != nil {
+	flags := 0
+	if info.IsDir() {
+		flags = unix.AT_REMOVEDIR
+	}
+	if err := unix.Unlinkat(int(directory.file.Fd()), quarantine, flags); err != nil {
 		return restore(err)
 	}
 	return nil

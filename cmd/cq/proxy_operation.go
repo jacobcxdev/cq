@@ -14,7 +14,7 @@ import (
 
 var inspectOperatorOperation = defaultInspectOperatorOperation
 var inspectCandidateReceipt = func(ctx context.Context, root, attemptID string) (proxy.CandidateReceiptInspectionV1, error) {
-	return proxy.InspectCandidateReceiptState(ctx, fsutil.OSFileSystem{}, root, attemptID)
+	return lookupCandidateReceipt(ctx, fsutil.OSFileSystem{}, root, attemptID)
 }
 
 type operatorOperationEnvelopeV1 struct {
@@ -128,4 +128,15 @@ func runCandidateReceiptLookup(ctx context.Context, output io.Writer, arguments 
 	}
 	_, err := fmt.Fprintf(output, "candidate receipt: %s\nstate: %s\n", arguments.AttemptID, state)
 	return exitCode, err
+}
+
+// lookupCandidateReceipt returns typed authenticated state, without rendering,
+// locking, repairing, or selecting another attempt.
+func lookupCandidateReceipt(ctx context.Context, fsys fsutil.FileSystem, root, attemptID string) (proxy.CandidateReceiptInspectionV1, error) {
+	result, err := proxy.InspectCandidateReceiptState(ctx, fsys, root, attemptID)
+	var pathErr *os.PathError
+	if err != nil && ctx.Err() == nil && !errors.As(err, &pathErr) && !errors.Is(err, fsutil.ErrSecureCapabilityUnavailable) {
+		return result, errors.Join(proxy.ErrCandidateLifecycleInvalid, err)
+	}
+	return result, err
 }

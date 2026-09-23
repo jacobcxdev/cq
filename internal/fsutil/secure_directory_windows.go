@@ -596,13 +596,17 @@ func (directory *windowsSecureDirectory) rename(oldName, newName string, expecte
 	if err := validateWindowsSecureEntryName(newName); err != nil {
 		return err
 	}
+	options := uint32(windows.FILE_NON_DIRECTORY_FILE)
+	if checked {
+		options = 0
+	} // Checked operations also accept exact directory identities.
 	result, err := openWindowsRelative(
 		windows.Handle(directory.file.Fd()),
 		oldName,
 		windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
 		windowsShareAll,
 		windows.FILE_OPEN,
-		windows.FILE_NON_DIRECTORY_FILE,
+		options,
 		nil,
 	)
 	if err != nil {
@@ -628,7 +632,16 @@ func (directory *windowsSecureDirectory) rename(oldName, newName string, expecte
 	if !SameSecureObject(identity, postIdentity) {
 		return fmt.Errorf("%w: renamed Windows source identity changed", ErrCommitIndeterminate)
 	}
-	destination, err := directory.OpenNoFollow(newName)
+	var destination SecureReadFile
+	if checked && info.IsDir() {
+		reopened, openErr := openWindowsRelative(windows.Handle(directory.file.Fd()), newName, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE, windowsShareAll, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE, nil)
+		err = openErr
+		if err == nil {
+			destination = &windowsSecureFile{file: reopened.file}
+		}
+	} else {
+		destination, err = directory.OpenNoFollow(newName)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: reopen renamed Windows destination: %v", ErrCommitIndeterminate, err)
 	}
@@ -653,13 +666,17 @@ func (directory *windowsSecureDirectory) RemoveChecked(name string, expected Sec
 }
 
 func (directory *windowsSecureDirectory) remove(name string, expected SecureFileIdentity, checked bool) error {
+	options := uint32(windows.FILE_NON_DIRECTORY_FILE)
+	if checked {
+		options = 0
+	} // Checked operations also accept exact directory identities.
 	result, err := openWindowsRelative(
 		windows.Handle(directory.file.Fd()),
 		name,
 		windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.SYNCHRONIZE,
 		windowsShareAll,
 		windows.FILE_OPEN,
-		windows.FILE_NON_DIRECTORY_FILE,
+		options,
 		nil,
 	)
 	if err != nil {

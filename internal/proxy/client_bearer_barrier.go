@@ -107,9 +107,21 @@ func ValidateClientBearerBarrier(registry ClientSenderRegistryV1, receipt Client
 	return nil
 }
 
-func validateClientBarrierInputs(registry ClientSenderRegistryV1, evidence []ClientSenderBarrierEvidenceV1) (ClientSenderRegistryV1, []ClientSenderBarrierEvidenceV1, error) {
+// ValidateClientSenderRegistry validates registry shape only; it creates no
+// observations, credentials, signatures or qualification evidence.
+func ValidateClientSenderRegistry(registry ClientSenderRegistryV1) error {
+	registry.Senders = slices.Clone(registry.Senders)
+	for i := range registry.Senders {
+		registry.Senders[i].CredentialDomains = slices.Clone(registry.Senders[i].CredentialDomains)
+		registry.Senders[i].Transports = slices.Clone(registry.Senders[i].Transports)
+	}
+	_, err := validateClientSenderRegistry(registry)
+	return err
+}
+
+func validateClientSenderRegistry(registry ClientSenderRegistryV1) (ClientSenderRegistryV1, error) {
 	if registry.SchemaVersion != 1 || registry.Revision == 0 || len(registry.Senders) == 0 || len(registry.Senders) > 17 {
-		return ClientSenderRegistryV1{}, nil, ErrClientBearerBarrier
+		return ClientSenderRegistryV1{}, ErrClientBearerBarrier
 	}
 	seenSenders := make(map[string]struct{}, len(registry.Senders))
 	hasCQ := false
@@ -118,18 +130,26 @@ func validateClientBarrierInputs(registry ClientSenderRegistryV1, evidence []Cli
 		sort.Strings(sender.CredentialDomains)
 		sort.Strings(sender.Transports)
 		if sender.SenderID == "" || sender.AdapterID == "" || !sender.HookSupported || len(sender.Transports) == 0 || !uniqueClosedStrings(sender.CredentialDomains, []string{"claude_bearer", "codex_bearer", "cq_local_token"}, true) || !uniqueClosedStrings(sender.Transports, []string{"compact", "http", "retained", "websocket"}, false) {
-			return ClientSenderRegistryV1{}, nil, ErrClientBearerBarrier
+			return ClientSenderRegistryV1{}, ErrClientBearerBarrier
 		}
 		if _, duplicate := seenSenders[sender.SenderID]; duplicate {
-			return ClientSenderRegistryV1{}, nil, ErrClientBearerBarrier
+			return ClientSenderRegistryV1{}, ErrClientBearerBarrier
 		}
 		seenSenders[sender.SenderID] = struct{}{}
 		hasCQ = hasCQ || sender.AdapterID == "cq_config_read_per_call_v1" && !sender.Stateful && slices.Equal(sender.CredentialDomains, []string{"cq_local_token"})
 	}
 	if !hasCQ {
-		return ClientSenderRegistryV1{}, nil, ErrClientBearerBarrier
+		return ClientSenderRegistryV1{}, ErrClientBearerBarrier
 	}
 	sort.Slice(registry.Senders, func(i, j int) bool { return registry.Senders[i].SenderID < registry.Senders[j].SenderID })
+	return registry, nil
+}
+
+func validateClientBarrierInputs(registry ClientSenderRegistryV1, evidence []ClientSenderBarrierEvidenceV1) (ClientSenderRegistryV1, []ClientSenderBarrierEvidenceV1, error) {
+	registry, err := validateClientSenderRegistry(registry)
+	if err != nil {
+		return ClientSenderRegistryV1{}, nil, err
+	}
 	expected := make(map[string]struct{})
 	for _, sender := range registry.Senders {
 		for _, domain := range sender.CredentialDomains {

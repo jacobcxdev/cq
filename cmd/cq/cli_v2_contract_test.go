@@ -80,7 +80,16 @@ func noAccessV2Fixture(t *testing.T) *v2Fixture {
 	f := &v2Fixture{In: noAccessV2Input{}, Secrets: []string{"cq-fixture-secret-never-output"}}
 	// Reject lookup itself, before a credential/network/write/service dependency
 	// can even be constructed. This also rejects unimplemented command execution.
-	f.Lookup = func(string) (cli.Handler, bool) {
+	f.Lookup = func(path string) (cli.Handler, bool) {
+		switch path {
+		case "proxy candidate start", "proxy candidate client-safety refresh", "proxy candidate release activate", "proxy candidate release validate":
+			return func(ctx context.Context, inv cli.Invocation, session *cli.Session) cli.Outcome {
+				return handleV2CandidateWithPreparation(ctx, inv, session, func(context.Context) (v2CandidateDependencies, error) {
+					f.Call("environment")
+					panic("unavailable candidate constructed dependencies")
+				})
+			}, true
+		}
 		f.Call("lookup")
 		panic("CLI v2 no-access fixture reached handler lookup")
 	}
