@@ -647,3 +647,29 @@ func sameServiceExecutable(left, right string) bool {
 }
 
 var _ servicePlatform = (*systemdServicePlatform)(nil)
+
+// Selected lifecycle support is implemented by the native adapter tasks.
+func (platform *systemdServicePlatform) StartProxy(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *systemdServicePlatform) StopProxy(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *systemdServicePlatform) StartRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *systemdServicePlatform) StopRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *systemdServicePlatform) PreflightSelected(context.Context, string, serviceSelection) error {
+	return errServiceUnavailable
+}
+func (platform *systemdServicePlatform) InspectSelected(context.Context, serviceSelection) (serviceStatus, error) {
+	return serviceStatus{}, errServiceUnavailable
+}
+func (platform *systemdServicePlatform) SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error) {
+	return servicePlatformSnapshot{}, errServiceUnavailable
+}
+func (platform *systemdServicePlatform) RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error {
+	return errServiceUnavailable
+}

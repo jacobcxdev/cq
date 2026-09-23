@@ -958,3 +958,29 @@ func windowsDirectory(path string) string {
 func equalWindowsPath(left, right string) bool {
 	return strings.EqualFold(strings.ReplaceAll(left, "/", `\`), strings.ReplaceAll(right, "/", `\`))
 }
+
+// Selected lifecycle support is implemented by the native adapter tasks.
+func (platform *windowsTaskServicePlatform) StartProxy(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) StopProxy(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) StartRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) StopRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) PreflightSelected(context.Context, string, serviceSelection) error {
+	return errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) InspectSelected(context.Context, serviceSelection) (serviceStatus, error) {
+	return serviceStatus{}, errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error) {
+	return servicePlatformSnapshot{}, errServiceUnavailable
+}
+func (platform *windowsTaskServicePlatform) RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error {
+	return errServiceUnavailable
+}

@@ -253,3 +253,45 @@ func requireJSONEnd(decoder *json.Decoder) error {
 	}
 	return fmt.Errorf("multiple JSON values")
 }
+
+// HasService reports whether the record owns this native registration.
+func (record Record) HasService(id string) bool {
+	for _, service := range record.Services {
+		if service == id {
+			return true
+		}
+	}
+	return false
+}
+
+// WithServices preserves the identity and ordering of existing ownership while
+// adding selected registrations. It never aliases the input record's slice.
+func (record Record) WithServices(ids ...string) Record {
+	record.Services = append([]string(nil), record.Services...)
+	for _, id := range ids {
+		if !record.HasService(id) {
+			record.Services = append(record.Services, id)
+		}
+	}
+	return record
+}
+
+// WithoutServices removes selected ownership only. An empty result means the
+// caller must remove the record instead of persisting an invalid empty record.
+func (record Record) WithoutServices(ids ...string) Record {
+	previous := record.Services
+	record.Services = make([]string, 0, len(previous))
+	for _, service := range previous {
+		remove := false
+		for _, id := range ids {
+			if service == id {
+				remove = true
+				break
+			}
+		}
+		if !remove {
+			record.Services = append(record.Services, service)
+		}
+	}
+	return record
+}

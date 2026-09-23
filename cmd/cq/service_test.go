@@ -658,3 +658,23 @@ func TestServiceErrorMessagesDoNotExposeEnvironment(t *testing.T) {
 		t.Fatalf("Install() error = %v", err)
 	}
 }
+
+// Selected lifecycle support is implemented by the native adapter tasks.
+func (platform *fakeServicePlatform) StartProxy(context.Context) error { return errServiceUnavailable }
+func (platform *fakeServicePlatform) StopProxy(context.Context) error  { return errServiceUnavailable }
+func (platform *fakeServicePlatform) StartRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *fakeServicePlatform) StopRefresh(context.Context) error { return errServiceUnavailable }
+func (platform *fakeServicePlatform) PreflightSelected(context.Context, string, serviceSelection) error {
+	return errServiceUnavailable
+}
+func (platform *fakeServicePlatform) InspectSelected(context.Context, serviceSelection) (serviceStatus, error) {
+	return serviceStatus{}, errServiceUnavailable
+}
+func (platform *fakeServicePlatform) SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error) {
+	return servicePlatformSnapshot{}, errServiceUnavailable
+}
+func (platform *fakeServicePlatform) RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error {
+	return errServiceUnavailable
+}

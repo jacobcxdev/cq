@@ -13,6 +13,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const (
@@ -23,18 +24,52 @@ const (
 
 var ErrServiceUnhealthy = errors.New("CQ services are unhealthy")
 
+// serviceObservation is native evidence for canonical service commands. It is
+// deliberately excluded from the frozen schema1 machine status.
+type serviceObservation struct {
+	Enabled      *bool
+	Healthy      *bool
+	Owner        string
+	Roots        *userdirs.Roots
+	LastRunAt    *time.Time
+	LastExitCode *int
+	ErrorCode    string
+}
+
+type serviceSelection string
+
+const (
+	serviceAll     serviceSelection = "all"
+	serviceProxy   serviceSelection = "proxy"
+	serviceRefresh serviceSelection = "token-refresh"
+)
+
+type serviceAction string
+
+const (
+	serviceInstall   serviceAction = "install"
+	serviceStart     serviceAction = "start"
+	serviceStop      serviceAction = "stop"
+	serviceRestart   serviceAction = "restart"
+	serviceInspect   serviceAction = "status"
+	serviceUninstall serviceAction = "uninstall"
+)
+
+var errServiceUnavailable = errors.New("selected service platform is unavailable")
+
 type componentStatus struct {
-	ID                   string `json:"id"`
-	Manager              string `json:"manager"`
-	Registered           bool   `json:"registered"`
-	Running              bool   `json:"running"`
-	ConfiguredExecutable string `json:"configured_executable,omitempty"`
-	LiveExecutable       string `json:"live_executable,omitempty"`
-	PID                  int    `json:"pid,omitempty"`
-	Listener             string `json:"listener,omitempty"`
-	Healthy              bool   `json:"healthy"`
-	LastResult           string `json:"last_result,omitempty"`
-	Error                string `json:"error,omitempty"`
+	Observed             *serviceObservation `json:"-"`
+	ID                   string              `json:"id"`
+	Manager              string              `json:"manager"`
+	Registered           bool                `json:"registered"`
+	Running              bool                `json:"running"`
+	ConfiguredExecutable string              `json:"configured_executable,omitempty"`
+	LiveExecutable       string              `json:"live_executable,omitempty"`
+	PID                  int                 `json:"pid,omitempty"`
+	Listener             string              `json:"listener,omitempty"`
+	Healthy              bool                `json:"healthy"`
+	LastResult           string              `json:"last_result,omitempty"`
+	Error                string              `json:"error,omitempty"`
 }
 
 type serviceStatus struct {
@@ -47,6 +82,15 @@ type serviceStatus struct {
 }
 
 type servicePlatform interface {
+	// Selected operations must never access or restore an unselected component.
+	PreflightSelected(context.Context, string, serviceSelection) error
+	InspectSelected(context.Context, serviceSelection) (serviceStatus, error)
+	SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error)
+	RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error
+	StartProxy(context.Context) error
+	StopProxy(context.Context) error
+	StartRefresh(context.Context) error
+	StopRefresh(context.Context) error
 	Preflight(context.Context, string) error
 	PrepareRollback(context.Context) (serviceRestore, error)
 	Snapshot(context.Context) (servicePlatformSnapshot, error)
@@ -522,4 +566,440 @@ func wrapServiceError(operation string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", operation, err)
+}
+
+// Selected is the canonical lifecycle. The legacy methods above retain the
+// whole-installation machine ABI used by package transactions.
+type serviceOperationResult struct {
+	Status   serviceStatus
+	Rollback string
+}
+type serviceComponentError struct {
+	Component serviceSelection
+	Cause     error
+}
+
+func (err *serviceComponentError) Error() string {
+	return fmt.Sprintf("service %s: %v", err.Component, err.Cause)
+}
+func (err *serviceComponentError) Unwrap() error { return err.Cause }
+func (selection serviceSelection) components() []serviceSelection {
+	if selection == serviceAll {
+		return []serviceSelection{serviceProxy, serviceRefresh}
+	}
+	if selection == serviceProxy || selection == serviceRefresh {
+		return []serviceSelection{selection}
+	}
+	return nil
+}
+func (status serviceStatus) component(id serviceSelection) componentStatus {
+	if id == serviceProxy {
+		return status.Proxy
+	}
+	return status.Refresh
+}
+func (status *serviceStatus) setComponent(id serviceSelection, c componentStatus) {
+	if id == serviceProxy {
+		status.Proxy = c
+	} else {
+		status.Refresh = c
+	}
+}
+
+func (lifecycle *serviceLifecycle) Selected(ctx context.Context, action serviceAction, selection serviceSelection, strict bool) (result serviceOperationResult, returnErr error) {
+	result.Rollback = "not_needed"
+	if err := lifecycle.validateWithoutOwner(); err != nil {
+		return result, errors.Join(errServiceUnavailable, err)
+	}
+	components := selection.components()
+	if len(components) == 0 {
+		return result, fmt.Errorf("invalid service selection")
+	}
+	switch action {
+	case serviceInstall, serviceStart, serviceStop, serviceRestart, serviceInspect, serviceUninstall:
+	default:
+		return result, fmt.Errorf("invalid service action")
+	}
+	if action != serviceInspect {
+		if lifecycle.MutationLocker == nil {
+			return result, errServiceUnavailable
+		}
+		lock, err := lifecycle.acquireSelectedLock(ctx)
+		if err != nil {
+			return result, err
+		}
+		defer func() { returnErr = errors.Join(returnErr, lock.Close()) }()
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	status, err := lifecycle.Platform.InspectSelected(ctx, selection)
+	if err != nil {
+		return result, err
+	}
+	result.Status = status
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	record, loadErr := lifecycle.Store.Load()
+	if loadErr != nil && !errors.Is(loadErr, installstate.ErrNotInstalled) {
+		return result, loadErr
+	}
+	recordExists := loadErr == nil
+	defer func() {
+		if recordExists {
+			result.Status = selectedServiceOwnership(result.Status, selection, record)
+		}
+	}()
+	// Ownership is never inferred from process liveness or an unknown record.
+	if recordExists {
+		status = selectedServiceOwnership(status, selection, record)
+	}
+	result.Status = status
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if action == serviceInspect {
+		if strict {
+			for _, id := range components {
+				if !status.component(id).Registered {
+					return result, &serviceComponentError{id, installstate.ErrNotInstalled}
+				}
+			}
+			for _, id := range components {
+				if !serviceSelectedHealthy(id, status.component(id)) {
+					return result, &serviceComponentError{id, ErrServiceUnhealthy}
+				}
+			}
+		}
+		return result, nil
+	}
+	for _, id := range components {
+		c := status.component(id)
+		if c.Registered && (c.Observed == nil || (c.Observed.Owner != "cq" && c.Observed.Owner != "package") || !recordExists || !record.HasService(c.ID) || !sameServiceExecutable(c.ConfiguredExecutable, record.Executable)) {
+			return result, installstate.ErrOwnershipConflict
+		}
+		if (action == serviceStart || action == serviceRestart) && !c.Registered {
+			return result, &serviceComponentError{id, installstate.ErrNotInstalled}
+		}
+	}
+	if action == serviceInstall || action == serviceUninstall {
+		if recordExists && (record.Owner != installstate.OwnerManual || !sameServiceExecutable(record.Executable, lifecycle.Executable)) {
+			return result, installstate.ErrOwnershipConflict
+		}
+	}
+	if action == serviceUninstall && !recordExists {
+		return result, nil
+	}
+	executable := lifecycle.Executable
+	if recordExists && action != serviceInstall {
+		executable = record.Executable
+	}
+	if err := lifecycle.Platform.PreflightSelected(ctx, executable, selection); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	unselectedOwnership := false
+	if recordExists {
+		selectedIDs := make(map[string]bool, len(components))
+		for _, id := range components {
+			selectedIDs[status.component(id).ID] = true
+		}
+		for _, id := range record.Services {
+			if !selectedIDs[id] {
+				unselectedOwnership = true
+			}
+		}
+	}
+	digest := ""
+	if action == serviceInstall || (action == serviceUninstall && recordExists) {
+		digestFile := lifecycle.DigestExecutable
+		if digestFile == nil {
+			digestFile = installstate.DigestFile
+		}
+		digest, err = digestFile(executable)
+		if err != nil {
+			return result, err
+		}
+		if action == serviceInstall && recordExists && unselectedOwnership && digest != record.BinaryDigest {
+			return result, installstate.ErrOwnershipConflict
+		}
+		if action == serviceUninstall && digest != record.BinaryDigest {
+			return result, installstate.ErrOwnershipConflict
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	snapshot, err := lifecycle.Platform.SnapshotSelected(ctx, selection)
+	if err != nil {
+		return result, err
+	}
+	ownershipTouched := false
+	mutationAttempted := false
+	rollback := func(cause error) (serviceOperationResult, error) {
+		if !mutationAttempted {
+			return result, cause
+		}
+		result.Rollback = "failed"
+		// Cleanup shares the original deadline. Expiry is never proof of rollback.
+		restoreErr := ctx.Err()
+		if restoreErr == nil {
+			restoreErr = lifecycle.Platform.RestoreSelected(ctx, selection, snapshot)
+		}
+		if ownershipTouched && ctx.Err() == nil {
+			if recordExists {
+				restoreErr = errors.Join(restoreErr, lifecycle.Store.Save(record))
+			} else {
+				restoreErr = errors.Join(restoreErr, lifecycle.Store.Remove())
+			}
+		}
+		restoreErr = errors.Join(restoreErr, ctx.Err())
+		if restoreErr == nil {
+			restored, snapshotErr := lifecycle.Platform.SnapshotSelected(ctx, selection)
+			if snapshotErr != nil {
+				restoreErr = snapshotErr
+			} else if !sameServicePlatformSnapshot(restored, snapshot) {
+				restoreErr = fmt.Errorf("selected rollback differs from snapshot")
+			}
+		}
+		if restoreErr == nil && ownershipTouched {
+			restored, loadErr := lifecycle.Store.Load()
+			if recordExists {
+				if loadErr != nil || !sameServiceOwnership(restored, record) {
+					restoreErr = fmt.Errorf("restored ownership differs")
+				}
+			} else if !errors.Is(loadErr, installstate.ErrNotInstalled) {
+				restoreErr = fmt.Errorf("ownership remains after rollback")
+			}
+		}
+		if restoreErr == nil && ctx.Err() == nil {
+			result.Rollback = "restored"
+		}
+		if ctx.Err() == nil {
+			if observed, inspectErr := lifecycle.Platform.InspectSelected(ctx, selection); inspectErr == nil {
+				result.Status = observed
+			}
+		}
+		return result, errors.Join(cause, restoreErr)
+	}
+	order := append([]serviceSelection(nil), components...)
+	if action == serviceStop || action == serviceUninstall {
+		for i, j := 0, len(order)-1; i < j; i, j = i+1, j-1 {
+			order[i], order[j] = order[j], order[i]
+		}
+	}
+	for _, id := range order {
+		before := status.component(id)
+		if (action == serviceStop || action == serviceUninstall) && !before.Registered {
+			continue
+		}
+		if action == serviceStart && before.Observed != nil && before.Observed.Enabled != nil && *before.Observed.Enabled && serviceSelectedHealthy(id, before) {
+			continue
+		}
+		if action == serviceStop && before.Observed != nil && before.Observed.Enabled != nil && !*before.Observed.Enabled && !before.Running {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return rollback(err)
+		}
+		requested := time.Now()
+		mutationAttempted = true
+		// Once a manager call begins, old enablement/health is not a current
+		// observation. Keep completed sibling observations if verification times out.
+		uncertain := before
+		uncertain.Observed = nil
+		result.Status.setComponent(id, uncertain)
+		if err := lifecycle.mutateSelected(ctx, action, id); err != nil {
+			return rollback(&serviceComponentError{id, err})
+		}
+		observed, verifyErr := lifecycle.waitSelected(ctx, action, id, before, requested)
+		if observed.ID != "" {
+			result.Status.setComponent(id, observed)
+		}
+		if verifyErr != nil {
+			return rollback(&serviceComponentError{id, verifyErr})
+		}
+	}
+	if action == serviceInstall || action == serviceUninstall {
+		next := record
+		if !recordExists {
+			next = installstate.Record{SchemaVersion: installstate.CurrentSchemaVersion, Owner: installstate.OwnerManual, Version: lifecycle.Version, Executable: lifecycle.Executable, BinaryDigest: digest}
+		}
+		ids := make([]string, 0, len(components))
+		for _, id := range components {
+			ids = append(ids, result.Status.component(id).ID)
+		}
+		if action == serviceInstall {
+			if !unselectedOwnership {
+				next.Version = lifecycle.Version
+				next.BinaryDigest = digest
+			}
+			next = next.WithServices(ids...)
+		} else {
+			next = next.WithoutServices(ids...)
+		}
+		if !sameServiceOwnership(next, record) {
+			if err := ctx.Err(); err != nil {
+				return rollback(err)
+			}
+			ownershipTouched = true
+			mutationAttempted = true
+			if len(next.Services) == 0 {
+				err = lifecycle.Store.Remove()
+			} else {
+				err = lifecycle.Store.Save(next)
+			}
+			if err != nil {
+				return rollback(err)
+			}
+			if err := ctx.Err(); err != nil {
+				return rollback(err)
+			}
+			saved, loadErr := lifecycle.Store.Load()
+			if len(next.Services) == 0 {
+				if !errors.Is(loadErr, installstate.ErrNotInstalled) {
+					return rollback(fmt.Errorf("removed ownership still exists"))
+				}
+			} else if loadErr != nil || !sameServiceOwnership(saved, next) {
+				return rollback(fmt.Errorf("saved ownership differs"))
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	return result, nil
+}
+
+func (lifecycle *serviceLifecycle) acquireSelectedLock(ctx context.Context) (installer.InstallLock, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lock, err := lifecycle.MutationLocker.Acquire()
+		if !errors.Is(err, installer.ErrInstallationInProgress) {
+			return lock, err
+		}
+		if err := waitForServicePoll(ctx, 10*time.Millisecond); err != nil {
+			return nil, err
+		}
+	}
+}
+func sameServiceOwnership(a, b installstate.Record) bool {
+	return a.SchemaVersion == b.SchemaVersion && a.Owner == b.Owner && a.Version == b.Version && a.Executable == b.Executable && a.BinaryDigest == b.BinaryDigest && sameServiceIDs(a.Services, b.Services)
+}
+func serviceSelectedHealthy(id serviceSelection, c componentStatus) bool {
+	value := projectV2ServiceComponent(id, c, time.Now())
+	return value.Healthy != nil && *value.Healthy
+}
+func (lifecycle *serviceLifecycle) mutateSelected(ctx context.Context, action serviceAction, id serviceSelection) error {
+	if id == serviceProxy {
+		switch action {
+		case serviceInstall:
+			return lifecycle.Platform.InstallProxy(ctx, lifecycle.Executable)
+		case serviceStart:
+			return lifecycle.Platform.StartProxy(ctx)
+		case serviceStop:
+			return lifecycle.Platform.StopProxy(ctx)
+		case serviceRestart:
+			return lifecycle.Platform.RestartProxy(ctx)
+		case serviceUninstall:
+			return lifecycle.Platform.RemoveProxy(ctx)
+		}
+	} else {
+		switch action {
+		case serviceInstall:
+			return lifecycle.Platform.InstallRefresh(ctx, lifecycle.Executable)
+		case serviceStart:
+			return lifecycle.Platform.StartRefresh(ctx)
+		case serviceStop:
+			return lifecycle.Platform.StopRefresh(ctx)
+		case serviceRestart:
+			return lifecycle.Platform.RestartRefresh(ctx)
+		case serviceUninstall:
+			return lifecycle.Platform.RemoveRefresh(ctx)
+		}
+	}
+	return fmt.Errorf("invalid selected service mutation")
+}
+func (lifecycle *serviceLifecycle) waitSelected(ctx context.Context, action serviceAction, id serviceSelection, before componentStatus, requested time.Time) (componentStatus, error) {
+	attempts := lifecycle.StatusAttempts
+	if attempts <= 0 {
+		attempts = 20
+	}
+	interval := lifecycle.StatusInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	wait := lifecycle.Wait
+	if wait == nil {
+		wait = waitForServicePoll
+	}
+	var c componentStatus
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return c, err
+		}
+		status, err := lifecycle.Platform.InspectSelected(ctx, id)
+		if err == nil {
+			c = status.component(id)
+			verified := false
+			switch action {
+			case serviceUninstall:
+				verified = !c.Registered && !c.Running
+			case serviceStop:
+				verified = c.Registered && !c.Running && c.Observed != nil && c.Observed.Enabled != nil && !*c.Observed.Enabled
+			default:
+				if c.Observed != nil && c.Observed.Enabled != nil {
+					expectedExecutable := before.ConfiguredExecutable
+					if action == serviceInstall {
+						expectedExecutable = lifecycle.Executable
+					}
+					identityOK := c.Registered && sameServiceExecutable(c.ConfiguredExecutable, expectedExecutable)
+					enabled := *c.Observed.Enabled
+					policyOK := enabled
+					if action == serviceRestart {
+						policyOK = before.Observed != nil && before.Observed.Enabled != nil && enabled == *before.Observed.Enabled
+					}
+					if id == serviceProxy {
+						verified = identityOK && policyOK && serviceSelectedHealthy(id, c)
+					} else {
+						fresh := c.Observed.LastRunAt != nil && c.Observed.LastExitCode != nil && *c.Observed.LastExitCode == 0 && !c.Observed.LastRunAt.Before(requested.Truncate(time.Second))
+						if before.Observed != nil && before.Observed.LastRunAt != nil {
+							fresh = fresh && c.Observed.LastRunAt != nil && c.Observed.LastRunAt.After(*before.Observed.LastRunAt)
+						}
+						projected := projectV2ServiceComponent(id, c, time.Now())
+						verified = identityOK && policyOK && fresh && (serviceSelectedHealthy(id, c) || (action == serviceRestart && !enabled && projected.State != "indeterminate"))
+					}
+				}
+			}
+			if verified {
+				return c, ctx.Err()
+			}
+		}
+		if attempt+1 < attempts {
+			if err := wait(ctx, interval); err != nil {
+				return c, err
+			}
+		}
+	}
+	return c, ErrServiceUnhealthy
+}
+
+func selectedServiceOwnership(status serviceStatus, selection serviceSelection, record installstate.Record) serviceStatus {
+	for _, id := range selection.components() {
+		c := status.component(id)
+		if c.Registered && c.Observed != nil && c.Observed.Owner == "cq" && record.HasService(c.ID) && sameServiceExecutable(c.ConfiguredExecutable, record.Executable) {
+			obs := *c.Observed
+			if record.Owner != installstate.OwnerManual {
+				obs.Owner = "package"
+			}
+			c.Observed = &obs
+			status.setComponent(id, c)
+		}
+	}
+	return status
 }

@@ -765,3 +765,27 @@ func equalStrings(left, right []string) bool {
 }
 
 var _ servicePlatform = (*darwinServicePlatform)(nil)
+
+// Selected lifecycle support is implemented by the native adapter tasks.
+func (platform *darwinServicePlatform) StartProxy(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *darwinServicePlatform) StopProxy(context.Context) error { return errServiceUnavailable }
+func (platform *darwinServicePlatform) StartRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *darwinServicePlatform) StopRefresh(context.Context) error {
+	return errServiceUnavailable
+}
+func (platform *darwinServicePlatform) PreflightSelected(context.Context, string, serviceSelection) error {
+	return errServiceUnavailable
+}
+func (platform *darwinServicePlatform) InspectSelected(context.Context, serviceSelection) (serviceStatus, error) {
+	return serviceStatus{}, errServiceUnavailable
+}
+func (platform *darwinServicePlatform) SnapshotSelected(context.Context, serviceSelection) (servicePlatformSnapshot, error) {
+	return servicePlatformSnapshot{}, errServiceUnavailable
+}
+func (platform *darwinServicePlatform) RestoreSelected(context.Context, serviceSelection, servicePlatformSnapshot) error {
+	return errServiceUnavailable
+}
