@@ -2575,7 +2575,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 Rollback · {rollback}
 ```
 
-Confirmed stopped and disabled is green operation success even though healthy=false. Do not colour the intended false health value as a failed stop. Definitions and user data remain. Already stopped is idempotent. Rollback not_needed is neutral, restored is amber (operation still failed), failed is red. Partial components retain their observed states; never replace whole table with a generic error.
+Confirmed stopped and disabled is green operation success even though healthy=false. Do not colour the intended false health value as a failed stop. Definitions and user data remain where registrations exist; an absent selected component must not be described as retained. Already stopped is idempotent. Rollback not_needed is neutral, restored is amber (operation still failed), failed is red. Partial components retain their observed states; never replace whole table with a generic error.
 
 **Empty, partial and interrupted variants:** Render nullable values according to their domain meaning: unknown for unobserved/uncertain, — only for known not applicable. An empty collection is “No <resource plural>” using its section name; retain documented explicit sentinel words where required. Missing mandatory resources use the declared failure below. Preserve any returned observations after deadline/interruption; do not show a success title, assume rollback, or claim unchanged state. No progress percentage is defined.
 
@@ -2660,7 +2660,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 Rollback · {rollback}
 ```
 
-Confirmed absence is green operation success, not service health. Absence is idempotent. Credentials/config/cache/logs and binary remain; no removal claim beyond selected CQ-owned registrations. Rollback not_needed is neutral, restored is amber (operation still failed), failed is red. Partial components retain their observed states; never replace whole table with a generic error.
+Confirmed absence is green operation success, not service health. Absence is idempotent; the final observation alone does not prove a registration was removed. Credentials/config/cache/logs and binary remain; no removal claim beyond selected CQ-owned registrations. Rollback not_needed is neutral, restored is amber (operation still failed), failed is red. Partial components retain their observed states; never replace whole table with a generic error.
 
 **Empty, partial and interrupted variants:** Render nullable values according to their domain meaning: unknown for unobserved/uncertain, — only for known not applicable. An empty collection is “No <resource plural>” using its section name; retain documented explicit sentinel words where required. Missing mandatory resources use the declared failure below. Preserve any returned observations after deadline/interruption; do not show a success title, assume rollback, or claim unchanged state. No progress percentage is defined.
 
@@ -2676,4 +2676,3 @@ Confirmed absence is green operation success, not service health. Absence is ide
 | service_unhealthy | 1 | Service component {component} is unhealthy. | Health verification fails, or strict status detects unhealthy selected component. |
 | service_partial | 8 | Service operation was only partially completed; inspect component results. | At least one component changed but final state/rollback incomplete. |
 | service_uninstall_timeout | 7 | Operation timed out; inspect state before retrying. | The declared total operational deadline expires. Retain completed observations or known mutation outcomes; do not infer rollback. |
-

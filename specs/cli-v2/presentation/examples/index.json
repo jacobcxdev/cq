@@ -6685,7 +6685,7 @@
       "source": "runtime.md",
       "line": 4465,
       "file": "text/cq-service-stop/02-success.txt",
-      "sha256": "23382f74c59e126967953ff9ba47901fcd20f24f92779f5357826e44b4c902f3",
+      "sha256": "e024d5d7931e0463a5ebb43d8983e71f48d021da07092eb985780a2853d0bb60",
       "context": "### Success\n\nInvocation:\n\n```sh\ncq service stop\n```\n\nStdout:"
     },
     {
@@ -6737,7 +6737,7 @@
       "source": "runtime.md",
       "line": 4615,
       "file": "text/cq-service-uninstall/02-success.txt",
-      "sha256": "0ed1ef82678e577df93f971954d6d77a06e25b264cc67d98f68adc8ee8c390da",
+      "sha256": "01f9f9bfe9e27d07af697f3b8e91b942de8d2008a62c6cdd1a7b8af3161dd6d5",
       "context": "### Success\n\nInvocation:\n\n```sh\ncq service uninstall --component proxy\n```\n\nStdout:"
     },
     {

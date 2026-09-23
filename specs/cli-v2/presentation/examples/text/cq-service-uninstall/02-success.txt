@@ -17,5 +17,5 @@ proxy
   Runtime     unknown
   Logs        unknown
 
-Registration removed; credentials and user data retained.
+Selected registrations absent; credentials and user data retained.
 Rollback · not_needed

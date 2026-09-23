@@ -4496,7 +4496,7 @@ token-refresh
   Runtime     /Users/alex/Library/Application Support/cq/runtime
   Logs        /Users/alex/Library/Logs/cq
 
-Registrations retained; automatic starts disabled.
+Selected services stopped or absent; automatic starts disabled where registered.
 Rollback · not_needed
 ```
 
@@ -4631,7 +4631,7 @@ proxy
   Runtime     unknown
   Logs        unknown
 
-Registration removed; credentials and user data retained.
+Selected registrations absent; credentials and user data retained.
 Rollback · not_needed
 ```
 

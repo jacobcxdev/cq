@@ -88,13 +88,9 @@ func terminalService(data v2ServiceData, exit int, o cli.TerminalOptions) string
 				out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Requested run completed successfully; automatic starts remain disabled."}))
 			}
 		case serviceStop:
-			out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Registrations retained; automatic starts disabled."}))
+			out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Selected services stopped or absent; automatic starts disabled where registered."}))
 		case serviceUninstall:
-			message := "Registration removed; credentials and user data retained."
-			if len(components) > 1 {
-				message = "Registrations removed; credentials and user data retained."
-			}
-			out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: message}))
+			out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Selected registrations absent; credentials and user data retained."}))
 		}
 	}
 	rollbackRole := cli.Secondary

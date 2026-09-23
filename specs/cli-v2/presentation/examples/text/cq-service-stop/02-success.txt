@@ -32,5 +32,5 @@ token-refresh
   Runtime     /Users/alex/Library/Application Support/cq/runtime
   Logs        /Users/alex/Library/Logs/cq
 
-Registrations retained; automatic starts disabled.
+Selected services stopped or absent; automatic starts disabled where registered.
 Rollback · not_needed

@@ -271,6 +271,45 @@ func TestTerminalServiceAdapterFakeManager(t *testing.T) {
 	}
 }
 
+func TestTerminalServiceAbsentNoOpClaimsOnlyFinalState(t *testing.T) {
+	for _, tc := range []struct {
+		action serviceAction
+		want   string
+	}{
+		{serviceStop, "Selected services stopped or absent; automatic starts disabled where registered."},
+		{serviceUninstall, "Selected registrations absent; credentials and user data retained."},
+	} {
+		t.Run(string(tc.action), func(t *testing.T) {
+			l, p, store := newSelectedServiceHarness(t)
+			store.exists = false
+			for _, id := range serviceAll.components() {
+				c := p.statuses[id]
+				c.Registered, c.Running = false, false
+				c.Observed.Enabled = serviceBool(false)
+				p.statuses[id] = c
+			}
+			var stdout, stderr bytes.Buffer
+			exit := cli.Run(context.Background(), []string{"service", string(tc.action)}, &cli.Session{Out: &stdout, Err: &stderr, OutTerminal: terminalFixtureOptions(100), ErrTerminal: terminalFixtureOptions(100)}, func(string) (cli.Handler, bool) {
+				return func(ctx context.Context, inv cli.Invocation, s *cli.Session) cli.Outcome {
+					return handleV2ServiceWithPreparation(ctx, inv, s, func(context.Context) (*serviceLifecycle, error) { return l, nil })
+				}, true
+			})
+			if exit != 0 || stderr.Len() != 0 {
+				t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+			}
+			got := ansi.Strip(stdout.String())
+			if !strings.Contains(got, tc.want) || !strings.Contains(got, "proxy          absent") || !strings.Contains(got, "token-refresh  absent") {
+				t.Fatalf("no-op state not presented accurately:\n%s", got)
+			}
+			for _, call := range p.calls {
+				if strings.Contains(call, "-stop") || strings.Contains(call, "-uninstall") {
+					t.Fatalf("unexpected manager mutation %q", call)
+				}
+			}
+		})
+	}
+}
+
 func TestTerminalServiceUnavailableAndPlainJSON(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	o := terminalFixtureOptions(100)
