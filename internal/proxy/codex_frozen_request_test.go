@@ -307,6 +307,35 @@ func TestInspectCodexNativeRequestEnforcesTypedAuthority(t *testing.T) {
 	}
 }
 
+func TestInspectCodexNativeRequestCapturesCyberProgramme(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "root", body: `{"access_programs":{"cyber":"daybreak_blue"}}`, want: "daybreak_blue"},
+		{name: "params", body: `{"params":{"access_programs":{"cyber":"daybreak_red"}}}`, want: "daybreak_red"},
+		{name: "root wins", body: `{"access_programs":{"cyber":"daybreak_blue"},"params":{"access_programs":{"cyber":"daybreak_red"}}}`, want: "daybreak_blue"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-6-sol", CodexRequestTurn, "history")), "}") + "," + strings.TrimPrefix(test.body, "{"))
+			inspection, err := InspectCodexNativeRequest(context.Background(), body, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inspection.Release()
+			protocol, err := inspection.Protocol()
+			if err != nil || protocol.CyberAccessProgram != test.want {
+				t.Fatalf("programme = %q, error %v, want %q", protocol.CyberAccessProgram, err, test.want)
+			}
+		})
+	}
+	invalid := []byte(strings.TrimSuffix(string(frozenRequestBody("gpt-6-sol", CodexRequestTurn, "history")), "}") + `,"access_programs":{"cyber":42}}`)
+	if _, err := InspectCodexNativeRequest(context.Background(), invalid, nil); err == nil {
+		t.Fatal("invalid Cyber programme accepted")
+	}
+}
+
 func TestInspectCodexNativeRequestCapturesRequestedReasoningEffort(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

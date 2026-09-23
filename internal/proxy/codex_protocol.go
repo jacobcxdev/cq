@@ -17,6 +17,7 @@ const (
 type CodexProtocolRequest struct {
 	Type                          string
 	Model                         string
+	CyberAccessProgram            string
 	PreviousResponseID            string
 	HasPreviousResponseID         bool
 	RequestedReasoningEffort      string
@@ -47,6 +48,7 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 	var envelope struct {
 		Type               string          `json:"type"`
 		Model              string          `json:"model"`
+		AccessPrograms     json.RawMessage `json:"access_programs"`
 		PreviousResponseID json.RawMessage `json:"previous_response_id"`
 		Reasoning          json.RawMessage `json:"reasoning"`
 		Params             json.RawMessage `json:"params"`
@@ -61,6 +63,7 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 	if len(envelope.Params) != 0 && !bytes.Equal(envelope.Params, []byte("null")) {
 		var params struct {
 			Model              string          `json:"model"`
+			AccessPrograms     json.RawMessage `json:"access_programs"`
 			PreviousResponseID json.RawMessage `json:"previous_response_id"`
 			Reasoning          json.RawMessage `json:"reasoning"`
 		}
@@ -69,6 +72,9 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 		}
 		if envelope.Model == "" {
 			envelope.Model = params.Model
+		}
+		if len(envelope.AccessPrograms) == 0 {
+			envelope.AccessPrograms = params.AccessPrograms
 		}
 		paramsPreviousResponseID, hasParamsPreviousResponseID, decodeErr := decodeCodexPreviousResponseID(params.PreviousResponseID)
 		if decodeErr != nil {
@@ -83,9 +89,18 @@ func parseCodexProtocolRequest(body []byte, directMetadata string, handshake *Co
 		}
 	}
 	reasoningEffort, hasReasoningEffort, reasoningEffortValid := parseCodexRequestedReasoningEffort(envelope.Reasoning)
+	var accessPrograms struct {
+		Cyber string `json:"cyber"`
+	}
+	if len(envelope.AccessPrograms) != 0 && !bytes.Equal(envelope.AccessPrograms, []byte("null")) {
+		if err := json.Unmarshal(envelope.AccessPrograms, &accessPrograms); err != nil {
+			return CodexProtocolRequest{}, fmt.Errorf("decode Codex access programs: %w", err)
+		}
+	}
 	return CodexProtocolRequest{
 		Type:                          envelope.Type,
 		Model:                         envelope.Model,
+		CyberAccessProgram:            accessPrograms.Cyber,
 		PreviousResponseID:            previousResponseID,
 		HasPreviousResponseID:         hasPreviousResponseID,
 		RequestedReasoningEffort:      reasoningEffort,
@@ -131,6 +146,7 @@ type CodexWrappedError struct {
 	Status         int
 	ErrorType      string
 	Code           string
+	Param          string
 	Message        string
 	AuthFailure    bool
 	HardUsageLimit bool
@@ -196,6 +212,10 @@ func parseCodexError(payload []byte, transportStatus int, allowTransportStatus b
 	if err != nil {
 		return CodexWrappedError{}, fmt.Errorf("decode Codex error event: %w", err)
 	}
+	param, _, _, err := parseCodexErrorString(nested["param"])
+	if err != nil {
+		return CodexWrappedError{}, fmt.Errorf("decode Codex error event: %w", err)
+	}
 	message, _, _, err := parseCodexErrorString(nested["message"])
 	if err != nil {
 		return CodexWrappedError{}, fmt.Errorf("decode Codex error event: %w", err)
@@ -209,6 +229,7 @@ func parseCodexError(payload []byte, transportStatus int, allowTransportStatus b
 		Status:    status,
 		ErrorType: errorType,
 		Code:      code,
+		Param:     param,
 		Message:   message,
 		AuthFailure: validStatus && (status == http.StatusUnauthorized ||
 			(status == http.StatusForbidden && errorTypeValid && errorType == "authentication_error")),
@@ -333,7 +354,7 @@ func isCodexErrorAuthorityField(path []string, name string) bool {
 	if len(path) == 0 {
 		return codexJSONNameEqual(name, "type") || codexJSONNameEqual(name, "status") || codexJSONNameEqual(name, "status_code") || codexJSONNameEqual(name, "error")
 	}
-	return len(path) == 1 && codexJSONNameEqual(path[0], "error") && (codexJSONNameEqual(name, "type") || codexJSONNameEqual(name, "code"))
+	return len(path) == 1 && codexJSONNameEqual(path[0], "error") && (codexJSONNameEqual(name, "type") || codexJSONNameEqual(name, "code") || codexJSONNameEqual(name, "param"))
 }
 
 func codexJSONNameEqual(name, authority string) bool {
