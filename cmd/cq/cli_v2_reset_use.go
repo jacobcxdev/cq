@@ -77,6 +77,18 @@ func handleV2ResetUseWithApp(ctx context.Context, inv cli.Invocation, session *c
 	return handleV2ResetUseWithFactory(ctx, inv, session, func(context.Context, bool) (v2ResetDependencies, error) { return v2ResetDependencies{app: a}, nil })
 }
 func handleV2ResetUseWithFactory(parent context.Context, inv cli.Invocation, s *cli.Session, factory v2ResetFactory) (out cli.Outcome) {
+	var terminalData *ResetUseResult
+	finish := func(result cli.Outcome, data ResetUseResult) cli.Outcome {
+		terminalData = &data
+		return v2ResetUseData(result, data)
+	}
+	defer func() {
+		if terminalData != nil {
+			data, exit := *terminalData, out.ExitCode
+			out.Terminal = func(o cli.TerminalOptions) string { return terminalResetUse(data, exit, o) }
+		}
+	}()
+
 	confirmed := len(inv.Options["yes"]) > 0 && inv.Options["yes"][0] == "true"
 	if !confirmed && (inv.JSON || !s.Interactive) {
 		return v2ResetUseFailure("confirmation_required")
@@ -147,11 +159,15 @@ func handleV2ResetUseWithFactory(parent context.Context, inv cli.Invocation, s *
 		return v2ResetUseError(err)
 	}
 	data := ResetUseResult{AccountReference: string(plan.AccountKey), CreditID: &plan.Credit.ID, Outcome: "cancelled", ChangedWindows: []ResetWindowChange{}}
-	if err := writeV2ResetPreview(s, plan, !confirmed); err != nil {
-		return v2ResetUseData(v2ResetUseIOError(err), data)
+	previewSession := *s
+	if inv.JSON {
+		previewSession.ErrTerminal = cli.TerminalOptions{}
+	}
+	if err := writeV2ResetPreview(&previewSession, plan, !confirmed); err != nil {
+		return finish(v2ResetUseIOError(err), data)
 	}
 	if err := ctx.Err(); err != nil {
-		return v2ResetUseData(v2ResetUseError(err), data)
+		return finish(v2ResetUseError(err), data)
 	}
 	if !confirmed {
 		// PrepareUse returns successfully only after its workers have quiesced.
@@ -180,14 +196,14 @@ func handleV2ResetUseWithFactory(parent context.Context, inv cli.Invocation, s *
 		budget.Resume()
 		ctx = budget.Work()
 		if err != nil {
-			return v2ResetUseData(v2ResetUseIOError(err), data)
+			return finish(v2ResetUseIOError(err), data)
 		}
 		if err := ctx.Err(); err != nil {
-			return v2ResetUseData(v2ResetUseError(err), data)
+			return finish(v2ResetUseError(err), data)
 		}
 	}
 	if !confirmed {
-		return v2ResetUseData(cli.Outcome{}, data)
+		return finish(cli.Outcome{}, data)
 	}
 	result, err := deps.app.ExecuteUse(ctx, plan)
 	data.Outcome = string(result.Outcome)
@@ -225,7 +241,7 @@ func handleV2ResetUseWithFactory(parent context.Context, inv cli.Invocation, s *
 		failure := v2ResetUseFailure("postcheck_partial")
 		out.ExitCode, out.Errors = failure.ExitCode, failure.Errors
 	}
-	return v2ResetUseData(out, data)
+	return finish(out, data)
 }
 
 func openV2ResetUseDependencies(ctx context.Context, factory v2ResetFactory) (v2ResetDependencies, error) {
@@ -294,6 +310,9 @@ func writeV2ResetPreview(s *cli.Session, plan app.CodexResetUsePlan, prompt bool
 		fmt.Fprintf(&text, "Use reset credit %s for %s? [y/N]", cli.HumanValue(plan.Credit.ID), cli.HumanValue(name))
 	}
 	output := text.String()
+	if s.ErrTerminal.Width > 0 {
+		output = terminalResetPreview(plan, prompt, s.ErrTerminal)
+	}
 	written, err := fmt.Fprint(s.Err, output)
 	if err == nil && written != len(output) {
 		err = io.ErrShortWrite
@@ -318,6 +337,8 @@ func v2ResetUseData(out cli.Outcome, data ResetUseResult) cli.Outcome {
 	if data.CreditID != nil {
 		credit = cli.HumanValue(*data.CreditID)
 	}
+	exit := out.ExitCode
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalResetUse(data, exit, o) }
 	out.Human = fmt.Sprintf("Reset outcome: %s.\nAccount: %s.\nCredit: %s.\nWindows reset: %d.\n", data.Outcome, cli.HumanValue(data.AccountReference), credit, data.WindowsReset)
 	if data.Retry != nil {
 		quote := func(value string) string { return "'" + strings.ReplaceAll(cli.HumanValue(value), "'", "'\\''") + "'" }

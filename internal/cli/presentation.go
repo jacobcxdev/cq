@@ -119,7 +119,7 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 		marker, role = "Warning", Attention
 	}
 	switch primary.Code {
-	case "check_partial", "check_timeout", "auth_refresh_partial", "auth_interrupted", "account_timeout", "gemini_account_timeout", "account_activation_partial", "account_login_partial", "account_login_postcheck_partial", "account_removal_partial", "codex_reset_inventory_partial", "models_refresh_partial", "trace_history_gap":
+	case "check_partial", "check_timeout", "auth_refresh_partial", "auth_interrupted", "account_timeout", "gemini_account_timeout", "account_activation_partial", "account_login_partial", "account_login_postcheck_partial", "account_removal_partial", "codex_reset_inventory_partial", "codex_reset_postcheck_partial", "codex_reset_recommendation_incomplete", "codex_reset_timeout", "models_refresh_partial", "trace_history_gap":
 		marker, role = "Warning", Attention
 	}
 	command := "cq"
@@ -127,6 +127,9 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 		command += " " + path
 	}
 	var out strings.Builder
+	if path == "codex reset use" && outcome.Terminal != nil {
+		out.WriteByte('\n')
+	}
 	if primary.Code == "unknown_command" {
 		out.WriteString(TerminalLine(options, 0, Span{Text: marker, Role: role}, Span{Text: " · Unknown command"}))
 		out.WriteString(TerminalLine(options, 2, Span{Text: primary.Message}))

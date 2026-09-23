@@ -136,6 +136,7 @@ func handleV2ResetInspectionWithFactory(parent context.Context, inv cli.Invocati
 		return v2ResetFailure(observed.err)
 	}
 	outcome := handleV2ResetInspectionWithApp(ctx, inv, session, observed.deps.app)
+	cleanupFailed := false
 	if observed.deps.close != nil {
 		closed := make(chan error, 1)
 		go func() { closed <- closeV2ResetDependencies(observed.deps.close) }()
@@ -143,11 +144,19 @@ func handleV2ResetInspectionWithFactory(parent context.Context, inv cli.Invocati
 		case err := <-closed:
 			if err != nil && outcome.ExitCode == 0 {
 				failure := v2ResetFailure(err)
+				cleanupFailed = true
 				outcome.ExitCode, outcome.Errors = failure.ExitCode, failure.Errors
 			}
 		case <-ctx.Done():
 			failure := v2ResetFailure(ctx.Err())
+			cleanupFailed = true
 			outcome.ExitCode, outcome.Errors = failure.ExitCode, failure.Errors
+		}
+	}
+	if cleanupFailed && outcome.Terminal != nil {
+		render := outcome.Terminal
+		outcome.Terminal = func(o cli.TerminalOptions) string {
+			return render(o) + "\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Command verification: "}, cli.Span{Text: "incomplete", Role: cli.Attention})
 		}
 	}
 	return outcome
@@ -273,6 +282,11 @@ func handleV2ResetInspectionWithApp(parent context.Context, inv cli.Invocation, 
 			fmt.Fprintf(&human, "%s\t%s\t%s\t%s\t%s\n", cli.HumanValue(item.AccountReference), cli.HumanValue(item.CreditID), item.Status, v2ResetTimeText(item.UseAt, "not scheduled"), v2ResetTimeText(item.UseBy, "no expiry"))
 		}
 		out.Human = human.String()
+		// Keep the source observation for presentation: the public DTO fills
+		// missing horizon/confidence for its existing machine contract.
+		terminalDTO := dto
+		terminalDTO.Horizon, terminalDTO.Confidence = schedule.Horizon, schedule.Confidence
+		out.Terminal = func(o cli.TerminalOptions) string { return terminalResetSchedule(terminalDTO, o) }
 		return out
 	}
 	reference := ""
@@ -311,6 +325,7 @@ func handleV2ResetInspectionWithApp(parent context.Context, inv cli.Invocation, 
 		}
 	}
 	out.Human = human.String()
+	out.Terminal = func(o cli.TerminalOptions) string { return terminalResetInventory(rows, complete, reference != "", o) }
 	return out
 }
 func v2ResetDiagnostic(exit int, code, message string) cli.Outcome {
