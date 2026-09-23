@@ -122,6 +122,7 @@ type windowsTaskRuntimeState struct {
 	LastResult         uint32
 	HasLastResult      bool
 	EnginePIDs         []uint32
+	InstanceGUIDs      []string
 	SecurityDescriptor string
 }
 
@@ -240,6 +241,15 @@ func (platform *windowsTaskServicePlatform) Snapshot(ctx context.Context) (servi
 				return servicePlatformSnapshot{}, fmt.Errorf("snapshot Windows task state: %w", err)
 			}
 			running = state.Running
+			if running {
+				d, err := parseWindowsTaskDefinition(definition)
+				if err != nil {
+					return servicePlatformSnapshot{}, err
+				}
+				if !windowsTaskDefaultTrue(d.Settings.Enabled) {
+					return servicePlatformSnapshot{}, windowsDisabledRunningRecovery(kind)
+				}
+			}
 		}
 		snapshot.Components = append(snapshot.Components, serviceComponentSnapshot{ID: taskPath, Definition: append([]byte(nil), definition...), Exists: exists, Running: running})
 	}
@@ -1372,6 +1382,12 @@ func (platform *windowsTaskServicePlatform) SnapshotSelected(ctx context.Context
 			}
 			c.Running = state.Running
 			c.Enabled = windowsTaskDefaultTrue(d.Settings.Enabled)
+			if c.Running && !c.Enabled {
+				c.WindowsInstanceGUID, err = windowsSingleTaskInstance(state)
+				if err != nil {
+					return snapshot, err
+				}
+			}
 		}
 		snapshot.Components = append(snapshot.Components, c)
 	}
@@ -1412,6 +1428,25 @@ func (platform *windowsTaskServicePlatform) RestoreSelected(ctx context.Context,
 				return errServiceUnavailable
 			}
 		}
+		if c.Exists && c.Running && !c.Enabled {
+			if !validWindowsTaskInstanceGUID(c.WindowsInstanceGUID) {
+				return errServiceUnavailable
+			}
+		} else if c.WindowsInstanceGUID != "" {
+			return errServiceUnavailable
+		}
+	}
+	// A disabled action cannot be recreated by Run. Preserve the original live
+	// instance, reversing only an Enabled change made by the failed operation.
+	preserved := make(map[string]bool)
+	for i, c := range snapshot.Components {
+		if c.Exists && c.Running && !c.Enabled {
+			keep, err := platform.preserveDisabledRunning(ctx, kinds[i], c)
+			if err != nil {
+				return err
+			}
+			preserved[c.ID] = keep
+		}
 	}
 	if selection == serviceProxy || selection == serviceAll {
 		if err := platform.removeProxySession(ctx); err != nil {
@@ -1442,15 +1477,21 @@ func (platform *windowsTaskServicePlatform) RestoreSelected(ctx context.Context,
 			return ErrServiceUnhealthy
 		}
 	}
+	var incomplete error
 	for i := 0; i < len(snapshot.Components); i++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		c := snapshot.Components[i]
-		if c.ID == windowsProxySessionTaskPath && !c.Exists {
+		if (c.ID == windowsProxySessionTaskPath && !c.Exists) || preserved[c.ID] {
 			continue
 		}
-		if err := platform.restore(ctx, c.ID, c.Definition, c.Exists, c.Running); err != nil {
+		running := c.Running
+		if c.Exists && c.Running && !c.Enabled {
+			running = false
+			incomplete = errors.Join(incomplete, windowsDisabledRunningRecovery(kinds[i]))
+		}
+		if err := platform.restore(ctx, c.ID, c.Definition, c.Exists, running); err != nil {
 			return err
 		}
 		restored, exists, err := platform.queryDefinitionBytes(ctx, kinds[i])
@@ -1470,7 +1511,102 @@ func (platform *windowsTaskServicePlatform) RestoreSelected(ctx context.Context,
 		}
 		return platform.removeFolder(ctx)
 	}
-	return ctx.Err()
+	return errors.Join(incomplete, ctx.Err())
+}
+
+func windowsDisabledRunningRecovery(kind windowsTaskKind) error {
+	component := "proxy"
+	if kind == windowsRefreshTask {
+		component = "token-refresh"
+	}
+	return fmt.Errorf("%w: disabled running task cannot be recreated; run `cq service stop --component %s` before retrying", ErrServiceUnhealthy, component)
+}
+
+func validWindowsTaskInstanceGUID(value string) bool {
+	if len(value) == 38 && value[0] == '{' && value[37] == '}' {
+		value = value[1:37]
+	}
+	if len(value) != 36 || value == "00000000-0000-0000-0000-000000000000" {
+		return false
+	}
+	for i, c := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func windowsSingleTaskInstance(state windowsTaskRuntimeState) (string, error) {
+	if !state.Running || len(state.EnginePIDs) != 1 || state.EnginePIDs[0] == 0 || len(state.InstanceGUIDs) != 1 || !validWindowsTaskInstanceGUID(state.InstanceGUIDs[0]) {
+		return "", errServiceUnavailable
+	}
+	return strings.ToLower(strings.Trim(state.InstanceGUIDs[0], "{}")), nil
+}
+
+func (platform *windowsTaskServicePlatform) preserveDisabledRunning(ctx context.Context, kind windowsTaskKind, c serviceComponentSnapshot) (bool, error) {
+	data, exists, err := platform.queryDefinitionBytes(ctx, kind)
+	if err != nil || !exists {
+		return false, err
+	}
+	state, err := platform.queryState(ctx, c.ID)
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err != nil {
+		return false, err
+	}
+	if !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, platform.sid, false) {
+		return false, installstate.ErrOwnershipConflict
+	}
+	if !state.Running {
+		return false, nil
+	}
+	guid, err := windowsSingleTaskInstance(state)
+	if err != nil {
+		return false, err
+	}
+	if guid != c.WindowsInstanceGUID {
+		return false, windowsDisabledRunningRecovery(kind)
+	}
+	if !bytes.Equal(data, c.Definition) {
+		// Start may have enabled this same live instance before a later failure.
+		// Restore only that exact property delta without ending the original run.
+		offset := bytes.Index(c.Definition, []byte("<Settings>"))
+		if offset < 0 {
+			return false, windowsDisabledRunningRecovery(kind)
+		}
+		enabled := append(append([]byte(nil), c.Definition[:offset]...), bytes.Replace(c.Definition[offset:], []byte("<Enabled>false</Enabled>"), []byte("<Enabled>true</Enabled>"), 1)...)
+		if !bytes.Equal(data, enabled) {
+			return false, windowsDisabledRunningRecovery(kind)
+		}
+		if err := platform.setEnabled(ctx, kind, false); err != nil {
+			return false, err
+		}
+		data, exists, err = platform.queryDefinitionBytes(ctx, kind)
+		if err != nil {
+			return false, err
+		}
+		if !exists || !bytes.Equal(data, c.Definition) {
+			return false, windowsDisabledRunningRecovery(kind)
+		}
+		confirmed, err := platform.queryState(ctx, c.ID)
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if err != nil {
+			return false, err
+		}
+		confirmedGUID, err := windowsSingleTaskInstance(confirmed)
+		if err != nil || confirmedGUID != guid || !validWindowsTaskSecurityDescriptor(confirmed.SecurityDescriptor, platform.sid, false) {
+			return false, windowsDisabledRunningRecovery(kind)
+		}
+	}
+	return true, nil
 }
 
 func (platform *windowsTaskServicePlatform) proxySession(ctx context.Context) ([]byte, bool, error) {
@@ -1541,7 +1677,7 @@ func (platform *windowsTaskServicePlatform) rejectProxySession(ctx context.Conte
 		return err
 	}
 	if exists {
-		return fmt.Errorf("%w: stop the proxy session before package snapshot or upgrade", errServiceUnavailable)
+		return fmt.Errorf("%w: run `cq service stop --component proxy` before a package snapshot, upgrade or cq-install uninstall", errServiceUnavailable)
 	}
 	return nil
 }

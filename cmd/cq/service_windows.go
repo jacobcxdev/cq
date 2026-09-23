@@ -213,7 +213,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	}
 	comTaskFolder := strings.TrimSuffix(taskFolder, `\`)
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=([int]$registered.State -eq 4);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
+		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); $guids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID; $guids += [string]$instances.Item($index).InstanceGuid }; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=([int]$registered.State -eq 4);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);InstanceGUIDs=@($guids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();InstanceGUIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
 		comTaskFolder,
 		taskName,
 	)
@@ -231,6 +231,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 		Running            bool     `json:"Running"`
 		LastResult         int64    `json:"LastResult"`
 		EnginePIDs         []uint32 `json:"EnginePIDs"`
+		InstanceGUIDs      []string `json:"InstanceGUIDs"`
 		SecurityDescriptor string   `json:"SecurityDescriptor"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(output))
@@ -254,6 +255,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 		LastResult:         lastResult,
 		HasLastResult:      true,
 		EnginePIDs:         append([]uint32(nil), state.EnginePIDs...),
+		InstanceGUIDs:      append([]string(nil), state.InstanceGUIDs...),
 		SecurityDescriptor: state.SecurityDescriptor,
 	}, nil
 }

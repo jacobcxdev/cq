@@ -200,6 +200,11 @@ func TestWindowsTaskRuntimeStateNative(t *testing.T) {
 		t.Fatalf("runtime state = %#v", state)
 	}
 
+	instanceGUID, err := windowsSingleTaskInstance(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("native running instance GUID=%s", instanceGUID)
 	engine, err := readWindowsServiceProcessIdentity(state.EnginePIDs[0])
 	if err != nil {
 		t.Fatal(err)
@@ -220,6 +225,14 @@ func TestWindowsTaskRuntimeStateNative(t *testing.T) {
 	t.Logf("native EnginePID=%d action PID=%d parent=%d creation=%d engine_creation=%d children=%d", engine.PID, action.PID, action.ParentPID, action.Created, engine.Created, engine.Children)
 	if _, err := runWindowsSchtasks(ctx, "/Disable", "/TN", windowsProxyTaskPath); err != nil {
 		t.Fatal(err)
+	}
+	stillRunning, err := queryWindowsTaskState(ctx, windowsProxyTaskPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedGUID, err := windowsSingleTaskInstance(stillRunning)
+	if err != nil || retainedGUID != instanceGUID {
+		t.Fatalf("Disable changed original instance: %q %v", retainedGUID, err)
 	}
 	data, err = runWindowsSchtasks(ctx, "/Query", "/TN", windowsProxyTaskPath, "/XML", "/HResult")
 	if err != nil {

@@ -114,12 +114,13 @@ type servicePlatformSnapshot struct {
 }
 
 type serviceComponentSnapshot struct {
-	ID            string `json:"id"`
-	Definition    []byte `json:"definition,omitempty"`
-	Exists        bool   `json:"exists"`
-	Enabled       bool   `json:"enabled,omitempty"`
-	UnitFileState string `json:"unit_file_state,omitempty"`
-	Running       bool   `json:"running,omitempty"`
+	WindowsInstanceGUID string `json:"-"` // In-memory rollback identity; never part of schema 1.
+	ID                  string `json:"id"`
+	Definition          []byte `json:"definition,omitempty"`
+	Exists              bool   `json:"exists"`
+	Enabled             bool   `json:"enabled,omitempty"`
+	UnitFileState       string `json:"unit_file_state,omitempty"`
+	Running             bool   `json:"running,omitempty"`
 }
 
 type persistedServiceSnapshot struct {
@@ -416,7 +417,7 @@ func sameServicePlatformSnapshot(left, right servicePlatformSnapshot) bool {
 	for index := range left.Components {
 		leftComponent := left.Components[index]
 		rightComponent := right.Components[index]
-		if leftComponent.ID != rightComponent.ID || leftComponent.Exists != rightComponent.Exists || leftComponent.Enabled != rightComponent.Enabled || leftComponent.UnitFileState != rightComponent.UnitFileState || leftComponent.Running != rightComponent.Running {
+		if leftComponent.ID != rightComponent.ID || leftComponent.Exists != rightComponent.Exists || leftComponent.Enabled != rightComponent.Enabled || leftComponent.UnitFileState != rightComponent.UnitFileState || leftComponent.Running != rightComponent.Running || leftComponent.WindowsInstanceGUID != rightComponent.WindowsInstanceGUID {
 			return false
 		}
 		if leftComponent.Exists && !bytes.Equal(leftComponent.Definition, rightComponent.Definition) {

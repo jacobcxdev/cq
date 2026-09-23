@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -626,11 +628,12 @@ func TestWindowsTaskDefinitionServiceRestoreRecreatesExactFolderFirst(t *testing
 func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *fakeWindowsTaskRunner) {
 	t.Helper()
 	runner := &fakeWindowsTaskRunner{
-		tasks:      map[string][]byte{},
-		running:    map[string]bool{},
-		lastResult: map[string]uint32{},
-		enginePIDs: map[string][]uint32{},
-		failOnce:   map[string]error{},
+		tasks:         map[string][]byte{},
+		running:       map[string]bool{},
+		lastResult:    map[string]uint32{},
+		enginePIDs:    map[string][]uint32{},
+		instanceGUIDs: map[string][]string{},
+		failOnce:      map[string]error{},
 	}
 	platform := &windowsTaskServicePlatform{
 		sid:                testWindowsSID,
@@ -653,15 +656,17 @@ func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *f
 }
 
 type fakeWindowsTaskRunner struct {
-	calls        [][]string
-	xmlPaths     []string
-	tasks        map[string][]byte
-	running      map[string]bool
-	lastResult   map[string]uint32
-	enginePIDs   map[string][]uint32
-	failOnce     map[string]error
-	folderExists bool
-	folderSDDL   string
+	calls            [][]string
+	xmlPaths         []string
+	tasks            map[string][]byte
+	running          map[string]bool
+	lastResult       map[string]uint32
+	enginePIDs       map[string][]uint32
+	instanceGUIDs    map[string][]string
+	instanceSequence int
+	failOnce         map[string]error
+	folderExists     bool
+	folderSDDL       string
 }
 
 func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -737,6 +742,8 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 			return nil, windowsTaskCommandError{Code: windowsTaskAlreadyRunning, Output: "already running"}
 		}
 		runner.running[path] = true
+		runner.instanceSequence++
+		runner.instanceGUIDs[path] = []string{fmt.Sprintf("%08x-0000-4000-8000-000000000001", runner.instanceSequence)}
 		if (path == windowsProxyTaskPath || path == windowsProxySessionTaskPath) && len(runner.enginePIDs[path]) == 0 {
 			runner.enginePIDs[path] = []uint32{902}
 		}
@@ -747,6 +754,7 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 			return nil, windowsTaskCommandError{Code: windowsTaskNotFound, Output: "cannot find the file"}
 		}
 		runner.running[path] = false
+		delete(runner.instanceGUIDs, path)
 		delete(runner.enginePIDs, path)
 		return nil, nil
 	case "/delete":
@@ -756,6 +764,7 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 		}
 		delete(runner.tasks, path)
 		delete(runner.running, path)
+		delete(runner.instanceGUIDs, path)
 		delete(runner.enginePIDs, path)
 		return nil, nil
 	default:
@@ -767,7 +776,12 @@ func (runner *fakeWindowsTaskRunner) State(_ context.Context, path string) (wind
 	if runner.tasks[path] == nil {
 		return windowsTaskRuntimeState{}, windowsTaskCommandError{Code: windowsTaskNotFound, Output: "cannot find the file"}
 	}
+	guids, set := runner.instanceGUIDs[path]
+	if !set && runner.running[path] {
+		guids = []string{"ffffffff-0000-4000-8000-000000000001"}
+	}
 	return windowsTaskRuntimeState{
+		InstanceGUIDs:      append([]string(nil), guids...),
 		Running:            runner.running[path],
 		LastResult:         runner.lastResult[path],
 		HasLastResult:      true,
@@ -1424,5 +1438,418 @@ func TestWindowsServiceAbsentAndRepeatedStop(t *testing.T) {
 	}
 	if !bytes.Equal(before, r.tasks[windowsProxyTaskPath]) {
 		t.Fatal("status changed disabled policy")
+	}
+}
+
+// This runs the real installer's snapshot-before-uninstall transaction. Only
+// process transport and filesystem I/O are replaced; scheduler methods are real.
+func TestWindowsServiceInstallerUninstallSessionBoundary(t *testing.T) {
+	for _, mode := range []string{"session-refused", "stopped-uninstall", "stopped-rollback"} {
+		t.Run(mode, func(t *testing.T) {
+			l, p, r := newSelectedWindowsHarness(t)
+			if _, err := l.Selected(context.Background(), serviceStop, serviceProxy, false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.Selected(context.Background(), serviceRestart, serviceProxy, false); err != nil {
+				t.Fatal(err)
+			}
+			if mode != "session-refused" {
+				if _, err := l.Selected(context.Background(), serviceStop, serviceProxy, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := map[string][]byte{}
+			for name, data := range r.tasks {
+				before[name] = append([]byte(nil), data...)
+			}
+			r.calls = nil
+			fs := fsutil.NewMemFS()
+			root := t.TempDir()
+			executable := filepath.Join(root, "cq.exe")
+			body := []byte("owned installer fixture")
+			if err := fs.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.WriteFile(executable, body, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			digest := fmt.Sprintf("%x", sha256.Sum256(body))
+			state := &selectedServiceStore{exists: true, record: installstate.Record{SchemaVersion: 1, Owner: installstate.OwnerGo, Version: "1.0.0", Executable: executable, BinaryDigest: digest, Services: []string{windowsProxyTaskPath, windowsRefreshTaskPath}}}
+			transport := &windowsInstallerTransport{platform: p, fs: fs}
+			metadata := &windowsInstallerMetadata{}
+			if mode == "stopped-rollback" {
+				metadata.failure = errors.New("metadata removal failed")
+			}
+			unused := &windowsInstallerUnused{t: t}
+			i := installer.Installer{FS: fs, Downloader: unused, Runner: unused, Lifecycle: transport, Metadata: metadata, State: state, Locker: &selectedServiceLock{}, Temporary: &windowsInstallerTemporary{root: root}, Installation: installer.Installation{Owner: installstate.OwnerGo, Version: "1.0.0", Executable: executable, Services: state.record.Services}}
+			err := i.Uninstall(context.Background())
+			if mode == "session-refused" {
+				if err == nil || !strings.Contains(err.Error(), "cq service stop --component proxy") {
+					t.Fatalf("missing exact stop remedy: %v", err)
+				}
+				if !reflect.DeepEqual(transport.calls, []string{"snapshot"}) || metadata.calls != 0 {
+					t.Fatalf("mutation after refusal: %v, metadata=%d", transport.calls, metadata.calls)
+				}
+				for _, call := range r.calls {
+					if call[0] != "/Query" {
+						t.Fatalf("scheduler mutation before snapshot: %v", call)
+					}
+				}
+				if !r.running[windowsProxySessionTaskPath] || !reflect.DeepEqual(before, r.tasks) {
+					t.Fatal("session changed on refusal")
+				}
+			} else if mode == "stopped-rollback" {
+				if !errors.Is(err, metadata.failure) || errors.Is(err, installer.ErrRollbackUnverified) {
+					t.Fatalf("rollback failure: %v", err)
+				}
+				if !reflect.DeepEqual(transport.calls, []string{"snapshot", "uninstall", "restore"}) {
+					t.Fatalf("order: %v", transport.calls)
+				}
+				if !reflect.DeepEqual(before, r.tasks) || r.running[windowsProxyTaskPath] {
+					t.Fatal("stopped baseline not restored exactly")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(transport.calls, []string{"snapshot", "uninstall"}) || len(r.tasks) != 0 || state.exists {
+					t.Fatalf("incomplete uninstall: %v", transport.calls)
+				}
+				if _, err := fs.Stat(executable); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("binary remains: %v", err)
+				}
+			}
+			if mode != "stopped-uninstall" {
+				got, err := fs.ReadFile(executable)
+				if err != nil || !bytes.Equal(got, body) || !state.exists {
+					t.Fatalf("binary/ownership changed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+type windowsInstallerTransport struct {
+	platform *windowsTaskServicePlatform
+	fs       *fsutil.MemFS
+	calls    []string
+}
+
+func (l *windowsInstallerTransport) Stop(context.Context) error {
+	return errors.New("unexpected installer Stop")
+}
+func (l *windowsInstallerTransport) Install(context.Context, installstate.Owner) error {
+	return errors.New("unexpected installer Install")
+}
+func (l *windowsInstallerTransport) Status(context.Context) error {
+	return errors.New("unexpected installer Status")
+}
+func (l *windowsInstallerTransport) Snapshot(ctx context.Context, _ installstate.Owner, path string) error {
+	l.calls = append(l.calls, "snapshot")
+	if err := l.platform.Preflight(ctx, l.platform.executable); err != nil {
+		return err
+	}
+	snapshot, err := l.platform.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return l.fs.WriteFile(path, data, 0o600)
+}
+func (l *windowsInstallerTransport) Uninstall(ctx context.Context, _ installstate.Owner) error {
+	l.calls = append(l.calls, "uninstall")
+	if err := l.platform.Preflight(ctx, l.platform.executable); err != nil {
+		return err
+	}
+	return errors.Join(l.platform.RemoveRefresh(ctx), l.platform.RemoveProxy(ctx))
+}
+func (l *windowsInstallerTransport) Restore(ctx context.Context, _ installstate.Owner, path string) error {
+	l.calls = append(l.calls, "restore")
+	data, err := l.fs.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var snapshot servicePlatformSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return err
+	}
+	return l.platform.Restore(ctx, snapshot)
+}
+
+type windowsInstallerMetadata struct {
+	failure error
+	calls   int
+}
+
+func (m *windowsInstallerMetadata) Install(context.Context, installer.Installation) error {
+	m.calls++
+	return nil
+}
+func (m *windowsInstallerMetadata) Inspect(context.Context, installer.Installation) error {
+	m.calls++
+	return nil
+}
+func (m *windowsInstallerMetadata) Remove(context.Context, installer.Installation) error {
+	m.calls++
+	return m.failure
+}
+
+type windowsInstallerTemporary struct{ root string }
+
+func (d *windowsInstallerTemporary) Create() (string, error) { return d.root, nil }
+func (d *windowsInstallerTemporary) Remove(string) error     { return nil }
+
+type windowsInstallerUnused struct{ t *testing.T }
+
+func (u *windowsInstallerUnused) Download(context.Context, string) (installer.StagedBinary, error) {
+	u.t.Fatal("unexpected download")
+	return installer.StagedBinary{}, nil
+}
+func (u *windowsInstallerUnused) Version(context.Context, string) (string, error) {
+	u.t.Fatal("unexpected version probe")
+	return "", nil
+}
+
+func TestWindowsServiceDisabledRunningPrimaryRollback(t *testing.T) {
+	for _, selection := range []serviceSelection{serviceProxy, serviceRefresh} {
+		t.Run(string(selection), func(t *testing.T) {
+			l, _, r := newSelectedWindowsHarness(t)
+			path := windowsProxyTaskPath
+			if selection == serviceRefresh {
+				path = windowsRefreshTaskPath
+			}
+			r.running[path] = true
+			r.enginePIDs[path] = []uint32{902}
+			if _, err := r.Run(context.Background(), "/Disable", "/TN", path); err != nil {
+				t.Fatal(err)
+			}
+			before := append([]byte(nil), r.tasks[path]...)
+			r.calls = nil
+			failure := errors.New("original End failed")
+			r.failOnce[strings.Join([]string{"/End", "/TN", path}, "\x00")] = failure
+			result, err := l.Selected(context.Background(), serviceStop, selection, false)
+			if !errors.Is(err, failure) || result.Rollback != "restored" {
+				t.Fatalf("error=%v rollback=%s", err, result.Rollback)
+			}
+			if !r.running[path] || !bytes.Equal(before, r.tasks[path]) {
+				t.Fatal("original disabled live primary lost")
+			}
+			ends := 0
+			for _, call := range r.calls {
+				if call[0] == "/End" && call[2] == path {
+					ends++
+				}
+				if call[0] == "/Run" || call[0] == "/Create" || call[0] == "/Enable" {
+					t.Fatalf("destructive rollback: %v", call)
+				}
+			}
+			if ends != 1 {
+				t.Fatalf("original task ended again: %d", ends)
+			}
+			if _, err := l.Selected(context.Background(), serviceStop, selection, false); err != nil {
+				t.Fatal(err)
+			}
+			if r.running[path] {
+				t.Fatal("canonical stop recovery failed")
+			}
+		})
+	}
+}
+
+func TestWindowsServiceDisabledRunningRecoveryBoundaries(t *testing.T) {
+	for _, selection := range []serviceSelection{serviceProxy, serviceRefresh} {
+		for _, mode := range []string{"ended", "replacement", "missing-guid", "malformed-guid", "multiple-guids", "cancelled-end"} {
+			t.Run(string(selection)+"/"+mode, func(t *testing.T) {
+				l, p, r := newSelectedWindowsHarness(t)
+				path := windowsProxyTaskPath
+				if selection == serviceRefresh {
+					path = windowsRefreshTaskPath
+				}
+				r.running[path], r.enginePIDs[path] = true, []uint32{902}
+				if _, err := r.Run(context.Background(), "/Disable", "/TN", path); err != nil {
+					t.Fatal(err)
+				}
+				before := append([]byte(nil), r.tasks[path]...)
+				if mode == "missing-guid" {
+					r.instanceGUIDs[path] = nil
+				}
+				if mode == "malformed-guid" {
+					r.instanceGUIDs[path] = []string{"{ffffffff-0000-4000-8000-000000000001"}
+				}
+				if mode == "multiple-guids" {
+					r.instanceGUIDs[path] = []string{"ffffffff-0000-4000-8000-000000000001", "ffffffff-0000-4000-8000-000000000002"}
+				}
+				r.calls = nil
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				failure := errors.New("End failed with changed runtime")
+				base, failed := p.run, false
+				p.run = func(ctx context.Context, args ...string) ([]byte, error) {
+					if !failed && args[0] == "/End" && args[2] == path {
+						failed = true
+						if mode == "ended" {
+							_, _ = base(ctx, args...)
+						} else {
+							r.calls = append(r.calls, append([]string(nil), args...))
+						}
+						if mode == "replacement" {
+							r.instanceGUIDs[path] = []string{"ffffffff-0000-4000-8000-000000000002"}
+						}
+						if mode == "cancelled-end" {
+							cancel()
+						}
+						return nil, failure
+					}
+					return base(ctx, args...)
+				}
+				result, err := l.Selected(ctx, serviceStop, selection, false)
+				if err == nil {
+					t.Fatal("unsupported rollback succeeded")
+				}
+				if strings.Contains(mode, "guid") {
+					if result.Rollback != "not_needed" || failed {
+						t.Fatalf("invalid GUID reached mutation: %s %v", result.Rollback, err)
+					}
+				} else {
+					if !errors.Is(err, failure) || result.Rollback != "failed" {
+						t.Fatalf("lost original failure or false rollback: %s %v", result.Rollback, err)
+					}
+					if mode == "cancelled-end" {
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("lost budget: %v", err)
+						}
+					} else if !strings.Contains(err.Error(), "cq service stop --component "+string(selection)) {
+						t.Fatalf("missing recovery command: %v", err)
+					}
+				}
+				if !bytes.Equal(before, r.tasks[path]) || r.running[path] != (mode != "ended") {
+					t.Fatal("disabled policy or replacement changed")
+				}
+				ends := 0
+				for _, call := range r.calls {
+					if call[0] == "/End" && call[2] == path {
+						ends++
+					}
+					if call[0] == "/Enable" || call[0] == "/Run" {
+						t.Fatalf("recreated disabled instance: %v", call)
+					}
+					if mode != "ended" && call[0] == "/Create" {
+						t.Fatalf("replaced live task: %v", call)
+					}
+				}
+				if mode != "ended" && ends > 1 {
+					t.Fatal("replacement ended during rollback")
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsServiceDisabledRunningEnabledRollback(t *testing.T) {
+	for _, selection := range []serviceSelection{serviceProxy, serviceRefresh} {
+		for _, mode := range []string{"preserved", "disable-failed", "replacement-during-disable", "cancelled-disable", "other-xml-change"} {
+			t.Run(string(selection)+"/"+mode, func(t *testing.T) {
+				_, p, r := newSelectedWindowsHarness(t)
+				kind, path := windowsProxyTask, windowsProxyTaskPath
+				if selection == serviceRefresh {
+					kind, path = windowsRefreshTask, windowsRefreshTaskPath
+				}
+				r.running[path], r.enginePIDs[path] = true, []uint32{902}
+				if err := p.setEnabled(context.Background(), kind, false); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := p.SnapshotSelected(context.Background(), selection)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, _ := json.Marshal(snapshot)
+				if bytes.Contains(data, []byte("ffffffff")) || bytes.Contains(data, []byte("GUID")) {
+					t.Fatal("instance identity leaked into frozen schema")
+				}
+				if err := p.setEnabled(context.Background(), kind, true); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "other-xml-change" {
+					r.tasks[path] = bytes.Replace(r.tasks[path], []byte("<Priority>7</Priority>"), []byte("<Priority>6</Priority>"), 1)
+				}
+				r.calls = nil
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				base := p.run
+				p.run = func(ctx context.Context, args ...string) ([]byte, error) {
+					if args[0] == "/Disable" {
+						if mode == "disable-failed" {
+							return nil, errors.New("Disable rejected")
+						}
+						out, err := base(ctx, args...)
+						if mode == "replacement-during-disable" {
+							r.instanceGUIDs[path] = []string{"ffffffff-0000-4000-8000-000000000002"}
+						}
+						if mode == "cancelled-disable" {
+							cancel()
+						}
+						return out, err
+					}
+					return base(ctx, args...)
+				}
+				err = p.RestoreSelected(ctx, selection, snapshot)
+				if mode == "preserved" {
+					if err != nil {
+						t.Fatal(err)
+					}
+					restored, err := p.SnapshotSelected(ctx, selection)
+					if err != nil || !sameServicePlatformSnapshot(snapshot, restored) {
+						t.Fatalf("unverified restored state: %v", err)
+					}
+				} else if err == nil {
+					t.Fatal("unverified restoration succeeded")
+				}
+				if mode == "cancelled-disable" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("lost cancellation: %v", err)
+				}
+				if !r.running[path] {
+					t.Fatal("original or replacement instance ended")
+				}
+				for _, call := range r.calls {
+					if call[0] != "/Query" && call[0] != "/Disable" {
+						t.Fatalf("destructive restoration: %v", call)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsServiceLegacySnapshotDisabledRunningBoundary(t *testing.T) {
+	for _, selection := range []serviceSelection{serviceProxy, serviceRefresh} {
+		t.Run(string(selection), func(t *testing.T) {
+			l, p, r := newSelectedWindowsHarness(t)
+			path := windowsProxyTaskPath
+			if selection == serviceRefresh {
+				path = windowsRefreshTaskPath
+			}
+			r.running[path], r.enginePIDs[path] = true, []uint32{902}
+			if _, err := r.Run(context.Background(), "/Disable", "/TN", path); err != nil {
+				t.Fatal(err)
+			}
+			r.calls = nil
+			if _, err := p.Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "cq service stop --component "+string(selection)) {
+				t.Fatalf("missing exact stop remedy: %v", err)
+			}
+			for _, call := range r.calls {
+				if call[0] != "/Query" {
+					t.Fatalf("snapshot mutated task: %v", call)
+				}
+			}
+			if _, err := l.Selected(context.Background(), serviceStop, selection, false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.Snapshot(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
