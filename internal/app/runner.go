@@ -143,6 +143,9 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	var burnRates history.BurnRates
 	var estimates history.RateEstimates
 	if r.History != nil && ctx.Err() == nil {
+		// Cancellation can detach the worker before report annotation replaces
+		// snapshot entries. Prepare its independent input map before launching it.
+		historyInput := providerFetched(snapshot)
 		type historyResult struct {
 			rates     history.BurnRates
 			estimates history.RateEstimates
@@ -161,9 +164,9 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 			if h, ok := r.History.(interface {
 				UpdateAndGetEstimatesObserved(context.Context, map[string][]quota.Result, int64, func(string, string)) (history.BurnRates, history.RateEstimates, error)
 			}); observed && ok {
-				result.rates, result.estimates, result.err = h.UpdateAndGetEstimatesObserved(ctx, providerFetched(snapshot), now.Unix(), func(code, message string) { provider.ObserveWarning(ctx, code, message) })
+				result.rates, result.estimates, result.err = h.UpdateAndGetEstimatesObserved(ctx, historyInput, now.Unix(), func(code, message string) { provider.ObserveWarning(ctx, code, message) })
 			} else {
-				result.rates, result.estimates, result.err = r.History.UpdateAndGetEstimates(ctx, providerFetched(snapshot), now.Unix())
+				result.rates, result.estimates, result.err = r.History.UpdateAndGetEstimates(ctx, historyInput, now.Unix())
 			}
 			return
 		}
