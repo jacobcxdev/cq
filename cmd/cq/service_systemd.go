@@ -1316,3 +1316,65 @@ func (platform *systemdServicePlatform) RestoreSelected(ctx context.Context, sel
 	}
 	return syncSystemdDirectory(platform.unitDirectory)
 }
+
+// Discovery precedes selecting the ownership store and mutation lock roots.
+func (platform *systemdServicePlatform) discoverSelected(ctx context.Context, selection serviceSelection) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := validateSystemdOwnedExecutable(platform.executable); err != nil {
+		return false, err
+	}
+	var directory string
+	var roots userdirs.Roots
+	for _, name := range systemdSelectedUnits(selection) {
+		properties, err := platform.selectedShow(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		if properties["LoadState"] == "not-found" && properties["FragmentPath"] == "" {
+			continue
+		}
+		fragment := properties["FragmentPath"]
+		unitDir := filepath.Dir(fragment)
+		if !filepath.IsAbs(fragment) || filepath.Clean(fragment) != fragment || filepath.Base(fragment) != name || filepath.Base(unitDir) != "user" || filepath.Base(filepath.Dir(unitDir)) != "systemd" {
+			return false, installstate.ErrOwnershipConflict
+		}
+		candidate := *platform
+		candidate.unitDirectory = unitDir
+		_, exists, _, installedRoots, err := candidate.selectedDefinition(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		if err := candidate.validateSelectedFragment(name, exists, properties); err != nil {
+			return false, err
+		}
+		config := filepath.Join(filepath.Dir(filepath.Dir(unitDir)), "cq")
+		state := filepath.Join(config, "state")
+		if installedRoots != nil && (installedRoots.Config != config || installedRoots.State != state) {
+			return false, installstate.ErrOwnershipConflict
+		}
+		if directory != "" && (directory != unitDir || roots.State != state) {
+			return false, installstate.ErrOwnershipConflict
+		}
+		if installedRoots != nil {
+			if roots.Config != "" && roots != *installedRoots {
+				return false, installstate.ErrOwnershipConflict
+			}
+			roots = *installedRoots
+		} else if roots.State == "" {
+			// Frozen legacy layout proves only the ownership-state location.
+			// It does not establish runtime/cache roots for status observation.
+			roots.State = state
+		}
+		directory = unitDir
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if directory == "" {
+		return false, nil
+	}
+	platform.unitDirectory, platform.roots = directory, roots
+	return true, nil
+}

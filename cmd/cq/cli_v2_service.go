@@ -21,10 +21,14 @@ func lookupV2Service(path string) (cli.Handler, bool) {
 	return nil, false
 }
 
-var selectedServiceLifecycleFactory = func() (*serviceLifecycle, error) { return serviceLifecycleFactory("") }
+var selectedServiceLifecycleFactory = func(context.Context, serviceAction, serviceSelection) (*serviceLifecycle, error) {
+	return serviceLifecycleFactory("")
+}
 
 func handleV2Service(ctx context.Context, inv cli.Invocation, session *cli.Session) cli.Outcome {
-	return handleV2ServiceWithPreparation(ctx, inv, session, func(context.Context) (*serviceLifecycle, error) { return selectedServiceLifecycleFactory() })
+	return handleV2ServiceWithPreparation(ctx, inv, session, func(ctx context.Context) (*serviceLifecycle, error) {
+		return selectedServiceLifecycleFactory(ctx, serviceAction(strings.TrimPrefix(inv.Path, "service ")), serviceSelection(inv.Options["component"][0]))
+	})
 }
 
 func handleV2ServiceWithPreparation(parent context.Context, inv cli.Invocation, _ *cli.Session, prepare func(context.Context) (*serviceLifecycle, error)) cli.Outcome {

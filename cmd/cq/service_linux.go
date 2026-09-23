@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,10 +45,16 @@ func inspectSelectedLinuxProxy(ctx context.Context, executable string, roots use
 	if err != nil || config == nil || config.Port < 1 || config.Port > 65535 {
 		return componentStatus{Error: "Linux proxy runtime inspection is unavailable"}
 	}
-	return inspectLinuxProxyAtPort(ctx, executable, config.Port)
+	return inspectLinuxProxyAtPortWithHealth(ctx, executable, config.Port, func(ctx context.Context, address string) bool {
+		return probeSelectedLinuxProxyHealth(ctx, address, config.LocalToken)
+	})
 }
 
 func inspectLinuxProxyAtPort(ctx context.Context, executable string, port int) componentStatus {
+	return inspectLinuxProxyAtPortWithHealth(ctx, executable, port, probeLinuxProxyRuntimeHealthFn)
+}
+
+func inspectLinuxProxyAtPortWithHealth(ctx context.Context, executable string, port int, health func(context.Context, string) bool) componentStatus {
 	status := componentStatus{ID: systemdProxyUnit, Manager: "systemd-user"}
 	identity, err := inspectLinuxProxyRuntimeFn(ctx, executable, port)
 	if err != nil || !identity.Valid() {
@@ -59,7 +66,7 @@ func inspectLinuxProxyAtPort(ctx context.Context, executable string, port int) c
 		status.Error = "Linux proxy runtime inspection is unavailable"
 		return status
 	}
-	if !probeLinuxProxyRuntimeHealthFn(ctx, identity.Listener.Address) {
+	if !health(ctx, identity.Listener.Address) {
 		status.Error = "Linux proxy runtime health is unavailable"
 		return status
 	}
@@ -84,18 +91,7 @@ func inspectLinuxProxyAtPort(ctx context.Context, executable string, port int) c
 func init() {
 	serviceRefreshRunner = runLinuxServiceRefresh
 	serviceLifecycleFactory = defaultLinuxServiceLifecycle
-	selectedServiceLifecycleFactory = func() (*serviceLifecycle, error) {
-		lifecycle, err := defaultLinuxServiceLifecycle("")
-		if err != nil {
-			return nil, err
-		}
-		home, err := linuxSelectedHome()
-		if err != nil {
-			return nil, err
-		}
-		lifecycle.Platform.(*systemdServicePlatform).home = home
-		return lifecycle, nil
-	}
+	selectedServiceLifecycleFactory = defaultSelectedLinuxServiceLifecycle
 }
 
 var linuxSelectedHome = func() (string, error) {
@@ -108,6 +104,8 @@ var linuxSelectedHome = func() (string, error) {
 	}
 	return filepath.Clean(current.HomeDir), nil
 }
+
+var linuxSelectedSystemctl = runLinuxSystemctl
 
 func defaultLinuxServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
 	platform, roots, executable, err := defaultLinuxSystemdPlatform(stableExecutable)
@@ -312,4 +310,63 @@ func runLinuxServiceRefresh(run func() error) error {
 		return errServiceUnavailable
 	}
 	return recordServiceRefresh(executable, *roots, run, time.Now)
+}
+
+func defaultSelectedLinuxServiceLifecycle(ctx context.Context, action serviceAction, selection serviceSelection) (*serviceLifecycle, error) {
+	executable, err := resolveServiceExecutable("")
+	if err != nil {
+		return nil, err
+	}
+	home, err := linuxSelectedHome()
+	if err != nil {
+		return nil, err
+	}
+	p := &systemdServicePlatform{executable: executable, home: home, run: linuxSelectedSystemctl, inspectSelectedProxy: inspectSelectedLinuxProxy}
+	found, err := p.discoverSelected(ctx, selection)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		fresh, _, _, err := defaultLinuxSystemdPlatform(executable)
+		if err != nil {
+			return nil, err
+		}
+		p.unitDirectory, p.roots = fresh.unitDirectory, fresh.roots
+	}
+	if found && p.roots.Config == "" {
+		store := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: p.roots}
+		record, err := store.Load()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if errors.Is(err, installstate.ErrNotInstalled) {
+			if action != serviceInspect {
+				return nil, installstate.ErrOwnershipConflict
+			}
+		} else if err != nil {
+			return nil, err
+		} else {
+			for _, component := range selection.components() {
+				names := systemdSelectedUnits(component)
+				_, exists, configured, _, err := p.selectedDefinition(ctx, names[0])
+				if err != nil {
+					return nil, err
+				}
+				if exists && (!record.HasService(names[len(names)-1]) || !sameServiceExecutable(record.Executable, configured)) {
+					return nil, installstate.ErrOwnershipConflict
+				}
+			}
+		}
+	}
+	if action == serviceInstall && p.roots.Config == "" {
+		cache, err := (userdirs.Resolver{Getenv: os.Getenv, UserHomeDir: func() (string, error) { return home, nil }}).Resolve(userdirs.CacheRoot)
+		if err != nil {
+			return nil, err
+		}
+		config := filepath.Join(filepath.Dir(filepath.Dir(p.unitDirectory)), "cq")
+		p.roots = userdirs.Roots{Config: config, State: filepath.Join(config, "state"), Runtime: filepath.Join(config, "state"), Logs: filepath.Join(config, "state", "logs"), Cache: cache.Cache}
+	}
+	lifecycle := newLinuxServiceLifecycle(executable, p.unitDirectory, p.roots, p.run, linuxProxyRuntimeInspector)
+	lifecycle.Platform = p
+	return lifecycle, ctx.Err()
 }

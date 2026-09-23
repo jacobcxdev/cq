@@ -744,7 +744,7 @@ func TestDarwinServiceSelectedFactoryUsesNativeHome(t *testing.T) {
 	original := darwinSelectedHome
 	darwinSelectedHome = func() (string, error) { return nativeHome, nil }
 	t.Cleanup(func() { darwinSelectedHome = original })
-	selected, err := selectedServiceLifecycleFactory()
+	selected, err := selectedServiceLifecycleFactory(context.Background(), serviceInspect, serviceProxy)
 	if err != nil {
 		t.Fatal(err)
 	}

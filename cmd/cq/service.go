@@ -817,9 +817,6 @@ func (lifecycle *serviceLifecycle) Selected(ctx context.Context, action serviceA
 		if action == serviceStart && before.Observed != nil && before.Observed.Enabled != nil && *before.Observed.Enabled && serviceSelectedHealthy(id, before) {
 			continue
 		}
-		if action == serviceStop && before.Observed != nil && before.Observed.Enabled != nil && !*before.Observed.Enabled && !before.Running {
-			continue
-		}
 		if err := ctx.Err(); err != nil {
 			return rollback(err)
 		}

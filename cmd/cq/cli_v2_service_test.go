@@ -416,7 +416,7 @@ func TestCLIV2ServiceIdempotenceAndMissing(t *testing.T) {
 				t.Fatal(exit)
 			}
 			for _, call := range p.calls {
-				if strings.HasSuffix(call, "-"+action) {
+				if action != "stop" && strings.HasSuffix(call, "-"+action) {
 					t.Fatalf("idempotent mutation %s", call)
 				}
 			}
@@ -929,5 +929,27 @@ func TestCLIV2ServiceVerificationPollsObservedHealth(t *testing.T) {
 	_, err := l.waitSelected(context.Background(), serviceRestart, serviceProxy, before, time.Now())
 	if err != nil || calls != 2 {
 		t.Fatalf("observed health polling err=%v calls=%d", err, calls)
+	}
+}
+
+func TestCLIV2ServiceFactoryReceivesBudgetSelection(t *testing.T) {
+	old := selectedServiceLifecycleFactory
+	t.Cleanup(func() { selectedServiceLifecycleFactory = old })
+	calls := 0
+	selectedServiceLifecycleFactory = func(ctx context.Context, action serviceAction, selection serviceSelection) (*serviceLifecycle, error) {
+		calls++
+		if action != serviceInspect || selection != serviceRefresh {
+			t.Fatalf("preparation inputs: %s %s", action, selection)
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("preparation missing total budget")
+		}
+		<-ctx.Done()
+		return nil, errors.New("late discovery error")
+	}
+	inv := cli.Invocation{Path: "service status", Options: map[string][]string{"component": {"token-refresh"}, "timeout": {"1ms"}}}
+	outcome := handleV2Service(context.Background(), inv, nil)
+	if outcome.ExitCode != 7 || calls != 1 {
+		t.Fatalf("factory budget exit=%d calls=%d", outcome.ExitCode, calls)
 	}
 }

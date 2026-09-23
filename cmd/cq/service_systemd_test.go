@@ -766,9 +766,10 @@ func TestSystemdServiceSelectedIdempotence(t *testing.T) {
 	if _, err := l.Selected(context.Background(), serviceStop, serviceAll, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, call := range r.calls {
-		if call[1] == "stop" || call[1] == "disable" {
-			t.Fatalf("stopped stop mutated: %v", call)
+	for _, name := range systemdSelectedUnits(serviceAll) {
+		state, _ := parseSystemdShow(r.show[name])
+		if state["ActiveState"] != "inactive" {
+			t.Fatalf("repeated stop left %s active", name)
 		}
 	}
 }
@@ -1425,6 +1426,150 @@ func TestSystemdServiceSelectedReceiptFailurePrecedence(t *testing.T) {
 			}
 			if scenario == "new native signal" && (dto.LastExitCode == nil || *dto.LastExitCode != 143) {
 				t.Fatal("native signal exit lost")
+			}
+		})
+	}
+}
+
+func TestSystemdServiceSelectedStopDisabledActiveTimer(t *testing.T) {
+	l, _, r := newSelectedSystemdHarness(t)
+	timer, _ := parseSystemdShow(r.show[systemdRefreshTimer])
+	timer["UnitFileState"], timer["ActiveState"] = "disabled", "active"
+	r.show[systemdRefreshTimer] = systemdShow(timer)
+	job, _ := parseSystemdShow(r.show[systemdRefreshService])
+	job["ActiveState"] = "inactive"
+	r.show[systemdRefreshService] = systemdShow(job)
+	if _, err := l.Selected(context.Background(), serviceStop, serviceRefresh, false); err != nil {
+		t.Fatal(err)
+	}
+	timer, _ = parseSystemdShow(r.show[systemdRefreshTimer])
+	if timer["ActiveState"] != "inactive" {
+		t.Fatal("disabled timer remained active and can trigger another job")
+	}
+	disable, stop := -1, -1
+	for i, args := range r.calls {
+		if args[1] == "disable" {
+			disable = i
+		}
+		if args[1] == "stop" && args[len(args)-1] == systemdRefreshService {
+			stop = i
+		}
+	}
+	if disable < 0 || stop <= disable {
+		t.Fatalf("timer/job order: %v", r.calls)
+	}
+}
+
+func TestSystemdServiceSelectedDiscoversInstalledRoots(t *testing.T) {
+	_, installed, runner := newSelectedSystemdHarness(t)
+	shellBase := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", shellBase)
+	t.Setenv("HOME", shellBase)
+	p := &systemdServicePlatform{executable: installed.executable, run: installed.run, unitDirectory: filepath.Join(shellBase, "systemd", "user"), roots: userdirs.Roots{State: filepath.Join(shellBase, "cq", "state")}}
+	found, err := p.discoverSelected(context.Background(), serviceRefresh)
+	if err != nil || !found {
+		t.Fatalf("installed native fragment not discovered: found=%v err=%v", found, err)
+	}
+	if p.unitDirectory != installed.unitDirectory || p.roots != installed.roots {
+		t.Fatalf("shell roots replaced installed roots: %+v", p.roots)
+	}
+	for _, args := range runner.calls {
+		if args[len(args)-1] == systemdProxyUnit {
+			t.Fatal("discovery queried unselected proxy")
+		}
+	}
+}
+
+func TestSystemdServiceSelectedDiscoverySafety(t *testing.T) {
+	for _, scenario := range []string{"missing manager", "cancelled", "late cancellation", "deadline", "unsafe executable", "symlink fragment", "writable fragment", "wrong layout", "wrong basename", "drop-in", "unloaded fragment", "conflicting roots", "legacy", "absent"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, installed, r := newSelectedSystemdHarness(t)
+			p := &systemdServicePlatform{executable: installed.executable, run: installed.run}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			props, _ := parseSystemdShow(r.show[systemdProxyUnit])
+			switch scenario {
+			case "missing manager":
+				p.run = func(context.Context, ...string) ([]byte, error) { return nil, errors.New("unavailable") }
+			case "cancelled":
+				cancel()
+			case "late cancellation":
+				run := p.run
+				p.run = func(ctx context.Context, args ...string) ([]byte, error) {
+					out, err := run(ctx, args...)
+					cancel()
+					return out, err
+				}
+			case "deadline":
+				var timeoutCancel context.CancelFunc
+				ctx, timeoutCancel = context.WithTimeout(ctx, time.Millisecond)
+				defer timeoutCancel()
+				p.run = func(ctx context.Context, args ...string) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
+			case "unsafe executable":
+				if err := os.Chmod(p.executable, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink fragment":
+				path := installed.unitPath(systemdProxyUnit)
+				target := path + ".original"
+				if err := os.Rename(path, target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			case "writable fragment":
+				if err := os.Chmod(installed.unitPath(systemdProxyUnit), 0o666); err != nil {
+					t.Fatal(err)
+				}
+			case "wrong layout":
+				props["FragmentPath"] = filepath.Join(t.TempDir(), systemdProxyUnit)
+			case "wrong basename":
+				props["FragmentPath"] = installed.unitPath(systemdRefreshService)
+			case "drop-in":
+				props["DropInPaths"] = "/foreign/override.conf"
+			case "unloaded fragment":
+				props["LoadState"] = "error"
+			case "conflicting roots":
+				_, _, otherRunner := newSelectedSystemdHarness(t)
+				r.show[systemdRefreshService] = otherRunner.show[systemdRefreshService]
+				r.show[systemdRefreshTimer] = otherRunner.show[systemdRefreshTimer]
+			case "legacy":
+				defs, err := renderSystemdServiceDefinitions(p.executable)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := atomicWriteSystemdUnit(installed.unitPath(systemdProxyUnit), defs[systemdProxyUnit]); err != nil {
+					t.Fatal(err)
+				}
+			case "absent":
+				props = map[string]string{"LoadState": "not-found", "FragmentPath": ""}
+			}
+			r.show[systemdProxyUnit] = systemdShow(props)
+			selection := serviceProxy
+			if scenario == "conflicting roots" {
+				selection = serviceAll
+			}
+			found, err := p.discoverSelected(ctx, selection)
+			if scenario == "legacy" {
+				if err != nil || !found || p.roots != (userdirs.Roots{State: installed.roots.State}) {
+					t.Fatalf("legacy roots falsely observed: %+v %v", p.roots, err)
+				}
+				status, err := p.InspectSelected(ctx, selection)
+				if err != nil || status.Proxy.Observed.Roots != nil {
+					t.Fatalf("legacy canonical roots became known: %v", err)
+				}
+			} else if scenario == "absent" {
+				if err != nil || found {
+					t.Fatalf("absence=%v %v", found, err)
+				}
+			} else if err == nil || found || p.unitDirectory != "" {
+				t.Fatalf("unsafe discovery adopted: found=%v err=%v dir=%s", found, err, p.unitDirectory)
+			}
+			if scenario == "cancelled" || scenario == "unsafe executable" {
+				if len(r.calls) != 0 {
+					t.Fatal("manager launched before preflight/cancellation")
+				}
 			}
 		})
 	}

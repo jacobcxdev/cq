@@ -57,7 +57,9 @@ type darwinServicePlatform struct {
 
 func init() {
 	serviceLifecycleFactory = defaultDarwinServiceLifecycle
-	selectedServiceLifecycleFactory = func() (*serviceLifecycle, error) { return darwinServiceLifecycleWithHome("", darwinSelectedHome) }
+	selectedServiceLifecycleFactory = func(context.Context, serviceAction, serviceSelection) (*serviceLifecycle, error) {
+		return darwinServiceLifecycleWithHome("", darwinSelectedHome)
+	}
 }
 
 var darwinSelectedHome = nativeDarwinHome
