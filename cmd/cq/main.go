@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/provider"
@@ -28,6 +29,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	session := &cli.Session{In: os.Stdin, Out: os.Stdout, Err: os.Stderr, Interactive: isStdinTerminal(), BuildInfo: cli.BuildInfo{Version: version}}
+	if term.IsTerminal(os.Stdout.Fd()) {
+		session.TerminalWidth, _, _ = term.GetSize(os.Stdout.Fd())
+		if session.TerminalWidth <= 0 {
+			session.TerminalWidth = 80
+		}
+		session.Colour = os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+	}
 	os.Exit(runCLIV2(ctx, os.Args[1:], session))
 }
 

@@ -8,8 +8,6 @@ Choose a subcommand below. A bare group prints this help without reading configu
 or changing state.
 
 Commands:
-  claude
-      Manage Claude accounts and proxy routing pins.
   account
       Authenticate, inspect, activate and remove Claude accounts.
   proxy

@@ -8,8 +8,6 @@ Choose a subcommand below. A bare group prints this help without reading configu
 or changing state.
 
 Commands:
-  codex
-      Manage Codex accounts, quota resets and provider-specific proxy controls.
   account
       Authenticate, inspect, activate and remove Codex accounts.
   proxy

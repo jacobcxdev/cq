@@ -11,6 +11,12 @@ Commands:
   pin
       Inspect, set or clear the Claude proxy account override.
 
+Related commands:
+  cq proxy
+      Shared proxy runtime, health, state and diagnostics.
+  cq service
+      Manage background services.
+
 Global options:
   -h, --help
       Show help for the resolved command or group and exit 0 without reading state.

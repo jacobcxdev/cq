@@ -8,10 +8,16 @@ Choose a subcommand below. A bare group prints this help without reading configu
 or changing state.
 
 Commands:
-  auth
-      Refresh stored provider authentication credentials.
   refresh
       Refresh eligible stored Claude and Codex OAuth credentials.
+
+Related commands:
+  cq claude account
+      Add, inspect, select and remove Claude accounts.
+  cq codex account
+      Add, inspect, select and remove Codex accounts.
+  cq gemini account
+      Inspect externally managed Gemini account.
 
 Global options:
   -h, --help

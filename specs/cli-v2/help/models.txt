@@ -8,8 +8,6 @@ Choose a subcommand below. A bare group prints this help without reading configu
 or changing state.
 
 Commands:
-  models
-      Inspect model registries and publish local model-cache updates.
   list
       List active models from local registry caches.
   overlay

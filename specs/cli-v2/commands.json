@@ -83,7 +83,21 @@
         "cmd/cq/help.go:341"
       ],
       "family": "models",
-      "kind": "group"
+      "kind": "group",
+      "related_commands": [
+        {
+          "path": "claude account",
+          "description": "Add, inspect, select and remove Claude accounts."
+        },
+        {
+          "path": "codex account",
+          "description": "Add, inspect, select and remove Codex accounts."
+        },
+        {
+          "path": "gemini account",
+          "description": "Inspect externally managed Gemini account."
+        }
+      ]
     },
     {
       "id": "auth.refresh",
@@ -1006,7 +1020,17 @@
       ],
       "sources": [],
       "family": "navigation",
-      "kind": "group"
+      "kind": "group",
+      "related_commands": [
+        {
+          "path": "proxy",
+          "description": "Shared proxy runtime, health, state and diagnostics."
+        },
+        {
+          "path": "service",
+          "description": "Manage background services."
+        }
+      ]
     },
     {
       "id": "claude.proxy.pin",
@@ -2005,7 +2029,17 @@
       ],
       "sources": [],
       "family": "navigation",
-      "kind": "group"
+      "kind": "group",
+      "related_commands": [
+        {
+          "path": "proxy",
+          "description": "Shared proxy runtime, health, state and diagnostics."
+        },
+        {
+          "path": "service",
+          "description": "Manage background services."
+        }
+      ]
     },
     {
       "id": "codex.proxy.canary",
@@ -9481,7 +9515,29 @@
       ],
       "sources": [],
       "family": "navigation",
-      "kind": "group"
+      "kind": "group",
+      "related_commands": [
+        {
+          "path": "codex proxy reserve",
+          "description": "Codex quota reserves; previously cq proxy reserve."
+        },
+        {
+          "path": "codex proxy policy",
+          "description": "Codex routing policy; previously cq proxy policy. Pools and sessions now live under cq codex proxy."
+        },
+        {
+          "path": "codex proxy",
+          "description": "Codex pins, fallback, priming, leases, trace, validation, credential endpoints and hooks."
+        },
+        {
+          "path": "claude proxy pin",
+          "description": "Claude routing pins; previously cq proxy pin claude."
+        },
+        {
+          "path": "service",
+          "description": "Install, start, stop, restart and uninstall background services."
+        }
+      ]
     },
     {
       "id": "proxy.candidate",
@@ -11943,7 +11999,13 @@
       ],
       "sources": [],
       "family": "navigation",
-      "kind": "group"
+      "kind": "group",
+      "related_commands": [
+        {
+          "path": "proxy",
+          "description": "Inspect proxy readiness or run proxy in foreground."
+        }
+      ]
     },
     {
       "id": "service.install",

@@ -32,11 +32,13 @@ type Outcome struct {
 }
 
 type Session struct {
-	In          io.Reader
-	Out         io.Writer
-	Err         io.Writer
-	Interactive bool
-	BuildInfo   BuildInfo
+	In            io.Reader
+	Out           io.Writer
+	Err           io.Writer
+	Interactive   bool
+	TerminalWidth int // Zero keeps reference output for non-terminal writers.
+	Colour        bool
+	BuildInfo     BuildInfo
 }
 
 type Handler func(context.Context, Invocation, *Session) Outcome

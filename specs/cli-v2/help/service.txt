@@ -8,8 +8,6 @@ Choose a subcommand below. A bare group prints this help without reading configu
 or changing state.
 
 Commands:
-  service
-      Manage proxy and periodic token-refresh background services.
   install
       Install and start selected CQ services.
   restart
@@ -22,6 +20,10 @@ Commands:
       Stop and disable selected CQ services.
   uninstall
       Stop and remove selected CQ service registrations.
+
+Related commands:
+  cq proxy
+      Inspect proxy readiness or run proxy in foreground.
 
 Global options:
   -h, --help

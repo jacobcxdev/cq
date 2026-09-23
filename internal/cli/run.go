@@ -20,7 +20,12 @@ func Run(ctx context.Context, argv []string, session *Session, lookup Lookup) in
 		if !ok {
 			return render(session, inv, internalFailure())
 		}
-		inv.JSON = false // help is plain text even with an explicit --json
+		if session.TerminalWidth > 0 {
+			if styled, available := terminalHelp(inv.Path, session.TerminalWidth, session.Colour); available {
+				text = styled
+			}
+		}
+		inv.JSON = false // Help is text even with an explicit --json.
 		return render(session, inv, Outcome{Human: text})
 	}
 	if inv.Presentation == "version" || inv.Path == "version" {
