@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_only:
+        description: Build six candidate binaries with release provider configuration; no release or installation
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -12,6 +18,7 @@ concurrency:
 
 jobs:
   cli-contract:
+    if: ${{ !inputs.candidate_only }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -26,6 +33,7 @@ jobs:
       - run: go test -race -count=1 ./...
 
   packages:
+    if: ${{ !inputs.candidate_only }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     outputs:
@@ -89,6 +97,7 @@ jobs:
           compression-level: 0
 
   validate-codex:
+    if: ${{ !inputs.candidate_only }}
     needs: packages
     runs-on: macos-15
     timeout-minutes: 15
@@ -139,6 +148,7 @@ jobs:
           .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
 
   homebrew-lifecycle:
+    if: ${{ !inputs.candidate_only }}
     needs: packages
     runs-on: macos-15
     timeout-minutes: 15
@@ -187,6 +197,7 @@ jobs:
             "$CURRENT_VERSION"
 
   linux:
+    if: ${{ !inputs.candidate_only }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -233,6 +244,7 @@ jobs:
           done
 
   windows:
+    if: ${{ !inputs.candidate_only }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -276,3 +288,104 @@ jobs:
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
+
+  # Build transport only; this job does not qualify or publish a release.
+  candidate-build:
+    if: ${{ inputs.candidate_only }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          install-only: true
+
+      - name: Prepare fixed-version candidate configuration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          cp .goreleaser.yml "$RUNNER_TEMP/candidate.yml"
+          cat >> "$RUNNER_TEMP/candidate.yml" <<'CONFIG'
+          snapshot:
+            version_template: '1.0.0'
+          CONFIG
+          printf 'dist: "%s/candidate-build"\n' "$RUNNER_TEMP" >> "$RUNNER_TEMP/candidate.yml"
+          echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go 1.0.0 ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
+
+      - name: Build all six targets with release provider configuration
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
+          # Never enable verbose output: linker flags contain the client secret.
+          goreleaser build --snapshot --clean --skip=before,pre-hooks,post-hooks --config "$RUNNER_TEMP/candidate.yml"
+
+      - name: Collect binaries and safe provenance
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "candidate-artifact"
+          output.mkdir()
+          binaries = []
+          for target_os in ("darwin", "linux", "windows"):
+              for arch in ("amd64", "arm64"):
+                  executable = "cq.exe" if target_os == "windows" else "cq"
+                  matches = list((Path(os.environ["RUNNER_TEMP"]) / "candidate-build").glob(f"cq_{target_os}_{arch}*/{executable}"))
+                  if len(matches) != 1:
+                      raise SystemExit(f"expected one executable for {target_os}/{arch}")
+                  destination = output / f"{target_os}_{arch}" / executable
+                  destination.parent.mkdir()
+                  shutil.copy2(matches[0], destination)
+                  # Capture privately; never print linker flags or other build settings.
+                  info = subprocess.check_output(["go", "version", "-m", str(destination)], text=True)
+                  settings = {}
+                  for line in info.splitlines():
+                      for key in ("vcs.revision", "vcs.modified", "GOOS", "GOARCH"):
+                          prefix = "\tbuild\t" + key + "="
+                          if line.startswith(prefix):
+                              settings[key] = line[len(prefix):]
+                  assert settings == {"vcs.revision": os.environ["GITHUB_SHA"], "vcs.modified": "false", "GOOS": target_os, "GOARCH": arch}
+                  binaries.append({"path": str(destination.relative_to(output)), "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "build": settings})
+          version = json.loads(subprocess.check_output([str(output / "linux_arm64/cq"), "version", "--json"], text=True))
+          assert version["schema_version"] == 2 and version["ok"] is True
+          assert version["data"]["version"] == "1.0.0"
+          assert version["data"]["cli_schema_version"] == 2
+          metadata = {
+              "kind": "candidate-build-only",
+              "version": "1.0.0",
+              "cli_schema_version": 2,
+              "source_commit": os.environ["GITHUB_SHA"],
+              "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "codex_stage11_provenance_sha256": os.environ["CODEX_STAGE11_PROVENANCE_SHA256"],
+              "binaries": binaries,
+          }
+          (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PYTHON
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cq-candidate-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
