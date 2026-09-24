@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -194,9 +195,25 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 		return validationLookup(deps), check
 	}
 	if strings.Contains(file, "fixture-create") {
-		dir := t.TempDir()
+		tempRoot, err := filepath.EvalSymlinks("/tmp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir, err := os.MkdirTemp(tempRoot, "cq-t08-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+		})
 		input, output := filepath.Join(dir, "request.json"), filepath.Join(dir, "fixture.json")
-		if err := os.WriteFile(input, []byte(v2FixtureBody), 0600); err != nil {
+		nestedBody := strings.Replace(v2FixtureBody, `"client_metadata":`, `"client_metadata":{"x-codex-turn-metadata":`, 1)
+		nestedBody = strings.TrimSuffix(nestedBody, "}") + "}}"
+		body := []byte(nestedBody)
+		body = append(body, bytes.Repeat([]byte(" "), 2048-len(body))...)
+		if err := os.WriteFile(input, body, 0600); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(file, "/03-") {
@@ -230,6 +247,7 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 	}
 	deps, _ := newV2CanaryFixture(t)
 	deps.now = func() time.Time { return terminalFixtureOptions(100).Now }
+	deps.currentTuple = func() (proxy.CodexCanaryTuple, error) { return validationFixtureCanary(true).Tuple, nil }
 	if strings.Contains(file, "canary-start/03-") {
 		if out := callV2Canary(t, deps, "start"); out.ExitCode != 0 {
 			t.Fatal(out)
@@ -296,26 +314,62 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 
 func terminalValidationDynamicEvidence(t *testing.T, file, output string) {
 	t.Helper()
+	wantBytes, err := os.ReadFile(filepath.Join("..", "..", "specs", "cli-v2", "presentation", "examples", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(wantBytes)
 	switch {
-	case strings.Contains(file, "canary-start/02-"):
-		if !strings.Contains(output, "Codex canary · active") || !strings.Contains(output, "Last observed day  unknown") || !strings.Contains(output, "Not finalised.") {
-			t.Fatalf("canary start evidence: %s", output)
+	case strings.Contains(file, "canary-start/02-"), strings.Contains(file, "canary-status/02-"), strings.Contains(file, "canary-stop/02-"):
+		output = normaliseValidationField(t, output, want, "Run", strings.Repeat("A", 43), `[A-Za-z0-9_-]{43}`)
+		for i, kind := range []string{"account_registry", "codexbar_auth", "codexbar_manifest", "cq_managed_auth", "routing_default", "system_auth"} {
+			output = normaliseValidationField(t, output, want, kind, strings.Repeat(string(rune('a'+i)), 64), `[0-9a-f]{64}`)
 		}
-	case strings.Contains(file, "canary-status/02-"):
-		if !strings.Contains(output, "Last observed day  15h 30m ago · 23 Sep 2026, 01:00:00 BST (UTC+01:00)") || !strings.Contains(output, "Admitted turns             1") || !strings.Contains(output, "Codex canary · active") {
-			t.Fatalf("canary status evidence: %s", output)
-		}
-	case strings.Contains(file, "canary-stop/02-"):
-		if !strings.Contains(output, "Codex canary · active") || !strings.Contains(output, "Finalised          no") || !strings.Contains(output, "Stop requested; drain completion has not been observed.") {
-			t.Fatalf("stop claimed completion: %s", output)
+		if !strings.Contains(file, "canary-start/02-") {
+			output = normaliseValidationField(t, output, want, "Admitted turns", "1,248", `[0-9]+(?:,[0-9]{3})*`)
 		}
 	case strings.Contains(file, "fixture-create/02-"):
-		if !strings.Contains(output, "Fixture · created") || !strings.Contains(output, "Body SHA-256") || !strings.Contains(output, "0s ago") || strings.Contains(output, "raw-session-sentinel") {
-			t.Fatalf("fixture evidence: %s", output)
-		}
+		output = normaliseValidationField(t, output, want, "File", "/Users/alex/cq-inputs/fixture.json", `/.+/fixture\.json`)
+		output = normaliseValidationField(t, output, want, "Session hint", "session:111122223333", `session:[0-9a-f]{12}`)
+		output = normaliseValidationField(t, output, want, "Thread hint", "thread:444455556666", `thread:[0-9a-f]{12}`)
+		output = normaliseValidationField(t, output, want, "Turn hint", "turn:777788889999", `turn:[0-9a-f]{12}`)
+		output = normaliseValidationField(t, output, want, "Body SHA-256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", `[0-9a-f]{64}`)
 	default:
 		t.Fatalf("unclassified dynamic fixture %s", file)
 	}
+	if output != want {
+		t.Fatalf("full handler fixture %s differs\nwant:\n%s\ngot:\n%s", file, want, output)
+	}
+}
+
+func normaliseValidationField(t *testing.T, got, want, label, placeholder, valuePattern string) string {
+	t.Helper()
+	prefix := ""
+	for _, line := range strings.Split(want, "\n") {
+		if strings.HasPrefix(line, "  "+label) && strings.HasSuffix(line, placeholder) {
+			prefix = strings.TrimSuffix(line, placeholder)
+			break
+		}
+	}
+	if prefix == "" {
+		t.Fatalf("authored field %s missing", label)
+	}
+	lines, matches := strings.Split(got, "\n"), 0
+	pattern := regexp.MustCompile(`^` + valuePattern + `$`)
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			value := strings.TrimPrefix(line, prefix)
+			if !pattern.MatchString(value) {
+				t.Fatalf("invalid %s value %q", label, value)
+			}
+			lines[i] = prefix + placeholder
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("field %s occurred %d times", label, matches)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func assertTerminalValidationPlain(t *testing.T, file, got string) {
