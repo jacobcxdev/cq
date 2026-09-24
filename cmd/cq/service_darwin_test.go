@@ -33,7 +33,7 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 	}
 
 	proxyDefinition := readDarwinDefinition(t, platform.plistPath(proxyAgentLabel))
-	if proxyDefinition.Label != proxyAgentLabel || !reflect.DeepEqual(proxyDefinition.ProgramArguments, []string{executable, "proxy", "start"}) || !proxyDefinition.RunAtLoad || !proxyDefinition.KeepAlive {
+	if proxyDefinition.Label != proxyAgentLabel || !reflect.DeepEqual(proxyDefinition.ProgramArguments, []string{executable, "proxy", "start"}) || !proxyDefinition.RunAtLoad || !proxyDefinition.KeepAlive || proxyDefinition.ExitTimeOut != darwinProxyExitTimeout {
 		t.Fatalf("proxy definition = %#v", proxyDefinition)
 	}
 	if proxyDefinition.StandardErrorPath != filepath.Join(platform.roots.Logs, "proxy.log") {

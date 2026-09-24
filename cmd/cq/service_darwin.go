@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	darwinRefreshInterval = 1800
-	maxDarwinPlistBytes   = 64 << 10
+	darwinRefreshInterval  = 1800
+	darwinProxyExitTimeout = 41 * 60
+	maxDarwinPlistBytes    = 64 << 10
 )
 
 type darwinLaunchAgentDefinition struct {
@@ -33,6 +34,7 @@ type darwinLaunchAgentDefinition struct {
 	RunAtLoad         bool
 	KeepAlive         bool
 	StartInterval     int
+	ExitTimeOut       int
 	StandardErrorPath string
 }
 
@@ -212,6 +214,7 @@ func (platform *darwinServicePlatform) InstallProxy(ctx context.Context, executa
 		ProgramArguments:  []string{executable, "proxy", "start"},
 		RunAtLoad:         true,
 		KeepAlive:         true,
+		ExitTimeOut:       darwinProxyExitTimeout,
 		StandardErrorPath: filepath.Join(platform.roots.Logs, "proxy.log"),
 	}
 	return platform.reconcile(ctx, definition)
@@ -462,6 +465,11 @@ func renderDarwinLaunchAgent(definition darwinLaunchAgentDefinition) ([]byte, er
 		output.WriteString(strconv.Itoa(definition.StartInterval))
 		output.WriteString("</integer>\n")
 	}
+	if definition.ExitTimeOut > 0 {
+		output.WriteString("\t<key>ExitTimeOut</key>\n\t<integer>")
+		output.WriteString(strconv.Itoa(definition.ExitTimeOut))
+		output.WriteString("</integer>\n")
+	}
 	writeDarwinBool(&output, "RunAtLoad", definition.RunAtLoad)
 	writeDarwinString(&output, "ProcessType", "Background")
 	writeDarwinString(&output, "StandardErrorPath", definition.StandardErrorPath)
@@ -613,6 +621,7 @@ func darwinDefinitionFromValues(values map[string]any) (darwinLaunchAgentDefinit
 	definition.RunAtLoad, _ = values["RunAtLoad"].(bool)
 	definition.KeepAlive, _ = values["KeepAlive"].(bool)
 	definition.StartInterval, _ = values["StartInterval"].(int)
+	definition.ExitTimeOut, _ = values["ExitTimeOut"].(int)
 	definition.StandardErrorPath, _ = values["StandardErrorPath"].(string)
 	return definition, nil
 }
