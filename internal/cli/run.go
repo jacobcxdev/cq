@@ -17,6 +17,9 @@ func Run(ctx context.Context, argv []string, session *Session, lookup Lookup) in
 		if !inv.JSON && session.ErrTerminal.Width > 0 && parseErr.AttemptedPath != "" {
 			inv.Path = parseErr.AttemptedPath
 		}
+		if !inv.JSON && session.ErrTerminal.Width > 0 && len(argv) > 0 && argv[0] == "help" {
+			inv.Path = "help"
+		}
 		return render(session, inv, Outcome{ExitCode: parseErr.ExitCode, Errors: []Diagnostic{parseErr.Diagnostic}})
 	}
 	if inv.Presentation == "help" {

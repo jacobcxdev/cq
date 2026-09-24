@@ -315,7 +315,7 @@
       "source": "groups.md",
       "line": 692,
       "file": "text/cq-codex-proxy-credential-endpoint-legacy/02-failure.txt",
-      "sha256": "95721a5ea76405a7ab9d3aa4cd1017c052c23fafa29548a9e3e6d2b662e5ad1f",
+      "sha256": "9f8d743b55b2d2bc0c66147265129e0fab5d93b76188ab870c4870f0e0094a03",
       "context": "### Failure\n\n```sh\ncq codex proxy credential-endpoint legacy status\n```\n\nExit 2 · stderr:"
     },
     {
@@ -326,7 +326,7 @@
       "invocation": "cq codex proxy fallback --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 709,
+      "line": 708,
       "file": "text/cq-codex-proxy-fallback/01-help.txt",
       "sha256": "d5dd88e3348fa2bbf4167be922c08c68f204ce38723d03b04d1ae42b49c7c1bf",
       "context": "### Help\n\n```sh\ncq codex proxy fallback --help\n```\n\nExit 0 · stdout:"
@@ -339,7 +339,7 @@
       "invocation": "cq codex proxy fallback inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 749,
+      "line": 748,
       "file": "text/cq-codex-proxy-fallback/02-failure.txt",
       "sha256": "d1b0dd733fd3f64f8cea174f5c3d67c975e04d05754c7b0c5f59cad7bddc5500",
       "context": "### Failure\n\n```sh\ncq codex proxy fallback inspect\n```\n\nExit 2 · stderr:"
@@ -352,7 +352,7 @@
       "invocation": "cq codex proxy fixture --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 765,
+      "line": 764,
       "file": "text/cq-codex-proxy-fixture/01-help.txt",
       "sha256": "ac28157d506bef02c1c195219c3813b8a8b9591968687f217a272adaf5533542",
       "context": "### Help\n\n```sh\ncq codex proxy fixture --help\n```\n\nExit 0 · stdout:"
@@ -365,7 +365,7 @@
       "invocation": "cq codex proxy fixture inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 798,
+      "line": 797,
       "file": "text/cq-codex-proxy-fixture/02-failure.txt",
       "sha256": "e7e1b1ad106ca79c158d79920d6807c0a1e64e52f020cb55bf95a435918873f2",
       "context": "### Failure\n\n```sh\ncq codex proxy fixture inspect\n```\n\nExit 2 · stderr:"
@@ -378,7 +378,7 @@
       "invocation": "cq codex proxy hook --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 814,
+      "line": 813,
       "file": "text/cq-codex-proxy-hook/01-help.txt",
       "sha256": "86809848176f77648f3001bcd4bd81583e836d83a8b82513e8168945eaca0458",
       "context": "### Help\n\n```sh\ncq codex proxy hook --help\n```\n\nExit 0 · stdout:"
@@ -391,7 +391,7 @@
       "invocation": "cq codex proxy hook inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 849,
+      "line": 848,
       "file": "text/cq-codex-proxy-hook/02-failure.txt",
       "sha256": "d025faa76315fe6d7fbe80ebd192e8095d4203ba94bdbdf9060ad9fc43bbf4e0",
       "context": "### Failure\n\n```sh\ncq codex proxy hook inspect\n```\n\nExit 2 · stderr:"
@@ -404,7 +404,7 @@
       "invocation": "cq codex proxy lease --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 865,
+      "line": 864,
       "file": "text/cq-codex-proxy-lease/01-help.txt",
       "sha256": "4e156dfb5b272f10a4522c3b1627095246e8a320b4556ead064f0b7e455f8b76",
       "context": "### Help\n\n```sh\ncq codex proxy lease --help\n```\n\nExit 0 · stdout:"
@@ -417,7 +417,7 @@
       "invocation": "cq codex proxy lease inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 900,
+      "line": 899,
       "file": "text/cq-codex-proxy-lease/02-failure.txt",
       "sha256": "5df12995082adb344d3cfab917e2bbd39970ae1ab8099867ec90d24911a8bb28",
       "context": "### Failure\n\n```sh\ncq codex proxy lease inspect\n```\n\nExit 2 · stderr:"
@@ -430,7 +430,7 @@
       "invocation": "cq codex proxy pin --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 916,
+      "line": 915,
       "file": "text/cq-codex-proxy-pin/01-help.txt",
       "sha256": "4b456f99a3a407ea7e6f822457a1ed7f3a10b3219fc8320d3e850b3207ac911d",
       "context": "### Help\n\n```sh\ncq codex proxy pin --help\n```\n\nExit 0 · stdout:"
@@ -443,7 +443,7 @@
       "invocation": "cq codex proxy pin inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 956,
+      "line": 955,
       "file": "text/cq-codex-proxy-pin/02-failure.txt",
       "sha256": "326d3baf87835d6895f9507af282391223a122283b19a3a4e6c9b1a423a1102d",
       "context": "### Failure\n\n```sh\ncq codex proxy pin inspect\n```\n\nExit 2 · stderr:"
@@ -456,7 +456,7 @@
       "invocation": "cq codex proxy policy --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 972,
+      "line": 971,
       "file": "text/cq-codex-proxy-policy/01-help.txt",
       "sha256": "72c23d95c1e3c273acd5d36d7728600bfab2e543e288bc1b5d7e16921389c574",
       "context": "### Help\n\n```sh\ncq codex proxy policy --help\n```\n\nExit 0 · stdout:"
@@ -469,7 +469,7 @@
       "invocation": "cq codex proxy policy inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1009,
+      "line": 1008,
       "file": "text/cq-codex-proxy-policy/02-failure.txt",
       "sha256": "df8ec9c7d1ad14d462f9b6c9d98f85be824a3bf094ef4497123fd7ce3af60d4a",
       "context": "### Failure\n\n```sh\ncq codex proxy policy inspect\n```\n\nExit 2 · stderr:"
@@ -482,7 +482,7 @@
       "invocation": "cq codex proxy pool --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1025,
+      "line": 1024,
       "file": "text/cq-codex-proxy-pool/01-help.txt",
       "sha256": "240622a39c643488fd42a0b00f431717551b965d91260f5d9af4187b12f38641",
       "context": "### Help\n\n```sh\ncq codex proxy pool --help\n```\n\nExit 0 · stdout:"
@@ -495,7 +495,7 @@
       "invocation": "cq codex proxy pool inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1063,
+      "line": 1062,
       "file": "text/cq-codex-proxy-pool/02-failure.txt",
       "sha256": "b111607bdf38a2ec97e94355297f2fb5f2a8c89651fcf7c89dc89b7ebcb238e4",
       "context": "### Failure\n\n```sh\ncq codex proxy pool inspect\n```\n\nExit 2 · stderr:"
@@ -508,7 +508,7 @@
       "invocation": "cq codex proxy prime --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1079,
+      "line": 1078,
       "file": "text/cq-codex-proxy-prime/01-help.txt",
       "sha256": "7ccea0b61788e022206836b5047291ff82f2a5c47d41444088f49783a5c4b8ca",
       "context": "### Help\n\n```sh\ncq codex proxy prime --help\n```\n\nExit 0 · stdout:"
@@ -521,7 +521,7 @@
       "invocation": "cq codex proxy prime inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1117,
+      "line": 1116,
       "file": "text/cq-codex-proxy-prime/02-failure.txt",
       "sha256": "570fc48a04b92d4a665b2241128e78f5b0c554de01845289a3348c6dd8d90dfa",
       "context": "### Failure\n\n```sh\ncq codex proxy prime inspect\n```\n\nExit 2 · stderr:"
@@ -534,7 +534,7 @@
       "invocation": "cq codex proxy readiness --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1133,
+      "line": 1132,
       "file": "text/cq-codex-proxy-readiness/01-help.txt",
       "sha256": "ce1fb648423b15c4d89bf1970563f4d8443fc69cb21706dc6ff2319ac8d880d5",
       "context": "### Help\n\n```sh\ncq codex proxy readiness --help\n```\n\nExit 0 · stdout:"
@@ -547,7 +547,7 @@
       "invocation": "cq codex proxy readiness inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1166,
+      "line": 1165,
       "file": "text/cq-codex-proxy-readiness/02-failure.txt",
       "sha256": "6456f7724a35e04a9cad88f4f60ee3c063be50fbcf277f3a8f38ab064d17fbdb",
       "context": "### Failure\n\n```sh\ncq codex proxy readiness inspect\n```\n\nExit 2 · stderr:"
@@ -560,7 +560,7 @@
       "invocation": "cq codex proxy reserve --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1182,
+      "line": 1181,
       "file": "text/cq-codex-proxy-reserve/01-help.txt",
       "sha256": "0c1c0e29ad6ded175d4886e5b2f9d8bde9f8f7ef21d6ef209e97486cd00e62f9",
       "context": "### Help\n\n```sh\ncq codex proxy reserve --help\n```\n\nExit 0 · stdout:"
@@ -573,7 +573,7 @@
       "invocation": "cq codex proxy reserve inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1226,
+      "line": 1225,
       "file": "text/cq-codex-proxy-reserve/02-failure.txt",
       "sha256": "fc2e4cf68bebba643edf96e3c476cedfc308ed4b67bf7dd46cd0c5ce0fce9fb5",
       "context": "### Failure\n\n```sh\ncq codex proxy reserve inspect\n```\n\nExit 2 · stderr:"
@@ -586,7 +586,7 @@
       "invocation": "cq codex proxy session --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1242,
+      "line": 1241,
       "file": "text/cq-codex-proxy-session/01-help.txt",
       "sha256": "ebab2a23c3a3f8a38edb2f6f7f05c9771eb824d028b7f8aefe405d43bc5420d3",
       "context": "### Help\n\n```sh\ncq codex proxy session --help\n```\n\nExit 0 · stdout:"
@@ -599,7 +599,7 @@
       "invocation": "cq codex proxy session inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1282,
+      "line": 1281,
       "file": "text/cq-codex-proxy-session/02-failure.txt",
       "sha256": "f7a5922624a1e33118cb53c250114ecf9e977aadcc63b46cf7b17d280e22dcb9",
       "context": "### Failure\n\n```sh\ncq codex proxy session inspect\n```\n\nExit 2 · stderr:"
@@ -612,7 +612,7 @@
       "invocation": "cq codex proxy validate --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1298,
+      "line": 1297,
       "file": "text/cq-codex-proxy-validate/01-help.txt",
       "sha256": "a65a5f0b20f43a2d762c11431cbb51fd4e00b6d334ceb1e523232dab88b929a2",
       "context": "### Help\n\n```sh\ncq codex proxy validate --help\n```\n\nExit 0 · stdout:"
@@ -625,7 +625,7 @@
       "invocation": "cq codex proxy validate inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1335,
+      "line": 1334,
       "file": "text/cq-codex-proxy-validate/02-failure.txt",
       "sha256": "116eba70960ab873532603d25e9c612c14c5454a18e36f96f0dd30bd6701d1f7",
       "context": "### Failure\n\n```sh\ncq codex proxy validate inspect\n```\n\nExit 2 · stderr:"
@@ -638,7 +638,7 @@
       "invocation": "cq codex reset --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1351,
+      "line": 1350,
       "file": "text/cq-codex-reset/01-help.txt",
       "sha256": "f33c2a3d7db557a516b2e094537a86470bc82840c570679fb2c8008b1bea04eb",
       "context": "### Help\n\n```sh\ncq codex reset --help\n```\n\nExit 0 · stdout:"
@@ -651,7 +651,7 @@
       "invocation": "cq codex reset inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1391,
+      "line": 1390,
       "file": "text/cq-codex-reset/02-failure.txt",
       "sha256": "ec6205262c463475dff334b1fbcf109def09182afc0e21f29c5d125db57ef7f4",
       "context": "### Failure\n\n```sh\ncq codex reset inspect\n```\n\nExit 2 · stderr:"
@@ -664,7 +664,7 @@
       "invocation": "cq gemini --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1407,
+      "line": 1406,
       "file": "text/cq-gemini/01-help.txt",
       "sha256": "e0e68035817126b4e5e1618135af6b17334654cc8223603e8ca75ec0a4d5baeb",
       "context": "### Help\n\n```sh\ncq gemini --help\n```\n\nExit 0 · stdout:"
@@ -677,7 +677,7 @@
       "invocation": "cq gemini inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1440,
+      "line": 1439,
       "file": "text/cq-gemini/02-failure.txt",
       "sha256": "fc31eda069ab780d65f907e8dbe2136356bef56a45ab0739e598bf45dc5f3bff",
       "context": "### Failure\n\n```sh\ncq gemini inspect\n```\n\nExit 2 · stderr:"
@@ -690,7 +690,7 @@
       "invocation": "cq gemini account --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1456,
+      "line": 1455,
       "file": "text/cq-gemini-account/01-help.txt",
       "sha256": "9b07384b1ea4b5514bdd87c9c264fb8409e7f29eefcbd3dd491e0ae6380395b7",
       "context": "### Help\n\n```sh\ncq gemini account --help\n```\n\nExit 0 · stdout:"
@@ -703,7 +703,7 @@
       "invocation": "cq gemini account inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1492,
+      "line": 1491,
       "file": "text/cq-gemini-account/02-failure.txt",
       "sha256": "c1976180b8f4c6f0d5046e9012735da6b5c3f6c389d843199af9dde627e6c265",
       "context": "### Failure\n\n```sh\ncq gemini account inspect\n```\n\nExit 2 · stderr:"
@@ -716,7 +716,7 @@
       "invocation": "cq models --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1508,
+      "line": 1507,
       "file": "text/cq-models/01-help.txt",
       "sha256": "6423ce292d9f262102a80bb4fe5b08b22c99bc112648829ccaa49d176a195f4e",
       "context": "### Help\n\n```sh\ncq models --help\n```\n\nExit 0 · stdout:"
@@ -729,7 +729,7 @@
       "invocation": "cq models inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1546,
+      "line": 1545,
       "file": "text/cq-models/02-failure.txt",
       "sha256": "65785eb03b109f4bd98b3add8f723103997a435a4fa5aebefa2e979aaf7f751a",
       "context": "### Failure\n\n```sh\ncq models inspect\n```\n\nExit 2 · stderr:"
@@ -742,7 +742,7 @@
       "invocation": "cq models overlay --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1562,
+      "line": 1561,
       "file": "text/cq-models-overlay/01-help.txt",
       "sha256": "e0fd2a300214ed676722caee0cee27c13f7a16ee57da4c151c62c8fc06e44b84",
       "context": "### Help\n\n```sh\ncq models overlay --help\n```\n\nExit 0 · stdout:"
@@ -755,7 +755,7 @@
       "invocation": "cq models overlay inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1602,
+      "line": 1601,
       "file": "text/cq-models-overlay/02-failure.txt",
       "sha256": "41dd65ee86d679310f533732bdcbb1eb9171ae468d42dc19eb4f7f79d93493e9",
       "context": "### Failure\n\n```sh\ncq models overlay inspect\n```\n\nExit 2 · stderr:"
@@ -768,7 +768,7 @@
       "invocation": "cq proxy --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1619,
+      "line": 1618,
       "file": "text/cq-proxy/01-help.txt",
       "sha256": "c068a7511417272e4c0fa81d6a3c9b249726ba718c1ca2d613a8ef8ec93c28af",
       "context": "### Help\n\n```sh\ncq proxy --help\n```\n\nExit 0 · stdout:"
@@ -781,7 +781,7 @@
       "invocation": "cq proxy inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1669,
+      "line": 1668,
       "file": "text/cq-proxy/02-failure.txt",
       "sha256": "42f9ad606a074be0ca239e73c2f299d39ada1bc5755caa7a3839a2ca2a34c35c",
       "context": "### Failure\n\n```sh\ncq proxy inspect\n```\n\nExit 2 · stderr:"
@@ -794,7 +794,7 @@
       "invocation": "cq proxy candidate --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1685,
+      "line": 1684,
       "file": "text/cq-proxy-candidate/01-help.txt",
       "sha256": "e9ab0cdfae881ea801576a656d1e75b80dca5382971a179e0a5d54fd16d22744",
       "context": "### Help\n\n```sh\ncq proxy candidate --help\n```\n\nExit 0 · stdout:"
@@ -807,7 +807,7 @@
       "invocation": "cq proxy candidate inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1731,
+      "line": 1730,
       "file": "text/cq-proxy-candidate/02-failure.txt",
       "sha256": "263e1a343c39d650c3f140be9678b27221082a3cd0870005a0cad315decf8b99",
       "context": "### Failure\n\n```sh\ncq proxy candidate inspect\n```\n\nExit 2 · stderr:"
@@ -820,7 +820,7 @@
       "invocation": "cq proxy candidate client-safety --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1747,
+      "line": 1746,
       "file": "text/cq-proxy-candidate-client-safety/01-help.txt",
       "sha256": "2ce4280609a934cca8b2590343773962183beed41677010a01708542f86558ef",
       "context": "### Help\n\n```sh\ncq proxy candidate client-safety --help\n```\n\nExit 0 · stdout:"
@@ -833,7 +833,7 @@
       "invocation": "cq proxy candidate client-safety inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1784,
+      "line": 1783,
       "file": "text/cq-proxy-candidate-client-safety/02-failure.txt",
       "sha256": "74d7dda54631ffd4f39d2755f6afd6bac26e2438f88476a3e9a2fb4059328966",
       "context": "### Failure\n\n```sh\ncq proxy candidate client-safety inspect\n```\n\nExit 2 · stderr:"
@@ -846,7 +846,7 @@
       "invocation": "cq proxy candidate receipt --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1800,
+      "line": 1799,
       "file": "text/cq-proxy-candidate-receipt/01-help.txt",
       "sha256": "9595377dd3792e8a080c058294ae44242a16fa67598354e803880855b3d8b819",
       "context": "### Help\n\n```sh\ncq proxy candidate receipt --help\n```\n\nExit 0 · stdout:"
@@ -859,7 +859,7 @@
       "invocation": "cq proxy candidate receipt inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1835,
+      "line": 1834,
       "file": "text/cq-proxy-candidate-receipt/02-failure.txt",
       "sha256": "12f3e8b7ea5878df2ac14de3cb5d71de560fa50cdff8cb0e43fa0deec1519311",
       "context": "### Failure\n\n```sh\ncq proxy candidate receipt inspect\n```\n\nExit 2 · stderr:"
@@ -872,7 +872,7 @@
       "invocation": "cq proxy candidate release --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1851,
+      "line": 1850,
       "file": "text/cq-proxy-candidate-release/01-help.txt",
       "sha256": "b47c015d74fad339e6daaf646a6d86cc71c202f3c97c4f2b501e95b173411115",
       "context": "### Help\n\n```sh\ncq proxy candidate release --help\n```\n\nExit 0 · stdout:"
@@ -885,7 +885,7 @@
       "invocation": "cq proxy candidate release inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1893,
+      "line": 1892,
       "file": "text/cq-proxy-candidate-release/02-failure.txt",
       "sha256": "e02a38a1935bb69a706f217ef761244605358c2faeca21dc39033d63003999cb",
       "context": "### Failure\n\n```sh\ncq proxy candidate release inspect\n```\n\nExit 2 · stderr:"
@@ -898,7 +898,7 @@
       "invocation": "cq proxy operation --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1909,
+      "line": 1908,
       "file": "text/cq-proxy-operation/01-help.txt",
       "sha256": "77441ae1d81c15acbdb4a0cb8da1ab4b98ecc7ad80336a9ccc9449a027ad238d",
       "context": "### Help\n\n```sh\ncq proxy operation --help\n```\n\nExit 0 · stdout:"
@@ -911,7 +911,7 @@
       "invocation": "cq proxy operation inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1942,
+      "line": 1941,
       "file": "text/cq-proxy-operation/02-failure.txt",
       "sha256": "21c2355dddc1dccc61d3e70bf1a6f520928550b8af9e102556d1bc4a3331f7ec",
       "context": "### Failure\n\n```sh\ncq proxy operation inspect\n```\n\nExit 2 · stderr:"
@@ -924,7 +924,7 @@
       "invocation": "cq proxy rescue --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 1958,
+      "line": 1957,
       "file": "text/cq-proxy-rescue/01-help.txt",
       "sha256": "ff2717d6b6617269c77a7dc96d82f6cd0d95d571b862fbbe8299fdc85d18854c",
       "context": "### Help\n\n```sh\ncq proxy rescue --help\n```\n\nExit 0 · stdout:"
@@ -937,7 +937,7 @@
       "invocation": "cq proxy rescue inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 1999,
+      "line": 1998,
       "file": "text/cq-proxy-rescue/02-failure.txt",
       "sha256": "b12a641a87f1a4d42365450c5f021d980ff0785bc72d41b3d3d01ecb3bfdf906",
       "context": "### Failure\n\n```sh\ncq proxy rescue inspect\n```\n\nExit 2 · stderr:"
@@ -950,7 +950,7 @@
       "invocation": "cq proxy state --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 2015,
+      "line": 2014,
       "file": "text/cq-proxy-state/01-help.txt",
       "sha256": "e524d358a170f81912920797cd7b09b1a2aee41d8a85840fc0d7af7507a0c82b",
       "context": "### Help\n\n```sh\ncq proxy state --help\n```\n\nExit 0 · stdout:"
@@ -963,7 +963,7 @@
       "invocation": "cq proxy state inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 2048,
+      "line": 2047,
       "file": "text/cq-proxy-state/02-failure.txt",
       "sha256": "75558a3df51b39a69b25b6190e08180fc81f97fa3e47486d598cc248c825cf26",
       "context": "### Failure\n\n```sh\ncq proxy state inspect\n```\n\nExit 2 · stderr:"
@@ -976,7 +976,7 @@
       "invocation": "cq service --help",
       "exit": 0,
       "source": "groups.md",
-      "line": 2064,
+      "line": 2063,
       "file": "text/cq-service/01-help.txt",
       "sha256": "efd448d9bfccedd867e1237d0ee670390b25861a65886eeff9688ef533f1573c",
       "context": "### Help\n\n```sh\ncq service --help\n```\n\nExit 0 · stdout:"
@@ -989,7 +989,7 @@
       "invocation": "cq service inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 2105,
+      "line": 2104,
       "file": "text/cq-service/02-failure.txt",
       "sha256": "6a75b1fba81183a3692514b4e0b427eaa9e9d475830b416784f02838d70293f1",
       "context": "### Failure\n\n```sh\ncq service inspect\n```\n\nExit 2 · stderr:"

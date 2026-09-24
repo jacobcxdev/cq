@@ -691,8 +691,7 @@ Exit 2 · stderr:
 ```text
 Error · Unknown command
   Unknown command: status. Run cq help.
-  Code: unknown_command
-  Command: cq codex proxy credential-endpoint legacy status
+  Code: unknown_command · Command: cq codex proxy credential-endpoint legacy status
 ```
 
 ## `cq codex proxy fallback`

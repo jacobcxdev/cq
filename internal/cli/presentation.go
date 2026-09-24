@@ -159,9 +159,19 @@ func terminalDiagnostics(path string, outcome Outcome, options TerminalOptions) 
 	if path == "codex reset use" && outcome.Terminal != nil {
 		out.WriteByte('\n')
 	}
-	if primary.Code == "unknown_command" {
+	if primary.Code == "unknown_command" && path == "help" {
+		out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, primary.Message))
+		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}))
+		out.WriteString(TerminalLine(options, 2, Span{Text: "Command: "}, Span{Text: command, Role: Identity}))
+	} else if primary.Code == "unknown_command" {
 		out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, "Unknown command"))
 		out.WriteString(TerminalLine(options, 2, Span{Text: primary.Message}))
+		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}, Span{Text: " · Command: "}, Span{Text: command, Role: Identity}))
+	} else if primary.Code == "cli_invalid_usage" && strings.Contains(primary.Message, "Unknown command:") && strings.LastIndex(primary.Message, ". Run cq ") > 0 {
+		split := strings.LastIndex(primary.Message, ". Run cq ")
+		out.WriteString(terminalDiagnosticHeading(options, Span{Text: marker, Role: role}, "Unknown command"))
+		out.WriteString(TerminalLine(options, 2, Span{Text: primary.Message[:split+1]}))
+		out.WriteString(TerminalLine(options, 2, Span{Text: primary.Message[split+2:]}))
 		out.WriteString(TerminalLine(options, 2, Span{Text: "Code: "}, Span{Text: primary.Code, Role: Identity}, Span{Text: " · Command: "}, Span{Text: command, Role: Identity}))
 	} else {
 		if primary.Code == "models_clone_not_found" {

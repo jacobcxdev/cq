@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -124,5 +125,75 @@ func TestAuthoredHelpFixtures(t *testing.T) {
 	}
 	if count != 127 {
 		t.Fatalf("covered %d help pages", count)
+	}
+}
+
+func TestAuthoredGroupFailureFixtures(t *testing.T) {
+	base := filepath.Join("..", "..")
+	var manifest struct {
+		Fixtures []struct{ Command, Scenario, Stream, File, Task string }
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(base, "docs", "superpowers", "plans", "terminal-presentation-coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Fixtures []struct {
+			Command, Scenario, Stream, Invocation, File string
+			Exit                                        json.RawMessage
+		}
+	}
+	examples := filepath.Join(base, "specs", "cli-v2", "presentation", "examples")
+	indexBytes, err := os.ReadFile(filepath.Join(examples, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		t.Fatal(err)
+	}
+	byFile := make(map[string]struct {
+		Command, Scenario, Stream, Invocation, File string
+		Exit                                        json.RawMessage
+	}, len(index.Fixtures))
+	for _, fixture := range index.Fixtures {
+		byFile[fixture.File] = fixture
+	}
+	count := 0
+	for _, row := range manifest.Fixtures {
+		if row.Task != "T03" || row.Scenario != "Failure" {
+			continue
+		}
+		count++
+		t.Run(row.Command, func(t *testing.T) {
+			fixture, ok := byFile[row.File]
+			if !ok || fixture.Command != row.Command || fixture.Scenario != row.Scenario || fixture.Stream != "stderr" {
+				t.Fatalf("bad group fixture registration: %+v", row)
+			}
+			want, err := os.ReadFile(filepath.Join(examples, fixture.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantExit, err := strconv.Atoi(string(fixture.Exit))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, colour := range []bool{false, true} {
+				var out, stderr bytes.Buffer
+				args := strings.Fields(fixture.Invocation)[1:]
+				exit := Run(context.Background(), args, &Session{Out: &out, Err: &stderr, ErrTerminal: TerminalOptions{Width: 100, Colour: colour}}, func(string) (Handler, bool) {
+					t.Fatal("group syntax failure consulted handlers")
+					return nil, false
+				})
+				if exit != wantExit || out.Len() != 0 || ansi.Strip(stderr.String()) != string(want) {
+					t.Fatalf("fixture %s exit %d stdout %q stderr %q", fixture.File, exit, &out, ansi.Strip(stderr.String()))
+				}
+			}
+		})
+	}
+	if count != 41 {
+		t.Fatalf("covered %d group failure fixtures", count)
 	}
 }
