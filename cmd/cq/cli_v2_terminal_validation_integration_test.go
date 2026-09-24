@@ -57,7 +57,7 @@ func TestTerminalValidationHandlerFixtures(t *testing.T) {
 		t.Run(fixture.File, func(t *testing.T) {
 			for _, mode := range []string{"terminal", "no-colour", "plain", "json"} {
 				t.Run(mode, func(t *testing.T) {
-					lookup, check := terminalValidationHandlerSetup(t, fixture.File)
+					lookup, check, fixturePath := terminalValidationHandlerSetup(t, fixture.File)
 					args := strings.Fields(strings.TrimPrefix(entry.Invocation, "cq "))
 					if mode == "json" {
 						args = append(args, "--json")
@@ -115,7 +115,7 @@ func TestTerminalValidationHandlerFixtures(t *testing.T) {
 						} else if fixture.Command == "cq codex proxy readiness show" {
 							assertTerminalFixture(t, fixture.File, strings.ReplaceAll(ansi.Strip(got), "CQ build  "+version, "CQ build  1.0.0"))
 						} else {
-							terminalValidationDynamicEvidence(t, fixture.File, ansi.Strip(got))
+							terminalValidationDynamicEvidence(t, fixture.File, ansi.Strip(got), fixturePath)
 						}
 					} else {
 						assertTerminalValidationPlain(t, fixture.File, got)
@@ -126,7 +126,7 @@ func TestTerminalValidationHandlerFixtures(t *testing.T) {
 	}
 }
 
-func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func(*testing.T)) {
+func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func(*testing.T), string) {
 	t.Helper()
 	check := func(*testing.T) {}
 	if strings.Contains(file, "readiness-show") {
@@ -145,7 +145,7 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 				t.Fatalf("marker loads = %d", calls)
 			}
 		}
-		return validationLookup(deps), check
+		return validationLookup(deps), check, ""
 	}
 	if strings.Contains(file, "validate-http") {
 		calls := 0
@@ -167,7 +167,7 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 				t.Fatalf("HTTP transport calls = %d", calls)
 			}
 		}
-		return validationLookup(deps), check
+		return validationLookup(deps), check, ""
 	}
 	if strings.Contains(file, "validate-websocket") {
 		calls := 0
@@ -192,23 +192,15 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 				t.Fatalf("WebSocket transport calls = %d", calls)
 			}
 		}
-		return validationLookup(deps), check
+		return validationLookup(deps), check, ""
 	}
 	if strings.Contains(file, "fixture-create") {
-		tempRoot, err := filepath.EvalSymlinks("/tmp")
-		if err != nil {
-			t.Fatal(err)
-		}
-		dir, err := os.MkdirTemp(tempRoot, "cq-t08-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if err := os.RemoveAll(dir); err != nil {
-				t.Error(err)
-			}
-		})
+		dir := t.TempDir()
 		input, output := filepath.Join(dir, "request.json"), filepath.Join(dir, "fixture.json")
+		output, err := filepath.Abs(output)
+		if err != nil {
+			t.Fatal(err)
+		}
 		nestedBody := strings.Replace(v2FixtureBody, `"client_metadata":`, `"client_metadata":{"x-codex-turn-metadata":`, 1)
 		nestedBody = strings.TrimSuffix(nestedBody, "}") + "}}"
 		body := []byte(nestedBody)
@@ -243,7 +235,7 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 				inv.Options["input"], inv.Options["output"] = []string{input}, []string{output}
 				return createV2FixtureWithClock(inv, func() time.Time { return terminalFixtureOptions(100).Now })
 			}, ok
-		}, check
+		}, check, output
 	}
 	deps, _ := newV2CanaryFixture(t)
 	deps.now = func() time.Time { return terminalFixtureOptions(100).Now }
@@ -309,10 +301,10 @@ func terminalValidationHandlerSetup(t *testing.T, file string) (cli.Lookup, func
 		return func(ctx context.Context, inv cli.Invocation, s *cli.Session) cli.Outcome {
 			return handleV2CanaryWithDependencies(ctx, inv, s, deps)
 		}, ok
-	}, check
+	}, check, ""
 }
 
-func terminalValidationDynamicEvidence(t *testing.T, file, output string) {
+func terminalValidationDynamicEvidence(t *testing.T, file, output, fixturePath string) {
 	t.Helper()
 	wantBytes, err := os.ReadFile(filepath.Join("..", "..", "specs", "cli-v2", "presentation", "examples", file))
 	if err != nil {
@@ -329,7 +321,7 @@ func terminalValidationDynamicEvidence(t *testing.T, file, output string) {
 			output = normaliseValidationField(t, output, want, "Admitted turns", "1,248", `[0-9]+(?:,[0-9]{3})*`)
 		}
 	case strings.Contains(file, "fixture-create/02-"):
-		output = normaliseValidationField(t, output, want, "File", "/Users/alex/cq-inputs/fixture.json", `/.+/fixture\.json`)
+		output = normaliseValidationPath(t, output, want, fixturePath)
 		output = normaliseValidationField(t, output, want, "Session hint", "session:111122223333", `session:[0-9a-f]{12}`)
 		output = normaliseValidationField(t, output, want, "Thread hint", "thread:444455556666", `thread:[0-9a-f]{12}`)
 		output = normaliseValidationField(t, output, want, "Turn hint", "turn:777788889999", `turn:[0-9a-f]{12}`)
@@ -339,6 +331,32 @@ func terminalValidationDynamicEvidence(t *testing.T, file, output string) {
 	}
 	if output != want {
 		t.Fatalf("full handler fixture %s differs\nwant:\n%s\ngot:\n%s", file, want, output)
+	}
+}
+
+func normaliseValidationPath(t *testing.T, got, want, path string) string {
+	t.Helper()
+	if !filepath.IsAbs(path) || filepath.Base(path) != "fixture.json" {
+		t.Fatalf("fixture path is not a native absolute fixture path: %q", path)
+	}
+	actualLine := ansi.Strip(validationField(terminalFixtureOptions(100), "File", 19, validationID(path)))
+	wantLine := "  File               /Users/alex/cq-inputs/fixture.json\n"
+	if (!strings.HasPrefix(actualLine, "  File               ") && !strings.HasPrefix(actualLine, "  File\n  ")) || strings.Count(got, actualLine) != 1 || strings.Count(want, wantLine) != 1 {
+		t.Fatalf("fixture path line differs: %q", actualLine)
+	}
+	return strings.Replace(got, actualLine, wantLine, 1)
+}
+
+func TestNormaliseValidationPathWrap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), strings.Repeat("segment", 20), "fixture.json")
+	line := ansi.Strip(validationField(terminalFixtureOptions(100), "File", 19, validationID(path)))
+	if !strings.Contains(strings.TrimSuffix(line, "\n"), "\n  ") {
+		t.Fatalf("expected a wrapped native path, got %q", line)
+	}
+	want := "Fixture · created\n  File               /Users/alex/cq-inputs/fixture.json\n  Request kind       turn\n"
+	got := "Fixture · created\n" + line + "  Request kind       turn\n"
+	if normalised := normaliseValidationPath(t, got, want, path); normalised != want {
+		t.Fatalf("normalised wrapped path differs: %q", normalised)
 	}
 }
 
