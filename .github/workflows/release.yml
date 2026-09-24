@@ -668,10 +668,8 @@ jobs:
           checkout="$RUNNER_TEMP/winget-pkgs"
           gh repo clone jacobcxdev/winget-pkgs "$checkout" -- --filter=blob:none --no-checkout --depth=1
           git -C "$checkout" sparse-checkout set "manifests/j/jacobcxdev/cq"
-          git -C "$checkout" remote set-url upstream https://github.com/microsoft/winget-pkgs.git
-          git -C "$checkout" fetch upstream master --depth=1 --filter=blob:none
           git -C "$checkout" fetch origin "$branch:refs/remotes/origin/$branch" --depth=1 --filter=blob:none || true
-          git -C "$checkout" switch -C "$branch" upstream/master
+          git -C "$checkout" switch -C "$branch" origin/master
           destination="$checkout/manifests/j/jacobcxdev/cq/$version"
           mkdir -p "$destination"
           cp "$manifest_dir"/*.yaml "$destination/"
