@@ -197,3 +197,111 @@ func TestAuthoredGroupFailureFixtures(t *testing.T) {
 		t.Fatalf("covered %d group failure fixtures", count)
 	}
 }
+
+func TestAuthoredPureCatalogueFixtures(t *testing.T) {
+	base := filepath.Join("..", "..")
+	var manifest struct {
+		Fixtures []struct{ Command, Scenario, Stream, File, Task string }
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(base, "docs", "superpowers", "plans", "terminal-presentation-coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Fixtures []struct {
+			Command, Scenario, Stream, Invocation, File string
+			Exit                                        json.RawMessage
+		}
+	}
+	examples := filepath.Join(base, "specs", "cli-v2", "presentation", "examples")
+	indexBytes, err := os.ReadFile(filepath.Join(examples, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		t.Fatal(err)
+	}
+	byFile := make(map[string]int, len(index.Fixtures))
+	for i, fixture := range index.Fixtures {
+		byFile[fixture.File] = i
+	}
+	count := 0
+	for _, row := range manifest.Fixtures {
+		if row.Task != "T03" {
+			continue
+		}
+		count++
+		t.Run(row.File, func(t *testing.T) {
+			at, ok := byFile[row.File]
+			if !ok {
+				t.Fatal("fixture missing from index")
+			}
+			fixture := index.Fixtures[at]
+			if fixture.Command != row.Command || fixture.Scenario != row.Scenario || fixture.Stream != row.Stream {
+				t.Fatal("fixture metadata differs from assignment")
+			}
+			exitWant, err := strconv.Atoi(string(fixture.Exit))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.ReadFile(filepath.Join(examples, fixture.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := BuildInfo{}
+			switch row.Scenario {
+			case "Help", "Failure":
+			case "Success":
+				if row.Command == "cq version" {
+					revision, clean := "0123456789abcdef0123456789abcdef01234567", false
+					info = BuildInfo{Version: "1.0.0", Revision: &revision, Dirty: &clean}
+				} else if row.Command != "cq help" {
+					t.Fatal("unhandled pure success scenario")
+				}
+			case "Unknown provenance":
+				if row.Command != "cq version" {
+					t.Fatal("unhandled provenance scenario")
+				}
+			case "Success — bash raw protocol", "Success — zsh raw protocol", "Success — fish raw protocol":
+				if row.Command != "cq completion" {
+					t.Fatal("unhandled raw protocol scenario")
+				}
+			default:
+				t.Fatalf("unhandled pure fixture scenario: %s", row.Scenario)
+			}
+			for _, colour := range []bool{false, true} {
+				var stdout, stderr bytes.Buffer
+				options := TerminalOptions{Width: 100, Colour: colour}
+				args := strings.Fields(fixture.Invocation)[1:]
+				exit := Run(context.Background(), args, &Session{Out: &stdout, Err: &stderr, OutTerminal: options, ErrTerminal: options, BuildInfo: info}, func(string) (Handler, bool) {
+					t.Fatal("pure catalogue fixture consulted handlers")
+					return nil, false
+				})
+				if exit != exitWant {
+					t.Fatalf("exit %d want %d", exit, exitWant)
+				}
+				got := stdout.String()
+				other := stderr.String()
+				if row.Stream == "stderr" {
+					got, other = other, got
+				}
+				if row.Stream != "stdout" && row.Stream != "stderr" || other != "" {
+					t.Fatalf("unexpected stream: stdout=%q stderr=%q", &stdout, &stderr)
+				}
+				if strings.HasPrefix(row.Scenario, "Success —") {
+					if got != string(want) {
+						t.Fatalf("raw bytes differ: %s", row.File)
+					}
+				} else if ansi.Strip(got) != string(want) {
+					t.Fatalf("terminal fixture differs: %s\ngot:\n%s", row.File, ansi.Strip(got))
+				}
+			}
+		})
+	}
+	if count != 174 {
+		t.Fatalf("covered %d pure catalogue fixtures", count)
+	}
+}

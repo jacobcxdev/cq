@@ -61,6 +61,56 @@ func TestTerminalCatalogueManifestCoverage(t *testing.T) {
 	if len(manifest.Commands) != 89 || manifest.Groups.Task != "T03" || len(manifest.Groups.Paths) != 38 || index.HelpPages != 127 || len(index.Fixtures) != 522 || len(manifest.Fixtures) != len(index.Fixtures) {
 		t.Fatalf("catalogue size changed: commands=%d groups-and-root=%d helps=%d fixtures=%d assigned=%d", len(manifest.Commands), len(manifest.Groups.Paths), index.HelpPages, len(index.Fixtures), len(manifest.Fixtures))
 	}
+	var catalogue struct {
+		Commands []struct{ Path, Kind string }
+	}
+	catalogueBytes, err := os.ReadFile(filepath.Join(base, "specs", "cli-v2", "commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(catalogueBytes, &catalogue); err != nil {
+		t.Fatal(err)
+	}
+	commandPaths := make(map[string]bool)
+	groupPaths := map[string]bool{"cq": true}
+	for _, entry := range catalogue.Commands {
+		path := "cq " + entry.Path
+		switch entry.Kind {
+		case "command":
+			if commandPaths[path] {
+				t.Errorf("duplicate catalogue command %s", path)
+			}
+			commandPaths[path] = true
+		case "group":
+			if groupPaths[path] {
+				t.Errorf("duplicate catalogue group %s", path)
+			}
+			groupPaths[path] = true
+		default:
+			t.Errorf("unexpected catalogue kind %q", entry.Kind)
+		}
+	}
+	assignedCommands := make(map[string]bool)
+	for _, encoded := range manifest.Commands {
+		var row struct{ Command string }
+		if err := json.Unmarshal(encoded, &row); err != nil {
+			t.Fatal(err)
+		}
+		if assignedCommands[row.Command] || !commandPaths[row.Command] {
+			t.Errorf("duplicate or unknown assigned command %s", row.Command)
+		}
+		assignedCommands[row.Command] = true
+	}
+	assignedGroups := make(map[string]bool)
+	for _, path := range manifest.Groups.Paths {
+		if assignedGroups[path] || !groupPaths[path] {
+			t.Errorf("duplicate or unknown assigned group %s", path)
+		}
+		assignedGroups[path] = true
+	}
+	if len(assignedCommands) != len(commandPaths) || len(assignedGroups) != len(groupPaths) {
+		t.Errorf("catalogue paths missing: commands %d/%d groups %d/%d", len(assignedCommands), len(commandPaths), len(assignedGroups), len(groupPaths))
+	}
 	registered := make(map[string]terminalFixtureRegistration, len(index.Fixtures))
 	add := func(f terminalFixtureRegistration) {
 		if _, exists := registered[f.File]; exists {
