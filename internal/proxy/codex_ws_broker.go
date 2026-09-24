@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -170,6 +171,8 @@ type codexTerminatingWebSocketHandler struct {
 	upstreamURL    string
 	prewarmTimeout time.Duration
 	generation     atomic.Uint64
+	drainOnce      sync.Once
+	drain          chan struct{}
 }
 
 // NewCodexTerminatingWebSocketHandler constructs readiness-gated WebSocket
@@ -195,7 +198,14 @@ func NewCodexTerminatingWebSocketHandler(plans CodexNativeHTTPRequestPlanner, ex
 		cyber:          cyber,
 		upstreamURL:    upstreamURL,
 		prewarmTimeout: codexWSPrewarmResponseTimeout,
+		drain:          make(chan struct{}),
 	}, nil
+}
+
+func (handler *codexTerminatingWebSocketHandler) BeginDrain() {
+	if handler != nil && handler.drain != nil {
+		handler.drainOnce.Do(func() { close(handler.drain) })
+	}
 }
 
 func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, downstream *websocket.Conn, header http.Header) error {
@@ -216,6 +226,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 		Headers:              header,
 		DownstreamGeneration: generation,
 		PrewarmTimeout:       handler.prewarmTimeout,
+		Drain:                handler.drain,
 	})
 	if err != nil {
 		return err
@@ -267,6 +278,7 @@ type codexTerminatingWSBrokerConfig struct {
 	AcceptedRevision     codex.Revision
 	DownstreamGeneration uint64
 	PrewarmTimeout       time.Duration
+	Drain                <-chan struct{}
 }
 
 type codexTerminatingWSBroker struct {
@@ -389,7 +401,17 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		closeCodexWSActiveUpstream(&active)
 	}()
 	for {
-		messageType, encoded, err := downstreamReader.read(ctx, serveCtx)
+		select {
+		case <-broker.config.Drain:
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
+			return nil
+		default:
+		}
+		messageType, encoded, err := downstreamReader.read(ctx, serveCtx, broker.config.Drain)
+		if errors.Is(err, errCodexWSDraining) {
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
+			return nil
+		}
 		if err != nil {
 			return classifyCodexWSDownstreamReadError(err)
 		}
@@ -495,11 +517,15 @@ func startCodexWSDownstreamReader(ctx context.Context, cancel context.CancelFunc
 	return reader
 }
 
-func (reader *codexWSDownstreamReader) read(parent, ctx context.Context) (int, []byte, error) {
+var errCodexWSDraining = errors.New("Codex WebSocket draining")
+
+func (reader *codexWSDownstreamReader) read(parent, ctx context.Context, drain <-chan struct{}) (int, []byte, error) {
 	if reader == nil {
 		return 0, nil, ErrCodexLeaseWriterUnavailable
 	}
 	select {
+	case <-drain:
+		return 0, nil, errCodexWSDraining
 	case frame, ok := <-reader.frames:
 		if ok {
 			return frame.messageType, frame.payload, nil

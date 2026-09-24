@@ -5,15 +5,83 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestDarwinProxyStartWiresTerminationHandling(t *testing.T) {
+	if reflect.ValueOf(runProxyOwnedRuntimeFn).Pointer() != reflect.ValueOf(runDarwinProxyOwnedRuntime).Pointer() {
+		t.Fatal("macOS owned runtime bypasses termination handling")
+	}
+	if reflect.ValueOf(runProxyAdoptedRuntimeFn).Pointer() != reflect.ValueOf(runDarwinProxyAdoptedRuntime).Pointer() {
+		t.Fatal("macOS adopted runtime bypasses termination handling")
+	}
+}
+
+func TestDarwinOwnedRuntimeCancelsOnTermination(t *testing.T) {
+	original := runDarwinUnixProxyOwnedRuntime
+	started := make(chan struct{})
+	runDarwinUnixProxyOwnedRuntime = func(ctx context.Context, _ int, _ func(context.Context, net.Listener, http.Handler) error) (bool, error) {
+		close(started)
+		<-ctx.Done()
+		return true, ctx.Err()
+	}
+	t.Cleanup(func() { runDarwinUnixProxyOwnedRuntime = original })
+	done := make(chan error, 1)
+	go func() {
+		_, err := runDarwinProxyOwnedRuntime(context.Background(), 0, nil)
+		done <- err
+	}()
+	<-started
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("terminated macOS runtime = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("macOS runtime ignored termination")
+	}
+}
+
+func TestDarwinAdoptedRuntimeCancelsOnTermination(t *testing.T) {
+	original := runDarwinUnixProxyAdoptedRuntime
+	started := make(chan struct{})
+	runDarwinUnixProxyAdoptedRuntime = func(ctx context.Context, _ net.Listener, _ func(context.Context, net.Listener, http.Handler) error) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { runDarwinUnixProxyAdoptedRuntime = original })
+	done := make(chan error, 1)
+	go func() { done <- runDarwinProxyAdoptedRuntime(context.Background(), nil, nil) }()
+	<-started
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("terminated adopted macOS runtime = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("adopted macOS runtime ignored termination")
+	}
+}
 
 func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	dir := t.TempDir()
@@ -38,19 +106,22 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 		}
 	})
 
-	if len(calls) != 3 {
-		t.Fatalf("launchctl calls = %d, want 3", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("launchctl calls = %d, want 4", len(calls))
 	}
 	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), proxyAgentLabel)
 	expectedPlistPath := filepath.Join(dir, "Library", "LaunchAgents", proxyAgentLabel+".plist")
-	if got, want := strings.Join(calls[0], "|"), strings.Join([]string{"bootout", target}, "|"); got != want {
-		t.Fatalf("first launchctl call = %v, want bootout", calls[0])
+	if got, want := strings.Join(calls[0], "|"), strings.Join([]string{"print", target}, "|"); got != want {
+		t.Fatalf("first launchctl call = %v, want print", calls[0])
 	}
-	if got, want := strings.Join(calls[1], "|"), strings.Join([]string{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), expectedPlistPath}, "|"); got != want {
-		t.Fatalf("second launchctl call = %v, want bootstrap", calls[1])
+	if got, want := strings.Join(calls[1], "|"), strings.Join([]string{"bootout", target}, "|"); got != want {
+		t.Fatalf("second launchctl call = %v, want bootout", calls[1])
 	}
-	if got, want := strings.Join(calls[2], "|"), strings.Join([]string{"kickstart", "-k", target}, "|"); got != want {
-		t.Fatalf("third launchctl call = %v, want kickstart", calls[2])
+	if got, want := strings.Join(calls[2], "|"), strings.Join([]string{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), expectedPlistPath}, "|"); got != want {
+		t.Fatalf("third launchctl call = %v, want bootstrap", calls[2])
+	}
+	if got, want := strings.Join(calls[3], "|"), strings.Join([]string{"kickstart", "-k", target}, "|"); got != want {
+		t.Fatalf("fourth launchctl call = %v, want kickstart", calls[3])
 	}
 
 	plistPath, err := proxyAgentPlistPath()

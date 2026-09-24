@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -126,6 +127,9 @@ func TestAdoptedSupervisorWaitsForAdmittedRequestBeforeReapingWorker(t *testing.
 		}
 	case <-time.After(time.Second):
 		t.Fatal("worker did not stop after admitted request finished")
+	}
+	if !slices.Contains(events, "drain:worker") {
+		t.Fatalf("worker was not asked to close idle sockets: %v", events)
 	}
 }
 

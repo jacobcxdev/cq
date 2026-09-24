@@ -176,6 +176,7 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 	if manifest.Role != RuntimeRoleWorker || ValidateRuntimeRoleFiles(manifest, files) != nil || handler == nil {
 		return ErrRuntimeRoleManifest
 	}
+	drainer, _ := handler.(interface{ BeginDrain() })
 	secret, err := ReadRuntimeSecret(files.Secret)
 	files.Secret = nil
 	if err != nil {
@@ -259,6 +260,9 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 				return err
 			}
 		case "begin_drain":
+			if drainer != nil {
+				drainer.BeginDrain()
+			}
 			kind = "draining"
 		case "await_quiescence":
 			kind = "quiescent"
@@ -380,7 +384,7 @@ type RuntimeProcessWorkerLauncher struct {
 }
 
 func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, workerManifest WorkerManifestV1) (RuntimeWorkerProcess, error) {
-	if launcher == nil || launcher.Executable == "" || launcher.OpenLifecycle == nil || workerManifest.SchemaVersion != 1 {
+	if launcher == nil || ctx == nil || launcher.Executable == "" || launcher.OpenLifecycle == nil || workerManifest.SchemaVersion != 1 {
 		return nil, ErrRuntimeWorkerUnavailable
 	}
 	lifecycle, holder, err := launcher.OpenLifecycle()
@@ -468,7 +472,9 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 	defer workFile.Close()
 	commandFactory := launcher.Command
 	if commandFactory == nil {
-		commandFactory = exec.CommandContext
+		commandFactory = func(_ context.Context, executable string, args ...string) *exec.Cmd {
+			return exec.Command(executable, args...)
+		}
 	}
 	command := commandFactory(ctx, launcher.Executable, append([]string{"proxy", "start"}, arguments...)...)
 	configureRuntimeWorkerCommand(command)
@@ -477,6 +483,9 @@ func (launcher *RuntimeProcessWorkerLauncher) Launch(ctx context.Context, worker
 	spawnDigest, spawnStat, err := runtimeExecutableDigest(launcher.Executable)
 	if err != nil || spawnStat != verifiedStat || spawnDigest != verifiedDigest {
 		return nil, errors.Join(ErrRuntimeArtifactMismatch, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := command.Start(); err != nil {
 		return nil, err

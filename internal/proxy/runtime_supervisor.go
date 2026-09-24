@@ -97,7 +97,13 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 	defer func() {
 		supervisor.mu.RLock()
 		normalZero := supervisor.normalZero
+		worker := supervisor.worker
 		supervisor.mu.RUnlock()
+		if worker != nil {
+			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			returnErr = errors.Join(returnErr, worker.BeginDrain(drainCtx, TrafficModeDrain, 0))
+			cancel()
+		}
 		select {
 		case <-normalZero:
 		case <-time.After(defaultServerShutdownGracePeriod):
