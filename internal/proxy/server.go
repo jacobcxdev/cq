@@ -25,7 +25,7 @@ import (
 
 const maxRequestBody = 10 << 20 // 10 MiB
 
-const defaultServerShutdownGracePeriod = 5 * time.Second
+const defaultServerShutdownGracePeriod = 20 * time.Minute
 
 const (
 	codexResponsesPath              = "/v1/responses"

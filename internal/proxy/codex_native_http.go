@@ -311,18 +311,13 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 			UpstreamStatus: result.Response.StatusCode, AccountHint: codexTraceAccountHint(result.Choice.AccountKey), Attempt: result.Attempt.Ordinal,
 		})
 
-		// A local reserve decision must not discard account-bound turn state.
-		if result.reserveProtected && request.Header.Get("X-Codex-Turn-State") != "" {
-			canReplanQuota = false
-		}
-
 		// The session has durably rejected this account before any response bytes
 		// reached the client. A full create can now acquire a replacement binding.
 		if result.quotaExhausted && canReplanQuota && claim == nil && remainingQuotaRetries > 0 && request.Context().Err() == nil {
 			closeCodexHTTPResponseBody(result.Response.Body)
 			remainingQuotaRetries--
 			request = request.Clone(request.Context())
-			request.Header.Del("X-Codex-Turn-State")
+			deleteCodexTurnStateHeader(request.Header)
 			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "failover", Outcome: "replan", Reason: "capacity_exhausted", Retry: true, Failover: true})
 			continue
 		}

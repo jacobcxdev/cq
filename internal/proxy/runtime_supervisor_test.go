@@ -94,6 +94,41 @@ func (w *runtimeTestWorker) ExecuteHTTP(context.Context, RuntimeHTTPRequestV1) (
 	return w.response, nil
 }
 
+func TestAdoptedSupervisorWaitsForAdmittedRequestBeforeReapingWorker(t *testing.T) {
+	events := []string{}
+	worker := &runtimeTestWorker{holder: runtimeHolder("worker"), events: &events}
+	launcher := &runtimeTestLauncher{events: &events, workers: []*runtimeTestWorker{worker}}
+	checkpoint := &runtimeTestCheckpointStore{events: &events}
+	admitted := make(chan *RuntimeSupervisor, 1)
+	finished := make(chan error, 1)
+	go func() {
+		finished <- RunAdoptedRuntimeSupervisorConfigured(context.Background(), &runtimeTestListener{}, runtimeHolder("supervisor"), launcher, checkpoint, nil, WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}, nil, func(_ context.Context, _ net.Listener, handler http.Handler) error {
+			supervisor := handler.(*RuntimeSupervisor)
+			supervisor.mu.Lock()
+			supervisor.normalZero = make(chan struct{})
+			supervisor.normalAdmitted = 1
+			supervisor.mu.Unlock()
+			admitted <- supervisor
+			return nil
+		})
+	}()
+	supervisor := <-admitted
+	select {
+	case err := <-finished:
+		t.Fatalf("worker reaped with active request: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	supervisor.releaseNormalAdmission()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop after admitted request finished")
+	}
+}
+
 type runtimeTestLauncher struct {
 	events  *[]string
 	workers []*runtimeTestWorker

@@ -143,6 +143,7 @@ type CodexJournalRecordV2 struct {
 	PredecessorAuthoritative         bool       `json:"predecessor_authoritative,omitempty"`
 	CorrelationHash                  string     `json:"correlation_hash,omitempty"`
 	TurnStateHash                    string     `json:"turn_state_hash,omitempty"`
+	PreviousTurnStateHash            string     `json:"previous_turn_state_hash,omitempty"`
 	RecordGeneration                 uint64     `json:"record_generation"`
 	LaneGeneration                   uint64     `json:"lane_generation"`
 	PredecessorGeneration            uint64     `json:"predecessor_generation,omitempty"`
@@ -1250,7 +1251,7 @@ func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelop
 	if !validCodexLeaseDigest(record.SessionHash) || !validCodexLeaseDigest(record.ThreadHash) || record.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) || !validCodexLeaseDigest(record.TurnHash) {
 		return errors.New("invalid record identity hash")
 	}
-	for _, digest := range []string{record.AccountHash, record.PredecessorTurnHash, record.CorrelationHash, record.TurnStateHash, record.RequestedModelHash, record.DispatchPermitDigest} {
+	for _, digest := range []string{record.AccountHash, record.PredecessorTurnHash, record.CorrelationHash, record.TurnStateHash, record.PreviousTurnStateHash, record.RequestedModelHash, record.DispatchPermitDigest} {
 		if digest != "" && !validCodexLeaseDigest(digest) {
 			return errors.New("invalid optional record hash")
 		}

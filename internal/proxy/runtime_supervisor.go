@@ -95,6 +95,14 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 		}
 	}
 	defer func() {
+		supervisor.mu.RLock()
+		normalZero := supervisor.normalZero
+		supervisor.mu.RUnlock()
+		select {
+		case <-normalZero:
+		case <-time.After(defaultServerShutdownGracePeriod):
+			returnErr = errors.Join(returnErr, errors.New("runtime worker drain timed out with admitted requests"))
+		}
 		supervisor.mu.Lock()
 		defer supervisor.mu.Unlock()
 		supervisor.admissionReady = false
